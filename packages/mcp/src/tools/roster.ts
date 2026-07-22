@@ -1674,6 +1674,21 @@ const LIMIT_HEADROOM_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.doc_coverage_report`. Mirrors
+ * `docCoverageReportInputSchema` (doc-coverage-report.ts): `limit` (max 100,
+ * default 20) and `offset` page the RANKED per-object list worst-covered first.
+ * Drift between this schema and the Zod schema is a code-review concern.
+ */
+const DOC_COVERAGE_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.app_access`. Mirrors `appAccessInputSchema` —
  * a `componentId` (`CustomApplication:`/`Profile:`/`PermissionSet:` id) OR a
  * natural app-name selector (`apiName`/`app`/`nameContains`), plus optional
@@ -4400,6 +4415,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "Fetch a single component by canonical id. Returns its frontmatter and a response-safe Markdown body slice; large bodies are truncated with explicit bodyBytes/returnedBodyBytes/omittedBodyBytes metadata. Optional maxBodyBytes (0..30000) narrows the body slice. `maxBodyBytes: 0` (or any small value) is the EXISTENCE/METADATA-PROBE pattern — the response becomes a bounded metadata envelope (`metadataOnly: true`) instead of the full document: frontmatter is capped the same way body is, `properties` keeps whichever entries fit a small budget (scalars survive, huge arrays like a Profile's fieldPermissions/objectPermissions are the ones dropped and named in `omittedPropertyKeys`), and `referenceIds` is capped with the true total in `referenceCount` — a `disclosure` string names exactly what was omitted. This guarantees `maxBodyBytes: 0` never trips the global oversize guard, even on a huge node (e.g. a Profile with thousands of grants). A PHANTOM id (referenced by retrieved metadata but never itself retrieved) returns component-not-found with a classified reference stub — and an AUTOMATION-CRITICAL phantom hit is also queued in meta/demand-queue.jsonl so `sfi refresh --drain-demand-queue` (or the watch daemon with --drain-demand-queue) can pull exactly the components real questions needed. An `UnresolvedProfile:{id}` stub (a Profile Id a RestrictionRule/DuplicateRule referenced but the vault could not resolve to an api name) classifies as `unresolved-profile-id`: its remedy is a Profile Id→apiName index / live Tooling, NOT a wider retrieve manifest.",
     inputSchema: GET_COMPONENT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.doc_coverage_report',
+    description:
+      'Offline, vault-only documentation-GAP meter — the documentation axis `sfi.tech_debt_score` lacks. MEASURES where the org\'s metadata is undocumented (it does NOT PRODUCE docs like `sfi.generate_data_dictionary` / `sfi.generate_admin_handbook`). Rolls the two documentation axes the extractors capture — a component\'s `description` and a field\'s `inlineHelpText` presence — into a scored, LOWEST-COVERAGE-FIRST report broken down by object, and WEIGHTS each undocumented component by its inbound graph edge-degree (a real criticality proxy — an undocumented, heavily-referenced field ranks above an undocumented orphan). `objects` is the per-object breakdown (each with a `description` and `helpText` axis rollup — measurable / documented / undocumented / coveragePct — plus `combinedCoveragePct` and `undocumentedDegreeWeight`), ranked worst-covered first and PAGED by `limit` (default 20, max 100) / `offset` / `nextOffset`; the page self-fits the response byte budget (`nextOffset` always equals `offset + objects.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips an object). `topUndocumented` surfaces the highest-impact undocumented components (undocumented AND high-degree) regardless of page; `totals` carries the org-wide axis rollups plus the excluded `notMeasurableCount` / `outOfScopeCount`. HONESTY: "not measurable" ≠ "undocumented" — a type whose description the extractor does NOT capture (or a family the refresh did not retrieve) is NOT MEASURABLE and is EXCLUDED from the undocumented count, never counted as a gap (objects have no inline help text, so they are not measurable on the help-text axis). Scoped to what the ORG owns: custom `__c`/`__mdt`/… fields + custom objects; standard fields (Salesforce-provided help) and managed-package (`ns__…`) components are reported separately as out-of-scope and never penalize the org. `description` absence and `inlineHelpText` absence are distinct axes, never conflated. Coverage is a floor (only retrieved families measured). Presence is `declared` (structural); "documented" means a NON-EMPTY field, not a QUALITY judgment (a one-word description still counts as present).',
+    inputSchema: DOC_COVERAGE_REPORT_INPUT_SCHEMA,
   },
   {
     name: 'sfi.limit_headroom_report',

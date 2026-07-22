@@ -4603,6 +4603,43 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // DOCUMENTATION-COVERAGE gap meter — where the org's metadata is
+    // undocumented (missing `description` / `inlineHelpText`), ranked
+    // worst-covered first and weighted by graph edge-degree. Anchored on
+    // documentation-coverage / undocumented / missing-descriptions /
+    // missing-help-text vocabulary so it never steals the test-coverage route
+    // ("coverage gaps" / "test coverage") or the single-field explain_field
+    // help-text lookup ("what is the help text for X" — a BARE help-text mention
+    // with no gap/coverage qualifier stays with explain_field). Placed before
+    // tech-debt so a documentation-coverage ask lands on the doc axis
+    // tech_debt_score lacks, not the generic debt score.
+    intent: 'doc-coverage',
+    plane: 'vault',
+    tools: ['sfi.doc_coverage_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Offline documentation-coverage gap meter — which custom metadata lacks a description / inline help text, ranked worst-covered first and weighted by graph edge-degree. The documentation axis sfi.tech_debt_score lacks; distinct from the Apex test-coverage tools.',
+    patterns: [
+      /\bdoc_coverage_report\b/,
+      // "documentation coverage / gaps / debt / completeness / quality / health".
+      /\bdocumentation\s+(coverage|gaps?|debt|completeness|quality|health)\b/,
+      /\bdocs?\s+coverage\b/,
+      // "undocumented" (fields / objects / metadata / components).
+      /\bun-?documented\b/,
+      // "(which|what) ... (fields|objects|components|metadata) ... not/never documented".
+      /\b(fields?|objects?|components?|metadata)\b[^.?!]{0,40}\b(not|aren.?t|never)\s+documented\b/,
+      // "(lack|missing|without|no) ... description(s) / documentation".
+      /\b(lack|lacks|lacking|missing|without|no)\b[^.?!]{0,30}\b(descriptions?|documentation)\b/,
+      // "description(s) ... (missing|blank|empty|absent|coverage|gaps)".
+      /\bdescriptions?\b[^.?!]{0,25}\b(missing|blank|empty|absent|coverage|gaps?)\b/,
+      // Help text WITH a gap/coverage qualifier — a bare "help text for X" lookup
+      // stays with explain_field (which owns the single-field help-text bubble).
+      /\b(missing|no|without|lacks?|lacking|blank|empty)\b[^.?!]{0,25}\b(inline\s+)?help\s*text\b/,
+      /\b(inline\s+)?help\s*text\b[^.?!]{0,25}\b(coverage|missing|gaps?|blank|empty|completeness)\b/,
+    ],
+  },
+  {
     intent: 'tech-debt',
     plane: 'vault',
     tools: ['sfi.tech_debt_score', 'sfi.org_risk_report'],
