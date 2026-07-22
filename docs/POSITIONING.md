@@ -51,6 +51,11 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 
 - `sfi.get_impact`, `sfi.safe_to_delete_field`, the `sfi.what_if_*` family
 - `sfi.what_happens_on_save` / `sfi.order_of_execution`
+- `sfi.automation_risk_report` — per-finding automation risk, plus a
+  `mode: 'sprawl'` org-wide per-object automation-density triage ranking (where
+  is automation sprawl worst first — a candidate queue, not a verdict), the
+  org-wide roll-up the single-object `automation_collisions` /
+  `automation_build_advisor` / `order_of_execution` tools lack
 - `sfi.compare_vaults` / `sfi.compare_object_across_vaults` /
   `sfi.compare_profile_across_vaults`
 

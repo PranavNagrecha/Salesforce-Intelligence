@@ -772,6 +772,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'find automations that could hit governor limits',
     'which flows run synchronously and could slow things down?',
     'automation risk overview — what should we fix first?',
+    'which objects have the most automation?',
+    'where is flow sprawl worst?',
+    'rank objects by automation density',
+    'show me automation sprawl across the org',
   ],
   'sfi.permission_risk_report': [
     'who has too much access in this org?',
