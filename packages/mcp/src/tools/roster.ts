@@ -1130,9 +1130,12 @@ const SYNTHESIS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze(
 /**
  * Concrete JSON Schema for `sfi.automation_risk_report`. Mirrors
  * `automationRiskReportInputSchema`: the generic `limit` plus an optional OBJECT
- * SCOPE (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE). A scope narrows the
- * legacy-automation half to that object and excludes the org-wide Apex
- * governor-limit half (disclosed), never silently returning the org-wide report.
+ * SCOPE (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE) and the optional `mode`
+ * (AUTOMATION-SPRAWL-MODE). A scope narrows the legacy-automation half to that
+ * object and excludes the org-wide Apex governor-limit half (disclosed), never
+ * silently returning the org-wide report. `mode: 'sprawl'` switches to the
+ * org-wide per-object automation-density ranking; the default (`'risk'`) is the
+ * per-finding risk synthesis.
  */
 const AUTOMATION_RISK_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -1143,6 +1146,7 @@ const AUTOMATION_RISK_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       object: { type: 'string', minLength: 1 },
       objectId: { type: 'string', minLength: 1 },
       componentId: { type: 'string', minLength: 1 },
+      mode: { type: 'string', enum: ['risk', 'sprawl'] },
     },
   });
 
@@ -4704,7 +4708,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.automation_risk_report',
     description:
-      "Ranked automation risks: Process Builder migration candidates and governor-limit findings. Optional object scope (`objectApiName` / `object` / `objectId` / `CustomObject:` `componentId`) is HONORED: the legacy-automation half narrows to Process Builders parented to that object and the response echoes `appliedScope`; the Apex governor-limit half is EXCLUDED from the object-scoped view (Apex classes aren't attributable to one object) and that exclusion is disclosed — never silently returning the org-wide report. An object absent from the vault is refused with `invalid-query`. A bare call stays org-wide and byte-identical.",
+      "Ranked automation risks: Process Builder migration candidates and governor-limit findings. Optional object scope (`objectApiName` / `object` / `objectId` / `CustomObject:` `componentId`) is HONORED: the legacy-automation half narrows to Process Builders parented to that object and the response echoes `appliedScope`; the Apex governor-limit half is EXCLUDED from the object-scoped view (Apex classes aren't attributable to one object) and that exclusion is disclosed — never silently returning the org-wide report. An object absent from the vault is refused with `invalid-query`. A bare call stays org-wide and byte-identical. `mode: 'sprawl'` switches to an org-wide, per-OBJECT automation-density ranking — which objects have the most automation (record-triggered flows, triggers, workflow rules, Process Builders, field-write collisions) — a prioritized candidate queue for triage (where is flow/automation sprawl worst first), not a graded verdict, with the score weights disclosed in `scoreBasis`.",
     inputSchema: AUTOMATION_RISK_REPORT_INPUT_SCHEMA,
   },
   {

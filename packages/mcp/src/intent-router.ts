@@ -3877,6 +3877,33 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // AUTOMATION-SPRAWL-MODE — the org-wide, per-OBJECT automation-density
+    // ranking ("which objects have the most automation / where is sprawl
+    // worst"). Placed BEFORE the generic automation-risk rule so a sprawl
+    // phrasing wins first-match and routes with `mode: 'sprawl'`; every other
+    // automation-risk ask still falls through to the per-finding synthesis
+    // below. The patterns key on sprawl / density / most-automation-per-object
+    // vocabulary the risk rule never uses.
+    intent: 'automation-sprawl',
+    plane: 'vault',
+    tools: ['sfi.automation_risk_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Org-wide per-object automation-density ranking — a prioritized triage queue (where is automation sprawl worst first), the sprawl MODE of automation_risk_report.',
+    suggestArgs: () => ({ mode: 'sprawl' }),
+    patterns: [
+      /\bautomation\s+sprawl\b/,
+      /\bflow\s+sprawl\b/,
+      /\bsprawl\b[^.?!]{0,30}\b(?:automation|flows?|objects?)\b/,
+      /\b(?:automation|flow)\s+density\b/,
+      /\b(?:which|what)\s+objects?\b[^.?!]{0,40}\bmost\s+(?:automation|flows?|triggers?)\b/,
+      /\bmost\s+(?:automation|flows?|triggers?)\b[^.?!]{0,25}\bobjects?\b/,
+      /\brank\s+(?:the\s+)?objects?\b[^.?!]{0,30}\b(?:automation|flow|density)\b/,
+      /\bwhere\s+is\b[^.?!]{0,30}\bsprawl\b/,
+    ],
+  },
+  {
     intent: 'automation-risk',
     plane: 'vault',
     tools: ['sfi.automation_risk_report'],
