@@ -24,6 +24,7 @@ import {
   buildHeadroomRows,
   capFor,
   DEFAULT_ASSUMED_EDITION,
+  packToByteBudget,
   rankWorstFirst,
   resolveLimit,
   SALESFORCE_LIMITS,
@@ -188,6 +189,61 @@ describe('limit_headroom_report pure core', () => {
       'unlimited',
     );
     expect(worstHeadroomOf(unlimitedRows)).toBe(92.5);
+  });
+
+  it('packToByteBudget: cursor equals SERVED count on a budget-trimmed page (no silent drop)', () => {
+    // 50 items, each 1000 bytes; requested limit 100 but the budget only fits 3.
+    const items = Array.from({ length: 50 }, (_, i) => ({ i }));
+    const sizeOf = (): number => 1000;
+    const res = packToByteBudget(items, 0, 100, 3500, sizeOf);
+    expect(res.page.length).toBe(3); // 3*1000=3000 ≤ 3500; a 4th (4000) would exceed
+    expect(res.nextOffset).toBe(0 + res.page.length); // THE invariant: cursor == served
+    expect(res.truncated).toBe(true);
+    expect(res.byteTrimmed).toBe(true); // trimmed below the requested limit for bytes
+  });
+
+  it('packToByteBudget: a full cursor walk reaches EVERY item with no skip', () => {
+    const items = Array.from({ length: 50 }, (_, i) => ({ i }));
+    const sizeOf = (): number => 1000;
+    const seen: number[] = [];
+    let offset = 0;
+    for (let guard = 0; guard < 1000; guard += 1) {
+      const p = packToByteBudget(items, offset, 100, 3500, sizeOf);
+      // The cursor NEVER overstates the advance.
+      expect(p.nextOffset).toBe(offset + p.page.length);
+      for (const it of p.page) seen.push(it.i);
+      if (!p.truncated) break;
+      offset = p.nextOffset;
+    }
+    // Every rank 0..49 reached exactly once, in order — no silent drop.
+    expect(seen).toEqual(items.map((x) => x.i));
+  });
+
+  it('packToByteBudget: forward progress — a single over-budget item is still served (cursor +1)', () => {
+    const items = [{ big: 'x' }, { big: 'y' }];
+    const res = packToByteBudget(items, 0, 100, 10, (): number => 5000);
+    expect(res.page.length).toBe(1); // one item shipped despite exceeding the budget
+    expect(res.nextOffset).toBe(1); // cursor advances by exactly one — never empty-with-cursor
+    expect(res.truncated).toBe(true);
+    expect(res.byteTrimmed).toBe(true);
+  });
+
+  it('packToByteBudget: an offset at/after the end is an empty page, nextOffset == offset, not truncated', () => {
+    const items = [{ a: 1 }, { a: 2 }];
+    const res = packToByteBudget(items, 2, 100, 10_000, (): number => 100);
+    expect(res.page.length).toBe(0);
+    expect(res.nextOffset).toBe(2);
+    expect(res.truncated).toBe(false);
+    expect(res.byteTrimmed).toBe(false);
+  });
+
+  it('packToByteBudget: a whole-fit page is not flagged truncated/byteTrimmed', () => {
+    const items = Array.from({ length: 5 }, (_, i) => ({ i }));
+    const res = packToByteBudget(items, 0, 100, 1_000_000, (): number => 100);
+    expect(res.page.length).toBe(5);
+    expect(res.nextOffset).toBe(5);
+    expect(res.truncated).toBe(false);
+    expect(res.byteTrimmed).toBe(false);
   });
 
   it('cap table carries GENERAL Salesforce limits with source notes and no org identifiers', () => {

@@ -393,6 +393,71 @@ export const worstHeadroomOf = (
   return worst;
 };
 
+/** Result of packing a ranked list into a byte budget ({@link packToByteBudget}). */
+export interface BytePackResult<T> {
+  /** The items included on this page (already sliced to fit `limit` AND the budget). */
+  readonly page: readonly T[];
+  /**
+   * The resume cursor. ALWAYS equals `offset + page.length` — the cursor can
+   * never overstate the advance, so a caller that follows it can never skip a
+   * ranked item.
+   */
+  readonly nextOffset: number;
+  /** True when items remain past `nextOffset`. */
+  readonly truncated: boolean;
+  /** True when the page stopped for the BYTE budget before reaching `limit`/end. */
+  readonly byteTrimmed: boolean;
+}
+
+/**
+ * Greedily pack `items[offset..]` (at most `limit` items) into `budgetBytes`,
+ * measuring each item with `sizeOf`. This is the tool's cursor-integrity
+ * primitive: it self-fits the page HERE so the central `jsonResult` response
+ * guard never has to tail-truncate the array and leave a hand-set `nextOffset`
+ * stale (the exact defect this closes — the guard truncates `data.objects` but
+ * does NOT repair a handler's own `nextOffset`).
+ *
+ * Invariants:
+ *   - `nextOffset === offset + page.length` — the advertised advance is EXACTLY
+ *     the served count, so a walk following the cursor drops no row.
+ *   - Forward progress: when `offset` is in range at least ONE item is emitted,
+ *     even if that single item alone exceeds `budgetBytes` — so a page is never
+ *     empty with a non-zero `nextOffset`. (A degenerate over-budget single item
+ *     is still tiny next to the response budget, so the central guard does not
+ *     truncate it either.)
+ *   - An `offset` at/after the end yields an empty page, `nextOffset === offset`,
+ *     `truncated === false`.
+ */
+export const packToByteBudget = <T>(
+  items: readonly T[],
+  offset: number,
+  limit: number,
+  budgetBytes: number,
+  sizeOf: (item: T) => number,
+): BytePackResult<T> => {
+  const page: T[] = [];
+  let used = 0;
+  for (let i = offset; i < items.length && page.length < limit; i += 1) {
+    const item = items[i] as T;
+    const cost = sizeOf(item);
+    // Always keep the first item (forward progress); stop before the budget
+    // would be exceeded for any subsequent one.
+    if (page.length > 0 && used + cost > budgetBytes) break;
+    page.push(item);
+    used += cost;
+  }
+  const nextOffset = offset + page.length;
+  const remaining = Math.max(0, items.length - offset);
+  return {
+    page,
+    nextOffset,
+    truncated: nextOffset < items.length,
+    // Trimmed iff we served fewer than could have been by count alone — the
+    // only remaining reason is the byte budget.
+    byteTrimmed: page.length < Math.min(limit, remaining),
+  };
+};
+
 // ---------------------------------------------------------------------------
 // Node classification helpers (pure — exported for tests).
 // ---------------------------------------------------------------------------
@@ -520,25 +585,51 @@ export interface LimitHeadroomReportOutput {
   /** True when the object-level slice was trimmed to `limit`. */
   readonly truncated: boolean;
   readonly trust: TrustSummary;
-  /** Page size applied. Present only on a PAGED response (`truncated` or `offset > 0`). */
+  /** Requested page size echoed. Present only on a PAGED response (`truncated`, `offset > 0`, or byte-trimmed). */
   readonly limit?: number;
   /** Zero-based offset of the first returned object. Present only when paged. */
   readonly offset?: number;
-  /** Offset to pass on the next call. Present only when `truncated`. */
+  /**
+   * Offset to pass on the next call. ALWAYS equals `offset + objects.length` —
+   * the cursor never overstates the advance, so a consumer that follows it can
+   * never skip a ranked object. Present only when `truncated`.
+   */
   readonly nextOffset?: number;
+  /**
+   * True when the page was trimmed below the requested `limit` to fit the
+   * response byte budget (a large `limit` self-fits to fewer objects). The
+   * cursor stays honest — resume from `nextOffset`. Present only when trimmed.
+   */
+  readonly byteTrimmed?: boolean;
+  /** Human note explaining a byte-trimmed page. Present only when `byteTrimmed`. */
+  readonly pageNote?: string;
 }
 
-/** Inclusive upper bound on the object-page `limit`. */
+/** Inclusive upper bound on the requested object-page `limit`. */
 const LHR_MAX_LIMIT = 100;
 /**
- * Default object-page size. Each object carries 4 metric rows (~1.3 KB), so 15
- * objects + the org-wide set + legend + verbatim boundaries lands comfortably
- * under the central 40 KB response budget — the page therefore returns whole and
- * this tool's own `nextOffset` stays honest (the guard never has to trim it). A
- * caller that requests a larger `limit` may see the central guard truncate the
- * tail; its `responseBudget.nextOffset` is then authoritative.
+ * Default requested object-page size when the caller omits `limit`. The real
+ * bound on the page is the BYTE budget, not this number: the handler self-fits
+ * the object slice ({@link packToByteBudget}) so the response always lands under
+ * {@link LHR_RESPONSE_TARGET_BYTES}. A caller can therefore pass `limit` up to
+ * {@link LHR_MAX_LIMIT} and still get a whole, cursor-honest page — the page is
+ * simply trimmed to as many objects as fit and `nextOffset` reflects exactly
+ * what was served.
  */
 const LHR_DEFAULT_LIMIT = 15;
+/**
+ * Self-fit target for the WHOLE serialized `{ data, vaultState }` body. Sits
+ * below the central jsonResult response budget (default 40 KB,
+ * `RESPONSE_BUDGET_DEFAULT_BYTES`) with headroom for the central vaultState
+ * stamping (`targetOrg` / `vaultPath` / `builderVersion`), `estimatedPayloadBytes`,
+ * and an optional org-drift badge. Sizing the object page HERE means the central
+ * guard never has to tail-truncate `data.objects` — so this tool's own
+ * `nextOffset` can never be left stale (the cursor-integrity bug this closes).
+ */
+const LHR_RESPONSE_TARGET_BYTES = 36_000;
+/** Note surfaced when the object page was byte-trimmed below the requested `limit`. */
+const LHR_PAGE_NOTE =
+  'This object page was trimmed below the requested `limit` to fit the response byte budget. No ranked object was dropped: `nextOffset` equals `offset + objects.length`, so resume from it to walk the rest.';
 /** Cap on the `topRisks` list. */
 const TOP_RISKS_CAP = 5;
 
@@ -561,7 +652,11 @@ export const limitHeadroomReportInputSchema = z.object({
   edition: z
     .enum(['enterprise', 'unlimited', 'developer', 'professional'])
     .optional(),
-  /** Object-page size (1..100, default 25). Slices the RANKED per-object list. */
+  /**
+   * Requested object-page size (1..100, default 15). Upper bound on the RANKED
+   * per-object slice; the page also self-fits the response byte budget, so a
+   * large `limit` returns as many objects as fit with an honest `nextOffset`.
+   */
   limit: z.number().int().min(1).max(LHR_MAX_LIMIT).optional(),
   /** Zero-based offset for paging the ranked object list forward. */
   offset: z.number().int().min(0).optional(),
@@ -791,11 +886,6 @@ export const limitHeadroomReportHandler = async (
     };
   }
 
-  // Page the ranked object list.
-  const slice = objectHeadrooms.slice(offset, offset + limit);
-  const truncated = offset + slice.length < objectHeadrooms.length;
-  const isPaged = truncated || offset > 0;
-
   // Boundaries — always disclosed.
   const boundaries: string[] = [
     buildEditionDisclosure(edition),
@@ -816,32 +906,78 @@ export const limitHeadroomReportHandler = async (
       ? { status: 'complete' }
       : { status: 'partial', missingCoverage: [...incompleteFamilies].sort() };
 
-  return ok({
+  // --- Self-fitting object page (cursor-honest) ---------------------------
+  // The per-object rows dominate the payload. Rather than lean on the central
+  // jsonResult budget (which tail-truncates `data.objects` yet leaves a hand-set
+  // `nextOffset` stale — the cursor-integrity bug), size the page HERE: measure
+  // the fixed envelope, give the remaining budget to the object slice, and
+  // derive `nextOffset`/`truncated` from the objects we ACTUALLY include.
+  const editionBlock = {
+    provided: edition ?? null,
+    applied: edition ?? DEFAULT_ASSUMED_EDITION,
+    assumed: edition === undefined,
+  };
+  const coverageBlock = {
+    incompleteFamilies,
+    note: buildCoverageFloorDisclosure(incompleteFamilies),
+  };
+  const trust = offlineTrust(ctx, completeness);
+  const vaultState = {
+    sourceTreeHash: ctx.manifest.sourceTreeHash,
+    refreshedAt: ctx.manifest.refreshedAt,
+  };
+  // Fixed envelope (everything except the `objects` page). Measured WITH the
+  // pagination + note fields present so the object budget accounts for them.
+  const fixedBody = {
     data: {
-      edition: {
-        provided: edition ?? null,
-        applied: edition ?? DEFAULT_ASSUMED_EDITION,
-        assumed: edition === undefined,
-      },
+      edition: editionBlock,
       metricLegend,
       orgLimits,
       topRisks,
-      objects: slice,
+      objects: [] as ObjectHeadroom[],
       totalObjectCount: objectHeadrooms.length,
       scannedObjectCount: objectsNodes.length,
-      coverage: {
-        incompleteFamilies,
-        note: buildCoverageFloorDisclosure(incompleteFamilies),
-      },
+      coverage: coverageBlock,
       boundaries,
-      truncated,
-      trust: offlineTrust(ctx, completeness),
+      truncated: true,
+      trust,
+      limit,
+      offset,
+      nextOffset: offset,
+      byteTrimmed: true,
+      pageNote: LHR_PAGE_NOTE,
+    },
+    vaultState,
+  };
+  const fixedBytes = Buffer.byteLength(JSON.stringify(fixedBody), 'utf8');
+  const objectsBudget = Math.max(0, LHR_RESPONSE_TARGET_BYTES - fixedBytes);
+  const packed = packToByteBudget(
+    objectHeadrooms,
+    offset,
+    limit,
+    objectsBudget,
+    // +1 for the array comma separator between elements.
+    (o) => Buffer.byteLength(JSON.stringify(o), 'utf8') + 1,
+  );
+  const isPaged = packed.truncated || offset > 0 || packed.byteTrimmed;
+
+  return ok({
+    data: {
+      edition: editionBlock,
+      metricLegend,
+      orgLimits,
+      topRisks,
+      objects: packed.page,
+      totalObjectCount: objectHeadrooms.length,
+      scannedObjectCount: objectsNodes.length,
+      coverage: coverageBlock,
+      boundaries,
+      truncated: packed.truncated,
+      trust,
       ...(isPaged ? { limit, offset } : {}),
-      ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(packed.truncated ? { nextOffset: packed.nextOffset } : {}),
+      ...(packed.byteTrimmed ? { byteTrimmed: true, pageNote: LHR_PAGE_NOTE } : {}),
     },
-    vaultState: {
-      sourceTreeHash: ctx.manifest.sourceTreeHash,
-      refreshedAt: ctx.manifest.refreshedAt,
-    },
+    vaultState,
   });
 };
