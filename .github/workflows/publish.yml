@@ -33,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the org-leak guard can scan past commits
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -54,6 +56,25 @@ jobs:
 
       - name: Build all packages
         run: pnpm -r build
+
+      # Privacy guard — REFUSE to publish if any real-org identifier or PII
+      # slipped into the tree or git history. Mirrors the CI org-leak gate so
+      # the tag-triggered publish is self-guarding, not reliant on CI having
+      # run separately on the tagged commit. The blocklist of real org terms is
+      # kept out of the repo and materialized from the ORG_LEAK_BLOCKLIST secret
+      # (absent → the generic structural patterns still run). This step runs
+      # BEFORE publish, so a leak fails the job with nothing pushed to npm.
+      - name: Privacy guard (org-leak scan + release guard)
+        env:
+          ORG_LEAK_BLOCKLIST: ${{ secrets.ORG_LEAK_BLOCKLIST }}
+        run: |
+          if [ -n "$ORG_LEAK_BLOCKLIST" ]; then
+            printf '%s' "$ORG_LEAK_BLOCKLIST" > scripts/forbidden-names.local.json
+          fi
+          node scripts/scan-org-leaks.mjs --strict
+          node scripts/scan-org-leaks.mjs --git-history --strict
+          pnpm guard
+          rm -f scripts/forbidden-names.local.json
 
       - name: Publish sf-intelligence (keyless, with provenance)
         working-directory: packages/cli
