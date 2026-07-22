@@ -863,6 +863,36 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // Org-wide picklist VALUE-SET INTEGRITY scan — orphaned / stale / renamed
+    // value references in formulas, validation rules, and flow decisions. Keyed
+    // on integrity / orphaned / stale / dead / renamed vocabulary so it never
+    // steals `what_if_remove_picklist_value` (remove/delete a value),
+    // `live_picklist_usage` (never-used / usage counts), or `picklist-values`
+    // (what values are in X). Placed EARLY so the specific integrity framing wins
+    // first-match over the generic picklist rules further down.
+    intent: 'picklist-integrity',
+    plane: 'vault',
+    tools: ['sfi.picklist_integrity_scan'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Org-wide picklist value-set integrity scan — literals in formulas / validation rules / flow decisions that reference a value the field does not define (orphaned) or defines only as inactive. Distinct from what_if_remove_picklist_value (single-value blast radius) and live_picklist_usage (runtime value counts).',
+    patterns: [
+      /\bpicklist_integrity_scan\b/,
+      /\bpicklist\b[^.?!]{0,40}\bintegrit\w*\b/,
+      /\bintegrit\w*\b[^.?!]{0,40}\bpicklist\b/,
+      /\bvalue\s+sets?\b[^.?!]{0,30}\bintegrit\w*\b/,
+      // "orphaned / stale / dead / renamed / missing ... picklist value(s)".
+      /\b(?:orphaned|stale|dead|renamed|non-?existent|invalid)\b[^.?!]{0,30}\bpicklist\b/,
+      /\bpicklist\b[^.?!]{0,40}\b(?:orphaned|stale|no\s+longer\s+exists?|renamed\s+away|deactivated)\b/,
+      // "orphaned value(s)" / "stale value(s)" (value-set framing without the word picklist).
+      /\borphaned\s+(?:picklist\s+)?(?:value|literal|reference)s?\b/,
+      /\bstale\s+(?:picklist\s+)?values?\b/,
+      // "value(s) that (no longer|don't) exist ... on the field / picklist".
+      /\bvalues?\b[^.?!]{0,30}\b(?:no\s+longer\s+exists?|do(?:es)?n['’]?t\s+exist|been\s+renamed)\b[^.?!]{0,30}\b(?:field|picklist)\b/,
+    ],
+  },
+  {
     intent: 'trigger-order',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],

@@ -2456,6 +2456,22 @@ const FLOW_BULKIFICATION_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.picklist_integrity_scan`. Mirrors
+ * `picklistIntegrityScanInputSchema` (picklist-integrity-scan.ts): an optional
+ * `limit` (1..500, default 50 in the handler) and `offset` (>= 0), both paging
+ * the FIELDS-with-findings list. Drift between this schema and the Zod schema is
+ * a code-review concern.
+ */
+const PICKLIST_INTEGRITY_SCAN_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.flow_trace`. Mirrors `flowTraceInputSchema`
  * (flow-trace.ts). `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare
  * Flow API name, or a Flow record id (the shared resolver reconciles them and
@@ -5194,6 +5210,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "v2.3 R2a what-if tool: given a CustomField canonical id (`CustomField:{Object}.{Field}`) and a proposed new field type, returns the structured impact across every incoming dependency edge. Classifies the (currentType, newType) transition via the matrix in WhatIfSemantics.md as `forward-compatible` / `lossy` / `breaking`, then walks every incoming edge (`references` from validation rules / formulas, `readsFrom`/`writesTo` from Flow + Apex + LWC/Aura/VF, `usedInLayout` from layouts, integration references from External Service / External Data Source) and emits per-impact entries with `category` (metadata-blocker / code-needs-update / integration-touch / configuration-only), source ComponentId, edge-level `confidence`, and a one-sentence explanation. FLS grants (Profile / PermissionSet) are NOT impacts — access keys on API name, not type — and Formula / Roll-Up Summary (computed) fields return `invalid-query` because their type is derived, not stored, so a field-type change is not a valid operation (mirrors `what_if_make_field_required`). Aggregate `verdict` is `safe` / `review` / `risky` / `blocking` based on the impact mix. Supported newType values include `EncryptedText` (Shield/Classic encryption): any transition to EncryptedText is classified as `lossy` because encrypted fields cannot be used in formulas, are invisible to SOQL filters in standard queries, and Apex/Flow reading the field without SYSTEM_MODE will receive masked values. Honesty axis (verbatim): dynamic SOQL, reflective field access via `obj.get('FieldName')`, and runtime computation are invisible; compatibility matrix is conservative — narrow data-shape edge cases may behave compatibly in practice.",
     inputSchema: WHAT_IF_CHANGE_FIELD_TYPE_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.picklist_integrity_scan',
+    description:
+      "Org-wide picklist value-set integrity scan — the INVERSE of what_if_remove_picklist_value (which starts from one value). Sweeps EVERY Picklist / MultiselectPicklist CustomField that carries an inline value set and, for each, gathers every string literal that DECLARATIVE source metadata compares or assigns against it — ValidationRule / formula-field formulas and `ISPICKVAL(field,'X')`, Flow decision criteria, Flow record-create/update LITERAL assignments (`<stringValue>` on a `writesTo` edge), Workflow-Rule criteria, and the field's own default(s) — then flags each literal that matches NO defined value (`orphaned`, HIGH; a spelling-close defined value is offered as a `nearMatch`) or matches only an INACTIVE/deactivated value (`inactive-only`, MEDIUM). Comparison vs assignment matters: an orphaned COMPARISON cannot match a defined value so it is flagged (a branch that silently died on a value rename), but an orphaned ASSIGNMENT is a defect only for a RESTRICTED picklist — an UNRESTRICTED picklist accepts free text — so an orphaned assignment to a field of unknown/unrestricted restrictedness is NOT flagged (free-text writes are not mis-flagged). Output pages over FIELDS-with-findings (`limit` 1..500 default 50, `offset`), with per-hit citations carrying source ComponentId, use kind, location, and edge/parse confidence, plus a `trust` block whose claim confidence is the WEAKEST grounding source (any `parsed` formula literal weakens the `declared` value set to `parsed`). Honesty axis (verbatim): this is a METADATA integrity check, NOT a record-value check — whether any RECORD holds a value is a runtime question for live_picklist_usage. Apex picklist-literal comparison is NOT covered (an Apex node carries no literal-bearing property and a bare-field-name scan of raw `.cls` source would cross-attribute a same-named field on a different object). Variable comparisons, dynamic SOQL/Apex strings, and reflective field access are invisible, so an empty finding is \"not checked\", not proven clean; and the offline vault does not model each field's `restricted` flag, so orphaned assignments are withheld unless the flag is present and true.",
+    inputSchema: PICKLIST_INTEGRITY_SCAN_INPUT_SCHEMA,
   },
   {
     name: 'sfi.what_if_remove_picklist_value',

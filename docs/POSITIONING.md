@@ -57,6 +57,15 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 ### 2. Change safety (impact / what-if)
 
 - `sfi.get_impact`, `sfi.safe_to_delete_field`, the `sfi.what_if_*` family
+- `sfi.picklist_integrity_scan` — the org-wide INVERSE of
+  `what_if_remove_picklist_value`: sweeps every inline-value-set picklist and
+  flags declarative literals (VR / formula-field formulas + `ISPICKVAL`, Flow
+  decision criteria / literal assignments, Workflow criteria, defaults) that
+  reference a value the field no longer defines (orphaned — a branch that
+  silently died on a value rename) or defines only as inactive. Honest about
+  scope — a COMPARISON is flagged, but an ASSIGNMENT is a defect only for a
+  `restricted` picklist, and Apex picklist-literal comparison is out of scope
+  (disclosed), so it never mis-flags a free-text write.
 - `sfi.what_happens_on_save` / `sfi.order_of_execution`
 - `sfi.automation_risk_report` — per-finding automation risk, plus a
   `mode: 'sprawl'` org-wide per-object automation-density triage ranking (where

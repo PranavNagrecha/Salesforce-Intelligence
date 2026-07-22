@@ -562,6 +562,10 @@ import {
 } from './package-impact.js';
 import { hasHandlerCursor } from './page-cursor.js';
 import {
+  picklistIntegrityScanHandler,
+  picklistIntegrityScanInputSchema,
+} from './picklist-integrity-scan.js';
+import {
   piiInventoryHandler,
   piiInventoryInputSchema,
 } from './pii-inventory.js';
@@ -1589,6 +1593,13 @@ export const dispatchTool = async (
         args,
         valueChangeAuditInputSchema,
         valueChangeAuditHandler,
+      );
+    case 'sfi.picklist_integrity_scan':
+      return runTool(
+        ctx,
+        args,
+        picklistIntegrityScanInputSchema,
+        picklistIntegrityScanHandler,
       );
     case 'sfi.what_if_remove_picklist_value':
       return runTool(
