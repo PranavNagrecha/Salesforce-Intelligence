@@ -2401,6 +2401,21 @@ const FLOW_GRAPH_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.flow_bulkification_audit`. Mirrors
+ * `flowBulkificationAuditInputSchema` (flow-bulkification-audit.ts). `limit`
+ * caps the FLOW-level slice (max 500, default 100); `offset` pages the flow list
+ * forward. Drift between this schema and the Zod schema is a code-review concern.
+ */
+const FLOW_BULKIFICATION_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.flow_trace`. Mirrors `flowTraceInputSchema`
  * (flow-trace.ts). `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare
  * Flow API name, or a Flow record id (the shared resolver reconciles them and
@@ -5031,6 +5046,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "The FAITHFUL, LOSSLESS structural graph of a Flow — every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decision rules, assignment items, record-op filters, loops, formulas, variables, subflows, actions, and the <start> element with its entry criteria + scheduled paths. This is the tool for \"show me the structure of <Flow>\", \"what are the branches / decisions in <Flow>\", \"trace the connectors\", \"what elements does <Flow> have\", or \"give me the full element graph\" — where `sfi.explain_flow` gives a plain-business SUMMARY (and historically renamed decisions to condition-N, collapsed conditions to the word \"and\", and emitted ZERO connectors), flow_graph exposes the RAW graph so the host LLM composes the answer. `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare Flow API name (fuzzy-resolved; an AMBIGUOUS bare name returns candidates as a success envelope, never a silent pick), or a Flow record id (300…/301… — fails closed with an actionable message unless a Tooling-API id index exists). The Flow source is read ON DEMAND from the vault and projected; nothing is persisted. Each `connectors[]` edge carries `from`, `to`, and `kind` (`immediate` for the start's first element, `default`, `rule` with the decision outcome `ruleName`, `fault`, `nextValue`/`noMoreValues` for a loop's two branches, `scheduled` with the `scheduledPathName`), plus `isGoTo` for reconnect / loop-back edges; `connectors[]` is authoritative and the per-element `connectsTo` fields are conveniences. Subflow `resolved` is overlaid from the vault (a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated). HONESTY (spec §4.3, verbatim in `disclosure`): NO runtime inference — reachability, dead-branch detection, and ordering are NOT computed here (that is the host LLM's or `flow_trace`'s job); any canvas-element type the parser does not model lands in `unmodeled[]` by name, never silently dropped. Large flows: `include` narrows to a subset of body sections (`connectors|decisions|assignments|recordOps|formulas|variables|loops|actions`) and `element` returns the subgraph for ONE element (it + its immediate connectors + neighbors); any narrowing is DISCLOSED in a `narrowing` block (with `omittedSections`), and the central byte budget truncates disclosed, never silent. Invalid `Type:` prefix or a record id without an index → `invalid-query`; an unknown name / non-Flow → `component-not-found`.",
     inputSchema: FLOW_GRAPH_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.flow_bulkification_audit',
+    description:
+      "Flag Flows that perform a record Create / Update / Delete or a Get Records lookup INSIDE a Loop body, plus filterless Get Records anywhere — the Flow-side complement of `sfi.governor_limit_risks`, which scans only ApexClass / ApexTrigger source and never sees Flows. For each Flow it walks the declared connector graph, computes each Loop's body (the elements reachable from its `nextValueConnector` before control returns or exits via `noMoreValuesConnector`), and reports each record element sitting inside it. Rules: `dml-in-loop` (a create / update / delete per iteration, HIGH), `get-records-in-loop` (a lookup per iteration, HIGH), and `filterless-get-records` (a Get Records with no filter / where clause — an unbounded read, MEDIUM). A record element in nested loops is attributed to the innermost. `flows` are the per-Flow entries (`{ componentId, apiName, risks: [{ rule, severity, location, loop, object, explanation }] }`) sorted by componentId; `totalRiskCount` / `byRule` are the FULL pre-slice counts; `limit` defaults to 100 (max 500) and slices over FLOWS, with `offset` / `nextOffset` paging the rest. HONESTY: findings are read from the declared connector graph (confidence: declared, NOT heuristic like the Apex-source scan); the verbatim boundary is 'iteration count unknown at rest' — a Loop may run 0 or many times, so this is a static Flow-shape smell, not a proven runtime breach. A Flow whose `.flow-meta.xml` is missing or unparseable is a named `soundness` blind spot (kind `unparsed-flow`), never silently dropped — an empty result for it is 'not checked', not 'clean'.",
+    inputSchema: FLOW_BULKIFICATION_AUDIT_INPUT_SCHEMA,
   },
   {
     name: 'sfi.flow_trace',

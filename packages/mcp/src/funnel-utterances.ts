@@ -1461,6 +1461,17 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what are the fault-path connectors in <FlowName>',
     'diagram the flow of control through <FlowName>',
   ],
+  'sfi.flow_bulkification_audit': [
+    'which of my flows are not bulkified?',
+    'find flows that create or update records once per iteration',
+    'is this flow bulkified or does it hit the database every iteration?',
+    'show me flows with a record create, update, or delete inside a loop',
+    'which flows have a Get Records element with no filter?',
+    'audit my flows for record operations that should move out of the loop',
+    'do any flows run a Get Records with no filter conditions?',
+    'flag flows that create <Object> records one row at a time',
+    'find flows with a per-iteration record operation',
+  ],
   'sfi.flow_trace': [
     'what happens to this record in <FlowName> if Status is Active',
     'trace <FlowName> with these field values',

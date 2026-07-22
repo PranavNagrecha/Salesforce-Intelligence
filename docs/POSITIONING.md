@@ -57,6 +57,8 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 ### 3. Code quality / Salesforce-specific SAST
 
 - `sfi.governor_limit_risks`, `sfi.crud_fls_audit`, `sfi.find_hardcoded_values*`
+- `sfi.flow_bulkification_audit` (the Flow-side sibling of `governor_limit_risks`:
+  record DML / Get Records inside a Loop body + filterless Get Records)
 - `sfi.pii_inventory`, `sfi.test_coverage_gaps` / `sfi.meaningful_test_audit`
 - `sfi.code_quality_audit` / `sfi.tech_debt_score`
 - `sfi.find_dead_code` / `sfi.method_reachability`

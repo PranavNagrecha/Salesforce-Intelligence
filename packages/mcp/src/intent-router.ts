@@ -803,6 +803,33 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // FLOW-side bulkification: DML / Get Records inside a Loop body (+ filterless
+    // Get Records) — the complement of the Apex-only governor_limit_risks scan.
+    // Placed BEFORE the trigger / governor-risks rules so a FLOW-scoped loop ask
+    // wins first-match over the Apex governor rule's generic
+    // `(soql|dml|query) ... in loop` pattern. Every pattern anchors on "flow(s)"
+    // so it never steals the Apex governor / automation-collision asks.
+    intent: 'flow-bulkification',
+    plane: 'vault',
+    tools: ['sfi.flow_bulkification_audit'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Static Flow bulkification audit — record DML / Get Records inside a Loop body (one operation per iteration) plus filterless Get Records, read from the declared connector graph. The Flow-side sibling of the Apex-only governor_limit_risks scan.',
+    patterns: [
+      /\bflow_bulkification_audit\b/,
+      // "flow(s) ... bulkif*" (either order).
+      /\bflows?\b[^.?!]{0,60}\bbulkif\w*\b/,
+      /\bbulkif\w*\b[^.?!]{0,60}\bflows?\b/,
+      // "DML / create / update / delete / get records ... in a loop ... flow" —
+      // the loop anti-pattern, scoped to flows.
+      /\bflows?\b[^.?!]{0,80}\b(?:dml|create|update|delete|get\s+records|record\s+lookup|soql|quer(?:y|ies))\b[^.?!]{0,40}\b(?:in\s+(?:a\s+)?loop|inside\s+(?:a\s+)?loop|loops?)\b/,
+      /\b(?:dml|create|update|delete|get\s+records|record\s+lookup|soql|quer(?:y|ies))\b[^.?!]{0,40}\b(?:in\s+(?:a\s+)?loop|inside\s+(?:a\s+)?loop|loops?)\b[^.?!]{0,60}\bflows?\b/,
+      // "flow(s) ... filterless / unbounded / no filter Get Records".
+      /\bflows?\b[^.?!]{0,60}\b(?:filterless|unbounded|no\s+filter|without\s+(?:a\s+)?filter)\b[^.?!]{0,30}\b(?:get\s+records|quer(?:y|ies))\b/,
+    ],
+  },
+  {
     intent: 'trigger-order',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
