@@ -199,7 +199,7 @@ flowchart TB
     end
 
     subgraph CONCEPT["Concept Model — ships with the package · no org data, ever"]
-        CM[["Graph B · Concept Model<br/>94 org-independent concepts / 143 rules<br/>save-order · relationships · sharing · code-shape"]]
+        CM[["Graph B · Concept Model<br/>142 org-independent concepts / 193 rules<br/>save-order · relationships · sharing · code-shape"]]
     end
 
     subgraph ASK["Ask — every question, offline on your machine"]
@@ -226,7 +226,7 @@ org is the only one that can touch Salesforce, and only after you opt in.
 Retrieval (`route_question → sfi.* → synthesize_answer`) reports *what's in the
 org*; the reasoning path (`resolve → interpret → synthesize_answer`) reports
 *what its shape implies*. `sfi.interpret` is a deterministic, offline **join** of
-the org-independent **Concept Model** (Graph B — 94 concepts / 143 rules, which
+the org-independent **Concept Model** (Graph B — 142 concepts / 193 rules, which
 never touches your org) against a grounded slice of the vault (Graph A); it runs
 with no LLM and no live read, and every claim it feeds `synthesize_answer` is
 cited and confidence-tiered. The deterministic `SFI_ROUTER_MODE=offline` mode

@@ -54,7 +54,7 @@ against the org-independent Concept Model (Graph B):
 ```
    Graph A · org vault slice          Graph B · Concept Model
    (grounded, org-specific)           (org-independent, in the package)
-     CustomObject:Account               94 concepts / 143 rules
+     CustomObject:Account               142 concepts / 193 rules
      Flow:Account_Set_Defaults          save-order · relationships ·
      Flow:Account_Enrich_Billing        sharing · code-shape
      CustomField:Invoice__c.Total__c    NO org data (no ids, no counts)
@@ -279,7 +279,7 @@ API name up front:
 | `sfi.interpret`                      | canonical component ID, optional `concepts` / `ruleIds` filters | cited structural-implication claims (`interpretations[]` with `groundedIn` + claim confidence) + `trust` block | Join the Concept Model against the component's vault slice — deterministic, offline reasoning (no LLM, no live read). |
 
 `sfi.interpret` is the reasoning tool: it fires the curated Concept Model
-(94 concepts / 143 rules — see §1) against a minimal graph slice assembled around
+(142 concepts / 193 rules — see §1) against a minimal graph slice assembled around
 the target component. Each returned claim cites the exact ids it matched, and an
 empty list means "no rule fired," not "nothing depends on it." Its per-claim
 confidence is a *distinct* axis from per-edge confidence and can never exceed the

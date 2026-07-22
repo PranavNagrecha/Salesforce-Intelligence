@@ -235,8 +235,8 @@ references what. A second class of question asks what a structure
 **implies**: does deleting this parent cascade-delete its children? Do these
 two flows run in a defined order? Is this class an entry point where
 field-level security isn't auto-enforced? Those are answered by
-`sfi.interpret`, which joins a curated, org-independent **Concept Model** (94
-concepts / 143 rules of general Salesforce truth) against the org's grounded
+`sfi.interpret`, which joins a curated, org-independent **Concept Model** (142
+concepts / 193 rules of general Salesforce truth) against the org's grounded
 vault slice and returns **cited, confidence-tiered structural claims**. It is
 deterministic and offline — no LLM, no live org read.
 

@@ -82,7 +82,7 @@ cascade-delete children, do these two flows run in a defined order, is
 this class an unenforced entry point — go one step past retrieval:
 **resolve → interpret → synthesize**. `sfi.resolve` fixes the component;
 `sfi.interpret` joins the org's grounded vault slice against a curated,
-org-independent **Concept Model** (94 concepts / 143 rules of general
+org-independent **Concept Model** (142 concepts / 193 rules of general
 Salesforce truth) and returns **cited, confidence-tiered structural
 claims**; `sfi.synthesize_answer` folds those claims into the answer,
 hedged and attributed. It is **deterministic and offline** — no LLM, no
