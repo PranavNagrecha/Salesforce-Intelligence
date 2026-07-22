@@ -46,6 +46,13 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 - `sfi.find_field_anywhere` / `sfi.find_semantic_field` / `sfi.disambiguate_concepts`
 - `sfi.generate_onboarding_doc` / `sfi.org_overview` / `sfi.domain_clusters`
 - `sfi.get_naming_convention_report`
+- `sfi.doc_coverage_report` — MEASURES documentation gaps (the axis the
+  generators and `tech_debt_score` lack): where custom metadata lacks a
+  `description` / `inlineHelpText`, ranked worst-covered first by object and
+  weighted by graph edge-degree so undocumented, heavily-referenced components
+  surface first. Honest about scope — a type whose description the extractor
+  cannot capture is NOT MEASURABLE (excluded), and standard / managed-package
+  components are out-of-scope, never counted against the org.
 
 ### 2. Change safety (impact / what-if)
 

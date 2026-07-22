@@ -168,6 +168,10 @@ import {
   disambiguateConceptsInputSchema,
 } from './disambiguate-concepts.js';
 import {
+  docCoverageReportHandler,
+  docCoverageReportInputSchema,
+} from './doc-coverage-report.js';
+import {
   domainClustersHandler,
   domainClustersInputSchema,
 } from './domain-clusters.js';
@@ -1350,6 +1354,13 @@ export const dispatchTool = async (
         args,
         domainClustersInputSchema,
         domainClustersHandler,
+      );
+    case 'sfi.doc_coverage_report':
+      return runTool(
+        ctx,
+        args,
+        docCoverageReportInputSchema,
+        docCoverageReportHandler,
       );
     case 'sfi.changed_since':
       return runTool(
