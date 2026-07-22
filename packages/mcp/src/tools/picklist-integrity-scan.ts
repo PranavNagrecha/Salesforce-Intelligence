@@ -124,7 +124,7 @@ const PICKLIST_INTEGRITY_RECALL_DISCLOSURE =
  * inference the offline model does not have.
  */
 const PICKLIST_INTEGRITY_APEX_DISCLOSURE =
-  'Apex picklist-literal comparison is NOT covered. An Apex `field == \'X\'` / `ISPICKVAL(field,\'X\')` reference is invisible to this scan: an Apex node carries no literal-bearing property, and a bare-field-name scan of the raw `.cls` source would cross-attribute a same-named field on a DIFFERENT object (e.g. `courseOffering.Status__c` vs `Training_Assignments__c.Status__c`) — an unsound false positive without Apex type inference. Review Apex picklist comparisons separately.';
+  'Apex picklist-literal comparison is NOT covered. An Apex `field == \'X\'` / `ISPICKVAL(field,\'X\')` reference is invisible to this scan: an Apex node carries no literal-bearing property, and a bare-field-name scan of the raw `.cls` source would cross-attribute a same-named field on a DIFFERENT object (e.g. `acct.Status__c` vs `Case.Status__c`) — an unsound false positive without Apex type inference. Review Apex picklist comparisons separately.';
 
 /**
  * The verbatim "static shape, not proof" boundary — an orphaned literal is a
@@ -676,8 +676,8 @@ interface ConditionMirrorLike {
  * Apex classes / triggers are deliberately NOT scanned for picklist literals —
  * see the module-level Apex boundary. Their node carries no literal-bearing
  * property, and a bare-field-name scan of the raw `.cls` source cross-attributes
- * a literal from one object's same-named field (`courseOffering.Status__c`) to a
- * different object's field (`Training_Assignments__c.Status__c`), a cross-object
+ * a literal from one object's same-named field (`acct.Status__c`) to a
+ * different object's field (`Case.Status__c`), a cross-object
  * false positive the offline model cannot resolve without Apex type inference.
  */
 export const referencesFromEdgeSource = (
