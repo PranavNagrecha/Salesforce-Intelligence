@@ -893,6 +893,34 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // Permission-set CONSOLIDATION — redundant / duplicate / subset / overlapping
+    // permission sets that could be merged, from DECLARED grants. Keyed on
+    // redundant/duplicate/consolidate/merge/subset/overlap + permission set(s) so
+    // it never steals `unassigned_permission_sets` (who HOLDS a set — assignment)
+    // or `permission_risk_report` (god-mode / over-privilege — how DANGEROUS a
+    // grant is). Placed EARLY so the consolidation framing wins first-match over
+    // generic permission asks.
+    intent: 'permission-set-consolidation',
+    plane: 'vault',
+    tools: ['sfi.permission_set_consolidation'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Offline permission-set consolidation candidates from declared grants — empty / strict-subset / near-duplicate permission sets ranked by consolidation opportunity. Distinct from unassigned_permission_sets (who holds a set) and permission_risk_report (over-privilege / god-mode).',
+    patterns: [
+      /\bpermission_set_consolidation\b/,
+      // "redundant / duplicate / consolidate / merge / overlapping ... permission set(s)".
+      /\b(?:redundant|duplicate|consolidat\w*|overlapping|near-?duplicate)\b[^.?!]{0,40}\bpermission\s+sets?\b/,
+      /\bpermission\s+sets?\b[^.?!]{0,40}\b(?:redundant|duplicate|consolidat\w*|overlapping|near-?duplicate|subset)\b/,
+      // "merge / combine ... permission set(s)".
+      /\b(?:merge|combine)\b[^.?!]{0,30}\bpermission\s+sets?\b/,
+      // "permission set(s) ... (that are a )subset of / contained in another".
+      /\bpermission\s+sets?\b[^.?!]{0,40}\b(?:subset\s+of|contained\s+in)\b/,
+      // "empty permission set(s)".
+      /\bempty\s+permission\s+sets?\b/,
+    ],
+  },
+  {
     intent: 'trigger-order',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
