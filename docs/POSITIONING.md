@@ -76,6 +76,12 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 
 - Offline fleet: `sfi.fleet_find`, `sfi.fleet_drift_ranking`,
   `sfi.generate_fleet_report`
+- Offline limit headroom: `sfi.limit_headroom_report` — the vault-only
+  replacement for the retiring Salesforce Optimizer limit report. Counts
+  metadata against per-object / per-org configuration ceilings and ranks
+  objects worst-first by remaining headroom%. Edition is unknown offline, so
+  edition-dependent caps are labeled `assumed-edition` and disclosed; runtime
+  limits (storage, API counts, daily async) are deferred to `sfi.live_org_limits`.
 - Opt-in live plane: the `sfi.live_*` family (counts, samples, limits, drift,
   scheduled jobs, etc.) — never ambient; consent-gated and disclosed
 
@@ -206,7 +212,9 @@ CRUD/FLS.
   pipeline agents), not a question-answering dependency graph for day-to-day
   org understanding.
 - **Salesforce Optimizer** — free first-party unused-field / limits style
-  report.
+  report (being retired). `sfi.limit_headroom_report` is the offline,
+  vault-only replacement for its limit table (metadata-vs-configuration-limit
+  headroom, ranked worst-first); runtime limits stay on the opt-in live plane.
 
 These tools *act*. sf-intelligence is read-only by design. Bridge story:
 `sfi.org_risk_report` / promotion-readiness style tools inform a deploy gate;

@@ -1649,6 +1649,27 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
 });
 
 /**
+ * Concrete JSON Schema for `sfi.limit_headroom_report`. Mirrors
+ * `limitHeadroomReportInputSchema` (limit-headroom-report.ts). `edition` is the
+ * optional org edition (edition-dependent limits are computed against an ASSUMED
+ * `enterprise` edition when omitted, disclosed in `boundaries[]`); `limit`
+ * (max 100, default 15) and `offset` page the RANKED per-object list. Drift
+ * between this schema and the Zod schema is a code-review concern.
+ */
+const LIMIT_HEADROOM_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      edition: {
+        type: 'string',
+        enum: ['enterprise', 'unlimited', 'developer', 'professional'],
+      },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.app_access`. Mirrors `appAccessInputSchema` —
  * a `componentId` (`CustomApplication:`/`Profile:`/`PermissionSet:` id) OR a
  * natural app-name selector (`apiName`/`app`/`nameContains`), plus optional
@@ -4375,6 +4396,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "Fetch a single component by canonical id. Returns its frontmatter and a response-safe Markdown body slice; large bodies are truncated with explicit bodyBytes/returnedBodyBytes/omittedBodyBytes metadata. Optional maxBodyBytes (0..30000) narrows the body slice. `maxBodyBytes: 0` (or any small value) is the EXISTENCE/METADATA-PROBE pattern — the response becomes a bounded metadata envelope (`metadataOnly: true`) instead of the full document: frontmatter is capped the same way body is, `properties` keeps whichever entries fit a small budget (scalars survive, huge arrays like a Profile's fieldPermissions/objectPermissions are the ones dropped and named in `omittedPropertyKeys`), and `referenceIds` is capped with the true total in `referenceCount` — a `disclosure` string names exactly what was omitted. This guarantees `maxBodyBytes: 0` never trips the global oversize guard, even on a huge node (e.g. a Profile with thousands of grants). A PHANTOM id (referenced by retrieved metadata but never itself retrieved) returns component-not-found with a classified reference stub — and an AUTOMATION-CRITICAL phantom hit is also queued in meta/demand-queue.jsonl so `sfi refresh --drain-demand-queue` (or the watch daemon with --drain-demand-queue) can pull exactly the components real questions needed. An `UnresolvedProfile:{id}` stub (a Profile Id a RestrictionRule/DuplicateRule referenced but the vault could not resolve to an api name) classifies as `unresolved-profile-id`: its remedy is a Profile Id→apiName index / live Tooling, NOT a wider retrieve manifest.",
     inputSchema: GET_COMPONENT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.limit_headroom_report',
+    description:
+      "Offline, vault-only limit-headroom report — the replacement for the retiring Salesforce Optimizer's limit report. Counts the org's METADATA against per-object and per-org CONFIGURATION ceilings and ranks the rows WORST-FIRST by remaining headroom% so an admin acts before a deploy hits a wall. Per CustomObject it reports consumed / limit / headroom% for custom fields, active validation rules, record types, and relationship fields (lookup + master-detail); org-wide it reports custom objects, custom tabs, custom apps, and active flows. `orgLimits` is the always-included org-wide set; `objects` is the per-object set (each with its 4 metric rows and `worstHeadroomPct`), ranked worst-first and PAGED by `limit` (default 15, max 100) / `offset` / `nextOffset`; `topRisks` surfaces the ≤5 tightest rows across the WHOLE report regardless of page; `metricLegend` holds each metric's label + general-Salesforce source note + consumption caveat (deduped out of the lean rows). This is NOT `sfi.tech_debt_score` (a weighted debt index, no per-limit headroom) and NOT `sfi.coverage_report` (retrieval coverage, not config limits). HONESTY: edition cannot be read offline — pass `edition` (enterprise | unlimited | developer | professional) or edition-dependent limits use an ASSUMED enterprise edition, disclosed verbatim, with every such row labeled `limitBasis: 'assumed-edition'` (the cap table is GENERAL Salesforce documented limits, never this org's provisioned ceilings). Field consumption is an APPROXIMATION (geolocation counted as 3 slots; roll-up summary has a separate cap; managed-package namespaced fields excluded because they generally do not count). Only families the refresh retrieved are counted — an un-retrieved family reads as 0 consumed, a FLOOR flagged `consumedIsFloor`. Runtime limits (data/file storage, API request counts, daily async) are out of scope and deferred to the consent-gated live plane (`sfi.live_org_limits`).",
+    inputSchema: LIMIT_HEADROOM_REPORT_INPUT_SCHEMA,
   },
   {
     name: 'sfi.list_components',

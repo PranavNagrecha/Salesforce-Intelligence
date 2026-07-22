@@ -1472,6 +1472,18 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'flag flows that create <Object> records one row at a time',
     'find flows with a per-iteration record operation',
   ],
+  'sfi.limit_headroom_report': [
+    'how many custom fields can I still add to <Object>?',
+    'which objects are closest to their configuration limits?',
+    'am I approaching any Salesforce limits before this deploy?',
+    'show me the limit headroom for this org, worst first',
+    'how much room is left on custom objects, tabs, and apps?',
+    'run the Optimizer-style limit report offline',
+    'which object is running out of custom field slots?',
+    'how many validation rules and record types is <Object> using vs the limit?',
+    'rank my objects by remaining headroom on fields and relationships',
+    'are we close to the custom object limit for our edition?',
+  ],
   'sfi.flow_trace': [
     'what happens to this record in <FlowName> if Status is Active',
     'trace <FlowName> with these field values',

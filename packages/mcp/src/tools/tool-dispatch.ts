@@ -409,6 +409,10 @@ import {
   lightningPagesInputSchema,
 } from './lightning-pages.js';
 import {
+  limitHeadroomReportHandler,
+  limitHeadroomReportInputSchema,
+} from './limit-headroom-report.js';
+import {
   listComponentsHandler,
   listComponentsInputSchema,
 } from './list-components.js';
@@ -871,6 +875,13 @@ export const dispatchTool = async (
         args,
         getComponentInputSchema,
         getComponentHandler,
+      );
+    case 'sfi.limit_headroom_report':
+      return runTool(
+        ctx,
+        args,
+        limitHeadroomReportInputSchema,
+        limitHeadroomReportHandler,
       );
     case 'sfi.list_components':
       return runTool(

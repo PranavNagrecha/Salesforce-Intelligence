@@ -830,6 +830,39 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // CONFIGURATION limit headroom — metadata counts vs per-object / per-org
+    // Salesforce config ceilings, ranked worst-first (the offline Optimizer
+    // limit report). Anchored on "headroom" / "limit report" / "Optimizer" /
+    // "approaching|close to|running out of ... limit(s)" / "how many ... left",
+    // so it never steals the Apex governor_limit_risks asks (which anchor on
+    // governor / SOQL-DML-in-loop) — those are RUNTIME per-transaction limits,
+    // a different question from these config CEILINGS.
+    intent: 'limit-headroom',
+    plane: 'vault',
+    tools: ['sfi.limit_headroom_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Offline configuration-limit headroom report — metadata counts vs per-object / per-org Salesforce config ceilings, ranked worst-first (the vault-only replacement for the Salesforce Optimizer limit report). Distinct from the Apex governor_limit_risks RUNTIME scan.',
+    patterns: [
+      /\blimit_headroom_report\b/,
+      /\bheadroom\b/,
+      /\blimit\s+report\b/,
+      /\boptimizer\b/,
+      // "approaching / close to / nearing / almost at ... limit(s)". Deliberately
+      // EXCLUDES the governor-collision verbs (hit / hitting / exceed), which
+      // belong to the RUNTIME governor_limit_risks scan ("hitting governor
+      // limits"), not the config-CEILING headroom report.
+      /\b(?:approaching|close\s+to|near(?:ing)?|almost\s+at|running\s+out\s+of)\b[^.?!]{0,40}\blimits?\b/,
+      // "custom field / object / tab / app limit" — config-limit vocabulary.
+      /\bcustom\s+(?:field|object|tab|app|application)s?\b[^.?!]{0,20}\blimits?\b/,
+      // "how many (custom) fields / objects / ... (left|remaining)".
+      /\bhow\s+many\b[^.?!]{0,40}\b(?:left|remaining)\b/,
+      // "running out of ... (fields|slots|record types|relationships)".
+      /\brunning\s+out\s+of\b[^.?!]{0,30}\b(?:fields?|slots?|record\s+types?|relationships?|objects?)\b/,
+    ],
+  },
+  {
     intent: 'trigger-order',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
