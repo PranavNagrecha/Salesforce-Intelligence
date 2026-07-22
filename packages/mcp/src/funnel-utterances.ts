@@ -1669,6 +1669,15 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'if I convert this currency field to a formula field, what automation breaks?',
     'blast radius of making Amount__c a formula field instead of editable',
   ],
+  'sfi.picklist_integrity_scan': [
+    'scan the org for orphaned or stale picklist value references',
+    'are there any validation rules or flows comparing a field to a picklist value that no longer exists?',
+    'find picklist integrity problems — comparisons pointing at renamed or deactivated values',
+    'which formulas reference a picklist value that is not defined on the field?',
+    'check every picklist value set for dead references and bad defaults',
+    'do any decisions branch on a stale picklist value that was renamed away?',
+    'audit picklist value sets for typos and orphaned literals across the org',
+  ],
   'sfi.what_if_remove_picklist_value': [
     'what happens if I delete the \'Pending\' value from Case.Status?',
     'if I remove the \'Cold\' picklist value from Lead.Rating, what records are affected?',

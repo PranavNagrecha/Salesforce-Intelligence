@@ -298,6 +298,7 @@ describe('dispatchTool', () => {
     'sfi.find_hardcoded_values',
     'sfi.crud_fls_audit',
     'sfi.test_coverage_gaps',
+    'sfi.picklist_integrity_scan',
     // v2.3 R2a — what-if field-level tools.
     'sfi.what_if_change_field_type',
     'sfi.what_if_remove_picklist_value',
@@ -670,6 +671,7 @@ describe('V01_TOOLS', () => {
       'sfi.crud_fls_audit',
       'sfi.test_coverage_gaps',
       'sfi.what_if_change_field_type',
+      'sfi.picklist_integrity_scan',
       'sfi.what_if_remove_picklist_value',
       'sfi.what_if_make_field_required',
       'sfi.what_if_deactivate_flow',

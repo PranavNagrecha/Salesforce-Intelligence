@@ -452,6 +452,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'Which fields do my prompt templates ground on?',
       'Which sensitive fields have no field-history tracking enabled?',
       'Which annotation proposals are still unconfirmed?',
+      'Are any validation rules or flows comparing a field to a picklist value that no longer exists?',
     ],
     tools: [
       'sfi.health_check',
@@ -471,6 +472,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.tech_debt_score',
       'sfi.limit_headroom_report',
       'sfi.doc_coverage_report',
+      'sfi.picklist_integrity_scan',
       'sfi.org_risk_report',
     ],
   },
