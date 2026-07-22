@@ -41,6 +41,8 @@
       "sfi.find_formula_references",
       "sfi.live_picklist_usage",
       "sfi.safe_to_delete_field",
+      "sfi.user_ability",
+      "sfi.value_change_audit",
       "sfi.what_if_change_field_type",
       "sfi.what_if_change_field_value",
       "sfi.what_if_make_field_required",
@@ -48,11 +50,20 @@
       "sfi.why_field_changed"
     ],
     "objectId": [
+      "sfi.automation_risk_report",
+      "sfi.domain_clusters",
+      "sfi.effective_permissions",
+      "sfi.endpoint_catalog",
       "sfi.field_cleanup_candidates",
       "sfi.find_dead_code",
+      "sfi.flow_fault_audit",
       "sfi.generate_data_dictionary",
+      "sfi.guest_exposure_report",
       "sfi.history_tracking_gaps",
       "sfi.pii_inventory",
+      "sfi.process_builder_migration_candidates",
+      "sfi.recordtype_availability",
+      "sfi.tab_availability",
       "sfi.unused_fields_deep"
     ],
     "targetId": [
@@ -64,6 +75,9 @@
       "sfi.effective_permissions",
       "sfi.layout_for_user",
       "sfi.profile_security",
+      "sfi.recordtype_availability",
+      "sfi.tab_availability",
+      "sfi.user_ability",
       "sfi.what_if_split_profile"
     ],
     "communityId": [
@@ -73,8 +87,18 @@
       "sfi.layout_for_user",
       "sfi.what_happens_on_save"
     ],
+    "permissionSetId": [
+      "sfi.recordtype_availability",
+      "sfi.tab_availability",
+      "sfi.user_ability",
+      "sfi.what_if_assign_permset",
+      "sfi.what_if_revoke_permset"
+    ],
     "eventId": [
       "sfi.event_subscribers"
+    ],
+    "seedComponentId": [
+      "sfi.domain_clusters"
     ],
     "flowId": [
       "sfi.explain_flow",
@@ -83,12 +107,11 @@
     "triggerId": [
       "sfi.what_if_disable_trigger"
     ],
-    "permissionSetId": [
-      "sfi.what_if_assign_permset",
-      "sfi.what_if_revoke_permset"
-    ],
     "rootApexClassId": [
       "sfi.async_chain_depth"
+    ],
+    "packageId": [
+      "sfi.package_impact"
     ],
     "ruleId": [
       "sfi.cpq_rule_chain"
