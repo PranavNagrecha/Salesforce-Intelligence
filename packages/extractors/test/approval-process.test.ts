@@ -1252,4 +1252,131 @@ describe('extractApprovalProcess', () => {
       }
     });
   });
+
+  describe('D7 — userHierarchyField approver resolves its nextAutomatedApprover field', () => {
+    it('FAIL-BEFORE/PASS-AFTER: a name-less userHierarchyField approver captures the custom <nextAutomatedApprover> field + emits a User-scoped CustomField edge', async () => {
+      // Real metadata shape: the step approver is <type>userHierarchyField</type>
+      // with NO <name>; the field it routes through is designated ONCE at the
+      // process root in <nextAutomatedApprover><userHierarchyField>. A CUSTOM
+      // hierarchy field there (a user-lookup field, ends `__c`) must be captured
+      // — FAIL-BEFORE this returned approvers:[{name:null}] and emitted NO edge,
+      // silently losing who approves.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <label>MyApproval</label>
+    <approvalStep>
+        <label>Approver Field Step</label>
+        <name>Approver_Field_Step</name>
+        <assignedApprover>
+            <approver><type>userHierarchyField</type></approver>
+        </assignedApprover>
+    </approvalStep>
+    <nextAutomatedApprover>
+        <useApproverFieldOfRecordOwner>true</useApproverFieldOfRecordOwner>
+        <userHierarchyField>Approver__c</userHierarchyField>
+    </nextAutomatedApprover>
+</ApprovalProcess>`;
+      const { dir, path } = await writeTempApprovalXml('MyObject__c.MyApproval', xml);
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+
+        // The node + stepCount still survive.
+        const node = result.value.nodes.find((n) => n.type === 'ApprovalProcess');
+        expect(node?.properties.stepCount).toBe(1);
+
+        // (1) The approver summary now carries the field API name, not null.
+        const props = node!.properties as {
+          steps: ReadonlyArray<{
+            approvers: ReadonlyArray<{ name: string | null; type: string | null }>;
+          }>;
+        };
+        expect(props.steps[0]?.approvers).toEqual([
+          { name: 'Approver__c', type: 'userHierarchyField' },
+        ]);
+
+        // (2) A User-scoped CustomField reference edge is emitted — the field is
+        // a hierarchy field on User, NOT on the approval object (MyObject__c).
+        const approverRefs = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.properties.approverType === 'userHierarchyField',
+        );
+        expect(approverRefs).toHaveLength(1);
+        expect(approverRefs[0]!.toId).toBe('CustomField:User.Approver__c');
+        expect(approverRefs[0]!.confidence).toBe('declared');
+        expect(approverRefs[0]!.properties).toMatchObject({
+          stepIndex: 0,
+          approverType: 'userHierarchyField',
+          viaNextAutomatedApprover: true,
+        });
+        // Not scoped to the approval process's own object.
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'CustomField:MyObject__c.Approver__c',
+          ),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('GUARD: a name-less implicit-Manager (standard) userHierarchyField approver stays name-optional with no spurious field edge', async () => {
+      // The standard `Manager` hierarchy field is a STANDARD field, not a
+      // CustomField node — it must remain the edgeless implicit-Manager approver
+      // even though <nextAutomatedApprover> designates it.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <label>MyApproval</label>
+    <approvalStep>
+        <label>Manager Step</label>
+        <name>Manager_Step</name>
+        <assignedApprover>
+            <approver><type>userHierarchyField</type></approver>
+        </assignedApprover>
+    </approvalStep>
+    <nextAutomatedApprover>
+        <useApproverFieldOfRecordOwner>false</useApproverFieldOfRecordOwner>
+        <userHierarchyField>Manager</userHierarchyField>
+    </nextAutomatedApprover>
+</ApprovalProcess>`;
+      const { dir, path } = await writeTempApprovalXml('MyObject__c.MyApproval', xml);
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+
+        const node = result.value.nodes.find((n) => n.type === 'ApprovalProcess');
+        expect(node?.properties.stepCount).toBe(1);
+
+        // Still resolves as the name-optional implicit Manager (name: null).
+        const props = node!.properties as {
+          steps: ReadonlyArray<{
+            approvers: ReadonlyArray<{ name: string | null; type: string | null }>;
+          }>;
+        };
+        expect(props.steps[0]?.approvers).toEqual([
+          { name: null, type: 'userHierarchyField' },
+        ]);
+
+        // No spurious field edge (neither User-scoped nor object-scoped).
+        const approverRefs = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.properties.approverType === 'userHierarchyField',
+        );
+        expect(approverRefs).toHaveLength(0);
+        expect(
+          result.value.edges.some((e) =>
+            String(e.toId).endsWith('.Manager'),
+          ),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
