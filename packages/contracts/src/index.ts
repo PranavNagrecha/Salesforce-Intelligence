@@ -2140,6 +2140,43 @@ export interface RuleWitnessPartition {
 }
 
 /**
+ * CITED-REMEDIATION — an org-agnostic, AUTHORED remediation attached to a
+ * {@link ConceptRule}. When the rule fires, the engine emits the fix as a
+ * {@link Remediation} on the {@link Interpretation}, filling each `{ids}` /
+ * positional `{0}` token from the SAME grounded ids the claim cites and stamping
+ * the SAME confidence, so a remediation is never stronger than the finding it
+ * attaches to.
+ *
+ * Honesty is load-bearing:
+ *   - `steps` are AUTHORED template text (general Salesforce guidance), NEVER
+ *     generated prose and NEVER a real org component name — the concept-model
+ *     gate forbids canonical ids here exactly as it does for `interpretation`.
+ *   - `steps` are DEPENDENCY-ORDERED (author order = execution order): do step 1
+ *     before step 2.
+ *   - These are the fix STEPS. They NEVER assert that the finding is CLOSED after
+ *     them — no `what_if_*` tool mutates the sharing / CRUD / keyword shapes the
+ *     engine reasons over, so the engine cannot compute a counterfactual closure.
+ *   - `whatIfTool`, when set, names a REAL registered tool that can MODEL the
+ *     counterfactual (e.g. `sfi.what_if_revoke_permset`, `sfi.get_impact`); it is
+ *     a pointer to model the change, never a claim that running it clears the
+ *     finding.
+ */
+export interface RuleRemediation {
+  /**
+   * Ordered fix-step templates. Author order IS dependency order. Each may carry
+   * `{ids}` / positional `{0}` tokens filled from the claim's grounded ids at
+   * emit time. Non-empty; org-agnostic (no canonical component ids).
+   */
+  readonly steps: readonly string[];
+  /**
+   * OPTIONAL pointer to a REAL registered tool that can MODEL the counterfactual
+   * (e.g. `sfi.what_if_revoke_permset`, `sfi.get_impact`). Advisory — it never
+   * asserts the finding is closed after the fix.
+   */
+  readonly whatIfTool?: string;
+}
+
+/**
  * Binds a {@link Concept} to a structural {@link RulePredicate} and the
  * interpretation to emit when the predicate matches. `maxConfidence` is a
  * ceiling — the emitted confidence is the WEAKEST of it and every matched
@@ -2174,9 +2211,43 @@ export interface ConceptRule {
    * path (every other edge rule) is byte-identical.
    */
   readonly witnessPartition?: RuleWitnessPartition;
+  /**
+   * CITED-REMEDIATION — OPTIONAL authored fix for a rule that names an
+   * actionable finding (a security / governor / structural shape worth acting
+   * on). When present, every {@link Interpretation} this rule emits carries a
+   * grounded {@link Remediation} (steps filled from the claim's cited ids, at the
+   * claim's confidence). Absent ⇒ the rule emits NO fix and the interpretation
+   * carries no `remediation` (never a fabricated generic one). Neutral,
+   * non-actionable concepts (a formula field is read-only, a junction pattern)
+   * deliberately have none.
+   */
+  readonly remediation?: RuleRemediation;
   readonly maxConfidence: ConfidenceLevel;
   readonly absenceShaped: boolean;
   readonly dependsOnCoverage: readonly ComponentType[];
+}
+
+/**
+ * CITED-REMEDIATION — the grounded fix emitted on an {@link Interpretation} when
+ * its firing {@link ConceptRule} carries an authored {@link RuleRemediation}. The
+ * `steps` are the authored templates FILLED from the claim's grounded ids;
+ * `groundedIn` + `confidence` are copied VERBATIM from the claim, so the fix is
+ * cited by exactly the same components and can never read stronger than the
+ * finding.
+ *
+ * These are fix STEPS ONLY — the engine NEVER asserts the finding is closed after
+ * them. `whatIfTool`, when present, points at a real tool that can MODEL the
+ * counterfactual; it is not a claim of closure.
+ */
+export interface Remediation {
+  /** Dependency-ordered fix steps, filled from the claim's grounded ids. */
+  readonly steps: readonly string[];
+  /** Copied from the claim: the fix is only as strong as the finding it fixes. */
+  readonly confidence: ConfidenceLevel | 'unknown';
+  /** Copied from the claim's `groundedIn`: the exact components the fix cites. */
+  readonly groundedIn: readonly ComponentId[];
+  /** OPTIONAL pointer to a real tool that MODELS the counterfactual (never closure). */
+  readonly whatIfTool?: string;
 }
 
 /**
@@ -2195,6 +2266,13 @@ export interface Interpretation {
   readonly coverageCaveat: string | null;
   readonly modelVersion: string;
   readonly provenance: 'offline_snapshot';
+  /**
+   * CITED-REMEDIATION — the grounded fix, present ONLY when the firing rule
+   * carried an authored {@link RuleRemediation}. Absent ⇒ no fix was authored for
+   * this claim (never a fabricated one). Byte-identical to the pre-remediation
+   * output for every rule without one.
+   */
+  readonly remediation?: Remediation;
   /**
    * EPIC-3 — set by the reconciliation pass when a STRONGER / more-specific
    * co-firing claim SUPERSEDED this one over a shared anchor (or curated topic).

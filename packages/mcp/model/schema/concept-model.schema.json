@@ -176,6 +176,30 @@
           "description": "Template with `{ids}` / positional `{0}` tokens filled from matched ids.",
           "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
         },
+        "remediation": {
+          "type": "object",
+          "description": "OPTIONAL authored, dependency-ordered fix STEPS for an actionable finding. Org-agnostic general Salesforce guidance only (never a canonical id, never a closure claim). Emitted on the interpretation with steps filled from the claim's grounded ids at the claim's confidence.",
+          "additionalProperties": false,
+          "required": ["steps"],
+          "properties": {
+            "steps": {
+              "type": "array",
+              "description": "Ordered fix-step templates (author order = execution order). Each may carry `{ids}` / positional `{0}` tokens.",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+              }
+            },
+            "whatIfTool": {
+              "type": "string",
+              "minLength": 1,
+              "description": "OPTIONAL pointer to a real registered tool that can MODEL the counterfactual (e.g. sfi.what_if_revoke_permset). Never a closure claim.",
+              "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+            }
+          }
+        },
         "maxConfidence": {
           "type": "string",
           "enum": ["declared", "parsed", "heuristic"]
