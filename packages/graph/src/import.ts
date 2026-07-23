@@ -494,17 +494,270 @@ const canonicalizeEdgeTargetsByCase = (
   }
 };
 
+/** Canonical id prefix for a CustomField node. */
+const CUSTOM_FIELD_PREFIX = 'CustomField:';
+
+/**
+ * Lowercased object API name shared by the polymorphic-base remap: a custom
+ * field defined on `Activity` is physically stored on that object and shared by
+ * its two children.
+ */
+const ACTIVITY_OBJECT_LOWER = 'activity';
+
+/**
+ * Lowercased API names of the two polymorphic children of `Activity`. A custom
+ * field written/read through one of these receivers is really the shared
+ * `Activity` field (Salesforce has no per-child custom-field storage).
+ */
+const ACTIVITY_CHILD_OBJECTS_LOWER: ReadonlySet<string> = new Set([
+  'task',
+  'event',
+]);
+
+/**
+ * Split a `CustomField:{Object}.{Field}` id into its object + field parts on the
+ * FIRST `.` — the id format is always `CustomField:` + object + `.` + field (see
+ * `custom-field.ts`: `CustomField:${objectApiName}.${fieldApiName}`), and
+ * neither a Salesforce object nor field API name contains a `.`. Returns null
+ * when the id is not a well-formed CustomField id (no prefix, or no `.`).
+ */
+const splitFieldId = (
+  id: string,
+): { readonly object: string; readonly field: string } | null => {
+  if (!id.startsWith(CUSTOM_FIELD_PREFIX)) return null;
+  const body = id.slice(CUSTOM_FIELD_PREFIX.length);
+  const dot = body.indexOf('.');
+  if (dot === -1) return null;
+  return { object: body.slice(0, dot), field: body.slice(dot + 1) };
+};
+
+/**
+ * D2 (polymorphic Activity-base alias): remap a DANGLING
+ * `CustomField:Task.<field>` / `CustomField:Event.<field>` edge target onto the
+ * shared `CustomField:Activity.<field>` node when that Activity field actually
+ * exists in the graph.
+ *
+ * Salesforce `Activity` CUSTOM fields are defined on the `Activity` object and
+ * SHARED by its polymorphic children `Task`/`Event` — there is no per-child
+ * custom-field storage. When Apex writes `someTask.CAP_Field__c = …`, the
+ * writesTo/readsFrom edge is keyed on the RECEIVER type (`Task`/`Event`),
+ * projecting to a `CustomField:Task.CAP_Field__c` / `CustomField:Event.…`
+ * target that never attaches to the real `CustomField:Activity.CAP_Field__c`
+ * node. The case-only remap in {@link canonicalizeEdgeTargetsByCase} can't
+ * bridge it (`task` ≠ `activity`), so the target dangles and an edge-only
+ * consumer (`safe_to_delete_field`, `unused_fields_deep`, impact/usage walks)
+ * reads the Activity field as unreferenced — flipping a blocking
+ * `ApexClass writesTo` into a false "safe to delete".
+ *
+ * Precision guards (mirrors {@link canonicalizeEdgeTargetsByCase}'s honesty
+ * invariants):
+ *   - Only DANGLING targets are remapped (an exact node-id match is final).
+ *   - The source object must be `Task`/`Event` (case-insensitive) — the only
+ *     two Activity children.
+ *   - The target `CustomField:Activity.<field>` node MUST already exist; a
+ *     dangling Activity ref is NEVER minted. This "Activity node exists" guard
+ *     is exactly what keeps standard Task/Event-own fields (which have no
+ *     Activity counterpart) unremapped while the shared custom fields (which
+ *     live on Activity) are attached.
+ *   - The field name is matched case-insensitively; a synthetic case collision
+ *     between two Activity fields drops the key (never guesses).
+ *   - Edge `properties` are untouched — the verbatim source-text path stays as
+ *     the raw evidence, and the alias is disclosed as a name-based (heuristic)
+ *     import remap by the tools that surface it.
+ *
+ * NB: name-based, not a declared parent relationship. That Task/Event ARE
+ * Activity is general Salesforce truth, but the attribution is applied here from
+ * a matched {object, field} name pair, so consumers disclose it as a
+ * confirm-before-you-delete alias rather than a parsed edge.
+ */
+export const canonicalizeActivityPolymorphicFieldEdgeTargets = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  /** lowercased Activity field name -> canonical id, or null on a case collision. */
+  const activityFieldByLowerName = new Map<string, string | null>();
+  const nodeIds = new Set<string>();
+  for (const node of nodes) {
+    nodeIds.add(node.id);
+    if (node.type !== 'CustomField') continue;
+    const parts = splitFieldId(node.id);
+    if (parts === null) continue;
+    if (parts.object.toLowerCase() !== ACTIVITY_OBJECT_LOWER) continue;
+    const key = parts.field.toLowerCase();
+    const existing = activityFieldByLowerName.get(key);
+    if (existing === undefined) activityFieldByLowerName.set(key, node.id);
+    else if (existing !== node.id) activityFieldByLowerName.set(key, null);
+  }
+  if (activityFieldByLowerName.size === 0) return;
+  for (let i = 0; i < edges.length; i += 1) {
+    const edge = edges[i];
+    if (edge === undefined) continue;
+    if (!edge.toId.startsWith(CUSTOM_FIELD_PREFIX)) continue;
+    if (nodeIds.has(edge.toId)) continue; // an exact node-id match is final
+    const parts = splitFieldId(edge.toId);
+    if (parts === null) continue;
+    if (!ACTIVITY_CHILD_OBJECTS_LOWER.has(parts.object.toLowerCase())) continue;
+    const canonical = activityFieldByLowerName.get(parts.field.toLowerCase());
+    if (
+      canonical !== undefined &&
+      canonical !== null &&
+      canonical !== edge.toId
+    ) {
+      edges[i] = { ...edge, toId: canonical as Edge['toId'] };
+    }
+  }
+};
+
+/** The three polymorphic forms of a shared Activity field, in canonical priority. */
+const ACTIVITY_POLYMORPHIC_SLOTS = ['activity', 'task', 'event'] as const;
+type ActivitySlot = (typeof ACTIVITY_POLYMORPHIC_SLOTS)[number];
+
+/** Field-edge types whose target identifies a CustomField dependency. */
+const POLYMORPHIC_MIRROR_EDGE_TYPES: ReadonlySet<Edge['edgeType']> = new Set([
+  'readsFrom',
+  'writesTo',
+  'references',
+]);
+
+/** Source marker stamped on minted polymorphic-mirror edges. */
+const ACTIVITY_POLYMORPHIC_SOURCE = 'graph-activity-polymorphic';
+
+/**
+ * D2 (polymorphic Activity-field mirror): when a shared Activity custom field is
+ * materialized in the graph as MORE THAN ONE polymorphic representation (its
+ * `Task` and `Event` describe-snapshot siblings, and/or its `Activity` base),
+ * ensure a field-reference edge (`readsFrom` / `writesTo` / `references`) that
+ * lands on ONE representation is also present (incoming) on every OTHER existing
+ * representation — because they are ONE physical field.
+ *
+ * Why this exists ON TOP of {@link canonicalizeActivityPolymorphicFieldEdgeTargets}:
+ * a Metadata-API retrieve that ships the field's own `Activity/fields/*.field-
+ * meta.xml` yields a single `CustomField:Activity.<field>` node, and the remap
+ * above attaches dangling `Task`/`Event` edges to it. But a vault whose activity
+ * fields come from the offline `sobject describe` snapshot has NO `Activity`
+ * object node at all — the SAME field is materialized twice, as
+ * `CustomField:Task.<field>` AND `CustomField:Event.<field>`. Apex that writes it
+ * through a `Task` receiver (`someTask.<field> = …`) attaches its `writesTo` ONLY
+ * to the `Task` sibling; querying the `Event` sibling then walks zero
+ * dependencies and `safe_to_delete_field` reads it as a false `safe`/`review`,
+ * even though deleting the (one shared) field breaks that Apex. Mirroring the
+ * edge onto the `Event` sibling makes both representations report the blocking
+ * write.
+ *
+ * Precision + honesty invariants:
+ *   - A field is treated as SHARED only when it has >= 2 existing polymorphic
+ *     representations among {Activity, Task, Event}. A field present on ONLY one
+ *     of them (a Task-own / Event-own standard field) is never mirrored — a
+ *     Salesforce activity CUSTOM field always exists on both children, so
+ *     "same-named field on both" is a reliable shared-field signal, and the
+ *     >= 2 guard is the mirror-side analogue of the remap's "Activity node
+ *     exists" guard.
+ *   - Minted edges are `confidence: 'heuristic'`, carry the distinct
+ *     `source: 'graph-activity-polymorphic'` marker and
+ *     `properties.polymorphicMirror: true` / `mirroredFrom`, and are DEDUPED
+ *     against every existing `(fromId, toId, edgeType)` — a real edge is never
+ *     duplicated or downgraded. The attribution is a name-based alias, disclosed
+ *     as a confirm-before-you-delete limitation by the tools that surface it.
+ *   - Only field-reference edge types are mirrored — `grantedBy` (per-object
+ *     FLS) and `parentOf` (structural containment) are legitimately per-sibling
+ *     and are left alone.
+ *
+ * INCREMENTAL caveat (mirrors {@link mintFutureDispatchEdges}): on the
+ * apply-change-set path it only sees the change-set's node view, so a sibling
+ * representation outside the change set is invisible and it under-mints vs a
+ * full refresh. A full `/sfi-refresh` is the ground truth.
+ */
+export const mintPolymorphicActivityFieldEdges = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  // lowercased field name -> existing rep node id per polymorphic slot.
+  const repsByField = new Map<string, Partial<Record<ActivitySlot, string>>>();
+  for (const node of nodes) {
+    if (node.type !== 'CustomField') continue;
+    const parts = splitFieldId(node.id);
+    if (parts === null) continue;
+    const slot = parts.object.toLowerCase() as ActivitySlot;
+    if (!ACTIVITY_POLYMORPHIC_SLOTS.includes(slot)) continue;
+    const key = parts.field.toLowerCase();
+    const rec = repsByField.get(key) ?? {};
+    if (rec[slot] === undefined) rec[slot] = node.id;
+    repsByField.set(key, rec);
+  }
+
+  // A field is SHARED only when >= 2 of its polymorphic representations exist.
+  const repIdsByField = new Map<string, readonly string[]>();
+  const fieldByRepId = new Map<string, string>();
+  for (const [field, rec] of repsByField) {
+    const ids = ACTIVITY_POLYMORPHIC_SLOTS.map((s) => rec[s]).filter(
+      (x): x is string => x !== undefined,
+    );
+    if (ids.length < 2) continue;
+    repIdsByField.set(field, ids);
+    for (const id of ids) fieldByRepId.set(id, field);
+  }
+  if (repIdsByField.size === 0) return;
+
+  // Every existing (fromId, toId, edgeType) so a real edge is never duplicated.
+  const seen = new Set<string>();
+  for (const edge of edges) {
+    seen.add(`${edge.fromId} ${edge.toId} ${edge.edgeType}`);
+  }
+
+  // Snapshot the length so mirrored edges are not themselves re-mirrored.
+  const originalLength = edges.length;
+  const minted: Edge[] = [];
+  for (let i = 0; i < originalLength; i += 1) {
+    const edge = edges[i];
+    if (edge === undefined) continue;
+    if (!POLYMORPHIC_MIRROR_EDGE_TYPES.has(edge.edgeType)) continue;
+    const field = fieldByRepId.get(edge.toId);
+    if (field === undefined) continue;
+    const reps = repIdsByField.get(field);
+    if (reps === undefined) continue;
+    for (const rep of reps) {
+      if (rep === edge.toId) continue;
+      const key = `${edge.fromId} ${rep} ${edge.edgeType}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      minted.push({
+        fromId: edge.fromId,
+        toId: rep as Edge['toId'],
+        edgeType: edge.edgeType,
+        confidence: 'heuristic',
+        source: ACTIVITY_POLYMORPHIC_SOURCE,
+        properties: {
+          polymorphicMirror: true,
+          mirroredFrom: edge.toId,
+          mechanism: 'activity-shared-field',
+        },
+      });
+    }
+  }
+  for (const edge of minted) edges.push(edge);
+};
+
 /**
  * R6-03: remap `CustomField:` edge targets to the canonical vaulted field id
  * when the producer used a different casing. See
  * {@link canonicalizeEdgeTargetsByCase} for the shared mechanics and honesty
  * invariants.
+ *
+ * Runs the case-fold remap FIRST (an exact / case-variant Task/Event-own field
+ * is the more specific target and wins), THEN the D2 polymorphic Activity-base
+ * alias ({@link canonicalizeActivityPolymorphicFieldEdgeTargets}) for the
+ * dangling `CustomField:Task.<field>` / `CustomField:Event.<field>` targets that
+ * are really the shared `Activity` field — so both `writesTo` and `readsFrom`
+ * edges land on the Activity field node when that base node exists. The
+ * describe-snapshot case (siblings but no Activity base) is handled separately
+ * by {@link mintPolymorphicActivityFieldEdges}.
  */
 export const canonicalizeFieldEdgeTargets = (
   nodes: readonly Node[],
   edges: Edge[],
 ): void => {
   canonicalizeEdgeTargetsByCase('CustomField:', 'CustomField', nodes, edges);
+  canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
 };
 
 /**
@@ -672,7 +925,14 @@ export const importExtractionResults = async (
   canonicalizeApexCallEdgeTargets(allNodes, allEdges);
   // R6-03: remap case-variant CustomField targets (SOQL/Apex are case-
   // insensitive; the graph's edge walk is not) onto the vaulted field id.
+  // Includes the D2 polymorphic Activity-base remap (dangling Task/Event field
+  // edges -> the shared Activity field node when that base node exists).
   canonicalizeFieldEdgeTargets(allNodes, allEdges);
+  // D2: mirror field-reference edges across the existing polymorphic siblings
+  // of a shared Activity field (Task/Event describe-snapshot duplicates), so a
+  // write via a Task receiver is visible from the Event representation too.
+  // Runs after canonicalizeFieldEdgeTargets so remapped targets are considered.
+  mintPolymorphicActivityFieldEdges(allNodes, allEdges);
   // R7-W3: same remap for CustomObject targets (SOQL FROM, listensTo, trigger
   // `on Object`, etc.) onto the vaulted object id.
   canonicalizeObjectEdgeTargets(allNodes, allEdges);
