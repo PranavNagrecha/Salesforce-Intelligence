@@ -1476,6 +1476,18 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'flag flows that create <Object> records one row at a time',
     'find flows with a per-iteration record operation',
   ],
+  'sfi.nonselective_soql': [
+    'find my non-selective SOQL queries',
+    'which queries will do a full table scan?',
+    'which queries will time out at scale?',
+    'flag Apex SOQL that filters only on non-indexed fields',
+    'which SOQL uses a leading-wildcard LIKE?',
+    'find queries with no WHERE clause on a big object',
+    'are any of my queries non-selective at large data volume?',
+    'which Apex queries filter on a non-indexed field like <Field>?',
+    'show me full-scan-risk queries on <Object>',
+    'which SOQL uses != or NOT IN as the only filter?',
+  ],
   'sfi.doc_coverage_report': [
     'which fields lack descriptions?',
     'what is our documentation coverage?',

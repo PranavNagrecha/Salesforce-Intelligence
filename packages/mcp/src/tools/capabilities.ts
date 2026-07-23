@@ -390,6 +390,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.flow_fault_audit',
       'sfi.call_graph',
       'sfi.governor_limit_risks',
+      'sfi.nonselective_soql',
       'sfi.flow_bulkification_audit',
       'sfi.find_dead_code',
       'sfi.test_coverage_for_method',

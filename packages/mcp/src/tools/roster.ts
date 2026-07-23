@@ -2475,6 +2475,22 @@ const FLOW_BULKIFICATION_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.nonselective_soql`. Mirrors
+ * `nonselectiveSoqlInputSchema` (nonselective-soql.ts): an optional `limit`
+ * (1..200, default 50 in the handler) and `offset` (>= 0), both paging the
+ * flagged-component list. Drift between this schema and the Zod schema is a
+ * code-review concern.
+ */
+const NONSELECTIVE_SOQL_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.picklist_integrity_scan`. Mirrors
  * `picklistIntegrityScanInputSchema` (picklist-integrity-scan.ts): an optional
  * `limit` (1..500, default 50 in the handler) and `offset` (>= 0), both paging
@@ -5142,6 +5158,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "The FAITHFUL, LOSSLESS structural graph of a Flow — every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decision rules, assignment items, record-op filters, loops, formulas, variables, subflows, actions, and the <start> element with its entry criteria + scheduled paths. This is the tool for \"show me the structure of <Flow>\", \"what are the branches / decisions in <Flow>\", \"trace the connectors\", \"what elements does <Flow> have\", or \"give me the full element graph\" — where `sfi.explain_flow` gives a plain-business SUMMARY (and historically renamed decisions to condition-N, collapsed conditions to the word \"and\", and emitted ZERO connectors), flow_graph exposes the RAW graph so the host LLM composes the answer. `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare Flow API name (fuzzy-resolved; an AMBIGUOUS bare name returns candidates as a success envelope, never a silent pick), or a Flow record id (300…/301… — fails closed with an actionable message unless a Tooling-API id index exists). The Flow source is read ON DEMAND from the vault and projected; nothing is persisted. Each `connectors[]` edge carries `from`, `to`, and `kind` (`immediate` for the start's first element, `default`, `rule` with the decision outcome `ruleName`, `fault`, `nextValue`/`noMoreValues` for a loop's two branches, `scheduled` with the `scheduledPathName`), plus `isGoTo` for reconnect / loop-back edges; `connectors[]` is authoritative and the per-element `connectsTo` fields are conveniences. Subflow `resolved` is overlaid from the vault (a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated). HONESTY (spec §4.3, verbatim in `disclosure`): NO runtime inference — reachability, dead-branch detection, and ordering are NOT computed here (that is the host LLM's or `flow_trace`'s job); any canvas-element type the parser does not model lands in `unmodeled[]` by name, never silently dropped. Large flows: `include` narrows to a subset of body sections (`connectors|decisions|assignments|recordOps|formulas|variables|loops|actions`) and `element` returns the subgraph for ONE element (it + its immediate connectors + neighbors); any narrowing is DISCLOSED in a `narrowing` block (with `omittedSections`), and the central byte budget truncates disclosed, never silent. Invalid `Type:` prefix or a record id without an index → `invalid-query`; an unknown name / non-Flow → `component-not-found`.",
     inputSchema: FLOW_GRAPH_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.nonselective_soql',
+    description:
+      "Flag NON-SELECTIVE SOQL — a WHERE clause with a full-table-scan / timeout shape at large data volume. The first INDEX-AWARE static analysis of Apex: for each inline `[SELECT …]` statement in every non-test class / trigger it walks the WHERE clause (parser-grade, over the ANTLR parse tree) and scores each predicate's field against an index set — THIS org's declared CustomIndex metadata plus unique / externalId / lookup fields, unioned with a curated standard-index table (Id, Name, audit fields, RecordTypeId, OwnerId, `<Relationship>Id` foreign keys). Rules: `nonselective-non-indexed-filters` (HIGH — no predicate references an indexed field, so the read cannot narrow by index), `leading-wildcard-like` (MEDIUM — `LIKE '%foo'` defeats any index), `negative-operator-only` (MEDIUM — the sole filters are `!=` / `<>` / `NOT IN` / `EXCLUDES`), and `no-where-clause` (MEDIUM — an unbounded read). An equality / range / IN filter on any indexed field (or a foreign-key relationship traversal) makes the statement at-least-potentially selective and it is NOT flagged for the core rule. `classes` are per-component entries (`{ componentId, type, apiName, findings: [{ rule, severity, sObject, location, reason }] }`) sorted by componentId; `byRule` / `byObject` / `totalFindingCount` are the full pre-slice counts; `limit` (default 50, max 200) + `offset` / `nextOffset` self-fit the class page to the byte budget. HONESTY: a STATIC SHAPE, never the Salesforce optimizer's runtime verdict — the optimizer weighs actual record counts the vault cannot know, so a non-selective-shaped read on a SMALL table is fine; record counts are unknown offline. Predicate fields/operators are `parsed`; the index set is `declared` + standard-index knowledge. Dynamic `Database.query(str)` / string-built reads are INVISIBLE (a recall gap); an unparseable file is a named `soundness` blind spot; test classes are excluded. This is the SELECTIVITY axis, a distinct question from the in-transaction limit scan.",
+    inputSchema: NONSELECTIVE_SOQL_INPUT_SCHEMA,
   },
   {
     name: 'sfi.flow_bulkification_audit',

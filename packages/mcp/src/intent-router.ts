@@ -830,6 +830,34 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // INDEX-AWARE non-selective SOQL — Apex queries whose WHERE clause is a
+    // full-scan shape (filters only on non-indexed fields, leading-wildcard LIKE,
+    // negative-only, or no WHERE). A SELECTIVITY axis, distinct from the RUNTIME
+    // governor_limit_risks in-loop scan. Anchored on "non-selective" / "selective
+    // query" / "full (table) scan" / "time out ... at scale" / "index" + "query"
+    // so it never steals the governor in-loop asks (which anchor on loops).
+    intent: 'nonselective-soql',
+    plane: 'vault',
+    tools: ['sfi.nonselective_soql'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Index-aware non-selective SOQL audit — Apex queries whose WHERE clause filters only on non-indexed fields, uses a leading-wildcard LIKE, is negative-only, or is absent (full-scan / timeout risk at scale). A selectivity axis distinct from the governor_limit_risks in-loop scan.',
+    patterns: [
+      /\bnonselective_soql\b/,
+      /\bnon[-\s]?selective\b/,
+      /\bselective\s+quer(?:y|ies)\b/,
+      // "full (table) scan" query risk.
+      /\bfull[-\s]?(?:table\s+)?scan\b/,
+      // "queries / SOQL ... time out / timeout ... at scale / large data".
+      /\b(?:quer(?:y|ies)|soql)\b[^.?!]{0,50}\b(?:time\s*out|timeout|full\s+scan|non[-\s]?selective)\b/,
+      // "queries filtering on non-indexed / unindexed field(s)".
+      /\b(?:quer(?:y|ies)|soql|filter(?:s|ing)?)\b[^.?!]{0,40}\b(?:non[-\s]?indexed|un[-\s]?indexed|no\s+index)\b/,
+      // "leading wildcard" LIKE.
+      /\bleading[-\s]?wildcard\b/,
+    ],
+  },
+  {
     // CONFIGURATION limit headroom — metadata counts vs per-object / per-org
     // Salesforce config ceilings, ranked worst-first (the offline Optimizer
     // limit report). Anchored on "headroom" / "limit report" / "Optimizer" /
