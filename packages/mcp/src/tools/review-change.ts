@@ -182,6 +182,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  resolveAccessParity,
+  type AccessParityResult,
+} from './access-parity.js';
+import {
   buildEnumerationCoverageCaveatFor,
   buildUsageSourceCoverageCaveat,
   offlineTrust,
@@ -440,6 +444,12 @@ export const REVIEW_CHANGE_DISCLOSURE =
  *     against THAT vault's dependency graph (e.g. PROD) instead of the current
  *     one — see the module JSDoc's cross-vault section. Omitted → default
  *     (current-vault) behaviour, byte-for-byte unchanged.
+ *   - `checkAccessParity`: optional flag (default false). When true, an ADDITIVE
+ *     `accessParity` section is emitted — the grant-completeness ("ships for
+ *     nobody") check: each ADDED/MODIFIED CustomField / CustomObject that
+ *     resolves to ZERO modeled grants is flagged as a feature that would deploy
+ *     invisible (no permission set / profile grants it). Omitted / false →
+ *     output is byte-for-byte unchanged; the section is absent.
  */
 export const reviewChangeInputSchema = z.object({
   components: z
@@ -492,6 +502,7 @@ export const reviewChangeInputSchema = z.object({
     .max(MAX_CHANGE_SET),
   limit: z.number().int().min(1).max(MAX_CHANGE_SET).optional(),
   againstVault: z.string().min(1).optional(),
+  checkAccessParity: z.boolean().optional(),
 });
 
 /** Parsed input shape. */
@@ -585,6 +596,14 @@ export interface ReviewChangeOutput {
   readonly recommendation: string;
   /** Present when a family in the changeset is not fully modeled by the vault. */
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * Grant-completeness ("ships for nobody") check. Present ONLY when the caller
+   * sets `checkAccessParity: true` (additive — absent by default, so the default
+   * response is byte-for-byte unchanged). Each ADDED/MODIFIED custom
+   * field/object that resolves to ZERO modeled grants is a candidate feature
+   * that would deploy invisible (no permission set / profile grants it).
+   */
+  readonly accessParity?: AccessParityResult;
   readonly trust: TrustSummary;
   readonly disclosure: string;
   readonly boundaries: readonly string[];
@@ -673,6 +692,7 @@ const runReviewCore = async (
   ctx: Context,
   components: ReviewChangeInput['components'],
   limitInput: number | undefined,
+  checkAccessParity: boolean,
 ): Promise<Result<CoreReview, McpError>> => {
   const limit = limitInput ?? DEFAULT_LIMIT;
 
@@ -1009,6 +1029,19 @@ const runReviewCore = async (
       : { status: coverageCaveat.status, missingCoverage: coverageCaveat.missingCoverage },
   );
 
+  // Additive grant-completeness ("ships for nobody") section — computed ONLY
+  // when the caller opts in via `checkAccessParity`. Default (flag off) leaves
+  // the response byte-for-byte identical to the R6-16 / R7-C2 output, so every
+  // existing consumer and snapshot is unaffected. Runs against THIS ctx's graph
+  // (the current vault, or the against-vault shadow context in cross-vault
+  // mode), so a cross-vault parity check honestly reports the target's grants.
+  let accessParity: AccessParityResult | undefined;
+  if (checkAccessParity) {
+    const parityRes = await resolveAccessParity(ctx, components);
+    if (!parityRes.ok) return parityRes;
+    accessParity = parityRes.value;
+  }
+
   return ok({
     data: {
       reviewed: reviewed.slice(0, limit),
@@ -1017,6 +1050,7 @@ const runReviewCore = async (
       selectedTests: sortIds(selectedTestsUnion).slice(0, SELECTED_TESTS_CAP),
       recommendation: buildRecommendation(summary, reviewed),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(accessParity !== undefined ? { accessParity } : {}),
       trust,
       disclosure: REVIEW_CHANGE_DISCLOSURE,
       boundaries: REVIEW_CHANGE_BOUNDARIES,
@@ -1143,7 +1177,12 @@ export const reviewChangeHandler = async (
   // Default path — resolve against the current vault. Byte-identical to R6-16:
   // the CoreReview.data object is returned unchanged, with no cross-vault keys.
   if (input.againstVault === undefined) {
-    const core = await runReviewCore(ctx, input.components, input.limit);
+    const core = await runReviewCore(
+      ctx,
+      input.components,
+      input.limit,
+      input.checkAccessParity ?? false,
+    );
     if (!core.ok) return core;
     return ok({ data: core.value.data, vaultState: core.value.vaultState });
   }
@@ -1161,7 +1200,12 @@ export const reviewChangeHandler = async (
       manifest: resolved.value.manifest,
       graph: opened.value.store,
     };
-    const core = await runReviewCore(shadowCtx, input.components, input.limit);
+    const core = await runReviewCore(
+      shadowCtx,
+      input.components,
+      input.limit,
+      input.checkAccessParity ?? false,
+    );
     if (!core.ok) return core;
 
     const info: AgainstVaultInfo = {

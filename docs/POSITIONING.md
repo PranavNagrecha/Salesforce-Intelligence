@@ -67,6 +67,18 @@ impact). The shipped surface is wider than those three labels. Named jobs:
   `restricted` picklist, and Apex picklist-literal comparison is out of scope
   (disclosed), so it never mis-flags a free-text write.
 - `sfi.what_happens_on_save` / `sfi.order_of_execution`
+- `sfi.review_change` — the pre-deploy gate over a caller-assembled changeset
+  (per-component blocking / risky / review / safe + dependents + tests-to-run).
+  Opt-in `checkAccessParity` adds a grant-completeness ("ships for nobody")
+  check: each ADDED/MODIFIED custom field/object that resolves to ZERO modeled
+  grants (no Profile/PermissionSet `grantedBy`, no ViewAllData/ModifyAllData,
+  not standard-default) is flagged as a candidate feature that would deploy
+  invisible — did the release ship the permissions, or did you forget the
+  permission set? Honest about scope — the "ships for NOBODY" direction only
+  (the "ships for everybody" breadth is per-user live assignment data deferred
+  to `sfi.live_permset_holders`), stamped with the vault's last refresh, and a
+  CANDIDATE to verify (a grant may live in an unretrieved perm set) rather than
+  a proof. Distinct from `crud_fls_audit` (Apex CRUD/FLS enforcement).
 - `sfi.automation_risk_report` — per-finding automation risk, plus a
   `mode: 'sprawl'` org-wide per-object automation-density triage ranking (where
   is automation sprawl worst first — a candidate queue, not a verdict), the

@@ -1930,6 +1930,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'review the components in this package.xml before I deploy',
     'run a pre-deployment risk check on my diff',
     'which of my changes are blocking, risky, or safe to deploy?',
+    'before I deploy this package, did I grant the new field to a permission set or does it ship for nobody?',
+    'is it safe to release these fields, or did I forget the permission set that grants access?',
+    'does this changeset ship the permissions, or are the new fields invisible with no grant?',
   ],
   'sfi.cdc_subscribers': [
     'what\'s subscribed to Change Data Capture events on Contact?',
