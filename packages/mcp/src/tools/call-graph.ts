@@ -62,7 +62,11 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdgesForNodes, listNodesByIds } from '@sf-intelligence/graph';
+import {
+  isHiddenUnresolved,
+  listEdgesForNodes,
+  listNodesByIds,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -330,6 +334,17 @@ const walkOneDirection = async (
     if (!edgeBatch.ok) return err(edgeBatch.error.message);
     for (const nodeId of frontier) {
       for (const edge of edgeBatch.value.get(nodeId) ?? []) {
+        // Phantom heuristic edge: `to_id` was tagged `targetMissing` at import
+        // because it resolves to no real node — e.g. the Apex scanner minting
+        // `ApexClass:{PascalCaseLocalVar}` from a `Map<Id,Foo> Foo = …` local
+        // that `LOCAL_DECL_PATTERN` (lowercase-initial only) never registered.
+        // Skip it entirely so it never enters `edges`/`discovered`, extends the
+        // frontier, or inflates `depthReached`/`cycleDetected`. Mirrors
+        // getSubgraph's default `bfsExpand` skip (queries.ts `isHiddenUnresolved`);
+        // call_graph has no `includeUnresolved` opt-in, so the skip is
+        // unconditional — a phantom target is a false-positive "call", never a
+        // real callee to surface in a call graph.
+        if (isHiddenUnresolved(edge)) continue;
         const methods = edgeMethods(edge);
         // P4-C5 method filter: narrow ONLY the root's direct edges to those
         // whose target methods include the queried method (e.g. "who calls
@@ -506,7 +521,19 @@ export const callGraphHandler = async (
   }
 
   const sortedNodes = [...nodesRes.value].sort(compareNodes);
-  const sortedEdges = [...mergedEdges].sort(compareEdges);
+  // Self-contained-slice invariant (CR-13, mirrors getSubgraph's returnedIds
+  // filter in queries.ts): every emitted edge must have BOTH endpoints present
+  // in `nodes`. `resolveNodes` drops ids with no real node row, so an edge
+  // whose endpoint didn't resolve — a heuristic `targetMissing` phantom (the
+  // `ApexClass:{PascalCaseLocalVar}` case, already skipped at walk time above)
+  // OR a `declared`/`parsed` reference to an out-of-vault class — is dropped
+  // here rather than emitted as an edge pointing at a node that isn't in
+  // `nodes`. Belt-and-braces: layer 1 (walk-time) handles the reported phantom;
+  // this final filter guarantees the invariant against any remaining dangler.
+  const nodeIds = new Set(sortedNodes.map((n) => n.id));
+  const sortedEdges = mergedEdges
+    .filter((e) => nodeIds.has(e.fromId) && nodeIds.has(e.toId))
+    .sort(compareEdges);
 
   return ok({
     data: {
