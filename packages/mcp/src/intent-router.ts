@@ -4536,6 +4536,14 @@ const RULES: readonly Rule[] = [
       /\bwhich\s+of\s+(?:my|these)\s+changes\s+are\s+(?:blocking|risky|safe)\b/,
       /\breview\s+(?:the\s+)?components?\s+in\s+(?:this\s+|my\s+)?package\.xml\b/,
       /\breview_change\b/,
+      // Access-parity ("ships for nobody") phrasings — the grant-completeness
+      // half of the deploy gate. Anchored on a deploy/release artifact so they
+      // never steal from the field/object access-audit rules (which key on a
+      // SPECIFIC object/field, not a release/changeset/PR).
+      /\bships?\s+for\s+nobody\b/,
+      /\bdid\s+i\s+forget\s+(?:the\s+)?permission\s+set\b/,
+      /\bdoes\s+(?:this|my)\s+(?:release|deploy(?:ment)?|changeset|change\s+set|pr|pull\s+request)\b[^.?!]{0,40}\bship\b[^.?!]{0,20}\bpermissions?\b/,
+      /\bdid\s+(?:this|my|the)\s+(?:release|deploy(?:ment)?|changeset|change\s+set|pr|pull\s+request)\b[^.?!]{0,40}\b(?:include|ship|grant)\b[^.?!]{0,30}\b(?:access|permissions?|permission\s+set|profile)\b/,
     ],
   },
   {
