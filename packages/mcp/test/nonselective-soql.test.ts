@@ -229,7 +229,7 @@ describe('classifyQuery — relationship traversal + unknown-object soundness', 
   });
 
   it('does NOT flag an unknown object when a POSITIVE predicate could be a hidden index (managed lookup IN + negative)', () => {
-    // The real-vault ContactAffiliation shape: `WHERE Managed_Lookup__c IN :ids
+    // A junction-object-style shape: `WHERE Managed_Lookup__c IN :ids
     // AND Other__c != null` on a managed object absent from the vault. The IN may
     // well be on a lookup index we cannot see — so we must not fall through to
     // negative-operator-only.
