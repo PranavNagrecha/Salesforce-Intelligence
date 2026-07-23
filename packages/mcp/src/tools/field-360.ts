@@ -854,10 +854,10 @@ export const field360Handler = async (
   // this is a property-scan reconstruction, not a first-class edge). Deduped
   // against real `readsFrom` readers so a Flow that ALSO reads via dataflow is
   // never double-counted.
-  const flowConditionReaders = await scanFlowConditionFieldReaders(ctx, fieldId);
+  const flowConditionScan = await scanFlowConditionFieldReaders(ctx, fieldId);
   const readerIds = new Set(buckets.readers.map((r) => r.componentId));
   let flowConditionReaderCount = 0;
-  for (const fc of flowConditionReaders) {
+  for (const fc of flowConditionScan.readers) {
     if (readerIds.has(fc.flowId)) continue;
     readerIds.add(fc.flowId);
     flowConditionReaderCount += 1;
@@ -1144,6 +1144,14 @@ export const field360Handler = async (
   if (flowConditionReaderCount > 0) {
     boundaries.push(
       `${flowConditionReaderCount} Flow decision/record-trigger filter reader(s) were reconstructed from ConditionalContext field references (a Flow decision or filter that references this field is stored as a firesWhen edge to a ConditionalContext, NOT a readsFrom edge onto the field) and surfaced in \`readers\` with heuristic confidence and source \`flow-condition-reads-scan\` — without this, these Flows are invisible (readers would read 0).`,
+    );
+  }
+  // D3-soundness-overclaim (residual): when the ConditionalContext scan hit its
+  // full-scan ceiling, a flow-condition reader in the un-scanned tail may be
+  // MISSED — disclose the cap so the reconstruction is never implied complete.
+  if (flowConditionScan.truncated) {
+    boundaries.push(
+      `Flow decision/filter reader reconstruction was CAPPED at ${flowConditionScan.scannedCount} of ${flowConditionScan.totalCount} ConditionalContext nodes (full-scan ceiling, SFI_CONDITION_SCAN_MAX) — a flow-condition reader in the un-scanned tail is NOT reflected in \`readers\`; treat the reader set as possibly INCOMPLETE, and narrow the vault or raise the ceiling to fully enumerate.`,
     );
   }
   // D3-soundness-overclaim: referrer classes NOT modeled as incoming edges are

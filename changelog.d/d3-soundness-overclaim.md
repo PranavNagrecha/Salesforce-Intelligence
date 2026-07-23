@@ -18,6 +18,11 @@
   `fieldRefs` name the field) are reconstructed from the extracted graph and
   surfaced in `readers` as disclosed, heuristic-confidence rows
   (`source: flow-condition-reads-scan:*`), deduped against real `readsFrom`
-  readers. `boundaries[]` discloses the reconstruction and names the referrer
-  classes still not composed into any section (roll-up source coupling, layout
-  related-list placement).
+  readers. The reconstruction pages EVERY `ConditionalContext` node (via the
+  shared full-window scan), not just the first 500 — so a field whose sole
+  flow-condition reader lives past node 500 is no longer silently missed. When
+  the scan hits its `SFI_CONDITION_SCAN_MAX` residual ceiling, `boundaries[]`
+  discloses `CAPPED at N of M ConditionalContext nodes` so a tail miss is
+  surfaced, never silent. `boundaries[]` also discloses the reconstruction and
+  names the referrer classes still not composed into any section (roll-up source
+  coupling, layout related-list placement).
