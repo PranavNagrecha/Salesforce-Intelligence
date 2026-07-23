@@ -78,7 +78,7 @@ import {
   reportDashboardUsageDetail,
   type ReportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
-import { soundnessFromNodes, type Soundness } from './soundness.js';
+import { soundnessForImpactWalk, type Soundness } from './soundness.js';
 
 /**
  * Inclusive upper bound on `hops`. Mirrors `getSubgraph`'s ceiling so
@@ -390,6 +390,7 @@ const buildImpactDisclosure = (params: {
   readonly slimmedCount: number;
   readonly byteTrimmed: boolean;
   readonly rootIsObject: boolean;
+  readonly rootIsField: boolean;
   readonly reportUsage?: ReportDashboardUsageDetail;
 }): string => {
   const payloadLabel = formatPayloadSize(params.payloadBytes);
@@ -415,6 +416,19 @@ const buildImpactDisclosure = (params: {
       ' `sfi.field_360` / `sfi.generate_data_dictionary`.'
     : '';
   const reportNote = formatFoldedReportUsageNote(params.reportUsage);
+
+  // D3-soundness-overclaim: for a CustomField / CustomObject root, the walk only
+  // sees referrers modeled as incoming edges. Name the referrer classes that are
+  // NOT edge-modeled (and so NOT walked) so "no referrers" is never read as
+  // certainty — mirrors the structured `soundness.blindSpots` disclosure.
+  const referrerBlindNote =
+    params.rootIsField || params.rootIsObject
+      ? ' This walk covers only edge-modeled referrers; roll-up source coupling,' +
+        ' layout placement, flow decision/filter reads, and tab/app membership are' +
+        ' NOT modeled as incoming edges and were NOT walked (see' +
+        ' `soundness.blindSpots`) — treat "no referrers" as "not checked", not' +
+        ' proven none.'
+      : '';
 
   // GET-IMPACT-PARENT-FANIN-BLEED: when the ONLY edges reaching the root are
   // structural `parentOf` (its parent object), there are NO usage dependents in
@@ -442,7 +456,8 @@ const buildImpactDisclosure = (params: {
       `Re-query with fewer hops or a narrower edgeTypes filter for a complete view.` +
       lookupCaveat +
       reportNote +
-      structuralNote
+      structuralNote +
+      referrerBlindNote
     );
   }
 
@@ -454,7 +469,8 @@ const buildImpactDisclosure = (params: {
       `Re-query with fewer hops or edgeTypes excluding grantedBy to shrink the response.` +
       lookupCaveat +
       reportNote +
-      structuralNote
+      structuralNote +
+      referrerBlindNote
     );
   }
 
@@ -463,7 +479,8 @@ const buildImpactDisclosure = (params: {
     `${IMPACT_MAX_NODES}-node / ${IMPACT_MAX_EDGES}-edge cap; estimated JSON payload ${payloadLabel}.${slimNote}` +
     lookupCaveat +
     reportNote +
-    structuralNote
+    structuralNote +
+    referrerBlindNote
   );
 };
 
@@ -690,7 +707,20 @@ export const getImpactHandler = async (
   // any oversized property value (Profile grant matrices etc.).
   // Soundness from the FULL (pre-slim) nodes so the dynamic-apex signal in
   // properties.qualityIssues is read intact, before payload slimming.
-  const soundness = soundnessFromNodes(sortedNodes);
+  // D3-soundness-overclaim: for a CustomField / CustomObject root, whole classes
+  // of referrer (roll-ups, layout placement, flow decision/filter reads, tab/app
+  // membership) are structurally NOT modeled as incoming edges, so this walk is
+  // blind to them — `soundnessForImpactWalk` downgrades `complete`/`full` and
+  // names the un-walked classes rather than implying a completeness it can't have.
+  // Derive the root type from the id prefix (robust when the root node row is
+  // absent, e.g. an unknown field), mirroring the `rootIsObject` disclosure below.
+  const rootTypeForSoundness =
+    rootId.startsWith('CustomField:')
+      ? 'CustomField'
+      : rootId.startsWith('CustomObject:')
+        ? 'CustomObject'
+        : null;
+  const soundness = soundnessForImpactWalk(sortedNodes, rootTypeForSoundness);
   const { nodes: slimNodes, slimmedCount } = slimGraphNodes(sortedNodes);
   // Per-node slimming bounds fat properties but not the slice total; enforce a
   // hard byte budget so the response always fits the MCP client's token limit.
@@ -715,6 +745,7 @@ export const getImpactHandler = async (
   const disclosure = buildImpactDisclosure({
     componentId: input.componentId,
     rootIsObject: rootId.startsWith('CustomObject:'),
+    rootIsField: rootId.startsWith('CustomField:'),
     hops,
     truncated: finalTruncated,
     nodeCount: budgeted.nodes.length,

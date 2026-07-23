@@ -1223,3 +1223,306 @@ describe('field360Handler — componentId ↔ fieldId alias', () => {
     expect(field360InputSchema.safeParse({}).success).toBe(false);
   });
 });
+
+// =============================================================================
+// D3-soundness-overclaim — a Flow decision/filter that references a field is
+// extracted as a `firesWhen` edge to a ConditionalContext (the field lives on
+// the context's `fieldRefs` property), NOT a `readsFrom` onto the field. Before
+// the fix field_360 reported readers:0 for a field several Flows filter on. The
+// scan reconstructs these as DISCLOSED, heuristic readers so readers > 0.
+// =============================================================================
+
+describe('field360Handler: Flow decision/filter reads (readers no longer 0)', () => {
+  const FIELD = 'CustomField:Account.Stage__c';
+  const FLOW = 'Flow:Account_Stage_Router';
+  const CC = 'ConditionalContext:Flow:Account_Stage_Router.condition-0';
+  let dir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-flowcond-'));
+    const opened = await openGraph(join(dir, 'flowcond.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    localStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+        makeNode({
+          id: FIELD,
+          type: 'CustomField',
+          apiName: 'Stage__c',
+          label: 'Stage',
+          parentId: 'CustomObject:Account',
+          properties: { dataType: 'Picklist' },
+        }),
+        makeNode({ id: FLOW, type: 'Flow', apiName: 'Account_Stage_Router' }),
+        // The synthetic ConditionalContext whose fieldRefs include the field —
+        // parent is the Flow. This is what the decision-extractor emits; there
+        // is NO readsFrom edge onto the field, only this firesWhen target.
+        makeNode({
+          id: CC,
+          type: 'ConditionalContext',
+          apiName: 'Flow:Account_Stage_Router.condition-0',
+          parentId: FLOW,
+          properties: {
+            kind: 'flow-decision',
+            expression: 'Stage__c equals Closed',
+            fieldRefs: [FIELD],
+          },
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'CustomObject:Account',
+          toId: FIELD,
+          edgeType: 'parentOf',
+          confidence: 'declared',
+          source: 'extractor:custom-object',
+        }),
+        // The real firesWhen edge points Flow -> ConditionalContext (NOT the field).
+        makeEdge({
+          fromId: FLOW,
+          toId: CC,
+          edgeType: 'firesWhen',
+          confidence: 'declared',
+          source: 'condition-extractor',
+          properties: { kind: 'flow-decision', conditionIndex: 0 },
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(localStore, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('surfaces the flow-condition reader in `readers` (> 0), disclosed + heuristic', async () => {
+    const result = await field360Handler(localCtx, { fieldId: FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const readers = result.value.data.readers?.rows ?? [];
+    // FAIL-BEFORE: readers was 0 — the Flow's decision read carried no readsFrom edge.
+    expect(readers.length).toBeGreaterThan(0);
+    const flowReader = readers.find((r) => r.componentId === FLOW);
+    expect(flowReader).toBeDefined();
+    expect(flowReader?.componentType).toBe('Flow');
+    expect(flowReader?.confidence).toBe('heuristic');
+    expect(flowReader?.source).toContain('flow-condition-reads-scan');
+    expect(flowReader?.properties['mechanism']).toBe('flow-decision-filter');
+    // Honesty: the reconstruction is disclosed in boundaries.
+    expect(
+      result.value.data.boundaries.some(
+        (b) => b.includes('flow-condition-reads-scan') && /reconstructed/i.test(b),
+      ),
+    ).toBe(true);
+  });
+
+  it('discloses the structurally-unmodeled referrer classes (roll-up / related-list) in boundaries', async () => {
+    const result = await field360Handler(localCtx, { fieldId: FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.data.boundaries.some(
+        (b) => b.includes('roll-up source coupling') && b.includes('related-list'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT double-count a Flow that already reads the field via a real readsFrom edge', async () => {
+    // Add a real readsFrom edge from the SAME flow; the reader must appear ONCE.
+    const dupDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-flowcond-dup-'));
+    try {
+      const opened = await openGraph(join(dupDir, 'dup.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const dupStore = opened.value;
+      const seed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+          makeNode({
+            id: FIELD,
+            type: 'CustomField',
+            apiName: 'Stage__c',
+            parentId: 'CustomObject:Account',
+            properties: { dataType: 'Picklist' },
+          }),
+          makeNode({ id: FLOW, type: 'Flow', apiName: 'Account_Stage_Router' }),
+          makeNode({
+            id: CC,
+            type: 'ConditionalContext',
+            apiName: 'Flow:Account_Stage_Router.condition-0',
+            parentId: FLOW,
+            properties: { kind: 'flow-decision', fieldRefs: [FIELD] },
+          }),
+        ],
+        edges: [
+          // A REAL readsFrom edge from the flow (e.g. a recordLookup on the field).
+          makeEdge({
+            fromId: FLOW,
+            toId: FIELD,
+            edgeType: 'readsFrom',
+            confidence: 'parsed',
+            source: 'flow-extractor',
+          }),
+        ],
+      };
+      const imp = await importExtractionResults(dupStore, [seed]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const dupCtx: Context = { vaultRoot: dupDir, manifest: FIXTURE_MANIFEST, graph: dupStore };
+      const result = await field360Handler(dupCtx, { fieldId: FIELD });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const flowRows = (result.value.data.readers?.rows ?? []).filter(
+        (r) => r.componentId === FLOW,
+      );
+      expect(flowRows.length).toBe(1);
+      // The kept row is the REAL readsFrom edge (parsed), not the reconstruction.
+      expect(flowRows[0]?.source).toBe('flow-extractor');
+      await closeGraph(dupStore);
+    } finally {
+      rmSync(dupDir, { recursive: true, force: true });
+    }
+  });
+
+  // D3 residual (silent-truncation fix): the old scan capped at the first 500
+  // ConditionalContext nodes. A field whose SOLE flow-condition reader is a CC
+  // past position 500 would silently read readers:0 — the exact under-reporting
+  // D3 exists to eliminate. The scan now pages ALL ConditionalContext nodes.
+  it('finds a flow-condition reader whose ConditionalContext is BEYOND the old 500-node single-page cap', async () => {
+    const bigDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-flowcond-tail-'));
+    try {
+      const opened = await openGraph(join(bigDir, 'tail.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const bigStore = opened.value;
+      const FIELD_T = 'CustomField:Account.TailStage__c';
+      const FLOW_T = 'Flow:zzz_Tail_Router';
+      const nodes = [
+        makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+        makeNode({
+          id: FIELD_T,
+          type: 'CustomField',
+          apiName: 'TailStage__c',
+          parentId: 'CustomObject:Account',
+          properties: { dataType: 'Picklist' },
+        }),
+        makeNode({ id: FLOW_T, type: 'Flow', apiName: 'zzz_Tail_Router' }),
+      ];
+      // 600 dummy flow-parented CCs (empty fieldRefs) whose ids sort BEFORE the
+      // target — id-ASC order places the target CC at position 601, past the old
+      // single-page 500 cap.
+      for (let i = 0; i < 600; i++) {
+        const idx = String(i).padStart(4, '0');
+        nodes.push(
+          makeNode({
+            id: `ConditionalContext:Flow:Dummy_${idx}.condition-0`,
+            type: 'ConditionalContext',
+            apiName: `Flow:Dummy_${idx}.condition-0`,
+            parentId: `Flow:Dummy_${idx}`,
+            properties: { kind: 'flow-decision', fieldRefs: [] },
+          }),
+        );
+      }
+      // The target CC — id 'zzz…' sorts AFTER every 'Dummy_' id → position 601.
+      nodes.push(
+        makeNode({
+          id: 'ConditionalContext:Flow:zzz_Tail_Router.condition-0',
+          type: 'ConditionalContext',
+          apiName: 'Flow:zzz_Tail_Router.condition-0',
+          parentId: FLOW_T,
+          properties: { kind: 'flow-decision', fieldRefs: [FIELD_T] },
+        }),
+      );
+      const imp = await importExtractionResults(bigStore, [{ nodes, edges: [] }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const bigCtx: Context = { vaultRoot: bigDir, manifest: FIXTURE_MANIFEST, graph: bigStore };
+      const result = await field360Handler(bigCtx, { fieldId: FIELD_T });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // FAIL-BEFORE: a single 500-node page never reached the position-601 CC.
+      const flowReader = (result.value.data.readers?.rows ?? []).find((r) => r.componentId === FLOW_T);
+      expect(flowReader).toBeDefined();
+      expect((result.value.data.readers?.rows ?? []).length).toBeGreaterThan(0);
+      // The full scan was NOT truncated (601 << ceiling), so no cap boundary.
+      expect(
+        result.value.data.boundaries.some((b) => /CAPPED at .* ConditionalContext nodes/.test(b)),
+      ).toBe(false);
+      await closeGraph(bigStore);
+    } finally {
+      rmSync(bigDir, { recursive: true, force: true });
+    }
+  });
+
+  // When the ConditionalContext scan DOES hit its ceiling, the miss must be
+  // DISCLOSED (never silent). SFI_CONDITION_SCAN_MAX (ceiling) + SFI_NODE_SCAN_LIMIT
+  // (window) are lowered so the truncated path fires without seeding thousands.
+  it('discloses a truncation boundary when the ConditionalContext scan hits its ceiling (tail reader disclosed, not silent)', async () => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+    process.env['SFI_CONDITION_SCAN_MAX'] = '2';
+    const capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-flowcond-cap-'));
+    try {
+      const opened = await openGraph(join(capDir, 'cap.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const capStore = opened.value;
+      const FIELD_C = 'CustomField:Account.CapStage__c';
+      const FLOW_C = 'Flow:zzz_Cap_Router';
+      const nodes = [
+        makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+        makeNode({
+          id: FIELD_C,
+          type: 'CustomField',
+          apiName: 'CapStage__c',
+          parentId: 'CustomObject:Account',
+          properties: { dataType: 'Picklist' },
+        }),
+        makeNode({ id: FLOW_C, type: 'Flow', apiName: 'zzz_Cap_Router' }),
+      ];
+      // 4 dummy CCs (sort first) + the target CC (sorts last) = 5 CC nodes; the
+      // ceiling of 2 stops the walk before the tail target is reached.
+      for (let i = 0; i < 4; i++) {
+        nodes.push(
+          makeNode({
+            id: `ConditionalContext:Flow:Dummy_${i}.condition-0`,
+            type: 'ConditionalContext',
+            apiName: `Flow:Dummy_${i}.condition-0`,
+            parentId: `Flow:Dummy_${i}`,
+            properties: { kind: 'flow-decision', fieldRefs: [] },
+          }),
+        );
+      }
+      nodes.push(
+        makeNode({
+          id: 'ConditionalContext:Flow:zzz_Cap_Router.condition-0',
+          type: 'ConditionalContext',
+          apiName: 'Flow:zzz_Cap_Router.condition-0',
+          parentId: FLOW_C,
+          properties: { kind: 'flow-decision', fieldRefs: [FIELD_C] },
+        }),
+      );
+      const imp = await importExtractionResults(capStore, [{ nodes, edges: [] }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const capCtx: Context = { vaultRoot: capDir, manifest: FIXTURE_MANIFEST, graph: capStore };
+      const result = await field360Handler(capCtx, { fieldId: FIELD_C });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // The truncation is DISCLOSED (N of M), so a tail miss is never silent.
+      expect(
+        result.value.data.boundaries.some(
+          (b) => /CAPPED at 2 of 5 ConditionalContext nodes/.test(b) && /INCOMPLETE/.test(b),
+        ),
+      ).toBe(true);
+      // The tail reader (position 5, past the ceiling of 2) is not in readers —
+      // but the boundary above discloses it, rather than the old silent miss.
+      const flowReader = (result.value.data.readers?.rows ?? []).find((r) => r.componentId === FLOW_C);
+      expect(flowReader).toBeUndefined();
+      await closeGraph(capStore);
+    } finally {
+      delete process.env['SFI_NODE_SCAN_LIMIT'];
+      delete process.env['SFI_CONDITION_SCAN_MAX'];
+      rmSync(capDir, { recursive: true, force: true });
+    }
+  });
+});

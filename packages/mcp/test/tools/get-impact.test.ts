@@ -308,6 +308,49 @@ describe('getImpactHandler', () => {
     expect(result.value.data.disclosure).toContain('lookup');
   });
 
+  // D3-soundness-overclaim: a CustomField impact walk is structurally blind to
+  // referrer classes not modeled as incoming edges (roll-ups, layout placement,
+  // flow decision/filter reads, tab/app membership). It must NOT report
+  // complete:true / staticCoverage:'full' on their absence.
+  it('does NOT report complete/full for a CustomField root; names the un-walked referrer classes', async () => {
+    const result = await getImpactHandler(ctx, {
+      componentId: 'CustomField:Account.Industry__c',
+      hops: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const s = result.value.data.soundness;
+    expect(s.complete).toBe(false);
+    expect(s.staticCoverage).toBe('partial');
+    const referrer = s.blindSpots.find((b) => b.kind === 'unwalked-referrer-class');
+    expect(referrer).toBeDefined();
+    expect(referrer?.referrerClasses).toEqual([
+      'roll-up source coupling',
+      'layout placement',
+      'flow decision/filter reads',
+      'tab/app membership',
+    ]);
+    // The prose disclosure also names the un-walked classes.
+    expect(result.value.data.disclosure).toContain('roll-up source coupling');
+    expect(result.value.data.disclosure).toContain('flow decision/filter reads');
+    expect(result.value.data.disclosure).toMatch(/not checked/i);
+  });
+
+  it('GUARD: a non-field/object root (ApexTrigger) is genuinely fully-walked — soundness stays complete/full', async () => {
+    const result = await getImpactHandler(ctx, {
+      componentId: 'ApexTrigger:UnrelatedTrigger',
+      hops: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const s = result.value.data.soundness;
+    // No field/object root, no dynamic-apex nodes → strongest honest coverage,
+    // and NO structural referrer blind spot (those classes reference fields/objects).
+    expect(s.blindSpots.some((b) => b.kind === 'unwalked-referrer-class')).toBe(false);
+    expect(s.complete).toBe(true);
+    expect(s.staticCoverage).toBe('full');
+  });
+
   it('reaches the 2-hop dependent (SegmentFlow) when hops=2', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.Industry__c',
