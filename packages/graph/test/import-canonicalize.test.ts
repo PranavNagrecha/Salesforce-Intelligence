@@ -3,11 +3,13 @@
 import type { Edge, Node } from '@sf-intelligence/contracts';
 
 import {
+  canonicalizeActivityPolymorphicFieldEdgeTargets,
   canonicalizeApexCallEdgeTargets,
   canonicalizeFieldEdgeTargets,
   canonicalizeLabelEdgeTargets,
   canonicalizeObjectEdgeTargets,
   canonicalizeResourceEdgeTargets,
+  mintPolymorphicActivityFieldEdges,
 } from '../src/import.js';
 
 const makeClass = (apiName: string): Node => ({
@@ -228,6 +230,256 @@ describe('canonicalizeFieldEdgeTargets — R6-03', () => {
       path: 'account.Custom_Flag__c',
       viaAst: true,
     });
+  });
+});
+
+/**
+ * D2 — polymorphic Activity-base field alias. Salesforce Activity CUSTOM
+ * fields live on the `Activity` object and are SHARED by its polymorphic
+ * children `Task`/`Event`. When Apex writes `someTask.Foo__c = …`, the write
+ * edge is keyed on the RECEIVER type (`Task`), projecting to a dangling
+ * `CustomField:Task.Foo__c` that never attaches to the real
+ * `CustomField:Activity.Foo__c`. The case-only remap can't bridge it
+ * (`task` ≠ `activity`), so `safe_to_delete_field` reads the Activity field as
+ * unreferenced and a blocking `writesTo` flips to a false "safe to delete".
+ */
+describe('canonicalizeActivityPolymorphicFieldEdgeTargets — D2', () => {
+  it('remaps a dangling CustomField:Task.<field> writesTo onto the shared Activity field', () => {
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Activity.Foo__c');
+  });
+
+  it('remaps a dangling CustomField:Event.<field> readsFrom onto the shared Activity field', () => {
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Event.Foo__c', 'readsFrom', 'apex-ast'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Activity.Foo__c');
+  });
+
+  it('remaps BOTH writesTo and readsFrom to the Activity field in one pass', () => {
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+      fieldEdge('CustomField:Event.Foo__c', 'readsFrom', 'apex-ast'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Activity.Foo__c');
+    expect(edges[1]?.toId).toBe('CustomField:Activity.Foo__c');
+  });
+
+  it('PRECISION: a dangling Task field with NO matching Activity field is NOT remapped (stays as-is)', () => {
+    // Bar__c exists on Activity nowhere in the graph, so the "Activity node
+    // exists" guard keeps the Task-own field target untouched — a standard
+    // Task field is never mis-attributed to Activity.
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Bar__c', 'writesTo', 'apex-ast'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Task.Bar__c');
+  });
+
+  it('does NOT remap a Task field target that resolves to a real Task node (exact match is final)', () => {
+    // A genuine Task-own custom field modeled as its own node must win over the
+    // Activity alias — only DANGLING targets are ever remapped.
+    const nodes = [
+      makeField('Activity', 'Foo__c'),
+      makeField('Task', 'Foo__c'),
+      makeClass('Q'),
+    ];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Task.Foo__c');
+  });
+
+  it('leaves a non-Activity dangling field (Account) untouched', () => {
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Account.Foo__c', 'writesTo', 'apex-ast'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Account.Foo__c');
+  });
+
+  it('matches the Task/Event object and field case-insensitively', () => {
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:TASK.foo__c', 'writesTo', 'apex-scanner'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Activity.Foo__c');
+  });
+
+  it('drops an ambiguous Activity case collision — never guesses', () => {
+    // Impossible on real metadata (field API names are case-insensitive unique
+    // per object) but guarded defensively.
+    const nodes = [
+      makeField('Activity', 'Foo__c'),
+      makeField('Activity', 'FOO__c'),
+      makeClass('Q'),
+    ];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.foo__c', 'writesTo', 'apex-ast'),
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Task.foo__c');
+  });
+
+  it('preserves edge properties verbatim on rewrite (the raw receiver-path evidence stays)', () => {
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      {
+        ...fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+        properties: { path: 'someTask.Foo__c', receiver: 'Task' },
+      },
+    ];
+    canonicalizeActivityPolymorphicFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Activity.Foo__c');
+    expect(edges[0]?.properties).toEqual({
+      path: 'someTask.Foo__c',
+      receiver: 'Task',
+    });
+  });
+
+  it('is applied by canonicalizeFieldEdgeTargets (the import entry point) after the case-fold pass', () => {
+    const nodes = [makeField('Activity', 'Foo__c'), makeClass('Q')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+    ];
+    canonicalizeFieldEdgeTargets(nodes, edges);
+    expect(edges[0]?.toId).toBe('CustomField:Activity.Foo__c');
+  });
+});
+
+/**
+ * D2 — polymorphic Activity-field MIRROR. When an activity custom field is
+ * sourced from the offline `sobject describe` snapshot there is NO `Activity`
+ * base node: the same field is materialized as BOTH `CustomField:Task.<field>`
+ * and `CustomField:Event.<field>`. Apex writing it through a `Task` receiver
+ * attaches its `writesTo` only to the Task sibling, so querying the Event
+ * sibling walks zero dependencies and reads a false safe. The mirror mints the
+ * missing edge onto the other existing sibling(s).
+ */
+describe('mintPolymorphicActivityFieldEdges — D2 (describe-snapshot siblings)', () => {
+  it('mirrors a Task-sibling writesTo onto the Event sibling of the same shared field', () => {
+    // Both siblings exist, NO Activity base node — the describe-snapshot shape.
+    const nodes = [
+      makeField('Task', 'Foo__c'),
+      makeField('Event', 'Foo__c'),
+      makeClass('Writer'),
+    ];
+    const edges: Edge[] = [
+      {
+        fromId: 'ApexClass:Writer',
+        toId: 'CustomField:Task.Foo__c' as Edge['toId'],
+        edgeType: 'writesTo',
+        confidence: 'parsed',
+        source: 'apex-ast',
+        properties: { path: 'someTask.Foo__c' },
+      },
+    ];
+    mintPolymorphicActivityFieldEdges(nodes, edges);
+    // The original Task edge is untouched; a mirrored Event edge is minted.
+    expect(edges).toHaveLength(2);
+    const mirrored = edges.find((e) => e.toId === 'CustomField:Event.Foo__c');
+    expect(mirrored).toBeDefined();
+    expect(mirrored?.fromId).toBe('ApexClass:Writer');
+    expect(mirrored?.edgeType).toBe('writesTo');
+    expect(mirrored?.confidence).toBe('heuristic');
+    expect(mirrored?.source).toBe('graph-activity-polymorphic');
+    expect(mirrored?.properties['polymorphicMirror']).toBe(true);
+    expect(mirrored?.properties['mirroredFrom']).toBe('CustomField:Task.Foo__c');
+    // The original edge is left exactly as-is (raw evidence preserved).
+    expect(edges[0]?.toId).toBe('CustomField:Task.Foo__c');
+    expect(edges[0]?.confidence).toBe('parsed');
+  });
+
+  it('mirrors across all three representations when Activity, Task and Event all exist', () => {
+    const nodes = [
+      makeField('Activity', 'Foo__c'),
+      makeField('Task', 'Foo__c'),
+      makeField('Event', 'Foo__c'),
+      makeClass('Writer'),
+    ];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+    ];
+    mintPolymorphicActivityFieldEdges(nodes, edges);
+    const targets = new Set(edges.map((e) => e.toId));
+    expect(targets).toContain('CustomField:Activity.Foo__c');
+    expect(targets).toContain('CustomField:Event.Foo__c');
+    expect(edges).toHaveLength(3); // original Task + Activity + Event
+  });
+
+  it('PRECISION: does NOT mirror a field that exists on only ONE polymorphic representation', () => {
+    // A Task-own field (no Event / Activity sibling) is never treated as shared.
+    const nodes = [makeField('Task', 'Bar__c'), makeClass('Writer')];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Bar__c', 'writesTo', 'apex-ast'),
+    ];
+    mintPolymorphicActivityFieldEdges(nodes, edges);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.toId).toBe('CustomField:Task.Bar__c');
+  });
+
+  it('does not mirror grantedBy or parentOf (per-sibling edges, not shared references)', () => {
+    const nodes = [
+      makeField('Task', 'Foo__c'),
+      makeField('Event', 'Foo__c'),
+      { ...makeClass('PS'), id: 'PermissionSet:PS', type: 'PermissionSet' as const, apiName: 'PS' },
+    ];
+    const edges: Edge[] = [
+      {
+        fromId: 'PermissionSet:PS',
+        toId: 'CustomField:Task.Foo__c' as Edge['toId'],
+        edgeType: 'grantedBy',
+        confidence: 'declared',
+        source: 'permission-set-extractor',
+        properties: {},
+      },
+    ];
+    mintPolymorphicActivityFieldEdges(nodes, edges);
+    expect(edges).toHaveLength(1); // grantedBy is not mirrored
+  });
+
+  it('does not duplicate an edge the Event sibling already has', () => {
+    const nodes = [
+      makeField('Task', 'Foo__c'),
+      makeField('Event', 'Foo__c'),
+      makeClass('Writer'),
+    ];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+      // The Event sibling already carries an equivalent write from the same class.
+      fieldEdge('CustomField:Event.Foo__c', 'writesTo', 'apex-ast'),
+    ];
+    mintPolymorphicActivityFieldEdges(nodes, edges);
+    // No new edge minted — both real edges already exist (dedup on from/to/type).
+    expect(edges).toHaveLength(2);
+    expect(edges.filter((e) => e.source === 'graph-activity-polymorphic')).toHaveLength(0);
+  });
+
+  it('is idempotent — re-running mints no additional edges', () => {
+    const nodes = [
+      makeField('Task', 'Foo__c'),
+      makeField('Event', 'Foo__c'),
+      makeClass('Writer'),
+    ];
+    const edges: Edge[] = [
+      fieldEdge('CustomField:Task.Foo__c', 'writesTo', 'apex-ast'),
+    ];
+    mintPolymorphicActivityFieldEdges(nodes, edges);
+    const afterFirst = edges.length;
+    mintPolymorphicActivityFieldEdges(nodes, edges);
+    expect(edges.length).toBe(afterFirst);
   });
 });
 

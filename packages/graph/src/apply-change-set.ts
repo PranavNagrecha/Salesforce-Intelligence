@@ -13,6 +13,7 @@ import {
   edgeRowParams,
   IMPORT_BATCH_SIZE,
   mintFutureDispatchEdges,
+  mintPolymorphicActivityFieldEdges,
   NODE_COLUMN_COUNT,
   nodeRowParams,
 } from './import.js';
@@ -222,6 +223,12 @@ export const computeChangeSet = async (
   // edge stays dangling until a full rebuild; full `/sfi-refresh` is the
   // ground truth (same bound as the GRF-01/CR-CAP-09 mirrors above).
   canonicalizeFieldEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  // D2: mirror cold import — mirror field-reference edges across the existing
+  // polymorphic siblings of a shared Activity field (Task/Event describe-
+  // snapshot duplicates). Same INCREMENTAL GAP as the mirrors above: only sees
+  // the change-set's node view, so a sibling representation outside the change
+  // set is invisible and it under-mints vs a full refresh.
+  mintPolymorphicActivityFieldEdges([...desiredNodes.values()], desiredEdgeList);
   // R7-W3: mirror cold import — remap case-variant CustomObject targets onto
   // the vaulted object id. Same INCREMENTAL GAP as the CustomField mirror
   // above: only sees the change-set's node view.
