@@ -2044,11 +2044,18 @@ const PII_INVENTORY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       objectApiName: { type: 'string', minLength: 1 },
       classification: {
         type: 'string',
-        enum: ['pii', 'sensitive', 'all'],
+        enum: ['pii', 'sensitive', 'protected', 'all'],
       },
       category: {
         type: 'string',
-        enum: ['identifier', 'contact', 'financial', 'health', 'all'],
+        enum: [
+          'identifier',
+          'contact',
+          'financial',
+          'health',
+          'protected-class',
+          'all',
+        ],
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },

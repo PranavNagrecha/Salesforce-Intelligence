@@ -324,11 +324,16 @@ export const orgRiskReportHandler = async (
   const pii = await collectPiiInventoryFields(ctx, { classification: 'all' });
   if (pii.ok) {
     const regulated = pii.value.fields.filter(
-      (f) => f.classification === 'pii' || f.classification === 'sensitive',
+      (f) =>
+        f.classification === 'pii' ||
+        f.classification === 'sensitive' ||
+        f.classification === 'protected',
     );
     const piiCount = pii.value.fields.filter((f) => f.classification === 'pii').length;
+    // Protected-class is the highest tier — roll it into the sensitive count so
+    // `regulatedFieldCount === piiCount + sensitiveCount` stays consistent.
     const sensitiveCount = pii.value.fields.filter(
-      (f) => f.classification === 'sensitive',
+      (f) => f.classification === 'sensitive' || f.classification === 'protected',
     ).length;
     piiExposure = {
       regulatedFieldCount: regulated.length,

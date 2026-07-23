@@ -101,7 +101,10 @@ import {
   listEdgesForNodes,
   listNodesByType,
 } from '@sf-intelligence/graph';
-import { detectPiiClassification } from '@sf-intelligence/patterns';
+import {
+  detectPiiClassification,
+  isRegulatedPiiClassification,
+} from '@sf-intelligence/patterns';
 import { fitCsvRowsToBudget, type CsvCell } from '@sf-intelligence/renderers';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { summarizeCoverage } from '@sf-intelligence/vault';
@@ -343,11 +346,11 @@ export interface UnusedFieldDeepEntry {
   /**
    * GROUP-A PII-safety: machine-readable PII/sensitive classification from the
    * heuristic `detectPiiClassification` recognizer, present only when the field
-   * classifies as `pii` or `sensitive`. When present, `recommendedAction` is
-   * PREPENDED with a compliance escalation. HEURISTIC — absence is NOT a
-   * clearance, only the absence of a recognised signal.
+   * classifies as `pii`, `sensitive`, or `protected`. When present,
+   * `recommendedAction` is PREPENDED with a compliance escalation. HEURISTIC —
+   * absence is NOT a clearance, only the absence of a recognised signal.
    */
-  readonly piiClassification?: 'pii' | 'sensitive';
+  readonly piiClassification?: 'pii' | 'sensitive' | 'protected';
   /**
    * CR-CAP-L5: live production population evidence, present ONLY when this
    * field's static `confidence` was `high` AND the live plane answered
@@ -976,7 +979,7 @@ const recommendedActionFor = (
     return 'inventory only.';
   })();
   const pii = detectPiiClassification(node).piiClassification;
-  if (pii === 'pii' || pii === 'sensitive') {
+  if (isRegulatedPiiClassification(pii)) {
     return `${PII_DELETION_ESCALATION} ${base}`;
   }
   return base;
@@ -1361,10 +1364,9 @@ export const unusedFieldsDeepHandler = async (
 
     const confidence = computeConfidence(isProtected);
     const piiDetected = detectPiiClassification(field).piiClassification;
-    const piiClassification =
-      piiDetected === 'pii' || piiDetected === 'sensitive'
-        ? piiDetected
-        : undefined;
+    const piiClassification = isRegulatedPiiClassification(piiDetected)
+      ? piiDetected
+      : undefined;
     entries.push({
       id: field.id,
       apiName,

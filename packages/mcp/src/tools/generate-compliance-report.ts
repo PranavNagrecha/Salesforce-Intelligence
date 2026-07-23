@@ -76,7 +76,9 @@ const escapeCell = (raw: string): string =>
 const isRegulatedPiiField = (field: PiiField): boolean =>
   field.type === 'EncryptedText' ||
   field.category === 'identifier' ||
-  field.classification === 'sensitive';
+  field.category === 'protected-class' ||
+  field.classification === 'sensitive' ||
+  field.classification === 'protected';
 
 const objectAccessLabel = (
   properties: Readonly<Record<string, unknown>>,
@@ -304,7 +306,13 @@ export const generateComplianceReportHandler = async (
   ].join('\n');
 
   const inventoryBlock: string[] = ['## PII Inventory by Category', ''];
-  const categories = ['identifier', 'contact', 'financial', 'health'] as const;
+  const categories = [
+    'protected-class',
+    'identifier',
+    'contact',
+    'financial',
+    'health',
+  ] as const;
   for (const cat of categories) {
     const catFields = regulatedFields.filter((f) => f.category === cat);
     if (catFields.length === 0) continue;

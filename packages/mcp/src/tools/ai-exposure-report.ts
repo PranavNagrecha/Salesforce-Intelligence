@@ -56,6 +56,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import {
   detectPiiClassificationWithReason,
+  isRegulatedPiiClassification,
   type PiiCategory,
   type PiiClassification,
 } from '@sf-intelligence/patterns';
@@ -138,7 +139,7 @@ export interface PiiExposure {
   readonly fieldId: ComponentId;
   readonly objectApiName: string;
   readonly fieldApiName: string;
-  readonly classification: 'pii' | 'sensitive';
+  readonly classification: 'pii' | 'sensitive' | 'protected';
   readonly category: PiiCategory;
   readonly via: readonly string[];
   readonly reason: string;
@@ -204,12 +205,13 @@ const fetchAllOfType = async (
   return ok(all);
 };
 
-/** Classification severity for sorting — pii/sensitive first so the field cap never hides them. */
+/** Classification severity for sorting — protected/sensitive/pii first so the field cap never hides them. */
 const CLASS_RANK: Record<PiiClassification, number> = {
-  sensitive: 0,
-  pii: 1,
-  public: 2,
-  unknown: 3,
+  protected: 0,
+  sensitive: 1,
+  pii: 2,
+  public: 3,
+  unknown: 4,
 };
 
 const STATIC_BOUNDARIES: readonly string[] = Object.freeze([
@@ -553,7 +555,11 @@ export const aiExposureReportHandler = async (
     const fieldsTruncated = fields.length > MAX_FIELDS_PER_SURFACE;
     const keptFields = fields.slice(0, MAX_FIELDS_PER_SURFACE);
     const piiFieldCount = fields.filter((f) => f.classification === 'pii').length;
-    const sensitiveFieldCount = fields.filter((f) => f.classification === 'sensitive').length;
+    // Protected-class is the highest tier — roll it into the sensitive count so
+    // the summary stays consistent with the piiExposures list below.
+    const sensitiveFieldCount = fields.filter(
+      (f) => f.classification === 'sensitive' || f.classification === 'protected',
+    ).length;
 
     const label = raw.node.label ?? raw.node.apiName;
     surfaces.push({
@@ -568,7 +574,7 @@ export const aiExposureReportHandler = async (
     });
 
     for (const f of fields) {
-      if (f.classification === 'pii' || f.classification === 'sensitive') {
+      if (isRegulatedPiiClassification(f.classification)) {
         piiExposures.push({
           surfaceId: raw.node.id,
           surfaceType: raw.surfaceType,
@@ -602,7 +608,9 @@ export const aiExposureReportHandler = async (
   // --- Summary counts over the FULL (pre-pagination) sets. ---
   const fieldsExposed = globalFieldClasses.size;
   const piiFieldsExposed = [...globalFieldClasses.values()].filter((c) => c === 'pii').length;
-  const sensitiveFieldsExposed = [...globalFieldClasses.values()].filter((c) => c === 'sensitive').length;
+  const sensitiveFieldsExposed = [...globalFieldClasses.values()].filter(
+    (c) => c === 'sensitive' || c === 'protected',
+  ).length;
   const surfacesWithFieldExposure = surfaces.filter((s) => s.exposedFieldCount > 0).length;
 
   // --- Byte-budget + limit the two lists (no resumable cursor exposed — the

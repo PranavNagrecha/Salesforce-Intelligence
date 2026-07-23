@@ -451,6 +451,22 @@ const buildProperties = (
       const valueSetName = extractValueSetName(rootObj);
       return valueSetName !== null ? { valueSetName } : {};
     })(),
+    // OMIT-when-null (unlike the fixed keys above): the declared field-level
+    // Data Classification. `<securityClassification>` is the "sensitivity level"
+    // (Public / Internal / Confidential / Restricted / MissionCritical) and
+    // `<complianceGroup>` the regulatory tag (PII / HIPAA / PCI / GDPR / …). Most
+    // fields carry NEITHER, so a `null` row on every CustomField would churn
+    // every rendered markdown vault file — emit only when present. Downstream,
+    // the pii-detection recognizer consumes a declared `securityClassification`
+    // as its HIGHEST-PRECEDENCE (`declared`-confidence) signal.
+    ...(() => {
+      const securityClassification = toNullableString(rootObj['securityClassification']);
+      return securityClassification !== null ? { securityClassification } : {};
+    })(),
+    ...(() => {
+      const complianceGroup = toNullableString(rootObj['complianceGroup']);
+      return complianceGroup !== null ? { complianceGroup } : {};
+    })(),
     // OMIT-when-null (unlike the fixed keys above): only `type: Summary`
     // (roll-up summary) fields carry these three, and a null row on every
     // stored/formula CustomField would churn every rendered markdown vault

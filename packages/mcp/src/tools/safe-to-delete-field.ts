@@ -122,6 +122,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import {
   detectPiiClassification,
+  isRegulatedPiiClassification,
   type PiiCategory,
 } from '@sf-intelligence/patterns';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
@@ -350,7 +351,7 @@ export interface SafeToDeleteFieldOutput {
  * field whose deletion is otherwise judged safe. Does NOT alter the verdict.
  */
 export interface PiiCompliance {
-  readonly classification: 'pii' | 'sensitive';
+  readonly classification: 'pii' | 'sensitive' | 'protected';
   readonly category: PiiCategory;
   readonly message: string;
 }
@@ -563,7 +564,7 @@ const applyCoverageToVerdict = (
  */
 const buildPiiCompliance = (node: Node): PiiCompliance | undefined => {
   const { piiClassification, piiCategory } = detectPiiClassification(node);
-  if (piiClassification !== 'pii' && piiClassification !== 'sensitive') {
+  if (!isRegulatedPiiClassification(piiClassification)) {
     return undefined;
   }
   return {
