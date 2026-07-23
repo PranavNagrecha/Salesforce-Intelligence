@@ -562,6 +562,10 @@ import {
 } from './package-impact.js';
 import { hasHandlerCursor } from './page-cursor.js';
 import {
+  permissionSetConsolidationHandler,
+  permissionSetConsolidationInputSchema,
+} from './permission-set-consolidation.js';
+import {
   picklistIntegrityScanHandler,
   picklistIntegrityScanInputSchema,
 } from './picklist-integrity-scan.js';
@@ -1089,6 +1093,13 @@ export const dispatchTool = async (
         args,
         permissionRiskReportInputSchema,
         permissionRiskReportHandler,
+      );
+    case 'sfi.permission_set_consolidation':
+      return runTool(
+        ctx,
+        args,
+        permissionSetConsolidationInputSchema,
+        permissionSetConsolidationHandler,
       );
     case 'sfi.release_readiness_report':
       return runTool(

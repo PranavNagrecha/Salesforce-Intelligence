@@ -1570,6 +1570,15 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which automation is Salesforce going to sunset that we need to replace?',
     'what legacy automation is being retired that we still depend on?',
   ],
+  'sfi.permission_set_consolidation': [
+    'redundant permission sets — which could be consolidated?',
+    'find duplicate permission sets',
+    'consolidate permission sets that overlap or are subsets of each other',
+    'which perm sets could I merge to reduce sprawl?',
+    'show me PS grants fully contained in a bigger one',
+    'are there empty perm sets with no grants?',
+    'perm set cleanup — overlapping or near-identical grants',
+  ],
   'sfi.unassigned_permission_sets': [
     'are there permission sets that aren\'t assigned to anyone?',
     'which permission sets are deployed but have zero users?',

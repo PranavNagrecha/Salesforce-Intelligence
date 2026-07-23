@@ -88,6 +88,16 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 
 - Permission math and risk: `sfi.effective_permissions`, `sfi.permission_risk_report`,
   sharing / FLS tracing tools
+- `sfi.permission_set_consolidation` — offline permission-set consolidation
+  CANDIDATES from declared grants: flags empty, strict-subset (A ⊊ B → merge A
+  into B), and near-duplicate (Jaccard-overlap ≥ a disclosed threshold)
+  permission sets, ranked by consolidation opportunity. Candidate-flagging, not
+  a merge verdict — honest that base-profile redundancy and who-holds-what are
+  per-user LIVE assignment data (deferred to the live plane / manual review),
+  that an empty set may be a permission-set-group component, and that
+  group-scoped muting is not applied to the standalone grant comparison.
+  Distinct from `permission_risk_report` (how DANGEROUS a grant is, not how
+  REDUNDANT) and `unassigned_permission_sets` (who holds a set).
 - Experience Cloud: `sfi.guest_exposure_report`
 - Agentforce / GenAI surface: `sfi.ai_exposure_report` (what modeled AI assets
   touch, composed with PII inventory where applicable)

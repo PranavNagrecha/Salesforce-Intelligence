@@ -1653,6 +1653,25 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
 });
 
 /**
+ * Concrete JSON Schema for `sfi.permission_set_consolidation`. Mirrors
+ * `permissionSetConsolidationInputSchema` (permission-set-consolidation.ts):
+ * `minOverlap` (0.5..1, default 0.9) is the near-duplicate Jaccard threshold;
+ * `includeEmpty` (default true) toggles empty-permission-set candidates; `limit`
+ * (max 100, default 25) and `offset` page the RANKED candidate list. Drift
+ * between this schema and the Zod schema is a code-review concern.
+ */
+const PERMISSION_SET_CONSOLIDATION_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      minOverlap: { type: 'number', minimum: 0.5, maximum: 1 },
+      includeEmpty: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.limit_headroom_report`. Mirrors
  * `limitHeadroomReportInputSchema` (limit-headroom-report.ts). `edition` is the
  * optional org edition (edition-dependent limits are computed against an ASSUMED
@@ -4753,6 +4772,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata: every Profile or PermissionSet that grants a god-mode or administrative system permission (Modify All Data / View All Data = critical; Author Apex, Customize Application, Manage Users, Manage Profiles/PermSets, Modify Metadata, Manage Sharing, Manage Roles, password/login policies = high) OR object-level View All / Modify All, surfaced as ONE aggregated finding per grantor (severity = the worst signal; system perms + a per-grantor count of objects escalated). PermissionSetGroups are analysed too: a PSG's effective god-mode is aggregated from its MEMBER permission sets (so a user who gets Modify All Data via a group is caught), with the muting permission set noted but not subtracted (v1 honesty boundary). A `privilege` block rosters the `modifyAllDataGrantors` / `viewAllDataGrantors` (profiles, permission sets, AND groups) and the `overPrivilegedGrantorCount`. Also rolls in unassigned permission sets and CRUD/FLS audit totals. Answers 'who has god mode / Modify All / View All / who is an admin / who is over-permissioned'. Optional `profileFilter` (a Profile api name / label or canonical `Profile:<ApiName>` id) SCOPES the report to one profile — and is HONORED: when the named profile does NOT exist in the vault the report STOPS with a `profileFilter.found: false` result (empty findings + a caveat naming the closest existing profile), never silently dropping the filter and dumping the org-wide report (a false-premise profile name therefore yields a 'profile not found', not a misleading full report). Read-only, declared confidence (literal metadata flags, not heuristics); `limit` (default 50) caps the findings. When the vault holds a captured permission-holder aggregate, the god-mode grantors carry active-holder counts via a `dataShape` holders block (`data_snapshot`, counts only) — a god-mode permission set held by 40 active users outranks one held by none.",
     inputSchema: PERMISSION_RISK_REPORT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.permission_set_consolidation',
+    description:
+      "Offline, vault-only CONSOLIDATION candidates for permission sets, from DECLARED grants — 'which permission sets are redundant / duplicate / consolidatable'. Sweeps every PermissionSet, compiles each one's compact grant-key list from its `grantedBy` edges (object CRUD, FLS, Apex, Flow, custom permission) plus grant properties (system `<userPermissions>`, record-type / app / tab visibility), and flags three shapes: EMPTY (no meaningful declared grants — may be intentional or a placeholder); STRICT SUBSET (every grant of A is also in B, A ⊊ B → A is a merge CANDIDATE into B); NEAR-DUPLICATE (grant overlap ≥ a disclosed Jaccard threshold, default 0.9, with neither a strict subset — clustered by the overlap relation; exact duplicates are Jaccard = 1). `candidates[]` is a single opportunity-ranked list (biggest number of declared grants a merge could eliminate first), each entry a `strict-subset` / `near-duplicate` / `empty` shape carrying refs (`{id, grantCount, inPermissionSetGroup}`); it PAGES by `limit` (default 25, max 100) / `offset` / `nextOffset` and self-fits the response byte budget (`nextOffset` always equals `offset + candidates.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips a candidate). `summary` carries the complete analyzed / empty / subset / cluster counts. Optional `minOverlap` (0.5..1, default 0.9) tunes the near-duplicate threshold; `includeEmpty` (default true) toggles empty candidates. This is CANDIDATE-flagging, NOT a merge verdict, and is distinct from `sfi.permission_risk_report` (over-privilege / god-mode — how DANGEROUS a grant is, not how REDUNDANT), `sfi.unassigned_permission_sets` (WHO holds a set), `sfi.effective_permissions` (the single-container-bundle union), and `sfi.what_if_merge_profiles` (a single pairwise PROFILE what-if). HONESTY (surfaced verbatim in `boundaries[]`): a strict subset / near-duplicate is a CANDIDATE from declared grants, NEVER a proven safe merge — A may be assigned to different users or exist deliberately; base-profile redundancy and safe-to-merge are OUT OF SCOPE offline (per-user live assignment data — deferred to sfi.live_permset_holders / sfi.live_user_permsets / manual review; the tool NEVER asserts a set is redundant); an empty one is not necessarily deletable; each candidate's grant-keys are its OWN declared grants, and one that is also a group component is flagged `inPermissionSetGroup`; the Jaccard threshold value is disclosed; only retrieved permission-set metadata is analysed (an incomplete family makes a relation a FLOOR, disclosed via `coverageCaveat` / `scanTruncated`). `declared` confidence. Pure, unit-testable core (`computeConsolidationCore` / `rankCandidates`), no vault dependency.",
+    inputSchema: PERMISSION_SET_CONSOLIDATION_INPUT_SCHEMA,
   },
   {
     name: 'sfi.release_readiness_report',
