@@ -576,6 +576,34 @@ export const STALE_CHECK_TYPES = [
 /** Strict ISO-8601 UTC timestamp guard for the SOQL datetime literal. */
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 
+/**
+ * Build the `WHERE LastModifiedDate > …` threshold literal from the vault's
+ * `refreshedAt`, CEILING to the next whole second when there is any sub-second
+ * component. Pure + exported so the boundary math is unit-testable without a
+ * live org.
+ *
+ * Ceil, NOT floor — direction is load-bearing. Salesforce SOQL datetime literals
+ * are documented as `YYYY-MM-DDThh:mm:ssZ` (no fractional seconds) and many
+ * Tooling-API versions REJECT a fractional-second literal in a WHERE clause, so
+ * the milliseconds must go. Trimming them (the old behavior) FLOORED the
+ * threshold DOWN to the whole second, moving it EARLIER than the true refresh
+ * instant: a component modified in the sub-second window BEFORE the refresh
+ * (e.g. `…40.500Z` against a refresh at `…40.744Z`) is already captured in the
+ * vault, yet `40.500Z > 40Z` counted it as org-ahead-of-vault drift — a
+ * false-positive staleness window of up to ~1s. Ceiling guarantees the threshold
+ * is NEVER earlier than the real refresh instant, so that false positive cannot
+ * occur. The cost is a <1s CONSERVATIVE false NEGATIVE (a change in the
+ * sub-second window right after the refresh is missed until the next
+ * `/sfi-refresh`) — the safe direction. Minute/hour/day/month/year rollover is
+ * handled by rounding on the epoch-millisecond value.
+ */
+export const staleSinceLiteral = (refreshedAt: string): string => {
+  const ms = Date.parse(refreshedAt);
+  const remainder = ms % 1000;
+  const ceiled = remainder === 0 ? ms : ms + (1000 - remainder);
+  return new Date(ceiled).toISOString().replace(/\.\d+Z$/, 'Z');
+};
+
 export interface LiveStaleCheckOutput {
   readonly refreshedAt: string;
   /** True when ANY checked type has a component modified after the vault refresh. */
@@ -625,8 +653,11 @@ export const checkVaultStaleness = async (
       message: `vault manifest refreshedAt is missing or not an ISO timestamp ('${String(refreshedAt)}') — cannot build the staleness query.`,
     });
   }
-  // SOQL accepts a datetime literal without milliseconds; trim them.
-  const sinceLiteral = refreshedAt.replace(/\.\d+Z$/, 'Z');
+  // SOQL datetime literals carry no fractional seconds; CEIL to the next whole
+  // second (never floor) so the threshold is never earlier than the true refresh
+  // instant. See {@link staleSinceLiteral} — flooring widened a ~1s
+  // false-positive drift window.
+  const sinceLiteral = staleSinceLiteral(refreshedAt);
 
   const byType: Record<string, number> = {};
   const checkedTypes: string[] = [];
