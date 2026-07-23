@@ -25,6 +25,7 @@ import type {
   Interpretation,
   McpError,
   McpResponse,
+  Remediation,
 } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
 import { z } from 'zod';
@@ -208,6 +209,19 @@ const SHAPE_DRIFT_INTERPRETATION_CAVEAT =
   'NOT be parsed — its interpretation entries did not match the expected shape ' +
   '(a cross-version/shape drift). No reasoning claim was surfaced from it; this ' +
   'is NOT the same as "no concept rule fired", and no absence conclusion follows.';
+
+/**
+ * CITED-REMEDIATION absence disclosure. Composed when the source carried fired
+ * reasoning claim(s) but NONE carried an authored remediation AND no scraped fix
+ * filled the slot. The FIX slot stays empty by design (the engine never
+ * fabricates a fix); this states WHY, so a host never invents one to paper over
+ * the gap. Only for a real interpret payload with ≥1 fired claim — byte-identical
+ * for interpretation-free inputs.
+ */
+const NO_REMEDIATION_CAVEAT =
+  'REMEDIATION: no cited remediation was authored for the fired reasoning ' +
+  'claim(s) yet, so none is surfaced here. Do NOT invent a fix — if one is ' +
+  'needed, author it on the concept rule so it ships cited and confidence-tiered.';
 
 // P12-UX-synth-next-action — keys whose string values populate the grounded
 // Finding → Evidence → Cause → Fix → Risk → Next-action template. Each field is
@@ -702,6 +716,38 @@ const INTERPRETATION_CONFIDENCE_TIERS = [
 ] as const satisfies readonly (ConfidenceLevel | 'unknown')[];
 
 /**
+ * CITED-REMEDIATION — normalize an untrusted `remediation` value into a typed
+ * {@link Remediation}, or `undefined` when the source carried none / a malformed
+ * one. Defensive: `steps` are filtered to non-empty strings (an empty result ⇒
+ * `undefined`, never a fabricated fix), `confidence` falls back to `'unknown'`
+ * outside the known tiers, `groundedIn` to string ids. Nothing is invented.
+ */
+const toRemediation = (v: unknown): Remediation | undefined => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const o = v as Record<string, unknown>;
+  const steps = Array.isArray(o['steps'])
+    ? o['steps'].filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+    : [];
+  if (steps.length === 0) return undefined;
+  const confidence = o['confidence'];
+  const groundedIn = Array.isArray(o['groundedIn'])
+    ? o['groundedIn'].filter((x): x is string => typeof x === 'string')
+    : [];
+  return {
+    steps,
+    confidence: (INTERPRETATION_CONFIDENCE_TIERS as readonly string[]).includes(
+      confidence as string,
+    )
+      ? (confidence as ConfidenceLevel | 'unknown')
+      : 'unknown',
+    groundedIn: groundedIn as ComponentId[],
+    ...(typeof o['whatIfTool'] === 'string' && o['whatIfTool'].trim().length > 0
+      ? { whatIfTool: o['whatIfTool'] }
+      : {}),
+  };
+};
+
+/**
  * Normalize a shape-matched object into a typed `Interpretation`. The source is
  * untrusted JSON (a host may reshape the interpret payload), so every field is
  * defensively narrowed: `groundedIn` is filtered to string ids, `confidence`
@@ -735,6 +781,12 @@ const toInterpretation = (o: Record<string, unknown>): Interpretation => {
       typeof o['coverageCaveat'] === 'string' ? o['coverageCaveat'] : null,
     modelVersion: typeof o['modelVersion'] === 'string' ? o['modelVersion'] : '',
     provenance: 'offline_snapshot',
+    // CITED-REMEDIATION — lift the authored fix when the source carried one.
+    // Absent ⇒ the field is omitted (byte-identical to the pre-remediation lift).
+    ...((): { remediation?: Remediation } => {
+      const remediation = toRemediation(o['remediation']);
+      return remediation !== undefined ? { remediation } : {};
+    })(),
   };
 };
 
@@ -1032,6 +1084,56 @@ export const synthesizeAnswerHandler = async (
       MAX_BULLETS,
     );
     if (out.bullets.length > before) promotedClaimCount += 1;
+  }
+
+  // CITED-REMEDIATION — fold each fired interpretation's AUTHORED remediation into
+  // the FIX / NEXT slots (the previously-empty `evidence.recommendedFix` /
+  // `nextAction`). Uses `presentationInterpretations` (compound-subsumed
+  // constituents already filtered, in lockstep with the bullet/note rendering) so
+  // a compound claim's fix is not doubled by its parts. Pushed AFTER the scalar
+  // `collect` pass, so a scraped `recommendation`/`nextStep` still WINS the slot
+  // (non-clobbering); a PURE interpret flow (empty fix/next hints) gets the
+  // remediation. Each hint is ATTRIBUTED (concept · ruleId · confidence), HEDGED
+  // (its confidence tier + any coverageCaveat inline), CITED (the grounded ids
+  // ride on the claim into `citations`), and framed as fix STEPS that do NOT close
+  // the finding — the engine cannot compute a counterfactual closure, so we never
+  // assert one. Byte-neutral for interpretation-free inputs (`interp.list` empty ⇒
+  // `presentationInterpretations` empty ⇒ the loop pushes nothing).
+  const scrapedFixCount = out.fixHints.length;
+  let remediationSurfaced = false;
+  for (const i of presentationInterpretations) {
+    const rem = i.remediation;
+    if (rem === undefined || rem.steps.length === 0) continue;
+    remediationSurfaced = true;
+    const ordered = rem.steps.map((s, n) => `(${n + 1}) ${s.trim()}`).join(' ');
+    const tool =
+      rem.whatIfTool !== undefined && rem.whatIfTool.trim().length > 0
+        ? ` Model the change with ${rem.whatIfTool.trim()} (models the counterfactual; does NOT itself close this finding).`
+        : '';
+    const coverage =
+      i.coverageCaveat !== null && i.coverageCaveat.trim().length > 0
+        ? ` [coverage caveat: ${i.coverageCaveat.trim()}]`
+        : '';
+    pushCapped(
+      out.fixHints,
+      `Cited remediation [${i.concept} · ${i.ruleId} · confidence: ${rem.confidence}]: ${ordered}${tool} These are dependency-ordered fix STEPS; the engine does NOT re-verify the finding after them.${coverage}`,
+      MAX_HINTS,
+    );
+    // NEXT — the immediate first step (or, when the only step is the tool
+    // pointer, that). Verbatim from the authored remediation; never invented.
+    const firstStep = rem.steps[0]?.trim();
+    if (firstStep !== undefined && firstStep.length > 0) {
+      pushCapped(out.nextHints, `${firstStep}${tool}`, MAX_HINTS);
+    }
+  }
+  // CITED-REMEDIATION honesty — DISCLOSE ABSENCE. Fired reasoning claim(s), but
+  // NONE carried authored remediation AND no scraped fix filled the slot: the FIX
+  // slot stays empty BY DESIGN (never a fabricated fix). Surface an explicit "no
+  // cited remediation authored" note so a host never invents one. Scoped so it
+  // never fires for interpretation-free inputs (byte-identical) or when a
+  // remediation / scraped fix IS present.
+  if (interp.list.length > 0 && !remediationSurfaced && scrapedFixCount === 0) {
+    pushCapped(out.caveats, NO_REMEDIATION_CAVEAT, MAX_CAVEATS);
   }
 
   const citations = [...out.ids].sort().map(parseCitation);

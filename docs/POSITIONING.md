@@ -288,7 +288,16 @@ Gearset/Copado/DX MCP still ship the change.
    inference, no live call. That is a step past "supply the facts to the model":
    the structural conclusion is computed and grounded, with a citation for every
    claim (no citation, no claim). Cloud NL competitors reason inside a hosted
-   model you cannot audit; this reasons in a rule engine you can read.
+   model you cannot audit; this reasons in a rule engine you can read. The rules
+   that name an actionable finding now carry **cited, dependency-ordered
+   remediation**: `interpret` emits ordered fix steps grounded in the same ids and
+   stamped with the same confidence as the claim, and `synthesize_answer` folds
+   them into a FIX / NEXT answer — attributed, hedged, and honest. It ships the
+   REMEDIATION HALF only: the steps never assert the finding is *closed* (no
+   `what_if_*` tool mutates the sharing/CRUD/keyword shapes the engine reasons
+   over, so closure is uncomputable and is refused); where a real `what_if_*` /
+   impact tool can *model* the change it points at it, and a claim with no
+   authored remediation discloses that absence rather than inventing a fix.
 
 The wedge is not "better SAST than Clayton" or "better deploys than Gearset."
 It is **convergence + locality + honesty** after first-party MCP made shallow

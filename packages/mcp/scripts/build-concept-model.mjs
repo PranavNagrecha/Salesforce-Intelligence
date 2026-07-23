@@ -408,7 +408,16 @@ const RULE_KEYS = [
  * rule's matched edges into production vs test-witness so a test-only edge never
  * establishes production reachability.
  */
-const RULE_OPTIONAL_KEYS = ['interpretationCrossPhase', 'witnessPartition'];
+const RULE_OPTIONAL_KEYS = ['interpretationCrossPhase', 'witnessPartition', 'remediation'];
+/**
+ * The keys a `remediation` (CITED-REMEDIATION authored fix) may carry. `steps` is
+ * required (a non-empty array of ordered, org-agnostic template strings);
+ * `whatIfTool` is an optional pointer to a real tool that can MODEL the
+ * counterfactual (never a closure claim).
+ */
+const REMEDIATION_KEYS = ['steps', 'whatIfTool'];
+/** The required subset of {@link REMEDIATION_KEYS}. */
+const REMEDIATION_REQUIRED_KEYS = ['steps'];
 /**
  * The keys a `witnessPartition` (edge-rule primary-vs-witness plane guard) may
  * carry. `witnessKind` + `witnessProperty` are OPTIONAL: `witnessKind` defaults
@@ -1215,6 +1224,42 @@ function assertWitnessPartition(wp, where) {
 }
 
 /**
+ * Validate one `remediation` RuleRemediation (CITED-REMEDIATION): only allowed
+ * keys, `steps` a non-empty array of non-empty strings (no canonical ids — the
+ * fix is org-agnostic general guidance, exactly like `interpretation`), and an
+ * optional `whatIfTool` non-empty string (no canonical id). Throws `ModelError`.
+ */
+function assertRemediation(rem, where) {
+  if (rem === null || typeof rem !== 'object' || Array.isArray(rem)) {
+    throw new ModelError(`${where} must be a mapping`);
+  }
+  const keys = Object.keys(rem);
+  const unknown = keys.filter((k) => !REMEDIATION_KEYS.includes(k));
+  if (unknown.length > 0) {
+    throw new ModelError(`${where}: unknown key(s): ${unknown.join(', ')}`);
+  }
+  const missing = REMEDIATION_REQUIRED_KEYS.filter((k) => !keys.includes(k));
+  if (missing.length > 0) {
+    throw new ModelError(`${where}: missing required key(s): ${missing.join(', ')}`);
+  }
+  if (!Array.isArray(rem.steps) || rem.steps.length === 0) {
+    throw new ModelError(`${where}.steps must be a non-empty array`);
+  }
+  rem.steps.forEach((s, i) => {
+    if (typeof s !== 'string' || s.length === 0) {
+      throw new ModelError(`${where}.steps[${i}] must be a non-empty string`);
+    }
+    assertNoCanonicalId(s, `${where}.steps[${i}]`);
+  });
+  if (rem.whatIfTool !== undefined) {
+    if (typeof rem.whatIfTool !== 'string' || rem.whatIfTool.length === 0) {
+      throw new ModelError(`${where}.whatIfTool must be a non-empty string when present`);
+    }
+    assertNoCanonicalId(rem.whatIfTool, `${where}.whatIfTool`);
+  }
+}
+
+/**
  * Validate a `{ key, equals }` where-mapping (shared by an aggregate's
  * endpoint and counted-edge property filters): exactly `key`/`equals`, `key` a
  * non-empty string, `equals` a scalar, and no canonical ids in either.
@@ -1648,6 +1693,10 @@ export function loadConceptRules() {
       assertWitnessPartition(rule.witnessPartition, `${w}.witnessPartition`);
     }
 
+    if (rule.remediation !== undefined) {
+      assertRemediation(rule.remediation, `${w}.remediation`);
+    }
+
     if (!CONFIDENCE_LEVELS.includes(rule.maxConfidence)) {
       throw new ModelError(
         `${w}.maxConfidence must be one of ${CONFIDENCE_LEVELS.join(' | ')}; got ${JSON.stringify(rule.maxConfidence)}`,
@@ -1825,6 +1874,27 @@ function renderWitnessPartition(wp) {
   lines.push(`        ${tsStr(wp.interpretationWitnessOnly)},`);
   lines.push(`      interpretationMixedWitnessSuffix:`);
   lines.push(`        ${tsStr(wp.interpretationMixedWitnessSuffix)},`);
+  lines.push('    }');
+  return lines.join('\n');
+}
+
+/**
+ * Render one `remediation` RuleRemediation (CITED-REMEDIATION) as a multi-line
+ * TypeScript object literal. Each ordered step gets its own line (the steps are
+ * long, matching the `interpretation` emit style). Field order is fixed (steps,
+ * then the optional whatIfTool) so the artifact is deterministic regardless of
+ * YAML key order.
+ */
+function renderRemediation(rem) {
+  const lines = ['{'];
+  lines.push('      steps: [');
+  for (const step of rem.steps) {
+    lines.push(`        ${tsStr(step)},`);
+  }
+  lines.push('      ],');
+  if (rem.whatIfTool !== undefined) {
+    lines.push(`      whatIfTool: ${tsStr(rem.whatIfTool)},`);
+  }
   lines.push('    }');
   return lines.join('\n');
 }
@@ -2155,6 +2225,9 @@ function renderConceptRules(rules) {
     }
     if (r.witnessPartition !== undefined) {
       lines.push(`    witnessPartition: ${renderWitnessPartition(r.witnessPartition)},`);
+    }
+    if (r.remediation !== undefined) {
+      lines.push(`    remediation: ${renderRemediation(r.remediation)},`);
     }
     lines.push(`    maxConfidence: ${tsStr(r.maxConfidence)},`);
     lines.push(`    absenceShaped: ${r.absenceShaped},`);

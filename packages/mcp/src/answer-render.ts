@@ -74,6 +74,12 @@ interface InterpretationLike {
   readonly groundedIn: readonly string[];
   readonly confidence: 'declared' | 'parsed' | 'heuristic' | 'unknown';
   readonly coverageCaveat: string | null;
+  /** CITED-REMEDIATION — the authored fix, present only when the rule carried one. */
+  readonly remediation?: {
+    readonly steps: readonly string[];
+    readonly confidence: 'declared' | 'parsed' | 'heuristic' | 'unknown';
+    readonly whatIfTool?: string;
+  };
 }
 
 /** The `sfi.interpret` payload the renderer needs (a subset of `InterpretOutput`). */
@@ -112,7 +118,19 @@ export const renderInterpretationsMarkdown = (
         ? `\n  Grounded in: ${i.groundedIn.map((id) => `\`${id}\``).join(', ')}`
         : '';
     const caveat = i.coverageCaveat ? `\n  Coverage caveat: ${i.coverageCaveat}` : '';
-    return `- **${i.claim}** _(${i.confidence} · \`${i.ruleId}\`)_${cited}${caveat}`;
+    // CITED-REMEDIATION — the authored, dependency-ordered fix steps (cited by the
+    // same grounded ids, at the claim's confidence). Empty when the rule authored
+    // none, so a rule WITHOUT remediation renders byte-identically. Framed as fix
+    // STEPS, never a closure of the finding.
+    const remediation =
+      i.remediation !== undefined && i.remediation.steps.length > 0
+        ? `\n  Remediation _(cited, ${i.remediation.confidence}; dependency-ordered fix steps — the engine does NOT re-verify the finding after them)_:` +
+          i.remediation.steps.map((step, n) => `\n    ${n + 1}. ${step}`).join('') +
+          (i.remediation.whatIfTool !== undefined
+            ? `\n    Model the change with \`${i.remediation.whatIfTool}\` (models the counterfactual; does not itself close this finding).`
+            : '')
+        : '';
+    return `- **${i.claim}** _(${i.confidence} · \`${i.ruleId}\`)_${cited}${caveat}${remediation}`;
   });
   const caveatLine = data.coverageCaveat
     ? `\n\n_Coverage: ${data.coverageCaveat}_`
