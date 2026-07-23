@@ -1,52 +1,82 @@
-<!doctype html><html><head><meta charset="utf-8"><style>
-  html,body{margin:0;padding:0;background:#05070A}
-  svg{display:block}
-</style></head><body>
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640"
-     font-family="ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" font-family="ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace">
   <defs>
     <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="2.4" result="b"/>
+      <feGaussianBlur stdDeviation="2.2" result="b"/>
       <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <radialGradient id="vg" cx="0.5" cy="0.4" r="0.85">
+    <radialGradient id="vg" cx="0.32" cy="0.42" r="0.9">
       <stop offset="50%" stop-color="#000000" stop-opacity="0"/>
-      <stop offset="100%" stop-color="#000000" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.55"/>
     </radialGradient>
     <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#3DF07A"/><stop offset="1" stop-color="#177A3F"/>
     </linearGradient>
+    <linearGradient id="chipbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0C1710"/><stop offset="1" stop-color="#081008"/>
+    </linearGradient>
     <pattern id="scan" width="4" height="4" patternUnits="userSpaceOnUse">
-      <rect width="4" height="1" fill="#0A110C" opacity="0.55"/>
+      <rect width="4" height="1" fill="#0A110C" opacity="0.5"/>
     </pattern>
   </defs>
 
-  <rect width="1280" height="640" fill="#05070A"/>
-  <rect width="1280" height="640" fill="url(#scan)"/>
-  <rect width="1280" height="640" fill="url(#vg)"/>
-  <rect x="0" y="0" width="9" height="640" fill="url(#bar)"/>
+  <!-- backdrop -->
+  <rect width="1200" height="420" fill="#05070A"/>
+  <rect width="1200" height="420" fill="url(#scan)"/>
+  <rect width="1200" height="420" fill="url(#vg)"/>
+  <rect x="0" y="0" width="8" height="420" fill="url(#bar)"/>
+
+  <!-- floating tool chips (right) — every id is a real sfi.* MCP tool -->
+  <g font-size="13.5" fill="#7FE7A5">
+    <g transform="translate(1008,58)">
+      <rect width="150" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
+      <text x="18" y="21">sfi.get_impact</text>
+    </g>
+    <g transform="translate(772,104)">
+      <rect width="262" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
+      <text x="18" y="21">sfi.why_cant_user_see_record</text>
+    </g>
+    <g transform="translate(1024,150)">
+      <rect width="146" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
+      <text x="18" y="21">sfi.field_360</text>
+    </g>
+    <g transform="translate(806,196)">
+      <rect width="214" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
+      <text x="18" y="21">sfi.order_of_execution</text>
+    </g>
+    <g transform="translate(998,242)">
+      <rect width="172" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
+      <text x="18" y="21">sfi.pii_inventory</text>
+    </g>
+    <g transform="translate(780,288)">
+      <rect width="228" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
+      <text x="18" y="21">sfi.safe_to_delete_field</text>
+    </g>
+    <g transform="translate(984,334)">
+      <rect width="186" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
+      <text x="18" y="21">sfi.find_dead_code</text>
+    </g>
+  </g>
 
   <!-- brand line -->
-  <text x="82" y="118" fill="#3DF07A" font-size="34" font-weight="700" filter="url(#glow)">&gt;_ sf-intelligence</text>
-  <text x="508" y="118" fill="#5E8A6E" font-size="23">read-only · offline · source-available</text>
+  <text x="70" y="70" fill="#3DF07A" font-size="27" font-weight="700" filter="url(#glow)">&gt;_ sf-intelligence</text>
+  <text x="70" y="98" fill="#5E8A6E" font-size="16">read-only · offline · source-available</text>
 
   <!-- headline -->
-  <text x="80" y="238" fill="#EAF6EE" font-size="66" font-weight="800" letter-spacing="-1">Salesforce Org Intelligence</text>
-  <text x="80" y="312" fill="#EAF6EE" font-size="66" font-weight="800" letter-spacing="-1">for AI agents</text>
+  <text x="68" y="168" fill="#EAF6EE" font-size="44" font-weight="800" letter-spacing="-1">Salesforce Org Intelligence</text>
+  <text x="68" y="216" fill="#EAF6EE" font-size="44" font-weight="800" letter-spacing="-1">for AI agents</text>
 
   <!-- subhead -->
-  <text x="82" y="380" fill="#9FB4A6" font-size="26">A read-only, offline MCP server and CLI. Grounded answers about</text>
-  <text x="82" y="416" fill="#9FB4A6" font-size="26">your org's metadata, dependencies, permissions, Apex and Flows.</text>
+  <text x="70" y="262" fill="#9FB4A6" font-size="16.5">A read-only, offline MCP server and CLI. Grounded answers about</text>
+  <text x="70" y="286" fill="#9FB4A6" font-size="16.5">your org's metadata, dependencies, permissions, Apex and Flows.</text>
 
-  <!-- stat chips -->
-  <text x="82" y="498" font-size="27" font-weight="700">
-    <tspan fill="#3DF07A">209 tools</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">100% offline</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">0 writes</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#9FB4A6">MIT + Commons Clause</tspan>
+  <!-- stats -->
+  <text x="70" y="330" font-size="17.5" font-weight="700">
+    <tspan fill="#3DF07A">209 tools</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">23 edge types</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">102 component types</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#9FB4A6">0 writes</tspan>
   </text>
 
   <!-- terminal command -->
-  <text x="82" y="560" font-size="23"><tspan fill="#3DF07A">$</tspan><tspan fill="#8AA795"> sfi ask "what breaks if I delete Account.Industry?"</tspan></text>
+  <text x="70" y="366" font-size="16"><tspan fill="#3DF07A">$</tspan><tspan fill="#8AA795"> sfi ask "what breaks if I delete Account.Industry?"</tspan></text>
 
   <!-- footer -->
-  <text x="82" y="600" fill="#5E7466" font-size="21">github.com/PranavNagrecha/Salesforce-Intelligence   ·   sfi.auditforce.cloud</text>
+  <text x="70" y="400" fill="#5E7466" font-size="13.5">MIT + Commons Clause   ·   github.com/PranavNagrecha/Salesforce-Intelligence   ·   sfi.auditforce.cloud</text>
 </svg>
-</body></html>

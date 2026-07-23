@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/hero.svg" alt="SfIntelligence — an intelligence layer for your Salesforce org" width="100%">
+  <img src="assets/hero.svg" alt="sf-intelligence — Salesforce Org Intelligence for AI agents: a read-only, offline MCP server and CLI" width="100%">
 </p>
 
 <p align="center">
