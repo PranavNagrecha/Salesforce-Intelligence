@@ -74,7 +74,10 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
-import { detectPiiClassification } from '@sf-intelligence/patterns';
+import {
+  detectPiiClassification,
+  isRegulatedPiiClassification,
+} from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -592,16 +595,15 @@ const computeRisk = (
  * reading a `properties.piiClassification` value that NOTHING in the
  * extraction pipeline ever stamps (the prior read was dead, so the
  * PII-risk escalation in `computeRisk` never fired for EncryptedText /
- * SSN / financial fields). Returns true for `pii` or `sensitive`.
+ * SSN / financial fields). Returns true for `pii`, `sensitive`, or
+ * `protected` (protected-class).
  *
  * HEURISTIC: a name/type recognizer can miss PII (custom-named columns,
  * description-only signals it can't see), so a `false` here is NOT a
  * clearance — only the absence of a recognised signal.
  */
-const detectIsPii = (node: Node): boolean => {
-  const c = detectPiiClassification(node).piiClassification;
-  return c === 'pii' || c === 'sensitive';
-};
+const detectIsPii = (node: Node): boolean =>
+  isRegulatedPiiClassification(detectPiiClassification(node).piiClassification);
 
 interface SectionBuckets {
   validates: Field360Row[];

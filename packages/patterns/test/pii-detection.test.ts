@@ -370,3 +370,199 @@ describe('detectPiiClassification: defaults and edge cases', () => {
     expect(a).toEqual(b);
   });
 });
+
+// D4 (P1 compliance): protected-class attributes are the HIGHEST sensitivity
+// tier. Synthetic field names only — general protected-class vocabulary.
+describe('detectPiiClassification: protected-class patterns', () => {
+  it('classifies Race__c as protected/protected-class', () => {
+    const r = detectPiiClassification(field('Contact', 'Race__c'));
+    expect(r.piiClassification).toBe('protected');
+    expect(r.piiCategory).toBe('protected-class');
+  });
+
+  it('classifies Ethnicity__c as protected/protected-class', () => {
+    const r = detectPiiClassification(field('Contact', 'Ethnicity__c'));
+    expect(r.piiClassification).toBe('protected');
+    expect(r.piiCategory).toBe('protected-class');
+  });
+
+  it('classifies a Disability_Status__c Checkbox as protected (constrained type does NOT suppress a protected fact)', () => {
+    const r = detectPiiClassification(
+      field('Contact', 'Disability_Status__c', { dataType: 'Checkbox' }),
+    );
+    expect(r.piiClassification).toBe('protected');
+    expect(r.piiCategory).toBe('protected-class');
+  });
+
+  it('classifies a Race__c MultiselectPicklist as protected (constrained type does NOT suppress a protected fact)', () => {
+    const r = detectPiiClassification(
+      field('Contact', 'Race__c', { dataType: 'MultiselectPicklist' }),
+    );
+    expect(r.piiClassification).toBe('protected');
+    expect(r.piiCategory).toBe('protected-class');
+  });
+
+  it('classifies Citizenship__c and Citizenship_Status__c as protected/protected-class', () => {
+    for (const name of ['Citizenship__c', 'Citizenship_Status__c']) {
+      const r = detectPiiClassification(field('Contact', name));
+      expect(r.piiClassification).toBe('protected');
+      expect(r.piiCategory).toBe('protected-class');
+    }
+  });
+
+  it('covers general protected-class vocabulary (org-independent tokens)', () => {
+    for (const name of [
+      'Veteran_Status__c',
+      'Military_Status__c',
+      'Religion__c',
+      'Religious_Affiliation__c',
+      'National_Origin__c',
+      'Nationality__c',
+      'Sexual_Orientation__c',
+      'Gender_Identity__c',
+      'Ethnic_Group__c',
+    ]) {
+      const r = detectPiiClassification(field('Contact', name));
+      expect(r.piiClassification).toBe('protected');
+      expect(r.piiCategory).toBe('protected-class');
+    }
+  });
+
+  it('matches `race` only as a WHOLE word — Grace/Trace/Racetrack/Embrace do NOT classify protected', () => {
+    for (const name of [
+      'Grace_Period__c',
+      'Trace_Id__c',
+      'Racetrack_Location__c',
+      'Embrace_Program__c',
+    ]) {
+      const r = detectPiiClassification(field('Account', name));
+      expect(r.piiClassification).toBe('public');
+    }
+  });
+});
+
+// D4: the bare 3-letter `phi` token was a false-positive generator. The PHI
+// health signal must fire ONLY on the genuine acronym, never the Greek letter.
+describe('detectPiiClassification: PHI acronym vs Greek-letter / word context', () => {
+  it('does NOT classify Phi_Theta_Kappa__c (an honor society) as health', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Contact', 'Phi_Theta_Kappa__c', { dataType: 'Checkbox' }),
+    );
+    expect(r.piiCategory).not.toBe('health');
+    expect(r.piiClassification).not.toBe('sensitive');
+    expect(r.piiClassification).toBe('public');
+  });
+
+  it('does NOT classify Philosophy__c or Philadelphia_Office__c as health', () => {
+    expect(
+      detectPiiClassification(field('Contact', 'Philosophy__c')).piiClassification,
+    ).toBe('public');
+    expect(
+      detectPiiClassification(field('Account', 'Philadelphia_Office__c'))
+        .piiClassification,
+    ).toBe('public');
+  });
+
+  it('does NOT fire health on a description naming the Phi Theta Kappa honor society', () => {
+    const r = detectPiiClassification(
+      field('Contact', 'Member_Flag__c', {
+        dataType: 'Checkbox',
+        description:
+          "Is the applicant a member of the Phi Theta Kappa honor's society?",
+      }),
+    );
+    expect(r.piiCategory).not.toBe('health');
+    expect(r.piiClassification).toBe('public');
+  });
+
+  it('classifies PHI__c (standalone acronym) as sensitive/health', () => {
+    const r = detectPiiClassification(field('Patient__c', 'PHI__c'));
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.piiCategory).toBe('health');
+  });
+
+  it('classifies Protected_Health_Info__c as sensitive/health', () => {
+    const r = detectPiiClassification(
+      field('Patient__c', 'Protected_Health_Info__c'),
+    );
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.piiCategory).toBe('health');
+  });
+
+  it('classifies a description naming "protected health" as sensitive/health', () => {
+    const r = detectPiiClassification(
+      field('Account', 'Notes__c', {
+        description: 'Contains protected health information',
+      }),
+    );
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.piiCategory).toBe('health');
+  });
+});
+
+// D4: a declared <securityClassification> is the HIGHEST-PRECEDENCE signal.
+describe('detectPiiClassification: declared securityClassification precedence', () => {
+  it('classifies an innocuous-named Confidential field as sensitive at declared confidence', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Account', 'Detail__c', { securityClassification: 'Confidential' }),
+    );
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.confidence).toBe('declared');
+    expect(r.reason).toMatch(/securityClassification/i);
+  });
+
+  it('classifies a Restricted field as protected at declared confidence', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Account', 'Detail__c', { securityClassification: 'Restricted' }),
+    );
+    expect(r.piiClassification).toBe('protected');
+    expect(r.confidence).toBe('declared');
+  });
+
+  it('escalates a name-only pii field (SSN) to sensitive when Confidential is declared', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Contact', 'SSN__c', { securityClassification: 'Confidential' }),
+    );
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.confidence).toBe('declared');
+  });
+
+  it('does NOT downgrade a stronger protected name signal for a Confidential field', () => {
+    // name -> protected (rank 4) beats Confidential -> sensitive (rank 3):
+    // keep protected, and the verdict stays heuristic (name-driven).
+    const r = detectPiiClassificationWithReason(
+      field('Student_Record__c', 'Disability_Status__c', {
+        dataType: 'Checkbox',
+        securityClassification: 'Confidential',
+      }),
+    );
+    expect(r.piiClassification).toBe('protected');
+    expect(r.confidence).toBe('heuristic');
+  });
+
+  it('falls back to heuristics for a non-escalating (Public) classification — never a silent downgrade', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Contact', 'SSN__c', { securityClassification: 'Public' }),
+    );
+    expect(r.piiClassification).toBe('pii');
+    expect(r.confidence).toBe('heuristic');
+  });
+});
+
+describe('detectPiiClassification: confidence axis', () => {
+  it('marks a name-based match heuristic', () => {
+    expect(
+      detectPiiClassification(field('Contact', 'SSN__c')).confidence,
+    ).toBe('heuristic');
+  });
+
+  it('marks a declared-classification match declared', () => {
+    expect(
+      detectPiiClassification(
+        field('Account', 'Innocuous__c', {
+          securityClassification: 'Confidential',
+        }),
+      ).confidence,
+    ).toBe('declared');
+  });
+});

@@ -14,15 +14,18 @@
  *
  * Input scope:
  *
- *   - `classification` (`'pii' | 'sensitive' | 'all'`, default
- *     `'all'`): narrow to fields whose detected classification matches.
+ *   - `classification` (`'pii' | 'sensitive' | 'protected' | 'all'`,
+ *     default `'all'`): narrow to fields whose detected classification
+ *     matches. `'protected'` is the highest tier (protected-class
+ *     attributes such as race / ethnicity / disability / citizenship).
  *     When `'all'`, the tool emits every classified field — including
  *     `public`-classified fields — so callers can see the full
  *     inventory and the per-classification counts in `summary`.
  *
  *   - `category` (`'identifier' | 'contact' | 'financial' | 'health' |
- *     'all'`, default `'all'`): narrow to fields whose detected
- *     category matches. Same `'all'`-emits-everything semantics.
+ *     'protected-class' | 'all'`, default `'all'`): narrow to fields
+ *     whose detected category matches. Same `'all'`-emits-everything
+ *     semantics.
  *
  *   - `limit` (`1..500`, default `200`): cap the response size. The
  *     response is sorted globally by `(classification, category, id)`
@@ -82,6 +85,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdgesForNodes, listNodesByType } from '@sf-intelligence/graph';
 import {
   detectPiiClassificationWithReason,
+  isRegulatedPiiClassification,
   type PiiCategory,
   type PiiClassification,
 } from '@sf-intelligence/patterns';
@@ -118,7 +122,12 @@ const SCAN_PAGE_SIZE = 500;
  * The classification axis values the input accepts. `'all'` is the
  * sentinel for "no filter".
  */
-const CLASSIFICATION_FILTER_VALUES = ['pii', 'sensitive', 'all'] as const;
+const CLASSIFICATION_FILTER_VALUES = [
+  'pii',
+  'sensitive',
+  'protected',
+  'all',
+] as const;
 
 /**
  * The category axis values the input accepts. `'all'` is the
@@ -129,6 +138,7 @@ const CATEGORY_FILTER_VALUES = [
   'contact',
   'financial',
   'health',
+  'protected-class',
   'all',
 ] as const;
 
@@ -265,6 +275,7 @@ const PII_PAYLOAD_BUDGET_BYTES = 38_000;
  * across runs even when a key has zero matches.
  */
 const emptyClassificationCounts = (): Record<PiiClassification, number> => ({
+  protected: 0,
   pii: 0,
   sensitive: 0,
   public: 0,
@@ -281,6 +292,7 @@ const emptyCategoryCounts = (): Record<PiiCategory, number> => ({
   contact: 0,
   financial: 0,
   health: 0,
+  'protected-class': 0,
   unknown: 0,
 });
 
@@ -288,7 +300,7 @@ const emptyCategoryCounts = (): Record<PiiCategory, number> => ({
  * Check the classification filter; `'all'` always matches.
  */
 const classificationMatches = (
-  filter: 'pii' | 'sensitive' | 'all',
+  filter: (typeof CLASSIFICATION_FILTER_VALUES)[number],
   detected: PiiClassification,
 ): boolean => filter === 'all' || filter === detected;
 
@@ -296,7 +308,7 @@ const classificationMatches = (
  * Check the category filter; `'all'` always matches.
  */
 const categoryMatches = (
-  filter: 'identifier' | 'contact' | 'financial' | 'health' | 'all',
+  filter: (typeof CATEGORY_FILTER_VALUES)[number],
   detected: PiiCategory,
 ): boolean => filter === 'all' || filter === detected;
 
@@ -479,13 +491,13 @@ const classifyPiiFields = async (
       const src = fieldById.get(edge.toId);
       if (src === undefined) continue;
       const srcDet = detectPiiClassificationWithReason(src);
-      if (
-        srcDet.piiClassification === 'pii' ||
-        srcDet.piiClassification === 'sensitive'
-      ) {
+      if (isRegulatedPiiClassification(srcDet.piiClassification)) {
         return {
           piiClassification: srcDet.piiClassification,
           piiCategory: srcDet.piiCategory,
+          // The inheritance is a heuristic inference over the formula's
+          // `references` edges, even when the source itself was `declared`.
+          confidence: 'heuristic',
           reason: `formula derives from ${src.apiName} (${edge.toId}), classified ${srcDet.piiClassification}/${srcDet.piiCategory}; a formula-derived field inherits the source field's exposure`,
         };
       }
