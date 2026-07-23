@@ -525,6 +525,10 @@ import {
   namingConventionReportInputSchema,
 } from './naming-convention-report.js';
 import {
+  nonselectiveSoqlHandler,
+  nonselectiveSoqlInputSchema,
+} from './nonselective-soql.js';
+import {
   objectAccessAuditHandler,
   objectAccessAuditInputSchema,
 } from './object-access-audit.js';
@@ -1439,6 +1443,13 @@ export const dispatchTool = async (
         args,
         flowBulkificationAuditInputSchema,
         flowBulkificationAuditHandler,
+      );
+    case 'sfi.nonselective_soql':
+      return runTool(
+        ctx,
+        args,
+        nonselectiveSoqlInputSchema,
+        nonselectiveSoqlHandler,
       );
     case 'sfi.flow_graph':
       return runTool(ctx, args, flowGraphInputSchema, flowGraphHandler);

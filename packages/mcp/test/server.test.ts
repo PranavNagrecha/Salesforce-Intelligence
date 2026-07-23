@@ -296,6 +296,7 @@ describe('dispatchTool', () => {
     // v2.1 R3 — code-quality composer tools.
     'sfi.code_quality_audit',
     'sfi.governor_limit_risks',
+    'sfi.nonselective_soql',
     'sfi.find_hardcoded_values',
     'sfi.crud_fls_audit',
     'sfi.test_coverage_gaps',
@@ -657,6 +658,7 @@ describe('V01_TOOLS', () => {
       'sfi.record_creation_paths',
       'sfi.explain_flow',
       'sfi.flow_graph',
+      'sfi.nonselective_soql',
       'sfi.flow_bulkification_audit',
       'sfi.flow_trace',
       'sfi.flow_fault_audit',
