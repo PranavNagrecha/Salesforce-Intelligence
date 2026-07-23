@@ -1223,3 +1223,168 @@ describe('field360Handler — componentId ↔ fieldId alias', () => {
     expect(field360InputSchema.safeParse({}).success).toBe(false);
   });
 });
+
+// =============================================================================
+// D3-soundness-overclaim — a Flow decision/filter that references a field is
+// extracted as a `firesWhen` edge to a ConditionalContext (the field lives on
+// the context's `fieldRefs` property), NOT a `readsFrom` onto the field. Before
+// the fix field_360 reported readers:0 for a field several Flows filter on. The
+// scan reconstructs these as DISCLOSED, heuristic readers so readers > 0.
+// =============================================================================
+
+describe('field360Handler: Flow decision/filter reads (readers no longer 0)', () => {
+  const FIELD = 'CustomField:Account.Stage__c';
+  const FLOW = 'Flow:Account_Stage_Router';
+  const CC = 'ConditionalContext:Flow:Account_Stage_Router.condition-0';
+  let dir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-flowcond-'));
+    const opened = await openGraph(join(dir, 'flowcond.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    localStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+        makeNode({
+          id: FIELD,
+          type: 'CustomField',
+          apiName: 'Stage__c',
+          label: 'Stage',
+          parentId: 'CustomObject:Account',
+          properties: { dataType: 'Picklist' },
+        }),
+        makeNode({ id: FLOW, type: 'Flow', apiName: 'Account_Stage_Router' }),
+        // The synthetic ConditionalContext whose fieldRefs include the field —
+        // parent is the Flow. This is what the decision-extractor emits; there
+        // is NO readsFrom edge onto the field, only this firesWhen target.
+        makeNode({
+          id: CC,
+          type: 'ConditionalContext',
+          apiName: 'Flow:Account_Stage_Router.condition-0',
+          parentId: FLOW,
+          properties: {
+            kind: 'flow-decision',
+            expression: 'Stage__c equals Closed',
+            fieldRefs: [FIELD],
+          },
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'CustomObject:Account',
+          toId: FIELD,
+          edgeType: 'parentOf',
+          confidence: 'declared',
+          source: 'extractor:custom-object',
+        }),
+        // The real firesWhen edge points Flow -> ConditionalContext (NOT the field).
+        makeEdge({
+          fromId: FLOW,
+          toId: CC,
+          edgeType: 'firesWhen',
+          confidence: 'declared',
+          source: 'condition-extractor',
+          properties: { kind: 'flow-decision', conditionIndex: 0 },
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(localStore, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('surfaces the flow-condition reader in `readers` (> 0), disclosed + heuristic', async () => {
+    const result = await field360Handler(localCtx, { fieldId: FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const readers = result.value.data.readers?.rows ?? [];
+    // FAIL-BEFORE: readers was 0 — the Flow's decision read carried no readsFrom edge.
+    expect(readers.length).toBeGreaterThan(0);
+    const flowReader = readers.find((r) => r.componentId === FLOW);
+    expect(flowReader).toBeDefined();
+    expect(flowReader?.componentType).toBe('Flow');
+    expect(flowReader?.confidence).toBe('heuristic');
+    expect(flowReader?.source).toContain('flow-condition-reads-scan');
+    expect(flowReader?.properties['mechanism']).toBe('flow-decision-filter');
+    // Honesty: the reconstruction is disclosed in boundaries.
+    expect(
+      result.value.data.boundaries.some(
+        (b) => b.includes('flow-condition-reads-scan') && /reconstructed/i.test(b),
+      ),
+    ).toBe(true);
+  });
+
+  it('discloses the structurally-unmodeled referrer classes (roll-up / related-list) in boundaries', async () => {
+    const result = await field360Handler(localCtx, { fieldId: FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.data.boundaries.some(
+        (b) => b.includes('roll-up source coupling') && b.includes('related-list'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT double-count a Flow that already reads the field via a real readsFrom edge', async () => {
+    // Add a real readsFrom edge from the SAME flow; the reader must appear ONCE.
+    const dupDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-flowcond-dup-'));
+    try {
+      const opened = await openGraph(join(dupDir, 'dup.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const dupStore = opened.value;
+      const seed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+          makeNode({
+            id: FIELD,
+            type: 'CustomField',
+            apiName: 'Stage__c',
+            parentId: 'CustomObject:Account',
+            properties: { dataType: 'Picklist' },
+          }),
+          makeNode({ id: FLOW, type: 'Flow', apiName: 'Account_Stage_Router' }),
+          makeNode({
+            id: CC,
+            type: 'ConditionalContext',
+            apiName: 'Flow:Account_Stage_Router.condition-0',
+            parentId: FLOW,
+            properties: { kind: 'flow-decision', fieldRefs: [FIELD] },
+          }),
+        ],
+        edges: [
+          // A REAL readsFrom edge from the flow (e.g. a recordLookup on the field).
+          makeEdge({
+            fromId: FLOW,
+            toId: FIELD,
+            edgeType: 'readsFrom',
+            confidence: 'parsed',
+            source: 'flow-extractor',
+          }),
+        ],
+      };
+      const imp = await importExtractionResults(dupStore, [seed]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const dupCtx: Context = { vaultRoot: dupDir, manifest: FIXTURE_MANIFEST, graph: dupStore };
+      const result = await field360Handler(dupCtx, { fieldId: FIELD });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const flowRows = (result.value.data.readers?.rows ?? []).filter(
+        (r) => r.componentId === FLOW,
+      );
+      expect(flowRows.length).toBe(1);
+      // The kept row is the REAL readsFrom edge (parsed), not the reconstruction.
+      expect(flowRows[0]?.source).toBe('flow-extractor');
+      await closeGraph(dupStore);
+    } finally {
+      rmSync(dupDir, { recursive: true, force: true });
+    }
+  });
+});

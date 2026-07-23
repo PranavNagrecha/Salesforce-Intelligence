@@ -86,6 +86,7 @@ import type { Context } from '../server.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { scanFlowConditionFieldReaders } from './flow-condition-field-readers-scan.js';
 import { scanSupplementalFlowFieldWriters } from './flow-field-writers-scan.js';
 import { resolveFieldAlias } from './input-aliases.js';
 import {
@@ -843,6 +844,39 @@ export const field360Handler = async (
     });
   }
 
+  // D3-soundness-overclaim — Flow decision/filter READS. A Flow decision or
+  // record-trigger filter that references this field is extracted as a
+  // `firesWhen` edge to a ConditionalContext (with the field on the context's
+  // `fieldRefs` property), NEVER a `readsFrom` edge onto the field — so these
+  // reads were invisible here (readers:0 for a field several Flows filter on).
+  // Reconstruct them from the graph's ConditionalContext nodes and surface each
+  // as a DISCLOSED, heuristic reader (the fact is declared/parsed in the XML, but
+  // this is a property-scan reconstruction, not a first-class edge). Deduped
+  // against real `readsFrom` readers so a Flow that ALSO reads via dataflow is
+  // never double-counted.
+  const flowConditionReaders = await scanFlowConditionFieldReaders(ctx, fieldId);
+  const readerIds = new Set(buckets.readers.map((r) => r.componentId));
+  let flowConditionReaderCount = 0;
+  for (const fc of flowConditionReaders) {
+    if (readerIds.has(fc.flowId)) continue;
+    readerIds.add(fc.flowId);
+    flowConditionReaderCount += 1;
+    buckets.readers.push({
+      componentId: fc.flowId,
+      componentType: 'Flow',
+      componentApiName: fc.flowApiName,
+      edgeType: 'readsFrom',
+      confidence: 'heuristic',
+      source: `flow-condition-reads-scan:${fc.conditionKind}`,
+      properties: {
+        supplemental: true,
+        mechanism: 'flow-decision-filter',
+        conditionKind: fc.conditionKind,
+        conditionContextId: fc.conditionContextId,
+      },
+    });
+  }
+
   // `dependencies`: OUTGOING references for formula fields only.
   if (isFormula) {
     const outResult = await listEdges(ctx.graph, fieldId, {
@@ -1104,6 +1138,20 @@ export const field360Handler = async (
       `${grantedByCount} field-level security grant(s) (Profile / PermissionSet) appear in summary.flsGrantCount but NOT in totalIncomingEdges or any usage section — field_360 covers usage, not access. Use \`sfi.field_access_audit\` for who can read/edit this field.`,
     );
   }
+  // D3-soundness-overclaim: when Flow decision/filter reads were reconstructed
+  // (they carry no readsFrom edge), name the reconstruction so the reader count
+  // is honest about its provenance.
+  if (flowConditionReaderCount > 0) {
+    boundaries.push(
+      `${flowConditionReaderCount} Flow decision/record-trigger filter reader(s) were reconstructed from ConditionalContext field references (a Flow decision or filter that references this field is stored as a firesWhen edge to a ConditionalContext, NOT a readsFrom edge onto the field) and surfaced in \`readers\` with heuristic confidence and source \`flow-condition-reads-scan\` — without this, these Flows are invisible (readers would read 0).`,
+    );
+  }
+  // D3-soundness-overclaim: referrer classes NOT modeled as incoming edges are
+  // NOT composed into any section, so their absence is "not checked", not proven
+  // "none". Named verbatim so "no such referrer" is never overstated.
+  boundaries.push(
+    'Referrer classes NOT modeled as incoming edges are NOT composed into any field_360 section and their absence is NOT proof of none: roll-up source coupling (a roll-up summary field whose summaryForeignKey targets this field — stored as a field property, no edge) and layout related-list placement (related lists reference the RELATED object\'s fields, not modeled as an edge onto this field). Use `sfi.get_impact` for the edge-walked dependency slice and its `soundness` blind spots.',
+  );
 
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
   const annotations = await annotationsBlockFor(ctx, fieldId);
