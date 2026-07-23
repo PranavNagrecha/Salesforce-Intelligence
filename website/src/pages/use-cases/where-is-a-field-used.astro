@@ -2,9 +2,9 @@
 import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 
-const title = "Where is a Salesforce field used? - sf-intelligence";
+const title = "Where Is This Salesforce Field Used? Dependency Analysis Guide";
 const description =
-  "Find every place a Salesforce field is referenced - Flows, Apex, layouts, reports, validation rules - by asking an AI agent instead of clicking through Setup.";
+  "Trace a Salesforce field across Flows, Apex, validation rules, layouts, permissions and other metadata, with evidence confidence and known gaps.";
 
 const faq = [
   {
@@ -28,6 +28,8 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-23",
+    mainEntityOfPage: `${site.url}/use-cases/where-is-a-field-used`,
   },
   {
     "@type": "FAQPage",
@@ -49,6 +51,7 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
         <div class="callout">
           <p><strong>Short answer:</strong> Ask sf-intelligence <em>"where is Account.Industry__c used?"</em> and it returns every component that references the field - Flows, Apex, layouts, validation rules, reports - from a dependency graph plus a source grep of your retrieved metadata, each reference labelled with its confidence. One question replaces a field-by-field crawl through Setup.</p>
         </div>

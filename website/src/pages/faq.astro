@@ -1,9 +1,9 @@
 ---
 import DocPage from "../layouts/DocPage.astro";
 
-const title = "FAQ - sf-intelligence Salesforce org intelligence";
+const title = "sf-intelligence FAQ: Salesforce MCP, Privacy, Setup & Licensing";
 const description =
-  "FAQ for sf-intelligence: read-only guarantees, local metadata, offline vs live planes, AI accuracy, install requirements, cost, and freshness.";
+  "Answers about setup, offline operation, read-only access, supported Salesforce metadata, MCP clients, licensing, limits and troubleshooting.";
 
 const jsonld = [
   {
@@ -90,7 +90,7 @@ const jsonld = [
   title={title}
   description={description}
   path="/faq"
-  heading="Salesforce knowledge base - FAQ"
+  heading="Frequently asked questions about sf-intelligence"
   intro="The questions people ask before they point sf-intelligence at a production Salesforce org."
   crumbs={[{ label: "faq", href: "/faq" }]}
   breadcrumbs={[{ name: "FAQ", path: "/faq" }]}
@@ -136,7 +136,7 @@ const jsonld = [
 
       <details class="faq-item" id="accuracy">
         <summary>Are its answers always correct?</summary>
-        <div class="answer"><p>Answers are grounded in real metadata, but each is tagged so you know how much to trust it. Confidence is <code>declared</code>, <code>parsed</code>, or <code>heuristic</code> - heuristic findings from the regex Apex scanner can have false positives and should be spot-checked. It also performs static analysis, so dynamic SOQL and reflective Apex are invisible: a “no references found” result means “no static evidence”, not “definitely unused”.</p></div>
+        <div class="answer"><p>Answers are grounded in real metadata, but each is tagged so you know how much to trust it. Confidence is <code>declared</code>, <code>parsed</code>, or <code>heuristic</code> - heuristic findings from the regex Apex scanner can have false positives and should be spot-checked. It also performs static analysis, so dynamic SOQL and reflective Apex are invisible: a “no references found” result means “no static evidence”, not “definitely unused”. See the <a href="/trust">security and evidence model</a> for how every answer is labelled and tested.</p></div>
       </details>
 
       <details class="faq-item" id="fresh">

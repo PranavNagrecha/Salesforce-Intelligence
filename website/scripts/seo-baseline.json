@@ -1,0 +1,387 @@
+{
+  "/404": {
+    "title": "404 - command not found · sf-intelligence",
+    "canonical": null,
+    "h1": "404",
+    "jsonLdTypes": [
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/agent-skills": {
+    "title": "Salesforce Agent Skills for Org Intelligence | sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/agent-skills",
+    "h1": "Portable Salesforce Agent Skills, backed by grounded MCP tools",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/ai-safety": {
+    "title": "Is AI Safe for Salesforce Metadata? sf-intelligence Security Model",
+    "canonical": "https://sfi.auditforce.cloud/ai-safety",
+    "h1": "When AI is — and is not — safe for Salesforce org analysis",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/blog": {
+    "title": "Blog - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/blog",
+    "h1": "Blog",
+    "jsonLdTypes": [
+      "Blog",
+      "BreadcrumbList",
+      "ItemList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/blog/deterministic-reasoning-model": {
+    "title": "How sf-intelligence reasons about your Salesforce org (0.2.0 → 0.2.1)",
+    "canonical": "https://sfi.auditforce.cloud/blog/deterministic-reasoning-model",
+    "h1": "Reasoning about your org, not just retrieving it",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/blog/salesforce-data-dictionary": {
+    "title": "How to Create a Salesforce Data Dictionary (Auto-Generated from Metadata)",
+    "canonical": "https://sfi.auditforce.cloud/blog/salesforce-data-dictionary",
+    "h1": "How to create a Salesforce data dictionary",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/blog/salesforce-order-of-execution": {
+    "title": "Salesforce Order of Execution Explained: What Runs When You Save a Record",
+    "canonical": "https://sfi.auditforce.cloud/blog/salesforce-order-of-execution",
+    "h1": "Salesforce order of execution, explained",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/capabilities": {
+    "title": "Salesforce MCP Capabilities: Metadata, Dependencies &amp; Permissions | sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/capabilities",
+    "h1": "The full Salesforce capability map",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "ItemList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/compare": {
+    "title": "Compare Salesforce Org Intelligence Tools | sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/compare",
+    "h1": "Compare Salesforce org-intelligence and metadata-analysis approaches",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "CollectionPage",
+      "ItemList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/compare/dx0": {
+    "title": "sf-intelligence vs dx0 - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/compare/dx0",
+    "h1": "sf-intelligence vs dx0",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/compare/elements-cloud": {
+    "title": "sf-intelligence vs Elements.cloud - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/compare/elements-cloud",
+    "h1": "sf-intelligence vs Elements.cloud",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/compare/hubbl": {
+    "title": "sf-intelligence vs Hubbl - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/compare/hubbl",
+    "h1": "sf-intelligence vs Hubbl",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/compare/metazoa": {
+    "title": "sf-intelligence vs Metazoa Snapshot - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/compare/metazoa",
+    "h1": "sf-intelligence vs Metazoa Snapshot",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/compare/salesforce-dx-mcp": {
+    "title": "sf-intelligence vs Salesforce DX MCP &amp; hosted MCP - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/compare/salesforce-dx-mcp",
+    "h1": "sf-intelligence vs Salesforce MCP",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/compare/sweep": {
+    "title": "sf-intelligence vs SWEEP for Salesforce Org Intelligence",
+    "canonical": "https://sfi.auditforce.cloud/compare/sweep",
+    "h1": "sf-intelligence vs Sweep",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/configuration": {
+    "title": "sf-intelligence Configuration: Tool Profiles, Live Reads &amp; Vault Settings",
+    "canonical": "https://sfi.auditforce.cloud/configuration",
+    "h1": "Configure sf-intelligence safely",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/faq": {
+    "title": "sf-intelligence FAQ: Salesforce MCP, Privacy, Setup &amp; Licensing",
+    "canonical": "https://sfi.auditforce.cloud/faq",
+    "h1": "Frequently asked questions about sf-intelligence",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/getting-started": {
+    "title": "Install sf-intelligence: Salesforce MCP Setup for Claude, Cursor &amp; More",
+    "canonical": "https://sfi.auditforce.cloud/getting-started",
+    "h1": "Install sf-intelligence and answer your first org question",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/glossary": {
+    "title": "Salesforce Org Intelligence, MCP &amp; Metadata Glossary",
+    "canonical": "https://sfi.auditforce.cloud/glossary",
+    "h1": "Salesforce org-intelligence glossary",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "DefinedTermSet",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/googleb55dbce0af81cb50": {
+    "title": null,
+    "canonical": null,
+    "h1": null,
+    "jsonLdTypes": []
+  },
+  "/": {
+    "title": "Salesforce Org Intelligence for AI Agents | sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/",
+    "h1": "SALESFORCE ORGINTELLIGENCE YOUR AICAN TRUST.",
+    "jsonLdTypes": [
+      "Organization",
+      "SoftwareApplication",
+      "SoftwareSourceCode",
+      "WebSite"
+    ]
+  },
+  "/licensing": {
+    "title": "sf-intelligence License: MIT + Commons Clause Explained",
+    "canonical": "https://sfi.auditforce.cloud/licensing",
+    "h1": "What the sf-intelligence license allows",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/mcp": {
+    "title": "Salesforce MCP Server for Read-Only Org Intelligence | sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/mcp",
+    "h1": "A read-only Salesforce MCP server for grounded org intelligence",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "SoftwareApplication",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/tools": {
+    "title": "209 Salesforce MCP Tools: Complete sf-intelligence Reference",
+    "canonical": "https://sfi.auditforce.cloud/tools",
+    "h1": "All 209 Salesforce tools",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "ItemList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/trust": {
+    "title": "sf-intelligence Security, Privacy &amp; Evidence Model",
+    "canonical": "https://sfi.auditforce.cloud/trust",
+    "h1": "How sf-intelligence keeps Salesforce org analysis read-only and grounded",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/use-cases": {
+    "title": "Salesforce Org Intelligence Use Cases for Admins, Developers &amp; Architects",
+    "canonical": "https://sfi.auditforce.cloud/use-cases",
+    "h1": "Use cases",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "CollectionPage",
+      "ItemList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/use-cases/agent-readiness-audit": {
+    "title": "Salesforce Agent Readiness Audit for Agentforce and AI Assistants",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/agent-readiness-audit",
+    "h1": "Audit whether your Salesforce org is ready for AI agents",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/use-cases/claude-salesforce-mcp": {
+    "title": "Claude Salesforce MCP: Grounded Org Intelligence with sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/claude-salesforce-mcp",
+    "h1": "Claude Salesforce MCP server",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/use-cases/explain-a-salesforce-flow": {
+    "title": "Explain a Salesforce flow in plain English - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/explain-a-salesforce-flow",
+    "h1": "Explain this flow to me",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/use-cases/impact-analysis": {
+    "title": "Salesforce Impact Analysis: Find Change Blast Radius Before Deployment",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/impact-analysis",
+    "h1": "Salesforce impact analysis",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/use-cases/salesforce-dependency-analysis": {
+    "title": "Salesforce Dependency Analysis for Fields, Flows &amp; Apex | sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/salesforce-dependency-analysis",
+    "h1": "Map Salesforce dependencies before you change fields, Flows or Apex",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/use-cases/salesforce-metadata-analysis": {
+    "title": "Salesforce Metadata Analysis Tool for Fields, Flows, Apex &amp; Permissions",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/salesforce-metadata-analysis",
+    "h1": "Analyze Salesforce metadata with grounded, read-only org intelligence",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/use-cases/sharing-troubleshooting": {
+    "title": "Salesforce Sharing &amp; Permission Troubleshooting with Org Intelligence",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/sharing-troubleshooting",
+    "h1": "Salesforce sharing &amp; visibility troubleshooting",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "Organization",
+      "WebSite"
+    ]
+  },
+  "/use-cases/what-breaks-if-you-delete-a-field": {
+    "title": "Delete a Salesforce field: what breaks? - sf-intelligence",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/what-breaks-if-you-delete-a-field",
+    "h1": "What breaks if I delete this?",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  },
+  "/use-cases/where-is-a-field-used": {
+    "title": "Where Is This Salesforce Field Used? Dependency Analysis Guide",
+    "canonical": "https://sfi.auditforce.cloud/use-cases/where-is-a-field-used",
+    "h1": "Where is this field used?",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "Organization",
+      "TechArticle",
+      "WebSite"
+    ]
+  }
+}

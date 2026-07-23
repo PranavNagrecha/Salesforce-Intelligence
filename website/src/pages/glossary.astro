@@ -1,8 +1,8 @@
 ---
 import DocPage from "../layouts/DocPage.astro";
 
-const title = "Salesforce MCP & metadata glossary - sf-intelligence";
-const description = "Definitions for Salesforce org intelligence, MCP servers, metadata vaults, provenance, impact analysis, confidence tiers, and offline vs live planes.";
+const title = "Salesforce Org Intelligence, MCP & Metadata Glossary";
+const description = "Definitions for Salesforce metadata, dependency graphs, impact analysis, MCP, Agent Skills, evidence confidence, offline snapshots and live reads.";
 
 // DefinedTermSet schema, preserved from the source page (Organization/WebSite/BreadcrumbList are auto-injected by the layout).
 const jsonld = [
@@ -28,7 +28,7 @@ const jsonld = [
   title={title}
   description={description}
   path="/glossary"
-  heading="Glossary"
+  heading="Salesforce org-intelligence glossary"
   intro="Short, factual definitions for terms used across sf-intelligence docs. Each entry is written to be citable by search engines and AI assistants."
   crumbs={[{ label: "glossary", href: "/glossary" }]}
   breadcrumbs={[{ name: "Glossary", path: "/glossary" }]}
@@ -72,7 +72,7 @@ const jsonld = [
         <p>Scope-aware tools accept a natural selector (a canonical <code>componentId</code>, a bare <code>apiName</code>/<code>objectApiName</code>/<code>profileApiName</code>, a <code>nameContains</code> substring, a <code>namespacePrefix</code>) and echo the resolved scope back as <code>appliedScope</code>. If selectors disagree or none resolves, the tool refuses with a named <code>invalid-query</code> rather than silently answering org-wide against the wrong target; omitting scope returns the full, byte-identical default. See <a href="/configuration#input-scope">configuration</a>.</p>
 
         <h2 id="impact">Impact analysis / blast radius</h2>
-        <p>Tracing components that depend on a field, object, Flow, or Apex class before you change or delete it. Core use case - see <a href="/use-cases/impact-analysis">impact analysis</a>.</p>
+        <p>Tracing components that depend on a field, object, Flow, or Apex class before you change or delete it. Core use cases - see <a href="/use-cases/salesforce-dependency-analysis">Salesforce dependency analysis</a> and <a href="/use-cases/impact-analysis">impact analysis</a>.</p>
 
         <h2 id="static">Static analysis</h2>
         <p>Analysis of retrieved source and metadata without running code. Dynamic SOQL and reflective Apex are invisible. "No references" means no static evidence, not "unused."</p>

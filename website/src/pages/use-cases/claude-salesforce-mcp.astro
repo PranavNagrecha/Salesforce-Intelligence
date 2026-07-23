@@ -3,9 +3,9 @@ import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 import siteData from "../../data/site-data.json";
 
-const title = "Claude Salesforce MCP server setup - sf-intelligence";
+const title = "Claude Salesforce MCP: Grounded Org Intelligence with sf-intelligence";
 const description =
-  "Set up a read-only Salesforce MCP server for Claude Code, Claude Desktop, Cursor, Codex, or any MCP client using sf-intelligence.";
+  "Use sf-intelligence with Claude Code or Claude Desktop for grounded Salesforce metadata, dependency, permission and impact questions.";
 
 const jsonld = [
   {
@@ -14,7 +14,7 @@ const jsonld = [
     description: "How to register sf-intelligence as a read-only Salesforce MCP server for Claude Code, Claude Desktop, Cursor, Codex, and other MCP clients.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-10",
+    dateModified: "2026-07-23",
     mainEntityOfPage: `${site.url}/use-cases/claude-salesforce-mcp`,
   },
 ];
@@ -33,6 +33,7 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
         <h2 id="command">Claude Code setup</h2>
         <p>From a Salesforce DX project, register the server once:</p>
         <pre><code>claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</code></pre>
@@ -54,6 +55,10 @@ npx -y sf-intelligence refresh --target-org my-org-alias</code></pre>
 
         <h2 id="why">Why not use a write-capable server for this?</h2>
         <p>Deployment and retrieval MCP servers are useful for DevOps. sf-intelligence is deliberately different: it is a Salesforce org intelligence layer. It answers questions about dependencies, permissions, automation, Apex, Flows, and documentation from a local vault, and it has no write path to the org.</p>
+
+        <h2 id="skills">MCP tools vs Agent Skills</h2>
+        <p>MCP tools and <a href="/agent-skills">Salesforce Agent Skills</a> are two layers of the same agent stack, not competing choices. The read-only MCP tools are the execution layer: they run grounded, offline reads against your local metadata vault and return cited, confidence-tiered evidence. Agent Skills are the intent layer: portable instructions that teach an assistant when to reach for those tools, how to phrase the question, and how to hedge the answer. Skills interpret what you asked; the MCP layer does the grounded org read.</p>
+        <p>MCP is not going away here - it stays the grounded execution surface. Skills sit on top of it so the same read-only tools work the same way across Claude Code, Claude Desktop, Cursor, and any other MCP client. See <a href="/agent-skills">how Agent Skills and MCP tools work together</a> for the full picture.</p>
 
         <h2 id="queries">Searches this page targets</h2>
         <ul>

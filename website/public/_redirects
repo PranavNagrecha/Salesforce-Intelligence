@@ -1,2 +1,7 @@
 # Legacy hand-written sitemap → Astro-generated index (full URL set).
 /sitemap.xml  /sitemap-index.xml  301
+
+# Host consolidation — forward the stale Cloudflare Pages alias to the canonical
+# domain, path-preserving, single-hop (A01/T01). The primary-domain setting in
+# Cloudflare Pages is the needed complement (needs-user).
+https://salesforce-intelligence.pages.dev/*  https://sfi.auditforce.cloud/:splat  301!

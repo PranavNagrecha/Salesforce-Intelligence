@@ -1,0 +1,104 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+import site from "../data/site.ts";
+import siteData from "../data/site-data.json";
+
+const title = "Salesforce Agent Skills for Org Intelligence | sf-intelligence";
+const description =
+  "How Salesforce Agent Skills and sf-intelligence MCP tools work together: skills interpret intent, the read-only MCP layer executes grounded org reads.";
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Portable Salesforce Agent Skills, backed by grounded MCP tools",
+    description:
+      "How Salesforce Agent Skills and sf-intelligence read-only MCP tools divide the work: skills interpret intent and orchestrate, the MCP layer executes grounded, evidence-labelled org reads.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-23",
+    mainEntityOfPage: `${site.url}/agent-skills`,
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/agent-skills"
+  heading="Portable Salesforce Agent Skills, backed by grounded MCP tools"
+  intro="Agent Skills and MCP tools are two different layers of an AI workflow. <strong>Agent Skills</strong> are portable, model-invoked instructions that interpret intent and orchestrate. <strong>sf-intelligence</strong> is the read-only MCP layer underneath them that executes grounded, evidence-labelled reads against your Salesforce org."
+  crumbs={[{ label: "agent-skills", href: "/agent-skills" }]}
+  breadcrumbs={[{ name: "Agent Skills", path: "/agent-skills" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <p style="color: var(--fg-dim); font-size: .85em; margin-bottom: 1.3rem;">Last updated 2026-07-23</p>
+
+        <h2 id="two-layers">Two layers of an agent workflow</h2>
+        <p>An AI agent that answers Salesforce questions well needs two things: a way to understand what the user is asking and route the work, and a grounded source of truth to answer from. These are separate concerns, and they map onto two separate layers.</p>
+        <p><strong>Agent Skills</strong> are the interpretation layer. <strong>MCP tools</strong> are the execution layer. sf-intelligence ships the execution layer today - a read-only <a href="/mcp">Salesforce MCP server</a> whose tools read your org's real metadata and label every answer with its evidence. A skill decides <em>what</em> to ask; the MCP tools decide <em>what is true</em>.</p>
+
+        <h2 id="what-are-skills">What Agent Skills are</h2>
+        <p>An Agent Skill is a portable, model-invoked set of instructions - typically a short instruction file the assistant loads when a task matches its description. It is not code that runs on a server. It is guidance the model reads to decide when a task applies, which tools to call, in what order, and how to phrase the result. Because a skill is just portable instructions, it travels across orgs and across assistants that support the format.</p>
+        <p>A skill on its own cannot verify a fact about your org. It has no metadata, no dependency graph, and no read path to Salesforce. It only interprets and orchestrates. That is exactly why it pairs naturally with a grounded tool layer.</p>
+
+        <h2 id="what-ships">What sf-intelligence provides today</h2>
+        <p>sf-intelligence is a read-only MCP server with {siteData.toolCount} tools that answer from a local metadata vault - dependencies, permissions, sharing, Apex, Flows, integrations, and impact analysis. Every answer carries provenance and a confidence tier (<code>declared</code>, <code>parsed</code>, or <code>heuristic</code>), and the default mode is offline and read-only. This is the grounded execution layer a skill would call.</p>
+        <div class="callout"><p><strong>An honest scope note.</strong> sf-intelligence does not ship a downloadable or installable Agent Skills package, and it does not install skills from any skill ecosystem. What it ships is the read-only MCP tool layer described on the <a href="/mcp">MCP page</a> and <a href="/capabilities">capability map</a>. Agent Skills are a complementary layer you can author on top of that; this page explains the division of labor and how you would build one.</p></div>
+
+        <h2 id="contrast">MCP tools vs Agent Skills</h2>
+        <table class="doc-table">
+          <thead><tr><th>Dimension</th><th>Agent Skills</th><th>sf-intelligence MCP tools</th></tr></thead>
+          <tbody>
+            <tr><td>What it is</td><td>Portable, model-invoked instructions</td><td>Server-side tools with typed inputs and outputs</td></tr>
+            <tr><td>Primary job</td><td>Interpret intent, orchestrate, phrase the answer</td><td>Execute grounded org reads and return evidence</td></tr>
+            <tr><td>Where it runs</td><td>In the model's context, inside the agent host</td><td>In a local process against a local metadata vault</td></tr>
+            <tr><td>Portability</td><td>Portable across orgs and assistants</td><td>Bound to one org's vault</td></tr>
+            <tr><td>Source of truth</td><td>The instructions you author</td><td>Your org's real metadata graph</td></tr>
+            <tr><td>Side effects</td><td>None - it only guides</td><td>None - read-only by default, live plane opt-in</td></tr>
+            <tr><td>Can it ground a claim?</td><td>No - it cannot see the org on its own</td><td>Yes - every answer carries provenance and confidence</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="complement">How they complement each other</h2>
+        <p>The two layers are strongest together. A skill reads a vague, human request and turns it into a plan: which questions to ask, which order they run in, and how to summarize the result for the person reading it. The MCP layer takes each concrete question and answers it from real metadata, refusing to guess when the evidence is not there.</p>
+        <p>Concretely, when a user asks "is this org ready for an AI assistant?", a skill can decompose that into grounded sub-questions - coverage gaps, over-broad permissions, undocumented automation, low-confidence dependency edges - and dispatch each to the right read-only tool. The <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a> use case walks through that shape. The skill supplies intent and structure; the MCP tools supply the evidence.</p>
+
+        <h2 id="when">When to use which</h2>
+        <ul>
+          <li><strong>Reach for a skill</strong> when you want to encode a repeatable workflow, a routing convention, or a house style - "run my pre-deploy checklist", "give me the new-hire tour of this org". The value is orchestration and phrasing.</li>
+          <li><strong>Rely on the MCP tools</strong> when you need a grounded fact about the org - what depends on a field, who can see a record, what breaks if you delete something. The value is evidence you can trust and cite.</li>
+          <li><strong>Use both</strong> for anything real. A skill without a grounded tool layer will confidently hallucinate your org's structure; a tool layer without a skill answers narrow questions but does not orchestrate. sf-intelligence is deliberately the grounded half, so a skill never has to invent metadata.</li>
+        </ul>
+
+        <h2 id="build">Building skills on top of sf-intelligence</h2>
+        <p>Because the MCP tools are already grounded and read-only, authoring a skill on top of them is mostly about intent and orchestration, not about re-implementing org logic. A skill you write would:</p>
+        <ul>
+          <li>Describe the trigger - the kind of Salesforce question or routine it handles - so the model knows when to load it.</li>
+          <li>Map that intent to the right read-only tools and call them in a sensible order, rather than asking the user to name tools.</li>
+          <li>Preserve the evidence the tools return - the <code>declared</code> / <code>parsed</code> / <code>heuristic</code> tiers and any coverage caveats - instead of flattening a hedged answer into a confident one.</li>
+          <li>Summarize the grounded results in your team's language and format.</li>
+        </ul>
+        <p>The tools do the honest, verifiable work; your skill decides which of them to run and how to present the result. See the <a href="/capabilities">capability map</a> for the full tool surface a skill can orchestrate, and <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a> for connecting an assistant to the server first.</p>
+
+        <h2 id="infrastructure">sf-intelligence as agent infrastructure</h2>
+        <p>The point of positioning these as two layers is that they play different roles. Skills come and go with each workflow and each assistant. The grounded data plane underneath them is the durable part. sf-intelligence is that plane: an offline, read-only, evidence-labelled source of truth about one Salesforce org that any skill, agent, or MCP client can stand on. It does not compete with the skill layer - it is what the skill layer needs to be honest.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Ground your agent in real org metadata.</h2>
+            <p>Free, read-only, offline. Connect the MCP server, run one retrieve, then let your skills orchestrate grounded answers.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">get started</a>
+              <a class="btn btn-ghost" href="/mcp">MCP overview</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

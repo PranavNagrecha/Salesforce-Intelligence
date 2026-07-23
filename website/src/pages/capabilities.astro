@@ -2,8 +2,8 @@
 import DocPage from "../layouts/DocPage.astro";
 import siteData from "../data/site-data.json";
 
-const title = "Salesforce MCP capabilities - sf-intelligence";
-const description = `Explore ${siteData.toolCount} read-only sf-intelligence tools for Salesforce org intelligence: metadata search, impact, permissions, automation, integrations, docs, and audits.`;
+const title = "Salesforce MCP Capabilities: Metadata, Dependencies & Permissions | sf-intelligence";
+const description = "Explore sf-intelligence capabilities across metadata, dependencies, permissions, Apex, Flows, sharing, integrations and release readiness.";
 const intro = `sf-intelligence registers <strong>${siteData.toolCount} read-only tools</strong> for your Salesforce org, grouped into eight question areas, plus an opt-in live-org plane. You never call a tool by name - an offline semantic router surfaces a ranked shortlist of the right tools and your AI host picks which to run. Here is everything it can answer about your Salesforce org's metadata today.`;
 
 // ItemList of the nine capability areas (matches the card sections below).
@@ -39,6 +39,7 @@ const jsonld = [
   <section>
     <div class="container">
       <p style="margin-top:14px;">Follow-up questions work without server-side memory: the host passes the previous turn as an optional <span class="mono amber">context.previous</span> parameter, so a terse "does it fire on update?" resolves against the component and tool from the previous answer.</p>
+      <p style="margin-top:16px;">Every area below maps to the <a href="/tools">full Salesforce MCP tool reference</a>, and the <a href="/use-cases">Salesforce org intelligence use cases</a> show these tools applied to real admin, developer and architect workflows.</p>
       <p style="margin-top:16px;"><a class="btn btn-solid" href="/tools">› see all {siteData.toolCount} tools - each explained</a></p>
 
       <article class="card" id="find" style="margin-bottom:18px;">

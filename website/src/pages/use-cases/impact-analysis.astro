@@ -2,9 +2,9 @@
 import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 
-const title = "Salesforce field impact analysis - what breaks if deleted?";
+const title = "Salesforce Impact Analysis: Find Change Blast Radius Before Deployment";
 const description =
-  "Salesforce impact analysis for fields, objects, Flows, and Apex. Trace dependencies from real org metadata before you delete or change anything.";
+  "Trace Salesforce change blast radius across metadata, Flows, Apex, permissions and tests with evidence-labelled, read-only org intelligence.";
 
 // Source page used a HowTo node; HowTo rich results are deprecated, so this
 // converts to TechArticle, keeping the same headline/description.
@@ -15,7 +15,7 @@ const jsonld = [
     description: "Ask what breaks if you delete or change a Salesforce field, object, Flow, or Apex class using read-only dependency analysis.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-10",
+    dateModified: "2026-07-23",
     mainEntityOfPage: `${site.url}/use-cases/impact-analysis`,
   },
 ];
@@ -34,6 +34,7 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
 
         <h2 id="problem">The problem with guessing</h2>
         <p>A general AI model will list "typical" references - validation rules, page layouts, reports - but cannot know which ones exist in <em>your</em> org. sf-intelligence builds a DuckDB dependency graph from a read-only metadata retrieve and traces edges with confidence tags: <code>declared</code> (from Salesforce metadata), <code>parsed</code> (from AST/XML analysis), or <code>heuristic</code> (regex - spot-check these).</p>

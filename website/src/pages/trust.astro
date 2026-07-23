@@ -10,9 +10,11 @@ const integ = siteData.integrationSuiteCount;
 const pkgs = siteData.packageDescriptions;
 const budgets = siteData.scaleBudgets;
 
-const title = "Quality & trust - sf-intelligence";
+const title = "sf-intelligence Security, Privacy & Evidence Model";
 const description =
-  "How sf-intelligence earns trust: automated tests, CI gates, provenance, confidence, completeness labels, adversarial QA, leak scans, and clear limits.";
+  "Review the sf-intelligence threat model, offline data flow, read-only guarantees, provenance labels, test evidence and known analysis limits.";
+
+const dateModified = "2026-07-23";
 
 const jsonld = [
   {
@@ -21,6 +23,8 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
+    dateModified,
+    mainEntityOfPage: `${site.url}/trust`,
     about: "Software quality, testing and provenance for a Salesforce MCP server",
   },
 ];
@@ -30,7 +34,7 @@ const jsonld = [
   title={title}
   description={description}
   path="/trust"
-  heading="How to trust the answers"
+  heading="How sf-intelligence keeps Salesforce org analysis read-only and grounded"
   intro={`An AI that talks confidently about your Salesforce org is easy to build. One you can <em>trust</em> is not. Here is exactly how sf-intelligence earns it - the test suite, the CI gate every change must pass, the per-answer trust labels, and the boundaries it refuses to cross.`}
   crumbs={[{ label: "trust", href: "/trust" }]}
   breadcrumbs={[{ name: "Quality & trust", path: "/trust" }]}
@@ -167,6 +171,7 @@ const jsonld = [
           <a class="btn btn-ghost" href={site.github} rel="noopener">view on GitHub</a>
         </div>
       </div>
+      <p class="muted" style="margin-top:20px; font-size:.85rem; text-align:center;">Last updated {dateModified}.</p>
     </div>
   </section>
 </DocPage>

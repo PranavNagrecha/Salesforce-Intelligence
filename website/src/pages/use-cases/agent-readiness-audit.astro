@@ -1,9 +1,9 @@
 ---
 import DocPage from "../../layouts/DocPage.astro";
 
-const title = "Agent-readiness audit for Salesforce - sf-intelligence";
+const title = "Salesforce Agent Readiness Audit for Agentforce and AI Assistants";
 const description =
-  "Run an offline AI / Agentforce readiness audit with sf-intelligence: tech debt, unused metadata, org risk, PII, guest exposure, and AI exposure — free, local, read-only.";
+  "Assess Salesforce metadata quality, permissions, automation, dependencies and evidence gaps before connecting Agentforce or another AI assistant.";
 
 const jsonld = [
   {
@@ -34,7 +34,7 @@ const jsonld = [
   title={title}
   description={description}
   path="/use-cases/agent-readiness-audit"
-  heading="Agent-readiness audit"
+  heading="Audit whether your Salesforce org is ready for AI agents"
   intro="2026 buyers ask whether the org is <strong>ready for Agentforce / agentic AI</strong>. sf-intelligence already ships the kit — this page is the playbook, not a new product."
   crumbs={[
     { label: "use-cases", href: "/use-cases" },
@@ -86,6 +86,10 @@ const jsonld = [
           <li>Coverage depends on retrieve + extractors; gaps are disclosed, not invented as "none in org."</li>
           <li>Commercial audits still win when you need a vendor logo on a board deck — see <a href="/compare/hubbl">vs Hubbl</a> and <a href="/compare/elements-cloud">vs Elements.cloud</a>.</li>
         </ul>
+
+        <h2 id="skills">MCP tools vs Agent Skills</h2>
+        <p>Readiness is not just a metadata score - it is whether an agent can act on that metadata safely. sf-intelligence is agent infrastructure with two layers. The read-only MCP tools are the execution layer: grounded, offline reads that return cited, confidence-tiered evidence. <a href="/agent-skills">Salesforce Agent Skills</a> are the intent layer: portable instructions that decide when to run an audit tool, how to scope the question, and how to hedge the finding. Skills interpret the ask; the MCP tools do the grounded org read.</p>
+        <p>The two are complementary, not a migration - MCP stays the grounded execution surface while skills make the same read-only tools portable across Claude Code, Claude Desktop, Cursor, and other MCP clients. See <a href="/agent-skills">how Agent Skills and MCP tools work together</a>.</p>
 
         <h2 id="next">Next</h2>
         <p><a href="/getting-started">Install</a> · <a href="/capabilities">capability map</a> · <a href="/compare">compare hub</a> · repo <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/POSITIONING.md">POSITIONING.md</a>.</p>

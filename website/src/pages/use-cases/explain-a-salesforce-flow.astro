@@ -28,6 +28,8 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-23",
+    mainEntityOfPage: `${site.url}/use-cases/explain-a-salesforce-flow`,
   },
   {
     "@type": "FAQPage",
@@ -49,6 +51,7 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
         <div class="callout">
           <p><strong>Short answer:</strong> Ask sf-intelligence <em>"explain the Opportunity_Router flow"</em> and it summarizes what the Flow does - its trigger and object, its decision branches, and the fields, records, and Apex it reads or writes - from the Flow metadata, with every referenced component linked. It's a static, read-only explanation: it does not run the Flow.</p>
         </div>

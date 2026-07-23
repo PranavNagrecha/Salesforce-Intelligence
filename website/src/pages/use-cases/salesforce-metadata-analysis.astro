@@ -3,9 +3,9 @@ import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 import siteData from "../../data/site-data.json";
 
-const title = "Salesforce metadata analysis for AI agents - sf-intelligence";
+const title = "Salesforce Metadata Analysis Tool for Fields, Flows, Apex & Permissions";
 const description =
-  "Analyze Salesforce metadata with read-only AI agents. Search schema, Flows, Apex, permissions, integrations, and documentation from a local org vault.";
+  "Search and analyze Salesforce fields, objects, Flows, Apex, permissions and dependencies from a local, read-only metadata vault.";
 
 const jsonld = [
   {
@@ -14,7 +14,7 @@ const jsonld = [
     description: "How sf-intelligence lets AI agents analyze Salesforce metadata from a local, read-only org vault.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-10",
+    dateModified: "2026-07-23",
     mainEntityOfPage: `${site.url}/use-cases/salesforce-metadata-analysis`,
   },
 ];
@@ -24,7 +24,7 @@ const jsonld = [
   title={title}
   description={description}
   path="/use-cases/salesforce-metadata-analysis"
-  heading="Salesforce metadata analysis"
+  heading="Analyze Salesforce metadata with grounded, read-only org intelligence"
   intro="sf-intelligence gives AI agents a read-only way to analyze Salesforce metadata: schema, fields, Flows, Apex, permission models, integrations, OmniStudio, and generated documentation from one local org vault."
   crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "metadata-analysis", href: "/use-cases/salesforce-metadata-analysis" }]}
   breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Salesforce metadata analysis", path: "/use-cases/salesforce-metadata-analysis" }]}
@@ -33,6 +33,7 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
         <h2 id="what">What metadata analysis means here</h2>
         <p>Most Salesforce search tools stop at file search or raw metadata retrieval. sf-intelligence builds a queryable knowledge base from the retrieved org metadata, then exposes that knowledge through a Salesforce MCP server. The result is plain-language metadata analysis that stays grounded in the org you actually indexed.</p>
 
