@@ -46,6 +46,10 @@ const ALLOWED_RASTER_IMAGES = new Set([
   'website/public/assets/img/icon-192.png',
   'website/public/assets/img/icon-512.png',
   'website/public/assets/img/og-image.png',
+  // GitHub repo social-preview card (1280x640) — authored from scratch in
+  // assets/github-social-preview.source.html; only generic Salesforce terms
+  // (e.g. the standard field Account.Industry), no org data.
+  'assets/github-social-preview.png',
 ]);
 
 const violations = [];
