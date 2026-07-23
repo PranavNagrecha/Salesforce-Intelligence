@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-07-22T15:47:21.325Z",
-  "version": "0.2.2",
-  "toolCount": 203,
+  "generatedAt": "2026-07-23T19:51:20.111Z",
+  "version": "0.2.4",
+  "toolCount": 209,
   "skillCount": 25,
   "commandCount": 4,
   "componentTypeCount": 102,
@@ -10,13 +10,13 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 262,
-        "cases": 5296
+        "files": 271,
+        "cases": 5435
       },
       {
         "name": "extractors",
-        "files": 82,
-        "cases": 1100
+        "files": 83,
+        "cases": 1104
       },
       {
         "name": "cli",
@@ -26,22 +26,22 @@
       {
         "name": "graph",
         "files": 25,
-        "cases": 306
+        "cases": 322
       },
       {
         "name": "parsers",
-        "files": 6,
-        "cases": 169
+        "files": 7,
+        "cases": 176
+      },
+      {
+        "name": "patterns",
+        "files": 3,
+        "cases": 158
       },
       {
         "name": "renderers",
         "files": 10,
         "cases": 154
-      },
-      {
-        "name": "patterns",
-        "files": 3,
-        "cases": 138
       },
       {
         "name": "vault",
@@ -59,10 +59,10 @@
         "cases": 40
       }
     ],
-    "totalCases": 7794,
-    "totalFiles": 446,
+    "totalCases": 7980,
+    "totalFiles": 457,
     "packageCount": 10,
-    "approx": 7700
+    "approx": 7900
   },
   "integrationSuiteCount": 3,
   "gates": [
@@ -87,14 +87,14 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 262,
-      "cases": 5296,
-      "description": "The 203 read-only tools + router + grounding layer"
+      "files": 271,
+      "cases": 5435,
+      "description": "The 209 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 82,
-      "cases": 1100,
+      "files": 83,
+      "cases": 1104,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
@@ -106,26 +106,26 @@
     {
       "name": "graph",
       "files": 25,
-      "cases": 306,
+      "cases": 322,
       "description": "The DuckDB dependency-graph engine"
     },
     {
       "name": "parsers",
-      "files": 6,
-      "cases": 169,
+      "files": 7,
+      "cases": 176,
       "description": "Formula / SOQL / source tokenizers"
+    },
+    {
+      "name": "patterns",
+      "files": 3,
+      "cases": 158,
+      "description": "Heuristic recognizers (PII, naming, code quality)"
     },
     {
       "name": "renderers",
       "files": 10,
       "cases": 154,
       "description": "Markdown vault rendering"
-    },
-    {
-      "name": "patterns",
-      "files": 3,
-      "cases": 138,
-      "description": "Heuristic recognizers (PII, naming, code quality)"
     },
     {
       "name": "vault",

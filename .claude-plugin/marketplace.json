@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "sf-intelligence marketplace — an offline-first, MCP-first knowledge base for one Salesforce org.",
-    "version": "0.2.2"
+    "version": "0.2.4"
   },
   "plugins": [
     {
       "name": "sf-intelligence",
       "source": ".",
       "description": "MCP-first, offline-first hybrid knowledge base for a Salesforce org. Resolve-first routing, coverage-aware destructive verdicts, opt-in live read-only plane. Ask sfi.capabilities for the live tool map.",
-      "version": "0.2.2",
+      "version": "0.2.4",
       "category": "salesforce",
       "homepage": "https://github.com/PranavNagrecha/Salesforce-Intelligence",
       "license": "SEE LICENSE IN LICENSE"

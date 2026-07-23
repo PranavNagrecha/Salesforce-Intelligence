@@ -3,7 +3,7 @@
 **Purpose.** A diligence pass that clones the repo and reads `packages/mcp/src/tools/`
 sees a big TypeScript monorepo with a lot of MCP tool handlers. What it does not see —
 because none of it lives in a single file a reviewer opens — is the eval/gate harness
-that keeps 202 tools (198 advertised) from silently regressing, the confidence discipline threaded through
+that keeps 209 tools (205 advertised) from silently regressing, the confidence discipline threaded through
 every graph edge, and the honesty posture that refuses rather than guesses. This document
 assembles those invisible assets from artifacts that already exist in this repo. **Every
 number below is either measured live against this worktree (method and command given

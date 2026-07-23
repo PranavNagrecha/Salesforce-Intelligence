@@ -1,6 +1,6 @@
 {
   "name": "sf-intelligence",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "MCP-first, offline-first hybrid knowledge base for a Salesforce org. Resolve-first routing, coverage-aware destructive verdicts, opt-in live read-only plane. Ask sfi.capabilities for the live tool map.",
   "author": {
     "name": "sf-intelligence contributors"

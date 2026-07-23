@@ -5,6 +5,152 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-07-23
+
+> **Nine new analysis surfaces + six correctness/honesty fixes.** Six new
+> vault-only tools (`flow_bulkification_audit`, `picklist_integrity_scan`,
+> `limit_headroom_report`, `doc_coverage_report`, `permission_set_consolidation`,
+> `nonselective_soql`), a `sprawl` mode on `automation_risk_report`, an opt-in
+> grant-completeness check on `review_change`, and cited dependency-ordered
+> remediation from the `interpret` rule engine — the tool roster grows 203 → 209.
+> Bug fixes: polymorphic Activity/Task/Event write attribution
+> (`safe_to_delete_field`), protected-class + `securityClassification` PII
+> classification, `get_impact` soundness no longer over-claiming `complete`,
+> approval `userHierarchyField` approver resolution, `call_graph` phantom-node
+> filtering, and a live-staleness timestamp precision fix. Deterministic and
+> offline throughout; every new surface ships its honesty boundaries and confidence
+> tiers. No new dependency.
+
+### Added
+- `sfi.automation_risk_report` gains `mode: 'sprawl'` — an org-wide, per-OBJECT automation-density ranking that answers "where is automation sprawl worst first." It ranks objects by a disclosed composite of their inbound `triggersOn` firers (record-triggered Flows / ApexTriggers / WorkflowRules), parented Process Builders, field-write collisions (reused from the `automation_collisions` engine), and a small naming-consistency nudge (reused from `get_naming_convention_report`). Presented as a prioritized CANDIDATE QUEUE (objects to review first), not a graded verdict; the per-signal weights ship in `scoreBasis` and the honesty limits in `boundaries[]`.
+- Cited, dependency-ordered **remediation** on concept rules: `sfi.interpret` now
+  emits an optional `remediation` on each grounded claim whose firing
+  `ConceptRule` authors one — ordered fix steps filled from the SAME grounded ids
+  and stamped with the SAME confidence as the claim (a fix is never stronger than
+  the finding it attaches to). Authored for the security / governor / structural
+  concepts `interpret` most fires on (apex-sharing-mode, external-api-surface,
+  system-context-external-surface, view/modify-all object grants, master-detail
+  cascade, stacked record-triggered flows) — 11 of 193 rules. Remediation
+  templates are org-agnostic general Salesforce guidance (no canonical ids,
+  enforced by the concept-model gate).
+- `sfi.synthesize_answer` now folds authored remediation into its FIX / NEXT
+  slots (`evidence.recommendedFix` / `evidence.nextAction`), attributed
+  (concept · rule · confidence), hedged, and cited. A scraped recommendation
+  still wins the slot (non-clobbering); a fired claim with NO authored remediation
+  yields no fix and an explicit "no cited remediation authored" disclosure rather
+  than a fabricated one.
+- `sfi.doc_coverage_report` — offline, vault-only documentation-GAP meter: the documentation axis `sfi.tech_debt_score` lacks. MEASURES where the org's custom metadata is undocumented (it does NOT produce docs like the `sfi.generate_*` generators). Rolls the two axes the extractors capture — a component's `description` and a field's `inlineHelpText` presence — into a scored, LOWEST-COVERAGE-FIRST report broken down by object, and WEIGHTS each undocumented component by its inbound graph edge-degree (a real criticality proxy — an undocumented, heavily-referenced field ranks above an undocumented orphan). `objects` is the per-object breakdown (each with a `description` + `helpText` axis rollup, `combinedCoveragePct`, and `undocumentedDegreeWeight`), ranked worst-first and PAGED via `limit`/`offset`/`nextOffset` self-fitting the response byte budget (`nextOffset` always equals `offset + objects.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips an object); `topUndocumented` surfaces the highest-impact undocumented components regardless of page; `totals` carries org-wide axis rollups plus the excluded `notMeasurableCount` / `outOfScopeCount`. HONESTY: "not measurable" ≠ "undocumented" — a type whose description the extractor does NOT capture (or a family the refresh did not retrieve) is NOT MEASURABLE and is EXCLUDED from the undocumented count, never counted as a gap (objects have no inline help text, so they are not measurable on that axis). Scoped to what the ORG owns (custom `__c`/`__mdt`/… fields + custom objects); standard fields and managed-package (`ns__…`) components are reported separately as out-of-scope and never penalize the org. `description` and `inlineHelpText` absence are distinct axes, never conflated. Coverage is a floor (only retrieved families measured). Presence is `declared` (structural); "documented" means a NON-EMPTY field, not a QUALITY judgment. Pure, unit-testable core (`rollupDocCoverage` / `rankGroupsWorstFirst` / `rankImpactByDegree` / `paginateDocCoverage`) with no vault dependency.
+- `sfi.flow_bulkification_audit` — flag Flows that perform a record Create / Update / Delete (DML) or a Get Records (SOQL) inside a Loop body, plus filterless Get Records anywhere. The Flow-side sibling of `sfi.governor_limit_risks` (which sees only Apex): it walks each Flow's declared connector graph, computes each Loop's body, and reports `dml-in-loop` / `get-records-in-loop` (HIGH, one operation per iteration against the per-transaction DML/SOQL limits) and `filterless-get-records` (MEDIUM, unbounded query). Findings are `declared`-confidence (structural, not heuristic); the boundary is "iteration count unknown at rest" — a static Flow-shape smell, not a proven governor-limit breach. A Flow whose source is missing/unparseable surfaces as a named `soundness` blind spot. Paged over flows via `limit` / `offset`.
+- `sfi.limit_headroom_report` — offline, vault-only limit-headroom report: the replacement for the retiring Salesforce Optimizer limit report. Counts org metadata against per-object ceilings (custom fields, active validation rules, record types, relationship fields) and per-org ceilings (custom objects, tabs, apps, active flows) from a curated GENERAL Salesforce configuration-limit cap table, then ranks rows WORST-FIRST by remaining headroom% so an admin acts before a deploy hits a wall. `orgLimits` is always included; `objects` is paged worst-first via `limit`/`offset`/`nextOffset` and self-fits the response byte budget (a large `limit` returns as many objects as fit; `nextOffset` always equals `offset + objects.length`, and `byteTrimmed` flags a byte-limited page, so a cursor walk never skips a ranked object); `topRisks` surfaces the ≤5 tightest rows regardless of page; `metricLegend` dedupes labels + source notes out of the lean rows. HONESTY: edition is unknown offline — pass `edition` or edition-dependent limits use an ASSUMED `enterprise` edition (labeled `limitBasis: 'assumed-edition'`, disclosed verbatim); field consumption is an approximation (geolocation counted as 3 slots, managed-package namespaced fields excluded, roll-up summary noted); only retrieved families are counted (an un-retrieved family reads as a floor, flagged `consumedIsFloor`); runtime limits (storage, API counts, daily async) are out of scope and deferred to the live plane (`sfi.live_org_limits`). Distinct from `sfi.tech_debt_score` (a weighted index) and `sfi.coverage_report` (retrieval coverage). Pure, unit-testable core (`buildHeadroomRows` / `rankWorstFirst`) with no vault dependency.
+- `sfi.nonselective_soql` — the first INDEX-AWARE Apex static analysis: flag SOQL queries whose WHERE clause has a non-selective shape that risks a full table scan / query timeout at large data volume. For every inline `[SELECT …]` query in every non-test ApexClass / ApexTrigger it walks the WHERE clause (parser-grade, over the ANTLR SOQL parse tree — a new focused walker in `@sf-intelligence/parsers/soql-selectivity`, since the existing `readsFrom` edges do not track WHERE-clause membership) and classifies it against an index set built from THIS org's declared `CustomIndex` metadata + unique / externalId / lookup CustomField flags, unioned with a curated GENERAL Salesforce standard-index table (Id, Name, audit fields, RecordTypeId, OwnerId, `<Relationship>Id` foreign keys). Rules: `nonselective-non-indexed-filters` (HIGH — filters only on non-indexed fields), `leading-wildcard-like` (MEDIUM), `negative-operator-only` (MEDIUM), `no-where-clause` (MEDIUM — unbounded read). An equality / range / IN filter on any indexed field (or a foreign-key relationship traversal) makes a query at-least-potentially selective, so it is not flagged for the core rule. HONESTY: a STATIC SHAPE, not the Salesforce optimizer's runtime selectivity verdict (which uses actual row counts the vault cannot know — a non-selective-shaped query on a small table is fine); row counts unknown offline; WHERE fields/operators are `parsed`, the index set is `declared` + general Salesforce knowledge; dynamic SOQL (`Database.query(str)`) is invisible (recall gap); unparseable files are named `soundness` blind spots; test classes excluded. Distinct from `sfi.governor_limit_risks` (which flags SOQL/DML inside a loop). Class page self-fits the response byte budget via `limit` / `offset` / `nextOffset`.
+- `sfi.permission_set_consolidation` — offline, vault-only permission-set consolidation candidates from DECLARED grants: "which permission sets are redundant / duplicate / consolidatable". Sweeps every PermissionSet, compiles each one's compact grant-key set from its `grantedBy` edges (object CRUD, FLS, Apex, Flow, custom permission) + grant properties (system permissions, record-type / app / tab visibility), and flags three shapes — EMPTY (no meaningful declared grants), STRICT SUBSET (A ⊊ B → A is a merge candidate into B), and NEAR-DUPLICATE (grant overlap ≥ a disclosed Jaccard threshold, default 0.9, neither a strict subset; clustered by the near-duplicate relation). `candidates[]` is a single opportunity-ranked list (biggest declared-grant merge win first), PAGED by `limit` (default 25, max 100) / `offset` / `nextOffset` and self-fitted to the response byte budget (`nextOffset` always equals `offset + candidates.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips a candidate). Optional `minOverlap` (0.5..1, default 0.9) and `includeEmpty` (default true). This is CANDIDATE-flagging, NOT a merge verdict, and is distinct from `sfi.permission_risk_report` (over-privilege / god-mode), `sfi.unassigned_permission_sets` (who holds a set), `sfi.effective_permissions` (the single-container-bundle union), and `sfi.what_if_merge_profiles` (a single pairwise PROFILE what-if). HONESTY: a strict subset / near-duplicate is a candidate, never a proven safe merge (A may be assigned to different users or exist deliberately); base-profile redundancy and safe-to-merge are OUT OF SCOPE offline (per-user live assignment data — deferred to the live plane / manual review; the tool never asserts a set is redundant); empty ≠ deletable (may be a permission-set-group component or placeholder); grant sets are each set's own declared standalone grants, permission-set-group muting is group-scoped and not applied to the standalone comparison (MutingPermissionSets are a separate type and never candidates; group members are flagged `inPermissionSetGroup`); the Jaccard threshold value is disclosed; and only retrieved permission-set metadata is analysed (coverage floor, surfaced via `coverageCaveat` / `scanTruncated`). `declared` confidence. Pure, unit-testable core (`computeConsolidationCore` / `rankCandidates`) with no vault dependency; the O(N²) pairwise sweep is bounded by a disclosed cap and each set's grants are batch-loaded in one `listEdgesForNodes` round-trip.
+- `sfi.picklist_integrity_scan` — org-wide picklist value-set integrity scan, the
+  inverse of `what_if_remove_picklist_value`. Sweeps every inline-value-set
+  Picklist / MultiselectPicklist field and flags declarative literals (Validation
+  Rule / formula-field formulas + `ISPICKVAL`, Flow decision criteria and literal
+  assignments, Workflow-Rule criteria, field defaults) that reference a value the
+  field does not define (`orphaned`, HIGH, with a spelling near-match) or defines
+  only as inactive (`inactive-only`, MEDIUM). Distinguishes a COMPARISON (flagged
+  — a branch that silently died on a value rename) from an ASSIGNMENT (a defect
+  only for a `restricted` picklist; a free-text write to an unrestricted picklist
+  is not flagged). Metadata-only and offline; Apex picklist-literal comparison is
+  out of scope and disclosed as a verbatim boundary.
+- `sfi.review_change` — opt-in `checkAccessParity` flag adds an additive
+  `accessParity` grant-completeness ("ships for nobody") section: each
+  ADDED/MODIFIED CustomField / CustomObject that resolves to ZERO modeled grants
+  (no Profile/PermissionSet `grantedBy` conferring FLS/CRUD, no
+  ViewAllData/ModifyAllData system-perm holder, and not a standard default-access
+  component) is flagged as a candidate feature that would deploy invisible — did
+  the release ship the permissions, or was a permission set forgotten? The
+  "ships for NOBODY" (zero-grant) direction only; the "ships for everybody"
+  breadth (how many users hold a granting permission set) is deferred to the live
+  plane (`sfi.live_permset_holders`). Every verdict is stamped with the vault's
+  last-refresh time and framed as a candidate to verify, not a proof.
+
+### Changed
+- `sfi.automation_risk_report` default behavior is unchanged: an absent `mode` (or `mode: 'risk'`) returns the existing per-finding risk synthesis byte-for-byte. Only `mode: 'sprawl'` triggers the new org-wide ranking. The roster JSON schema, funnel utterances, and intent router gain the `mode` enum and sprawl phrasings.
+- Remediation ships the fix STEPS only and REFUSES counterfactual closure: no
+  step, and no synthesized output, asserts the finding is cleared after the fix —
+  no `what_if_*` tool mutates the sharing / CRUD / keyword shapes `interpret`
+  reasons over, so the engine cannot compute closure. Where a real `what_if_*` /
+  impact tool can MODEL the change (e.g. `sfi.what_if_revoke_permset`,
+  `sfi.get_impact`, `sfi.what_if_deactivate_flow`), the remediation points at it,
+  framed as "models the counterfactual; does not itself close this finding".
+- `sfi.review_change` default output is byte-for-byte unchanged — the parity
+  section is present only when `checkAccessParity: true` is passed. Router,
+  funnel utterances, and the tool description gain access-parity phrasings ("does
+  this release ship the permissions", "ships for nobody", "did I forget the
+  permission set").
+
+### Fixed
+- Live staleness check (`sfi.live_stale_check` and the hybrid drift guard) no longer floors the vault's `refreshedAt` down to the whole second when building the SOQL `LastModifiedDate >` threshold. Trimming milliseconds moved the threshold *earlier* than the true refresh instant, so a component modified in the sub-second window **before** the refresh — already captured in the vault — was falsely counted as org-ahead-of-vault drift (a false-positive window of up to ~1s). The threshold now CEILS to the next whole second (via the new pure `staleSinceLiteral` helper), keeping the SOQL-safe `…ssZ` literal format while guaranteeing the threshold is never earlier than the real refresh instant. The only trade-off is a sub-second conservative false-negative that the next `/sfi-refresh` catches.
+- Graph import now attributes Apex reads/writes to a shared Activity custom field made through a `Task`/`Event` receiver (`someTask.Field__c`) to the field's other polymorphic representations. The extractor keys such an edge on the receiver type, so a shared Activity field split across its `Task`/`Event`/`Activity` representations only ever attached the reference to one of them — `sfi.safe_to_delete_field` (and other edge-only consumers) then read the other representation as a false `safe`/`review`, losing a blocking `ApexClass writesTo`. Two import-layer passes fix it: `canonicalizeFieldEdgeTargets` re-points a dangling `CustomField:Task.<field>` / `CustomField:Event.<field>` target onto the shared `CustomField:Activity.<field>` node when that base exists, and `mintPolymorphicActivityFieldEdges` mirrors field-reference edges across the existing `Task`/`Event` describe-snapshot siblings when there is no Activity base node. Both are name-based aliases (Task/Event share Activity's custom fields), disclosed as a confirm-before-you-delete `trust.limitations` entry, and the over-claiming "dot-access writes ARE resolved" docstring is corrected to note the alias is a name match, not a declared parent relationship.
+- `sfi.get_impact` no longer reports `soundness.complete: true` / `staticCoverage: 'full'`
+  for a `CustomField` / `CustomObject` root. Whole classes of referrer are
+  structurally NOT modeled as incoming graph edges — roll-up source coupling
+  (`summaryForeignKey` is a field property), layout placement (Layout sections /
+  related-lists), flow decision/filter reads (a `firesWhen` edge to a
+  `ConditionalContext`, never a `readsFrom` onto the field), and tab/app
+  membership (`CustomTab` / `CustomApplication` are not traversed) — so an
+  edge-walking impact analysis is blind to them. The soundness envelope now
+  carries an `unwalked-referrer-class` blind spot naming those classes verbatim
+  in `referrerClasses[]` (and the prose `disclosure` names them), so "no
+  referrers found" is never presented as certainty. Non-field/object roots and
+  the Apex reachability tools are unchanged.
+- `sfi.field_360` no longer reports `readers: 0` for a field that one or more
+  Flows filter on. Flow decision / record-trigger filter reads (which carry no
+  `readsFrom` edge — only a `firesWhen` edge to a `ConditionalContext` whose
+  `fieldRefs` name the field) are reconstructed from the extracted graph and
+  surfaced in `readers` as disclosed, heuristic-confidence rows
+  (`source: flow-condition-reads-scan:*`), deduped against real `readsFrom`
+  readers. The reconstruction pages EVERY `ConditionalContext` node (via the
+  shared full-window scan), not just the first 500 — so a field whose sole
+  flow-condition reader lives past node 500 is no longer silently missed. When
+  the scan hits its `SFI_CONDITION_SCAN_MAX` residual ceiling, `boundaries[]`
+  discloses `CAPPED at N of M ConditionalContext nodes` so a tail miss is
+  surfaced, never silent. `boundaries[]` also discloses the reconstruction and
+  names the referrer classes still not composed into any section (roll-up source
+  coupling, layout related-list placement).
+- **PII classifier (`sfi.pii_inventory` and the compliance/AI-exposure surface):** three
+  P1 misclassifications.
+  - Protected-class attributes (race, ethnicity, disability, citizenship / national
+    origin, religion, veteran / military status, sexual orientation, gender identity) no
+    longer fall through to `public`. A new highest-sensitivity `protected` classification
+    and `protected-class` category are matched from general, org-independent name tokens
+    (the short `race` token matches only as a whole word, so `Grace` / `Trace` /
+    `Racetrack` do not fire).
+  - The health/PHI signal no longer fires on the bare 3-letter substring `phi` — a
+    Greek-letter society name, "philosophy", and "Philadelphia" are no longer classified
+    health. PHI is now recognized only from the standalone uppercase `PHI` acronym, the
+    `protected health` phrase, or a specific health token (`PHI__c` /
+    `Protected_Health_Info__c` still classify health).
+  - A declared field-level `<securityClassification>` is now captured by the CustomField
+    extractor and consumed as the highest-precedence signal: `Confidential` → `sensitive`,
+    `Restricted` / `MissionCritical` → `protected`, at `declared` confidence. It sets a
+    floor (escalates an innocuous-named field) but never downgrades a stronger name
+    heuristic. Name/label/type/description matches remain `heuristic` confidence.
+- `sfi.call_graph` no longer emits an edge pointing at a node absent from its
+  own `nodes` list. A `callsApex` edge whose target was tagged `targetMissing`
+  at import (a heuristic phantom — e.g. the Apex scanner minting
+  `ApexClass:{PascalCaseLocalVar}` from a `Map<Id,Foo> Foo = …` local that the
+  local-declaration scanner, lowercase-initial only, never registered) was
+  dropped from `nodes` by the node-resolve pass but left in `edges`, producing
+  an edge-without-node. `call_graph` now honors `targetMissing` the way
+  `getSubgraph` already does: phantom edges are skipped during the walk, and a
+  final self-contained-slice filter guarantees every emitted edge has both
+  endpoints in `nodes` (also dropping any `declared`/`parsed` dangler to an
+  out-of-vault class). Genuine resolved cross-class call edges are unaffected.
+- ApprovalProcess extractor: a name-less `userHierarchyField` step approver now
+  resolves the custom hierarchy field designated at
+  `<nextAutomatedApprover><userHierarchyField>` (a user-lookup field on `User`,
+  e.g. an `*_Approver__c` field) instead of dropping it as the implicit standard
+  Manager. The approver summary carries the field API name (was `{ name: null }`)
+  and a `User`-scoped `references` edge to the `CustomField` is emitted
+  (`CustomField:User.{field}`, `viaNextAutomatedApprover: true`, `declared`) so
+  the "who approves" reference is no longer silently lost. The built-in standard
+  `Manager` field (and an absent `<nextAutomatedApprover>`) stays the edgeless
+  implicit-Manager approver.
+
 ## [0.2.2] — 2026-07-22
 
 > **Concept-model expansion + grow-forever funnel routing.** The org-independent

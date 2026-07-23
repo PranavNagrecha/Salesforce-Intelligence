@@ -1,5 +1,0 @@
-### Added
-- `sfi.automation_risk_report` gains `mode: 'sprawl'` — an org-wide, per-OBJECT automation-density ranking that answers "where is automation sprawl worst first." It ranks objects by a disclosed composite of their inbound `triggersOn` firers (record-triggered Flows / ApexTriggers / WorkflowRules), parented Process Builders, field-write collisions (reused from the `automation_collisions` engine), and a small naming-consistency nudge (reused from `get_naming_convention_report`). Presented as a prioritized CANDIDATE QUEUE (objects to review first), not a graded verdict; the per-signal weights ship in `scoreBasis` and the honesty limits in `boundaries[]`.
-
-### Changed
-- `sfi.automation_risk_report` default behavior is unchanged: an absent `mode` (or `mode: 'risk'`) returns the existing per-finding risk synthesis byte-for-byte. Only `mode: 'sprawl'` triggers the new org-wide ranking. The roster JSON schema, funnel utterances, and intent router gain the `mode` enum and sprawl phrasings.
