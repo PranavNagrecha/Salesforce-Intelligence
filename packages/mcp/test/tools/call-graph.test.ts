@@ -13,6 +13,7 @@ import type {
 import {
   closeGraph,
   importExtractionResults,
+  listEdges,
   openGraph,
   type GraphStore,
 } from '@sf-intelligence/graph';
@@ -554,6 +555,125 @@ describe('callGraphHandler: callerMethods (CR-CAP-06)', () => {
     if (!r.ok) return;
     expect(r.value.data.disclosure).toMatch(/callerMethods/);
     expect(r.value.data.disclosure).toMatch(/apex-ast/);
+  });
+});
+
+// =============================================================================
+// D5 / edge-without-node: a phantom `targetMissing` callsApex edge — the Apex
+// scanner minting `ApexClass:{PascalCaseLocalVar}` from a `Map<Id,Foo> Foo = …`
+// local that LOCAL_DECL_PATTERN (lowercase-initial only) never registered as a
+// local — must NOT be emitted as an edge to a node absent from `nodes`.
+// call_graph now honors `targetMissing` the way getSubgraph's default does
+// (filter the phantom out), preserving the self-contained-slice invariant:
+// every emitted edge has BOTH endpoints in the returned node set. A genuine
+// resolved cross-class call in the same fixture is untouched.
+// =============================================================================
+describe('callGraphHandler: phantom targetMissing edges (D5 edge-without-node)', () => {
+  let dir4: string;
+  let store4: GraphStore;
+  let ctx4: Context;
+
+  // A PascalCase local-Map variable name the scanner misread as a class. NO
+  // node row exists for it, so the importer stamps targetMissing on the edge.
+  const PHANTOM_ID = 'ApexClass:RecordsByName';
+
+  beforeAll(async () => {
+    dir4 = mkdtempSync(join(tmpdir(), 'sfi-mcp-cg-phantom-'));
+    const opened = await openGraph(join(dir4, 'cg.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store4 = opened.value;
+    const seed4: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:SvcA', apiName: 'SvcA' }),
+        makeNode({ id: 'ApexClass:HelperB', apiName: 'HelperB' }),
+        // NOTE: no node for PHANTOM_ID — the importer flags the edge below.
+      ],
+      edges: [
+        // Genuine resolved cross-class call (real target node exists).
+        makeEdge({
+          fromId: 'ApexClass:SvcA',
+          toId: 'ApexClass:HelperB',
+          edgeType: 'callsApex',
+          properties: { methods: ['compute'] },
+        }),
+        // Phantom: heuristic apex-scanner edge to a non-existent class →
+        // import stamps properties.targetMissing = true.
+        makeEdge({
+          fromId: 'ApexClass:SvcA',
+          toId: PHANTOM_ID,
+          edgeType: 'callsApex',
+          properties: { methods: ['get'] },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store4, [seed4]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx4 = { vaultRoot: dir4, manifest: FIXTURE_MANIFEST, graph: store4 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store4);
+    rmSync(dir4, { recursive: true, force: true });
+  });
+
+  it('fixture sanity: the phantom edge IS stored with targetMissing:true (the bug precondition)', async () => {
+    // listEdges does NOT filter phantoms, so the raw graph still carries the
+    // dangling edge — the exact condition that made call_graph emit an
+    // edge-without-node before the fix.
+    const r = await listEdges(store4, 'ApexClass:SvcA', { direction: 'out' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const phantom = r.value.find((e) => e.toId === PHANTOM_ID);
+    expect(phantom?.properties['targetMissing']).toBe(true);
+    const real = r.value.find((e) => e.toId === 'ApexClass:HelperB');
+    expect(real?.properties['targetMissing']).toBeUndefined();
+  });
+
+  it('does NOT emit the phantom as a node, keeps the real callee, and does not inflate depth', async () => {
+    const r = await callGraphHandler(ctx4, {
+      rootId: 'ApexClass:SvcA',
+      direction: 'downstream',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = new Set(r.value.data.nodes.map((n) => n.id));
+    expect(ids.has(PHANTOM_ID)).toBe(false);
+    expect(ids.has('ApexClass:HelperB')).toBe(true);
+    // The phantom would have landed at depth 1; skipping it at walk time keeps
+    // maxDepthReached honest (the real callee, also depth 1, is the true max).
+    expect(r.value.data.maxDepthReached).toBe(1);
+    expect(r.value.data.cycleDetected).toBe(false);
+  });
+
+  it('does NOT emit the phantom edge, and the real resolved call edge survives unchanged', async () => {
+    const r = await callGraphHandler(ctx4, {
+      rootId: 'ApexClass:SvcA',
+      direction: 'downstream',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.edges.some((e) => e.toId === PHANTOM_ID)).toBe(false);
+    const real = r.value.data.edges.find((e) => e.toId === 'ApexClass:HelperB');
+    expect(real).toBeDefined();
+    expect(real?.fromId).toBe('ApexClass:SvcA');
+    expect(real?.methods).toEqual(['compute']);
+  });
+
+  it('every emitted edge has BOTH endpoints in nodes (self-contained-slice invariant)', async () => {
+    const r = await callGraphHandler(ctx4, {
+      rootId: 'ApexClass:SvcA',
+      direction: 'both',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = new Set(r.value.data.nodes.map((n) => n.id));
+    for (const e of r.value.data.edges) {
+      expect(ids.has(e.fromId)).toBe(true);
+      expect(ids.has(e.toId)).toBe(true);
+    }
   });
 });
 

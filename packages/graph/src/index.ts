@@ -43,6 +43,7 @@ export {
   freshnessSummary,
   getNodeById,
   getSubgraph,
+  isHiddenUnresolved,
   listChildren,
   listEdges,
   listEdgesForNodes,
