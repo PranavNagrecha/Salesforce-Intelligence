@@ -402,8 +402,8 @@ describe('detectPiiClassification: protected-class patterns', () => {
     expect(r.piiCategory).toBe('protected-class');
   });
 
-  it('classifies Citizenship__c and Citizenship_Status__c as protected/protected-class', () => {
-    for (const name of ['Citizenship__c', 'Citizenship_Status__c']) {
+  it('classifies Citizenship__c and Citizenship_Detail__c as protected/protected-class', () => {
+    for (const name of ['Citizenship__c', 'Citizenship_Detail__c']) {
       const r = detectPiiClassification(field('Contact', name));
       expect(r.piiClassification).toBe('protected');
       expect(r.piiCategory).toBe('protected-class');
@@ -444,9 +444,9 @@ describe('detectPiiClassification: protected-class patterns', () => {
 // D4: the bare 3-letter `phi` token was a false-positive generator. The PHI
 // health signal must fire ONLY on the genuine acronym, never the Greek letter.
 describe('detectPiiClassification: PHI acronym vs Greek-letter / word context', () => {
-  it('does NOT classify Phi_Theta_Kappa__c (an honor society) as health', () => {
+  it('does NOT classify Phi_Sigma_Member__c (a Greek-letter society) as health', () => {
     const r = detectPiiClassificationWithReason(
-      field('Contact', 'Phi_Theta_Kappa__c', { dataType: 'Checkbox' }),
+      field('Contact', 'Phi_Sigma_Member__c', { dataType: 'Checkbox' }),
     );
     expect(r.piiCategory).not.toBe('health');
     expect(r.piiClassification).not.toBe('sensitive');
