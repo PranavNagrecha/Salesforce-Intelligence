@@ -3885,13 +3885,31 @@ const computeReconciledTypes = (
  *
  * The fix mirrors `retrieveTypeBatch`: a fresh `mkdir`'d projectDir with a
  * `force-app/` package dir + an `sfdx-project.json`, with `sf` run from inside
- * it (`cwd: projectDir`) so the project root is valid. CRITICAL: these pulls
- * are ADDITIVE narrow-member subsets — unlike `retrieveTypeBatch`, they MUST
- * NOT call `reconcileSourceDeletions`/`syncAuthoritativeRetrieveIntoSource`
- * (a scoped delete would wipe other types). They KEEP the existing absolute
- * `--output-dir sourceDir` so `sf` writes straight into the vault source the
- * downstream re-walk reads (`sf` resolves `--output-dir` relative to `cwd`, so
- * it must stay absolute — `paths.source` from `vaultPaths(vaultRoot)` is).
+ * it (`cwd: projectDir`) so the project root is valid.
+ *
+ * RETRIEVE INTO THE PROJECT, THEN COPY. An earlier revision kept the absolute
+ * `--output-dir sourceDir` so `sf` wrote straight into the vault. Modern `sf`
+ * (2.144.x) REJECTS that outright:
+ *
+ *   Error (OutputDirOutsideProjectError): The output directory must be inside
+ *   the current project.
+ *
+ * — because the output dir sits outside the throwaway project the previous fix
+ * introduced. Every batch failed instantly, and because these pulls are
+ * best-effort the failure was swallowed: Reports/Dashboards stayed at 0 and the
+ * object auto-expansion never landed, with the vault reporting success. So the
+ * retrieve now targets `force-app/` INSIDE the project and the result is copied
+ * into the vault source afterwards.
+ *
+ * CRITICAL: these pulls are ADDITIVE narrow-member subsets, so the copy uses
+ * `syncAuthoritativeRetrieveIntoSource` (a pure recursive copy) and MUST NOT
+ * call `reconcileSourceDeletions` — a scoped reconcile would read every type
+ * outside this narrow manifest as deleted and wipe it.
+ *
+ * Copying also puts additively-pulled files under the same `main/default/...`
+ * layout the authoritative retrieve produces. That matters beyond this bug: while
+ * they landed flat, every one of them was deleted by the NEXT refresh's reconcile
+ * before the re-pull ran.
  * Best-effort/non-fatal: a residual failure is returned to the caller, which
  * logs-and-continues. `runSf` is injectable so tests can assert the `cwd`.
  *
@@ -3920,6 +3938,13 @@ const retrieveAdditiveManifest = async (
     'utf8',
   );
   await writeFile(manifestPath, args.manifestXml, 'utf8');
+  // NO --output-dir at all — exactly what `retrieveTypeBatch` does, and the only
+  // form modern `sf` accepts here. Both alternatives are rejected outright:
+  //   --output-dir <vault>/source  -> OutputDirOutsideProjectError
+  //   --output-dir <project>/force-app -> RetrieveTargetDirOverlapsPackageError
+  // Omitting it lets `sf` write into the project's default package directory,
+  // which is `force-app` per the sfdx-project.json written above.
+  const pkgDir = join(projectDir, 'force-app');
   try {
     await runSfFn(
       [
@@ -3930,11 +3955,11 @@ const retrieveAdditiveManifest = async (
         manifestPath,
         '--target-org',
         args.targetOrg,
-        '--output-dir',
-        args.outputDir,
       ],
       { maxBuffer: SF_MAX_BUFFER, cwd: projectDir, timeout: SF_RETRIEVE_TIMEOUT_MS },
     );
+    // Additive merge into the vault: copy only, never reconcile.
+    await syncAuthoritativeRetrieveIntoSource(args.outputDir, pkgDir);
   } finally {
     // Best-effort: the manifest + the whole throwaway project tree.
     await rm(manifestPath, { force: true }).catch(() => {});
