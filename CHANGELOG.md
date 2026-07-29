@@ -5,7 +5,7 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-07-29
+## [0.2.5] — 2026-07-29
 
 ### Fixed
 - **Flow record-trigger ENTRY CRITERIA minted no dependency edges at all.** Flow ships two XML spellings of the same condition triplet — `<leftValueReference>` inside `<decisions>`, and `<field>` inside `<start><filters>`. `parseFlowConditionTriplet` understood only the first and returned `null` for the second, so every record-trigger entry criterion parsed to nothing: no criteria item, no field refs, no edge. On the reference org that was **449 entry-criteria filters across 160 of 275 flows, 100% in the unparsed dialect**. The case this release names as closed in the skill, the article and these notes was the one case still fully open. Now aliased, with the `<leftValueReference>` spelling tried first so decision parsing stays byte-identical — yielding **442 edges across 222 fields** that previously had none.

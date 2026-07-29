@@ -1,4 +1,4 @@
-# sf-intelligence 0.3.0 — release notes (PREPARED, NOT SHIPPED)
+# sf-intelligence 0.2.5 — release notes (PREPARED, NOT SHIPPED)
 
 **Status: staged locally. Nothing pushed, nothing published, no tag cut.** Awaiting owner approval.
 
@@ -77,7 +77,7 @@ The refresh manifest's per-edge-type tally is derived from the Markdown render r
 - [ ] Rebuild the reference vault and re-derive the condition-edge and 85-field figures above
 - [ ] Push branch, open PR, CI green
 - [ ] Merge to `main` (squash — privacy rule)
-- [ ] Tag `v0.3.0` → OIDC Trusted Publishing to npm
+- [ ] Tag `v0.2.5` → OIDC Trusted Publishing to npm
 - [ ] GitHub release from these notes
 - [ ] Website auto-deploys from `main`
 - [ ] Re-run `scan:leaks:history` before publishing
