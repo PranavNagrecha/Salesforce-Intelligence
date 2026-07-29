@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-29T02:09:39.318Z",
-  "version": "0.2.2",
+  "generatedAt": "2026-07-29T03:18:09.467Z",
+  "version": "0.3.0",
   "toolCount": 203,
   "skillCount": 26,
   "agentCount": 2,
@@ -17,7 +17,7 @@
       {
         "name": "extractors",
         "files": 82,
-        "cases": 1103
+        "cases": 1104
       },
       {
         "name": "cli",
@@ -27,7 +27,7 @@
       {
         "name": "graph",
         "files": 26,
-        "cases": 315
+        "cases": 319
       },
       {
         "name": "parsers",
@@ -60,7 +60,7 @@
         "cases": 40
       }
     ],
-    "totalCases": 7808,
+    "totalCases": 7813,
     "totalFiles": 447,
     "packageCount": 10,
     "approx": 7800
@@ -95,7 +95,7 @@
     {
       "name": "extractors",
       "files": 82,
-      "cases": 1103,
+      "cases": 1104,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
@@ -107,7 +107,7 @@
     {
       "name": "graph",
       "files": 26,
-      "cases": 315,
+      "cases": 319,
       "description": "The DuckDB dependency-graph engine"
     },
     {

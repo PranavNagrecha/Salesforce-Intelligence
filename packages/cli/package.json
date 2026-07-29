@@ -1,6 +1,6 @@
 {
   "name": "sf-intelligence",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Offline-first, MCP-first knowledge base for a Salesforce org. Ask about your org's metadata, dependencies, permissions, and automation \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://sfi.auditforce.cloud",
