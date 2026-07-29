@@ -16,6 +16,7 @@ import {
   NODE_COLUMN_COUNT,
   nodeRowParams,
 } from './import.js';
+import { mintRelationshipTraversalEdges } from './relationship-refs.js';
 import type { GraphError, GraphStore } from './store.js';
 
 /**
@@ -239,6 +240,24 @@ export const computeChangeSet = async (
   // `/sfi-refresh` is the ground truth. Run before the PK dedupe so the minted
   // edges participate in the same first-writer-wins collapse.
   mintFutureDispatchEdges([...desiredNodes.values()], desiredEdgeList);
+  // Mirror cold import — resolve formula `__r` traversals and FlexiPage
+  // related-list column aliases into `references` edges. This call is NOT
+  // optional here, and the reason is sharper than for the mirrors above: these
+  // edges exist ONLY because this pass mints them, so when it did not run the
+  // reconcile saw every one of them as absent-from-desired. On the whole-graph
+  // path (`pruneNodeTypes` undefined) the preserve-guard below is skipped
+  // entirely and every absent edge is deleted — so a routine incremental
+  // refresh silently DROPPED real dependency evidence and returned those fields
+  // to "no referrers", which `safe_to_delete_field` reads as deletable.
+  //
+  // INCREMENTAL GAP (same bound as the canonicalize/CR-CAP-09 mirrors above):
+  // the relationship map is built from the change-set's node view, so a scoped
+  // pull (`--types X`) cannot see lookup fields outside the pull and under-mints
+  // versus a full refresh; full `/sfi-refresh` is the ground truth. The
+  // whole-graph incremental path passes the complete node set, so it resolves
+  // exactly as a cold rebuild does. Run before the PK dedupe so minted edges
+  // join the same first-writer-wins collapse.
+  mintRelationshipTraversalEdges([...desiredNodes.values()], desiredEdgeList);
   const desiredEdges = new Map<string, Edge>();
   for (const edge of desiredEdgeList) {
     const pk = edgePk(edge.fromId, edge.toId, edge.edgeType, edge.source);

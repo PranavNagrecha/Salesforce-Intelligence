@@ -81,7 +81,7 @@ const PERMISSION_GLOBAL_REFERENCE = /^\$Permission\.([A-Za-z_][A-Za-z_0-9]*)$/i;
  * because the leading segment is a relationship name and the target object is
  * not knowable from one file.
  *
- * Returned verbatim (`Faculty_Contact__r.Status__c`,
+ * Returned verbatim (`Widget_Contact__r.Status__c`,
  * `Parent__r.Grandparent__r.Code__c`, `Owner.Name`), deduplicated, sorted. The
  * caller stores them on the field node; the import-time resolver
  * (`mintRelationshipTraversalEdges` in @sf-intelligence/graph) walks the

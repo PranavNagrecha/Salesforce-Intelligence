@@ -1,0 +1,10 @@
+import { DuckDBInstance } from '@duckdb/node-api';
+const db = await DuckDBInstance.create(process.argv[2], {access_mode:'READ_ONLY'});
+const c = await db.connect();
+const q = async (sql)=>(await c.runAndReadAll(sql)).getRowObjectsJS();
+console.log('dangling parentOf samples');
+console.log(await q(`SELECT e.from_id, e.to_id, e.source, COUNT(*)::INT n FROM edges e LEFT JOIN nodes n ON n.id=e.from_id WHERE n.id IS NULL AND e.edge_type='parentOf' GROUP BY 1,2,3 LIMIT 8`));
+console.log('dangling by source');
+console.log(await q(`SELECT e.edge_type, e.source, split_part(e.from_id,':',1) pfx, COUNT(*)::INT n FROM edges e LEFT JOIN nodes n ON n.id=e.from_id WHERE n.id IS NULL GROUP BY 1,2,3 ORDER BY 4 DESC`));
+console.log('dangling to_id count');
+console.log(await q(`SELECT COUNT(*)::INT n FROM edges e LEFT JOIN nodes n ON n.id=e.to_id WHERE n.id IS NULL`));

@@ -343,3 +343,82 @@ describe('applyChangeSet — consistency under failure (invariant #2)', () => {
     expect(await dump(store)).toBe(before);
   });
 });
+
+describe('incremental reconcile mints relationship-resolver edges (regression)', () => {
+  /**
+   * Relationship-resolver edges exist ONLY because an import-time pass mints
+   * them — no extractor emits them. When `computeChangeSet` did not run that
+   * pass, every one of them read as absent-from-desired, and on the whole-graph
+   * path (`pruneNodeTypes` undefined) the preserve-guard is skipped and absent
+   * edges are DELETED. A routine incremental refresh therefore dropped real
+   * dependency evidence and returned those fields to "no referrers" — which
+   * `safe_to_delete_field` reads as deletable.
+   *
+   * A two-object model: Enrolment__c holds a lookup to Programme__c, and a
+   * formula on Enrolment__c reads Programme__c.Status__c through the traversal.
+   */
+  const model = (): readonly ExtractionResult[] => {
+    const lookup = makeNode({
+      id: 'CustomField:Enrolment__c.Programme__c',
+      type: 'CustomField',
+      apiName: 'Programme__c',
+      parentId: 'CustomObject:Enrolment__c',
+      properties: { referenceTo: 'Programme__c', relationshipName: 'Enrolments' },
+    });
+    const target = makeNode({
+      id: 'CustomField:Programme__c.Status__c',
+      type: 'CustomField',
+      apiName: 'Status__c',
+      parentId: 'CustomObject:Programme__c',
+      properties: {},
+    });
+    const formula = makeNode({
+      id: 'CustomField:Enrolment__c.Programme_Status__c',
+      type: 'CustomField',
+      apiName: 'Programme_Status__c',
+      parentId: 'CustomObject:Enrolment__c',
+      properties: {
+        isFormula: true,
+        formulaRelationshipRefs: ['Programme__r.Status__c'],
+      },
+    });
+    return [{ nodes: [lookup, target, formula], edges: [] }];
+  };
+
+  const resolverEdges = async (store: GraphStore): Promise<number> => {
+    const reader = await store.connection.runAndReadAll(
+      "SELECT COUNT(*) AS n FROM edges WHERE source = 'relationship-resolver'",
+    );
+    const rows = reader.getRowObjectsJS() as readonly Record<string, unknown>[];
+    return Number(rows[0]?.['n'] ?? 0);
+  };
+
+  it('a cold import mints the traversal edge', async () => {
+    const store = await makeStore();
+    const r = await importExtractionResults(store, model());
+    expect(r.ok).toBe(true);
+    expect(await resolverEdges(store)).toBe(1);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a whole-graph incremental reconcile PRESERVES it instead of deleting it', async () => {
+    const store = await makeStore();
+    const cold = await importExtractionResults(store, model());
+    expect(cold.ok).toBe(true);
+    expect(await resolverEdges(store)).toBe(1);
+
+    // Same source tree, reconciled incrementally with no pruneNodeTypes — the
+    // whole-graph path, where every absent-from-desired edge is deleted.
+    const cs = await computeChangeSet(store, model());
+    expect(cs.ok).toBe(true);
+    if (!cs.ok) return;
+
+    // Before the fix this asserted the failure: the edge was in deleteEdgeKeys.
+    expect(
+      cs.value.deleteEdgeKeys.filter((k) => k.source === 'relationship-resolver'),
+    ).toEqual([]);
+
+    const applied = await applyChangeSet(store, cs.value);
+    expect(applied.ok).toBe(true);
+    expect(await resolverEdges(store)).toBe(1);
+  });
+});
