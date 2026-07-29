@@ -11,7 +11,7 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
-import { buildReferencesEdges } from './formula-references.js';
+import { buildReferencesEdges, collectRelationshipRefs } from './formula-references.js';
 import { deriveComponentApiName, deriveParentApiName } from './path-utils.js';
 
 const FIELD_FILE_SUFFIX = '.field-meta.xml';
@@ -479,6 +479,19 @@ const buildProperties = (
     // `true` keeps stored fields byte-identical while making formula fields
     // self-describing.
     ...(isFormula ? { isFormula: true } : {}),
+    // OMIT-when-empty: the cross-object traversals in this formula, verbatim
+    // (`Parent__r.Field__c`). Only the import-time relationship resolver can
+    // turn these into edges — it is the only layer that can see the lookup
+    // fields of every OTHER object. Stored rather than dropped so a field read
+    // exclusively through a traversal stops looking orphaned.
+    ...(() => {
+      const relationshipRefs = isFormula
+        ? collectRelationshipRefs(formula ?? '')
+        : [];
+      return relationshipRefs.length > 0
+        ? { formulaRelationshipRefs: relationshipRefs }
+        : {};
+    })(),
     // OMIT-when-null (unlike the fixed keys above): only GlobalValueSet-driven
     // picklists carry a value-set name, and a `valueSetName: null` row on every
     // CustomField would churn every rendered markdown file in every vault
