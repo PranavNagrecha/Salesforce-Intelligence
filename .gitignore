@@ -104,3 +104,10 @@ packages/mcp/data/static-embedding-table.bin
 packages/mcp/data/static-embedding-meta.json
 packages/mcp/data/static-embedding-index.json
 org-kb
+
+# Agent/debug scratch scripts dropped into a package root. Twice now these were
+# swept in by `git add -A` — once shipping an absolute home path that the release
+# privacy guard caught in CI. Real tooling lives in scripts/, workers/ or test/;
+# nothing legitimate sits loose at a package root except build.mjs.
+packages/*/[_.]*.mjs
+packages/*/q[0-9]*.mjs

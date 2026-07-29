@@ -1,5 +1,7 @@
 /// <reference types="vitest/globals" />
 
+import type { ComponentId } from '@sf-intelligence/contracts';
+
 import {
   extractConditions,
   type ConditionSource,
@@ -817,5 +819,54 @@ describe('extractConditions', () => {
       expect(result.conditionNodes[0]!.label).not.toContain('\n');
       expect(result.conditionNodes[0]!.properties.expression).toBe(expression);
     });
+  });
+});
+
+describe('condition field edges are minted only for structurally valid field ids', () => {
+  /**
+   * Found by probing a real vault: making condition fieldRefs into EDGES turned
+   * things that are not fields into graph phantoms — 71 distinct bare Flow
+   * variable / choice names (`AnotherSubmission`, `ChoiceRenameOrDelete`), an
+   * unresolved `$Record`, and 87 multi-dot relationship traversals. As an inert
+   * node property they were harmless; as edges they pollute the phantom roll-up,
+   * and the taxonomy labels a bare PascalCase name a standard FIELD and offers a
+   * "treat it as a standard field" remedy for a Flow variable.
+   *
+   * fieldRefs keeps every ref verbatim — the JOIN rules read it. Only the edges
+   * are filtered.
+   */
+  it('drops bare names, globals and multi-dot traversals from edges but keeps them in fieldRefs', () => {
+    const result = extractConditions({
+      parentId: 'Flow:Some_Flow' as ComponentId,
+      parentSourcePath: 'flows/Some_Flow.flow-meta.xml',
+      parentObjectApiName: null,
+      sources: [
+        {
+          kind: 'criteria',
+          items: [
+            { field: 'Widget__c.Status__c', operation: 'equals', value: 'Open' },
+            { field: 'AnotherSubmission', operation: 'equals', value: 'true' },
+            { field: '$Record', operation: 'equals', value: 'x' },
+            {
+              field: 'Widget__c.Parent__r.Code__c',
+              operation: 'equals',
+              value: 'A',
+            },
+          ],
+          booleanFilter: null,
+        },
+      ],
+    });
+
+    // Every ref is still recorded verbatim — the honest account of what the
+    // condition mentions.
+    const refs = result.conditionsMirror[0]?.fieldRefs ?? [];
+    expect(refs.length).toBe(4);
+
+    // Only the one well-formed Object.Field id becomes an edge.
+    expect(result.conditionFieldEdges.map((e) => e.toId)).toEqual([
+      'CustomField:Widget__c.Status__c',
+    ]);
+    expect(result.conditionFieldEdges[0]?.edgeType).toBe('readsFrom');
   });
 });

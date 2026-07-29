@@ -34,7 +34,7 @@ const commandsDir = process.env.SFI_SLASH_COMMANDS_DIR ?? join(root, '.claude/co
  * composite first-run wizards that chain several real `sfi` commands. Their
  * referenced `sfi <subcommand>` calls are still parity-checked below.
  */
-const COMPOSITE_SLASH = new Set(['onboard']);
+const COMPOSITE_SLASH = new Set(['onboard', 'field-audit']);
 
 // 1. The real CLI subcommands (commander is the source of truth).
 const cliCommands = new Set(createProgram().commands.map((c) => c.name()));

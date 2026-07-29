@@ -144,34 +144,55 @@ export interface EdgeSemanticRule {
 
 /**
  * The safe-to-delete-field edge-semantics table (RM-1b). Mirrors the tool's
- * `classifyEdge` lookup order: the `formulaTokenizer` special case is checked
- * first, then `byEdgeType[edgeType].bySourceType[sourceType]`, then that edge
+ * `classifyEdge` lookup order: the ordered `bySource` special cases are checked
+ * first (first match wins), then `byEdgeType[edgeType].bySourceType[sourceType]`, then that edge
  * type's `default`, then the top-level `default` for an unknown edge type.
  */
+export interface EdgeSemanticSourceRule {
+  readonly source: string;
+  readonly edgeType: string;
+  /** When present, the rule only applies to this referrer ComponentType. */
+  readonly fromType?: string;
+  readonly category: string;
+  readonly verdict: string;
+}
+
 export interface EdgeSemantics {
-  readonly formulaTokenizer: {
-    readonly edgeType: string;
-    readonly source: string;
-    readonly category: string;
-    readonly verdict: string;
-  };
+  readonly bySource: readonly EdgeSemanticSourceRule[];
   readonly byEdgeType: Readonly<Record<string, EdgeSemanticRule>>;
   readonly default: EdgeSemanticVerdict;
 }
 
 export const EDGE_SEMANTICS: EdgeSemantics = Object.freeze({
-  formulaTokenizer: {
-    edgeType: 'references',
-    source: 'formula-tokenizer',
-    category: 'formula',
-    verdict: 'blocking',
-  },
+  bySource: [
+    {
+      source: 'formula-tokenizer',
+      edgeType: 'references',
+      fromType: 'CustomField',
+      category: 'formula',
+      verdict: 'blocking',
+    },
+    {
+      source: 'rollup-summary',
+      edgeType: 'references',
+      category: 'rollup',
+      verdict: 'blocking',
+    },
+    {
+      source: 'relationship-resolver',
+      edgeType: 'references',
+      fromType: 'CustomField',
+      category: 'formula',
+      verdict: 'blocking',
+    },
+  ],
   byEdgeType: {
     readsFrom: {
       bySourceType: {
         ApexClass: { category: 'apex', verdict: 'risky' },
         ApexTrigger: { category: 'apex', verdict: 'risky' },
         Flow: { category: 'flow', verdict: 'blocking' },
+        ConditionalContext: { category: 'condition', verdict: 'blocking' },
         LightningComponentBundle: { category: 'frontend', verdict: 'risky' },
         AuraDefinitionBundle: { category: 'frontend', verdict: 'risky' },
       },

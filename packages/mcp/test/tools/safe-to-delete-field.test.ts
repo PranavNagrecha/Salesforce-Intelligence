@@ -41,6 +41,13 @@ const completeFieldDeletionCoverage = (): readonly CoverageEntry[] =>
     'VisualforceComponent',
     'QuickAction',
     'WorkflowRule',
+    // The remaining condition firers: their ConditionalContext nodes emit
+    // readsFrom edges to the fields their criteria test, so an unretrieved one
+    // can hide a `condition` blocker.
+    'ApprovalProcess',
+    'AssignmentRule',
+    'AutoResponseRule',
+    'EscalationRule',
     'SharingRule',
     'Report',
     'Dashboard',
@@ -1490,5 +1497,620 @@ describe('safeToDeleteFieldHandler — componentId ↔ fieldId alias', () => {
 
   it('neither fieldId nor componentId → schema rejects', () => {
     expect(safeToDeleteFieldInputSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+// =============================================================================
+// CITATION HONESTY — the four defects below all share one shape: a note or a
+// description that PROMISED evidence the payload did not carry, or described a
+// dependency as something it is not. One fabricated citation (a roll-up summary
+// that did not exist) already shipped on this branch; these pin the rest.
+// All fixture names are invented.
+// =============================================================================
+
+describe('safeToDeleteFieldHandler — per-example citation provenance', () => {
+  it('stamps rollupRole on every roll-up example, including summaryFilterItem', async () => {
+    // Three roll-ups on the parent, one per declared role. Pre-fix the note
+    // described only summarizedField + summaryForeignKey, so a summaryFilterItem
+    // coupling — a THIRD of roll-up edges on the reference vault — was cited as
+    // something it is not.
+    const fieldId = 'CustomField:Opportunity.Stage_Flag__c';
+    const summarized = 'CustomField:Account.Total_Amount__c';
+    const foreignKey = 'CustomField:Account.Open_Count__c';
+    const filterItem = 'CustomField:Account.Won_Count__c';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: fieldId, apiName: 'Stage_Flag__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: summarized, apiName: 'Total_Amount__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: foreignKey, apiName: 'Open_Count__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: filterItem, apiName: 'Won_Count__c', parentId: ACCOUNT_ID }),
+      ],
+      edges: (
+        [
+          [summarized, 'summarizedField'],
+          [foreignKey, 'summaryForeignKey'],
+          [filterItem, 'summaryFilterItem'],
+        ] as const
+      ).map(([fromId, rollupRole]) =>
+        makeEdge({
+          fromId,
+          toId: fieldId,
+          edgeType: 'references',
+          source: 'rollup-summary',
+          properties: { rollupRole, summaryOperation: 'sum' },
+        }),
+      ),
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rollup = result.value.data.reasoning.find((r) => r.category === 'rollup');
+    expect(rollup).toBeDefined();
+    expect(rollup?.verdict).toBe('blocking');
+    expect(rollup?.count).toBe(3);
+    // Each citation names ITS OWN coupling, not the list of possibilities.
+    const byId = new Map(rollup?.examples.map((e) => [e.id, e.rollupRole]));
+    expect(byId.get(summarized)).toBe('summarizedField');
+    expect(byId.get(foreignKey)).toBe('summaryForeignKey');
+    expect(byId.get(filterItem)).toBe('summaryFilterItem');
+    // …and the note must name all three roles, not two.
+    expect(rollup?.note).toContain('summarizedField');
+    expect(rollup?.note).toContain('summaryForeignKey');
+    expect(rollup?.note).toContain('summaryFilterItem');
+  });
+
+  it('renders the rollupRole into the checklist and the proposal evidence', async () => {
+    const fieldId = 'CustomField:Opportunity.Filter_Only__c';
+    const rollupField = 'CustomField:Account.Filtered_Total__c';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: fieldId, apiName: 'Filter_Only__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: rollupField, apiName: 'Filtered_Total__c', parentId: ACCOUNT_ID }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: rollupField,
+          toId: fieldId,
+          edgeType: 'references',
+          source: 'rollup-summary',
+          properties: { rollupRole: 'summaryFilterItem' },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain('as summaryFilterItem');
+
+    const proposal = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'proposal',
+    });
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) return;
+    expect(proposal.value.data.proposal?.evidence.reasons.join(' ')).toContain(
+      'as summaryFilterItem',
+    );
+  });
+
+  it('surfaces the traversalPath the formula note promises, and renders it', async () => {
+    // Pre-fix the `formula` note promised "a traversal-derived one also carries
+    // the `traversalPath` it was resolved from" — but no such field existed on
+    // the example type and nothing populated or rendered it.
+    const fieldId = 'CustomField:Programme__c.Status__c';
+    const formulaField = 'CustomField:Enrolment__c.Programme_Status__c';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: fieldId, apiName: 'Status__c', parentId: ACCOUNT_ID }),
+        makeNode({
+          id: formulaField,
+          apiName: 'Programme_Status__c',
+          parentId: ACCOUNT_ID,
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: formulaField,
+          toId: fieldId,
+          edgeType: 'references',
+          source: 'relationship-resolver',
+          confidence: 'parsed',
+          properties: {
+            referenceKind: 'formulaRelationshipTraversal',
+            traversalPath: 'Programme__r.Status__c',
+          },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const formula = result.value.data.reasoning.find((r) => r.category === 'formula');
+    expect(formula).toBeDefined();
+    expect(formula?.verdict).toBe('blocking');
+    expect(formula?.examples[0]?.id).toBe(formulaField);
+    expect(formula?.examples[0]?.traversalPath).toBe('Programme__r.Status__c');
+    // The note's promise is now honoured by the payload AND both renderers.
+    expect(formula?.note).toContain('traversalPath');
+
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain('via Programme__r.Status__c');
+
+    const proposal = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'proposal',
+    });
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) return;
+    expect(proposal.value.data.proposal?.evidence.reasons.join(' ')).toContain(
+      'via Programme__r.Status__c',
+    );
+  });
+
+  it('names the actual condition FIRER, not just the ConditionalContext node', async () => {
+    // Seven firer families mint condition edges; pre-fix the note named four,
+    // so an ApprovalProcess blocker was described as a Flow / workflow rule.
+    const fieldId = 'CustomField:Account.Approval_Amount__c';
+    const firerId = 'ApprovalProcess:Account.Big_Deal_Approval';
+    const contextId = `ConditionalContext:${firerId}.condition-0`;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: fieldId,
+          apiName: 'Approval_Amount__c',
+          parentId: ACCOUNT_ID,
+        }),
+        makeNode({
+          id: contextId,
+          type: 'ConditionalContext',
+          apiName: `${firerId}.condition-0`,
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: contextId,
+          toId: fieldId,
+          edgeType: 'readsFrom',
+          source: 'condition-extractor',
+          properties: { kind: 'criteria', conditionIndex: 0, firerId },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const condition = result.value.data.reasoning.find(
+      (r) => r.category === 'condition',
+    );
+    expect(condition).toBeDefined();
+    expect(condition?.verdict).toBe('blocking');
+    expect(condition?.examples[0]?.firerId).toBe(firerId);
+    // All seven wired firer families must be named — an approval-process
+    // blocker described as a Flow criterion is a false citation.
+    for (const family of [
+      'Flow',
+      'validation-rule',
+      'workflow-rule',
+      'approval-process',
+      'assignment-rule',
+      'auto-response-rule',
+      'escalation-rule',
+    ]) {
+      expect(condition?.note).toContain(family);
+    }
+
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain(`fired by ${firerId}`);
+  });
+
+  it('never invents a qualifier for an edge that did not stamp one', async () => {
+    // The anti-fabrication pin: a plain Apex readsFrom carries no traversal,
+    // role or firer, so the example must carry none — a defaulted qualifier
+    // would be a fabricated citation on an otherwise correct verdict.
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: APEX_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const apex = result.value.data.reasoning.find((r) => r.category === 'apex');
+    const example = apex?.examples[0];
+    expect(example).toBeDefined();
+    expect(example?.traversalPath).toBeUndefined();
+    expect(example?.rollupRole).toBeUndefined();
+    expect(example?.firerId).toBeUndefined();
+    // …and the rendered citation stays a bare id.
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId: APEX_FIELD,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain(APEX_READER);
+    // No qualifier parenthetical follows the id — the citation is a bare id.
+    expect(checklist.value.data.checklist).not.toContain(`${APEX_READER} (`);
+  });
+});
+
+// =============================================================================
+// UPGRADE PATH — a user who installs the new build and does NOT re-refresh has
+// a vault with none of the new edge families, so they get exactly the
+// false-`safe` this release exists to fix. The coverage caveat cannot see it:
+// the metadata families WERE retrieved; the extractor that reads them did not
+// exist yet.
+// =============================================================================
+
+describe('safeToDeleteFieldHandler — stale-builder upgrade path', () => {
+  const PLUGIN_ENV = 'SFI_PLUGIN_VERSION';
+
+  afterEach(() => {
+    delete process.env[PLUGIN_ENV];
+  });
+
+  /** ctx whose vault manifest records the builder version `version`. */
+  const ctxBuiltBy = (version: string): Context => ({
+    ...ctx,
+    manifest: { ...FIXTURE_MANIFEST, version },
+  });
+
+  it('routes an otherwise-safe verdict to review and discloses why', async () => {
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, builderVersionCaveat, trust, reasoning } = result.value.data;
+    // NOT proven safe — same treatment incomplete coverage already gets.
+    expect(verdict).toBe('review');
+    // …and not by inventing a dependency that does not exist.
+    expect(reasoning).toHaveLength(0);
+    expect(builderVersionCaveat).toBeDefined();
+    expect(builderVersionCaveat).toContain('0.2.1');
+    expect(builderVersionCaveat).toContain('0.3.0');
+    expect(builderVersionCaveat).toMatch(/sfi refresh/);
+    // Mirrored into limitations so the proposal artifact discloses it too.
+    expect(trust.limitations.some((l) => l === builderVersionCaveat)).toBe(true);
+  });
+
+  it('surfaces the caveat above the verdict in the checklist (which renders no trust block)', async () => {
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+      format: 'checklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const checklist = result.value.data.checklist ?? '';
+    expect(checklist).toMatch(/Stale vault/i);
+    expect(checklist.indexOf('Stale vault')).toBeLessThan(
+      checklist.indexOf('**Verdict:'),
+    );
+  });
+
+  it('carries the caveat into the proposal disclosures', async () => {
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+      format: 'proposal',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const proposal = result.value.data.proposal;
+    expect(proposal?.evidence.verdict).toBe('review');
+    expect(proposal?.evidence.disclosures.join(' ')).toContain('0.2.1');
+  });
+
+  it('still discloses on a blocking verdict, without moving it', async () => {
+    // A stale vault makes the EVIDENCE incomplete regardless of the verdict, so
+    // the reader is told even when the verdict does not move. The caveat only
+    // ever demotes safe -> review; it never upgrades or downgrades anything else.
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: FLOW_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('blocking');
+    expect(result.value.data.builderVersionCaveat).toBeDefined();
+  });
+
+  it('stays silent when the vault builder matches, is newer, or the env is unset', async () => {
+    const safeVerdict = async (c: Context): Promise<string> => {
+      const r = await safeToDeleteFieldHandler(c, { fieldId: SAFE_FIELD });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return 'error';
+      expect(r.value.data.builderVersionCaveat).toBeUndefined();
+      return r.value.data.verdict;
+    };
+    process.env[PLUGIN_ENV] = '0.3.0';
+    expect(await safeVerdict(ctxBuiltBy('0.3.0'))).toBe('safe');
+    // A DOWNGRADE must not nag: an older running plugin implies nothing missing
+    // from a vault a newer one built.
+    expect(await safeVerdict(ctxBuiltBy('0.4.0'))).toBe('safe');
+    delete process.env[PLUGIN_ENV];
+    expect(await safeVerdict(ctxBuiltBy('0.2.1'))).toBe('safe');
+  });
+
+  it('never downgrades on an unparseable version on either side', async () => {
+    // A guess must never cost a user a `safe` verdict.
+    process.env[PLUGIN_ENV] = 'dev';
+    const a = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+    });
+    expect(a.ok).toBe(true);
+    if (a.ok) expect(a.value.data.verdict).toBe('safe');
+
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const b = await safeToDeleteFieldHandler(ctxBuiltBy(''), {
+      fieldId: SAFE_FIELD,
+    });
+    expect(b.ok).toBe(true);
+    if (b.ok) expect(b.value.data.verdict).toBe('safe');
+  });
+});
+
+// =============================================================================
+// GUARD (0.3.0): ONE referrer must be counted ONCE.
+//
+// FAIL-BEFORE: a ValidationRule reaches every field its `errorConditionFormula`
+// names by TWO edges tokenized from that one string in one extractor pass —
+// `ValidationRule -> CustomField` `references` (source formula-tokenizer) and
+// `ConditionalContext:ValidationRule:X.condition-0 -> CustomField` `readsFrom`
+// (source condition-extractor, firerId = the rule). The graph edge PK is
+// (from_id, to_id, edge_type, source) and the rows differ in three of those
+// four columns, so nothing dedups them — correctly, they are two FACTS. But the
+// per-edge bucket loop counted per EDGE, so ONE rule was reported as TWO
+// blockers under TWO categories with two counts and two examples. On the
+// reference vault: 681 such pairs, and 17 fields whose ENTIRE non-structural
+// incoming set is one duplicated pair (the checklist printed "condition (1)"
+// AND "formula (1)" for a field with one dependency). Inflated referrer counts
+// are precisely the clone-propagation double-count this product's own
+// field-audit method warns against.
+//
+// The three cases below pin the fix AND its two boundaries: an additive
+// condition must still surface, and a Flow that WRITES and separately TESTS one
+// field must still report two rows (that collapse would delete real signal —
+// a write and a condition-test have different remediations).
+// =============================================================================
+describe('safeToDeleteFieldHandler — validation-rule referrer collapse', () => {
+  const BOTH_FIELD = 'CustomField:Account.VrBothPaths__c';
+  const BOTH_RULE = 'ValidationRule:Account.RequiresBothPaths';
+  const BOTH_CONTEXT =
+    'ConditionalContext:ValidationRule:Account.RequiresBothPaths.condition-0';
+
+  const ADDITIVE_FIELD = 'CustomField:Account.VrConditionOnly__c';
+  const ADDITIVE_RULE = 'ValidationRule:Account.CrossObjectRule';
+  const ADDITIVE_CONTEXT =
+    'ConditionalContext:ValidationRule:Account.CrossObjectRule.condition-0';
+
+  const FLOW_BOTH_FIELD = 'CustomField:Account.FlowWritesAndTests__c';
+  const FLOW_BOTH = 'Flow:Account_Stage_Router';
+  const FLOW_BOTH_CONTEXT = 'ConditionalContext:Flow:Account_Stage_Router.condition-0';
+
+  beforeAll(async () => {
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: BOTH_FIELD,
+            apiName: 'VrBothPaths__c',
+            parentId: ACCOUNT_ID,
+          }),
+          makeNode({
+            id: BOTH_RULE,
+            type: 'ValidationRule',
+            apiName: 'RequiresBothPaths',
+          }),
+          makeNode({
+            id: BOTH_CONTEXT,
+            type: 'ConditionalContext',
+            apiName: 'ValidationRule:Account.RequiresBothPaths.condition-0',
+            parentId: BOTH_RULE,
+          }),
+        ],
+        edges: [
+          // Direct tokenized reference (buildReferencesEdges).
+          makeEdge({
+            fromId: BOTH_RULE,
+            toId: BOTH_FIELD,
+            edgeType: 'references',
+            source: 'formula-tokenizer',
+            confidence: 'parsed',
+            properties: { tokenizedFromField: 'errorConditionFormula' },
+          }),
+          // The SAME string, tokenized again by extractConditions.
+          makeEdge({
+            fromId: BOTH_CONTEXT,
+            toId: BOTH_FIELD,
+            edgeType: 'readsFrom',
+            source: 'condition-extractor',
+            confidence: 'parsed',
+            properties: {
+              kind: 'formula',
+              conditionIndex: 0,
+              firerId: BOTH_RULE,
+            },
+          }),
+        ],
+      },
+      {
+        // ADDITIVE: the condition reaches a field the direct tokenizer DROPPED
+        // (it discards dotted cross-object paths; the condition extractor keeps
+        // them verbatim). No direct edge from this rule to this field, so
+        // nothing may collapse.
+        nodes: [
+          makeNode({
+            id: ADDITIVE_FIELD,
+            apiName: 'VrConditionOnly__c',
+            parentId: ACCOUNT_ID,
+          }),
+          makeNode({
+            id: ADDITIVE_RULE,
+            type: 'ValidationRule',
+            apiName: 'CrossObjectRule',
+          }),
+          makeNode({
+            id: ADDITIVE_CONTEXT,
+            type: 'ConditionalContext',
+            apiName: 'ValidationRule:Account.CrossObjectRule.condition-0',
+            parentId: ADDITIVE_RULE,
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: ADDITIVE_CONTEXT,
+            toId: ADDITIVE_FIELD,
+            edgeType: 'readsFrom',
+            source: 'condition-extractor',
+            confidence: 'parsed',
+            properties: {
+              kind: 'formula',
+              conditionIndex: 0,
+              firerId: ADDITIVE_RULE,
+            },
+          }),
+        ],
+      },
+      {
+        // NEGATIVE: a Flow that WRITES the field and separately TESTS it in a
+        // decision. Two facts, two remediations — must stay two rows.
+        nodes: [
+          makeNode({
+            id: FLOW_BOTH_FIELD,
+            apiName: 'FlowWritesAndTests__c',
+            parentId: ACCOUNT_ID,
+          }),
+          makeNode({
+            id: FLOW_BOTH,
+            type: 'Flow',
+            apiName: 'Account_Stage_Router',
+          }),
+          makeNode({
+            id: FLOW_BOTH_CONTEXT,
+            type: 'ConditionalContext',
+            apiName: 'Flow:Account_Stage_Router.condition-0',
+            parentId: FLOW_BOTH,
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: FLOW_BOTH,
+            toId: FLOW_BOTH_FIELD,
+            edgeType: 'writesTo',
+            source: 'flow-extractor',
+            confidence: 'declared',
+          }),
+          makeEdge({
+            fromId: FLOW_BOTH_CONTEXT,
+            toId: FLOW_BOTH_FIELD,
+            edgeType: 'readsFrom',
+            source: 'condition-extractor',
+            confidence: 'declared',
+            properties: {
+              kind: 'flow-decision',
+              conditionIndex: 0,
+              firerId: FLOW_BOTH,
+            },
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+  });
+
+  it('counts a rule that reaches the field BOTH ways once, in the validation category', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: BOTH_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('blocking');
+
+    // ONE reason, ONE referrer, ONE citation — not condition(1) + formula(1).
+    expect(reasoning.map((r) => r.category)).toEqual(['validation']);
+    const validation = reasoning[0];
+    expect(validation?.count).toBe(1);
+    expect(validation?.verdict).toBe('blocking');
+    expect(validation?.examples.map((e) => e.id)).toEqual([BOTH_RULE]);
+
+    // The surviving category is the TRUTHFUL one: a validation rule is not
+    // "another formula field", which is what the unscoped formula-tokenizer
+    // rule used to label it.
+    expect(validation?.note).toContain('Validation Rule');
+    // Collapse by DISCLOSURE: the folded category is named on the citation and
+    // the note keeps the condition honesty hedge.
+    expect(validation?.examples[0]?.alsoVia).toEqual(['condition']);
+    expect(validation?.note).toContain('NOT evaluated');
+  });
+
+  it('renders one checklist item that discloses the folded condition row', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: BOTH_FIELD,
+      format: 'checklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rendered = result.value.data.checklist ?? '';
+    expect(rendered).toContain('**validation** (1)');
+    // FAIL-BEFORE: the checklist printed BOTH of these for one rule.
+    expect(rendered).not.toContain('**condition** (1)');
+    expect(rendered).not.toContain('**formula** (1)');
+    expect(rendered).toContain(`${BOTH_RULE} (also via condition)`);
+  });
+
+  it('keeps an ADDITIVE condition (no direct edge from that rule) as its own blocker', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: ADDITIVE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('blocking');
+    const condition = reasoning.find((r) => r.category === 'condition');
+    expect(condition).toBeDefined();
+    expect(condition?.count).toBe(1);
+    expect(condition?.examples[0]?.id).toBe(ADDITIVE_CONTEXT);
+    expect(condition?.examples[0]?.firerId).toBe(ADDITIVE_RULE);
+    expect(condition?.examples[0]?.alsoVia).toBeUndefined();
+  });
+
+  it('does NOT collapse a Flow that writes AND tests the same field', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: FLOW_BOTH_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { reasoning } = result.value.data;
+    const flow = reasoning.find((r) => r.category === 'flow');
+    const condition = reasoning.find((r) => r.category === 'condition');
+    // A write and a condition-test are different facts with different
+    // remediations. Two rows, one each.
+    expect(flow?.count).toBe(1);
+    expect(condition?.count).toBe(1);
+    expect(condition?.examples[0]?.firerId).toBe(FLOW_BOTH);
   });
 });

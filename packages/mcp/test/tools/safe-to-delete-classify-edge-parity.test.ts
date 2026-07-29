@@ -19,7 +19,38 @@ import { classifyEdge } from '../../src/tools/safe-to-delete-field.js';
 type Classification = { category: string; verdict: string };
 const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
   const fromType = fromNode.type;
-  if (edge.edgeType === 'references' && edge.source === 'formula-tokenizer') {
+  // INTENTIONAL post-RM-1b(2) extension, not drift. The single
+  // formula-tokenizer special case became an ordered source-keyed list, because
+  // `references` gained two more field->field producers on this branch and the
+  // referrer ComponentType cannot tell them apart. Classifying by type alone
+  // made safe_to_delete_field cite a roll-up summary that does not exist for
+  // every resolved formula traversal (127 fields on one real vault) — a
+  // fabricated citation on an otherwise-correct verdict.
+  //
+  // SECOND intentional extension (0.3.0 double-count fix): this case is now
+  // SCOPED to a CustomField referrer. While it was unscoped it also swallowed
+  // every ValidationRule `references` edge — every one of which carries
+  // `source: formula-tokenizer`, because the same tokenizer runs over
+  // `errorConditionFormula` — so the `references`/ValidationRule -> validation
+  // row below was DEAD in production and every validation rule was reported
+  // under the `formula` category, whose note reads "Another formula field
+  // references this field". False for a validation rule, and inconsistent with
+  // field_360, which classifies the identical edge by referrer type first.
+  if (
+    edge.edgeType === 'references' &&
+    edge.source === 'formula-tokenizer' &&
+    fromType === 'CustomField'
+  ) {
+    return { category: 'formula', verdict: 'blocking' };
+  }
+  if (edge.edgeType === 'references' && edge.source === 'rollup-summary') {
+    return { category: 'rollup', verdict: 'blocking' };
+  }
+  if (
+    edge.edgeType === 'references' &&
+    edge.source === 'relationship-resolver' &&
+    fromType === 'CustomField'
+  ) {
     return { category: 'formula', verdict: 'blocking' };
   }
   switch (edge.edgeType) {
@@ -29,6 +60,14 @@ const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
       }
       if (fromType === 'Flow') {
         return { category: 'flow', verdict: 'blocking' };
+      }
+      // INTENTIONAL post-RM-1b(2) extension, not drift: a ConditionalContext's
+      // readsFrom edges name the fields its condition TESTS. They used to fall
+      // through to {unknown, risky} — in practice to nothing at all, since the
+      // edges were never emitted — which is how a field used only in a Flow
+      // entry criterion could be reported as deletable.
+      if (fromType === 'ConditionalContext') {
+        return { category: 'condition', verdict: 'blocking' };
       }
       if (
         fromType === 'LightningComponentBundle' ||
@@ -124,13 +163,19 @@ interface Case {
 }
 
 const CASES: readonly Case[] = [
-  // 1. formula-tokenizer special case — beats the references/ValidationRule branch.
-  { name: 'formula special-case (over ValidationRule)', edgeType: 'references', source: 'formula-tokenizer', fromType: 'ValidationRule', expected: { category: 'formula', verdict: 'blocking' } },
-  { name: 'formula special-case (generic source node)', edgeType: 'references', source: 'formula-tokenizer', fromType: 'CustomField', expected: { category: 'formula', verdict: 'blocking' } },
+  // 1. formula-tokenizer special case — scoped to a CustomField referrer.
+  //    DELIBERATE REVERSAL (0.3.0): a ValidationRule referrer must now reach
+  //    `validation`, not `formula`. The tokenizer marker is shared (it runs over
+  //    `errorConditionFormula` too), so keying on it alone made the `validation`
+  //    category unreachable in production and labelled every validation rule
+  //    with the formula note "Another formula field references this field".
+  { name: 'formula special-case does NOT swallow a ValidationRule referrer', edgeType: 'references', source: 'formula-tokenizer', fromType: 'ValidationRule', expected: { category: 'validation', verdict: 'blocking' } },
+  { name: 'formula special-case (CustomField referrer)', edgeType: 'references', source: 'formula-tokenizer', fromType: 'CustomField', expected: { category: 'formula', verdict: 'blocking' } },
   // 2. readsFrom
   { name: 'readsFrom ApexClass', edgeType: 'readsFrom', source: 'apex-scanner', fromType: 'ApexClass', expected: { category: 'apex', verdict: 'risky' } },
   { name: 'readsFrom ApexTrigger', edgeType: 'readsFrom', source: 'apex-scanner', fromType: 'ApexTrigger', expected: { category: 'apex', verdict: 'risky' } },
   { name: 'readsFrom Flow', edgeType: 'readsFrom', source: 'flow-extractor', fromType: 'Flow', expected: { category: 'flow', verdict: 'blocking' } },
+  { name: 'readsFrom ConditionalContext (entry criterion)', edgeType: 'readsFrom', source: 'condition-extractor', fromType: 'ConditionalContext', expected: { category: 'condition', verdict: 'blocking' } },
   { name: 'readsFrom LWC', edgeType: 'readsFrom', source: 'lwc-scanner', fromType: 'LightningComponentBundle', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'readsFrom Aura', edgeType: 'readsFrom', source: 'aura-scanner', fromType: 'AuraDefinitionBundle', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'readsFrom default (Profile)', edgeType: 'readsFrom', source: 'x', fromType: 'Profile', expected: { category: 'unknown', verdict: 'risky' } },
@@ -143,6 +188,13 @@ const CASES: readonly Case[] = [
   { name: 'writesTo Aura', edgeType: 'writesTo', source: 'aura-scanner', fromType: 'AuraDefinitionBundle', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'writesTo default (Profile)', edgeType: 'writesTo', source: 'x', fromType: 'Profile', expected: { category: 'unknown', verdict: 'blocking' } },
   // 4. references (non-formula source)
+  { name: 'references CustomField (roll-up coupling)', edgeType: 'references', source: 'rollup-summary', fromType: 'CustomField', expected: { category: 'rollup', verdict: 'blocking' } },
+  // The regression this split exists to prevent: a resolved formula traversal
+  // must NOT be cited as a roll-up summary.
+  { name: 'references CustomField (resolved formula traversal)', edgeType: 'references', source: 'relationship-resolver', fromType: 'CustomField', expected: { category: 'formula', verdict: 'blocking' } },
+  // Same resolver, FlexiPage referrer: a related-list alias is a UI dependency
+  // and must keep falling through to the FlexiPage row, not the formula rule.
+  { name: 'references FlexiPage (related-list alias)', edgeType: 'references', source: 'relationship-resolver', fromType: 'FlexiPage', expected: { category: 'ui', verdict: 'blocking' } },
   { name: 'references ValidationRule', edgeType: 'references', source: 'enterprise-metadata', fromType: 'ValidationRule', expected: { category: 'validation', verdict: 'blocking' } },
   { name: 'references VisualforcePage', edgeType: 'references', source: 'x', fromType: 'VisualforcePage', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'references VisualforceComponent', edgeType: 'references', source: 'x', fromType: 'VisualforceComponent', expected: { category: 'frontend', verdict: 'risky' } },

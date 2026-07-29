@@ -95,6 +95,7 @@ try {
   log(`• component types:              ${surface.componentTypeCount}`);
   log(`• edge types:                   ${surface.edgeTypeCount}`);
   log(`• skills:                       ${surface.skillCount}`);
+  log(`• agents:                       ${surface.agentCount ?? 0}`);
   log(`• slash commands:               ${surface.slashCommandCount}`);
   if (surface.toolCount && surface.toolCount !== toolCount)
     warn(`product-surface toolCount (${surface.toolCount}) != V01_TOOLS length (${toolCount}); trusting V01_TOOLS.`);
@@ -143,6 +144,7 @@ const stats = {
   version: VERSION,
   toolCount,
   skillCount: surface.skillCount ?? null,
+  agentCount: surface.agentCount ?? null,
   commandCount: surface.slashCommandCount ?? null,
   componentTypeCount: surface.componentTypeCount ?? null,
   edgeTypeCount: surface.edgeTypeCount ?? null,

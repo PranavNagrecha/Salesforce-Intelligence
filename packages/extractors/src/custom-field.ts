@@ -11,7 +11,7 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
-import { buildReferencesEdges } from './formula-references.js';
+import { buildReferencesEdges, collectRelationshipRefs } from './formula-references.js';
 import { deriveComponentApiName, deriveParentApiName } from './path-utils.js';
 
 const FIELD_FILE_SUFFIX = '.field-meta.xml';
@@ -19,6 +19,13 @@ const ROOT_ELEMENT = 'CustomField';
 const FIELDS_DIR_NAME = 'fields';
 const PICKLIST_TYPES = ['Picklist', 'MultiselectPicklist'] as const;
 const FORMULA_ELEMENT_NAME = 'formula';
+/**
+ * Extractor `source` marker on the roll-up summary coupling edges. Distinct from
+ * `formula-tokenizer` (the special case `classifyEdge` evaluates first) and from
+ * the generic `custom-field-extractor` marker, so a consumer can tell a declared
+ * roll-up coupling apart from a tokenized formula reference by source alone.
+ */
+const ROLLUP_SUMMARY_SOURCE = 'rollup-summary';
 
 /**
  * Reserved standard-field names whose Salesforce data type is FIXED on every
@@ -384,6 +391,35 @@ const extractSummaryInfo = (
 };
 
 /**
+ * Extract the child-object field named by each `<summaryFilterItems><field>` on
+ * a roll-up summary field. Each is a `{ChildObject}.{ChildField}` string, the
+ * same shape as `summarizedField`. Deduplicated, source order preserved.
+ *
+ * These are dependencies in the same sense the summarized field is: the roll-up
+ * filter stops compiling if the field it tests is removed, so the platform
+ * refuses the delete. Like the rest of the roll-up triple, the declaration lives
+ * on the PARENT object's file, invisible to any search scoped to the child.
+ */
+const extractSummaryFilterFields = (
+  rootObj: Record<string, unknown>,
+): readonly string[] => {
+  const raw = rootObj['summaryFilterItems'];
+  if (raw === undefined || raw === null) return [];
+  const items = Array.isArray(raw) ? raw : [raw];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    if (typeof item !== 'object' || item === null) continue;
+    const field = toNullableString((item as Record<string, unknown>)['field']);
+    if (field === null || field.length === 0) continue;
+    if (seen.has(field)) continue;
+    seen.add(field);
+    out.push(field);
+  }
+  return out;
+};
+
+/**
  * Build the `properties` map for a CustomField Node. Keys are exactly
  * those listed in the vendored doc's "Node properties" section.
  */
@@ -443,6 +479,19 @@ const buildProperties = (
     // `true` keeps stored fields byte-identical while making formula fields
     // self-describing.
     ...(isFormula ? { isFormula: true } : {}),
+    // OMIT-when-empty: the cross-object traversals in this formula, verbatim
+    // (`Parent__r.Field__c`). Only the import-time relationship resolver can
+    // turn these into edges — it is the only layer that can see the lookup
+    // fields of every OTHER object. Stored rather than dropped so a field read
+    // exclusively through a traversal stops looking orphaned.
+    ...(() => {
+      const relationshipRefs = isFormula
+        ? collectRelationshipRefs(formula ?? '')
+        : [];
+      return relationshipRefs.length > 0
+        ? { formulaRelationshipRefs: relationshipRefs }
+        : {};
+    })(),
     // OMIT-when-null (unlike the fixed keys above): only GlobalValueSet-driven
     // picklists carry a value-set name, and a `valueSetName: null` row on every
     // CustomField would churn every rendered markdown file in every vault
@@ -614,6 +663,61 @@ export const extractCustomField = async (
     properties: { relationshipType },
   }));
 
+  // ROLLUP-SOURCE-EDGE: a roll-up summary field aggregates a field on a CHILD
+  // object, and the coupling metadata lives entirely in the PARENT's file. Until
+  // this edge existed the coupling was a node PROPERTY only, so an incoming-edge
+  // walk from the child field (safe_to_delete_field, find_field_anywhere,
+  // get_impact) could not see it — and the platform's hardest field-delete
+  // blocker returned no reason at all. Both targets are genuine blockers:
+  //
+  //   summarizedField    the child field being aggregated. Salesforce REFUSES to
+  //                      delete it while the roll-up exists. ABSENT for a `count`
+  //                      operation, which aggregates rows rather than a field.
+  //   summaryForeignKey  the child's master-detail field anchoring the roll-up.
+  //                      Deleting it (or converting MD -> Lookup) is refused too.
+  //
+  // Both are `{ChildObject}.{ChildField}` verbatim from the XML, which is already
+  // the `CustomField:` id body — no re-parsing needed. The child object may not
+  // have been retrieved into this vault, in which case the edge dangles and the
+  // existing phantom taxonomy classifies it (same contract as `lookupTo`).
+  //
+  // Source marker is deliberately NOT `formula-tokenizer`: that marker is the
+  // special case `classifyEdge` checks first, and these are declared XML facts,
+  // not tokenizer output.
+  const summaryInfo = extractSummaryInfo(rootObj, dataType);
+  const rollupTargets: readonly (readonly [string, string | null])[] = [
+    ['summarizedField', summaryInfo.summarizedField],
+    ['summaryForeignKey', summaryInfo.summaryForeignKey],
+    // A roll-up's FILTER also names child fields, and the platform refuses to
+    // delete those too — the filter would no longer compile. Same file, same
+    // parent-side invisibility as the two above.
+    ...(dataType === SUMMARY_DATA_TYPE
+      ? extractSummaryFilterFields(rootObj).map(
+          (field) => ['summaryFilterItem', field] as const,
+        )
+      : []),
+  ];
+  const rollupEdges: Edge[] = rollupTargets
+    .filter(
+      (entry): entry is readonly [string, string] =>
+        entry[1] !== null && entry[1].length > 0,
+    )
+    .map(([rollupRole, target]) => ({
+      fromId: nodeId,
+      toId: `CustomField:${target}`,
+      edgeType: 'references' as const,
+      confidence: 'declared' as const,
+      source: ROLLUP_SUMMARY_SOURCE,
+      properties: {
+        rollupRole,
+        // OMIT-when-null so a `count` roll-up (no operation recorded) does not
+        // carry a null row into every stored edge.
+        ...(summaryInfo.summaryOperation !== null
+          ? { summaryOperation: summaryInfo.summaryOperation }
+          : {}),
+      },
+    }));
+
   // P14-USAGE-gvs-edge (closes FINDINGS P-GVS-EDGE): a picklist driven by a
   // GlobalValueSet carries <valueSet><valueSetName> instead of an inline
   // definition. The usesValueSet edge type was declared in the contracts and
@@ -636,6 +740,12 @@ export const extractCustomField = async (
 
   return ok({
     nodes: [node],
-    edges: [parentEdge, ...referencesEdges, ...lookupEdges, ...valueSetEdges],
+    edges: [
+      parentEdge,
+      ...referencesEdges,
+      ...lookupEdges,
+      ...rollupEdges,
+      ...valueSetEdges,
+    ],
   });
 };

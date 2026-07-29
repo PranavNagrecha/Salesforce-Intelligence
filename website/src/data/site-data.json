@@ -1,9 +1,10 @@
 {
-  "generatedAt": "2026-07-23T19:51:20.111Z",
-  "version": "0.2.4",
+  "generatedAt": "2026-07-29T16:16:50.387Z",
+  "version": "0.2.5",
   "toolCount": 209,
-  "skillCount": 25,
-  "commandCount": 4,
+  "skillCount": 26,
+  "agentCount": 2,
+  "commandCount": 5,
   "componentTypeCount": 102,
   "edgeTypeCount": 23,
   "tests": {
@@ -11,22 +12,22 @@
       {
         "name": "mcp",
         "files": 271,
-        "cases": 5435
+        "cases": 5458
       },
       {
         "name": "extractors",
         "files": 83,
-        "cases": 1104
+        "cases": 1110
       },
       {
         "name": "cli",
-        "files": 44,
-        "cases": 445
+        "files": 45,
+        "cases": 467
       },
       {
         "name": "graph",
-        "files": 25,
-        "cases": 322
+        "files": 26,
+        "cases": 338
       },
       {
         "name": "parsers",
@@ -59,10 +60,10 @@
         "cases": 40
       }
     ],
-    "totalCases": 7980,
-    "totalFiles": 457,
+    "totalCases": 8047,
+    "totalFiles": 459,
     "packageCount": 10,
-    "approx": 7900
+    "approx": 8000
   },
   "integrationSuiteCount": 3,
   "gates": [
@@ -88,25 +89,25 @@
     {
       "name": "mcp",
       "files": 271,
-      "cases": 5435,
+      "cases": 5458,
       "description": "The 209 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 83,
-      "cases": 1104,
+      "cases": 1110,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
-      "files": 44,
-      "cases": 445,
+      "files": 45,
+      "cases": 467,
       "description": "The sfi command-line tool"
     },
     {
       "name": "graph",
-      "files": 25,
-      "cases": 322,
+      "files": 26,
+      "cases": 338,
       "description": "The DuckDB dependency-graph engine"
     },
     {

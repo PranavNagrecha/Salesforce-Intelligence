@@ -75,6 +75,40 @@ const PERMISSION_GLOBAL_REFERENCE = /^\$Permission\.([A-Za-z_][A-Za-z_0-9]*)$/i;
  *   );
  *   // edges[0].toId === 'CustomPermission:My_Custom_Perm'
  */
+/**
+ * Collect the CROSS-OBJECT relationship traversals in a formula — the dotted
+ * paths {@link buildReferencesEdges} deliberately does not turn into edges,
+ * because the leading segment is a relationship name and the target object is
+ * not knowable from one file.
+ *
+ * Returned verbatim (`Widget_Contact__r.Status__c`,
+ * `Parent__r.Grandparent__r.Code__c`, `Owner.Name`), deduplicated, sorted. The
+ * caller stores them on the field node; the import-time resolver
+ * (`mintRelationshipTraversalEdges` in @sf-intelligence/graph) walks the
+ * relationship map built from every vaulted lookup field and mints the real
+ * `references` edge, dropping anything it cannot resolve rather than minting a
+ * dangling id.
+ *
+ * This is why a field read ONLY through a relationship traversal used to show
+ * zero referrers: the tokenizer saw it, and then nothing downstream could act
+ * on it. Returns `[]` for an unparseable formula, matching
+ * {@link buildReferencesEdges}.
+ */
+export const collectRelationshipRefs = (formula: string): readonly string[] => {
+  const tokenized = tokenizeFormula(formula);
+  if (!tokenized.ok) return [];
+  const seen = new Set<string>();
+  for (const ref of tokenized.value.references) {
+    if (!ref.path.includes('.')) continue;
+    // `$User.Id`, `$Profile.Name`, `$Setup.X__c.Y__c` and friends are global
+    // value providers, not relationship traversals — they resolve to the
+    // running context, never to a vaulted field on another object.
+    if (ref.path.startsWith('$')) continue;
+    seen.add(ref.path);
+  }
+  return [...seen].sort();
+};
+
 export const buildReferencesEdges = (
   formula: string,
   fromId: string,

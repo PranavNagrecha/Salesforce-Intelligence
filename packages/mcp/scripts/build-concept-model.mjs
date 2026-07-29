@@ -182,9 +182,11 @@ function assertVerdictPair(value, where) {
 }
 
 /** The exact, ordered set of keys the `edgeSemantics` root carries. */
-const EDGE_SEMANTICS_KEYS = ['formulaTokenizer', 'byEdgeType', 'default'];
-/** The keys the `formulaTokenizer` special-case entry carries. */
-const FORMULA_TOKENIZER_KEYS = ['edgeType', 'source', 'category', 'verdict'];
+const EDGE_SEMANTICS_KEYS = ['bySource', 'byEdgeType', 'default'];
+/** Required keys on each ordered `bySource` special-case entry. */
+const BY_SOURCE_REQUIRED_KEYS = ['source', 'edgeType', 'category', 'verdict'];
+/** Optional keys on a `bySource` entry (`fromType` scopes it to one referrer type). */
+const BY_SOURCE_OPTIONAL_KEYS = ['fromType'];
 /** The keys each per-edge-type rule carries. */
 const EDGE_RULE_KEYS = ['bySourceType', 'default'];
 
@@ -218,25 +220,43 @@ export function loadEdgeSemantics() {
     throw new ModelError(`edgeSemantics: unknown key(s): ${esUnknown.join(', ')}`);
   }
 
-  // formulaTokenizer — the SPECIAL case, checked first by classifyEdge.
-  const ft = es.formulaTokenizer;
-  if (ft === null || typeof ft !== 'object' || Array.isArray(ft)) {
-    throw new ModelError('edgeSemantics.formulaTokenizer must be a mapping');
+  // bySource — ORDERED special cases, checked first by classifyEdge. A list
+  // (not a map) because evaluation order is part of the contract: the first
+  // matching entry wins, and `formula-tokenizer` must beat the per-source-type
+  // rows it overlaps.
+  const bySource = es.bySource;
+  if (!Array.isArray(bySource) || bySource.length === 0) {
+    throw new ModelError('edgeSemantics.bySource must be a non-empty list');
   }
-  const ftKeys = Object.keys(ft);
-  const ftMissing = FORMULA_TOKENIZER_KEYS.filter((k) => !ftKeys.includes(k));
-  if (ftMissing.length > 0) {
-    throw new ModelError(`edgeSemantics.formulaTokenizer: missing required key(s): ${ftMissing.join(', ')}`);
-  }
-  const ftUnknown = ftKeys.filter((k) => !FORMULA_TOKENIZER_KEYS.includes(k));
-  if (ftUnknown.length > 0) {
-    throw new ModelError(`edgeSemantics.formulaTokenizer: unknown key(s): ${ftUnknown.join(', ')}`);
-  }
-  for (const k of FORMULA_TOKENIZER_KEYS) {
-    if (typeof ft[k] !== 'string' || ft[k].length === 0) {
-      throw new ModelError(`edgeSemantics.formulaTokenizer.${k} must be a non-empty string`);
+  const seenSourceScopes = new Set();
+  for (const [i, entry] of bySource.entries()) {
+    const at = `edgeSemantics.bySource[${i}]`;
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ModelError(`${at} must be a mapping`);
     }
-    assertNoCanonicalId(ft[k], `edgeSemantics.formulaTokenizer.${k}`);
+    const keys = Object.keys(entry);
+    const missing = BY_SOURCE_REQUIRED_KEYS.filter((k) => !keys.includes(k));
+    if (missing.length > 0) {
+      throw new ModelError(`${at}: missing required key(s): ${missing.join(', ')}`);
+    }
+    const allowed = [...BY_SOURCE_REQUIRED_KEYS, ...BY_SOURCE_OPTIONAL_KEYS];
+    const unknown = keys.filter((k) => !allowed.includes(k));
+    if (unknown.length > 0) {
+      throw new ModelError(`${at}: unknown key(s): ${unknown.join(', ')}`);
+    }
+    for (const k of keys) {
+      if (typeof entry[k] !== 'string' || entry[k].length === 0) {
+        throw new ModelError(`${at}.${k} must be a non-empty string`);
+      }
+      assertNoCanonicalId(entry[k], `${at}.${k}`);
+    }
+    // A duplicate (source, edgeType, fromType) scope would make an entry
+    // unreachable — a silent curation error, so fail loudly instead.
+    const scope = `${entry.source}\u0000${entry.edgeType}\u0000${entry.fromType ?? '*'}`;
+    if (seenSourceScopes.has(scope)) {
+      throw new ModelError(`${at}: duplicate (source, edgeType, fromType) scope — the later entry is unreachable`);
+    }
+    seenSourceScopes.add(scope);
   }
 
   // byEdgeType — edgeType -> { bySourceType, default }.
@@ -1737,13 +1757,19 @@ function renderVerdictPair(pair) {
 function renderEdgeSemantics(es) {
   const lines = [];
   lines.push('export const EDGE_SEMANTICS: EdgeSemantics = Object.freeze({');
-  const ft = es.formulaTokenizer;
-  lines.push('  formulaTokenizer: {');
-  lines.push(`    edgeType: ${tsStr(ft.edgeType)},`);
-  lines.push(`    source: ${tsStr(ft.source)},`);
-  lines.push(`    category: ${tsStr(ft.category)},`);
-  lines.push(`    verdict: ${tsStr(ft.verdict)},`);
-  lines.push('  },');
+  lines.push('  bySource: [');
+  for (const entry of es.bySource) {
+    lines.push('    {');
+    lines.push(`      source: ${tsStr(entry.source)},`);
+    lines.push(`      edgeType: ${tsStr(entry.edgeType)},`);
+    if (entry.fromType !== undefined) {
+      lines.push(`      fromType: ${tsStr(entry.fromType)},`);
+    }
+    lines.push(`      category: ${tsStr(entry.category)},`);
+    lines.push(`      verdict: ${tsStr(entry.verdict)},`);
+    lines.push('    },');
+  }
+  lines.push('  ],');
   lines.push('  byEdgeType: {');
   for (const edgeType of Object.keys(es.byEdgeType)) {
     const rule = es.byEdgeType[edgeType];
@@ -2321,17 +2347,21 @@ export interface EdgeSemanticRule {
 
 /**
  * The safe-to-delete-field edge-semantics table (RM-1b). Mirrors the tool's
- * \`classifyEdge\` lookup order: the \`formulaTokenizer\` special case is checked
- * first, then \`byEdgeType[edgeType].bySourceType[sourceType]\`, then that edge
+ * \`classifyEdge\` lookup order: the ordered \`bySource\` special cases are checked
+ * first (first match wins), then \`byEdgeType[edgeType].bySourceType[sourceType]\`, then that edge
  * type's \`default\`, then the top-level \`default\` for an unknown edge type.
  */
+export interface EdgeSemanticSourceRule {
+  readonly source: string;
+  readonly edgeType: string;
+  /** When present, the rule only applies to this referrer ComponentType. */
+  readonly fromType?: string;
+  readonly category: string;
+  readonly verdict: string;
+}
+
 export interface EdgeSemantics {
-  readonly formulaTokenizer: {
-    readonly edgeType: string;
-    readonly source: string;
-    readonly category: string;
-    readonly verdict: string;
-  };
+  readonly bySource: readonly EdgeSemanticSourceRule[];
   readonly byEdgeType: Readonly<Record<string, EdgeSemanticRule>>;
   readonly default: EdgeSemanticVerdict;
 }

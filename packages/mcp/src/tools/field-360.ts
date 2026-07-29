@@ -23,13 +23,14 @@
  *
  *   | Section       | Backing edge / source                                  | Confidence       |
  *   |---------------|--------------------------------------------------------|------------------|
- *   | validates     | incoming `references` from ValidationRule              | declared         |
- *   | formulas      | incoming `references` from formula-tokenizer CustomField | parsed         |
+ *   | validates     | incoming `references` from ValidationRule — plus the ConditionalContext `readsFrom` row FOLDED into it when the same rule reaches this field both ways (one referrer, one row; disclosed in `boundaries[]`, still counted on the automation risk axis) | declared |
+ *   | formulas      | incoming `references` from formula-tokenizer, plus resolved cross-object `__r` traversals (relationship-resolver, CustomField referrer) | parsed |
+ *   | rollups       | incoming `references` from a PARENT roll-up (rollup-summary)   | declared       |
  *   | writers       | incoming `writesTo` from Apex/Flow/Workflow/PB         | mixed            |
- *   | readers       | incoming `readsFrom` from Apex/Flow/LWC/Aura/VF/SOQL   | mixed (heuristic)|
+ *   | readers       | incoming `readsFrom` from Apex/Flow/LWC/Aura/VF/SOQL — CODE reads only; a ConditionalContext `readsFrom` is NOT one (see `automations`) | mixed (heuristic)|
  *   | ui            | incoming `usedInLayout` + frontend `readsFrom` to UI   | declared/heuristic |
  *   | integrations  | incoming `references`/`exposes` from integration tier  | declared/heuristic |
- *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule    | declared/parsed/heuristic |
+ *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule + ConditionalContext `readsFrom` (the fields a Flow/workflow/validation condition TESTS, source condition-extractor) | declared/parsed/heuristic |
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
  *   | dependencies  | OUTGOING `references` for formula fields only          | parsed           |
  *   | listViews     | incoming `references` from ListView (referenceKind: fieldRef column / filterRef predicate / columnAndFilter) | heuristic |
@@ -102,6 +103,7 @@ import {
   reportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
+import { indexRestatedConditionEdges } from './restated-condition-edges.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -147,6 +149,7 @@ export const FIELD_360_DATA_NOT_AVAILABLE: readonly string[] = [
 const SECTION_NAMES = [
   'validates',
   'formulas',
+  'rollups',
   'writers',
   'readers',
   'ui',
@@ -276,6 +279,12 @@ export interface Field360Output {
   readonly referenceTo: string | null;
   readonly validates?: Field360Section;
   readonly formulas?: Field360Section;
+  /**
+   * Roll-up summary fields on the PARENT object that aggregate this field, are
+   * anchored on it, or filter on it. Salesforce refuses the delete while any of
+   * them exists, so this section is a hard blocker rather than a usage note.
+   */
+  readonly rollups?: Field360Section;
   readonly writers?: Field360Section;
   readonly readers?: Field360Section;
   readonly ui?: Field360Section;
@@ -532,12 +541,20 @@ const computeRisk = (
   isPii: boolean,
   isFormula: boolean,
   dependenciesCount: number,
+  foldedConditionCount: number,
 ): { level: 'low' | 'medium' | 'high'; factors: string[] } => {
   const writers = perSectionCounts['writers'] ?? 0;
   const readers = perSectionCounts['readers'] ?? 0;
   const integrations = perSectionCounts['integrations'] ?? 0;
   const emails = perSectionCounts['emails'] ?? 0;
-  const automations = perSectionCounts['automations'] ?? 0;
+  // The automation AXIS counts condition rows that were folded into `validates`
+  // as a duplicate PRESENTATION of one referrer (see the fold at the call site).
+  // The fold is about how many referrers to SHOW, not how many blocking
+  // declarative conditions exist, and a validation-rule condition is a blocking
+  // condition whether or not its row was folded. Adding them back keeps this
+  // axis byte-identical to its pre-fold value, so no field's risk level moves
+  // because of a presentation change.
+  const automations = (perSectionCounts['automations'] ?? 0) + foldedConditionCount;
 
   const factors: string[] = [];
 
@@ -609,6 +626,7 @@ const detectIsPii = (node: Node): boolean =>
 interface SectionBuckets {
   validates: Field360Row[];
   formulas: Field360Row[];
+  rollups: Field360Row[];
   writers: Field360Row[];
   readers: Field360Row[];
   ui: Field360Row[];
@@ -622,6 +640,7 @@ interface SectionBuckets {
 const emptyBuckets = (): SectionBuckets => ({
   validates: [],
   formulas: [],
+  rollups: [],
   writers: [],
   readers: [],
   ui: [],
@@ -652,14 +671,35 @@ const classifyIncomingEdge = (
     return;
   }
 
-  // `formulas`: incoming `references` from formula-tokenizer (source
-  // marker on the edge) — the source node is typically a CustomField
-  // (the formula field referencing this one).
+  // `formulas`: incoming `references` from the formula tokenizer OR from the
+  // import-time relationship resolver (a cross-object traversal
+  // `Parent__r.Field__c`, which the tokenizer deliberately leaves unresolved
+  // because one file cannot know the target object). Both are a formula
+  // referencing this field; the row carries `source` so a caller can still tell
+  // a directly-tokenized reference from a resolved traversal.
+  //
+  // The resolver ALSO emits FlexiPage related-list aliases. Those must not land
+  // here — they are a UI dependency — so this branch is scoped to a CustomField
+  // referrer, mirroring the scoping `classifyEdge` applies for the same reason.
   if (
     edge.edgeType === 'references' &&
-    edge.source === 'formula-tokenizer'
+    (edge.source === 'formula-tokenizer' ||
+      (edge.source === 'relationship-resolver' && source.type === 'CustomField'))
   ) {
     buckets.formulas.push(row);
+    return;
+  }
+
+  // `rollups`: incoming `references` from a roll-up summary field on the PARENT
+  // object — this field is its summarizedField, its summaryForeignKey, or a
+  // field its filter tests. Needs its own branch for the reason the ListView
+  // comment below documents: CustomField is in NONE of the UI / INTEGRATION /
+  // AUTOMATION / CODE node-type sets, so without this the edge falls through
+  // every case and is dropped silently — while safe_to_delete_field calls the
+  // very same edge `blocking`. Two tools disagreeing about one field is worse
+  // than either being wrong alone.
+  if (edge.edgeType === 'references' && edge.source === 'rollup-summary') {
+    buckets.rollups.push(row);
     return;
   }
 
@@ -681,6 +721,38 @@ const classifyIncomingEdge = (
 
   // `readers`: incoming readsFrom from Apex/Flow/LWC/Aura/VF.
   if (edge.edgeType === 'readsFrom') {
+    // A ConditionalContext `readsFrom` names a field a Flow entry criterion,
+    // workflow-rule criterion or validation-rule condition TESTS — a declarative
+    // BLOCKER, not a code read. Without this branch it fell through to `readers`,
+    // a section this module's own doc describes as heuristic Apex/LWC reads, while
+    // `safe_to_delete_field` classifies the SAME edge as {condition, blocking}.
+    // Two tools describing one dependency incompatibly is worse than either being
+    // wrong alone (the reason `rollups` got its own branch this release), and the
+    // mis-file is not rare: 1,488 such edges over 584 distinct fields on the
+    // reference vault. `automations` — not a new section — because the composition
+    // table ALREADY routes this node type there via its `firesWhen` edge, and
+    // splitting one component type across two sections would trade one
+    // inconsistency for another. Scoped to ConditionalContext, not to the whole
+    // AUTOMATION_NODE_TYPES set: it is the only member whose `readsFrom`
+    // classification safe_to_delete_field pins (the rest still fall through there
+    // as {unknown, risky}, so routing them here would MINT a disagreement.)
+    //
+    // A condition row that merely RESTATES this rule's own direct `references`
+    // edge never reaches this branch: the handler folds it into `validates`
+    // before classifying, so one referrer cannot occupy two sections. The fold
+    // is presentation-only — the folded rows are added back onto the automation
+    // risk axis in `computeRisk`, so `riskLevel` does not move.
+    //
+    // This also moves the edge onto the automation risk axis in `computeRisk`,
+    // which is the point: `automations >= 5` escalates to `high` outright, whereas
+    // `readers` only reaches `medium` above 3. Five blocking conditions on one
+    // field IS a high-blast-radius delete. As a side effect a field read ONLY by
+    // conditions no longer emits the "readers cover static SOQL only" boundary —
+    // correct, because a declarative condition is not SOQL at all.
+    if (source.type === 'ConditionalContext') {
+      buckets.automations.push(row);
+      return;
+    }
     // Frontend code types fold into `ui` if the edge marks a UI role.
     if (UI_NODE_TYPES.has(source.type) && CODE_NODE_TYPES.has(source.type)) {
       // LWC/Aura/VF are BOTH code and UI; route to UI bucket here.
@@ -809,13 +881,42 @@ export const field360Handler = async (
   const incoming = incomingResult.value;
 
   const buckets = emptyBuckets();
+  // PASS 1 — resolve every referrer BEFORE classifying, so the referrer-collapse
+  // index below sees exactly the edges that will be reported (pairing against a
+  // row the sparse-graph guard then drops would lose a dependency).
+  const resolvedIncoming: { edge: Edge; source: Node }[] = [];
   for (const edge of incoming) {
     // Skip structural parentOf — never part of a forensic answer.
     if (edge.edgeType === 'parentOf') continue;
     const sr = await resolveEdgeSource(ctx, edge);
     if (!sr.ok) return sr;
     if (sr.value === null) continue;
-    classifyIncomingEdge(edge, sr.value, buckets);
+    resolvedIncoming.push({ edge, source: sr.value });
+  }
+
+  // ONE referrer, ONE row. A validation rule reaches a field its
+  // `errorConditionFormula` names by two edges tokenized from that one string —
+  // a direct `references` edge (this tool files it under `validates`) and a
+  // `ConditionalContext` `readsFrom` (filed under `automations`). Reported as-is,
+  // `validates` and `automations` BOTH hold the same rule, which is the inflated
+  // referrer count `safe_to_delete_field` folds for the same reason. The
+  // condition row folds into the `validates` row it duplicates.
+  //
+  // The fold is presentation-only and DELIBERATELY risk-neutral: the suppressed
+  // rows are added back onto `computeRisk`'s automation axis below, so the axis
+  // total is byte-identical to what it was before the fold. Dropping them from
+  // the axis instead would de-escalate 224 fields on the reference vault to
+  // `low` / narrow-footprint — the exact outcome the guard block in
+  // `field-360.test.ts` ("a blocking declarative condition must not read as a
+  // narrow footprint") exists to prevent.
+  const restated = indexRestatedConditionEdges(
+    resolvedIncoming.map((r) => r.edge),
+  );
+
+  // PASS 2 — classify.
+  for (const { edge, source } of resolvedIncoming) {
+    if (restated.isRestatingCondition(edge)) continue;
+    classifyIncomingEdge(edge, source, buckets);
   }
 
   // Supplemental Flow writers from source XML (SObject-variable assignments the
@@ -856,6 +957,26 @@ export const field360Handler = async (
   // never double-counted.
   const flowConditionScan = await scanFlowConditionFieldReaders(ctx, fieldId);
   const readerIds = new Set(buckets.readers.map((r) => r.componentId));
+  // Also dedupe against `automations`. A Flow condition read now arrives TWICE
+  // by two independent routes: as a first-class ConditionalContext `readsFrom`
+  // edge (routed to `automations` above) and as this property-scan
+  // reconstruction. The scan predates the edge — it exists precisely because
+  // those edges did not used to be emitted — so where the edge now lands, the
+  // reconstruction is redundant, not additional.
+  //
+  // The two rows name DIFFERENT components (the synthetic ConditionalContext vs
+  // the Flow), so an id-only check against `readers` cannot see the collision:
+  // one Flow decision read would appear in two sections as two components and
+  // count on both the automation and the reader risk axis. Match on the firer
+  // instead — every condition edge carries `firerId` for exactly this purpose.
+  //
+  // The scan is NOT disabled: it still covers the cases no edge reaches (notably
+  // `filterFormula`-mode record-trigger entry conditions, whose field refs are
+  // not extracted), which is the coverage it was added for.
+  for (const row of buckets.automations) {
+    const firer = row.properties?.['firerId'];
+    if (typeof firer === 'string') readerIds.add(firer);
+  }
   let flowConditionReaderCount = 0;
   for (const fc of flowConditionScan.readers) {
     if (readerIds.has(fc.flowId)) continue;
@@ -914,6 +1035,7 @@ export const field360Handler = async (
   const allBuckets: ReadonlyArray<readonly [SectionName, Field360Row[]]> = [
     ['validates', buckets.validates],
     ['formulas', buckets.formulas],
+    ['rollups', buckets.rollups],
     ['writers', buckets.writers],
     ['readers', buckets.readers],
     ['ui', buckets.ui],
@@ -1024,6 +1146,7 @@ export const field360Handler = async (
     isPii,
     isFormula,
     buckets.dependencies.length,
+    restated.suppressedConditionCount,
   );
 
   const grantedByCount = incoming.filter(
@@ -1049,6 +1172,17 @@ export const field360Handler = async (
     FIELD_360_Q165_DISCLOSURE,
     'list view column AND filter field IDENTITY are composed into the `listViews` section (heuristic regex; a row\'s `referenceKind` is `fieldRef` for a column, `filterRef` for a filter predicate, or `columnAndFilter` for both) — but the saved view\'s runtime filter PREDICATE EVALUATION (whether a given record passes the filter) stays unmodeled and remains in dataNotAvailable as `list-view-filters`',
   ];
+  // Referrer collapse, disclosed rather than silent: a validation rule whose
+  // formula BOTH references and tests this field is one referrer reached by two
+  // edges tokenized from one string, so its `automations` row is folded into the
+  // `validates` row it duplicates. The rows are still counted on the automation
+  // RISK axis (riskLevel is unchanged by the fold) — only the referrer listing
+  // collapses.
+  if (restated.suppressedConditionCount > 0) {
+    boundaries.push(
+      `${restated.suppressedConditionCount} ConditionalContext \`readsFrom\` row(s) were FOLDED into \`validates\`: each restates a validation rule already listed there (the rule's errorConditionFormula is tokenized into BOTH a direct \`references\` edge and a condition edge, so counting both would report one rule as two referrers). Both edges remain in the graph — query them with sfi.get_edges — and the folded rows still count toward the automation risk axis, so \`riskLevel\` is unaffected. Conditions are listed but NOT evaluated: sfi does not know whether any record satisfies them.`,
+    );
+  }
   // CR-CAP-03: report / dashboard usage is folded onto the field as a node
   // property by the reports pull (not an edge — the fold DROPS the report/
   // dashboard nodes), so it appears in no section above. The honest disclosure

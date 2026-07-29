@@ -7,6 +7,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 
+import { mintRelationshipTraversalEdges } from './relationship-refs.js';
 import type { GraphError, GraphStore } from './store.js';
 
 /**
@@ -944,6 +945,12 @@ export const importExtractionResults = async (
   // CR-CAP-09: mint class-granular @future dispatchesAsync edges AFTER targets
   // are canonicalized so the future-set membership test sees real node ids.
   mintFutureDispatchEdges(allNodes, allEdges);
+  // FLEXIPAGE-RELATEDLIST-ALIASES + formula `__r` traversals: resolve the
+  // relationship-scoped references the per-file extractors could not, now that
+  // every object's lookup fields are visible. Runs AFTER canonicalization so the
+  // relationship map is built from canonical ids, and it only emits targets that
+  // match a real vaulted CustomField — resolve or drop, never a dangling guess.
+  mintRelationshipTraversalEdges(allNodes, allEdges);
 
   const nodeOutcome = await commitBatched(connection, allNodes, insertNode);
   if (!nodeOutcome.ok) {

@@ -33,6 +33,15 @@ const COVERAGE_TYPES = [
   'QuickAction',
   'WorkflowRule',
   'SharingRule',
+  // The remaining condition firers. safe_to_delete_field attests these for a
+  // CustomField because their ConditionalContext nodes emit readsFrom edges to
+  // the fields their criteria TEST — an unretrieved one can hide a `condition`
+  // blocker. Absent here, the coverage caveat fires and the destructive-safe
+  // CONTROL case can never reach `safe`, which is the whole point of that case.
+  'ApprovalProcess',
+  'AssignmentRule',
+  'AutoResponseRule',
+  'EscalationRule',
   'Report',
   'Dashboard',
   'ListView',

@@ -218,6 +218,15 @@ export const USAGE_SOURCE_FAMILIES: Readonly<Record<string, readonly string[]>> 
       'VisualforceComponent',
       'QuickAction',
       'WorkflowRule',
+      // The remaining condition firers wired to extractConditions. Their
+      // ConditionalContext nodes now emit `readsFrom` edges to the fields their
+      // criteria TEST, so a field can carry a `condition` blocker hiding behind
+      // any of these families — and without them listed, buildCoverageCaveat
+      // stayed silent on an unretrieved family while the verdict read clean.
+      'ApprovalProcess',
+      'AssignmentRule',
+      'AutoResponseRule',
+      'EscalationRule',
       'SharingRule',
       'Report',
       'Dashboard',

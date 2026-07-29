@@ -1536,6 +1536,70 @@ const extractFlexiPageEmbeddedFlows = (xml: string): readonly string[] => {
  * Lightning App Builder assignment. `activationsModeled: false` flags that so
  * the consuming tool discloses the gap rather than implying an assignment.
  */
+/**
+ * FLEXIPAGE-RELATEDLIST-ALIASES: a dynamic related list on a Lightning page
+ * declares its visible columns as `relatedListFieldAliases`, and those are BARE
+ * field api names on the RELATED object — not on the page's own `sobjectType`:
+ *
+ *   <componentInstanceProperties>
+ *     <name>relatedListApiName</name><value>Course_Enrollments__r</value>
+ *   </componentInstanceProperties>
+ *   <componentInstanceProperties>
+ *     <name>relatedListFieldAliases</name>
+ *     <valueList><valueListItems><value>Status__c</value></valueListItems></valueList>
+ *   </componentInstanceProperties>
+ *
+ * Because the tokens are bare, the whole-XML dotted-field sweep in
+ * {@link extractFieldRefs} cannot see them, and because the owning object is the
+ * related one, they cannot be scoped to `sobjectType` either. A field appearing
+ * only in a dynamic related list therefore had NO referrers at all.
+ *
+ * Captured here as `{relatedListApiName, fields}` pairs and resolved at import
+ * time, where the child relationship name can be mapped to a real object.
+ *
+ * Blocks are split on `<componentInstance>`; a related-list component is a leaf,
+ * so the non-greedy split pairs each alias list with its own
+ * `relatedListApiName`. A pairing that cannot be made is dropped, never guessed.
+ */
+const RELATED_LIST_BLOCK_RE = /<componentInstance>[\s\S]*?<\/componentInstance>/g;
+const RELATED_LIST_API_NAME_RE =
+  /<name>relatedListApiName<\/name>\s*<value>([^<]+)<\/value>/;
+const RELATED_LIST_ALIASES_RE =
+  /<name>relatedListFieldAliases<\/name>\s*<valueList>([\s\S]*?)<\/valueList>/;
+const VALUE_RE = /<value>([^<]+)<\/value>/g;
+
+interface RelatedListFieldRef {
+  readonly relatedListApiName: string;
+  readonly fields: readonly string[];
+}
+
+const extractFlexiPageRelatedListFieldRefs = (
+  xml: string,
+): readonly RelatedListFieldRef[] => {
+  const out: RelatedListFieldRef[] = [];
+  for (const block of xml.match(RELATED_LIST_BLOCK_RE) ?? []) {
+    const relatedListApiName = RELATED_LIST_API_NAME_RE.exec(block)?.[1]?.trim();
+    const aliasList = RELATED_LIST_ALIASES_RE.exec(block)?.[1];
+    if (
+      relatedListApiName === undefined ||
+      relatedListApiName.length === 0 ||
+      aliasList === undefined
+    ) {
+      continue;
+    }
+    const fields = [
+      ...new Set(
+        [...aliasList.matchAll(VALUE_RE)]
+          .map((m) => m[1]?.trim() ?? '')
+          .filter((v) => v.length > 0),
+      ),
+    ].sort();
+    if (fields.length === 0) continue;
+    out.push({ relatedListApiName, fields });
+  }
+  return out;
+};
+
 export const extractFlexiPage = async (
   path: string,
 ): Promise<Result<ExtractionResult, ExtractorError>> => {
@@ -1553,6 +1617,9 @@ export const extractFlexiPage = async (
   // FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: Screen Flows embedded via
   // `flowruntime:interview` components (previously invisible → false safe-to-delete).
   const embeddedFlows = extractFlexiPageEmbeddedFlows(text.value);
+  // FLEXIPAGE-RELATEDLIST-ALIASES: bare field names on the RELATED object;
+  // resolved into edges at import time (see the helper's doc).
+  const relatedListFieldRefs = extractFlexiPageRelatedListFieldRefs(text.value);
 
   const edges: Edge[] = fieldRefs.map((fieldId) => ({
     fromId: nodeId,
@@ -1606,6 +1673,7 @@ export const extractFlexiPage = async (
     rawReferenceCount: fieldRefs.length,
     permissionRefs,
     embeddedFlows,
+    ...(relatedListFieldRefs.length > 0 ? { relatedListFieldRefs } : {}),
   });
   return ok({ nodes: [node], edges });
 };

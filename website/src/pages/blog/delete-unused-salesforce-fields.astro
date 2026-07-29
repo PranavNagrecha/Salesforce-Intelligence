@@ -1,0 +1,186 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Can I Delete This Salesforce Field? A Dependency-First Field Cleanup Method";
+const description =
+  "Field population tells you how much data is in a field. It never tells you what depends on it. Here is the method for deciding whether a Salesforce custom field is safe to delete - what blocks a delete, what breaks silently, the four verdicts that make cleanup actionable, and the blind spots no static analysis closes.";
+
+const faqs = [
+  {
+    q: "Does field population tell you if a Salesforce field is unused?",
+    a: "No. Population measures how much data is in a field; it says nothing about what depends on it. The two agree on busy, obviously-live fields and diverge everywhere else. A field with 750,000 values can be dead - written once by a migration years ago and read by nothing. A field with zero values can be load-bearing, because a running-user formula that returns false for the person running the query still scopes a live report.",
+  },
+  {
+    q: "What stops you from deleting a custom field in Salesforce?",
+    a: "The platform refuses the delete outright when the field is a roll-up summary's summarized field or summary foreign key, is referenced by a formula field, is bound to a validation rule (including as its errorDisplayField, even when it never appears in the rule logic), is named by any Flow version - active or not - or is a master-detail field. Those are blocking. A separate class deletes successfully and breaks something quietly afterwards.",
+  },
+  {
+    q: "What happens if you delete a field used as a report filter?",
+    a: "The report does not empty - it silently widens. Deleting a field that a report filters on removes the filter, so the report returns more rows than it should while still looking healthy and still returning a plausible number. Nothing errors, nothing fails to deploy, and nobody files a ticket. That is why a field audit must record what each reference does, not just how many references exist.",
+  },
+  {
+    q: "Can you recover a deleted Salesforce field?",
+    a: "Partly, and only for a short window. A deleted field and its data sit in a recycle state for a limited period (commonly around 15 days) before purging, and that undelete window is the only rollback for the data. Field history rows are a harder loss: deleting a history-tracked field permanently discards its history, and an export of current values does not recover it.",
+  },
+  {
+    q: "How do you find which fields are actually unused in Salesforce?",
+    a: "Trace dependencies rather than counting rows. For each field, enumerate what consumes it - flow entry criteria, formulas, roll-ups on the parent object, validation rules, related lists on other objects' layouts, list-view and report filters, dashboard groupings, Apex, LWC, and integration contracts - then record what each consumer would do if the field vanished. Reverse dependencies are the ones most audits miss, because a roll-up that blocks the delete is declared on the parent object's metadata, not the field's.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Can I delete this Salesforce field? A dependency-first field cleanup method",
+    description:
+      "Why field population is the wrong evidence for a deletion decision, what actually blocks a Salesforce field delete, which dependencies break silently, and the four-verdict taxonomy that makes a field cleanup actionable.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    datePublished: "2026-07-28",
+    dateModified: "2026-07-28",
+    inLanguage: "en",
+    keywords:
+      "delete Salesforce field, unused fields Salesforce, Salesforce field cleanup, safe to delete field, Salesforce technical debt, field usage audit, deprecate custom field",
+    articleSection: "Engineering",
+    mainEntityOfPage: `${site.url}/blog/delete-unused-salesforce-fields`,
+    image: `${site.url}/assets/img/og-image.png`,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog/delete-unused-salesforce-fields"
+  heading="Can I delete this Salesforce field?"
+  intro={`Most field cleanups start with a population report and end with a spreadsheet of percentages. That measures the wrong thing. <strong>Population tells you how much data is in a field; it never tells you what depends on it.</strong> Here is a dependency-first method - what blocks a delete, what breaks silently afterwards, and the four verdicts that make the output actionable.`}
+  crumbs={[{ label: "blog", href: "/blog" }, { label: "delete-unused-salesforce-fields", href: "/blog/delete-unused-salesforce-fields" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "Deleting unused Salesforce fields", path: "/blog/delete-unused-salesforce-fields" }]}
+  jsonld={jsonld}
+>
+  <section style="padding-top:clamp(20px,3vw,28px);">
+    <div class="container">
+      <div class="prose">
+
+        <div class="callout">
+          <p><strong>Short answer:</strong> a field is safe to delete when nothing consumes it, not when nothing populates it. Before dispositioning any field, name one thing that consumes it and say what that thing would do if the field vanished. If you cannot fill in that sentence, the field is not decided yet - whatever the percentage says.</p>
+        </div>
+
+        <h2 id="population-trap">Why population is the wrong evidence</h2>
+        <p>Population and dependency are different questions, and they come apart hardest on exactly the fields that matter: formula fields, transient state flags, integration keys, and anything frozen years ago.</p>
+        <ul>
+          <li><strong>A dense field can be dead.</strong> A field populated on every record by a migration, read by nothing since, is residue with a reassuring percentage attached.</li>
+          <li><strong>An empty field can be load-bearing.</strong> Report filters cannot natively compare a field to the running user, so a formula like <code>IF(Owner__r.Id = $User.Id, TRUE, FALSE)</code> is often the <em>only</em> available scoping mechanism for a "my records" report. Measured by whoever runs the query, it can read 0% populated. Delete it and the dashboard it scopes silently widens to the whole org.</li>
+          <li><strong>A formula field has no meaningful population figure at all.</strong> If the body references <code>$User</code>, <code>$UserRole</code>, <code>$Profile</code> or <code>TODAY()</code>, the percentage measures who ran the query. If it returns <code>IF(...,1,0)</code> or <code>CASESAFEID(Id)</code>, it can never be null, so it reads 100% whether or not a human has ever looked at the object. Read the body; strike the number.</li>
+        </ul>
+
+        <h3 id="measure-flow">Measure flow, not just stock</h3>
+        <p>Population is a stock measure. It cannot tell you a process stopped five years ago. Three cheap queries per field usually reclassify more rows than the entire population report:</p>
+        <pre><code>SELECT MAX(Some_Field__c) FROM Custom_Object__c
+SELECT COUNT() FROM Custom_Object__c WHERE Some_Field__c &gt; TODAY
+SELECT CreatedById, COUNT(Id) FROM Custom_Object__c
+ WHERE Some_Field__c != null AND CreatedDate = LAST_N_DAYS:180 GROUP BY CreatedById</code></pre>
+        <p>A 40%-populated date field whose newest value is four years old is frozen. A 0.7%-populated deadline field with no future-dated value at all is residue - for a "by date" field, that absence is the tell. And if an integration identity created every recent row on a steady cadence, the field is alive regardless of how sparse it looks.</p>
+        <div class="callout">
+          <p><strong>Sandbox caution.</strong> A sandbox stops receiving production writes at its refresh point, so record creation falls off a cliff on a specific date and <em>every</em> field looks dead from that month onward. Before reading any "no writes since" finding as death, plot creation volume for the whole object and find the cliff. A field that stops well before it is dead; a field that stops at it is simply unmeasured.</p>
+        </div>
+
+        <h2 id="three-severities">Blocking, breaking, cosmetic</h2>
+        <p>Not every dependency is the same problem. Classify each one, because they fail in completely different ways.</p>
+        <table>
+          <thead><tr><th>Class</th><th>What happens on delete</th><th>When you find out</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Blocking</strong></td><td>The platform refuses the delete, or the destructive deploy fails validation</td><td>Immediately and loudly, in a sandbox</td></tr>
+            <tr><td><strong>Breaking</strong></td><td>The deploy succeeds and something silently misbehaves</td><td>Never, or weeks later via a wrong number</td></tr>
+            <tr><td><strong>Cosmetic</strong></td><td>A column vanishes, a layout gap appears, an unused grant drops</td><td>Visible and harmless</td></tr>
+          </tbody>
+        </table>
+        <p><strong>Blocking</strong> covers roll-up summary sources and summary foreign keys, formula references, validation-rule bindings (including <code>errorDisplayField</code>, which blocks even when the field never appears in the rule's logic), any Flow version naming the field - active, draft or obsolete - and master-detail relationships.</p>
+        <p><strong>Breaking</strong> is the dangerous class, because a green deploy is not evidence of safety:</p>
+        <table>
+          <thead><tr><th>Role the field plays</th><th>What deletion does</th><th>Failure mode</th></tr></thead>
+          <tbody>
+            <tr><td>Sole filter criterion on a report or list view</td><td>Scope disappears; the result set widens</td><td><strong>Silent - fails open</strong></td></tr>
+            <tr><td>Non-blank row gate</td><td>Rows previously excluded now appear</td><td><strong>Silent - fails open</strong></td></tr>
+            <tr><td>Related-list <code>sortField</code> on another object's layout</td><td>Every page rendering that list loses its ordering</td><td>Silent</td></tr>
+            <tr><td>Report date axis (<code>timeFrameFilter</code>)</td><td>The time window disappears</td><td>Semi-silent</td></tr>
+            <tr><td>Dashboard grouping column</td><td>The component loses its axis and breaks</td><td>Loud</td></tr>
+            <tr><td>Display column only</td><td>One column is missing</td><td>Loud, harmless</td></tr>
+          </tbody>
+        </table>
+        <p>This is why "16 reports" and "1 report" are not comparable evidence. Sixteen display columns break nothing in the org; one sole filter is a Keep or a staged retirement with report remediation first.</p>
+
+        <h2 id="reverse-dependencies">The dependencies most audits miss</h2>
+        <p>The hardest blockers are not declared on the field you are auditing. They live on <em>other</em> objects' metadata, which means a per-field search scoped to the field's own object cannot find any of them:</p>
+        <ul>
+          <li><strong>Roll-up summaries</strong> - <code>summarizedField</code>, <code>summaryForeignKey</code> and the fields inside <code>summaryFilterItems</code> are all declared on the <strong>parent</strong> object.</li>
+          <li><strong>Cross-object formulas</strong> - written as <code>Relationship__r.Field__c</code>, so a search for the <code>__c</code> spelling misses them entirely.</li>
+          <li><strong>Related lists on other objects' layouts</strong> - including the lookup that <em>keys</em> the related list, whose deletion removes the whole list rather than a column.</li>
+          <li><strong>Flow entry criteria</strong> and <code>PRIORVALUE()</code> expressions, which many dependency indexers model as a different kind of edge than a field read.</li>
+          <li><strong>Lookup filters, dependent-picklist bindings and default-value formulas</strong> on other fields entirely.</li>
+        </ul>
+
+        <h2 id="four-verdicts">Four verdicts, not three</h2>
+        <p>Most cleanup spreadsheets offer Keep, Review and Remove. That collapses a real and common answer - right destination, wrong timing - into either a parking label or a same-day delete that destroys history rows.</p>
+        <table>
+          <thead><tr><th>Verdict</th><th>Means</th><th>What must ship with it</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Keep</strong></td><td>Live dependency, integration contract, or clear business value</td><td>The blocker, never the population. "Keep because 100% populated" gets re-litigated within a year.</td></tr>
+            <tr><td><strong>Review</strong></td><td>Genuinely ambiguous; turns on a business decision</td><td>The exact question, and the named human who answers it. Without both, it is indistinguishable from an unanswered field.</td></tr>
+            <tr><td><strong>Deprecate-then-Remove</strong></td><td>Dead in practice, but holds data, tracked history or cosmetic references</td><td>An ordered retirement: strip layout, mark the description, remove from report types, monitor an integration cycle, then delete.</td></tr>
+            <tr><td><strong>Remove</strong></td><td>No data of value, no live dependency, no plausible future need</td><td>Ordered pre-work: strip layout → strip report-type columns → deploy → delete the field, as separate deployments.</td></tr>
+          </tbody>
+        </table>
+        <p>Two operational notes that bite during execution rather than analysis. Salesforce refuses a field delete while <em>any</em> Flow version references it, active or not - so obsolete flows and all their versions must be cleared first. And bundling the field delete with the layout and report-type strip in one deployment gets refused or silently dropped; run them as separate deployments.</p>
+
+        <h2 id="blind-spots">The blind spots no static analysis closes</h2>
+        <p>State these explicitly rather than letting a thorough metadata sweep imply full coverage. Every one of them fails at <em>runtime</em>, not at deploy time:</p>
+        <ul>
+          <li><strong>Dynamically built SOQL</strong> and reflective field access (<code>.get('Field__c')</code>) - the field name is a string assembled at runtime.</li>
+          <li><strong>Field lists stored as org DATA</strong> in custom settings or custom metadata records, read at runtime by a controller. These are data, not metadata: invisible to a metadata retrieval and to any metadata knowledge base. A single row naming your object can make arbitrary fields load-bearing on a live page.</li>
+          <li><strong>External ETL and integration job definitions</strong> - usually the only place a deletion can actually break something, and the one place you cannot look from inside the platform.</li>
+          <li><strong>Private and personal report folders</strong>, which are not retrievable via the Metadata API at all.</li>
+          <li><strong>Email template merge fields</strong>, and <strong>managed-package internals</strong>.</li>
+          <li><strong>Field history rows</strong>, which a delete destroys permanently and no export of current values recovers.</li>
+        </ul>
+        <p>The discipline that matters most: <strong>always separate "checked and found nothing" from "could not check."</strong> They look identical in a report and mean opposite things. One is a finding worth publishing; the other is an open question wearing a finding's clothes.</p>
+
+        <h2 id="tool-zeros">Never let a tool's zero stand on its own</h2>
+        <p>A zero from any dependency tool is a statement about the instrument until you have shown the instrument can see that surface. Before recording "no references", run the identical method against a field you already know is referenced. If it does not light up, the method is blind and its zeros mean nothing.</p>
+        <p>We take this seriously enough to apply it to ourselves. Auditing sf-intelligence against a real field-cleanup engagement surfaced four modelling gaps in our own dependency graph, each of which could return a clean <code>safe</code> verdict for a field the platform refuses to delete: roll-up coupling that lived only as a node property, condition field references that were never edges, formula <code>__r</code> traversals that were skipped, and dynamic related-list columns that were never parsed. All four are now closed and covered by tests. The condition gap had a second floor underneath it worth naming, because it generalises: Flow writes the same condition triplet two ways - <code>leftValueReference</code> inside a decision, <code>field</code> inside a record trigger's <code>start</code> block - and a parser that knows only the first reports decisions perfectly while dropping every entry criterion in the org.</p>
+        <div class="callout">
+          <p><strong>The property that made them dangerous</strong> is worth generalising past our own bug list: all four sat inside metadata families the tool had <em>fully retrieved</em>, so no coverage warning fired and the verdict presented as clean rather than hedged. A tool can only caveat the gaps it knows it has. Treat a confident <code>safe</code> on a field with real structural weight - a roll-up, a master-detail, a condition, an integration key - as a prompt to check by hand, no matter which tool produced it.</p>
+        </div>
+
+        <h2 id="with-sfi">Running this with sf-intelligence</h2>
+        <p>sf-intelligence is an offline, read-only knowledge base for one Salesforce org. For a field cleanup, the relevant calls are:</p>
+        <ul>
+          <li><code>sfi.coverage_report</code> - which metadata families the last refresh actually retrieved. A family listed as not modeled means "not checked", never "none".</li>
+          <li><code>sfi.field_360</code> - the full profile of one field across validation, formulas, writers, readers, UI and integrations.</li>
+          <li><code>sfi.find_field_anywhere</code> - every incoming edge, grouped by component type.</li>
+          <li><code>sfi.safe_to_delete_field</code> - a verdict with its reasoning chain, and a <code>coverageCaveat</code> when the families it depends on are not fully covered. Render that caveat before the verdict, never as a footnote.</li>
+        </ul>
+        <p>Claude Code users get the whole method as a plugin skill (<code>salesforce-field-audit</code>); other MCP hosts get it as the <code>sfi.field_audit</code> prompt. One prerequisite worth knowing, and it is the fifth gap from the list above - the one still open rather than closed: the default refresh pulls the top 500 reports and dashboards ranked by usage, so on a large org a field's report count is drawn from a fraction of the corpus. Raise <code>SFI_REPORTS_CAP</code> before an audit, and check that Report coverage reads <code>complete</code> rather than <code>pending</code> before quoting any report figure.</p>
+
+        <h2 id="faq">FAQ</h2>
+        {faqs.map((f) => (
+          <div>
+            <h3>{f.q}</h3>
+            <p>{f.a}</p>
+          </div>
+        ))}
+
+      </div>
+    </div>
+  </section>
+</DocPage>

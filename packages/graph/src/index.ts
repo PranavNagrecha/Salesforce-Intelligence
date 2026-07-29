@@ -21,6 +21,11 @@ export {
 } from './import.js';
 export type { ImportCounts } from './import.js';
 export {
+  buildRelationshipMaps,
+  mintRelationshipTraversalEdges,
+  RELATIONSHIP_RESOLVER_SOURCE,
+} from './relationship-refs.js';
+export {
   applyChangeSet,
   changeSetSize,
   computeChangeSet,
