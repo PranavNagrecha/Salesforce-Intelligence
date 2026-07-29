@@ -803,6 +803,152 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // FLOW-side bulkification: DML / Get Records inside a Loop body (+ filterless
+    // Get Records) — the complement of the Apex-only governor_limit_risks scan.
+    // Placed BEFORE the trigger / governor-risks rules so a FLOW-scoped loop ask
+    // wins first-match over the Apex governor rule's generic
+    // `(soql|dml|query) ... in loop` pattern. Every pattern anchors on "flow(s)"
+    // so it never steals the Apex governor / automation-collision asks.
+    intent: 'flow-bulkification',
+    plane: 'vault',
+    tools: ['sfi.flow_bulkification_audit'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Static Flow bulkification audit — record DML / Get Records inside a Loop body (one operation per iteration) plus filterless Get Records, read from the declared connector graph. The Flow-side sibling of the Apex-only governor_limit_risks scan.',
+    patterns: [
+      /\bflow_bulkification_audit\b/,
+      // "flow(s) ... bulkif*" (either order).
+      /\bflows?\b[^.?!]{0,60}\bbulkif\w*\b/,
+      /\bbulkif\w*\b[^.?!]{0,60}\bflows?\b/,
+      // "DML / create / update / delete / get records ... in a loop ... flow" —
+      // the loop anti-pattern, scoped to flows.
+      /\bflows?\b[^.?!]{0,80}\b(?:dml|create|update|delete|get\s+records|record\s+lookup|soql|quer(?:y|ies))\b[^.?!]{0,40}\b(?:in\s+(?:a\s+)?loop|inside\s+(?:a\s+)?loop|loops?)\b/,
+      /\b(?:dml|create|update|delete|get\s+records|record\s+lookup|soql|quer(?:y|ies))\b[^.?!]{0,40}\b(?:in\s+(?:a\s+)?loop|inside\s+(?:a\s+)?loop|loops?)\b[^.?!]{0,60}\bflows?\b/,
+      // "flow(s) ... filterless / unbounded / no filter Get Records".
+      /\bflows?\b[^.?!]{0,60}\b(?:filterless|unbounded|no\s+filter|without\s+(?:a\s+)?filter)\b[^.?!]{0,30}\b(?:get\s+records|quer(?:y|ies))\b/,
+    ],
+  },
+  {
+    // INDEX-AWARE non-selective SOQL — Apex queries whose WHERE clause is a
+    // full-scan shape (filters only on non-indexed fields, leading-wildcard LIKE,
+    // negative-only, or no WHERE). A SELECTIVITY axis, distinct from the RUNTIME
+    // governor_limit_risks in-loop scan. Anchored on "non-selective" / "selective
+    // query" / "full (table) scan" / "time out ... at scale" / "index" + "query"
+    // so it never steals the governor in-loop asks (which anchor on loops).
+    intent: 'nonselective-soql',
+    plane: 'vault',
+    tools: ['sfi.nonselective_soql'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Index-aware non-selective SOQL audit — Apex queries whose WHERE clause filters only on non-indexed fields, uses a leading-wildcard LIKE, is negative-only, or is absent (full-scan / timeout risk at scale). A selectivity axis distinct from the governor_limit_risks in-loop scan.',
+    patterns: [
+      /\bnonselective_soql\b/,
+      /\bnon[-\s]?selective\b/,
+      /\bselective\s+quer(?:y|ies)\b/,
+      // "full (table) scan" query risk.
+      /\bfull[-\s]?(?:table\s+)?scan\b/,
+      // "queries / SOQL ... time out / timeout ... at scale / large data".
+      /\b(?:quer(?:y|ies)|soql)\b[^.?!]{0,50}\b(?:time\s*out|timeout|full\s+scan|non[-\s]?selective)\b/,
+      // "queries filtering on non-indexed / unindexed field(s)".
+      /\b(?:quer(?:y|ies)|soql|filter(?:s|ing)?)\b[^.?!]{0,40}\b(?:non[-\s]?indexed|un[-\s]?indexed|no\s+index)\b/,
+      // "leading wildcard" LIKE.
+      /\bleading[-\s]?wildcard\b/,
+    ],
+  },
+  {
+    // CONFIGURATION limit headroom — metadata counts vs per-object / per-org
+    // Salesforce config ceilings, ranked worst-first (the offline Optimizer
+    // limit report). Anchored on "headroom" / "limit report" / "Optimizer" /
+    // "approaching|close to|running out of ... limit(s)" / "how many ... left",
+    // so it never steals the Apex governor_limit_risks asks (which anchor on
+    // governor / SOQL-DML-in-loop) — those are RUNTIME per-transaction limits,
+    // a different question from these config CEILINGS.
+    intent: 'limit-headroom',
+    plane: 'vault',
+    tools: ['sfi.limit_headroom_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Offline configuration-limit headroom report — metadata counts vs per-object / per-org Salesforce config ceilings, ranked worst-first (the vault-only replacement for the Salesforce Optimizer limit report). Distinct from the Apex governor_limit_risks RUNTIME scan.',
+    patterns: [
+      /\blimit_headroom_report\b/,
+      /\bheadroom\b/,
+      /\blimit\s+report\b/,
+      /\boptimizer\b/,
+      // "approaching / close to / nearing / almost at ... limit(s)". Deliberately
+      // EXCLUDES the governor-collision verbs (hit / hitting / exceed), which
+      // belong to the RUNTIME governor_limit_risks scan ("hitting governor
+      // limits"), not the config-CEILING headroom report.
+      /\b(?:approaching|close\s+to|near(?:ing)?|almost\s+at|running\s+out\s+of)\b[^.?!]{0,40}\blimits?\b/,
+      // "custom field / object / tab / app limit" — config-limit vocabulary.
+      /\bcustom\s+(?:field|object|tab|app|application)s?\b[^.?!]{0,20}\blimits?\b/,
+      // "how many (custom) fields / objects / ... (left|remaining)".
+      /\bhow\s+many\b[^.?!]{0,40}\b(?:left|remaining)\b/,
+      // "running out of ... (fields|slots|record types|relationships)".
+      /\brunning\s+out\s+of\b[^.?!]{0,30}\b(?:fields?|slots?|record\s+types?|relationships?|objects?)\b/,
+    ],
+  },
+  {
+    // Org-wide picklist VALUE-SET INTEGRITY scan — orphaned / stale / renamed
+    // value references in formulas, validation rules, and flow decisions. Keyed
+    // on integrity / orphaned / stale / dead / renamed vocabulary so it never
+    // steals `what_if_remove_picklist_value` (remove/delete a value),
+    // `live_picklist_usage` (never-used / usage counts), or `picklist-values`
+    // (what values are in X). Placed EARLY so the specific integrity framing wins
+    // first-match over the generic picklist rules further down.
+    intent: 'picklist-integrity',
+    plane: 'vault',
+    tools: ['sfi.picklist_integrity_scan'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Org-wide picklist value-set integrity scan — literals in formulas / validation rules / flow decisions that reference a value the field does not define (orphaned) or defines only as inactive. Distinct from what_if_remove_picklist_value (single-value blast radius) and live_picklist_usage (runtime value counts).',
+    patterns: [
+      /\bpicklist_integrity_scan\b/,
+      /\bpicklist\b[^.?!]{0,40}\bintegrit\w*\b/,
+      /\bintegrit\w*\b[^.?!]{0,40}\bpicklist\b/,
+      /\bvalue\s+sets?\b[^.?!]{0,30}\bintegrit\w*\b/,
+      // "orphaned / stale / dead / renamed / missing ... picklist value(s)".
+      /\b(?:orphaned|stale|dead|renamed|non-?existent|invalid)\b[^.?!]{0,30}\bpicklist\b/,
+      /\bpicklist\b[^.?!]{0,40}\b(?:orphaned|stale|no\s+longer\s+exists?|renamed\s+away|deactivated)\b/,
+      // "orphaned value(s)" / "stale value(s)" (value-set framing without the word picklist).
+      /\borphaned\s+(?:picklist\s+)?(?:value|literal|reference)s?\b/,
+      /\bstale\s+(?:picklist\s+)?values?\b/,
+      // "value(s) that (no longer|don't) exist ... on the field / picklist".
+      /\bvalues?\b[^.?!]{0,30}\b(?:no\s+longer\s+exists?|do(?:es)?n['’]?t\s+exist|been\s+renamed)\b[^.?!]{0,30}\b(?:field|picklist)\b/,
+    ],
+  },
+  {
+    // Permission-set CONSOLIDATION — redundant / duplicate / subset / overlapping
+    // permission sets that could be merged, from DECLARED grants. Keyed on
+    // redundant/duplicate/consolidate/merge/subset/overlap + permission set(s) so
+    // it never steals `unassigned_permission_sets` (who HOLDS a set — assignment)
+    // or `permission_risk_report` (god-mode / over-privilege — how DANGEROUS a
+    // grant is). Placed EARLY so the consolidation framing wins first-match over
+    // generic permission asks.
+    intent: 'permission-set-consolidation',
+    plane: 'vault',
+    tools: ['sfi.permission_set_consolidation'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Offline permission-set consolidation candidates from declared grants — empty / strict-subset / near-duplicate permission sets ranked by consolidation opportunity. Distinct from unassigned_permission_sets (who holds a set) and permission_risk_report (over-privilege / god-mode).',
+    patterns: [
+      /\bpermission_set_consolidation\b/,
+      // "redundant / duplicate / consolidate / merge / overlapping ... permission set(s)".
+      /\b(?:redundant|duplicate|consolidat\w*|overlapping|near-?duplicate)\b[^.?!]{0,40}\bpermission\s+sets?\b/,
+      /\bpermission\s+sets?\b[^.?!]{0,40}\b(?:redundant|duplicate|consolidat\w*|overlapping|near-?duplicate|subset)\b/,
+      // "merge / combine ... permission set(s)".
+      /\b(?:merge|combine)\b[^.?!]{0,30}\bpermission\s+sets?\b/,
+      // "permission set(s) ... (that are a )subset of / contained in another".
+      /\bpermission\s+sets?\b[^.?!]{0,40}\b(?:subset\s+of|contained\s+in)\b/,
+      // "empty permission set(s)".
+      /\bempty\s+permission\s+sets?\b/,
+    ],
+  },
+  {
     intent: 'trigger-order',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
@@ -3817,6 +3963,33 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // AUTOMATION-SPRAWL-MODE — the org-wide, per-OBJECT automation-density
+    // ranking ("which objects have the most automation / where is sprawl
+    // worst"). Placed BEFORE the generic automation-risk rule so a sprawl
+    // phrasing wins first-match and routes with `mode: 'sprawl'`; every other
+    // automation-risk ask still falls through to the per-finding synthesis
+    // below. The patterns key on sprawl / density / most-automation-per-object
+    // vocabulary the risk rule never uses.
+    intent: 'automation-sprawl',
+    plane: 'vault',
+    tools: ['sfi.automation_risk_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Org-wide per-object automation-density ranking — a prioritized triage queue (where is automation sprawl worst first), the sprawl MODE of automation_risk_report.',
+    suggestArgs: () => ({ mode: 'sprawl' }),
+    patterns: [
+      /\bautomation\s+sprawl\b/,
+      /\bflow\s+sprawl\b/,
+      /\bsprawl\b[^.?!]{0,30}\b(?:automation|flows?|objects?)\b/,
+      /\b(?:automation|flow)\s+density\b/,
+      /\b(?:which|what)\s+objects?\b[^.?!]{0,40}\bmost\s+(?:automation|flows?|triggers?)\b/,
+      /\bmost\s+(?:automation|flows?|triggers?)\b[^.?!]{0,25}\bobjects?\b/,
+      /\brank\s+(?:the\s+)?objects?\b[^.?!]{0,30}\b(?:automation|flow|density)\b/,
+      /\bwhere\s+is\b[^.?!]{0,30}\bsprawl\b/,
+    ],
+  },
+  {
     intent: 'automation-risk',
     plane: 'vault',
     tools: ['sfi.automation_risk_report'],
@@ -4391,6 +4564,14 @@ const RULES: readonly Rule[] = [
       /\bwhich\s+of\s+(?:my|these)\s+changes\s+are\s+(?:blocking|risky|safe)\b/,
       /\breview\s+(?:the\s+)?components?\s+in\s+(?:this\s+|my\s+)?package\.xml\b/,
       /\breview_change\b/,
+      // Access-parity ("ships for nobody") phrasings — the grant-completeness
+      // half of the deploy gate. Anchored on a deploy/release artifact so they
+      // never steal from the field/object access-audit rules (which key on a
+      // SPECIFIC object/field, not a release/changeset/PR).
+      /\bships?\s+for\s+nobody\b/,
+      /\bdid\s+i\s+forget\s+(?:the\s+)?permission\s+set\b/,
+      /\bdoes\s+(?:this|my)\s+(?:release|deploy(?:ment)?|changeset|change\s+set|pr|pull\s+request)\b[^.?!]{0,40}\bship\b[^.?!]{0,20}\bpermissions?\b/,
+      /\bdid\s+(?:this|my|the)\s+(?:release|deploy(?:ment)?|changeset|change\s+set|pr|pull\s+request)\b[^.?!]{0,40}\b(?:include|ship|grant)\b[^.?!]{0,30}\b(?:access|permissions?|permission\s+set|profile)\b/,
     ],
   },
   {
@@ -4513,6 +4694,43 @@ const RULES: readonly Rule[] = [
       // retrieve blind-spot; the existing anchors ("blind spot", "referenced but
       // not retrieved", "not being pulled") missed this framing.
       new RegExp('\\b(what|which)\\s+metadata\\s+types?\\b[^?!]{0,40}\\b(not|aren.?t|never)\\b[^?!]{0,20}\\b(track|deploy|retriev|pull)'),
+    ],
+  },
+  {
+    // DOCUMENTATION-COVERAGE gap meter — where the org's metadata is
+    // undocumented (missing `description` / `inlineHelpText`), ranked
+    // worst-covered first and weighted by graph edge-degree. Anchored on
+    // documentation-coverage / undocumented / missing-descriptions /
+    // missing-help-text vocabulary so it never steals the test-coverage route
+    // ("coverage gaps" / "test coverage") or the single-field explain_field
+    // help-text lookup ("what is the help text for X" — a BARE help-text mention
+    // with no gap/coverage qualifier stays with explain_field). Placed before
+    // tech-debt so a documentation-coverage ask lands on the doc axis
+    // tech_debt_score lacks, not the generic debt score.
+    intent: 'doc-coverage',
+    plane: 'vault',
+    tools: ['sfi.doc_coverage_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Offline documentation-coverage gap meter — which custom metadata lacks a description / inline help text, ranked worst-covered first and weighted by graph edge-degree. The documentation axis sfi.tech_debt_score lacks; distinct from the Apex test-coverage tools.',
+    patterns: [
+      /\bdoc_coverage_report\b/,
+      // "documentation coverage / gaps / debt / completeness / quality / health".
+      /\bdocumentation\s+(coverage|gaps?|debt|completeness|quality|health)\b/,
+      /\bdocs?\s+coverage\b/,
+      // "undocumented" (fields / objects / metadata / components).
+      /\bun-?documented\b/,
+      // "(which|what) ... (fields|objects|components|metadata) ... not/never documented".
+      /\b(fields?|objects?|components?|metadata)\b[^.?!]{0,40}\b(not|aren.?t|never)\s+documented\b/,
+      // "(lack|missing|without|no) ... description(s) / documentation".
+      /\b(lack|lacks|lacking|missing|without|no)\b[^.?!]{0,30}\b(descriptions?|documentation)\b/,
+      // "description(s) ... (missing|blank|empty|absent|coverage|gaps)".
+      /\bdescriptions?\b[^.?!]{0,25}\b(missing|blank|empty|absent|coverage|gaps?)\b/,
+      // Help text WITH a gap/coverage qualifier — a bare "help text for X" lookup
+      // stays with explain_field (which owns the single-field help-text bubble).
+      /\b(missing|no|without|lacks?|lacking|blank|empty)\b[^.?!]{0,25}\b(inline\s+)?help\s*text\b/,
+      /\b(inline\s+)?help\s*text\b[^.?!]{0,25}\b(coverage|missing|gaps?|blank|empty|completeness)\b/,
     ],
   },
   {

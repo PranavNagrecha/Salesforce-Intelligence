@@ -287,6 +287,12 @@ function main() {
       [rule.witnessPartition?.witnessArrayMember, `${w}.witnessPartition.witnessArrayMember`],
       [rule.witnessPartition?.interpretationWitnessOnly, `${w}.witnessPartition.interpretationWitnessOnly`],
       [rule.witnessPartition?.interpretationMixedWitnessSuffix, `${w}.witnessPartition.interpretationMixedWitnessSuffix`],
+      // CITED-REMEDIATION — the authored fix steps are FREE-PROSE emitted VERBATIM
+      // into user-facing remediation, so a canonical id here would ship to a caller
+      // with a green gate. Every ordered step + the optional whatIfTool pointer are
+      // scanned (the builder's own check is START-anchored and cannot see a mid-prose id).
+      ...(rule.remediation?.steps ?? []).map((s, i) => [s, `${w}.remediation.steps[${i}]`]),
+      [rule.remediation?.whatIfTool, `${w}.remediation.whatIfTool`],
       ...rule.dependsOnCoverage.map((t, i) => [t, `${w}.dependsOnCoverage[${i}]`]),
     ];
     for (const [value, where] of flat) {

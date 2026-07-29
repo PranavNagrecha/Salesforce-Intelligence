@@ -28,6 +28,8 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-23",
+    mainEntityOfPage: `${site.url}/use-cases/what-breaks-if-you-delete-a-field`,
   },
   {
     "@type": "FAQPage",
@@ -49,6 +51,7 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
         <div class="callout">
           <p><strong>Short answer:</strong> Don't guess - simulate. Ask sf-intelligence <em>"what breaks if I delete Contact.Legacy_Status__c?"</em> and it collects every dependent component, weighs the impact, and returns a verdict with a <strong>coverage caveat</strong> naming what it did and didn't check. It surfaces the risk before you make the change, and it's read-only - it never deletes anything for you.</p>
         </div>

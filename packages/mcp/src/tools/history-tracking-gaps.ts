@@ -471,6 +471,11 @@ const classifyHistoryGaps = async (
     fieldsScanned += 1;
 
     const detection = detectPiiClassificationWithReason(node);
+    // NOTE: the newer `protected` tier (protected-class attributes: race / ethnicity /
+    // disability / citizenship / …) is intentionally NOT yet gated here — this sweep still
+    // considers only `pii` / `sensitive`, so a protected-class field lacking history
+    // tracking is not surfaced as a gap. Deferred to preserve the pinned byClassification
+    // contract; tracked as a follow-up to extend this sweep to `protected`.
     if (detection.piiClassification !== 'pii' && detection.piiClassification !== 'sensitive') {
       continue;
     }

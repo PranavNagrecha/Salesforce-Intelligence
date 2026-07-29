@@ -46,17 +46,57 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 - `sfi.find_field_anywhere` / `sfi.find_semantic_field` / `sfi.disambiguate_concepts`
 - `sfi.generate_onboarding_doc` / `sfi.org_overview` / `sfi.domain_clusters`
 - `sfi.get_naming_convention_report`
+- `sfi.doc_coverage_report` — MEASURES documentation gaps (the axis the
+  generators and `tech_debt_score` lack): where custom metadata lacks a
+  `description` / `inlineHelpText`, ranked worst-covered first by object and
+  weighted by graph edge-degree so undocumented, heavily-referenced components
+  surface first. Honest about scope — a type whose description the extractor
+  cannot capture is NOT MEASURABLE (excluded), and standard / managed-package
+  components are out-of-scope, never counted against the org.
 
 ### 2. Change safety (impact / what-if)
 
 - `sfi.get_impact`, `sfi.safe_to_delete_field`, the `sfi.what_if_*` family
+- `sfi.picklist_integrity_scan` — the org-wide INVERSE of
+  `what_if_remove_picklist_value`: sweeps every inline-value-set picklist and
+  flags declarative literals (VR / formula-field formulas + `ISPICKVAL`, Flow
+  decision criteria / literal assignments, Workflow criteria, defaults) that
+  reference a value the field no longer defines (orphaned — a branch that
+  silently died on a value rename) or defines only as inactive. Honest about
+  scope — a COMPARISON is flagged, but an ASSIGNMENT is a defect only for a
+  `restricted` picklist, and Apex picklist-literal comparison is out of scope
+  (disclosed), so it never mis-flags a free-text write.
 - `sfi.what_happens_on_save` / `sfi.order_of_execution`
+- `sfi.review_change` — the pre-deploy gate over a caller-assembled changeset
+  (per-component blocking / risky / review / safe + dependents + tests-to-run).
+  Opt-in `checkAccessParity` adds a grant-completeness ("ships for nobody")
+  check: each ADDED/MODIFIED custom field/object that resolves to ZERO modeled
+  grants (no Profile/PermissionSet `grantedBy`, no ViewAllData/ModifyAllData,
+  not standard-default) is flagged as a candidate feature that would deploy
+  invisible — did the release ship the permissions, or did you forget the
+  permission set? Honest about scope — the "ships for NOBODY" direction only
+  (the "ships for everybody" breadth is per-user live assignment data deferred
+  to `sfi.live_permset_holders`), stamped with the vault's last refresh, and a
+  CANDIDATE to verify (a grant may live in an unretrieved perm set) rather than
+  a proof. Distinct from `crud_fls_audit` (Apex CRUD/FLS enforcement).
+- `sfi.automation_risk_report` — per-finding automation risk, plus a
+  `mode: 'sprawl'` org-wide per-object automation-density triage ranking (where
+  is automation sprawl worst first — a candidate queue, not a verdict), the
+  org-wide roll-up the single-object `automation_collisions` /
+  `automation_build_advisor` / `order_of_execution` tools lack
 - `sfi.compare_vaults` / `sfi.compare_object_across_vaults` /
   `sfi.compare_profile_across_vaults`
 
 ### 3. Code quality / Salesforce-specific SAST
 
 - `sfi.governor_limit_risks`, `sfi.crud_fls_audit`, `sfi.find_hardcoded_values*`
+- `sfi.flow_bulkification_audit` (the Flow-side sibling of `governor_limit_risks`:
+  record DML / Get Records inside a Loop body + filterless Get Records)
+- `sfi.nonselective_soql` (the first INDEX-AWARE Apex analysis: SOQL whose WHERE
+  clause filters only on non-indexed fields, uses a leading-wildcard LIKE, is
+  negative-only, or is absent — a full-scan / timeout SHAPE at volume, distinct
+  from the `governor_limit_risks` in-loop axis; index set = declared CustomIndex
+  metadata + general Salesforce standard-index knowledge)
 - `sfi.pii_inventory`, `sfi.test_coverage_gaps` / `sfi.meaningful_test_audit`
 - `sfi.code_quality_audit` / `sfi.tech_debt_score`
 - `sfi.find_dead_code` / `sfi.method_reachability`
@@ -65,6 +105,16 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 
 - Permission math and risk: `sfi.effective_permissions`, `sfi.permission_risk_report`,
   sharing / FLS tracing tools
+- `sfi.permission_set_consolidation` — offline permission-set consolidation
+  CANDIDATES from declared grants: flags empty, strict-subset (A ⊊ B → merge A
+  into B), and near-duplicate (Jaccard-overlap ≥ a disclosed threshold)
+  permission sets, ranked by consolidation opportunity. Candidate-flagging, not
+  a merge verdict — honest that base-profile redundancy and who-holds-what are
+  per-user LIVE assignment data (deferred to the live plane / manual review),
+  that an empty set may be a permission-set-group component, and that
+  group-scoped muting is not applied to the standalone grant comparison.
+  Distinct from `permission_risk_report` (how DANGEROUS a grant is, not how
+  REDUNDANT) and `unassigned_permission_sets` (who holds a set).
 - Experience Cloud: `sfi.guest_exposure_report`
 - Agentforce / GenAI surface: `sfi.ai_exposure_report` (what modeled AI assets
   touch, composed with PII inventory where applicable)
@@ -74,6 +124,12 @@ impact). The shipped surface is wider than those three labels. Named jobs:
 
 - Offline fleet: `sfi.fleet_find`, `sfi.fleet_drift_ranking`,
   `sfi.generate_fleet_report`
+- Offline limit headroom: `sfi.limit_headroom_report` — the vault-only
+  replacement for the retiring Salesforce Optimizer limit report. Counts
+  metadata against per-object / per-org configuration ceilings and ranks
+  objects worst-first by remaining headroom%. Edition is unknown offline, so
+  edition-dependent caps are labeled `assumed-edition` and disclosed; runtime
+  limits (storage, API counts, daily async) are deferred to `sfi.live_org_limits`.
 - Opt-in live plane: the `sfi.live_*` family (counts, samples, limits, drift,
   scheduled jobs, etc.) — never ambient; consent-gated and disclosed
 
@@ -204,7 +260,9 @@ CRUD/FLS.
   pipeline agents), not a question-answering dependency graph for day-to-day
   org understanding.
 - **Salesforce Optimizer** — free first-party unused-field / limits style
-  report.
+  report (being retired). `sfi.limit_headroom_report` is the offline,
+  vault-only replacement for its limit table (metadata-vs-configuration-limit
+  headroom, ranked worst-first); runtime limits stay on the opt-in live plane.
 
 These tools *act*. sf-intelligence is read-only by design. Bridge story:
 `sfi.org_risk_report` / promotion-readiness style tools inform a deploy gate;
@@ -235,7 +293,16 @@ Gearset/Copado/DX MCP still ship the change.
    inference, no live call. That is a step past "supply the facts to the model":
    the structural conclusion is computed and grounded, with a citation for every
    claim (no citation, no claim). Cloud NL competitors reason inside a hosted
-   model you cannot audit; this reasons in a rule engine you can read.
+   model you cannot audit; this reasons in a rule engine you can read. The rules
+   that name an actionable finding now carry **cited, dependency-ordered
+   remediation**: `interpret` emits ordered fix steps grounded in the same ids and
+   stamped with the same confidence as the claim, and `synthesize_answer` folds
+   them into a FIX / NEXT answer — attributed, hedged, and honest. It ships the
+   REMEDIATION HALF only: the steps never assert the finding is *closed* (no
+   `what_if_*` tool mutates the sharing/CRUD/keyword shapes the engine reasons
+   over, so closure is uncomputable and is refused); where a real `what_if_*` /
+   impact tool can *model* the change it points at it, and a claim with no
+   authored remediation discloses that absence rather than inventing a fix.
 
 The wedge is not "better SAST than Clayton" or "better deploys than Gearset."
 It is **convergence + locality + honesty** after first-party MCP made shallow

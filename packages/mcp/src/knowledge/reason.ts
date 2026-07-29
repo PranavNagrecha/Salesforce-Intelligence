@@ -34,6 +34,7 @@ import type {
   Edge,
   Interpretation,
   Node,
+  Remediation,
   RuleAggregate,
   RulePredicate,
   SupersedesRule,
@@ -2319,7 +2320,7 @@ const interpretWitnessPartition = (
  *                 scan-everything matching; the `sfi.interpret` tool always
  *                 passes it.
  */
-export const interpret = (
+const interpretRaw = (
   rule: ConceptRule,
   slice: GroundedSlice,
   coverage: Coverage,
@@ -2388,6 +2389,78 @@ export const interpret = (
     },
   ];
 };
+
+/**
+ * CITED-REMEDIATION — build the grounded {@link Remediation} for a fired claim
+ * from the rule's AUTHORED {@link ConceptRule.remediation}. Each ordered step
+ * template is FILLED from the claim's own `groundedIn` (the same `{ids}` /
+ * positional `{0}` fill the claim uses), and the fix carries the claim's
+ * `groundedIn` + `confidence` VERBATIM — so a remediation is cited by exactly the
+ * same components and can never read stronger than the finding.
+ *
+ * Honesty by construction:
+ *   - Returns `undefined` when the rule authored no remediation — the engine
+ *     NEVER fabricates a generic fix.
+ *   - Returns `undefined` for a claim whose `confidence` is `'unknown'` (a
+ *     coverage-gated "not checked" absence claim): an unverified finding gets no
+ *     fix steps. (None of the shipped remediation rules are absence-shaped, so
+ *     this is a defensive guard, not a live path.)
+ *   - The `steps` are fix STEPS ONLY — nothing here asserts the finding is
+ *     closed; `whatIfTool` (when authored) merely points at a tool that can MODEL
+ *     the counterfactual.
+ */
+const buildRemediation = (
+  rule: ConceptRule,
+  groundedIn: readonly ComponentId[],
+  confidence: ConfidenceLevel | 'unknown',
+): Remediation | undefined => {
+  const rem = rule.remediation;
+  if (rem === undefined) return undefined;
+  if (confidence === 'unknown') return undefined;
+  return {
+    steps: rem.steps.map((step) => fill(step, groundedIn)),
+    confidence,
+    groundedIn,
+    ...(rem.whatIfTool !== undefined ? { whatIfTool: rem.whatIfTool } : {}),
+  };
+};
+
+/**
+ * CITED-REMEDIATION — attach the rule's authored remediation onto every
+ * interpretation it emitted. Pure, and byte-identical to `interpretRaw` for any
+ * rule WITHOUT authored remediation (the common case): the array is returned
+ * untouched. Applied uniformly across ALL emit paths (scalar / join / aggregate /
+ * dualEdge / antiJoin / setDifference / propertyCompare / fieldJoin /
+ * propertyEqualsEndpoint / crossObjectCascade / witnessPartition) because it maps
+ * over the already-emitted claims — each fix is filled from that claim's own
+ * `groundedIn` and stamped with its `confidence`.
+ */
+const attachRemediation = (
+  rule: ConceptRule,
+  interps: Interpretation[],
+): Interpretation[] => {
+  if (rule.remediation === undefined) return interps;
+  return interps.map((it) => {
+    const remediation = buildRemediation(rule, it.groundedIn, it.confidence);
+    return remediation === undefined ? it : { ...it, remediation };
+  });
+};
+
+/**
+ * Interpret one {@link ConceptRule} against a grounded slice — the public entry
+ * point. Delegates to the pure per-shape engine ({@link interpretRaw}) and then
+ * attaches any AUTHORED {@link RuleRemediation} to the emitted claims
+ * ({@link attachRemediation}). A rule with no remediation is byte-identical to
+ * the pre-remediation engine; a rule with one emits a cited, confidence-tiered,
+ * dependency-ordered fix on each claim it fires. Same signature, same
+ * determinism.
+ */
+export const interpret = (
+  rule: ConceptRule,
+  slice: GroundedSlice,
+  coverage: Coverage,
+  rootId?: ComponentId,
+): Interpretation[] => attachRemediation(rule, interpretRaw(rule, slice, coverage, rootId));
 
 /**
  * EPIC-1 — second-pass chained interpretation.

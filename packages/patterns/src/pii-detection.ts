@@ -11,17 +11,23 @@
  * pair. No graph access is required; the recognizer is safe to call in
  * a tight per-field loop from the `sfi.pii_inventory` composer.
  *
- * Classification axis (`piiClassification`):
- *   - `pii`: Personally Identifiable Information. Contact information,
- *     identifiers (SSN, DOB), addresses. Generally regulated under
- *     GDPR, CCPA, and similar privacy regimes.
+ * Classification axis (`piiClassification`), from strongest to weakest:
+ *   - `protected`: Protected-class / special-category attribute (race,
+ *     ethnicity, disability, citizenship / national origin, religion,
+ *     veteran status, sexual orientation, gender identity). The HIGHEST
+ *     sensitivity tier — these are legally protected characteristics
+ *     regulated under FERPA, Title VI/VII/IX, the ADA, GDPR Art. 9
+ *     "special categories", and similar regimes.
  *   - `sensitive`: Confidential business or regulated data (salary,
  *     credit card, health records, internal-only flags). Subject to
  *     stricter access controls (HIPAA, PCI-DSS, SOX).
+ *   - `pii`: Personally Identifiable Information. Contact information,
+ *     identifiers (SSN, DOB), addresses. Generally regulated under
+ *     GDPR, CCPA, and similar privacy regimes.
  *   - `public`: No detected sensitive signal. The default for a field
  *     whose name and description do not match any rule.
- *   - `unknown`: Reserved for future use; the v2.0d recognizer always
- *     resolves to one of the three classes above.
+ *   - `unknown`: Reserved for future use; the recognizer resolves to
+ *     one of the classes above.
  *
  * Category axis (`piiCategory`):
  *   - `identifier`: Direct personal identifier (SSN, DOB, drivers
@@ -30,12 +36,33 @@
  *     code).
  *   - `financial`: Monetary or financial-instrument data (salary,
  *     credit card, bank account, PCI).
- *   - `health`: Health data (medical record, diagnosis, HIPAA).
+ *   - `health`: Health data (medical record, diagnosis, HIPAA, PHI).
+ *   - `protected-class`: Legally protected characteristic (race,
+ *     ethnicity, disability, citizenship / national origin, religion,
+ *     veteran / military status, sexual orientation, gender identity).
  *   - `unknown`: Sensitive signal detected but the category could not
  *     be narrowed (e.g., a description that only says "PII" without
  *     hinting at what kind).
  *
+ * Confidence axis (`confidence`):
+ *   - `declared`: driven by a declared `<securityClassification>` on the
+ *     field metadata (an admin's own data-classification assertion) —
+ *     the HIGHEST-PRECEDENCE signal.
+ *   - `heuristic`: driven by a name / label / data-type / description
+ *     match. Absence of a signal is NEVER a clearance.
+ *
  * Detection layers, in precedence order:
+ *
+ *   0. **Declared security classification (highest precedence).** A
+ *      declared `<securityClassification>` of `Confidential` (→
+ *      `sensitive`) or `Restricted` / `MissionCritical` (→ `protected`)
+ *      is an admin's own data-classification assertion. It sets a FLOOR:
+ *      the field classifies at least that tier at `declared` confidence,
+ *      overriding a weaker name/label heuristic — so a `Confidential`
+ *      field with an innocuous name is still surfaced. It never
+ *      DOWNGRADES a stronger heuristic signal (a name that already
+ *      resolves to `protected` keeps `protected`). Absent → fall back to
+ *      the heuristics below (all `heuristic` confidence).
  *
  *   1. **Field data type override.** `EncryptedText` ALWAYS classifies
  *      as `pii` regardless of the API name. The Salesforce
@@ -45,11 +72,17 @@
  *
  *   2. **API-name patterns.** Substring matches against the field's
  *      stripped API name (case-insensitive). The pattern table covers
- *      identifier (SSN, DOB, drivers license), contact (email, phone,
- *      address), financial (salary, credit card, bank), and health
- *      (medical record, diagnosis, MRN) tokens. The first matching
- *      pattern wins; the table is ordered most-specific first so that
- *      `CreditCard*` matches before a generic `*_CC_*`.
+ *      protected-class (race, ethnicity, disability, citizenship /
+ *      national origin, religion, veteran status, sexual orientation,
+ *      gender identity), identifier (SSN, DOB, drivers license), contact
+ *      (email, phone, address), financial (salary, credit card, bank),
+ *      and health (medical record, diagnosis, MRN, the PHI acronym)
+ *      tokens. The first matching pattern wins; the table is ordered
+ *      most-specific / highest-sensitivity first. The short, ambiguous
+ *      `race` token matches only as a whole WORD segment (so `Grace`,
+ *      `Trace`, `Racetrack` do not fire), and the `PHI` health acronym
+ *      matches only the standalone UPPERCASE token (so `Phi Theta Kappa`,
+ *      `philosophy`, `Philadelphia` do not fire).
  *
  *   3. **Data-type implications.** A field whose Salesforce type is
  *      `Email` carries `pii` + `contact` even without a matching name
@@ -117,10 +150,90 @@ const CONTACT_INCAPABLE_DATA_TYPES = new Set<string>([
 const CUSTOM_FIELD_SUFFIX = '__c';
 
 /**
+ * Severity rank on the classification axis (higher = more sensitive).
+ * `protected > sensitive > pii > public > unknown`. Used both to layer the
+ * description overlay and to apply the declared-securityClassification FLOOR
+ * (a declaration escalates but never downgrades a stronger heuristic signal).
+ */
+const CLASSIFICATION_RANK: Readonly<Record<PiiClassification, number>> = {
+  protected: 4,
+  sensitive: 3,
+  pii: 2,
+  public: 1,
+  unknown: 0,
+};
+
+/**
+ * Map a declared Salesforce `<securityClassification>` (the field-level Data
+ * Classification "sensitivity level") to the classification tier it asserts.
+ * Only the ESCALATING levels are mapped — `Confidential -> sensitive`,
+ * `Restricted` / `MissionCritical -> protected`. `Public` / `Internal` (and any
+ * unrecognized value) return `null` so the field falls back to the heuristics
+ * rather than being force-declared (and never silently DOWNGRADED to public).
+ */
+const SECURITY_CLASSIFICATION_TIERS: Readonly<Record<string, PiiClassification>> = {
+  confidential: 'sensitive',
+  restricted: 'protected',
+  missioncritical: 'protected',
+};
+
+/**
+ * Read a declared `<securityClassification>` from `properties`, normalized to
+ * the classification tier it asserts, or `null` when absent / non-escalating.
+ * This is the HIGHEST-PRECEDENCE signal (`declared` confidence).
+ */
+const getDeclaredSecurityTier = (node: Node): PiiClassification | null => {
+  const raw = node.properties['securityClassification'];
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  return SECURITY_CLASSIFICATION_TIERS[raw.trim().toLowerCase()] ?? null;
+};
+
+/** The raw declared `<securityClassification>` string, for the reason text. */
+const getDeclaredSecurityRaw = (node: Node): string | null => {
+  const raw = node.properties['securityClassification'];
+  return typeof raw === 'string' && raw.length > 0 ? raw.trim() : null;
+};
+
+/**
+ * Split an API name into lowercase word segments, breaking on non-alphanumeric
+ * delimiters (`_`) AND camelCase / acronym boundaries. So `Student_Race` and
+ * `StudentRace` both yield `['student','race']`, while `Grace_Period` yields
+ * `['grace','period']` and `Racetrack` yields `['racetrack']`. Used for the
+ * ambiguous short `race` token, which must match as a whole word — never as the
+ * substring inside `Grace` / `Trace` / `Embrace` / `Racetrack`.
+ */
+const toWordSegments = (name: string): readonly string[] =>
+  name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2') // camelCase boundary
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2') // ACRONYMWord boundary
+    .split(/[^A-Za-z0-9]+/)
+    .filter((s) => s.length > 0)
+    .map((s) => s.toLowerCase());
+
+/** True when `race` appears as a standalone word segment (not inside Grace/Trace). */
+const hasRaceSegment = (rawApiName: string): boolean =>
+  toWordSegments(rawApiName).includes('race');
+
+/**
+ * True when the standalone UPPERCASE `PHI` acronym (Protected Health
+ * Information) appears in `text`, delimited by non-letters on both sides.
+ * Case-SENSITIVE by design: it matches the health acronym `PHI` (`PHI__c`,
+ * "stores PHI") but NOT the Greek letter / word prefix `Phi` ("Phi Theta
+ * Kappa", "philosophy", "Philadelphia") nor a letter run like "GRAPHIC".
+ */
+const PHI_ACRONYM_RE = /(?<![A-Za-z])PHI(?![A-Za-z])/;
+const hasPhiAcronym = (rawText: string): boolean => PHI_ACRONYM_RE.test(rawText);
+
+/**
  * The classification axis the recognizer emits. See the module JSDoc
  * for the semantics of each value.
  */
-export type PiiClassification = 'pii' | 'sensitive' | 'public' | 'unknown';
+export type PiiClassification =
+  | 'protected'
+  | 'sensitive'
+  | 'pii'
+  | 'public'
+  | 'unknown';
 
 /**
  * The category axis the recognizer emits alongside the classification.
@@ -131,7 +244,16 @@ export type PiiCategory =
   | 'contact'
   | 'financial'
   | 'health'
+  | 'protected-class'
   | 'unknown';
+
+/**
+ * Confidence axis for a classification. `declared` means the verdict
+ * came from a declared `<securityClassification>` on the field metadata
+ * (highest precedence); `heuristic` means it came from a name / label /
+ * data-type / description match. See the module JSDoc.
+ */
+export type PiiConfidence = 'declared' | 'heuristic';
 
 /**
  * The output shape of `detectPiiClassification`. Tools can match on
@@ -142,6 +264,11 @@ export type PiiCategory =
 export interface PiiDetectionResult {
   readonly piiClassification: PiiClassification;
   readonly piiCategory: PiiCategory;
+  /**
+   * Whether the verdict is `declared` (from a `<securityClassification>`)
+   * or `heuristic` (from a name / type / description match).
+   */
+  readonly confidence: PiiConfidence;
 }
 
 /**
@@ -175,8 +302,11 @@ interface NamePattern {
  * happens against `apiName.toLowerCase()` and a copy of the token
  * lowercased once at module load.
  *
- * The pattern set is anchored to the v2.0d spec's enumeration:
+ * The pattern set is anchored to the spec's enumeration:
  *
+ *   - `*Race*` / `*Ethnicity*` / `*Disability*` / `*Citizenship*` /
+ *     `*National_Origin*` / `*Religion*` / `*Veteran*` /
+ *     `*Sexual_Orientation*` / `*Gender_Identity*` -> protected/protected-class
  *   - `*_SSN_*` / `*_SocialSecurity_*` / `SSN__c` -> pii/identifier
  *   - `*_Email__c` / `*_email_*` / `PersonalEmail__c` -> pii/contact
  *   - `*_Phone__c` / `Mobile__c` / `Fax__c` -> pii/contact
@@ -188,14 +318,65 @@ interface NamePattern {
  *     sensitive/financial
  *   - `MedicalRecord*` / `Diagnosis__c` / `HealthCondition*` ->
  *     sensitive/health
- *   - `PatientID__c` / `MRN__c` -> sensitive/health
+ *   - `PatientID__c` / `MRN__c` / `PHI__c` / `Protected_Health_Info__c`
+ *     -> sensitive/health
+ *
+ * The `race` token and the `PHI` health acronym are NOT matched here by
+ * plain substring — they are ambiguous (`Grace`, `Trace`, `Phi Theta
+ * Kappa`, `philosophy`) — and are handled by dedicated whole-word /
+ * whole-acronym matchers in {@link matchNamePattern}.
  */
 const NAME_PATTERNS: readonly NamePattern[] = [
+  // Protected class (highest sensitivity — legally protected characteristics).
+  // GENERAL, org-independent vocabulary matched on the semantic token, not on
+  // any specific package prefix or real field name. `race` is handled as a
+  // whole-word segment in `matchNamePattern` (not a substring), so `Grace` /
+  // `Trace` / `Racetrack` do not fire here.
+  {
+    classification: 'protected',
+    category: 'protected-class',
+    tokens: [
+      'ethnicity',
+      'ethnic',
+      'disability',
+      'disabilities',
+      'disabled',
+      'citizenship',
+      'citizen',
+      'national_origin',
+      'nationalorigin',
+      'national origin',
+      'nationality',
+      'veteran',
+      'military',
+      'religion',
+      'religious',
+      'sexual_orientation',
+      'sexualorientation',
+      'sexual orientation',
+      'gender_identity',
+      'genderidentity',
+      'gender identity',
+    ],
+    reasonTemplate:
+      'name suggests a protected-class attribute (race / ethnicity / disability / citizenship / national origin / religion / veteran status / sexual orientation / gender identity); classified protected/protected-class',
+  },
   // Health (most specific — `MRN__c` is short and could match elsewhere).
+  // `phi` is NOT listed as a plain substring token (it would match
+  // `Phi Theta Kappa`, `philosophy`, `Philadelphia`); the standalone `PHI`
+  // acronym is handled by a case-sensitive whole-word matcher instead.
   {
     classification: 'sensitive',
     category: 'health',
-    tokens: ['patientid', 'mrn', 'medicalrecord', 'diagnosis', 'healthcondition'],
+    tokens: [
+      'patientid',
+      'mrn',
+      'medicalrecord',
+      'diagnosis',
+      'healthcondition',
+      'protected_health',
+      'protectedhealth',
+    ],
     reasonTemplate:
       'name suggests health data (matches health-record token); classified sensitive/health',
   },
@@ -344,7 +525,12 @@ const DESCRIPTION_RULES: readonly DescriptionRule[] = [
   {
     classification: 'sensitive',
     category: 'health',
-    keywords: ['hipaa', 'health information', 'phi'],
+    // Bare 'phi' was REMOVED: as a 3-letter substring it fired on
+    // "Phi Theta Kappa", "philosophy", and "Philadelphia". The genuine
+    // Protected-Health-Information signal is the multi-word phrase
+    // "protected health" or the standalone UPPERCASE `PHI` acronym (matched
+    // case-sensitively in `descriptionNamesPhiAcronym`), not the substring.
+    keywords: ['hipaa', 'health information', 'protected health'],
     reason: 'description names a HIPAA/health-information rule; classified sensitive/health',
   },
   {
@@ -459,12 +645,18 @@ const getDescriptionLower = (node: Node): string | null => {
 };
 
 /**
- * Find the first name-pattern rule whose tokens contain a sub-string
- * of the stripped, lowercased API name. Returns null when no rule
- * fires.
+ * Find the first name-pattern rule that matches, in table priority order
+ * (protected-class > health > financial > identifier > contact). A rule matches
+ * on a plain substring token; the protected-class rule ALSO matches the
+ * whole-word `race` segment and the health rule ALSO matches the standalone
+ * `PHI` acronym — both checked at that rule's own priority so higher-sensitivity
+ * verdicts still win. `apiNameLower` is the stripped, lowercased name;
+ * `apiNameRaw` is the stripped, case-PRESERVED name (needed for the
+ * case-sensitive PHI acronym). Returns null when no rule fires.
  */
 const matchNamePattern = (
   apiNameLower: string,
+  apiNameRaw: string,
 ): {
   readonly classification: PiiClassification;
   readonly category: PiiCategory;
@@ -479,6 +671,25 @@ const matchNamePattern = (
           reason: rule.reasonTemplate,
         };
       }
+    }
+    // Protected-class: the ambiguous short `race` token, whole-word only.
+    if (rule.category === 'protected-class' && hasRaceSegment(apiNameRaw)) {
+      return {
+        classification: rule.classification,
+        category: rule.category,
+        reason:
+          'name contains the protected-class token "race" (whole-word); classified protected/protected-class',
+      };
+    }
+    // Health: the standalone UPPERCASE `PHI` (Protected Health Information)
+    // acronym — never the Greek letter / word prefix `Phi` (Phi Theta Kappa).
+    if (rule.category === 'health' && hasPhiAcronym(apiNameRaw)) {
+      return {
+        classification: rule.classification,
+        category: rule.category,
+        reason:
+          'name contains the standalone PHI (Protected Health Information) acronym; classified sensitive/health',
+      };
     }
   }
   return null;
@@ -502,50 +713,49 @@ const matchDescriptionRule = (
 };
 
 /**
- * Promote `current` to `next` along the classification severity axis.
- * `sensitive > pii > public > unknown`. Used to layer the description
- * rule on top of the name rule when the description is stricter than
- * the name.
+ * Return the stricter of two classifications along the severity axis
+ * (`protected > sensitive > pii > public > unknown`, per {@link
+ * CLASSIFICATION_RANK}). Used to layer the description rule on top of the name
+ * rule when the description is stricter — and, crucially, to NEVER downgrade a
+ * stronger signal (a `protected` name match survives a `sensitive` description).
  */
 const stricterClassification = (
   current: PiiClassification,
   next: PiiClassification,
-): PiiClassification => {
-  if (current === 'sensitive' || next === 'sensitive') return 'sensitive';
-  if (current === 'pii' || next === 'pii') return 'pii';
-  if (current === 'unknown' && next === 'public') return 'public';
-  return current;
-};
+): PiiClassification =>
+  CLASSIFICATION_RANK[next] > CLASSIFICATION_RANK[current] ? next : current;
+
+/** The heuristic (name / type / description) verdict, before the declared floor. */
+interface HeuristicVerdict {
+  readonly classification: PiiClassification;
+  readonly category: PiiCategory;
+  readonly reason: string;
+}
 
 /**
- * Classify a CustomField node along the (classification, category)
- * pair. Returns the result + a plain-English reason string. Callers
- * that don't need the reason should prefer `detectPiiClassification`.
- *
- * @example
- *   const r = detectPiiClassificationWithReason(node);
- *   console.log(r.piiClassification, r.piiCategory, r.reason);
+ * Run the name / data-type / description heuristics (Layers 1–4) and return the
+ * verdict WITHOUT the declared-securityClassification floor. All verdicts here
+ * are `heuristic` confidence; the caller applies the declared floor.
  */
-export const detectPiiClassificationWithReason = (
-  node: Node,
-): PiiDetectionWithReason => {
-  const apiNameLower = stripCustomFieldSuffix(node.apiName).toLowerCase();
+const detectHeuristic = (node: Node): HeuristicVerdict => {
+  const apiNameRaw = stripCustomFieldSuffix(node.apiName);
+  const apiNameLower = apiNameRaw.toLowerCase();
   const dataType = getDataType(node);
 
   // Layer 1: EncryptedText override. Always `pii` — encryption IS the signal.
   if (dataType === ENCRYPTED_TEXT_DATA_TYPE) {
-    const nameMatch = matchNamePattern(apiNameLower);
+    const nameMatch = matchNamePattern(apiNameLower, apiNameRaw);
     const category = nameMatch === null ? 'unknown' : nameMatch.category;
     return {
-      piiClassification: 'pii',
-      piiCategory: category,
+      classification: 'pii',
+      category,
       reason:
         'field data type is EncryptedText; classified pii (the encryption type IS the declaration)',
     };
   }
 
   // Layer 2: name patterns.
-  let nameMatch = matchNamePattern(apiNameLower);
+  let nameMatch = matchNamePattern(apiNameLower, apiNameRaw);
 
   // Layer 2a: venue / org-location contact-token false positives — a field on
   // OA_Location__c or OA_Engagements__c named Location_Address__c or
@@ -636,17 +846,60 @@ export const detectPiiClassificationWithReason = (
   }
 
   return {
-    piiClassification: baseClassification,
-    piiCategory: baseCategory,
+    classification: baseClassification,
+    category: baseCategory,
     reason: baseReason,
   };
 };
 
 /**
- * Classify a CustomField node along the (classification, category)
- * pair. The thin wrapper drops the `reason` field;
- * `sfi.pii_inventory` calls the with-reason variant so it can surface
- * the matching rule to the caller.
+ * Classify a CustomField node along the (classification, category, confidence)
+ * triple. Returns the result + a plain-English reason string. Callers that
+ * don't need the reason should prefer `detectPiiClassification`.
+ *
+ * A declared `<securityClassification>` (`Confidential` / `Restricted` /
+ * `MissionCritical`) is the HIGHEST-PRECEDENCE signal: it sets a FLOOR at
+ * `declared` confidence, overriding a weaker name/label heuristic — but it never
+ * DOWNGRADES a stronger heuristic verdict. Absent → the heuristic verdict stands
+ * at `heuristic` confidence.
+ *
+ * @example
+ *   const r = detectPiiClassificationWithReason(node);
+ *   console.log(r.piiClassification, r.piiCategory, r.reason, r.confidence);
+ */
+export const detectPiiClassificationWithReason = (
+  node: Node,
+): PiiDetectionWithReason => {
+  const heuristic = detectHeuristic(node);
+
+  // Layer 0: declared securityClassification FLOOR (highest precedence).
+  const declaredTier = getDeclaredSecurityTier(node);
+  if (
+    declaredTier !== null &&
+    CLASSIFICATION_RANK[declaredTier] >= CLASSIFICATION_RANK[heuristic.classification]
+  ) {
+    const raw = getDeclaredSecurityRaw(node) ?? declaredTier;
+    return {
+      piiClassification: declaredTier,
+      // The declaration carries no category; keep any name-derived one.
+      piiCategory: heuristic.category,
+      confidence: 'declared',
+      reason: `declared securityClassification "${raw}" → ${declaredTier}; a declared data-classification is the highest-precedence signal and overrides name/label heuristics`,
+    };
+  }
+
+  return {
+    piiClassification: heuristic.classification,
+    piiCategory: heuristic.category,
+    confidence: 'heuristic',
+    reason: heuristic.reason,
+  };
+};
+
+/**
+ * Classify a CustomField node along the (classification, category, confidence)
+ * triple. The thin wrapper drops the `reason` field; `sfi.pii_inventory` calls
+ * the with-reason variant so it can surface the matching rule to the caller.
  *
  * @example
  *   const r = detectPiiClassification(node);
@@ -659,5 +912,20 @@ export const detectPiiClassification = (node: Node): PiiDetectionResult => {
   return {
     piiClassification: r.piiClassification,
     piiCategory: r.piiCategory,
+    confidence: r.confidence,
   };
 };
+
+/**
+ * True when a classification is regulated / sensitive enough to warrant a
+ * compliance escalation on deletion, AI-exposure, and field-access surfaces —
+ * i.e. `pii`, `sensitive`, or `protected` (protected-class). Callers that gate
+ * escalations on the classification should use this rather than an ad-hoc
+ * `=== 'pii' || === 'sensitive'` check, so `protected` is never missed.
+ */
+export const isRegulatedPiiClassification = (
+  classification: PiiClassification,
+): classification is 'pii' | 'sensitive' | 'protected' =>
+  classification === 'pii' ||
+  classification === 'sensitive' ||
+  classification === 'protected';

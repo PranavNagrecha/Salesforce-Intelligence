@@ -1130,9 +1130,12 @@ const SYNTHESIS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze(
 /**
  * Concrete JSON Schema for `sfi.automation_risk_report`. Mirrors
  * `automationRiskReportInputSchema`: the generic `limit` plus an optional OBJECT
- * SCOPE (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE). A scope narrows the
- * legacy-automation half to that object and excludes the org-wide Apex
- * governor-limit half (disclosed), never silently returning the org-wide report.
+ * SCOPE (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE) and the optional `mode`
+ * (AUTOMATION-SPRAWL-MODE). A scope narrows the legacy-automation half to that
+ * object and excludes the org-wide Apex governor-limit half (disclosed), never
+ * silently returning the org-wide report. `mode: 'sprawl'` switches to the
+ * org-wide per-object automation-density ranking; the default (`'risk'`) is the
+ * per-finding risk synthesis.
  */
 const AUTOMATION_RISK_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -1143,6 +1146,7 @@ const AUTOMATION_RISK_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       object: { type: 'string', minLength: 1 },
       objectId: { type: 'string', minLength: 1 },
       componentId: { type: 'string', minLength: 1 },
+      mode: { type: 'string', enum: ['risk', 'sprawl'] },
     },
   });
 
@@ -1649,6 +1653,61 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
 });
 
 /**
+ * Concrete JSON Schema for `sfi.permission_set_consolidation`. Mirrors
+ * `permissionSetConsolidationInputSchema` (permission-set-consolidation.ts):
+ * `minOverlap` (0.5..1, default 0.9) is the near-duplicate Jaccard threshold;
+ * `includeEmpty` (default true) toggles empty-permission-set candidates; `limit`
+ * (max 100, default 25) and `offset` page the RANKED candidate list. Drift
+ * between this schema and the Zod schema is a code-review concern.
+ */
+const PERMISSION_SET_CONSOLIDATION_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      minOverlap: { type: 'number', minimum: 0.5, maximum: 1 },
+      includeEmpty: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
+ * Concrete JSON Schema for `sfi.limit_headroom_report`. Mirrors
+ * `limitHeadroomReportInputSchema` (limit-headroom-report.ts). `edition` is the
+ * optional org edition (edition-dependent limits are computed against an ASSUMED
+ * `enterprise` edition when omitted, disclosed in `boundaries[]`); `limit`
+ * (max 100, default 15) and `offset` page the RANKED per-object list. Drift
+ * between this schema and the Zod schema is a code-review concern.
+ */
+const LIMIT_HEADROOM_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      edition: {
+        type: 'string',
+        enum: ['enterprise', 'unlimited', 'developer', 'professional'],
+      },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
+ * Concrete JSON Schema for `sfi.doc_coverage_report`. Mirrors
+ * `docCoverageReportInputSchema` (doc-coverage-report.ts): `limit` (max 100,
+ * default 20) and `offset` page the RANKED per-object list worst-covered first.
+ * Drift between this schema and the Zod schema is a code-review concern.
+ */
+const DOC_COVERAGE_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.app_access`. Mirrors `appAccessInputSchema` —
  * a `componentId` (`CustomApplication:`/`Profile:`/`PermissionSet:` id) OR a
  * natural app-name selector (`apiName`/`app`/`nameContains`), plus optional
@@ -1985,11 +2044,18 @@ const PII_INVENTORY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       objectApiName: { type: 'string', minLength: 1 },
       classification: {
         type: 'string',
-        enum: ['pii', 'sensitive', 'all'],
+        enum: ['pii', 'sensitive', 'protected', 'all'],
       },
       category: {
         type: 'string',
-        enum: ['identifier', 'contact', 'financial', 'health', 'all'],
+        enum: [
+          'identifier',
+          'contact',
+          'financial',
+          'health',
+          'protected-class',
+          'all',
+        ],
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
@@ -2398,6 +2464,53 @@ const FLOW_GRAPH_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       element: { type: 'string', minLength: 1 },
     },
     required: ['flowRef'],
+  });
+
+/**
+ * Concrete JSON Schema for `sfi.flow_bulkification_audit`. Mirrors
+ * `flowBulkificationAuditInputSchema` (flow-bulkification-audit.ts). `limit`
+ * caps the FLOW-level slice (max 500, default 100); `offset` pages the flow list
+ * forward. Drift between this schema and the Zod schema is a code-review concern.
+ */
+const FLOW_BULKIFICATION_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
+ * Concrete JSON Schema for `sfi.nonselective_soql`. Mirrors
+ * `nonselectiveSoqlInputSchema` (nonselective-soql.ts): an optional `limit`
+ * (1..200, default 50 in the handler) and `offset` (>= 0), both paging the
+ * flagged-component list. Drift between this schema and the Zod schema is a
+ * code-review concern.
+ */
+const NONSELECTIVE_SOQL_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+      offset: { type: 'integer', minimum: 0 },
+    },
+  });
+
+/**
+ * Concrete JSON Schema for `sfi.picklist_integrity_scan`. Mirrors
+ * `picklistIntegrityScanInputSchema` (picklist-integrity-scan.ts): an optional
+ * `limit` (1..500, default 50 in the handler) and `offset` (>= 0), both paging
+ * the FIELDS-with-findings list. Drift between this schema and the Zod schema is
+ * a code-review concern.
+ */
+const PICKLIST_INTEGRITY_SCAN_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+    },
   });
 
 /**
@@ -3510,7 +3623,9 @@ const TESTS_FOR_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * `reviewed[]` rows (summary tallies stay full; the deploy-gate verdict is never
  * hidden by the cap). `againstVault` (a registered vault alias OR a path to an
  * org-kb) reviews the changeset against THAT vault's graph instead of the
- * current one. Drift between Zod and this schema is a code-review concern.
+ * current one. `checkAccessParity` (default false) adds the ADDITIVE
+ * `accessParity` grant-completeness ("ships for nobody") section. Drift between
+ * Zod and this schema is a code-review concern.
  */
 const REVIEW_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -3537,6 +3652,7 @@ const REVIEW_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       againstVault: { type: 'string', minLength: 1 },
+      checkAccessParity: { type: 'boolean' },
     },
     required: ['components'],
   });
@@ -4362,6 +4478,18 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     inputSchema: GET_COMPONENT_INPUT_SCHEMA,
   },
   {
+    name: 'sfi.doc_coverage_report',
+    description:
+      'Offline, vault-only documentation-GAP meter — the documentation axis `sfi.tech_debt_score` lacks. MEASURES where the org\'s metadata is undocumented (it does NOT PRODUCE docs like `sfi.generate_data_dictionary` / `sfi.generate_admin_handbook`). Rolls the two documentation axes the extractors capture — a component\'s `description` and a field\'s `inlineHelpText` presence — into a scored, LOWEST-COVERAGE-FIRST report broken down by object, and WEIGHTS each undocumented component by its inbound graph edge-degree (a real criticality proxy — an undocumented, heavily-referenced field ranks above an undocumented orphan). `objects` is the per-object breakdown (each with a `description` and `helpText` axis rollup — measurable / documented / undocumented / coveragePct — plus `combinedCoveragePct` and `undocumentedDegreeWeight`), ranked worst-covered first and PAGED by `limit` (default 20, max 100) / `offset` / `nextOffset`; the page self-fits the response byte budget (`nextOffset` always equals `offset + objects.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips an object). `topUndocumented` surfaces the highest-impact undocumented components (undocumented AND high-degree) regardless of page; `totals` carries the org-wide axis rollups plus the excluded `notMeasurableCount` / `outOfScopeCount`. HONESTY: "not measurable" ≠ "undocumented" — a type whose description the extractor does NOT capture (or a family the refresh did not retrieve) is NOT MEASURABLE and is EXCLUDED from the undocumented count, never counted as a gap (objects have no inline help text, so they are not measurable on the help-text axis). Scoped to what the ORG owns: custom `__c`/`__mdt`/… fields + custom objects; standard fields (Salesforce-provided help) and managed-package (`ns__…`) components are reported separately as out-of-scope and never penalize the org. `description` absence and `inlineHelpText` absence are distinct axes, never conflated. Coverage is a floor (only retrieved families measured). Presence is `declared` (structural); "documented" means a NON-EMPTY field, not a QUALITY judgment (a one-word description still counts as present).',
+    inputSchema: DOC_COVERAGE_REPORT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.limit_headroom_report',
+    description:
+      "Offline, vault-only limit-headroom report — the replacement for the retiring Salesforce Optimizer's limit report. Counts the org's METADATA against per-object and per-org CONFIGURATION ceilings and ranks the rows WORST-FIRST by remaining headroom% so an admin acts before a deploy hits a wall. Per CustomObject it reports consumed / limit / headroom% for custom fields, active validation rules, record types, and relationship fields (lookup + master-detail); org-wide it reports custom objects, custom tabs, custom apps, and active flows. `orgLimits` is the always-included org-wide set; `objects` is the per-object set (each with its 4 metric rows and `worstHeadroomPct`), ranked worst-first and PAGED by `limit` (default 15, max 100) / `offset` / `nextOffset` — the page also self-fits the response byte budget, so a large `limit` returns as many objects as fit with an honest cursor (`nextOffset` always equals `offset + objects.length`, and `byteTrimmed` flags a byte-limited page); `topRisks` surfaces the ≤5 tightest rows across the WHOLE report regardless of page; `metricLegend` holds each metric's label + general-Salesforce source note + consumption caveat (deduped out of the lean rows). This is NOT `sfi.tech_debt_score` (a weighted debt index, no per-limit headroom) and NOT `sfi.coverage_report` (retrieval coverage, not config limits). HONESTY: edition cannot be read offline — pass `edition` (enterprise | unlimited | developer | professional) or edition-dependent limits use an ASSUMED enterprise edition, disclosed verbatim, with every such row labeled `limitBasis: 'assumed-edition'` (the cap table is GENERAL Salesforce documented limits, never this org's provisioned ceilings). Field consumption is an APPROXIMATION (geolocation counted as 3 slots; roll-up summary has a separate cap; managed-package namespaced fields excluded because they generally do not count). Only families the refresh retrieved are counted — an un-retrieved family reads as 0 consumed, a FLOOR flagged `consumedIsFloor`. Runtime limits (data/file storage, API request counts, daily async) are out of scope and deferred to the consent-gated live plane (`sfi.live_org_limits`).",
+    inputSchema: LIMIT_HEADROOM_REPORT_INPUT_SCHEMA,
+  },
+  {
     name: 'sfi.list_components',
     description:
       'List components of a given type (optionally narrowed by parentId), sorted by id. Paginated via limit/offset; `hasMore` hints at additional pages (a truncated page returns a `nextCursor` to resume). Grant-heavy rows (Profile / PermissionSet, whose nodes carry tens of KB of declarative grants) are slimmed to scalar properties — each such row is marked `properties.propertiesTruncated: true` and the page carries a top-level `propertiesSlimmed: true` — so the whole inventory fits per page; fetch full detail per component via sfi.get_component. For `type: \'ApexClass\'`, optional boolean filters list interface/async/API implementers at the DB layer (correct pagination, not a post-filtered page): `isBatchable` / `isQueueable` / `isSchedulable` / `isRestResource` / `hasFutureMethod` / `hasInvocableMethod` / `hasAuraEnabledMethod` / `isTest` — e.g. `{ type: \'ApexClass\', isBatchable: true }` returns every Batchable class. `missingDescription: true` (or `hasDescription: true`) filters to components that lack (or carry) a non-empty `properties.description`, with `totalCount` as the authoritative tally — only meaningful for a type whose extractor captures a source `<description>` (a type that carries none in source will match ALL of its nodes, meaning "no description in source", not "left blank"). When manifest coverage for the requested `type` is not `complete`, a structured `coverageCaveat` flags the inventory as potentially incomplete (scoped refresh, errored retrieve, not modeled) — including on non-empty pages. When the FIRST page is empty, a `retrievalHint` (FRESH-02) says WHY — "none in the org" (retrieved, none found) vs "not retrieved" (a scoped refresh skipped the type — run /sfi-refresh) vs "not modeled" — so an empty list is never a silent `[]` read as "the org has none". (The hint is suppressed when a boolean filter is active, since an empty filtered result is not a coverage gap.)',
@@ -4662,7 +4790,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.automation_risk_report',
     description:
-      "Ranked automation risks: Process Builder migration candidates and governor-limit findings. Optional object scope (`objectApiName` / `object` / `objectId` / `CustomObject:` `componentId`) is HONORED: the legacy-automation half narrows to Process Builders parented to that object and the response echoes `appliedScope`; the Apex governor-limit half is EXCLUDED from the object-scoped view (Apex classes aren't attributable to one object) and that exclusion is disclosed — never silently returning the org-wide report. An object absent from the vault is refused with `invalid-query`. A bare call stays org-wide and byte-identical.",
+      "Ranked automation risks: Process Builder migration candidates and governor-limit findings. Optional object scope (`objectApiName` / `object` / `objectId` / `CustomObject:` `componentId`) is HONORED: the legacy-automation half narrows to Process Builders parented to that object and the response echoes `appliedScope`; the Apex governor-limit half is EXCLUDED from the object-scoped view (Apex classes aren't attributable to one object) and that exclusion is disclosed — never silently returning the org-wide report. An object absent from the vault is refused with `invalid-query`. A bare call stays org-wide and byte-identical. `mode: 'sprawl'` switches to an org-wide, per-OBJECT automation-density ranking — which objects have the most automation (record-triggered flows, triggers, workflow rules, Process Builders, field-write collisions) — a prioritized candidate queue for triage (where is flow/automation sprawl worst first), not a graded verdict, with the score weights disclosed in `scoreBasis`.",
     inputSchema: AUTOMATION_RISK_REPORT_INPUT_SCHEMA,
   },
   {
@@ -4670,6 +4798,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata: every Profile or PermissionSet that grants a god-mode or administrative system permission (Modify All Data / View All Data = critical; Author Apex, Customize Application, Manage Users, Manage Profiles/PermSets, Modify Metadata, Manage Sharing, Manage Roles, password/login policies = high) OR object-level View All / Modify All, surfaced as ONE aggregated finding per grantor (severity = the worst signal; system perms + a per-grantor count of objects escalated). PermissionSetGroups are analysed too: a PSG's effective god-mode is aggregated from its MEMBER permission sets (so a user who gets Modify All Data via a group is caught), with the muting permission set noted but not subtracted (v1 honesty boundary). A `privilege` block rosters the `modifyAllDataGrantors` / `viewAllDataGrantors` (profiles, permission sets, AND groups) and the `overPrivilegedGrantorCount`. Also rolls in unassigned permission sets and CRUD/FLS audit totals. Answers 'who has god mode / Modify All / View All / who is an admin / who is over-permissioned'. Optional `profileFilter` (a Profile api name / label or canonical `Profile:<ApiName>` id) SCOPES the report to one profile — and is HONORED: when the named profile does NOT exist in the vault the report STOPS with a `profileFilter.found: false` result (empty findings + a caveat naming the closest existing profile), never silently dropping the filter and dumping the org-wide report (a false-premise profile name therefore yields a 'profile not found', not a misleading full report). Read-only, declared confidence (literal metadata flags, not heuristics); `limit` (default 50) caps the findings. When the vault holds a captured permission-holder aggregate, the god-mode grantors carry active-holder counts via a `dataShape` holders block (`data_snapshot`, counts only) — a god-mode permission set held by 40 active users outranks one held by none.",
     inputSchema: PERMISSION_RISK_REPORT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.permission_set_consolidation',
+    description:
+      "Offline, vault-only CONSOLIDATION candidates for permission sets, from DECLARED grants — 'which permission sets are redundant / duplicate / consolidatable'. Sweeps every PermissionSet, compiles each one's compact grant-key list from its `grantedBy` edges (object CRUD, FLS, Apex, Flow, custom permission) plus grant properties (system `<userPermissions>`, record-type / app / tab visibility), and flags three shapes: EMPTY (no meaningful declared grants — may be intentional or a placeholder); STRICT SUBSET (every grant of A is also in B, A ⊊ B → A is a merge CANDIDATE into B); NEAR-DUPLICATE (grant overlap ≥ a disclosed Jaccard threshold, default 0.9, with neither a strict subset — clustered by the overlap relation; exact duplicates are Jaccard = 1). `candidates[]` is a single opportunity-ranked list (biggest number of declared grants a merge could eliminate first), each entry a `strict-subset` / `near-duplicate` / `empty` shape carrying refs (`{id, grantCount, inPermissionSetGroup}`); it PAGES by `limit` (default 25, max 100) / `offset` / `nextOffset` and self-fits the response byte budget (`nextOffset` always equals `offset + candidates.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips a candidate). `summary` carries the complete analyzed / empty / subset / cluster counts. Optional `minOverlap` (0.5..1, default 0.9) tunes the near-duplicate threshold; `includeEmpty` (default true) toggles empty candidates. This is CANDIDATE-flagging, NOT a merge verdict, and is distinct from `sfi.permission_risk_report` (over-privilege / god-mode — how DANGEROUS a grant is, not how REDUNDANT), `sfi.unassigned_permission_sets` (WHO holds a set), `sfi.effective_permissions` (the single-container-bundle union), and `sfi.what_if_merge_profiles` (a single pairwise PROFILE what-if). HONESTY (surfaced verbatim in `boundaries[]`): a strict subset / near-duplicate is a CANDIDATE from declared grants, NEVER a proven safe merge — A may be assigned to different users or exist deliberately; base-profile redundancy and safe-to-merge are OUT OF SCOPE offline (per-user live assignment data — deferred to sfi.live_permset_holders / sfi.live_user_permsets / manual review; the tool NEVER asserts a set is redundant); an empty one is not necessarily deletable; each candidate's grant-keys are its OWN declared grants, and one that is also a group component is flagged `inPermissionSetGroup`; the Jaccard threshold value is disclosed; only retrieved permission-set metadata is analysed (an incomplete family makes a relation a FLOOR, disclosed via `coverageCaveat` / `scanTruncated`). `declared` confidence. Pure, unit-testable core (`computeConsolidationCore` / `rankCandidates`), no vault dependency.",
+    inputSchema: PERMISSION_SET_CONSOLIDATION_INPUT_SCHEMA,
   },
   {
     name: 'sfi.release_readiness_report',
@@ -4684,7 +4818,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.get_impact',
     description:
-      'BFS over incoming edges from a component, up to `hops` (max 3). Returns the slice of nodes and edges that depend on the target — "what breaks if I change this?". Carries a `soundness` envelope (`complete` / `blindSpots[]` / `staticCoverage`): `complete: false` with a `dynamic-apex` blind spot listing any impacted class that builds references at runtime (dynamic SOQL / reflective describe / Type.forName / untyped JSON), so the result is never implied complete when static analysis is blind. R6-19: also returns `diagram` — a ```mermaid graph TD``` fence of the (already-capped) impact slice, nodes labeled `{ComponentType}: {apiName}` with the root as a circle, edges labeled by edgeType — present ONLY when the slice is at or under 30 nodes; above that, `diagram` is omitted and `diagramOmittedReason` names the actual node count (never a silently-partial diagram). R6-24 Option B: when the root is a CustomField with folded report/dashboard usage, `reportUsage` names the capped referencing report/dashboard api-names (Report/Dashboard nodes are dropped at refresh — they do not appear as impact edges).',
+      'BFS over incoming edges from a component, up to `hops` (max 3). Returns the slice of nodes and edges that depend on the target — "what breaks if I change this?". Carries a `soundness` envelope (`complete` / `blindSpots[]` / `staticCoverage`): `complete: false` with a `dynamic-apex` blind spot listing any impacted class that builds references at runtime (dynamic SOQL / reflective describe / Type.forName / untyped JSON), so the result is never implied complete when static analysis is blind. D3: a CustomField / CustomObject root ALSO carries an `unwalked-referrer-class` blind spot (`referrerClasses[]`) — whole classes of referrer are NOT modeled as incoming edges and so are NOT walked (roll-up source coupling, layout placement, flow decision/filter reads, tab/app membership), so `complete`/`full` is never reported on their absence; "no referrers" means "not checked", not proven none (use `sfi.field_360` for reconstructed Flow decision/filter readers). R6-19: also returns `diagram` — a ```mermaid graph TD``` fence of the (already-capped) impact slice, nodes labeled `{ComponentType}: {apiName}` with the root as a circle, edges labeled by edgeType — present ONLY when the slice is at or under 30 nodes; above that, `diagram` is omitted and `diagramOmittedReason` names the actual node count (never a silently-partial diagram). R6-24 Option B: when the root is a CustomField with folded report/dashboard usage, `reportUsage` names the capped referencing report/dashboard api-names (Report/Dashboard nodes are dropped at refresh — they do not appear as impact edges).',
     inputSchema: GET_IMPACT_INPUT_SCHEMA,
   },
   {
@@ -5033,6 +5167,18 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     inputSchema: FLOW_GRAPH_INPUT_SCHEMA,
   },
   {
+    name: 'sfi.nonselective_soql',
+    description:
+      "Flag NON-SELECTIVE SOQL — a WHERE clause with a full-table-scan / timeout shape at large data volume. The first INDEX-AWARE static analysis of Apex: for each inline `[SELECT …]` statement in every non-test class / trigger it walks the WHERE clause (parser-grade, over the ANTLR parse tree) and scores each predicate's field against an index set — THIS org's declared CustomIndex metadata plus unique / externalId / lookup fields, unioned with a curated standard-index table (Id, Name, audit fields, RecordTypeId, OwnerId, `<Relationship>Id` foreign keys). Rules: `nonselective-non-indexed-filters` (HIGH — no predicate references an indexed field, so the read cannot narrow by index), `leading-wildcard-like` (MEDIUM — `LIKE '%foo'` defeats any index), `negative-operator-only` (MEDIUM — the sole filters are `!=` / `<>` / `NOT IN` / `EXCLUDES`), and `no-where-clause` (MEDIUM — an unbounded read). An equality / range / IN filter on any indexed field (or a foreign-key relationship traversal) makes the statement at-least-potentially selective and it is NOT flagged for the core rule. `classes` are per-component entries (`{ componentId, type, apiName, findings: [{ rule, severity, sObject, location, reason }] }`) sorted by componentId; `byRule` / `byObject` / `totalFindingCount` are the full pre-slice counts; `limit` (default 50, max 200) + `offset` / `nextOffset` self-fit the class page to the byte budget. HONESTY: a STATIC SHAPE, never the Salesforce optimizer's runtime verdict — the optimizer weighs actual record counts the vault cannot know, so a non-selective-shaped read on a SMALL table is fine; record counts are unknown offline. Predicate fields/operators are `parsed`; the index set is `declared` + standard-index knowledge. Dynamic `Database.query(str)` / string-built reads are INVISIBLE (a recall gap); an unparseable file is a named `soundness` blind spot; test classes are excluded. This is the SELECTIVITY axis, a distinct question from the in-transaction limit scan.",
+    inputSchema: NONSELECTIVE_SOQL_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.flow_bulkification_audit',
+    description:
+      "Flag Flows that perform a record Create / Update / Delete or a Get Records lookup INSIDE a Loop body, plus filterless Get Records anywhere — the Flow-side complement of `sfi.governor_limit_risks`, which scans only ApexClass / ApexTrigger source and never sees Flows. For each Flow it walks the declared connector graph, computes each Loop's body (the elements reachable from its `nextValueConnector` before control returns or exits via `noMoreValuesConnector`), and reports each record element sitting inside it. Rules: `dml-in-loop` (a create / update / delete per iteration, HIGH), `get-records-in-loop` (a lookup per iteration, HIGH), and `filterless-get-records` (a Get Records with no filter / where clause — an unbounded read, MEDIUM). A record element in nested loops is attributed to the innermost. `flows` are the per-Flow entries (`{ componentId, apiName, risks: [{ rule, severity, location, loop, object, explanation }] }`) sorted by componentId; `totalRiskCount` / `byRule` are the FULL pre-slice counts; `limit` defaults to 100 (max 500) and slices over FLOWS, with `offset` / `nextOffset` paging the rest. HONESTY: findings are read from the declared connector graph (confidence: declared, NOT heuristic like the Apex-source scan); the verbatim boundary is 'iteration count unknown at rest' — a Loop may run 0 or many times, so this is a static Flow-shape smell, not a proven runtime breach. A Flow whose `.flow-meta.xml` is missing or unparseable is a named `soundness` blind spot (kind `unparsed-flow`), never silently dropped — an empty result for it is 'not checked', not 'clean'.",
+    inputSchema: FLOW_BULKIFICATION_AUDIT_INPUT_SCHEMA,
+  },
+  {
     name: 'sfi.flow_trace',
     description:
       "Honest PROJECTION of a Flow over a caller-supplied record state — the \"what happens to THIS record\" debugger. Given `flowRef` and a `recordState` field-value map (e.g. `{ \"Status__c\": \"Active\", \"Amount__c\": 10 }`), it walks the Flow's DECLARED graph from `<start>` and returns WHICH PATH executes (`path[]` — the ordered elements, each decision with its `matchedRule` + per-condition evaluation) and WHAT it writes (`writes[]` — each `FieldWrite` with `object`/`field`/`value`/`valueKind`/`viaElement`/`persists`). This is the tool for \"what happens to this record in <Flow> if Status is Active\", \"trace <Flow> with these field values\", \"which branch runs in <Flow> when <field> is X\", \"what does <Flow> write when …\", or \"simulate <Flow> for a record where …\" — where `sfi.flow_graph` gives the raw STRUCTURE and `sfi.explain_flow` the plain-business summary, flow_trace evaluates the tractable common subset over your state. Optional `priorState` supplies `$Record__Prior` for `ISCHANGED`/`PRIORVALUE`; `maxSteps` (default 500) guards loops/cycles. It is NOT a Salesforce runtime (verbatim in `disclosure`): it never executes Apex, callouts, DML, or subflows, and never reaches across to other automation's order-of-execution. A branch that depends on data NOT in `recordState` is `unknown`, NEVER assumed — when the executed path hits such a decision, an Apex/invocable action, a subflow, or an unmodeled (wait/dynamic) element, the walk STOPS honestly with `stoppedReason:'unevaluated-branch'` and the element is listed in `unevaluated[]` with a `why`. Entry criteria are evaluated first (`entered` + `entryEvaluation[]`); a false result stops with `stoppedReason:'no-entry'`. `assumptions[]` records honest gaps (e.g. a loop collection not supplied is \"assumed empty\"; a record lookup's results are unknown). `persists` mirrors the Bug-3 precondition — an in-memory `$Record.<field>` assignment reaches the database only when the flow also performs a whole-record `$Record` update (before-save flows persist automatically); record-op writes are real DML and always persist. `flowRef` resolution + failure modes are identical to `sfi.flow_graph` (canonical id / bare name / record id; ambiguous bare name → candidates as a success envelope, never a silent pick; invalid `Type:` prefix or index-less record id → `invalid-query`; unknown name / non-Flow → `component-not-found`).",
@@ -5121,6 +5267,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "v2.3 R2a what-if tool: given a CustomField canonical id (`CustomField:{Object}.{Field}`) and a proposed new field type, returns the structured impact across every incoming dependency edge. Classifies the (currentType, newType) transition via the matrix in WhatIfSemantics.md as `forward-compatible` / `lossy` / `breaking`, then walks every incoming edge (`references` from validation rules / formulas, `readsFrom`/`writesTo` from Flow + Apex + LWC/Aura/VF, `usedInLayout` from layouts, integration references from External Service / External Data Source) and emits per-impact entries with `category` (metadata-blocker / code-needs-update / integration-touch / configuration-only), source ComponentId, edge-level `confidence`, and a one-sentence explanation. FLS grants (Profile / PermissionSet) are NOT impacts — access keys on API name, not type — and Formula / Roll-Up Summary (computed) fields return `invalid-query` because their type is derived, not stored, so a field-type change is not a valid operation (mirrors `what_if_make_field_required`). Aggregate `verdict` is `safe` / `review` / `risky` / `blocking` based on the impact mix. Supported newType values include `EncryptedText` (Shield/Classic encryption): any transition to EncryptedText is classified as `lossy` because encrypted fields cannot be used in formulas, are invisible to SOQL filters in standard queries, and Apex/Flow reading the field without SYSTEM_MODE will receive masked values. Honesty axis (verbatim): dynamic SOQL, reflective field access via `obj.get('FieldName')`, and runtime computation are invisible; compatibility matrix is conservative — narrow data-shape edge cases may behave compatibly in practice.",
     inputSchema: WHAT_IF_CHANGE_FIELD_TYPE_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.picklist_integrity_scan',
+    description:
+      "Org-wide picklist value-set integrity scan — the INVERSE of what_if_remove_picklist_value (which starts from one value). Sweeps EVERY Picklist / MultiselectPicklist CustomField that carries an inline value set and, for each, gathers every string literal that DECLARATIVE source metadata compares or assigns against it — ValidationRule / formula-field formulas and `ISPICKVAL(field,'X')`, Flow decision criteria, Flow record-create/update LITERAL assignments (`<stringValue>` on a `writesTo` edge), Workflow-Rule criteria, and the field's own default(s) — then flags each literal that matches NO defined value (`orphaned`, HIGH; a spelling-close defined value is offered as a `nearMatch`) or matches only an INACTIVE/deactivated value (`inactive-only`, MEDIUM). Comparison vs assignment matters: an orphaned COMPARISON cannot match a defined value so it is flagged (a branch that silently died on a value rename), but an orphaned ASSIGNMENT is a defect only for a RESTRICTED picklist — an UNRESTRICTED picklist accepts free text — so an orphaned assignment to a field of unknown/unrestricted restrictedness is NOT flagged (free-text writes are not mis-flagged). Output pages over FIELDS-with-findings (`limit` 1..500 default 50, `offset`), with per-hit citations carrying source ComponentId, use kind, location, and edge/parse confidence, plus a `trust` block whose claim confidence is the WEAKEST grounding source (any `parsed` formula literal weakens the `declared` value set to `parsed`). Honesty axis (verbatim): this is a METADATA integrity check, NOT a record-value check — whether any RECORD holds a value is a runtime question for live_picklist_usage. Apex picklist-literal comparison is NOT covered (an Apex node carries no literal-bearing property and a bare-field-name scan of raw `.cls` source would cross-attribute a same-named field on a different object). Variable comparisons, dynamic SOQL/Apex strings, and reflective field access are invisible, so an empty finding is \"not checked\", not proven clean; and the offline vault does not model each field's `restricted` flag, so orphaned assignments are withheld unless the flag is present and true.",
+    inputSchema: PICKLIST_INTEGRITY_SCAN_INPUT_SCHEMA,
   },
   {
     name: 'sfi.what_if_remove_picklist_value',
@@ -5255,7 +5407,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.review_change',
     description:
-      "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `changeKind` plus its selector — EITHER `{ type, apiName }` OR a single `componentId` (`Type:ApiName`, the canonical id straight from `sfi.resolve`) — the two are equivalent), returns a per-component risk verdict, its direct dependents, and the tests to run — ordered most-dangerous first. For each component it composes THREE existing signals, not reimplemented: (a) IMPACT — direct INCOMING edges (the query `sfi.get_impact` / `sfi.promotion_readiness` build on), EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (structural) per the access≠usage rule; (b) TESTS — the covering set from `sfi.tests_for_change` (Apex only; everything else is not-applicable); (c) VERDICT from the shared blocking/risky/review/safe vocabulary. Classification: a DELETED component with ANY dependent = `blocking` (removing it breaks them; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate); a MODIFIED component with firm (declared/parsed) dependents = `risky`, with heuristic-only readers = `review`; a zero-dependent change in a family the vault does not fully cover = `review` (absence is 'not checked', surfaced as coverageCaveat); an ADDED component absent from the vault = `safe` (its OWN forward references are NOT analysed — only name-collision + tests), an ADDED id that already exists = `review` (collision). A modified/deleted id the vault lacks = `review`, never fabricated. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) also compose OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them and `selectedTests` carries the covering tests of the called Apex controllers (the bundle has no Apex tests of its own). `overallVerdict` is the worst across the set; `summary` tallies are always full (the `limit` cap only trims the inlined `reviewed[]` detail, and the most-dangerous rows sort first so the gate is never hidden). Honesty: analysis is against the LAST VAULT REFRESH of the TARGET org, which may drift from what is deployed — re-refresh before trusting a `safe`. Dependents are DIRECT (single-hop); the full transitive blast radius is `sfi.get_impact`. SELECTION ≠ VALIDATION. CROSS-VAULT (`againstVault`, a registered alias OR a path to an org-kb): composes R6-12 to answer 'will this changeset break anything in PROD?' — it opens that vault READ-ONLY and computes EVERY signal (dependents, verdict, tests, coverage) against ITS graph instead of the current (sandbox) one. It discloses `againstVault` (the target + its last refresh) with a prominent 'impact is against that vault, NOT the current one' note, `absentInAgainstVault` (changeset ids labelled modified/deleted that are ABSENT from the target — added relative to it, own contents not analysed), and an `extractorVersionCaveat` when the two vaults' product versions differ. Omitting `againstVault` keeps the default current-vault review byte-for-byte unchanged.",
+      "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `changeKind` plus its selector — EITHER `{ type, apiName }` OR a single `componentId` (`Type:ApiName`, the canonical id straight from `sfi.resolve`) — the two are equivalent), returns a per-component risk verdict, its direct dependents, and the tests to run — ordered most-dangerous first. For each component it composes THREE existing signals, not reimplemented: (a) IMPACT — direct INCOMING edges (the query `sfi.get_impact` / `sfi.promotion_readiness` build on), EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (structural) per the access≠usage rule; (b) TESTS — the covering set from `sfi.tests_for_change` (Apex only; everything else is not-applicable); (c) VERDICT from the shared blocking/risky/review/safe vocabulary. Classification: a DELETED component with ANY dependent = `blocking` (removing it breaks them; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate); a MODIFIED component with firm (declared/parsed) dependents = `risky`, with heuristic-only readers = `review`; a zero-dependent change in a family the vault does not fully cover = `review` (absence is 'not checked', surfaced as coverageCaveat); an ADDED component absent from the vault = `safe` (its OWN forward references are NOT analysed — only name-collision + tests), an ADDED id that already exists = `review` (collision). A modified/deleted id the vault lacks = `review`, never fabricated. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) also compose OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them and `selectedTests` carries the covering tests of the called Apex controllers (the bundle has no Apex tests of its own). `overallVerdict` is the worst across the set; `summary` tallies are always full (the `limit` cap only trims the inlined `reviewed[]` detail, and the most-dangerous rows sort first so the gate is never hidden). Honesty: analysis is against the LAST VAULT REFRESH of the TARGET org, which may drift from what is deployed — re-refresh before trusting a `safe`. Dependents are DIRECT (single-hop); the full transitive blast radius is `sfi.get_impact`. SELECTION ≠ VALIDATION. Optional `checkAccessParity: true` (default false; ADDITIVE `accessParity` section, omitting keeps the default output byte-for-byte unchanged) folds in a grant-completeness ('ships for nobody') check: each added/modified field/object with ZERO modeled Profile/PermissionSet grant (and no ViewAllData/ModifyAllData or standard-default access) is flagged as a candidate that would deploy invisible — did you forget the permission set? Zero-grant direction only (the 'ships for everybody' breadth is deferred to `sfi.live_permset_holders`), stamped with the vault's last refresh. CROSS-VAULT (`againstVault`, a registered alias OR a path to an org-kb): composes R6-12 to answer 'will this changeset break anything in PROD?' — it opens that vault READ-ONLY and computes EVERY signal (dependents, verdict, tests, coverage) against ITS graph instead of the current (sandbox) one. It discloses `againstVault` (the target + its last refresh) with a prominent 'impact is against that vault, NOT the current one' note, `absentInAgainstVault` (changeset ids labelled modified/deleted that are ABSENT from the target — added relative to it, own contents not analysed), and an `extractorVersionCaveat` when the two vaults' product versions differ. Omitting `againstVault` keeps the default current-vault review byte-for-byte unchanged.",
     inputSchema: REVIEW_CHANGE_INPUT_SCHEMA,
   },
   {
@@ -5384,7 +5536,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.field_360',
     description:
-      "A complete 360 profile of a single FIELD — everything that touches that field across validation, formulas, automation, code, UI, integrations, and emails, in one place. (Field forensics — this is about a field, NOT a user Profile or permissions.) The go-to answer for \"give me the full profile of this field\", \"the full picture of {Object}.{Field}\", \"everything that uses {Object}.{Field}\", \"what touches this field across automation and code\", or a BA's field impact assessment before a change. v3.0 unified field-forensics synthesis tool. Given a CustomField canonical id (or short `<Object>.<Field>` form), composes every prior tier's reads of the field into one structured response with ten optional content sections (`validates`, `formulas`, `writers`, `readers`, `ui`, `integrations`, `automations`, `emails`, `dependencies`, `summary`) plus the v3.0 constitutional honesty axis. A validation rule that reaches the field BOTH ways (a direct `references` edge and its own condition's `readsFrom`, both tokenized from one `errorConditionFormula`) is listed ONCE under `validates` — `validates` and `automations` never both hold one rule — with the fold named in `boundaries[]`; the folded rows still count on the automation RISK axis, so `riskLevel` is unaffected by the collapse. Optional `includeSections` narrows the response; `maxRowsPerSection` (default 50, max 200) bounds per-section row counts; `groupBy` (default `'source'`) reshuffles the rendering hint. The `summary` carries per-section unfiltered counts AND a `riskLevel` (`'low' | 'medium' | 'high'`) computed per PLAN-v3.0 §4.1 with the specific `riskFactors[]` enumerated; PII risk factors are computed live via the heuristic pii recognizer (EncryptedText / SSN / financial names), not read from a stamped property. The `boundaries[]` array carries the verbatim Q165 disclosure naming which surfaces are composed vs folded elsewhere (list views, reports, dashboards); `dataNotAvailable: ['list-view-filters', 'reports', 'dashboards']` surfaces verbatim regardless of section filter. Top-level `confidence` reports `'mixed'` when sections span tiers (the typical case for any real-org field). Honesty axis (verbatim, ALWAYS): synthesis without omission disclosure is a contract violation; the report is the COMPLETE answer ONLY for extracted axes. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`. When the vault holds captured data-shape facts (`refresh --with-data-shape`), the response embeds a `dataShape` block — the field's sampled fill rate as a stamped `data_snapshot` (sampled + TTL-checked; context, never a live read).",
+      "A complete 360 profile of a single FIELD — everything that touches that field across validation, formulas, automation, code, UI, integrations, and emails, in one place. (Field forensics — this is about a field, NOT a user Profile or permissions.) The go-to answer for \"give me the full profile of this field\", \"the full picture of {Object}.{Field}\", \"everything that uses {Object}.{Field}\", \"what touches this field across automation and code\", or a BA's field impact assessment before a change. v3.0 unified field-forensics synthesis tool. Given a CustomField canonical id (or short `<Object>.<Field>` form), composes every prior tier's reads of the field into one structured response with ten optional content sections (`validates`, `formulas`, `writers`, `readers`, `ui`, `integrations`, `automations`, `emails`, `dependencies`, `summary`) plus the v3.0 constitutional honesty axis. A validation rule that reaches the field BOTH ways (a direct `references` edge and its own condition's `readsFrom`, both tokenized from one `errorConditionFormula`) is listed ONCE under `validates` — `validates` and `automations` never both hold one rule — with the fold named in `boundaries[]`; the folded rows still count on the automation RISK axis, so `riskLevel` is unaffected by the collapse. Optional `includeSections` narrows the response; `maxRowsPerSection` (default 50, max 200) bounds per-section row counts; `groupBy` (default `'source'`) reshuffles the rendering hint. The `summary` carries per-section unfiltered counts AND a `riskLevel` (`'low' | 'medium' | 'high'`) computed per PLAN-v3.0 §4.1 with the specific `riskFactors[]` enumerated; PII risk factors are computed live via the heuristic pii recognizer (EncryptedText / SSN / financial names), not read from a stamped property. The `boundaries[]` array carries the verbatim Q165 disclosure naming which surfaces are composed vs folded elsewhere (list views, reports, dashboards); `dataNotAvailable: ['list-view-filters', 'reports', 'dashboards']` surfaces verbatim regardless of section filter. D3: a Flow decision / record-trigger filter that references this field carries NO `readsFrom` edge (it is a `firesWhen` edge to a ConditionalContext), so such Flow reads are RECONSTRUCTED from the graph's ConditionalContext `fieldRefs` and surfaced in `readers` as heuristic-confidence rows (`source: flow-condition-reads-scan:*`, deduped against real `readsFrom` readers) — otherwise `readers` would read 0 for a field several Flows filter on; `boundaries[]` also names the referrer classes still NOT composed into any section (roll-up source coupling, layout related-list placement). Top-level `confidence` reports `'mixed'` when sections span tiers (the typical case for any real-org field). Honesty axis (verbatim, ALWAYS): synthesis without omission disclosure is a contract violation; the report is the COMPLETE answer ONLY for extracted axes. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`. When the vault holds captured data-shape facts (`refresh --with-data-shape`), the response embeds a `dataShape` block — the field's sampled fill rate as a stamped `data_snapshot` (sampled + TTL-checked; context, never a live read).",
     inputSchema: FIELD_360_INPUT_SCHEMA,
   },
   {

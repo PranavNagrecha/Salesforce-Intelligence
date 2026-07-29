@@ -8,9 +8,9 @@ const version = siteData.version;
 const approxTests = siteData.tests.approx.toLocaleString("en-US");
 const ORG_ID = `${site.url}/#org`;
 
-const title = "Salesforce Org Intelligence MCP Server - sf-intelligence";
+const title = "Salesforce Org Intelligence for AI Agents | sf-intelligence";
 const description =
-  "Read-only Salesforce org intelligence for AI agents. Ask metadata, dependency, permission, Apex, Flow, and impact questions through an offline MCP server.";
+  "Map Salesforce metadata, dependencies, permissions, Apex and Flows with a read-only, offline MCP server and CLI. Try the demo or install locally.";
 
 const jsonld = [
   {
@@ -46,6 +46,15 @@ const jsonld = [
       "Read-only HTTP serving for CI and shared access",
       "Per-answer provenance and confidence labelling",
     ],
+  },
+  {
+    "@type": "SoftwareSourceCode",
+    "@id": `${site.url}/#sourcecode`,
+    codeRepository: site.github,
+    programmingLanguage: "TypeScript",
+    runtimePlatform: "Node.js 20+",
+    license: `${site.url}/licensing`,
+    targetProduct: { "@id": `${site.url}/#software` },
   },
 ];
 ---
@@ -120,9 +129,13 @@ const jsonld = [
   <section id="what-is" style="border-top:1px solid var(--line);">
     <div class="container">
       <p class="sec-label">$ what is sf-intelligence?</p>
+      <p class="what-lead" style="max-width:760px; font-size:1.15rem; font-weight:600; color:var(--fg); margin-bottom:6px;">Salesforce org intelligence for AI agents - grounded, read-only, offline.</p>
       <h2 class="head screen-type">A knowledge base for one org.</h2>
       <p class="sec-intro" style="max-width:760px; font-size:1.05rem; color:var(--fg);">
-        <b>sf-intelligence</b> is a free, open-source <b>Model Context Protocol (MCP) server</b> and CLI that turns one Salesforce org's metadata into a local, queryable knowledge base for AI agents like Claude and Cursor. You retrieve your org's metadata once; after that every answer is served <b>offline and read-only</b> from a vault on your machine - schema, fields, Apex, Flows, permissions, sharing, integrations, and OmniStudio - grounded in real metadata and labelled with its provenance. It never writes to your org and no org data leaves your machine. It is an independent project, not affiliated with Salesforce, Inc.
+        <b>sf-intelligence</b> is a free, source-available <b>Model Context Protocol (MCP) server</b> and CLI that turns one Salesforce org's metadata into a local, queryable knowledge base for AI agents like Claude and Cursor. You retrieve your org's metadata once; after that every answer is served <b>offline and read-only</b> from a vault on your machine - schema, fields, Apex, Flows, permissions, sharing, integrations, and OmniStudio - grounded in real metadata and labelled with its provenance. It never writes to your org and no org data leaves your machine. It is an independent project, not affiliated with Salesforce, Inc.
+      </p>
+      <p class="sec-intro" style="max-width:760px; margin-top:14px;">
+        It runs as a read-only <a href="/mcp">Salesforce MCP server</a> for Claude, Cursor and Codex, pairs with portable <a href="/agent-skills">Salesforce Agent Skills</a> that interpret intent, and you can <a href="/compare">compare Salesforce org-intelligence tools</a> to see where it fits.
       </p>
     </div>
   </section>
@@ -294,7 +307,7 @@ const jsonld = [
     <div class="container">
       <p class="sec-label">trust &amp; provenance</p>
       <h2 class="head screen-type">Every answer is labelled.</h2>
-      <p class="sec-intro">Findings carry where they came from, how they were derived, and how complete the underlying coverage was.</p>
+      <p class="sec-intro">Findings carry where they came from, how they were derived, and how complete the underlying coverage was - the full <a href="/trust">security and evidence model</a> spells out every label.</p>
       <div class="trust-cols" style="margin-top:30px;">
         <div class="trust-col">
           <h3>confidence</h3>
@@ -373,7 +386,7 @@ const jsonld = [
     <div class="container" style="max-width:840px;">
       <p class="sec-label">install</p>
       <h2 class="head screen-type">Register once, then just ask.</h2>
-      <p class="sec-intro">Distributed on npm as <span class="mono amber">sf-intelligence</span> - an MCP server plus the <span class="mono amber">sfi</span> CLI.</p>
+      <p class="sec-intro">Distributed on npm as <span class="mono amber">sf-intelligence</span> - an MCP server plus the <span class="mono amber">sfi</span> CLI. Follow the guide to <a href="/getting-started">install sf-intelligence</a> in a couple of minutes.</p>
 
       <h3 class="mono" style="color:var(--green-soft); margin-top:28px; font-size:.92rem;">// Claude Code - project-scoped</h3>
       <div class="code-block">

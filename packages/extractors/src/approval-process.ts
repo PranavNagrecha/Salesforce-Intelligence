@@ -87,6 +87,46 @@ const NAME_OPTIONAL_APPROVER_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * D7 — a `userHierarchyField` step approver carries NO `<name>` in the step
+ * block. The field it routes through is designated ONCE at the process root in
+ * `<nextAutomatedApprover><userHierarchyField>{FieldApiName}</userHierarchyField>`.
+ * That field API name is either the built-in standard `Manager` field (no `__c`
+ * suffix — a STANDARD field, not a `CustomField` node) or a CUSTOM hierarchy
+ * field on User (API name ends `__c`, e.g. an `*_Approver__c` field). Only a
+ * custom field is a referenceable `CustomField`; the standard `Manager` case
+ * stays the edgeless implicit-Manager approver.
+ */
+const isCustomHierarchyField = (fieldApiName: string): boolean =>
+  fieldApiName.endsWith('__c');
+
+/**
+ * The API name of the object that hosts a `userHierarchyField` approver field.
+ * `<nextAutomatedApprover><userHierarchyField>` names a hierarchical
+ * relationship field, which Salesforce only permits on the `User` object — so
+ * the reference edge is `User`-scoped (`CustomField:User.{field}`), NOT scoped
+ * to the approval process's own object.
+ */
+const HIERARCHY_FIELD_HOST_OBJECT = 'User';
+
+/**
+ * Read the process-level automated-approver hierarchy field, if any (D7).
+ * Returns the field API name from
+ * `<nextAutomatedApprover><userHierarchyField>` (e.g. `Manager`, or a custom
+ * `*_Approver__c` field) or `null` when the process defines no
+ * `<nextAutomatedApprover>` (the genuinely name-less implicit-Manager case).
+ */
+const readAutomatedApproverField = (
+  rootObj: Record<string, unknown>,
+): string | null => {
+  const nextAutomated = unwrapSingle(rootObj['nextAutomatedApprover']);
+  if (typeof nextAutomated !== 'object' || nextAutomated === null) return null;
+  return optionalString(
+    nextAutomated as Record<string, unknown>,
+    'userHierarchyField',
+  );
+};
+
+/**
  * Variant table for hook `<action>` types — identical shape to the
  * WorkflowRule `<actions>` variant table (per the spec's pointer to
  * `WorkflowRule.md`'s table). Hook actions emit edges with `hookType`
@@ -262,6 +302,14 @@ const templateRefToCanonicalTail = (templateRef: string): string =>
 interface ResolvedApprover {
   readonly name: string;
   readonly type: string;
+  /**
+   * D7 — set when the field was resolved from the process-level
+   * `<nextAutomatedApprover><userHierarchyField>` for a name-less
+   * `userHierarchyField` approver. Such hierarchy fields live on the `User`
+   * object, so the reference edge is `User`-scoped (`CustomField:User.{field}`)
+   * and carries a `viaNextAutomatedApprover: true` provenance property.
+   */
+  readonly viaNextAutomatedApprover?: boolean;
 }
 
 /** A resolved hook `<action>` element. */
@@ -277,6 +325,7 @@ interface ResolvedHookAction {
  */
 const resolveApprover = (
   approverRaw: unknown,
+  automatedApproverField: string | null,
   path: string,
 ): Result<ResolvedApprover | null, ExtractorError> => {
   if (typeof approverRaw !== 'object' || approverRaw === null) {
@@ -289,13 +338,30 @@ const resolveApprover = (
   const approver = approverRaw as Record<string, unknown>;
   const nameRaw = unwrapSingle(approver['name']);
   if (nameRaw === undefined || nameRaw === null || nameRaw === '') {
-    // A name-less hierarchy approver is the implicit standard Manager field —
-    // no named component to reference, so skip it (the node + stepCount stay).
     const typePeek = unwrapSingle(approver['type']);
     if (
       typeof typePeek === 'string' &&
       NAME_OPTIONAL_APPROVER_TYPES.has(typePeek)
     ) {
+      // D7 — a name-less `userHierarchyField` approver routes through the field
+      // designated at `<nextAutomatedApprover><userHierarchyField>`. When that
+      // is a CUSTOM hierarchy field on User (API name ends `__c`, e.g. an
+      // `*_Approver__c` field), CAPTURE it so the "who approves" field reference
+      // is not silently lost — emit a `User`-scoped `CustomField` edge below.
+      if (
+        typePeek === 'userHierarchyField' &&
+        automatedApproverField !== null &&
+        isCustomHierarchyField(automatedApproverField)
+      ) {
+        return ok({
+          name: automatedApproverField,
+          type: typePeek,
+          viaNextAutomatedApprover: true,
+        });
+      }
+      // Otherwise the genuinely name-less implicit standard Manager (or an
+      // `adhoc`/`relatedUserField` approver with no name) — no named component
+      // to reference, so skip it (the node + stepCount stay).
       return ok(null);
     }
     return err({
@@ -355,8 +421,14 @@ const approverEdge = (
   stepIndex: number,
 ): Edge => {
   const spec = APPROVER_VARIANT_TABLE[approver.type]!;
+  // D7 — a `userHierarchyField` field resolved from `<nextAutomatedApprover>`
+  // is a hierarchical relationship field on the `User` object, not a field on
+  // the approval process's own object.
+  const scopeObject = approver.viaNextAutomatedApprover
+    ? HIERARCHY_FIELD_HOST_OBJECT
+    : objectApiName;
   const targetTail = spec.scopedByObject
-    ? `${objectApiName}.${approver.name}`
+    ? `${scopeObject}.${approver.name}`
     : approver.name;
   const targetId = `${spec.idPrefix}:${targetTail}`;
   return {
@@ -369,6 +441,9 @@ const approverEdge = (
       stepIndex,
       approverType: approver.type,
       ...spec.extraProps,
+      ...(approver.viaNextAutomatedApprover
+        ? { viaNextAutomatedApprover: true }
+        : {}),
     },
   };
 };
@@ -383,6 +458,7 @@ const stepEdges = (
   stepIndex: number,
   processId: string,
   objectApiName: string,
+  automatedApproverField: string | null,
   path: string,
 ): Result<readonly Edge[], ExtractorError> => {
   if (typeof stepRaw !== 'object' || stepRaw === null) {
@@ -397,7 +473,11 @@ const stepEdges = (
       (assigned as Record<string, unknown>)['approver'],
     );
     for (const approverRaw of approvers) {
-      const resolved = resolveApprover(approverRaw, path);
+      const resolved = resolveApprover(
+        approverRaw,
+        automatedApproverField,
+        path,
+      );
       if (!resolved.ok) return resolved;
       // null = a name-less hierarchy approver (implicit Manager) with no named
       // target — skip the edge, keep walking.
@@ -474,8 +554,40 @@ const readNamedTypedList = (container: unknown, childKey: string): NamedTypedRef
   });
 };
 
+/**
+ * D7 — substitute the process-level automated-approver field into a name-less
+ * `userHierarchyField` approver's summary entry. A `userHierarchyField` approver
+ * carries no `<name>` in the step block; the field it routes through is
+ * designated ONCE at `<nextAutomatedApprover><userHierarchyField>`. When that is
+ * a CUSTOM hierarchy field (API name ends `__c`, e.g. an `*_Approver__c` field),
+ * surface it as the approver's field API name so `properties.steps[].approvers`
+ * names WHO approves instead of a bare `{ name: null }`. The standard `Manager`
+ * field (and any absent designation) stays name-optional — it is the built-in
+ * implicit-Manager routing with no custom component to name.
+ */
+const applyHierarchyFieldName = (
+  approvers: readonly NamedTypedRef[],
+  automatedApproverField: string | null,
+): NamedTypedRef[] => {
+  if (
+    automatedApproverField === null ||
+    !isCustomHierarchyField(automatedApproverField)
+  ) {
+    return [...approvers];
+  }
+  return approvers.map((a) =>
+    a.name === null && a.type === 'userHierarchyField'
+      ? { name: automatedApproverField, type: a.type }
+      : a,
+  );
+};
+
 /** Summarize one `<approvalStep>` into its structured, edge-free breakdown. */
-const summarizeApprovalStep = (stepRaw: unknown, stepIndex: number): ApprovalStepSummary => {
+const summarizeApprovalStep = (
+  stepRaw: unknown,
+  stepIndex: number,
+  automatedApproverField: string | null,
+): ApprovalStepSummary => {
   const step =
     typeof stepRaw === 'object' && stepRaw !== null
       ? (stepRaw as Record<string, unknown>)
@@ -495,7 +607,10 @@ const summarizeApprovalStep = (stepRaw: unknown, stepIndex: number): ApprovalSte
     stepIndex,
     name: optionalString(step, 'name'),
     label: optionalString(step, 'label'),
-    approvers: readNamedTypedList(assigned, 'approver'),
+    approvers: applyHierarchyFieldName(
+      readNamedTypedList(assigned, 'approver'),
+      automatedApproverField,
+    ),
     entryCriteriaFormula: entryCriteria === null ? null : optionalString(entryCriteria, 'formula'),
     entryCriteriaItemCount:
       entryCriteria === null ? 0 : toArray(entryCriteria['criteriaItems']).length,
@@ -760,6 +875,15 @@ const hookListEdges = (
  * are not extracted in v1.3) and `userHierarchyField` /
  * `relatedUserField` when the named field is outside the extracted
  * set; `role` / `group` / `queue` typically resolve to v1.1 nodes.
+ * D7: a name-less `userHierarchyField` approver carries no `<name>` in
+ * its step block — the field it routes through is designated ONCE at the
+ * process root in `<nextAutomatedApprover><userHierarchyField>`. A CUSTOM
+ * hierarchy field there (API name ends `__c`, e.g. an `*_Approver__c`
+ * field on User) is captured as the approver's field and emits a
+ * `User`-scoped `references` edge (`CustomField:User.{field}`,
+ * `viaNextAutomatedApprover: true`); the built-in standard `Manager`
+ * field (and an absent `<nextAutomatedApprover>`) stays the edgeless
+ * implicit-Manager approver.
  *
  * Returns an `ExtractorError` for any documented failure mode:
  * `file-not-found`, `parse-error`, or `malformed-input` (filename not
@@ -856,6 +980,14 @@ export const extractApprovalProcess = async (
   // canonical singular; keep the plural as a defensive fallback.
   const steps = toArray(rootObj['approvalStep'] ?? rootObj['approvalSteps']);
 
+  // D7 — the field a name-less `userHierarchyField` approver routes through is
+  // designated ONCE at the process root in
+  // `<nextAutomatedApprover><userHierarchyField>`, NOT in the `<approver>` block.
+  // Resolve it once and thread it into the per-step summary + edge builders so a
+  // custom hierarchy field (e.g. an `*_Approver__c` field on User) is captured
+  // instead of dropped as the implicit Manager.
+  const automatedApproverField = readAutomatedApproverField(rootObj);
+
   // v2.0a — A top-level `<entryCriteria>` block is the firing
   // condition for the process as a whole. Per
   // `ConditionalContextSemantics.md` §"ApprovalProcess conditions",
@@ -949,7 +1081,9 @@ export const extractApprovalProcess = async (
       // per-step actions in declared order — so the approval chain is
       // answerable from the node's own facts, not by re-deriving it from
       // unordered `references` edges. The edges are still emitted below.
-      steps: steps.map((step, i) => summarizeApprovalStep(step, i)),
+      steps: steps.map((step, i) =>
+        summarizeApprovalStep(step, i, automatedApproverField),
+      ),
       // Process-level action hooks, structured (the same actions the hook edges
       // model) so "what happens on final approval / rejection?" is answerable
       // from facts — e.g. the Rejected email alert + status field update.
@@ -1006,6 +1140,7 @@ export const extractApprovalProcess = async (
       stepIndex,
       processId,
       objectApiName,
+      automatedApproverField,
       path,
     );
     if (!stepResult.ok) return stepResult;

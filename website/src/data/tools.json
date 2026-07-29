@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-29T03:18:09.467Z",
-  "toolCount": 203,
+  "generatedAt": "2026-07-29T16:16:50.387Z",
+  "toolCount": 209,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -264,6 +264,10 @@
         {
           "name": "sfi.permission_risk_report",
           "description": "Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata: every Profile or PermissionSet that..."
+        },
+        {
+          "name": "sfi.permission_set_consolidation",
+          "description": "Offline, vault-only CONSOLIDATION candidates for permission sets, from DECLARED grants - 'which permission sets are redundant / duplicate / consolidatable'."
         },
         {
           "name": "sfi.effective_permissions",
@@ -734,6 +738,14 @@
           "description": "Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question: identity & freshness, coverage and blind spots up front, scal..."
         },
         {
+          "name": "sfi.doc_coverage_report",
+          "description": "Offline, vault-only documentation-GAP meter - the documentation axis `sfi.tech_debt_score` lacks."
+        },
+        {
+          "name": "sfi.limit_headroom_report",
+          "description": "Offline, vault-only limit-headroom report - the replacement for the retiring Salesforce Optimizer's limit report."
+        },
+        {
           "name": "sfi.query_graph",
           "description": "ADVANCED / power-user: a read-only, guard-railed STRUCTURED query over the vault's dependency graph, for ad-hoc questions the purpose-built tools don't cover (e.g."
         },
@@ -810,12 +822,24 @@
           "description": "The FAITHFUL, LOSSLESS structural graph of a Flow - every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decis..."
         },
         {
+          "name": "sfi.nonselective_soql",
+          "description": "Flag NON-SELECTIVE SOQL - a WHERE clause with a full-table-scan / timeout shape at large data volume."
+        },
+        {
+          "name": "sfi.flow_bulkification_audit",
+          "description": "Flag Flows that perform a record Create / Update / Delete or a Get Records lookup INSIDE a Loop body, plus filterless Get Records anywhere - the Flow-side complem..."
+        },
+        {
           "name": "sfi.flow_trace",
           "description": "Honest PROJECTION of a Flow over a caller-supplied record state - the \"what happens to THIS record\" debugger."
         },
         {
           "name": "sfi.flow_fault_audit",
           "description": "Which Flows have a DML/action element with NO fault path - the flow error-handling hygiene sweep."
+        },
+        {
+          "name": "sfi.picklist_integrity_scan",
+          "description": "Org-wide picklist value-set integrity scan - the INVERSE of what_if_remove_picklist_value (which starts from one value)."
         },
         {
           "name": "sfi.review_change",

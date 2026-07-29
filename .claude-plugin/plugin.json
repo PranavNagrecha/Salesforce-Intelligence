@@ -10,7 +10,6 @@
   "license": "SEE LICENSE IN LICENSE",
   "commands": "./.claude/commands",
   "skills": "./.claude/skills",
-  "agents": "./.claude/agents",
   "mcpServers": {
     "sf-intelligence": {
       "type": "stdio",

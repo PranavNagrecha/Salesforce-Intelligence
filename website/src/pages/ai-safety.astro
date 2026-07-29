@@ -2,9 +2,11 @@
 import DocPage from "../layouts/DocPage.astro";
 import site from "../data/site.ts";
 
-const title = "Is it safe to connect AI to your Salesforce org?";
+const title = "Is AI Safe for Salesforce Metadata? sf-intelligence Security Model";
 const description =
-  "Is it safe to point an AI agent at Salesforce? How an offline, read-only, fail-closed MCP server keeps org data on your machine - no writes, no data egress.";
+  "Understand the risks of AI-assisted Salesforce analysis and how local, read-only, evidence-labelled org intelligence reduces exposure and hallucination.";
+
+const dateModified = "2026-07-23";
 
 const faq = [
   {
@@ -32,6 +34,8 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
+    dateModified,
+    mainEntityOfPage: `${site.url}/ai-safety`,
     about: "AI agent security and data privacy for Salesforce orgs",
   },
   {
@@ -49,7 +53,7 @@ const jsonld = [
   title={title}
   description={description}
   path="/ai-safety"
-  heading="Is AI safe on your org?"
+  heading="When AI is — and is not — safe for Salesforce org analysis"
   intro={`Pointing an AI agent at a production Salesforce org raises two honest fears: could it <b>change something</b>, and could your <b>data leave</b>? This page answers both plainly - and explains why an offline, read-only, fail-closed design is the low-risk way to give AI real context about your org.`}
   crumbs={[{ label: "ai-safety", href: "/ai-safety" }]}
   breadcrumbs={[{ name: "Is AI safe on your org?", path: "/ai-safety" }]}
@@ -124,6 +128,7 @@ const jsonld = [
               <a class="btn btn-ghost" href="/trust">how it's tested</a>
             </div>
           </div>
+          <p class="muted" style="margin-top:20px; font-size:.85rem; text-align:center;">Last updated {dateModified}.</p>
         </div>
       </div>
     </div>

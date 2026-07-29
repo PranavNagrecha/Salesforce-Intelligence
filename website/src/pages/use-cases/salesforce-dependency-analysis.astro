@@ -2,9 +2,9 @@
 import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 
-const title = "Salesforce dependency analysis - fields, Flows, Apex";
+const title = "Salesforce Dependency Analysis for Fields, Flows & Apex | sf-intelligence";
 const description =
-  "Run Salesforce dependency analysis before changing fields, Flows, Apex, objects, layouts, or permission metadata. Read-only, local, and evidence-based.";
+  "Find upstream and downstream Salesforce dependencies, inspect evidence confidence and understand change blast radius before deployment.";
 
 const jsonld = [
   {
@@ -13,7 +13,7 @@ const jsonld = [
     description: "How sf-intelligence traces Salesforce metadata dependencies for fields, Flows, Apex, objects, layouts, and permissions.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-10",
+    dateModified: "2026-07-23",
     mainEntityOfPage: `${site.url}/use-cases/salesforce-dependency-analysis`,
   },
 ];
@@ -23,7 +23,7 @@ const jsonld = [
   title={title}
   description={description}
   path="/use-cases/salesforce-dependency-analysis"
-  heading="Salesforce dependency analysis"
+  heading="Map Salesforce dependencies before you change fields, Flows or Apex"
   intro="Use sf-intelligence to trace what depends on a Salesforce field, object, Flow, Apex class, layout, permission set, integration endpoint, or package boundary before you change it."
   crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "dependency-analysis", href: "/use-cases/salesforce-dependency-analysis" }]}
   breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Salesforce dependency analysis", path: "/use-cases/salesforce-dependency-analysis" }]}
@@ -32,6 +32,7 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
         <h2 id="why">Why Salesforce dependencies are hard to see</h2>
         <p>Salesforce dependencies live across XML metadata, Apex source, formulas, Flow definitions, Profile and Permission Set grants, page layouts, packages, and integration configuration. A single field can be referenced by automation, code, reports, validation rules, and external systems. sf-intelligence collects those signals into a local graph and reports how each dependency was found.</p>
 
@@ -61,8 +62,86 @@ const jsonld = [
         <h2 id="evidence">Evidence-first output</h2>
         <p>The output is designed for review before a change lands. Each dependency points to a canonical component ID, the edge type, the confidence tier, and any known coverage caveat. If a metadata family was not retrieved, sf-intelligence says that the scan is partial instead of implying safety.</p>
 
+        <h2 id="examples">Three worked examples</h2>
+        <p>Each example shows the question you type and the shape of the answer you get back. The output is a <em>static picture</em> of what the retrieved metadata references - not a runtime trace and not proof of what executes.</p>
+
+        <h3 id="example-field">1. Before deleting a field</h3>
+        <p>You are about to delete <code>Account.Industry__c</code> and want the upstream and downstream references first. This is the same trace behind <a href="/use-cases/where-is-a-field-used">where is a Salesforce field used</a>, read here as a pre-change dependency check.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> what depends on Account.Industry__c before I delete it?
+▸ 5 components reference <span class="tok-k">CustomField:Account.Industry__c</span>
+  ValidationRule:Account.Industry_Required   references   <span class="tok-s">declared</span>
+  Flow:Lead_To_Account_Sync                  writesField  <span class="tok-s">parsed</span>
+  ApexClass:AccountService (2 refs)          readsField   <span class="tok-s">parsed</span>
+  Layout:Account-Sales Layout                references   <span class="tok-s">declared</span>
+  Report:Accounts_by_Industry                references   <span class="tok-s">declared</span>
+  provenance offline_snapshot
+  <span class="tok-c">coverageCaveat: layouts & reports fully modeled; dynamic Apex not parsed</span></pre></div>
+        <p>Read this as a static shape: five families reference the field today. If a family comes back empty, that is <strong>no static evidence found</strong> for that family - not a verdict that the field is safe or unused. Weigh these dependents with the full delete simulation on <a href="/use-cases/impact-analysis">Salesforce impact analysis</a>.</p>
+
+        <h3 id="example-flow">2. Tracing a Flow both ways</h3>
+        <p>You want to know what a record-triggered Flow reads and writes, and whether anything else invokes it before you deactivate it.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> what does the Opportunity_Router flow depend on, and what depends on it?
+▸ <span class="tok-k">Flow:Opportunity_Router</span> — record-triggered, after save on Opportunity
+  depends on ↓
+    CustomField:Opportunity.StageName   readsField    <span class="tok-s">parsed</span>
+    CustomField:Account.Health__c       writesField   <span class="tok-s">parsed</span>
+    ApexClass:NotifyCsm                  invokes       <span class="tok-s">declared</span>
+  depended on by ↑
+    <span class="tok-c">no static evidence found — no retrieved component references this Flow</span>
+  provenance offline_snapshot · confidence: parsed</pre></div>
+        <p>The empty upstream line is deliberate wording: the graph found <strong>no static evidence</strong> that another component calls this Flow, which is different from proving nothing does. A subflow invoked by a dynamically built name, or an invocation added since the last refresh, would not appear.</p>
+
+        <h3 id="example-apex">3. An Apex class call graph</h3>
+        <p>You are refactoring an Apex class and need its resolved field access, its call graph, and - just as important - what the static parse could <em>not</em> see.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> what does BillingService depend on, and what calls it?
+▸ <span class="tok-k">ApexClass:BillingService</span>
+  depends on ↓
+    CustomField:Invoice__c.Amount__c    readsField    <span class="tok-s">parsed</span>
+    CustomField:Invoice__c.Status__c    writesField   <span class="tok-s">parsed</span>
+    ApexClass:TaxCalculator             calls         <span class="tok-s">parsed</span>
+  depended on by ↑
+    ApexTrigger:InvoiceTrigger          calls         <span class="tok-s">parsed</span>
+    ApexClass:BillingServiceTest        calls         <span class="tok-s">parsed</span>
+  blind spots on this class
+    <span class="tok-c">1 dynamic SOQL string not resolved — Database.query(...)</span>
+    <span class="tok-c">reflective field access via getPopulatedFieldsAsMap() not tracked</span>
+  provenance offline_snapshot · confidence: parsed + heuristic</pre></div>
+        <p>The <code>parsed</code> edges come from the default ANTLR pass over the Apex source; the blind-spot lines are shapes the parser explicitly flags rather than silently dropping. Treat the resolved edges as high-trust and the blind spots as prompts to read the source before you act.</p>
+
+        <h2 id="confidence">How edge confidence works</h2>
+        <p>Every dependency edge carries one of four tiers. The tier tells you <em>how the edge was found</em>, which is what governs how much to trust it. This is the per-edge confidence - distinct from a reasoning claim's confidence.</p>
+        <table class="doc-table">
+          <thead><tr><th>Tier</th><th>How the edge was found</th><th>How much to trust it</th></tr></thead>
+          <tbody>
+            <tr><td><code>declared</code></td><td>Salesforce metadata states the dependency directly - FLS, layout, validation rule, record type, lookup / master-detail</td><td>Highest - it is written in the XML</td></tr>
+            <tr><td><code>parsed</code></td><td>ANTLR/AST parse of Apex or XML parse of a Flow or formula - resolved field reads and writes, cross-class calls, field-level SOQL</td><td>High - grounded in the real source</td></tr>
+            <tr><td><code>heuristic</code></td><td>Regex/token backfill where the parser failed or the reference is only textual</td><td>Lower - can false-positive; spot-check before acting</td></tr>
+            <tr><td><code>partial</code></td><td>A metadata family was not retrieved this refresh</td><td>Not evidence of absence - "not checked", never "none"</td></tr>
+          </tbody>
+        </table>
+        <p>Static analysis has hard blind spots, and sf-intelligence names them rather than papering over them:</p>
+        <ul>
+          <li><strong>Dynamic SOQL / SOSL strings</strong> - queries assembled at runtime (<code>Database.query(someString)</code>) reference fields the parser cannot resolve.</li>
+          <li><strong>Reflective field access</strong> - <code>getPopulatedFieldsAsMap()</code>, <code>getGlobalDescribe()</code>, and dynamic <code>get()</code>/<code>put()</code> touch fields by name at runtime, invisibly to a static scan.</li>
+          <li><strong>Cross-method dataflow</strong> - a value read in one method and written in another is not traced end to end, so some transitive field dependencies are not linked.</li>
+        </ul>
+        <p>Because of these gaps, an empty result is reported as <strong>no static evidence found</strong>, never as "unused." A dependency finding describes a static shape in the retrieved metadata; it is not proof of what runs in production.</p>
+
+        <h2 id="coverage">Coverage: what dependency analysis sees and misses</h2>
+        <table class="doc-table">
+          <thead><tr><th>Metadata family</th><th>Edge confidence</th><th>Captured</th><th>Not captured</th></tr></thead>
+          <tbody>
+            <tr><td>Layouts, field-level security, validation rules, record types, lookups</td><td><code>declared</code></td><td>Direct references from the retrieved XML</td><td>—</td></tr>
+            <tr><td>Flows &amp; formulas</td><td><code>parsed</code></td><td>Field reads/writes, subflow calls, formula field references</td><td>Which branch a given record takes (needs record data)</td></tr>
+            <tr><td>Apex - default ANTLR pass</td><td><code>parsed</code></td><td>Resolved field reads/writes, cross-class calls, field-level SOQL</td><td>Dynamic SOQL/SOSL strings, reflective field access, cross-method dataflow</td></tr>
+            <tr><td>Apex - regex backfill on parse failure</td><td><code>heuristic</code></td><td>Textual field / class mentions the parser missed</td><td>False positives; confirm before acting</td></tr>
+            <tr><td>Any family the refresh skipped</td><td><code>partial</code></td><td>—</td><td>Reported as "not checked", never "none in org"</td></tr>
+          </tbody>
+        </table>
+        <p>Run <code>sfi.coverage_report</code> to see which families your last refresh actually retrieved. A type listed under <code>notModeled</code> means it was not checked - so any absence-based answer over that type is only as strong as that coverage.</p>
+
         <h2 id="related">Related pages</h2>
-        <p>For change-specific blast radius examples, read <a href="/use-cases/impact-analysis">Salesforce impact analysis</a>. For broader org inventory, read <a href="/use-cases/salesforce-metadata-analysis">Salesforce metadata analysis</a>. For installation in an AI client, read <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>.</p>
+        <p>For change-specific blast radius examples, read <a href="/use-cases/impact-analysis">Salesforce impact analysis</a>. To list every place a single field is referenced, read <a href="/use-cases/where-is-a-field-used">where is a Salesforce field used</a>. For broader org inventory, read <a href="/use-cases/salesforce-metadata-analysis">Salesforce metadata analysis</a>. For installation in an AI client, read <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>.</p>
 
         <div style="padding-top:36px;">
           <div class="cta-box">

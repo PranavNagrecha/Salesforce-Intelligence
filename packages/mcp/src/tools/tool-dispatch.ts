@@ -168,6 +168,10 @@ import {
   disambiguateConceptsInputSchema,
 } from './disambiguate-concepts.js';
 import {
+  docCoverageReportHandler,
+  docCoverageReportInputSchema,
+} from './doc-coverage-report.js';
+import {
   domainClustersHandler,
   domainClustersInputSchema,
 } from './domain-clusters.js';
@@ -302,6 +306,10 @@ import {
   generateFleetReportInputSchema,
 } from './fleet-report.js';
 import {
+  flowBulkificationAuditHandler,
+  flowBulkificationAuditInputSchema,
+} from './flow-bulkification-audit.js';
+import {
   flowFaultAuditHandler,
   flowFaultAuditInputSchema,
 } from './flow-fault-audit.js';
@@ -404,6 +412,10 @@ import {
   lightningPagesHandler,
   lightningPagesInputSchema,
 } from './lightning-pages.js';
+import {
+  limitHeadroomReportHandler,
+  limitHeadroomReportInputSchema,
+} from './limit-headroom-report.js';
 import {
   listComponentsHandler,
   listComponentsInputSchema,
@@ -513,6 +525,10 @@ import {
   namingConventionReportInputSchema,
 } from './naming-convention-report.js';
 import {
+  nonselectiveSoqlHandler,
+  nonselectiveSoqlInputSchema,
+} from './nonselective-soql.js';
+import {
   objectAccessAuditHandler,
   objectAccessAuditInputSchema,
 } from './object-access-audit.js';
@@ -549,6 +565,14 @@ import {
   packageImpactInputSchema,
 } from './package-impact.js';
 import { hasHandlerCursor } from './page-cursor.js';
+import {
+  permissionSetConsolidationHandler,
+  permissionSetConsolidationInputSchema,
+} from './permission-set-consolidation.js';
+import {
+  picklistIntegrityScanHandler,
+  picklistIntegrityScanInputSchema,
+} from './picklist-integrity-scan.js';
 import {
   piiInventoryHandler,
   piiInventoryInputSchema,
@@ -868,6 +892,13 @@ export const dispatchTool = async (
         getComponentInputSchema,
         getComponentHandler,
       );
+    case 'sfi.limit_headroom_report':
+      return runTool(
+        ctx,
+        args,
+        limitHeadroomReportInputSchema,
+        limitHeadroomReportHandler,
+      );
     case 'sfi.list_components':
       return runTool(
         ctx,
@@ -1066,6 +1097,13 @@ export const dispatchTool = async (
         args,
         permissionRiskReportInputSchema,
         permissionRiskReportHandler,
+      );
+    case 'sfi.permission_set_consolidation':
+      return runTool(
+        ctx,
+        args,
+        permissionSetConsolidationInputSchema,
+        permissionSetConsolidationHandler,
       );
     case 'sfi.release_readiness_report':
       return runTool(
@@ -1336,6 +1374,13 @@ export const dispatchTool = async (
         domainClustersInputSchema,
         domainClustersHandler,
       );
+    case 'sfi.doc_coverage_report':
+      return runTool(
+        ctx,
+        args,
+        docCoverageReportInputSchema,
+        docCoverageReportHandler,
+      );
     case 'sfi.changed_since':
       return runTool(
         ctx,
@@ -1391,6 +1436,20 @@ export const dispatchTool = async (
         args,
         flowFaultAuditInputSchema,
         flowFaultAuditHandler,
+      );
+    case 'sfi.flow_bulkification_audit':
+      return runTool(
+        ctx,
+        args,
+        flowBulkificationAuditInputSchema,
+        flowBulkificationAuditHandler,
+      );
+    case 'sfi.nonselective_soql':
+      return runTool(
+        ctx,
+        args,
+        nonselectiveSoqlInputSchema,
+        nonselectiveSoqlHandler,
       );
     case 'sfi.flow_graph':
       return runTool(ctx, args, flowGraphInputSchema, flowGraphHandler);
@@ -1556,6 +1615,13 @@ export const dispatchTool = async (
         args,
         valueChangeAuditInputSchema,
         valueChangeAuditHandler,
+      );
+    case 'sfi.picklist_integrity_scan':
+      return runTool(
+        ctx,
+        args,
+        picklistIntegrityScanInputSchema,
+        picklistIntegrityScanHandler,
       );
     case 'sfi.what_if_remove_picklist_value':
       return runTool(

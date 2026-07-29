@@ -1,0 +1,52 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+  html,body{margin:0;padding:0;background:#05070A}
+  svg{display:block}
+</style></head><body>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640"
+     font-family="ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace">
+  <defs>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="vg" cx="0.5" cy="0.4" r="0.85">
+      <stop offset="50%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.6"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3DF07A"/><stop offset="1" stop-color="#177A3F"/>
+    </linearGradient>
+    <pattern id="scan" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="1" fill="#0A110C" opacity="0.55"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" fill="#05070A"/>
+  <rect width="1280" height="640" fill="url(#scan)"/>
+  <rect width="1280" height="640" fill="url(#vg)"/>
+  <rect x="0" y="0" width="9" height="640" fill="url(#bar)"/>
+
+  <!-- brand line -->
+  <text x="82" y="118" fill="#3DF07A" font-size="34" font-weight="700" filter="url(#glow)">&gt;_ sf-intelligence</text>
+  <text x="508" y="118" fill="#5E8A6E" font-size="23">read-only · offline · source-available</text>
+
+  <!-- headline -->
+  <text x="80" y="238" fill="#EAF6EE" font-size="66" font-weight="800" letter-spacing="-1">Salesforce Org Intelligence</text>
+  <text x="80" y="312" fill="#EAF6EE" font-size="66" font-weight="800" letter-spacing="-1">for AI agents</text>
+
+  <!-- subhead -->
+  <text x="82" y="380" fill="#9FB4A6" font-size="26">A read-only, offline MCP server and CLI. Grounded answers about</text>
+  <text x="82" y="416" fill="#9FB4A6" font-size="26">your org's metadata, dependencies, permissions, Apex and Flows.</text>
+
+  <!-- stat chips -->
+  <text x="82" y="498" font-size="27" font-weight="700">
+    <tspan fill="#3DF07A">209 tools</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">100% offline</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">0 writes</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#9FB4A6">MIT + Commons Clause</tspan>
+  </text>
+
+  <!-- terminal command -->
+  <text x="82" y="560" font-size="23"><tspan fill="#3DF07A">$</tspan><tspan fill="#8AA795"> sfi ask "what breaks if I delete Account.Industry?"</tspan></text>
+
+  <!-- footer -->
+  <text x="82" y="600" fill="#5E7466" font-size="21">github.com/PranavNagrecha/Salesforce-Intelligence   ·   sfi.auditforce.cloud</text>
+</svg>
+</body></html>

@@ -1597,6 +1597,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { edgeType: 'lookupTo', componentTypes: ['CustomField', 'CustomObject'], edgeWhereProperty: { key: 'relationshipType', equals: 'MasterDetail' } },
     interpretation:
       'Master-detail relationship ({ids}): deleting the parent record cascade-deletes every child record, the child inherits the parent\'s ownership and sharing (it has none of its own), and the child cannot exist without a parent. How many child records exist is a live-plane question.',
+    remediation: {
+      steps: [
+        'Before deleting or reparenting the parent in the master-detail relationship among {ids}, model the dependency blast radius — cascade delete removes EVERY child record and the child inherits the parent\'s ownership and sharing.',
+        'If cascade delete is undesired, evaluate converting the relationship to a lookup to decouple the record lifecycles — subject to Salesforce\'s master-detail-to-lookup conversion limits.',
+        'Because how many child records exist is a live-plane question, confirm the current child volume on the live org before acting.',
+      ],
+      whatIfTool: 'sfi.get_impact',
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['CustomField', 'CustomObject'],
@@ -1729,6 +1737,15 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { edgeType: 'triggersOn', componentTypes: ['Flow'], aggregate: { groupByEdgeProperty: 'triggerType', eventSplitByProperty: 'recordTriggerType', endpointWhereProperty: { key: 'status', equals: 'Active' }, op: 'gte', threshold: 2 } },
     interpretation:
       '{object} runs {count} active record-triggered {timing} flows that co-fire on the {event} operation: {ids}. Salesforce best practice is one record-triggered flow per object per {timing} context. Their relative run order is UNDEFINED unless an explicit Flow Trigger Order (a 1–2000 value, GA since Spring \'22) is set on each — set trigger order to make the sequence deterministic, and/or consolidate to reduce maintenance load. (This model does not extract triggerOrder, so it cannot confirm whether ordering is already configured — verify before assuming the order is undefined.) If this is a managed-package object you may not be able to change its automation.',
+    remediation: {
+      steps: [
+        'Review the stacked record-triggered automations among {ids}: two or more active flows in the same trigger timing run in an UNDEFINED order on each save.',
+        'Consolidate them into a single record-triggered flow per object per timing context where possible, so the run order is deterministic.',
+        'Where multiple flows must coexist, set an explicit Flow Trigger Order (Trigger Order, GA since API 55) on each so the sequence is defined rather than left to the platform.',
+        'Verify the resulting order with sfi.order_of_execution before relying on it.',
+      ],
+      whatIfTool: 'sfi.what_if_deactivate_flow',
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['Flow'],
@@ -1897,6 +1914,13 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { componentTypes: ['ApexClass'], whereProperty: { key: 'isRestResource', equals: true } },
     interpretation:
       '{ids} is a REST resource (@RestResource) — it exposes an HTTP endpoint reachable OUTSIDE the org UI and its record-page automation, so it is an integration/security surface: field-level security and object CRUD are NOT automatically enforced in Apex and must be enforced in code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode); record-level sharing DEPENDS on the class\'s `with sharing` / `without sharing` / inherited declaration — a separate concern, not asserted here. Removing or changing it can break external callers, who may be off-platform and invisible to this vault. This names the surface structurally; it does NOT assert the endpoint is insecure, WHO calls it, or which method handles which verb. This marker does not exclude test (isTest) classes.',
+    remediation: {
+      steps: [
+        'Enforce field-level security and object CRUD explicitly inside every exposed method of {ids}: Apex does NOT auto-enforce them on an externally reachable entry point (use WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML).',
+        'Validate and authorize the caller inside each exposed method — an external entry point is reachable outside the record UI and its automation, so do not assume any UI-level guard ran.',
+        'Review the class-level sharing declaration (`with` / `without` / `inherited sharing`): record-level sharing on this surface depends on it, and is a separate concern from FLS/CRUD.',
+      ],
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['ApexClass'],
@@ -1907,6 +1931,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { componentTypes: ['ApexClass'], whereProperty: { key: 'hasAuraEnabledMethod', equals: true } },
     interpretation:
       '{ids} carries `@AuraEnabled` member(s), OUTSIDE record-page automation — an `@AuraEnabled` METHOD exposes a callable Apex endpoint to Lightning components (Aura/LWC) over the authenticated Aura endpoint; an `@AuraEnabled` property exposes a serialized field. The marker is class-level and does NOT distinguish the two, so confirm whether a callable method is present. Where a callable method IS present it is an integration/security surface: field-level security and object CRUD are NOT automatically enforced in Apex and must be enforced in code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode); record-level sharing DEPENDS on the class\'s `with sharing` / `without sharing` / inherited declaration — a separate concern, not asserted here. This names the surface structurally; it does NOT assert the endpoint is insecure or WHO calls it. This marker does not exclude test (isTest) classes.',
+    remediation: {
+      steps: [
+        'Confirm a callable `@AuraEnabled` METHOD (not just a serialized `@AuraEnabled` property) is exposed by {ids} before treating it as an entry point.',
+        'Enforce field-level security and object CRUD explicitly inside every exposed method: Apex does NOT auto-enforce them on a Lightning-reachable entry point (use WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML).',
+        'Validate and authorize the caller inside each exposed method — an `@AuraEnabled` method is reachable outside record-page automation, so do not assume any UI-level guard ran.',
+        'Review the class-level sharing declaration (`with` / `without` / `inherited sharing`): record-level sharing on this surface depends on it, and is a separate concern from FLS/CRUD.',
+      ],
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['ApexClass'],
@@ -1917,6 +1949,13 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { componentTypes: ['ApexClass'], whereProperty: { key: 'hasInvocableMethod', equals: true } },
     interpretation:
       '{ids} has @InvocableMethod method(s) — callable from Flow and other automation as a building block, OUTSIDE the class\'s own record-page path. Those annotated methods are an integration/security surface: field-level security and object CRUD are NOT automatically enforced in Apex and must be enforced in code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode); record-level sharing DEPENDS on the class\'s `with sharing` / `without sharing` / inherited declaration — a separate concern, not asserted here. This names the surface structurally; the marker is per-CLASS, not per-method, so SOME method is exposed (not necessarily all), and it does NOT assert the endpoint is insecure or WHO invokes it. This marker does not exclude test (isTest) classes.',
+    remediation: {
+      steps: [
+        'Enforce field-level security and object CRUD explicitly inside every `@InvocableMethod` of {ids}: Apex does NOT auto-enforce them on a Flow-reachable entry point (use WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML).',
+        'Validate the inputs and authorize the invoking context inside each exposed method — an invocable method is callable from Flow and other automation outside this class\'s own record-page path.',
+        'Review the class-level sharing declaration (`with` / `without` / `inherited sharing`): record-level sharing on this surface depends on it, and is a separate concern from FLS/CRUD.',
+      ],
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['ApexClass'],
@@ -1927,6 +1966,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { componentTypes: ['ApexClass'], whereProperty: { key: 'sharingModel', equals: 'without sharing' } },
     interpretation:
       '{ids} is declared `without sharing` — its own SOQL and DML run in system context and do NOT enforce the running user\'s record-level sharing; that record-level sharing enforcement is exactly what this keyword drops (all Apex already runs in system context regardless of the keyword), so it can read and write records the user could not otherwise access. This is OFTEN INTENTIONAL (e.g. a service that must see all records) and is NOT by itself a vulnerability. Field-level security and object CRUD are a SEPARATE concern Apex also does not auto-enforce — enforce them in code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode). The declaration is CLASS-level, not per-method; inner classes can declare their own mode. A class this one calls runs under its own `with`/`without sharing` declaration ONLY IF it has one — a callee that declares NO sharing keyword (or declares `inherited sharing`) runs in THIS class\'s sharing context, so `without sharing` can silently propagate into undeclared callees. This is the declared posture, not a proven access outcome for a specific user or record.',
+    remediation: {
+      steps: [
+        'Confirm whether system-context execution is INTENTIONAL for {ids}: a service that must legitimately see all records is a valid reason to keep `without sharing`; a class handling user-driven UI data usually is not.',
+        'If record-level sharing SHOULD be enforced, change the class declaration to `with sharing` (enforce the running user\'s sharing) or `inherited sharing` (enforce it only when this class is the entry point).',
+        'Independently of the sharing keyword, enforce field-level security and object CRUD in code (WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML) — Apex never auto-enforces these.',
+        'Check the classes {ids} calls: a callee that declares no sharing keyword runs in THIS class\'s context, so `without sharing` can silently propagate — declare each callee\'s sharing explicitly.',
+      ],
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['ApexClass'],
@@ -1947,6 +1994,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { componentTypes: ['ApexClass'], whereProperty: [{ key: 'sharingModel', equals: 'without sharing' }, { key: 'isRestResource', equals: true }, { key: 'isTest', equals: false }] },
     interpretation:
       '{ids} is declared `without sharing` AND exposes a REST endpoint (@RestResource) reachable OUTSIDE the org UI — so an external caller can reach code that runs in SYSTEM context and does NOT enforce the running user\'s record-level sharing, and is PERMITTED to read or write records the user could not otherwise access (if the method performs SOQL/DML in system context). This COMBINATION is a security-REVIEW priority; it MAY still be intentional (a deliberate service endpoint) and is NOT by itself a vulnerability. Field-level security and object CRUD are a SEPARATE concern Apex also does not auto-enforce — verify FLS/CRUD/sharing enforcement in the code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode). The `without sharing` declaration is CLASS-level, not per-method, and effective runtime sharing depends on the ENTRY-POINT class in the call chain; the REST marker is per-CLASS, not per-method. This is the declared posture, not a proven access outcome for a specific user or record.',
+    remediation: {
+      steps: [
+        'Prioritize a security review of {ids}: it is BOTH `without sharing` (system context, record sharing not enforced) AND externally reachable via @RestResource, so an external caller can reach code that reads or writes records the user could not otherwise access.',
+        'Decide whether the combination is intentional; if record-level sharing should apply, change the class to `with sharing` or `inherited sharing`, or enforce the running user\'s sharing explicitly in the exposed methods.',
+        'Enforce field-level security and object CRUD in code on every exposed entry point (WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode) — a separate concern Apex does not auto-enforce.',
+        'Constrain who can reach the endpoint (authorize the caller and restrict the permission that exposes it) so the system-context surface is not broadly reachable.',
+      ],
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['ApexClass'],
@@ -1957,6 +2012,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { componentTypes: ['ApexClass'], whereProperty: [{ key: 'sharingModel', equals: 'without sharing' }, { key: 'hasAuraEnabledMethod', equals: true }, { key: 'isTest', equals: false }] },
     interpretation:
       '{ids} is declared `without sharing` AND carries `@AuraEnabled` member(s) exposed to Lightning components (Aura/LWC) OUTSIDE record-page automation. The `@AuraEnabled` marker is class-level and does NOT distinguish a callable METHOD from a serialized property, so confirm a callable method is present. Where the class exposes a callable `@AuraEnabled` METHOD, a caller can reach code that runs in SYSTEM context and does NOT enforce the running user\'s record-level sharing, and is PERMITTED to read or write records the user could not otherwise access (if the method performs SOQL/DML in system context). This COMBINATION is a security-REVIEW priority; it MAY still be intentional and is NOT by itself a vulnerability. Field-level security and object CRUD are a SEPARATE concern Apex also does not auto-enforce — verify FLS/CRUD/sharing enforcement in the code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode). The `without sharing` declaration is CLASS-level, not per-method, and effective runtime sharing depends on the ENTRY-POINT class in the call chain. This is the declared posture, not a proven access outcome for a specific user or record.',
+    remediation: {
+      steps: [
+        'Prioritize a security review of {ids}: it is BOTH `without sharing` (system context, record sharing not enforced) AND reachable from Lightning via a callable `@AuraEnabled` method, so a caller can reach code that reads or writes records the user could not otherwise access.',
+        'Decide whether the combination is intentional; if record-level sharing should apply, change the class to `with sharing` or `inherited sharing`, or enforce the running user\'s sharing explicitly in the exposed methods.',
+        'Enforce field-level security and object CRUD in code on every exposed entry point (WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode) — a separate concern Apex does not auto-enforce.',
+        'Constrain who can reach the method (authorize the caller and restrict the permission that exposes it) so the system-context surface is not broadly reachable.',
+      ],
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['ApexClass'],
@@ -1967,6 +2030,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     bind: { componentTypes: ['ApexClass'], whereProperty: [{ key: 'sharingModel', equals: 'without sharing' }, { key: 'hasInvocableMethod', equals: true }, { key: 'isTest', equals: false }] },
     interpretation:
       '{ids} is declared `without sharing` AND has @InvocableMethod method(s) callable from Flow and other automation, OUTSIDE the class\'s own record-page path — so a caller can reach code that runs in SYSTEM context and does NOT enforce the running user\'s record-level sharing, and is PERMITTED to read or write records the user could not otherwise access (if the method performs SOQL/DML in system context). This COMBINATION is a security-REVIEW priority; it MAY still be intentional and is NOT by itself a vulnerability. Field-level security and object CRUD are a SEPARATE concern Apex also does not auto-enforce — verify FLS/CRUD/sharing enforcement in the code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode). The `without sharing` declaration is CLASS-level, not per-method, and effective runtime sharing depends on the ENTRY-POINT class in the call chain; the @InvocableMethod marker is per-CLASS, not per-method (SOME method is exposed, not necessarily all). This is the declared posture, not a proven access outcome for a specific user or record.',
+    remediation: {
+      steps: [
+        'Prioritize a security review of {ids}: it is BOTH `without sharing` (system context, record sharing not enforced) AND reachable from Flow and other automation via an `@InvocableMethod`, so a caller can reach code that reads or writes records the user could not otherwise access.',
+        'Decide whether the combination is intentional; if record-level sharing should apply, change the class to `with sharing` or `inherited sharing`, or enforce the running user\'s sharing explicitly in the exposed methods.',
+        'Enforce field-level security and object CRUD in code on every exposed entry point (WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode) — a separate concern Apex does not auto-enforce.',
+        'Constrain which automations can invoke the method so the system-context surface is not broadly reachable.',
+      ],
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['ApexClass'],
@@ -1987,6 +2058,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
       interpretationMixedWitnessSuffix:
         'Separately, {witnessIds} also grant "View All Records" on this object but ALSO hold an org-wide read-all-data system permission ("View All Data" or "Modify All Data"), so their view-all here cannot be told apart from that broader grant (which spans every object) — they are EXCLUDED from the object-level list above; verify them on the grantor.',
     },
+    remediation: {
+      steps: [
+        'Confirm the object-level "View All Records" grant among {ids} is intentional: every holder can READ all records of that object regardless of OWD, sharing rules, the role hierarchy, or manual shares.',
+        'Apply least privilege — where the broad grant is not required, remove "View All Records" and grant access through sharing rules, the role hierarchy, or record-level sharing instead.',
+        'Identify who actually HOLDS the granting permission set(s)/profile(s) with sfi.live_permset_holders (an assignment question the offline vault cannot answer) before assuming real exposure.',
+      ],
+      whatIfTool: 'sfi.what_if_revoke_permset',
+    },
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['PermissionSet', 'Profile', 'CustomObject'],
@@ -2006,6 +2085,14 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
         'Among {ids}: every permission set/profile that grants object-level "Modify All Records" here ALSO holds the org-wide "Modify All Data" system permission, so this is NOT a clean object-level grant — the ability to read, edit, and delete every record of this object is indistinguishable from (and no narrower than) that broader system permission, which spans EVERY object, not just this one. Verify the grant on the grantor; for a specific user use the why-cant-user-see-record tool.',
       interpretationMixedWitnessSuffix:
         'Separately, {witnessIds} also grant "Modify All Records" on this object but ALSO hold the org-wide "Modify All Data" system permission, so their modify-all here cannot be told apart from that broader grant (which spans every object) — they are EXCLUDED from the object-level list above; verify them on the grantor.',
+    },
+    remediation: {
+      steps: [
+        'Confirm the object-level "Modify All Records" grant among {ids} is intentional: every holder can READ, EDIT, and DELETE all records of that object regardless of OWD, sharing rules, the role hierarchy, or manual shares (it also includes View All).',
+        'Apply least privilege — where full modify is not required, remove "Modify All Records" (and "View All Records" too if read-all is also unneeded) and grant narrower access via sharing rules or the role hierarchy.',
+        'Identify who actually HOLDS the granting permission set(s)/profile(s) with sfi.live_permset_holders (an assignment question the offline vault cannot answer) before assuming real exposure.',
+      ],
+      whatIfTool: 'sfi.what_if_revoke_permset',
     },
     maxConfidence: 'declared',
     absenceShaped: false,

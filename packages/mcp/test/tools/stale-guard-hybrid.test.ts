@@ -2,7 +2,7 @@
 
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
-import { checkVaultStaleness } from '../../src/tools/live-plane.js';
+import { checkVaultStaleness, staleSinceLiteral } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 
 const REFRESHED_AT = '2026-06-02T19:02:05.214Z';
@@ -74,5 +74,54 @@ describe('checkVaultStaleness (P6-stale-guard-hybrid)', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('internal');
+  });
+});
+
+describe('staleSinceLiteral (D1 ms-flooring fix — ceil, not floor)', () => {
+  // Helper: parse a `…ssZ` literal back to epoch ms for threshold comparisons.
+  const asMs = (literal: string): number => Date.parse(literal);
+
+  it('ceils a sub-second refreshedAt UP to the next whole second (no fractional seconds in the literal)', () => {
+    const literal = staleSinceLiteral('2026-07-22T18:32:40.744Z');
+    expect(literal).toBe('2026-07-22T18:32:41Z');
+    expect(literal).not.toMatch(/\.\d+Z$/); // SOQL-safe: no milliseconds
+  });
+
+  it('leaves a whole-second refreshedAt unchanged (…40.000Z ⇒ …40Z)', () => {
+    expect(staleSinceLiteral('2026-07-22T18:32:40.000Z')).toBe('2026-07-22T18:32:40Z');
+  });
+
+  it('leaves an already-trimmed whole-second refreshedAt unchanged (…40Z ⇒ …40Z)', () => {
+    expect(staleSinceLiteral('2026-07-22T18:32:40Z')).toBe('2026-07-22T18:32:40Z');
+  });
+
+  it('ceils a .999Z refreshedAt up by one second', () => {
+    expect(staleSinceLiteral('2026-07-22T18:32:40.999Z')).toBe('2026-07-22T18:32:41Z');
+  });
+
+  it('rolls the minute over on a 59.5s refreshedAt', () => {
+    expect(staleSinceLiteral('2026-07-22T18:32:59.500Z')).toBe('2026-07-22T18:33:00Z');
+  });
+
+  it('rolls minute+hour+day over on a 23:59:59.5 refreshedAt', () => {
+    expect(staleSinceLiteral('2026-07-22T23:59:59.500Z')).toBe('2026-07-23T00:00:00Z');
+  });
+
+  it('rolls month+year over on a Dec-31 23:59:59.5 refreshedAt', () => {
+    expect(staleSinceLiteral('2026-12-31T23:59:59.500Z')).toBe('2027-01-01T00:00:00Z');
+  });
+
+  // KEY invariant: the threshold must NEVER move earlier than the true refresh
+  // instant, so a component modified in the sub-second window BEFORE the refresh
+  // is already in the vault and must NOT be counted as org-ahead-of-vault drift.
+  it('never yields a threshold earlier than refreshedAt (the false-positive guard)', () => {
+    const refreshedAt = '2026-07-22T18:32:40.744Z';
+    const threshold = staleSinceLiteral(refreshedAt);
+    expect(asMs(threshold)).toBeGreaterThanOrEqual(asMs(refreshedAt));
+
+    // A component modified at …40.500Z (BEFORE refresh, so captured in the vault)
+    // must not satisfy `LastModifiedDate > threshold` — no false-positive drift.
+    const preRefreshModify = asMs('2026-07-22T18:32:40.500Z');
+    expect(preRefreshModify > asMs(threshold)).toBe(false);
   });
 });

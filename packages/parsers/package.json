@@ -24,6 +24,10 @@
     "./apex-ast-spike": {
       "types": "./dist/src/apex-ast-spike.d.ts",
       "import": "./dist/src/apex-ast-spike.js"
+    },
+    "./soql-selectivity": {
+      "types": "./dist/src/soql-selectivity.d.ts",
+      "import": "./dist/src/soql-selectivity.js"
     }
   },
   "publishConfig": {

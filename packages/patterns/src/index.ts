@@ -14,10 +14,12 @@ export type { PatternError, RecognizeOptions } from './naming-convention.js';
 export {
   detectPiiClassification,
   detectPiiClassificationWithReason,
+  isRegulatedPiiClassification,
 } from './pii-detection.js';
 export type {
   PiiCategory,
   PiiClassification,
+  PiiConfidence,
   PiiDetectionResult,
   PiiDetectionWithReason,
 } from './pii-detection.js';

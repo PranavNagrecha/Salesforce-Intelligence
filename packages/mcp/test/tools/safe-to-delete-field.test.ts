@@ -456,6 +456,102 @@ const crowdedSeed: ExtractionResult = {
   ),
 };
 
+// =============================================================================
+// Seed: D2 polymorphic Activity field. An Apex class writes a SHARED Activity
+// custom field through a Task receiver (`someTask.Foo__c = …`), so the extractor
+// keys the writesTo edge on the RECEIVER type — a dangling
+// `CustomField:Task.Foo__c`. The import-time polymorphic alias re-points that
+// dangling target onto the real `CustomField:Activity.Foo__c`, so this field
+// must read as BLOCKING (an Apex write), not a false `safe`.
+// =============================================================================
+
+const ACTIVITY_ID = 'CustomObject:Activity';
+const ACTIVITY_FIELD = 'CustomField:Activity.Foo__c';
+const ACTIVITY_WRITER = 'ApexClass:ActivityTouch';
+const activityPolymorphicSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: ACTIVITY_ID, type: 'CustomObject', apiName: 'Activity' }),
+    makeNode({ id: ACTIVITY_FIELD, apiName: 'Foo__c', parentId: ACTIVITY_ID }),
+    makeNode({ id: ACTIVITY_WRITER, type: 'ApexClass', apiName: 'ActivityTouch' }),
+  ],
+  edges: [
+    makeEdge({ fromId: ACTIVITY_ID, toId: ACTIVITY_FIELD, edgeType: 'parentOf' }),
+    // The write lands on the polymorphic child (Task) receiver, dangling until
+    // the import-time polymorphic alias re-points it onto the Activity field.
+    makeEdge({
+      fromId: ACTIVITY_WRITER,
+      toId: 'CustomField:Task.Foo__c',
+      edgeType: 'writesTo',
+      source: 'apex-ast',
+      confidence: 'parsed',
+      properties: { path: 'someTask.Foo__c', receiver: 'Task' },
+    }),
+  ],
+};
+
+// D2 describe-snapshot shape: the SAME shared Activity field materialized as
+// BOTH a Task and an Event sibling (no Activity base node — the offline
+// `sobject describe` path). Apex writes it through a Task receiver, so the
+// writesTo attaches to the Task sibling; the mirror must surface it on the
+// Event sibling too, so BOTH read blocking (not a false safe).
+const TASK_SIBLING_FIELD = 'CustomField:Task.Shared__c';
+const EVENT_SIBLING_FIELD = 'CustomField:Event.Shared__c';
+const TASK_ID = 'CustomObject:Task';
+const EVENT_ID = 'CustomObject:Event';
+const SIBLING_WRITER = 'ApexClass:TaskTouch';
+const activitySiblingSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: TASK_ID, type: 'CustomObject', apiName: 'Task' }),
+    makeNode({ id: EVENT_ID, type: 'CustomObject', apiName: 'Event' }),
+    makeNode({
+      id: TASK_SIBLING_FIELD,
+      apiName: 'Shared__c',
+      parentId: TASK_ID,
+      sourcePath: 'describe-snapshot:Task',
+    }),
+    makeNode({
+      id: EVENT_SIBLING_FIELD,
+      apiName: 'Shared__c',
+      parentId: EVENT_ID,
+      sourcePath: 'describe-snapshot:Event',
+    }),
+    makeNode({ id: SIBLING_WRITER, type: 'ApexClass', apiName: 'TaskTouch' }),
+  ],
+  edges: [
+    makeEdge({ fromId: TASK_ID, toId: TASK_SIBLING_FIELD, edgeType: 'parentOf' }),
+    makeEdge({ fromId: EVENT_ID, toId: EVENT_SIBLING_FIELD, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: SIBLING_WRITER,
+      toId: TASK_SIBLING_FIELD,
+      edgeType: 'writesTo',
+      source: 'apex-ast',
+      confidence: 'parsed',
+      properties: { path: 'someTask.Shared__c' },
+    }),
+  ],
+};
+
+// A genuinely-unused Activity custom field — no writer, no reader. It must
+// still read as `safe` (the polymorphic alias only fires for dangling
+// Task/Event targets whose Activity field exists; it never invents a referrer).
+const ACTIVITY_UNUSED_FIELD = 'CustomField:Activity.Unused__c';
+const activityUnusedSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: ACTIVITY_UNUSED_FIELD,
+      apiName: 'Unused__c',
+      parentId: ACTIVITY_ID,
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: ACTIVITY_ID,
+      toId: ACTIVITY_UNUSED_FIELD,
+      edgeType: 'parentOf',
+    }),
+  ],
+};
+
 // One shared graph store + Context across the suite.
 let tempDir: string;
 let store: GraphStore;
@@ -510,6 +606,9 @@ beforeAll(async () => {
     workflowSeed,
     crowdedSeed,
     parentPermSeed,
+    activityPolymorphicSeed,
+    activitySiblingSeed,
+    activityUnusedSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -984,6 +1083,73 @@ describe('safeToDeleteFieldHandler', () => {
       await closeGraph(s);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('D2: an Activity custom field written via a Task receiver is NOT safe (polymorphic import alias attaches the write)', async () => {
+    // The Apex writesTo edge was minted against the dangling
+    // `CustomField:Task.Foo__c`; the import-time polymorphic alias re-points it
+    // onto `CustomField:Activity.Foo__c`. Without the fix this field had zero
+    // incoming edges and read as a false `safe`.
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: ACTIVITY_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning, trust } = result.value.data;
+    expect(verdict).toBe('blocking');
+    const apex = reasoning.find((r) => r.category === 'apex');
+    expect(apex).toBeDefined();
+    expect(apex?.verdict).toBe('blocking');
+    expect(apex?.examples[0]?.id).toBe(ACTIVITY_WRITER);
+    // The polymorphic attribution is disclosed as a name-based import alias.
+    expect(
+      trust.limitations.some((l) => /polymorphic activity/i.test(l)),
+    ).toBe(true);
+  });
+
+  it('D2 precision: a genuinely-unused Activity custom field still reads as safe', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: ACTIVITY_UNUSED_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('safe');
+    expect(result.value.data.reasoning.length).toBe(0);
+  });
+
+  it('D2 (describe-snapshot siblings): the Task-written shared field is NOT safe from the Task representation', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: TASK_SIBLING_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('blocking');
+    const apex = result.value.data.reasoning.find((r) => r.category === 'apex');
+    expect(apex?.verdict).toBe('blocking');
+    expect(apex?.examples[0]?.id).toBe(SIBLING_WRITER);
+  });
+
+  it('D2 (describe-snapshot siblings): the mirror makes the EVENT sibling of a Task-written shared field NOT safe too', async () => {
+    // Before the fix, the Event sibling had zero incoming reference edges and
+    // read a false safe even though deleting the (one shared) field breaks the
+    // Apex that writes it via a Task receiver.
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: EVENT_SIBLING_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('blocking');
+    const apex = result.value.data.reasoning.find((r) => r.category === 'apex');
+    expect(apex).toBeDefined();
+    expect(apex?.verdict).toBe('blocking');
+    // The mirrored edge cites the same Apex writer.
+    expect(apex?.examples[0]?.id).toBe(SIBLING_WRITER);
+    // The polymorphic attribution is disclosed as a name-based import alias.
+    expect(
+      result.value.data.trust.limitations.some((l) =>
+        /polymorphic activity/i.test(l),
+      ),
+    ).toBe(true);
   });
 });
 

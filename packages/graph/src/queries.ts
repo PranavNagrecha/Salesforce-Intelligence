@@ -280,8 +280,12 @@ const makeUnresolvedStubNode = (id: ComponentId): Node => {
  * scanner's heuristic accesses, tagged with their `heuristic` confidence; the
  * `targetMissing` flag on each edge's `properties` lets those tools disclose
  * the unresolved target without the edge vanishing.
+ *
+ * Exported so self-contained-slice consumers that build their OWN node set (and
+ * so cannot lean on `getSubgraph`'s bookkeeping) — e.g. `call_graph`'s BFS —
+ * apply the SAME phantom predicate rather than re-deriving a divergent one.
  */
-const isHiddenUnresolved = (e: Edge): boolean =>
+export const isHiddenUnresolved = (e: Edge): boolean =>
   e.confidence === 'heuristic' && e.properties['targetMissing'] === true;
 
 const fetchRows = async (

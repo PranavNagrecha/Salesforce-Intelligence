@@ -68,10 +68,12 @@ for (const path of sitemapUrls) {
   const h1 = countMatches(body, /<h1[\s>]/gi);
   if (h1 !== 1) fail(path, `expected 1 <h1>, found ${h1}`);
 
-  // title length 10–65
+  // title length 10–90 (upper bound raised for the v0.2.4 SEO release: the audit's
+  // page-build-specs use keyword-front-loaded titles up to ~87 chars — Google
+  // truncates the tail near ~60 chars, but the primary keyword leads on purpose).
   const title = between(body, "<title>", "</title>");
   if (!title) fail(path, `no <title>`);
-  else if (title.length < 10 || title.length > 65) fail(path, `title length ${title.length} out of 10–65: "${title}"`);
+  else if (title.length < 10 || title.length > 90) fail(path, `title length ${title.length} out of 10–90: "${title}"`);
 
   // meta description 70–170
   const descTag = (body.match(/<meta[^>]+name="description"[^>]*>/i) || [])[0];

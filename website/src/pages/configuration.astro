@@ -1,15 +1,15 @@
 ---
 import DocPage from "../layouts/DocPage.astro";
 
-const title = "Configuration - sf-intelligence";
-const description = "Configure sf-intelligence: live plane, HTTP serving, staged refresh, vault git history, annotations, report pull, Apex edges, fleet settings, and audit log.";
+const title = "sf-intelligence Configuration: Tool Profiles, Live Reads & Vault Settings";
+const description = "Configure sf-intelligence MCP clients, tool profiles, vault refresh, optional live reads, environment variables, limits and troubleshooting.";
 ---
 
 <DocPage
   title={title}
   description={description}
   path="/configuration"
-  heading="Configuration reference"
+  heading="Configure sf-intelligence safely"
   intro={`Environment variables and on-disk paths for sf-intelligence. Most installs need <strong>none</strong> of these - the defaults are safe for offline vault use. New here? Start with the <a href="/getting-started">install guide</a>.`}
   crumbs={[{ label: "getting-started", href: "/getting-started" }, { label: "configuration", href: "/configuration" }]}
   breadcrumbs={[{ name: "Getting started", path: "/getting-started" }, { name: "Configuration", path: "/configuration" }]}

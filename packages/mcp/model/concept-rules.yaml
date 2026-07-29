@@ -89,6 +89,12 @@ conceptRules:
   # curated knowledge (it grounds no rule until then).
   - id: rule:relationship/master-detail-cascade
     concept: concept:relationship
+    remediation:
+      steps:
+        - 'Before deleting or reparenting the parent in the master-detail relationship among {ids}, model the dependency blast radius — cascade delete removes EVERY child record and the child inherits the parent''s ownership and sharing.'
+        - 'If cascade delete is undesired, evaluate converting the relationship to a lookup to decouple the record lifecycles — subject to Salesforce''s master-detail-to-lookup conversion limits.'
+        - 'Because how many child records exist is a live-plane question, confirm the current child volume on the live org before acting.'
+      whatIfTool: sfi.get_impact
     bind:
       edgeType: lookupTo
       # Dangling-parent citation guard: a master-detail `lookupTo` may point at a
@@ -556,6 +562,13 @@ conceptRules:
   # operation) so it states exactly what co-fires.
   - id: rule:automation/stacked-record-triggered-flows
     concept: concept:automation-collision
+    remediation:
+      steps:
+        - 'Review the stacked record-triggered automations among {ids}: two or more active flows in the same trigger timing run in an UNDEFINED order on each save.'
+        - 'Consolidate them into a single record-triggered flow per object per timing context where possible, so the run order is deterministic.'
+        - 'Where multiple flows must coexist, set an explicit Flow Trigger Order (Trigger Order, GA since API 55) on each so the sequence is defined rather than left to the platform.'
+        - 'Verify the resulting order with sfi.order_of_execution before relying on it.'
+      whatIfTool: sfi.what_if_deactivate_flow
     bind:
       edgeType: triggersOn
       componentTypes:
@@ -934,6 +947,11 @@ conceptRules:
   # @RestResource class.
   - id: rule:external-api-surface/rest-resource
     concept: concept:external-api-surface
+    remediation:
+      steps:
+        - 'Enforce field-level security and object CRUD explicitly inside every exposed method of {ids}: Apex does NOT auto-enforce them on an externally reachable entry point (use WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML).'
+        - 'Validate and authorize the caller inside each exposed method — an external entry point is reachable outside the record UI and its automation, so do not assume any UI-level guard ran.'
+        - 'Review the class-level sharing declaration (`with` / `without` / `inherited sharing`): record-level sharing on this surface depends on it, and is a separate concern from FLS/CRUD.'
     bind:
       componentTypes:
         - ApexClass
@@ -947,6 +965,12 @@ conceptRules:
       - ApexClass
   - id: rule:external-api-surface/aura-enabled
     concept: concept:external-api-surface
+    remediation:
+      steps:
+        - 'Confirm a callable `@AuraEnabled` METHOD (not just a serialized `@AuraEnabled` property) is exposed by {ids} before treating it as an entry point.'
+        - 'Enforce field-level security and object CRUD explicitly inside every exposed method: Apex does NOT auto-enforce them on a Lightning-reachable entry point (use WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML).'
+        - 'Validate and authorize the caller inside each exposed method — an `@AuraEnabled` method is reachable outside record-page automation, so do not assume any UI-level guard ran.'
+        - 'Review the class-level sharing declaration (`with` / `without` / `inherited sharing`): record-level sharing on this surface depends on it, and is a separate concern from FLS/CRUD.'
     bind:
       componentTypes:
         - ApexClass
@@ -960,6 +984,11 @@ conceptRules:
       - ApexClass
   - id: rule:external-api-surface/invocable
     concept: concept:external-api-surface
+    remediation:
+      steps:
+        - 'Enforce field-level security and object CRUD explicitly inside every `@InvocableMethod` of {ids}: Apex does NOT auto-enforce them on a Flow-reachable entry point (use WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML).'
+        - 'Validate the inputs and authorize the invoking context inside each exposed method — an invocable method is callable from Flow and other automation outside this class''s own record-page path.'
+        - 'Review the class-level sharing declaration (`with` / `without` / `inherited sharing`): record-level sharing on this surface depends on it, and is a separate concern from FLS/CRUD.'
     bind:
       componentTypes:
         - ApexClass
@@ -1024,6 +1053,12 @@ conceptRules:
   # interpretation strings.)
   - id: rule:apex-sharing/without-sharing
     concept: concept:apex-sharing-mode
+    remediation:
+      steps:
+        - 'Confirm whether system-context execution is INTENTIONAL for {ids}: a service that must legitimately see all records is a valid reason to keep `without sharing`; a class handling user-driven UI data usually is not.'
+        - 'If record-level sharing SHOULD be enforced, change the class declaration to `with sharing` (enforce the running user''s sharing) or `inherited sharing` (enforce it only when this class is the entry point).'
+        - 'Independently of the sharing keyword, enforce field-level security and object CRUD in code (WITH SECURITY_ENFORCED, Security.stripInaccessible, or user-mode DML) — Apex never auto-enforces these.'
+        - 'Check the classes {ids} calls: a callee that declares no sharing keyword runs in THIS class''s context, so `without sharing` can silently propagate — declare each callee''s sharing explicitly.'
     bind:
       componentTypes:
         - ApexClass
@@ -1092,6 +1127,12 @@ conceptRules:
   # counts stay in this comment only — never in the interpretation strings.)
   - id: rule:system-context-external-surface/rest-resource
     concept: concept:system-context-external-surface
+    remediation:
+      steps:
+        - 'Prioritize a security review of {ids}: it is BOTH `without sharing` (system context, record sharing not enforced) AND externally reachable via @RestResource, so an external caller can reach code that reads or writes records the user could not otherwise access.'
+        - 'Decide whether the combination is intentional; if record-level sharing should apply, change the class to `with sharing` or `inherited sharing`, or enforce the running user''s sharing explicitly in the exposed methods.'
+        - 'Enforce field-level security and object CRUD in code on every exposed entry point (WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode) — a separate concern Apex does not auto-enforce.'
+        - 'Constrain who can reach the endpoint (authorize the caller and restrict the permission that exposes it) so the system-context surface is not broadly reachable.'
     bind:
       componentTypes:
         - ApexClass
@@ -1109,6 +1150,12 @@ conceptRules:
       - ApexClass
   - id: rule:system-context-external-surface/aura-enabled
     concept: concept:system-context-external-surface
+    remediation:
+      steps:
+        - 'Prioritize a security review of {ids}: it is BOTH `without sharing` (system context, record sharing not enforced) AND reachable from Lightning via a callable `@AuraEnabled` method, so a caller can reach code that reads or writes records the user could not otherwise access.'
+        - 'Decide whether the combination is intentional; if record-level sharing should apply, change the class to `with sharing` or `inherited sharing`, or enforce the running user''s sharing explicitly in the exposed methods.'
+        - 'Enforce field-level security and object CRUD in code on every exposed entry point (WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode) — a separate concern Apex does not auto-enforce.'
+        - 'Constrain who can reach the method (authorize the caller and restrict the permission that exposes it) so the system-context surface is not broadly reachable.'
     bind:
       componentTypes:
         - ApexClass
@@ -1126,6 +1173,12 @@ conceptRules:
       - ApexClass
   - id: rule:system-context-external-surface/invocable
     concept: concept:system-context-external-surface
+    remediation:
+      steps:
+        - 'Prioritize a security review of {ids}: it is BOTH `without sharing` (system context, record sharing not enforced) AND reachable from Flow and other automation via an `@InvocableMethod`, so a caller can reach code that reads or writes records the user could not otherwise access.'
+        - 'Decide whether the combination is intentional; if record-level sharing should apply, change the class to `with sharing` or `inherited sharing`, or enforce the running user''s sharing explicitly in the exposed methods.'
+        - 'Enforce field-level security and object CRUD in code on every exposed entry point (WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode) — a separate concern Apex does not auto-enforce.'
+        - 'Constrain which automations can invoke the method so the system-context surface is not broadly reachable.'
     bind:
       componentTypes:
         - ApexClass
@@ -1201,6 +1254,12 @@ conceptRules:
   # SUBSET of the view-all grants. An object with no such grant fires neither.
   - id: rule:access/view-all-records
     concept: concept:view-modify-all
+    remediation:
+      steps:
+        - 'Confirm the object-level "View All Records" grant among {ids} is intentional: every holder can READ all records of that object regardless of OWD, sharing rules, the role hierarchy, or manual shares.'
+        - 'Apply least privilege — where the broad grant is not required, remove "View All Records" and grant access through sharing rules, the role hierarchy, or record-level sharing instead.'
+        - 'Identify who actually HOLDS the granting permission set(s)/profile(s) with sfi.live_permset_holders (an assignment question the offline vault cannot answer) before assuming real exposure.'
+      whatIfTool: sfi.what_if_revoke_permset
     bind:
       edgeType: grantedBy
       # Cites ONLY endpoints whose node RESOLVES in the slice to one of these types
@@ -1247,6 +1306,12 @@ conceptRules:
       - CustomObject
   - id: rule:access/modify-all-records
     concept: concept:view-modify-all
+    remediation:
+      steps:
+        - 'Confirm the object-level "Modify All Records" grant among {ids} is intentional: every holder can READ, EDIT, and DELETE all records of that object regardless of OWD, sharing rules, the role hierarchy, or manual shares (it also includes View All).'
+        - 'Apply least privilege — where full modify is not required, remove "Modify All Records" (and "View All Records" too if read-all is also unneeded) and grant narrower access via sharing rules or the role hierarchy.'
+        - 'Identify who actually HOLDS the granting permission set(s)/profile(s) with sfi.live_permset_holders (an assignment question the offline vault cannot answer) before assuming real exposure.'
+      whatIfTool: sfi.what_if_revoke_permset
     bind:
       edgeType: grantedBy
       componentTypes:

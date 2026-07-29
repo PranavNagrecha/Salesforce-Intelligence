@@ -101,6 +101,22 @@
  * (`canonicalizeFieldEdgeTargets`), so the incoming-edge walk here sees
  * them. String-BUILT dynamic SOQL remains the disclosed blind spot.
  *
+ * D2 caveat — polymorphic Activity fields: a dot-access read/write keyed on a
+ * `Task`/`Event` receiver (`someTask.Foo__c = …`) does NOT land on the
+ * shared `CustomField:Activity.Foo__c` node by parsing alone — the
+ * extractor keys the edge on the RECEIVER type, so it projects to a dangling
+ * `CustomField:Task.Foo__c`. `canonicalizeFieldEdgeTargets` re-points that
+ * dangling target onto the existing Activity field at import via a NAME-BASED
+ * polymorphic alias (Task/Event share Activity's custom fields). When the vault
+ * has NO Activity base node — activity fields sourced from the offline `sobject
+ * describe` snapshot materialize the same field as BOTH a `Task` and an `Event`
+ * sibling — `mintPolymorphicActivityFieldEdges` instead mirrors the edge across
+ * those existing siblings, so the write is visible whichever representation the
+ * admin queries. Either way the incoming-edge walk here now sees such a write as
+ * the blocking `apex` referrer it is — but the attribution is a name match, not
+ * a declared parent relationship, and is disclosed as a confirm-before-you-
+ * delete limitation.
+ *
  * Implementation notes:
  *   - `fieldId` is required to start with `CustomField:`. Other prefixes
  *     return `invalid-query` at the handler boundary. Zod cannot
@@ -138,6 +154,7 @@ import { compareVersions, err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import {
   detectPiiClassification,
+  isRegulatedPiiClassification,
   type PiiCategory,
 } from '@sf-intelligence/patterns';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
@@ -438,7 +455,7 @@ export interface SafeToDeleteFieldOutput {
  * field whose deletion is otherwise judged safe. Does NOT alter the verdict.
  */
 export interface PiiCompliance {
-  readonly classification: 'pii' | 'sensitive';
+  readonly classification: 'pii' | 'sensitive' | 'protected';
   readonly category: PiiCategory;
   readonly message: string;
 }
@@ -740,7 +757,7 @@ const buildBuilderVersionCaveat = (ctx: Context): string | undefined => {
  */
 const buildPiiCompliance = (node: Node): PiiCompliance | undefined => {
   const { piiClassification, piiCategory } = detectPiiClassification(node);
-  if (piiClassification !== 'pii' && piiClassification !== 'sensitive') {
+  if (!isRegulatedPiiClassification(piiClassification)) {
     return undefined;
   }
   return {
@@ -1247,7 +1264,8 @@ const coreSafeToDeleteFieldHandler = async (
       : {}),
   };
   const baseLimitations: string[] = [
-    'Dependency evidence comes from the last offline vault refresh. String-built dynamic SOQL, reflective Apex, and runtime metadata access remain invisible to static analysis; inline static SOQL and constant-string Database.query field references ARE resolved (parsed-confidence Apex AST edges).',
+    'Dependency evidence comes from the last offline vault refresh. String-built dynamic SOQL, reflective Apex, and runtime metadata access remain invisible to static analysis; inline static SOQL and constant-string Database.query field references ARE resolved (parsed-confidence Apex AST edges). A dot-access read/write to a shared Activity custom field through a Task or Event receiver (someTask.Field__c) is NOT a direct parsed edge on the Activity field — it is attached by a name-based polymorphic import alias (see next limitation).',
+    'Polymorphic Activity attribution: a shared Activity custom field can appear as up to three nodes (CustomField:Activity/Task/Event.<field>) that are ONE physical field. A read/write keyed on one representation is attached to the others at import by a name-based alias — re-pointed onto the Activity base when it exists, otherwise mirrored across the Task/Event describe-snapshot siblings (Task and Event share the custom fields defined on Activity). This is a heuristic name match applied at import, not a declared parent relationship — an admin should still confirm the referrer before deleting.',
     // Unconditional when it fires — a `blocking` verdict on a stale vault is
     // still a verdict computed from incomplete edge families, so the reader is
     // told even though the verdict did not move.

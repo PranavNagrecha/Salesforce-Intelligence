@@ -9,6 +9,7 @@
  */
 
 export {
+  canonicalizeActivityPolymorphicFieldEdgeTargets,
   canonicalizeApexCallEdgeTargets,
   canonicalizeFieldEdgeTargets,
   canonicalizeLabelEdgeTargets,
@@ -16,6 +17,7 @@ export {
   canonicalizeResourceEdgeTargets,
   IMPORT_BATCH_SIZE,
   importExtractionResults,
+  mintPolymorphicActivityFieldEdges,
 } from './import.js';
 export type { ImportCounts } from './import.js';
 export {
@@ -46,6 +48,7 @@ export {
   freshnessSummary,
   getNodeById,
   getSubgraph,
+  isHiddenUnresolved,
   listChildren,
   listEdges,
   listEdgesForNodes,

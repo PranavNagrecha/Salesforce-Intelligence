@@ -16,6 +16,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   listEdges,
   listEdgesForNodes,
+  listNodesByIds,
   listNodesByType,
 } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
@@ -23,6 +24,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { automationCollisionsHandler } from './automation-collisions.js';
 import { offlineTrust } from './coverage-trust.js';
 import {
   crudFlsAuditHandler,
@@ -35,6 +37,7 @@ import {
 } from './governor-limit-risks.js';
 import { healthCheckHandler } from './health-check.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
+import { namingConventionReportHandler } from './naming-convention-report.js';
 import { expandPermissionSetGroup } from './permission-set-group.js';
 import { collectPiiInventoryFields } from './pii-inventory.js';
 import {
@@ -96,12 +99,20 @@ export type OrgRiskReportInput = z.infer<typeof orgRiskReportInputSchema>;
  * half is EXCLUDED from the object-scoped view (it is org-wide, not attributable
  * to one object) and that exclusion is disclosed — never silently returning the
  * org-wide report. Accepts the interchangeable object identifiers.
+ *
+ * `mode` (AUTOMATION-SPRAWL-MODE) selects the report shape. The default
+ * (`undefined` / `'risk'`) is the per-finding risk synthesis above, byte-for-byte
+ * unchanged. `'sprawl'` switches to an ORG-WIDE, per-OBJECT automation-density
+ * ranking — a prioritized candidate queue ("where is automation sprawl worst
+ * first"), not a graded verdict. Sprawl mode is always org-wide, so the object
+ * scope params do not apply to it.
  */
 export const automationRiskReportInputSchema = synthesisInputSchema.extend({
   objectApiName: z.string().min(1).optional(),
   object: z.string().min(1).optional(),
   objectId: z.string().min(1).optional(),
   componentId: z.string().min(1).optional(),
+  mode: z.enum(['risk', 'sprawl']).optional(),
 });
 export type AutomationRiskReportInput = z.infer<
   typeof automationRiskReportInputSchema
@@ -313,11 +324,16 @@ export const orgRiskReportHandler = async (
   const pii = await collectPiiInventoryFields(ctx, { classification: 'all' });
   if (pii.ok) {
     const regulated = pii.value.fields.filter(
-      (f) => f.classification === 'pii' || f.classification === 'sensitive',
+      (f) =>
+        f.classification === 'pii' ||
+        f.classification === 'sensitive' ||
+        f.classification === 'protected',
     );
     const piiCount = pii.value.fields.filter((f) => f.classification === 'pii').length;
+    // Protected-class is the highest tier — roll it into the sensitive count so
+    // `regulatedFieldCount === piiCount + sensitiveCount` stays consistent.
     const sensitiveCount = pii.value.fields.filter(
-      (f) => f.classification === 'sensitive',
+      (f) => f.classification === 'sensitive' || f.classification === 'protected',
     ).length;
     piiExposure = {
       regulatedFieldCount: regulated.length,
@@ -461,12 +477,111 @@ export interface AutomationRiskReportOutput extends SynthesisBase {
     readonly object: string;
     readonly mode: 'component';
   };
+  /**
+   * Discriminant for AUTOMATION-SPRAWL-MODE. Present (`'sprawl'`) ONLY on a
+   * `mode: 'sprawl'` call; ABSENT on the default/risk call so that response
+   * stays byte-identical. When present, `findings` is `[]`, `governorClasses`
+   * is `null`, and the per-object density ranking lives in `sprawl`.
+   */
+  readonly mode?: 'sprawl';
+  /**
+   * The org-wide per-OBJECT automation-density ranking. Present ONLY in
+   * `mode: 'sprawl'`. A prioritized CANDIDATE QUEUE ("review these objects
+   * first"), NOT a graded verdict — every number is a heuristic ranking signal.
+   */
+  readonly sprawl?: SprawlBlock;
+  /** Verbatim honesty disclosures for the sprawl ranking. Present ONLY in `mode: 'sprawl'`. */
+  readonly boundaries?: readonly string[];
+}
+
+/** The per-signal automation counts that feed one object's density score. */
+export interface SprawlObjectSignals {
+  /** Record-triggered Flows firing on the object (inbound `triggersOn`). */
+  readonly recordTriggeredFlows: number;
+  /** ApexTriggers on the object (inbound `triggersOn`). */
+  readonly apexTriggers: number;
+  /** WorkflowRules on the object (inbound `triggersOn`). */
+  readonly workflowRules: number;
+  /** Process Builders (Flow `processType` Workflow) parented to the object. */
+  readonly processBuilders: number;
+  /**
+   * Fields with 2+ distinct automations writing them (from the
+   * `automation_collisions` engine). 0 when the object was not collision-scanned
+   * (see `collisionScanned`).
+   */
+  readonly fieldWriteCollisions: number;
+  /**
+   * Count of the object's naming conventions (prefix/suffix/casing) that have
+   * deviating fields, capped at 3 — a minor field-hygiene nudge from
+   * `get_naming_convention_report`.
+   */
+  readonly namingInconsistencies: number;
+}
+
+/** One ranked object in the sprawl candidate queue. */
+export interface SprawlCandidate {
+  readonly rank: number;
+  readonly objectId: ComponentId;
+  readonly objectApiName: string;
+  /** The weighted density composite (see {@link SprawlBlock.scoreBasis}). */
+  readonly densityScore: number;
+  readonly signals: SprawlObjectSignals;
+  /**
+   * TRUE when the field-write-collision engine actually ran for this object.
+   * Collisions are computed only for the densest objects (2+ record-triggered
+   * firers, capped); elsewhere `signals.fieldWriteCollisions` is a floor of 0.
+   */
+  readonly collisionScanned: boolean;
+}
+
+/** The disclosed weighting behind the density score — never a black-box number. */
+export interface SprawlScoreBasis {
+  readonly weights: {
+    readonly recordTriggeredFlow: number;
+    readonly apexTrigger: number;
+    readonly workflowRule: number;
+    readonly processBuilder: number;
+    readonly fieldWriteCollision: number;
+    readonly namingInconsistency: number;
+  };
+  /** Human-readable formula the weights plug into. */
+  readonly formula: string;
+  /** Confidence-tier note for the density counts (the honesty axis). */
+  readonly confidenceNote: string;
+}
+
+/** The sprawl-mode payload: ranked candidates + the disclosed score basis. */
+export interface SprawlBlock {
+  /** Objects ranked worst-first, capped at `limit`. */
+  readonly candidates: readonly SprawlCandidate[];
+  readonly scoreBasis: SprawlScoreBasis;
+  readonly scanned: {
+    /** CustomObject nodes scanned (bounded by the graph list cap). */
+    readonly objects: number;
+    /** Objects with any automation density (score > 0) — the full ranked set before `limit`. */
+    readonly objectsRanked: number;
+    /** Objects the collision engine actually ran for. */
+    readonly objectsCollisionScanned: number;
+    /** TRUE when the CustomObject scan hit its node cap. */
+    readonly objectScanTruncated: boolean;
+    /** TRUE when the Flow scan (Process Builder detection) hit its node cap. */
+    readonly flowScanTruncated: boolean;
+    /** TRUE when more objects qualified for collision scanning than the cap allowed. */
+    readonly collisionScanCapped: boolean;
+  };
 }
 
 export const automationRiskReportHandler = async (
   ctx: Context,
   input: AutomationRiskReportInput,
 ): Promise<Result<McpResponse<AutomationRiskReportOutput>, McpError>> => {
+  // AUTOMATION-SPRAWL-MODE: a fully separate early return so the risk path below
+  // is byte-for-byte untouched. Only `mode: 'sprawl'` diverts here; `undefined`
+  // and `'risk'` fall through to the unchanged per-finding risk synthesis.
+  if (input.mode === 'sprawl') {
+    return automationSprawlReport(ctx, input);
+  }
+
   const limit = input.limit ?? 50;
   const findings: RankedFinding[] = [];
 
@@ -541,6 +656,289 @@ export const automationRiskReportHandler = async (
       governorClasses,
       trust: coverageTrust(ctx),
       disclosure,
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};
+
+// ---------------------------------------------------------------------------
+// sfi.automation_risk_report — mode: 'sprawl' (org-wide density triage)
+//
+// The org-wide per-OBJECT roll-up the three single-object automation tools
+// (automation_collisions / automation_build_advisor / order_of_execution) lack:
+// "where is automation sprawl worst FIRST". It reuses their raw signals —
+// inbound `triggersOn` firer counts, parented Process Builders, the
+// automation_collisions field-write-collision engine, and the naming-convention
+// recognizer — into ONE ranked candidate queue. It is a TRIAGE heuristic, not a
+// graded verdict; every number is disclosed via `scoreBasis` + `boundaries`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Disclosed weights for the density composite. Never a black-box number — the
+ * exact per-signal weight ships in `scoreBasis.weights`. Field-write collisions
+ * carry the highest weight (they are the sharpest silent-data-loss hazard);
+ * naming inconsistency is the lowest (a minor field-hygiene nudge).
+ */
+const SPRAWL_WEIGHTS = Object.freeze({
+  recordTriggeredFlow: 3,
+  apexTrigger: 3,
+  workflowRule: 2,
+  processBuilder: 2,
+  fieldWriteCollision: 4,
+  namingInconsistency: 1,
+});
+
+/** Bounded scan caps — the graph list cap for node scans, and a collision-scan budget. */
+const SPRAWL_OBJECT_SCAN_CAP = 500;
+const SPRAWL_FLOW_SCAN_CAP = 500;
+/** Only the densest objects get the (heavier) field-write-collision walk. */
+const SPRAWL_MAX_COLLISION_SCANS = 40;
+/** Default number of ranked candidates returned. */
+const SPRAWL_DEFAULT_LIMIT = 50;
+/** Naming-inconsistency sub-signal is capped so field hygiene can't outrank real automation stacking. */
+const SPRAWL_NAMING_CAP = 3;
+
+/** Verbatim honesty disclosures for the sprawl ranking. */
+const SPRAWL_BOUNDARIES: readonly string[] = Object.freeze([
+  'The sprawl density score is a TRIAGE HEURISTIC for ordering objects to review FIRST — not a defect count and not a proven-broken verdict. A high-ranked object is a candidate for review, not a confirmed problem.',
+  'Inactive / obsolete Flow versions are NOT counted: a source-format retrieve carries only the latest saved Flow version, so superseded/inactive versions are invisible here and never inflate a score.',
+  'Managed-package automation may be UNDER-counted: namespaced Flows/triggers a source retrieve omits, and Process Builders the vault could not attribute to an object (null parent), do not contribute to that object\'s density.',
+  'Only automation families the last refresh actually retrieved are counted (coverage floor). A family missing from sfi.coverage_report contributes zero, so a low score can mean "not retrieved," not "no automation" — re-run /sfi-refresh and check coverage before acting.',
+  'Density counts come from `triggersOn` / `writesTo` edges (mostly declared / parsed confidence); the field-write-collision sub-signal reuses sfi.automation_collisions, whose Apex-trigger writes are heuristic static analysis while Flow / WorkflowRule writes are parsed from declared XML.',
+]);
+
+/** The sprawl-mode disclosure, prepended to the shared synthesis disclosure. */
+const SPRAWL_DISCLOSURE =
+  'Automation-sprawl mode ranks OBJECTS org-wide by an automation-density composite so you can see where automation is thickest FIRST — a prioritized candidate queue for review, not a graded verdict that these objects are broken. The composite is a heuristic RANKING signal, not a correctness verdict; disclosed weights are in scoreBasis. Object-scope parameters do not apply in sprawl mode (it is always org-wide). ' +
+  SYNTHESIS_DISCLOSURE;
+
+/** Intermediate per-object firer tally, before the composite score is computed. */
+interface SprawlRow {
+  readonly objectId: ComponentId;
+  readonly apiName: string;
+  readonly recordTriggeredFlows: number;
+  readonly apexTriggers: number;
+  readonly workflowRules: number;
+  readonly processBuilders: number;
+  readonly namingInconsistencies: number;
+  /** triggersOn firers only (flows + triggers + workflow rules) — the collision-scan gate. */
+  readonly triggersOnFirers: number;
+}
+
+/**
+ * `sfi.automation_risk_report` `mode: 'sprawl'` — the org-wide, per-OBJECT
+ * automation-density ranking. See the section header for composition + honesty.
+ * Object-scope input is intentionally IGNORED (sprawl is always org-wide).
+ */
+const automationSprawlReport = async (
+  ctx: Context,
+  input: AutomationRiskReportInput,
+): Promise<Result<McpResponse<AutomationRiskReportOutput>, McpError>> => {
+  const limit = input.limit ?? SPRAWL_DEFAULT_LIMIT;
+  const fail = (m: string): Result<never, McpError> =>
+    err({ kind: 'internal', message: `graph query failed: ${m}` });
+
+  // 1) Every CustomObject (bounded scan).
+  const objectsRes = await listNodesByType(ctx.graph, 'CustomObject', {
+    limit: SPRAWL_OBJECT_SCAN_CAP,
+  });
+  if (!objectsRes.ok) return fail(objectsRes.error.message);
+  const objects = objectsRes.value;
+  const objectScanTruncated = objects.length >= SPRAWL_OBJECT_SCAN_CAP;
+  const objectIds = objects.map((o) => o.id);
+
+  // 2) Inbound `triggersOn` firers per object — ONE batched round-trip (the
+  //    automation_build_advisor / automation_collisions edge family).
+  const inEdges = await listEdgesForNodes(ctx.graph, objectIds, {
+    direction: 'in',
+    edgeTypes: ['triggersOn'],
+  });
+  if (!inEdges.ok) return fail(inEdges.error.message);
+
+  // 3) ONE batched node fetch of every firer, to read its type.
+  const firerIdSet = new Set<ComponentId>();
+  for (const edges of inEdges.value.values()) {
+    for (const e of edges) firerIdSet.add(e.fromId);
+  }
+  const firerNodesRes = await listNodesByIds(ctx.graph, [...firerIdSet]);
+  if (!firerNodesRes.ok) return fail(firerNodesRes.error.message);
+  const firerTypeById = new Map<ComponentId, Node['type']>();
+  for (const n of firerNodesRes.value) firerTypeById.set(n.id, n.type);
+
+  // 4) Process Builders (Flow processType Workflow) grouped by parent object.
+  //    These emit NO `triggersOn` edge (the Flow extractor only edges the three
+  //    RECORD trigger types), so counting them by parentId never double-counts
+  //    the record-triggered Flow firers above.
+  const flowsRes = await listNodesByType(ctx.graph, 'Flow', {
+    limit: SPRAWL_FLOW_SCAN_CAP,
+  });
+  if (!flowsRes.ok) return fail(flowsRes.error.message);
+  const flowScanTruncated = flowsRes.value.length >= SPRAWL_FLOW_SCAN_CAP;
+  const processBuilderByObject = new Map<ComponentId, number>();
+  for (const flow of flowsRes.value) {
+    if (flow.properties['processType'] !== 'Workflow') continue;
+    if (flow.parentId === null) continue;
+    processBuilderByObject.set(
+      flow.parentId,
+      (processBuilderByObject.get(flow.parentId) ?? 0) + 1,
+    );
+  }
+
+  // 5) Naming-inconsistency sub-signal — ONE org-wide naming-convention report
+  //    (reuse, not a re-scan). Per object: how many of its dominant conventions
+  //    (prefix/suffix/casing) have deviating fields.
+  const namingByObject = new Map<ComponentId, number>();
+  const naming = await namingConventionReportHandler(ctx, {});
+  if (naming.ok) {
+    for (const obs of naming.value.data.observations) {
+      if (obs.kind !== 'naming-convention') continue;
+      if (obs.evidence.matching >= obs.evidence.total) continue; // fully consistent
+      const m = /^CustomField:([^.]+)/.exec(obs.scope);
+      if (m === null) continue;
+      const objectId = `CustomObject:${m[1] as string}` as ComponentId;
+      namingByObject.set(objectId, (namingByObject.get(objectId) ?? 0) + 1);
+    }
+  }
+
+  // 6) Per-object firer tallies.
+  const rows: SprawlRow[] = objects.map((obj) => {
+    let recordTriggeredFlows = 0;
+    let apexTriggers = 0;
+    let workflowRules = 0;
+    for (const e of inEdges.value.get(obj.id) ?? []) {
+      const t = firerTypeById.get(e.fromId);
+      if (t === 'Flow') recordTriggeredFlows += 1;
+      else if (t === 'ApexTrigger') apexTriggers += 1;
+      else if (t === 'WorkflowRule') workflowRules += 1;
+    }
+    return {
+      objectId: obj.id,
+      apiName: obj.apiName,
+      recordTriggeredFlows,
+      apexTriggers,
+      workflowRules,
+      processBuilders: processBuilderByObject.get(obj.id) ?? 0,
+      namingInconsistencies: Math.min(
+        namingByObject.get(obj.id) ?? 0,
+        SPRAWL_NAMING_CAP,
+      ),
+      triggersOnFirers: recordTriggeredFlows + apexTriggers + workflowRules,
+    };
+  });
+
+  // 7) Field-write collisions for the densest objects only (the walk is heavy);
+  //    a collision needs 2+ distinct triggersOn writers, so objects below that
+  //    floor are skipped with a collisionCount of 0. Reuse the automation_collisions
+  //    engine rather than re-implementing its writesTo bucketing.
+  const collisionCandidates = rows
+    .filter((r) => r.triggersOnFirers >= 2)
+    .sort(
+      (a, b) =>
+        b.triggersOnFirers - a.triggersOnFirers ||
+        (a.objectId < b.objectId ? -1 : a.objectId > b.objectId ? 1 : 0),
+    );
+  const collisionScanCapped =
+    collisionCandidates.length > SPRAWL_MAX_COLLISION_SCANS;
+  const collisionByObject = new Map<ComponentId, number>();
+  const collisionScannedSet = new Set<ComponentId>();
+  for (const r of collisionCandidates.slice(0, SPRAWL_MAX_COLLISION_SCANS)) {
+    collisionScannedSet.add(r.objectId);
+    const coll = await automationCollisionsHandler(ctx, { object: r.apiName });
+    // Resilient: a per-object failure leaves the count at its 0 floor rather
+    // than failing the whole ranking.
+    collisionByObject.set(
+      r.objectId,
+      coll.ok ? coll.value.data.summary.fieldsWithMultipleWriters : 0,
+    );
+  }
+
+  // 8) Composite score. Keep only objects with ANY automation density (>0) —
+  //    an object with zero automation is not a sprawl candidate.
+  const scored = rows
+    .map((r) => {
+      const fieldWriteCollisions = collisionByObject.get(r.objectId) ?? 0;
+      const densityScore =
+        r.recordTriggeredFlows * SPRAWL_WEIGHTS.recordTriggeredFlow +
+        r.apexTriggers * SPRAWL_WEIGHTS.apexTrigger +
+        r.workflowRules * SPRAWL_WEIGHTS.workflowRule +
+        r.processBuilders * SPRAWL_WEIGHTS.processBuilder +
+        fieldWriteCollisions * SPRAWL_WEIGHTS.fieldWriteCollision +
+        r.namingInconsistencies * SPRAWL_WEIGHTS.namingInconsistency;
+      return { r, fieldWriteCollisions, densityScore };
+    })
+    .filter((s) => s.densityScore > 0)
+    .sort((a, b) => {
+      if (b.densityScore !== a.densityScore) return b.densityScore - a.densityScore;
+      const aAuto =
+        a.r.triggersOnFirers + a.r.processBuilders;
+      const bAuto =
+        b.r.triggersOnFirers + b.r.processBuilders;
+      if (bAuto !== aAuto) return bAuto - aAuto;
+      return a.r.objectId < b.r.objectId ? -1 : a.r.objectId > b.r.objectId ? 1 : 0;
+    });
+
+  const candidates: SprawlCandidate[] = scored.slice(0, limit).map((s, i) => ({
+    rank: i + 1,
+    objectId: s.r.objectId,
+    objectApiName: s.r.apiName,
+    densityScore: s.densityScore,
+    signals: {
+      recordTriggeredFlows: s.r.recordTriggeredFlows,
+      apexTriggers: s.r.apexTriggers,
+      workflowRules: s.r.workflowRules,
+      processBuilders: s.r.processBuilders,
+      fieldWriteCollisions: s.fieldWriteCollisions,
+      namingInconsistencies: s.r.namingInconsistencies,
+    },
+    collisionScanned: collisionScannedSet.has(s.r.objectId),
+  }));
+
+  const boundaries = [...SPRAWL_BOUNDARIES];
+  if (objectScanTruncated) {
+    boundaries.push(
+      `The CustomObject scan hit its ${SPRAWL_OBJECT_SCAN_CAP}-node cap; the ranking is computed over a deterministic prefix — re-verify on orgs with more than ${SPRAWL_OBJECT_SCAN_CAP} objects.`,
+    );
+  }
+  if (flowScanTruncated) {
+    boundaries.push(
+      `The Flow scan hit its ${SPRAWL_FLOW_SCAN_CAP}-node cap; Process Builder counts may under-count on orgs with more than ${SPRAWL_FLOW_SCAN_CAP} Flows.`,
+    );
+  }
+  if (collisionScanCapped) {
+    boundaries.push(
+      `Field-write collisions were computed for only the ${SPRAWL_MAX_COLLISION_SCANS} densest objects (2+ record-triggered firers); other objects report a collision floor of 0 (collisionScanned: false).`,
+    );
+  }
+
+  return ok({
+    data: {
+      mode: 'sprawl' as const,
+      findings: [],
+      governorClasses: null,
+      sprawl: {
+        candidates,
+        scoreBasis: {
+          weights: { ...SPRAWL_WEIGHTS },
+          formula:
+            'densityScore = recordTriggeredFlows*3 + apexTriggers*3 + workflowRules*2 + processBuilders*2 + fieldWriteCollisions*4 + namingInconsistencies*1',
+          confidenceNote:
+            'Counts derive from triggersOn/writesTo edges (mostly declared/parsed confidence). Apex-trigger write collisions are heuristic. The composite is a heuristic ranking signal, not a correctness verdict.',
+        },
+        scanned: {
+          objects: objects.length,
+          objectsRanked: scored.length,
+          objectsCollisionScanned: collisionScannedSet.size,
+          objectScanTruncated,
+          flowScanTruncated,
+          collisionScanCapped,
+        },
+      },
+      boundaries,
+      trust: coverageTrust(ctx),
+      disclosure: SPRAWL_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
