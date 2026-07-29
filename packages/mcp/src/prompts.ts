@@ -47,6 +47,10 @@ const PLAYBOOK_PREAMBLE = `You are running an sf-intelligence admin playbook —
 3. Cite canonical component ids; stamp provenance (\`offline_snapshot\` / \`live_org\`) and confidence. Use any tool's \`rendered\` field verbatim when present.
 4. Single-fact questions belong on \`sfi.route_question\`, not a playbook.`;
 
+const FIELD_AUDIT_PREAMBLE = `You are running an sf-intelligence FIELD AUDIT — deciding whether fields can be deleted, and what must happen first. This is a document that authorises destruction, so its value is entirely a function of whether the reader can tell your evidence apart from your inference.
+
+The one principle everything else follows from: **population tells you how much data is in a field; it never tells you what depends on it.** The two agree on busy, obviously-live fields and diverge everywhere else — formula fields, transient state flags, integration keys, anything frozen. Every serious error in this kind of analysis comes from substituting one for the other.`;
+
 const PROMPTS: readonly CuratedPrompt[] = [
   {
     meta: {
@@ -334,6 +338,75 @@ Playbook \`health\` — operational pulse (mostly live):
 3. \`sfi.org_risk_report\`
 
 Report: red/amber/green pulse with specific failing signals named.`,
+        ),
+      ],
+    }),
+  },
+  {
+    meta: {
+      name: 'sfi.field_audit',
+      description:
+        'Field-deletion audit: decide Keep / Review / Deprecate-then-Remove / Remove for a field or an object’s fields, tracing every dependency first. Also validates an existing field-cleanup analysis.',
+      arguments: [
+        {
+          name: 'objectApiName',
+          description:
+            'The object whose fields are under audit (e.g. Account or MyObject__c).',
+          required: true,
+        },
+        {
+          name: 'fieldApiNames',
+          description:
+            'Optional comma-separated field api names to scope the audit. Omit to assess the whole object.',
+          required: false,
+        },
+      ],
+    },
+    build: (args) => ({
+      description: 'Field-deletion audit with dependency tracing.',
+      messages: [
+        userMessage(
+          `${FIELD_AUDIT_PREAMBLE}
+
+Object under audit: \`${args?.['objectApiName'] ?? '<objectApiName>'}\`${
+            args?.['fieldApiNames'] !== undefined &&
+            args['fieldApiNames'].length > 0
+              ? `\nFields scoped to: ${args['fieldApiNames']}`
+              : '\nScope: every custom field on the object.'
+          }
+
+Run in this order. Do not skip step 0 — it is what makes the rest trustworthy.
+
+0. **Orient and calibrate.**
+   - \`sfi.org_card\` for component counts and DECLARED coverage gaps.
+   - \`sfi.coverage_report\`. If Report/Dashboard reads \`pending\`, the report pull was capped (default \`SFI_REPORTS_CAP\`=500, ranked by usage) — say so, and treat every report count as a floor, not a total.
+   - **Positive control:** pick a field you can already prove is referenced, run the same tools against it, and confirm they return something. A zero from an uncalibrated method is not a finding.
+
+1. **Per field, gather — do not judge yet.**
+   - \`sfi.field_360\` — full profile across validation, formulas, writers, readers, UI, integrations.
+   - \`sfi.find_field_anywhere\` — every incoming edge grouped by component type.
+   - \`sfi.safe_to_delete_field\` — the verdict with its reasoning chain. Use \`format: 'checklist'\` when you want ordered pre-work.
+   - \`sfi.find_formula_references\` for formula referrers.
+
+2. **Read the structure before any number.** \`required\` + \`unique\` + \`externalId\` with no in-org writer is an integration upsert key — the strongest possible Keep, and the exact shape a naive "nothing writes it" reading calls dead. \`trackHistory: true\` means deleting the field destroys history rows permanently; no export of current values recovers them.
+
+3. **A formula field has no population figure.** If the body references \`$User\`, \`$UserRole\`, \`$Profile\` or \`TODAY()\`, the percentage measures who ran the query. If it returns \`IF(...,1,0)\` or \`CASESAFEID(Id)\` it can never be null and measures arithmetic. Read the body; strike the number.
+
+4. **Measure flow, not just stock** (live plane only, and only with consent): \`sfi.live_field_population\`, then \`MAX(field)\` and a future-dated count via \`sfi.live_aggregate\`. A field with 750,000 values can be frozen; a field at 0% can be load-bearing. Watch \`sfi.live_budget\`; when it runs out, say which figures are carried forward UNVERIFIED.
+
+5. **Record ROLE, never count.** For each consumer, what would it do if the field vanished? A field used as a report or list-view **filter** does not empty the report when deleted — it silently WIDENS it. Nothing errors, so nobody reports it. That is strictly more dangerous than a lost display column.
+
+Verdict vocabulary — four values, not three:
+- **Keep** — live dependency, integration contract, or clear business value. Name the blocker, never the population.
+- **Review** — genuinely ambiguous. INCOMPLETE unless it names the exact question and the named human who answers it.
+- **Deprecate-then-Remove** — dead in practice but holds data, history, or cosmetic references. Needs staged retirement.
+- **Remove** — no data of value, no live dependency, every surface checked-negative with a proven method.
+
+Honesty rules, non-negotiable:
+- Render any \`coverageCaveat\` BEFORE the verdict, never as a footnote.
+- Separate "checked and found nothing" from "could not check". They look identical in a report and mean opposite things.
+- Name the blind spots no static analysis closes: dynamically-built SOQL, reflective \`.get('Field__c')\`, field lists stored as ORG DATA in custom settings or custom metadata (invisible to metadata retrieval AND to this vault — they fail at runtime, not at deploy), external ETL job definitions, managed-package internals, private report folders, and email-template merge fields.
+- Never present an \`sfi.safe_to_delete_field\` verdict of \`safe\` as permission to delete. It means no modelled dependency was found, which is a statement about coverage as much as about the field.`,
         ),
       ],
     }),
