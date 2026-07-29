@@ -957,6 +957,26 @@ export const field360Handler = async (
   // never double-counted.
   const flowConditionScan = await scanFlowConditionFieldReaders(ctx, fieldId);
   const readerIds = new Set(buckets.readers.map((r) => r.componentId));
+  // Also dedupe against `automations`. A Flow condition read now arrives TWICE
+  // by two independent routes: as a first-class ConditionalContext `readsFrom`
+  // edge (routed to `automations` above) and as this property-scan
+  // reconstruction. The scan predates the edge — it exists precisely because
+  // those edges did not used to be emitted — so where the edge now lands, the
+  // reconstruction is redundant, not additional.
+  //
+  // The two rows name DIFFERENT components (the synthetic ConditionalContext vs
+  // the Flow), so an id-only check against `readers` cannot see the collision:
+  // one Flow decision read would appear in two sections as two components and
+  // count on both the automation and the reader risk axis. Match on the firer
+  // instead — every condition edge carries `firerId` for exactly this purpose.
+  //
+  // The scan is NOT disabled: it still covers the cases no edge reaches (notably
+  // `filterFormula`-mode record-trigger entry conditions, whose field refs are
+  // not extracted), which is the coverage it was added for.
+  for (const row of buckets.automations) {
+    const firer = row.properties?.['firerId'];
+    if (typeof firer === 'string') readerIds.add(firer);
+  }
   let flowConditionReaderCount = 0;
   for (const fc of flowConditionScan.readers) {
     if (readerIds.has(fc.flowId)) continue;
