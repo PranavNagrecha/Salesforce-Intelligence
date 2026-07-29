@@ -55,6 +55,16 @@ const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
       }
       return { category: 'unknown', verdict: 'blocking' };
     case 'references':
+      // INTENTIONAL post-RM-1b(2) extension, not drift: a CustomField-sourced
+      // `references` edge that gets past the formula-tokenizer special case is a
+      // roll-up summary coupling (summarizedField / summaryForeignKey /
+      // summaryFilterItems). It used to fall through to {unknown, risky}, which
+      // is how the product's hardest field-delete blocker — one the platform
+      // refuses outright — could be reported as deletable. Everything else below
+      // remains the verbatim original switch.
+      if (fromType === 'CustomField') {
+        return { category: 'rollup', verdict: 'blocking' };
+      }
       if (fromType === 'ValidationRule') {
         return { category: 'validation', verdict: 'blocking' };
       }
@@ -143,6 +153,7 @@ const CASES: readonly Case[] = [
   { name: 'writesTo Aura', edgeType: 'writesTo', source: 'aura-scanner', fromType: 'AuraDefinitionBundle', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'writesTo default (Profile)', edgeType: 'writesTo', source: 'x', fromType: 'Profile', expected: { category: 'unknown', verdict: 'blocking' } },
   // 4. references (non-formula source)
+  { name: 'references CustomField (roll-up coupling)', edgeType: 'references', source: 'rollup-summary', fromType: 'CustomField', expected: { category: 'rollup', verdict: 'blocking' } },
   { name: 'references ValidationRule', edgeType: 'references', source: 'enterprise-metadata', fromType: 'ValidationRule', expected: { category: 'validation', verdict: 'blocking' } },
   { name: 'references VisualforcePage', edgeType: 'references', source: 'x', fromType: 'VisualforcePage', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'references VisualforceComponent', edgeType: 'references', source: 'x', fromType: 'VisualforceComponent', expected: { category: 'frontend', verdict: 'risky' } },

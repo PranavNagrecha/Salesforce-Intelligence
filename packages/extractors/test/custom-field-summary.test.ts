@@ -122,6 +122,102 @@ describe('CustomField roll-up-summary extraction', () => {
     }
   });
 
+  it('emits blocking references edges for summarizedField, summaryForeignKey and every summaryFilterItems field', async () => {
+    const { dir, path } = await writeFieldXml(
+      'Contact',
+      'Last_Sample_Training_Date__c',
+      MAX_ROLLUP_XML,
+    );
+    try {
+      const result = await extractCustomField(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      const rollupEdges = result.value.edges.filter(
+        (e) => e.source === 'rollup-summary',
+      );
+      // The coupling is declared on the PARENT (Contact) but every target is a
+      // field on the CHILD object — which is exactly why an incoming-edge walk
+      // from the child field could not see it before these edges existed.
+      expect(
+        rollupEdges.map((e) => [e.toId, e.properties['rollupRole']]),
+      ).toEqual([
+        [
+          'CustomField:Widget_Assignments__c.Completed_Date__c',
+          'summarizedField',
+        ],
+        [
+          'CustomField:Widget_Assignments__c.Widget_Contact__c',
+          'summaryForeignKey',
+        ],
+        ['CustomField:Widget_Assignments__c.Status__c', 'summaryFilterItem'],
+      ]);
+      for (const edge of rollupEdges) {
+        expect(edge.fromId).toBe(
+          'CustomField:Contact.Last_Sample_Training_Date__c',
+        );
+        expect(edge.edgeType).toBe('references');
+        // Declared XML fact, not tokenizer output — the `formula-tokenizer`
+        // source marker is the special case classifyEdge evaluates first.
+        expect(edge.confidence).toBe('declared');
+        expect(edge.properties['summaryOperation']).toBe('max');
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits the summaryForeignKey + filter edges for a count rollup, which has no summarizedField', async () => {
+    const { dir, path } = await writeFieldXml(
+      'Contact',
+      'Number_of_Upcoming_Courses__c',
+      COUNT_ROLLUP_XML,
+    );
+    try {
+      const result = await extractCustomField(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      const rollupEdges = result.value.edges.filter(
+        (e) => e.source === 'rollup-summary',
+      );
+      expect(
+        rollupEdges.map((e) => [e.toId, e.properties['rollupRole']]),
+      ).toEqual([
+        ['CustomField:Sample_Exam__c.Student_Name__c', 'summaryForeignKey'],
+        ['CustomField:Sample_Exam__c.Course_ID__c', 'summaryFilterItem'],
+        [
+          'CustomField:Sample_Exam__c.Course_Start_Date__c',
+          'summaryFilterItem',
+        ],
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits no rollup edges for a non-Summary field', async () => {
+    const textXml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Notes__c</fullName>
+    <label>Notes</label>
+    <type>TextArea</type>
+    <length>32768</length>
+</CustomField>
+`;
+    const { dir, path } = await writeFieldXml('Opportunity', 'Notes__c', textXml);
+    try {
+      const result = await extractCustomField(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(
+        result.value.edges.filter((e) => e.source === 'rollup-summary'),
+      ).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('does NOT emit summarizedField/summaryForeignKey/summaryOperation for a non-Summary field', async () => {
     const textXml = `<?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">

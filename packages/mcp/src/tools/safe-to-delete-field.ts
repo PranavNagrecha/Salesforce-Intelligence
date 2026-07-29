@@ -26,6 +26,7 @@
  *   | (any other source)           | writesTo    | unknown     | blocking         |
  *   | ValidationRule               | references  | validation  | blocking         |
  *   | (formula-tokenizer source)   | references  | formula     | blocking         |
+ *   | CustomField (roll-up source) | references  | rollup      | blocking         |
  *   | Layout                       | usedInLayout| layout      | review           |
  *   | VisualforcePage              | references  | frontend    | risky            |
  *   | VisualforceComponent         | references  | frontend    | risky            |
@@ -167,6 +168,7 @@ const CATEGORY_ORDER = [
   'validation',
   'layout',
   'formula',
+  'rollup',
   'integration',
   'permission',
   'sharing',
@@ -408,6 +410,8 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
       'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field) or referenced by a QuickAction (whose create/edit form is affected). Review the UI impact before deleting.',
     formula:
       'Another formula field references this field via its formula tokenizer. The referencing formula will fail to compile if this field is removed.',
+    rollup:
+      'A roll-up summary field on the PARENT object aggregates this field (as its summarizedField) or is anchored on it (as its summaryForeignKey master-detail field). Salesforce REFUSES the delete outright while the roll-up exists — delete or repoint the roll-up first. The coupling is declared in the parent object’s metadata, not this field’s, so a search restricted to this object cannot find it.',
     integration:
       'An integration surface (external data source, external service) references this field. Removing it may break the outbound or inbound contract.',
     permission:

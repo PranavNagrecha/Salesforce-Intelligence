@@ -190,6 +190,7 @@ export const EDGE_SEMANTICS: EdgeSemantics = Object.freeze({
     },
     references: {
       bySourceType: {
+        CustomField: { category: 'rollup', verdict: 'blocking' },
         ValidationRule: { category: 'validation', verdict: 'blocking' },
         VisualforcePage: { category: 'frontend', verdict: 'risky' },
         VisualforceComponent: { category: 'frontend', verdict: 'risky' },
