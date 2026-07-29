@@ -525,7 +525,30 @@ const buildConditionTriple = (
   // does not write it. Confidence is inherited from the condition surface —
   // `declared` for XML criteria, `parsed` for tokenized formulas — so the
   // caller can still tell a read declaration from a parsed one.
-  const fieldEdges: readonly Edge[] = fieldRefs.map((toId) => ({
+  // Only STRUCTURALLY VALID field ids become edges. `fieldRefs` keeps every ref
+  // verbatim — it is the honest record of what the condition mentions, and the
+  // multi-edge JOIN rules read it — but a condition surface also names things
+  // that are not fields at all: Flow variables and choices (`AnotherSubmission`,
+  // `ChoiceRenameOrDelete`), unresolved globals (`$Record`), and relationship
+  // traversals whose target object one file cannot resolve
+  // (`Parent__c.Rel__r.Field__c`). As a PROPERTY those were inert; as EDGES they
+  // mint phantom `CustomField:` targets that pollute the graph and the
+  // refresh-time phantom roll-up, and — worse — a bare Flow variable name is
+  // classified by the phantom taxonomy as a standard field, carrying a "treat it
+  // as a standard field" remedy for something that is not a field.
+  //
+  // A valid id is exactly `CustomField:{Object}.{Field}`: one dot, both segments
+  // non-empty, no leading `$`. Same resolve-or-drop rule the relationship
+  // resolver follows — an edge that cannot be grounded is not minted at all.
+  const isWellFormedFieldId = (id: string): boolean => {
+    const body = id.startsWith('CustomField:') ? id.slice('CustomField:'.length) : '';
+    if (body.length === 0 || body.startsWith('$')) return false;
+    const parts = body.split('.');
+    return parts.length === 2 && parts[0]!.length > 0 && parts[1]!.length > 0;
+  };
+  const fieldEdges: readonly Edge[] = fieldRefs
+    .filter(isWellFormedFieldId)
+    .map((toId) => ({
     fromId: conditionContextId,
     toId,
     edgeType: 'readsFrom',
