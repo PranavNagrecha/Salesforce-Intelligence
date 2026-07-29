@@ -17,9 +17,9 @@
 # Regenerate:  pnpm regen:concept-model      Parity gate:  pnpm check:concept-model
 #
 # Evaluation order (mirrors classifyEdge exactly):
-#   1. formulaTokenizer  - the SPECIAL case, checked FIRST: an incoming
-#      `references` edge whose extractor `source` marker is `formula-tokenizer`
-#      is a formula reference (blocking), regardless of the source node's type.
+#   1. bySource[]        - ordered SPECIAL cases, checked FIRST, keyed on the
+#      extractor `source` marker (plus an optional `fromType` scope). First
+#      match wins.
 #   2. byEdgeType[edgeType].bySourceType[sourceType]  - the per-edge-type table
 #      keyed by the referrer node's ComponentType.
 #   3. byEdgeType[edgeType].default  - fallback when the edge type is known but
@@ -29,14 +29,43 @@
 # Key ORDER is significant and preserved verbatim into the generated artifact.
 
 edgeSemantics:
-  # 1. SPECIAL case, evaluated before the per-edge-type table. The `references`
-  #    edgeType overlaps validation rules and frontend components; the `source`
-  #    marker is the source of truth for what the formula tokenizer extracted.
-  formulaTokenizer:
-    edgeType: references
-    source: formula-tokenizer
-    category: formula
-    verdict: blocking
+  # 1. SPECIAL cases, evaluated IN ORDER before the per-edge-type table below.
+  #    Keyed on the extractor `source` marker, because `references` is emitted by
+  #    several producers whose semantics differ and whose referrer ComponentType
+  #    does NOT distinguish them. `fromType`, when present, additionally scopes
+  #    the rule to one referrer type.
+  #
+  #    This list replaced a single hard-coded `formulaTokenizer` case plus a
+  #    `references.bySourceType.CustomField -> rollup` entry. That entry was
+  #    written when the formula tokenizer was the only OTHER field->field
+  #    `references` producer; adding `relationship-resolver` made it a third, and
+  #    every resolved formula traversal was then reported to the user as a
+  #    roll-up summary that does not exist — a fabricated citation on a correct
+  #    verdict. Keying on `source` is what keeps the citation truthful.
+  bySource:
+    # A formula field's tokenized reference. Beats the ValidationRule/frontend
+    # `references` rows below, which is why it is evaluated first.
+    - source: formula-tokenizer
+      edgeType: references
+      category: formula
+      verdict: blocking
+    # Roll-up summary coupling: summarizedField / summaryForeignKey /
+    # summaryFilterItems, all declared on the PARENT object's field file.
+    - source: rollup-summary
+      edgeType: references
+      category: rollup
+      verdict: blocking
+    # A cross-object formula traversal (`Parent__r.Field__c`) resolved at import
+    # time. Semantically a formula reference — the referencing formula stops
+    # compiling — so it shares the `formula` category rather than inventing one.
+    # SCOPED to CustomField on purpose: the same resolver also emits FlexiPage
+    # related-list alias edges, which are a UI dependency and must keep falling
+    # through to `references.bySourceType.FlexiPage -> ui`.
+    - source: relationship-resolver
+      edgeType: references
+      fromType: CustomField
+      category: formula
+      verdict: blocking
 
   # 2/3. Per-edge-type classification. Each entry:
   #   bySourceType - referrer ComponentType -> {category, verdict}
@@ -96,19 +125,6 @@ edgeSemantics:
         verdict: blocking
     references:
       bySourceType:
-        # A CustomField-sourced `references` edge that reaches this table is by
-        # construction a ROLL-UP SUMMARY coupling: the only other producer of a
-        # field->field `references` edge is the formula tokenizer, and that is
-        # caught by the `formulaTokenizer` special case above (evaluated first).
-        # The roll-up's metadata (`summarizedField` / `summaryForeignKey`) lives
-        # on the PARENT object's file, so this edge is the only way an
-        # incoming-edge walk from the child field can see the coupling — and
-        # Salesforce REFUSES the delete while the roll-up exists. If a third
-        # producer of field->field `references` is ever added, split this entry
-        # by the extractor `source` marker (`rollup-summary`) instead.
-        CustomField:
-          category: rollup
-          verdict: blocking
         ValidationRule:
           category: validation
           verdict: blocking

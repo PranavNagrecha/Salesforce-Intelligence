@@ -19,7 +19,24 @@ import { classifyEdge } from '../../src/tools/safe-to-delete-field.js';
 type Classification = { category: string; verdict: string };
 const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
   const fromType = fromNode.type;
+  // INTENTIONAL post-RM-1b(2) extension, not drift. The single
+  // formula-tokenizer special case became an ordered source-keyed list, because
+  // `references` gained two more field->field producers on this branch and the
+  // referrer ComponentType cannot tell them apart. Classifying by type alone
+  // made safe_to_delete_field cite a roll-up summary that does not exist for
+  // every resolved formula traversal (127 fields on one real vault) — a
+  // fabricated citation on an otherwise-correct verdict.
   if (edge.edgeType === 'references' && edge.source === 'formula-tokenizer') {
+    return { category: 'formula', verdict: 'blocking' };
+  }
+  if (edge.edgeType === 'references' && edge.source === 'rollup-summary') {
+    return { category: 'rollup', verdict: 'blocking' };
+  }
+  if (
+    edge.edgeType === 'references' &&
+    edge.source === 'relationship-resolver' &&
+    fromType === 'CustomField'
+  ) {
     return { category: 'formula', verdict: 'blocking' };
   }
   switch (edge.edgeType) {
@@ -63,16 +80,6 @@ const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
       }
       return { category: 'unknown', verdict: 'blocking' };
     case 'references':
-      // INTENTIONAL post-RM-1b(2) extension, not drift: a CustomField-sourced
-      // `references` edge that gets past the formula-tokenizer special case is a
-      // roll-up summary coupling (summarizedField / summaryForeignKey /
-      // summaryFilterItems). It used to fall through to {unknown, risky}, which
-      // is how the product's hardest field-delete blocker — one the platform
-      // refuses outright — could be reported as deletable. Everything else below
-      // remains the verbatim original switch.
-      if (fromType === 'CustomField') {
-        return { category: 'rollup', verdict: 'blocking' };
-      }
       if (fromType === 'ValidationRule') {
         return { category: 'validation', verdict: 'blocking' };
       }
@@ -163,6 +170,12 @@ const CASES: readonly Case[] = [
   { name: 'writesTo default (Profile)', edgeType: 'writesTo', source: 'x', fromType: 'Profile', expected: { category: 'unknown', verdict: 'blocking' } },
   // 4. references (non-formula source)
   { name: 'references CustomField (roll-up coupling)', edgeType: 'references', source: 'rollup-summary', fromType: 'CustomField', expected: { category: 'rollup', verdict: 'blocking' } },
+  // The regression this split exists to prevent: a resolved formula traversal
+  // must NOT be cited as a roll-up summary.
+  { name: 'references CustomField (resolved formula traversal)', edgeType: 'references', source: 'relationship-resolver', fromType: 'CustomField', expected: { category: 'formula', verdict: 'blocking' } },
+  // Same resolver, FlexiPage referrer: a related-list alias is a UI dependency
+  // and must keep falling through to the FlexiPage row, not the formula rule.
+  { name: 'references FlexiPage (related-list alias)', edgeType: 'references', source: 'relationship-resolver', fromType: 'FlexiPage', expected: { category: 'ui', verdict: 'blocking' } },
   { name: 'references ValidationRule', edgeType: 'references', source: 'enterprise-metadata', fromType: 'ValidationRule', expected: { category: 'validation', verdict: 'blocking' } },
   { name: 'references VisualforcePage', edgeType: 'references', source: 'x', fromType: 'VisualforcePage', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'references VisualforceComponent', edgeType: 'references', source: 'x', fromType: 'VisualforceComponent', expected: { category: 'frontend', verdict: 'risky' } },

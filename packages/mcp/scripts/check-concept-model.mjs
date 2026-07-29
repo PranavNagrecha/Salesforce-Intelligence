@@ -181,9 +181,11 @@ function main() {
     }
   };
   {
-    const ft = edgeSemantics.formulaTokenizer;
-    for (const k of ['edgeType', 'source', 'category', 'verdict']) {
-      checkEdgeValue(ft[k], `edgeSemantics.formulaTokenizer.${k}`);
+    for (const [i, entry] of edgeSemantics.bySource.entries()) {
+      for (const k of ['source', 'edgeType', 'fromType', 'category', 'verdict']) {
+        if (entry[k] === undefined) continue; // fromType is optional
+        checkEdgeValue(entry[k], `edgeSemantics.bySource[${i}].${k}`);
+      }
     }
     for (const [edgeType, rule] of Object.entries(edgeSemantics.byEdgeType)) {
       checkEdgeValue(edgeType, `edgeSemantics.byEdgeType.${edgeType} (key)`);

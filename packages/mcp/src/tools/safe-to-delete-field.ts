@@ -27,7 +27,9 @@
  *   | (any other source)           | writesTo    | unknown     | blocking         |
  *   | ValidationRule               | references  | validation  | blocking         |
  *   | (formula-tokenizer source)   | references  | formula     | blocking         |
- *   | CustomField (roll-up source) | references  | rollup      | blocking         |
+ *   | source=rollup-summary        | references  | rollup      | blocking         |
+ *   | source=relationship-resolver | references  | formula     | blocking         |
+ *   |   (fromType CustomField)     |             |             |                  |
  *   | Layout                       | usedInLayout| layout      | review           |
  *   | VisualforcePage              | references  | frontend    | risky            |
  *   | VisualforceComponent         | references  | frontend    | risky            |
@@ -373,13 +375,20 @@ export const classifyEdge = (
   edge: Edge,
   fromNode: Node,
 ): { category: ReasonCategory; verdict: Verdict } => {
-  if (
-    edge.edgeType === EDGE_SEMANTICS.formulaTokenizer.edgeType &&
-    edge.source === EDGE_SEMANTICS.formulaTokenizer.source
-  ) {
+  // Ordered source-keyed special cases, first match wins. Keyed on the extractor
+  // `source` marker because `references` has several producers whose semantics
+  // differ and whose referrer ComponentType does not tell them apart — a
+  // CustomField-sourced `references` edge is a formula reference, a roll-up
+  // coupling, or a resolved cross-object traversal depending ONLY on `source`.
+  // Classifying by type alone made the tool cite a roll-up summary that did not
+  // exist. `fromType`, when the rule carries one, scopes it further.
+  for (const rule of EDGE_SEMANTICS.bySource) {
+    if (edge.edgeType !== rule.edgeType) continue;
+    if (edge.source !== rule.source) continue;
+    if (rule.fromType !== undefined && fromNode.type !== rule.fromType) continue;
     return {
-      category: EDGE_SEMANTICS.formulaTokenizer.category as ReasonCategory,
-      verdict: EDGE_SEMANTICS.formulaTokenizer.verdict as Verdict,
+      category: rule.category as ReasonCategory,
+      verdict: rule.verdict as Verdict,
     };
   }
   const rule = EDGE_SEMANTICS.byEdgeType[edge.edgeType];
@@ -413,7 +422,7 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     layout:
       'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field) or referenced by a QuickAction (whose create/edit form is affected). Review the UI impact before deleting.',
     formula:
-      'Another formula field references this field via its formula tokenizer. The referencing formula will fail to compile if this field is removed.',
+      'Another formula field references this field — either directly (tokenized from the formula body) or through a cross-object relationship traversal (`Parent__r.Field__c`) resolved against the org\u2019s lookup fields. Each reasoning entry carries the referring field id, and a traversal-derived one also carries the `traversalPath` it was resolved from. The referencing formula will fail to compile if this field is removed.',
     rollup:
       'A roll-up summary field on the PARENT object aggregates this field (as its summarizedField) or is anchored on it (as its summaryForeignKey master-detail field). Salesforce REFUSES the delete outright while the roll-up exists — delete or repoint the roll-up first. The coupling is declared in the parent object’s metadata, not this field’s, so a search restricted to this object cannot find it.',
     integration:
