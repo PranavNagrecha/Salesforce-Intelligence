@@ -539,8 +539,11 @@ const classifyCategory = (edge: Edge, fromNode: Node): Category => {
   if (t === 'Flow') return 'metadata-blocker';
   // WorkflowRule field-update actions: declarative writes.
   if (t === 'WorkflowRule') return 'metadata-blocker';
-  // Other CustomFields with `references` are formula-tokenizer outputs —
-  // another formula field referencing this one is metadata-declared.
+  // A CustomField referrer with `references` is one of three metadata-declared
+  // things, all blocking a type change: a tokenized formula reference, a
+  // resolved cross-object formula traversal (relationship-resolver), or a
+  // roll-up summary coupling (rollup-summary). The classification is the same
+  // for all three, so this branch stays source-agnostic on purpose.
   if (t === 'CustomField') return 'metadata-blocker';
   // Apex classes and triggers: heuristic per the v0.3 scanner. A type
   // change requires updating the source.

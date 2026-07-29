@@ -24,7 +24,8 @@
  *   | Section       | Backing edge / source                                  | Confidence       |
  *   |---------------|--------------------------------------------------------|------------------|
  *   | validates     | incoming `references` from ValidationRule              | declared         |
- *   | formulas      | incoming `references` from formula-tokenizer CustomField | parsed         |
+ *   | formulas      | incoming `references` from formula-tokenizer, plus resolved cross-object `__r` traversals (relationship-resolver, CustomField referrer) | parsed |
+ *   | rollups       | incoming `references` from a PARENT roll-up (rollup-summary)   | declared       |
  *   | writers       | incoming `writesTo` from Apex/Flow/Workflow/PB         | mixed            |
  *   | readers       | incoming `readsFrom` from Apex/Flow/LWC/Aura/VF/SOQL   | mixed (heuristic)|
  *   | ui            | incoming `usedInLayout` + frontend `readsFrom` to UI   | declared/heuristic |
@@ -143,6 +144,7 @@ export const FIELD_360_DATA_NOT_AVAILABLE: readonly string[] = [
 const SECTION_NAMES = [
   'validates',
   'formulas',
+  'rollups',
   'writers',
   'readers',
   'ui',
@@ -272,6 +274,12 @@ export interface Field360Output {
   readonly referenceTo: string | null;
   readonly validates?: Field360Section;
   readonly formulas?: Field360Section;
+  /**
+   * Roll-up summary fields on the PARENT object that aggregate this field, are
+   * anchored on it, or filter on it. Salesforce refuses the delete while any of
+   * them exists, so this section is a hard blocker rather than a usage note.
+   */
+  readonly rollups?: Field360Section;
   readonly writers?: Field360Section;
   readonly readers?: Field360Section;
   readonly ui?: Field360Section;
@@ -606,6 +614,7 @@ const detectIsPii = (node: Node): boolean => {
 interface SectionBuckets {
   validates: Field360Row[];
   formulas: Field360Row[];
+  rollups: Field360Row[];
   writers: Field360Row[];
   readers: Field360Row[];
   ui: Field360Row[];
@@ -619,6 +628,7 @@ interface SectionBuckets {
 const emptyBuckets = (): SectionBuckets => ({
   validates: [],
   formulas: [],
+  rollups: [],
   writers: [],
   readers: [],
   ui: [],
@@ -649,14 +659,35 @@ const classifyIncomingEdge = (
     return;
   }
 
-  // `formulas`: incoming `references` from formula-tokenizer (source
-  // marker on the edge) — the source node is typically a CustomField
-  // (the formula field referencing this one).
+  // `formulas`: incoming `references` from the formula tokenizer OR from the
+  // import-time relationship resolver (a cross-object traversal
+  // `Parent__r.Field__c`, which the tokenizer deliberately leaves unresolved
+  // because one file cannot know the target object). Both are a formula
+  // referencing this field; the row carries `source` so a caller can still tell
+  // a directly-tokenized reference from a resolved traversal.
+  //
+  // The resolver ALSO emits FlexiPage related-list aliases. Those must not land
+  // here — they are a UI dependency — so this branch is scoped to a CustomField
+  // referrer, mirroring the scoping `classifyEdge` applies for the same reason.
   if (
     edge.edgeType === 'references' &&
-    edge.source === 'formula-tokenizer'
+    (edge.source === 'formula-tokenizer' ||
+      (edge.source === 'relationship-resolver' && source.type === 'CustomField'))
   ) {
     buckets.formulas.push(row);
+    return;
+  }
+
+  // `rollups`: incoming `references` from a roll-up summary field on the PARENT
+  // object — this field is its summarizedField, its summaryForeignKey, or a
+  // field its filter tests. Needs its own branch for the reason the ListView
+  // comment below documents: CustomField is in NONE of the UI / INTEGRATION /
+  // AUTOMATION / CODE node-type sets, so without this the edge falls through
+  // every case and is dropped silently — while safe_to_delete_field calls the
+  // very same edge `blocking`. Two tools disagreeing about one field is worse
+  // than either being wrong alone.
+  if (edge.edgeType === 'references' && edge.source === 'rollup-summary') {
+    buckets.rollups.push(row);
     return;
   }
 
@@ -878,6 +909,7 @@ export const field360Handler = async (
   const allBuckets: ReadonlyArray<readonly [SectionName, Field360Row[]]> = [
     ['validates', buckets.validates],
     ['formulas', buckets.formulas],
+    ['rollups', buckets.rollups],
     ['writers', buckets.writers],
     ['readers', buckets.readers],
     ['ui', buckets.ui],

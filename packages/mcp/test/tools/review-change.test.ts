@@ -86,6 +86,12 @@ const FAMILIES = [
   // Usage-source / placement families the destructive verdict now attests.
   'ValidationRule',
   'WorkflowRule',
+  // Condition firers whose ConditionalContext readsFrom edges can carry a
+  // `condition` blocker for a field.
+  'ApprovalProcess',
+  'AssignmentRule',
+  'AutoResponseRule',
+  'EscalationRule',
   'SharingRule',
   'Report',
   'Dashboard',

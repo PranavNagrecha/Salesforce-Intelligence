@@ -41,6 +41,13 @@ const completeFieldDeletionCoverage = (): readonly CoverageEntry[] =>
     'VisualforceComponent',
     'QuickAction',
     'WorkflowRule',
+    // The remaining condition firers: their ConditionalContext nodes emit
+    // readsFrom edges to the fields their criteria test, so an unretrieved one
+    // can hide a `condition` blocker.
+    'ApprovalProcess',
+    'AssignmentRule',
+    'AutoResponseRule',
+    'EscalationRule',
     'SharingRule',
     'Report',
     'Dashboard',
