@@ -6,6 +6,8 @@
   - **Formula `__r` traversals** now resolve. Cross-object dotted paths were skipped to avoid minting dangling ids; a field read only through `Parent__r.Field__c` therefore showed no referrers at all. A new import-time pass resolves single- and multi-hop traversals against a relationship map built from every vaulted lookup.
   - **FlexiPage `relatedListFieldAliases`** now resolve. Dynamic related-list columns are *bare* field names on the **related** object — invisible to the whole-XML dotted sweep, and wrong to attribute to the page's own `sobjectType`. They resolve through the same relationship map.
 
+- The relationship resolver is wired into the INCREMENTAL reconcile as well as the cold import. It was only in the cold path, and its edges exist solely because that pass mints them — so an incremental reconcile saw every one as absent-from-desired. On the whole-graph path (`pruneNodeTypes` undefined) the preserve-guard is skipped and absent edges are deleted, so `sfi refresh --incremental-graph` silently DROPPED real dependency evidence and returned those fields to "no referrers". Verified end to end on a real org: 343 resolver edges survive the incremental path unchanged.
+
 ### Added
 
 - `sfi.field_audit` — a curated MCP prompt carrying the field-deletion audit method (calibrate before trusting a zero; formula fields have no population figure; record role rather than count; a deleted report *filter* fails the report **open**, silently widening it). Gives non-Claude MCP hosts the discipline the plugin skill gives Claude Code.
@@ -13,7 +15,6 @@
 - **Subagents.** The plugin now ships agents (`"agents"` in the manifest; first two): `salesforce-field-auditor` batches 4–8 fields into structured verdict records, and `salesforce-field-refuter` attacks one verdict from one assigned lens. They are separate agents because the method's verification pass requires refuters that cannot see each other's reasoning — in the reference run it reverted a third of its own corrections.
 - `/sfi-field-audit <Object>` — orchestrates the run: scout inline (never parallelised, since a divergent evidence base silently invalidates every downstream comparison), fan out auditors, three independent refuters per contested verdict with a 2-of-3 majority, then single-threaded synthesis. Decides Keep / Review / Deprecate-then-Remove / Remove with full dependency tracing, and validates an existing field-cleanup analysis.
 
-- The relationship resolver is wired into the INCREMENTAL reconcile as well as the cold import. It was only in the cold path, and its edges exist solely because that pass mints them — so an incremental reconcile saw every one as absent-from-desired. On the whole-graph path (`pruneNodeTypes` undefined) the preserve-guard is skipped and absent edges are deleted, so `sfi refresh --incremental-graph` silently DROPPED real dependency evidence and returned those fields to "no referrers". Verified end to end on a real org: 343 resolver edges survive the incremental path unchanged.
 
 ### Changed
 
