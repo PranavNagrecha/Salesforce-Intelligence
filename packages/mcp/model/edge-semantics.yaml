@@ -53,6 +53,15 @@ edgeSemantics:
         Flow:
           category: flow
           verdict: blocking
+        # A synthetic ConditionalContext is the parsed condition of a Flow entry
+        # criterion, workflow-rule criterion, validation-rule condition or Flow
+        # decision. Its `readsFrom` edges name the fields the condition TESTS.
+        # The platform refuses to delete a field any live condition evaluates —
+        # and the `firesWhen` edge runs firer -> context, so this is the only
+        # edge that reaches the field at all.
+        ConditionalContext:
+          category: condition
+          verdict: blocking
         LightningComponentBundle:
           category: frontend
           verdict: risky

@@ -159,6 +159,17 @@ export interface ConditionExtractionResult {
   readonly conditionNodes: readonly Node[];
   readonly firesWhenEdges: readonly Edge[];
   readonly conditionsMirror: readonly ConditionMirror[];
+  /**
+   * CONDITION-FIELDREF-EDGES: `readsFrom` edges from each ConditionalContext to
+   * every field its condition tests — the only route by which an incoming-edge
+   * walk from a field can discover that a Flow entry criterion, workflow-rule
+   * criterion or validation-rule condition depends on it.
+   *
+   * Unlike the three arrays above this one is NOT index-parallel: a condition
+   * contributes zero edges when it references no resolvable field, and several
+   * when it tests several. Callers spread it into their edge output.
+   */
+  readonly conditionFieldEdges: readonly Edge[];
 }
 
 /**
@@ -454,7 +465,12 @@ const buildConditionTriple = (
   parentApiVersion: number | null,
   extraProperties: Readonly<Record<string, unknown>>,
   sourceName: string | null,
-): { readonly node: Node; readonly edge: Edge; readonly mirror: ConditionMirror } => {
+): {
+  readonly node: Node;
+  readonly edge: Edge;
+  readonly fieldEdges: readonly Edge[];
+  readonly mirror: ConditionMirror;
+} => {
   const conditionContextId: ComponentId =
     `ConditionalContext:${parentId}.condition-${index}`;
   const apiName = `${parentId}.condition-${index}`;
@@ -493,6 +509,36 @@ const buildConditionTriple = (
       conditionIndex: index,
     },
   };
+  // CONDITION-FIELDREF-EDGES: the fields a condition TESTS are dependencies of
+  // the firer, and until these edges existed they were reachable only by
+  // reading `properties.fieldRefs` off this synthetic node — never by an
+  // incoming-edge walk from the field.
+  //
+  // The consequence was specific and dangerous: `safe_to_delete_field` is a
+  // pure `listEdges(field, 'in')` composition, so a field used ONLY in a Flow
+  // entry criterion, a workflow-rule criterion, or a validation-rule condition
+  // returned "layout only" — or nothing at all — for a field the platform
+  // refuses to delete. The `firesWhen` edge points firer -> context, so it
+  // never reaches the field either.
+  //
+  // `readsFrom` is the accurate edge type: a condition evaluates the field, it
+  // does not write it. Confidence is inherited from the condition surface —
+  // `declared` for XML criteria, `parsed` for tokenized formulas — so the
+  // caller can still tell a read declaration from a parsed one.
+  const fieldEdges: readonly Edge[] = fieldRefs.map((toId) => ({
+    fromId: conditionContextId,
+    toId,
+    edgeType: 'readsFrom',
+    confidence,
+    source: EXTRACTOR_SOURCE,
+    properties: {
+      kind,
+      conditionIndex: index,
+      // The firer the condition belongs to, so a consumer reading the field's
+      // incoming edges can name the Flow / rule without a second hop.
+      firerId: parentId,
+    },
+  }));
   const mirror: ConditionMirror = {
     kind,
     conditionContextId,
@@ -500,7 +546,7 @@ const buildConditionTriple = (
     fieldRefs,
     ...(sourceName !== null ? { sourceName } : {}),
   };
-  return { node, edge, mirror };
+  return { node, edge, fieldEdges, mirror };
 };
 
 /**
@@ -595,6 +641,7 @@ export const extractConditions = (
   const conditionNodes: Node[] = [];
   const firesWhenEdges: Edge[] = [];
   const conditionsMirror: ConditionMirror[] = [];
+  const conditionFieldEdges: Edge[] = [];
   for (let i = 0; i < sources.length; i += 1) {
     const source = sources[i]!;
     const index = indexOffset + i;
@@ -703,6 +750,12 @@ export const extractConditions = (
     conditionNodes.push(triple.node);
     firesWhenEdges.push(triple.edge);
     conditionsMirror.push(triple.mirror);
+    conditionFieldEdges.push(...triple.fieldEdges);
   }
-  return { conditionNodes, firesWhenEdges, conditionsMirror };
+  return {
+    conditionNodes,
+    firesWhenEdges,
+    conditionsMirror,
+    conditionFieldEdges,
+  };
 };

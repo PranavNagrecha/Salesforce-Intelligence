@@ -172,6 +172,7 @@ export const EDGE_SEMANTICS: EdgeSemantics = Object.freeze({
         ApexClass: { category: 'apex', verdict: 'risky' },
         ApexTrigger: { category: 'apex', verdict: 'risky' },
         Flow: { category: 'flow', verdict: 'blocking' },
+        ConditionalContext: { category: 'condition', verdict: 'blocking' },
         LightningComponentBundle: { category: 'frontend', verdict: 'risky' },
         AuraDefinitionBundle: { category: 'frontend', verdict: 'risky' },
       },

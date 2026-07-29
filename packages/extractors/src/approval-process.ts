@@ -907,7 +907,7 @@ export const extractApprovalProcess = async (
       }
     }
   }
-  const { conditionNodes, firesWhenEdges, conditionsMirror } =
+  const { conditionNodes, firesWhenEdges, conditionsMirror, conditionFieldEdges } =
     extractConditions({
       parentId: processId,
       sources: entryConditionSources,
@@ -1082,7 +1082,7 @@ export const extractApprovalProcess = async (
 
   // v2.0a — Append the firesWhen edges and the synthetic
   // ConditionalContext nodes (if any).
-  edges.push(...firesWhenEdges);
+  edges.push(...firesWhenEdges, ...conditionFieldEdges);
 
   return ok({ nodes: [node, ...conditionNodes], edges });
 };

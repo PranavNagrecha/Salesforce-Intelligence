@@ -1918,7 +1918,7 @@ export const extractFlow = async (
   // is null and bare field names remain in their dangling form per
   // the helper's documented behaviour.
   const conditionSources = collectFlowConditionSources(rootObj);
-  const { conditionNodes, firesWhenEdges, conditionsMirror } =
+  const { conditionNodes, firesWhenEdges, conditionsMirror, conditionFieldEdges } =
     extractConditions({
       parentId: flowId,
       sources: conditionSources,
@@ -1931,7 +1931,7 @@ export const extractFlow = async (
   // the rest would scatter them throughout the edge list. The
   // alphabetic-by-toId convention already places
   // `ConditionalContext:...` entries near the top of any sort.
-  const allEdges = [...edges, ...firesWhenEdges];
+  const allEdges = [...edges, ...firesWhenEdges, ...conditionFieldEdges];
 
   const node: Node = {
     id: flowId,

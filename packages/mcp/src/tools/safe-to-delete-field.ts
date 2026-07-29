@@ -20,6 +20,7 @@
  *   |------------------------------|-------------|-------------|------------------|
  *   | ApexClass / ApexTrigger      | readsFrom   | apex        | risky            |
  *   | Flow                         | readsFrom   | flow        | blocking         |
+ *   | ConditionalContext           | readsFrom   | condition   | blocking         |
  *   | ApexClass / ApexTrigger      | writesTo    | apex        | blocking         |
  *   | Flow                         | writesTo    | flow        | blocking         |
  *   | WorkflowRule                 | writesTo    | workflow    | blocking         |
@@ -89,9 +90,9 @@
  *     ASC) so the response stays compact for the headline-summary
  *     persona.
  *   - Categories are emitted in a stable order
- *     (`apex, flow, workflow, validation, layout, formula, integration,
- *     permission, sharing, frontend, unknown`) so consumer fixtures see
- *     the same shape across runs.
+ *     (`apex, flow, condition, workflow, validation, layout, formula,
+ *     rollup, integration, permission, sharing, analytics, ui, frontend,
+ *     unknown`) so consumer fixtures see the same shape across runs.
  */
 
 import type {
@@ -164,6 +165,7 @@ const EXAMPLES_PER_CATEGORY_LIMIT = 5;
 const CATEGORY_ORDER = [
   'apex',
   'flow',
+  'condition',
   'workflow',
   'validation',
   'layout',
@@ -402,6 +404,8 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
   {
     apex: 'Apex classes and triggers reference this field. Parsed-confidence matches (the default-on Apex AST pass — dot-access plus inline static SOQL SELECT/WHERE/ORDER BY/GROUP BY fields and constant-string Database.query literals) are real references; heuristic-confidence matches (apex-scanner regex fallback) may include false positives — spot-check those before deleting. String-BUILT dynamic SOQL remains invisible either way.',
     flow: 'Flow definitions read or write this field. The Flow XML names the field literally; deleting the field will break the Flow at runtime.',
+    condition:
+      'A condition EVALUATES this field — a Flow entry criterion, a Flow decision, a workflow-rule criterion, or a validation-rule condition. Salesforce refuses to delete a field a live condition tests, so this is a hard blocker even when the field appears on no layout and in no formula. The condition is listed but NOT evaluated: sfi does not know whether any record satisfies it.',
     workflow:
       'A WorkflowRule field-update action writes this field. The action will fail at runtime if the field is removed.',
     validation:

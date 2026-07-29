@@ -224,7 +224,7 @@ export const extractValidationRule = async (
     errorConditionFormula.length === 0
       ? []
       : [{ kind: 'formula', expression: errorConditionFormula }];
-  const { conditionNodes, firesWhenEdges, conditionsMirror } =
+  const { conditionNodes, firesWhenEdges, conditionsMirror, conditionFieldEdges } =
     extractConditions({
       parentId: nodeId,
       sources: conditionSources,
@@ -270,6 +270,6 @@ export const extractValidationRule = async (
 
   return ok({
     nodes: [node, ...conditionNodes],
-    edges: [parentEdge, ...referencesEdges, ...firesWhenEdges],
+    edges: [parentEdge, ...referencesEdges, ...firesWhenEdges, ...conditionFieldEdges],
   });
 };

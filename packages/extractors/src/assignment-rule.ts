@@ -510,7 +510,7 @@ const buildRule = (
     conditionSources.push(source);
     conditionEntryIndices.push(entryIndex);
   }
-  const { conditionNodes, firesWhenEdges, conditionsMirror } =
+  const { conditionNodes, firesWhenEdges, conditionsMirror, conditionFieldEdges } =
     extractConditions({
       parentId: ruleId,
       sources: conditionSources,
@@ -606,7 +606,7 @@ const buildRule = (
 
   // v2.0a — Append the firesWhen edges at the tail. The synthetic
   // ConditionalContext nodes are returned alongside the rule node.
-  edges.push(...firesWhenEdges);
+  edges.push(...firesWhenEdges, ...conditionFieldEdges);
 
   return ok({ node, edges, conditionNodes });
 };

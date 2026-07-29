@@ -30,6 +30,14 @@ const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
       if (fromType === 'Flow') {
         return { category: 'flow', verdict: 'blocking' };
       }
+      // INTENTIONAL post-RM-1b(2) extension, not drift: a ConditionalContext's
+      // readsFrom edges name the fields its condition TESTS. They used to fall
+      // through to {unknown, risky} — in practice to nothing at all, since the
+      // edges were never emitted — which is how a field used only in a Flow
+      // entry criterion could be reported as deletable.
+      if (fromType === 'ConditionalContext') {
+        return { category: 'condition', verdict: 'blocking' };
+      }
       if (
         fromType === 'LightningComponentBundle' ||
         fromType === 'AuraDefinitionBundle'
@@ -141,6 +149,7 @@ const CASES: readonly Case[] = [
   { name: 'readsFrom ApexClass', edgeType: 'readsFrom', source: 'apex-scanner', fromType: 'ApexClass', expected: { category: 'apex', verdict: 'risky' } },
   { name: 'readsFrom ApexTrigger', edgeType: 'readsFrom', source: 'apex-scanner', fromType: 'ApexTrigger', expected: { category: 'apex', verdict: 'risky' } },
   { name: 'readsFrom Flow', edgeType: 'readsFrom', source: 'flow-extractor', fromType: 'Flow', expected: { category: 'flow', verdict: 'blocking' } },
+  { name: 'readsFrom ConditionalContext (entry criterion)', edgeType: 'readsFrom', source: 'condition-extractor', fromType: 'ConditionalContext', expected: { category: 'condition', verdict: 'blocking' } },
   { name: 'readsFrom LWC', edgeType: 'readsFrom', source: 'lwc-scanner', fromType: 'LightningComponentBundle', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'readsFrom Aura', edgeType: 'readsFrom', source: 'aura-scanner', fromType: 'AuraDefinitionBundle', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'readsFrom default (Profile)', edgeType: 'readsFrom', source: 'x', fromType: 'Profile', expected: { category: 'unknown', verdict: 'risky' } },

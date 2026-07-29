@@ -893,7 +893,7 @@ const buildRule = (
   // `conditionsMirror` is mirrored onto the rule's
   // `properties.conditions[]` per the documented property mirror.
   const conditionSources = collectWorkflowRuleConditionSources(rule);
-  const { conditionNodes, firesWhenEdges, conditionsMirror } =
+  const { conditionNodes, firesWhenEdges, conditionsMirror, conditionFieldEdges } =
     extractConditions({
       parentId: ruleId,
       sources: conditionSources,
@@ -979,7 +979,7 @@ const buildRule = (
       ),
     );
   }
-  edges.push(...firesWhenEdges);
+  edges.push(...firesWhenEdges, ...conditionFieldEdges);
   return ok({ node, edges, conditionNodes });
 };
 
