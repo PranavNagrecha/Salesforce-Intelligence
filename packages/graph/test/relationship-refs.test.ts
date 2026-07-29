@@ -188,6 +188,33 @@ describe('mintRelationshipTraversalEdges — dynamic related-list columns', () =
     ]);
   });
 
+  it('does not duplicate an edge the generic FlexiPage sweep already emitted', () => {
+    // Found by running the resolver against a real org: a field that appears
+    // BOTH as a direct fieldItem on the page and as a related-list alias column
+    // produced two identical (from, to, references) rows. Two edges read as two
+    // independent consumers when there is one page — the clone-propagation
+    // double-count a field audit must never make.
+    const page = flexiPage('Programme_Record_Page', {
+      sobjectType: 'Programme__c',
+      relatedListFieldRefs: [
+        { relatedListApiName: 'Enrolments__r', fields: ['Outcome__c'] },
+      ],
+    });
+    const edges: Edge[] = [
+      {
+        fromId: 'FlexiPage:Programme_Record_Page' as ComponentId,
+        toId: 'CustomField:Enrolment__c.Outcome__c' as ComponentId,
+        edgeType: 'references',
+        confidence: 'heuristic',
+        source: 'enterprise-metadata',
+        properties: { referenceKind: 'fieldRef' },
+      },
+    ];
+    mintRelationshipTraversalEdges([LOOKUP, CHILD_FIELD, page], edges);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.source).toBe('enterprise-metadata');
+  });
+
   it('mints nothing when the related list name is ambiguous across objects', () => {
     const rival = field('Withdrawal__c', 'Programme__c', {
       referenceTo: 'Programme__c',
