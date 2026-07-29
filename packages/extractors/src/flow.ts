@@ -1408,26 +1408,66 @@ const buildBeforeSaveFieldAssignmentEdges = (
 };
 
 /**
- * Parse a single Flow condition triplet (`<leftValueReference>`,
- * `<operator>`, `<rightValue>`) into the helper's `CriteriaItem`
- * shape. Flow `<rightValue>` is wrapped in a typed sub-element
- * (`<stringValue>`, `<numberValue>`, `<elementReference>`, etc.); the
- * (`<stringValue>`, `<numberValue>`, `<elementReference>`, etc.); the
- * extractor preserves whichever scalar form is present, falling back
- * to JSON-stringifying the wrapper when nothing matches (rare).
+ * Read the first of `keys` that unwraps to a present, non-empty payload, or
+ * `null` when none does. `keys` is in PRECEDENCE order, so the caller's
+ * canonical spelling is tried before its dialect alias. Used to accept the two
+ * XML spellings of a Flow condition triplet without duplicating the
+ * empty-string tolerance at each call site.
+ */
+const pickTripletMember = (
+  obj: Record<string, unknown>,
+  keys: readonly string[],
+): unknown => {
+  for (const key of keys) {
+    const v = unwrapSingle(obj[key]);
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
+};
+
+/**
+ * Parse a single Flow condition triplet into the helper's `CriteriaItem`
+ * shape.
+ *
+ * Flow ships TWO spellings of the same triplet and this parser must accept
+ * both:
+ *
+ *   - `<leftValueReference>` / `<operator>` / `<rightValue>` —
+ *     `<decisions><rules><conditions>`.
+ *   - `<field>` / `<operator>` / `<value>` — `<start><filters>`, the
+ *     record-trigger ENTRY CRITERIA (and the legacy `<recordTriggers><filters>`
+ *     shape).
+ *
+ * Reading only the first spelling made EVERY entry criterion parse to `null`:
+ * no `CriteriaItem`, so no `fieldRefs` on the ConditionalContext, so no
+ * `readsFrom` condition-field edge. A field used only as a record-trigger entry
+ * filter therefore looked unreferenced to `safe_to_delete_field`, which is a
+ * pure incoming-edge walk — a delete-it verdict for a field the platform
+ * refuses to delete. `leftValueReference` / `rightValue` are tried FIRST so the
+ * decision dialect's output is byte-identical to before this alias existed.
+ *
+ * `<operator>` is required in both dialects (`<start><filters>` always carries
+ * one, even for the unary `IsNull` / `IsChanged` operators), so an
+ * operator-less triplet is still rejected.
+ *
+ * The comparison value is wrapped in a typed sub-element in both dialects
+ * (`<stringValue>`, `<numberValue>`, `<elementReference>`, etc.); the extractor
+ * preserves whichever scalar form is present. A triplet with no value element
+ * at all (Salesforce allows it for unary tests) yields `value: null`, which
+ * `CriteriaItem` documents and the expression renderer handles.
  */
 const parseFlowConditionTriplet = (raw: unknown): CriteriaItem | null => {
   if (typeof raw !== 'object' || raw === null) return null;
   const obj = raw as Record<string, unknown>;
-  const fieldRaw = unwrapSingle(obj['leftValueReference']);
-  if (fieldRaw === undefined || fieldRaw === null || fieldRaw === '') {
+  const fieldRaw = pickTripletMember(obj, ['leftValueReference', 'field']);
+  if (fieldRaw === null) {
     return null;
   }
   const operatorRaw = unwrapSingle(obj['operator']);
   if (operatorRaw === undefined || operatorRaw === null || operatorRaw === '') {
     return null;
   }
-  const rightValueRaw = unwrapSingle(obj['rightValue']);
+  const rightValueRaw = pickTripletMember(obj, ['rightValue', 'value']);
   let value: string | null = null;
   if (typeof rightValueRaw === 'object' && rightValueRaw !== null) {
     const wrapper = rightValueRaw as Record<string, unknown>;

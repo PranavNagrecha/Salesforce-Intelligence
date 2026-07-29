@@ -162,6 +162,169 @@ describe('extractFlow', () => {
       }
     });
 
+    it('emits condition field edges for <start><filters> entry criteria in the <field>/<value> dialect', async () => {
+      // Record-trigger ENTRY CRITERIA use `<field>` / `<operator>` / `<value>`,
+      // not the `<leftValueReference>` / `<rightValue>` spelling the decision
+      // surface uses. Before the alias, every entry criterion parsed to null:
+      // no CriteriaItem, no fieldRefs, no `readsFrom` edge — so a field used
+      // ONLY as an entry filter was invisible to the incoming-edge walk behind
+      // `safe_to_delete_field`.
+      const xml = `<?xml version="1.0"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <apiVersion>59.0</apiVersion>
+  <label>Entry Criteria</label>
+  <processType>AutoLaunchedFlow</processType>
+  <status>Active</status>
+  <start>
+    <object>Acct</object>
+    <triggerType>RecordAfterSave</triggerType>
+    <recordTriggerType>CreateAndUpdate</recordTriggerType>
+    <filterLogic>1 AND 2</filterLogic>
+    <filters>
+      <field>Status__c</field>
+      <operator>EqualTo</operator>
+      <value>
+        <stringValue>Active</stringValue>
+      </value>
+    </filters>
+    <filters>
+      <field>Retired__c</field>
+      <operator>IsNull</operator>
+      <value>
+        <booleanValue>true</booleanValue>
+      </value>
+    </filters>
+  </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml(
+        'Entry_Criteria.flow-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const conditionNode = result.value.nodes.find(
+          (n) => n.type === 'ConditionalContext',
+        );
+        expect(conditionNode).toBeDefined();
+        expect(conditionNode!.properties.kind).toBe('flow-recordtrigger');
+        // Structured filters (not a filterFormula) → the criteria mode, and
+        // `declared` confidence because the field name was read from XML.
+        expect(conditionNode!.properties.mode).toBe('criteria');
+        expect(conditionNode!.properties.itemCount).toBe(2);
+        expect(conditionNode!.properties.expression).toBe(
+          '(Status__c EqualTo Active) AND (Retired__c IsNull true)',
+        );
+        // Bare field names resolve against `<start><object>` — the triggering
+        // record IS that object.
+        expect(conditionNode!.properties.fieldRefs).toEqual([
+          'CustomField:Acct.Status__c',
+          'CustomField:Acct.Retired__c',
+        ]);
+        const conditionId = conditionNode!.id;
+        const readsFrom = result.value.edges.filter(
+          (e) => e.edgeType === 'readsFrom' && e.fromId === conditionId,
+        );
+        expect(readsFrom.map((e) => e.toId)).toEqual([
+          'CustomField:Acct.Status__c',
+          'CustomField:Acct.Retired__c',
+        ]);
+        expect(readsFrom[0]!.confidence).toBe('declared');
+        expect(readsFrom[0]!.source).toBe('condition-extractor');
+        expect(readsFrom[0]!.properties.firerId).toBe('Flow:Entry_Criteria');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves the <leftValueReference> decision dialect unchanged when a <field> alias exists', async () => {
+      // Guard for the alias above: a decision condition still parses through
+      // `leftValueReference` / `rightValue` and resolves exactly as it did
+      // before the `<field>` alias existed — including the non-`$Record`
+      // global, which stays verbatim in `fieldRefs` but is structurally
+      // invalid as a field id and so mints no `readsFrom` edge.
+      const xml = `<?xml version="1.0"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <apiVersion>59.0</apiVersion>
+  <label>Mixed Dialects</label>
+  <processType>AutoLaunchedFlow</processType>
+  <status>Active</status>
+  <start>
+    <object>Acct</object>
+    <triggerType>RecordAfterSave</triggerType>
+    <recordTriggerType>Create</recordTriggerType>
+    <filters>
+      <field>Status__c</field>
+      <operator>EqualTo</operator>
+      <value>
+        <stringValue>Active</stringValue>
+      </value>
+    </filters>
+  </start>
+  <decisions>
+    <name>Choose_Path</name>
+    <rules>
+      <name>HighValue</name>
+      <conditionLogic>and</conditionLogic>
+      <conditions>
+        <leftValueReference>$Record.Amount__c</leftValueReference>
+        <operator>GreaterThan</operator>
+        <rightValue>
+          <numberValue>100000</numberValue>
+        </rightValue>
+      </conditions>
+      <conditions>
+        <leftValueReference>$User.ProfileId</leftValueReference>
+        <operator>EqualTo</operator>
+        <rightValue>
+          <stringValue>00e000000000000</stringValue>
+        </rightValue>
+      </conditions>
+    </rules>
+  </decisions>
+</Flow>`;
+      const { dir, path } = await writeTempXml(
+        'Mixed_Dialects.flow-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const decision = result.value.nodes.find(
+          (n) =>
+            n.type === 'ConditionalContext' &&
+            n.properties.kind === 'flow-decision',
+        );
+        expect(decision).toBeDefined();
+        expect(decision!.properties.expression).toBe(
+          '$Record.Amount__c GreaterThan 100000 AND $User.ProfileId EqualTo 00e000000000000',
+        );
+        // `$Record` IS the triggering record, so it resolves onto the start
+        // object; `$User` is a different global and stays verbatim.
+        expect(decision!.properties.fieldRefs).toEqual([
+          'CustomField:Acct.Amount__c',
+          'CustomField:$User.ProfileId',
+        ]);
+        // Only the resolvable ref becomes an edge — the `$`-prefixed one is
+        // structurally invalid as a field id and is dropped rather than minted
+        // as a phantom target.
+        const decisionReads = result.value.edges.filter(
+          (e) => e.edgeType === 'readsFrom' && e.fromId === decision!.id,
+        );
+        expect(decisionReads.map((e) => e.toId)).toEqual([
+          'CustomField:Acct.Amount__c',
+        ]);
+        // Both surfaces produced a context: the decision AND the entry criteria.
+        expect(
+          result.value.nodes.filter((n) => n.type === 'ConditionalContext'),
+        ).toHaveLength(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('emits no ConditionalContext for an autolaunched Flow with no conditions', async () => {
       const xml = `<?xml version="1.0"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">

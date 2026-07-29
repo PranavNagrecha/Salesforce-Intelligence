@@ -82,8 +82,80 @@ describe('buildRelationshipMaps', () => {
     });
     const maps = buildRelationshipMaps([LOOKUP, rival]);
     expect(maps.childward.has('enrolments__r')).toBe(false);
-    // The parentward direction is keyed by owning object, so it stays unambiguous.
+    // The parentward direction is keyed by owning object, so THIS pair stays
+    // unambiguous — two objects each get their own key.
     expect(maps.parentward.get('withdrawal__c|programme__r')).toBe('Programme__c');
+  });
+
+  it('drops a parentward key whose traversal resolves to two different objects', () => {
+    // FAIL-BEFORE: parentward was last-writer-wins with no guard, so this key
+    // silently took whichever lookup the node array happened to end on — while
+    // the module doc asserted `resolve or drop, never guess`. A guessed hop is
+    // worse than a dropped one: it retargets EVERY traversal that walks through
+    // it, minting an edge onto a field the formula never read.
+    //
+    // The collision is reachable because the key is lower-cased: two fields on
+    // one object differing only in case share a key. (Probed against the
+    // reference vault: 323 lookup/master-detail fields produced 323 distinct
+    // parentward keys and ZERO collisions — this guard is about holding the
+    // contract, not about repairing that vault.)
+    const upper = field('Enrolment__c', 'Sponsor__c', {
+      referenceTo: 'Organisation__c',
+    });
+    const lower = field('Enrolment__c', 'sponsor__c', {
+      referenceTo: 'Person__c',
+    });
+    expect(buildRelationshipMaps([upper, lower]).parentward.has('enrolment__c|sponsor__r')).toBe(false);
+    // Order-independent — a drop, not a race the caller could win by sorting.
+    expect(buildRelationshipMaps([lower, upper]).parentward.has('enrolment__c|sponsor__r')).toBe(false);
+  });
+
+  it('keeps a duplicated parentward key when both lookups agree on the target', () => {
+    // Only a DISAGREEING target is ambiguous. Two spellings that land on the
+    // same object resolve identically either way, so dropping them would lose a
+    // resolvable hop for no honesty gain.
+    const upper = field('Enrolment__c', 'Sponsor__c', {
+      referenceTo: 'Organisation__c',
+    });
+    const lower = field('Enrolment__c', 'sponsor__c', {
+      referenceTo: 'Organisation__c',
+    });
+    const maps = buildRelationshipMaps([upper, lower]);
+    expect(maps.parentward.get('enrolment__c|sponsor__r')).toBe('Organisation__c');
+  });
+});
+
+describe('mintRelationshipTraversalEdges — confidence tiers', () => {
+  it('stamps BOTH branches `parsed` — neither is a declared pointer', () => {
+    // GUARD against the asymmetry that shipped: the formula branch stamped
+    // `parsed` while the related-list alias branch stamped `declared`, though
+    // both are a scrape plus a join through the same inferred relationship map.
+    // `declared` is the tier a caller trusts most when deciding to delete a
+    // field, so an inferred join must not borrow it. Asserting both in ONE test
+    // means the pair cannot silently drift apart again.
+    const formulaField = field('Enrolment__c', 'Programme_Status__c', {
+      isFormula: true,
+      formulaRelationshipRefs: ['Programme__r.Status__c'],
+    });
+    const page = flexiPage('Programme_Record_Page', {
+      sobjectType: 'Programme__c',
+      relatedListFieldRefs: [
+        { relatedListApiName: 'Enrolments__r', fields: ['Outcome__c'] },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges(
+      [LOOKUP, TARGET_FIELD, CHILD_FIELD, formulaField, page],
+      edges,
+    );
+    expect(edges).toHaveLength(2);
+    const byKind = new Map(
+      edges.map((e) => [e.properties['referenceKind'], e.confidence]),
+    );
+    expect(byKind.get('formulaRelationshipTraversal')).toBe('parsed');
+    expect(byKind.get('relatedListFieldAlias')).toBe('parsed');
+    // Stated as a set too, so a future third branch cannot slip in `declared`.
+    expect(new Set(edges.map((e) => e.confidence))).toEqual(new Set(['parsed']));
   });
 });
 
@@ -165,7 +237,9 @@ describe('mintRelationshipTraversalEdges — dynamic related-list columns', () =
     // scoping it to the page's own sobjectType would have been wrong.
     expect(edges[0]?.toId).toBe('CustomField:Enrolment__c.Outcome__c');
     expect(edges[0]?.fromId).toBe('FlexiPage:Programme_Record_Page');
-    expect(edges[0]?.confidence).toBe('declared');
+    // Parsed, not declared: regex-scraped XML column resolved through the
+    // INFERRED childward map. See the both-branches confidence guard below.
+    expect(edges[0]?.confidence).toBe('parsed');
     expect(edges[0]?.properties['relatedListApiName']).toBe('Enrolments__r');
   });
 

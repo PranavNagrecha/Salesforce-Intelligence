@@ -1333,3 +1333,375 @@ describe('safeToDeleteFieldHandler — componentId ↔ fieldId alias', () => {
     expect(safeToDeleteFieldInputSchema.safeParse({}).success).toBe(false);
   });
 });
+
+// =============================================================================
+// CITATION HONESTY — the four defects below all share one shape: a note or a
+// description that PROMISED evidence the payload did not carry, or described a
+// dependency as something it is not. One fabricated citation (a roll-up summary
+// that did not exist) already shipped on this branch; these pin the rest.
+// All fixture names are invented.
+// =============================================================================
+
+describe('safeToDeleteFieldHandler — per-example citation provenance', () => {
+  it('stamps rollupRole on every roll-up example, including summaryFilterItem', async () => {
+    // Three roll-ups on the parent, one per declared role. Pre-fix the note
+    // described only summarizedField + summaryForeignKey, so a summaryFilterItem
+    // coupling — a THIRD of roll-up edges on the reference vault — was cited as
+    // something it is not.
+    const fieldId = 'CustomField:Opportunity.Stage_Flag__c';
+    const summarized = 'CustomField:Account.Total_Amount__c';
+    const foreignKey = 'CustomField:Account.Open_Count__c';
+    const filterItem = 'CustomField:Account.Won_Count__c';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: fieldId, apiName: 'Stage_Flag__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: summarized, apiName: 'Total_Amount__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: foreignKey, apiName: 'Open_Count__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: filterItem, apiName: 'Won_Count__c', parentId: ACCOUNT_ID }),
+      ],
+      edges: (
+        [
+          [summarized, 'summarizedField'],
+          [foreignKey, 'summaryForeignKey'],
+          [filterItem, 'summaryFilterItem'],
+        ] as const
+      ).map(([fromId, rollupRole]) =>
+        makeEdge({
+          fromId,
+          toId: fieldId,
+          edgeType: 'references',
+          source: 'rollup-summary',
+          properties: { rollupRole, summaryOperation: 'sum' },
+        }),
+      ),
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rollup = result.value.data.reasoning.find((r) => r.category === 'rollup');
+    expect(rollup).toBeDefined();
+    expect(rollup?.verdict).toBe('blocking');
+    expect(rollup?.count).toBe(3);
+    // Each citation names ITS OWN coupling, not the list of possibilities.
+    const byId = new Map(rollup?.examples.map((e) => [e.id, e.rollupRole]));
+    expect(byId.get(summarized)).toBe('summarizedField');
+    expect(byId.get(foreignKey)).toBe('summaryForeignKey');
+    expect(byId.get(filterItem)).toBe('summaryFilterItem');
+    // …and the note must name all three roles, not two.
+    expect(rollup?.note).toContain('summarizedField');
+    expect(rollup?.note).toContain('summaryForeignKey');
+    expect(rollup?.note).toContain('summaryFilterItem');
+  });
+
+  it('renders the rollupRole into the checklist and the proposal evidence', async () => {
+    const fieldId = 'CustomField:Opportunity.Filter_Only__c';
+    const rollupField = 'CustomField:Account.Filtered_Total__c';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: fieldId, apiName: 'Filter_Only__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: rollupField, apiName: 'Filtered_Total__c', parentId: ACCOUNT_ID }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: rollupField,
+          toId: fieldId,
+          edgeType: 'references',
+          source: 'rollup-summary',
+          properties: { rollupRole: 'summaryFilterItem' },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain('as summaryFilterItem');
+
+    const proposal = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'proposal',
+    });
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) return;
+    expect(proposal.value.data.proposal?.evidence.reasons.join(' ')).toContain(
+      'as summaryFilterItem',
+    );
+  });
+
+  it('surfaces the traversalPath the formula note promises, and renders it', async () => {
+    // Pre-fix the `formula` note promised "a traversal-derived one also carries
+    // the `traversalPath` it was resolved from" — but no such field existed on
+    // the example type and nothing populated or rendered it.
+    const fieldId = 'CustomField:Programme__c.Status__c';
+    const formulaField = 'CustomField:Enrolment__c.Programme_Status__c';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: fieldId, apiName: 'Status__c', parentId: ACCOUNT_ID }),
+        makeNode({
+          id: formulaField,
+          apiName: 'Programme_Status__c',
+          parentId: ACCOUNT_ID,
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: formulaField,
+          toId: fieldId,
+          edgeType: 'references',
+          source: 'relationship-resolver',
+          confidence: 'parsed',
+          properties: {
+            referenceKind: 'formulaRelationshipTraversal',
+            traversalPath: 'Programme__r.Status__c',
+          },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const formula = result.value.data.reasoning.find((r) => r.category === 'formula');
+    expect(formula).toBeDefined();
+    expect(formula?.verdict).toBe('blocking');
+    expect(formula?.examples[0]?.id).toBe(formulaField);
+    expect(formula?.examples[0]?.traversalPath).toBe('Programme__r.Status__c');
+    // The note's promise is now honoured by the payload AND both renderers.
+    expect(formula?.note).toContain('traversalPath');
+
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain('via Programme__r.Status__c');
+
+    const proposal = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'proposal',
+    });
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) return;
+    expect(proposal.value.data.proposal?.evidence.reasons.join(' ')).toContain(
+      'via Programme__r.Status__c',
+    );
+  });
+
+  it('names the actual condition FIRER, not just the ConditionalContext node', async () => {
+    // Seven firer families mint condition edges; pre-fix the note named four,
+    // so an ApprovalProcess blocker was described as a Flow / workflow rule.
+    const fieldId = 'CustomField:Account.Approval_Amount__c';
+    const firerId = 'ApprovalProcess:Account.Big_Deal_Approval';
+    const contextId = `ConditionalContext:${firerId}.condition-0`;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: fieldId,
+          apiName: 'Approval_Amount__c',
+          parentId: ACCOUNT_ID,
+        }),
+        makeNode({
+          id: contextId,
+          type: 'ConditionalContext',
+          apiName: `${firerId}.condition-0`,
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: contextId,
+          toId: fieldId,
+          edgeType: 'readsFrom',
+          source: 'condition-extractor',
+          properties: { kind: 'criteria', conditionIndex: 0, firerId },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const condition = result.value.data.reasoning.find(
+      (r) => r.category === 'condition',
+    );
+    expect(condition).toBeDefined();
+    expect(condition?.verdict).toBe('blocking');
+    expect(condition?.examples[0]?.firerId).toBe(firerId);
+    // All seven wired firer families must be named — an approval-process
+    // blocker described as a Flow criterion is a false citation.
+    for (const family of [
+      'Flow',
+      'validation-rule',
+      'workflow-rule',
+      'approval-process',
+      'assignment-rule',
+      'auto-response-rule',
+      'escalation-rule',
+    ]) {
+      expect(condition?.note).toContain(family);
+    }
+
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain(`fired by ${firerId}`);
+  });
+
+  it('never invents a qualifier for an edge that did not stamp one', async () => {
+    // The anti-fabrication pin: a plain Apex readsFrom carries no traversal,
+    // role or firer, so the example must carry none — a defaulted qualifier
+    // would be a fabricated citation on an otherwise correct verdict.
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: APEX_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const apex = result.value.data.reasoning.find((r) => r.category === 'apex');
+    const example = apex?.examples[0];
+    expect(example).toBeDefined();
+    expect(example?.traversalPath).toBeUndefined();
+    expect(example?.rollupRole).toBeUndefined();
+    expect(example?.firerId).toBeUndefined();
+    // …and the rendered citation stays a bare id.
+    const checklist = await safeToDeleteFieldHandler(ctx, {
+      fieldId: APEX_FIELD,
+      format: 'checklist',
+    });
+    expect(checklist.ok).toBe(true);
+    if (!checklist.ok) return;
+    expect(checklist.value.data.checklist).toContain(APEX_READER);
+    // No qualifier parenthetical follows the id — the citation is a bare id.
+    expect(checklist.value.data.checklist).not.toContain(`${APEX_READER} (`);
+  });
+});
+
+// =============================================================================
+// UPGRADE PATH — a user who installs the new build and does NOT re-refresh has
+// a vault with none of the new edge families, so they get exactly the
+// false-`safe` this release exists to fix. The coverage caveat cannot see it:
+// the metadata families WERE retrieved; the extractor that reads them did not
+// exist yet.
+// =============================================================================
+
+describe('safeToDeleteFieldHandler — stale-builder upgrade path', () => {
+  const PLUGIN_ENV = 'SFI_PLUGIN_VERSION';
+
+  afterEach(() => {
+    delete process.env[PLUGIN_ENV];
+  });
+
+  /** ctx whose vault manifest records the builder version `version`. */
+  const ctxBuiltBy = (version: string): Context => ({
+    ...ctx,
+    manifest: { ...FIXTURE_MANIFEST, version },
+  });
+
+  it('routes an otherwise-safe verdict to review and discloses why', async () => {
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, builderVersionCaveat, trust, reasoning } = result.value.data;
+    // NOT proven safe — same treatment incomplete coverage already gets.
+    expect(verdict).toBe('review');
+    // …and not by inventing a dependency that does not exist.
+    expect(reasoning).toHaveLength(0);
+    expect(builderVersionCaveat).toBeDefined();
+    expect(builderVersionCaveat).toContain('0.2.1');
+    expect(builderVersionCaveat).toContain('0.3.0');
+    expect(builderVersionCaveat).toMatch(/sfi refresh/);
+    // Mirrored into limitations so the proposal artifact discloses it too.
+    expect(trust.limitations.some((l) => l === builderVersionCaveat)).toBe(true);
+  });
+
+  it('surfaces the caveat above the verdict in the checklist (which renders no trust block)', async () => {
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+      format: 'checklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const checklist = result.value.data.checklist ?? '';
+    expect(checklist).toMatch(/Stale vault/i);
+    expect(checklist.indexOf('Stale vault')).toBeLessThan(
+      checklist.indexOf('**Verdict:'),
+    );
+  });
+
+  it('carries the caveat into the proposal disclosures', async () => {
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+      format: 'proposal',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const proposal = result.value.data.proposal;
+    expect(proposal?.evidence.verdict).toBe('review');
+    expect(proposal?.evidence.disclosures.join(' ')).toContain('0.2.1');
+  });
+
+  it('still discloses on a blocking verdict, without moving it', async () => {
+    // A stale vault makes the EVIDENCE incomplete regardless of the verdict, so
+    // the reader is told even when the verdict does not move. The caveat only
+    // ever demotes safe -> review; it never upgrades or downgrades anything else.
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: FLOW_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('blocking');
+    expect(result.value.data.builderVersionCaveat).toBeDefined();
+  });
+
+  it('stays silent when the vault builder matches, is newer, or the env is unset', async () => {
+    const safeVerdict = async (c: Context): Promise<string> => {
+      const r = await safeToDeleteFieldHandler(c, { fieldId: SAFE_FIELD });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return 'error';
+      expect(r.value.data.builderVersionCaveat).toBeUndefined();
+      return r.value.data.verdict;
+    };
+    process.env[PLUGIN_ENV] = '0.3.0';
+    expect(await safeVerdict(ctxBuiltBy('0.3.0'))).toBe('safe');
+    // A DOWNGRADE must not nag: an older running plugin implies nothing missing
+    // from a vault a newer one built.
+    expect(await safeVerdict(ctxBuiltBy('0.4.0'))).toBe('safe');
+    delete process.env[PLUGIN_ENV];
+    expect(await safeVerdict(ctxBuiltBy('0.2.1'))).toBe('safe');
+  });
+
+  it('never downgrades on an unparseable version on either side', async () => {
+    // A guess must never cost a user a `safe` verdict.
+    process.env[PLUGIN_ENV] = 'dev';
+    const a = await safeToDeleteFieldHandler(ctxBuiltBy('0.2.1'), {
+      fieldId: SAFE_FIELD,
+    });
+    expect(a.ok).toBe(true);
+    if (a.ok) expect(a.value.data.verdict).toBe('safe');
+
+    process.env[PLUGIN_ENV] = '0.3.0';
+    const b = await safeToDeleteFieldHandler(ctxBuiltBy(''), {
+      fieldId: SAFE_FIELD,
+    });
+    expect(b.ok).toBe(true);
+    if (b.ok) expect(b.value.data.verdict).toBe('safe');
+  });
+});

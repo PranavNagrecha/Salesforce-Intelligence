@@ -240,8 +240,8 @@ that two active before-save flows on one object run in an **undefined order**, o
 that an `@AuraEnabled` method is an entry point where Apex does not auto-enforce
 field-level security. SfIntelligence answers those with a small second graph.
 
-Alongside the org's grounded vault, the product ships a **Concept Model**: **94**
-org-independent, curated concepts and **143** rules that encode general Salesforce
+Alongside the org's grounded vault, the product ships a **Concept Model**: **142**
+org-independent, curated concepts and **193** rules that encode general Salesforce
 truth — save-order phases, relationship semantics, sharing posture, code-shape
 signals. No org data lives in it; the org enters reasoning **only** through the
 grounded slice at query time. The `sfi.interpret` tool **joins** the two: it
@@ -362,7 +362,7 @@ answer carries a known-coverage caveat instead of a silent blind spot.
 | --- | --- |
 | **MCP roster** | Every `sfi.*` tool is registered in code; run `sfi.capabilities` for the live count and workflow map |
 | **Graph model** | A broad `ComponentType` union across **102** component types (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by **23** typed edge types — see `sfi.capabilities` for how tools group those families |
-| **Concept Model** | **94** org-independent, curated reasoning concepts and **143** rules that JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret` — no org data lives in the model |
+| **Concept Model** | **142** org-independent, curated reasoning concepts and **193** rules that JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret` — no org data lives in the model |
 | **26** | skills + **5** slash commands + **2** subagents (Claude Code plugin layer) that auto-activate in a session |
 
 ## What it does NOT do

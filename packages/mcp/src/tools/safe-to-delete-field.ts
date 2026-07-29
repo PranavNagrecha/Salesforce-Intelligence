@@ -41,12 +41,28 @@
  *   | (any other edge)             | *           | unknown     | risky            |
  *
  * **Aggregate verdict**:
- *   - `safe` if there are NO incoming edges at all (and coverage is complete).
- *   - `review` if coverage is incomplete and the graph would otherwise be `safe`
- *     — means "not proven safe"; treat as **not permission to delete**.
+ *   - `safe` if there are NO incoming edges at all (and coverage is complete,
+ *     and the vault was built by this version or newer).
+ *   - `review` if the graph would otherwise be `safe` but the evidence is not
+ *     provably complete — either coverage is incomplete, or the vault was BUILT
+ *     by an older sf-intelligence than the one running (`builderVersionCaveat`:
+ *     the roll-up / condition / traversal edge families added in 0.3.0 are
+ *     absent from an older vault, so their absence proves nothing). Both mean
+ *     "not proven safe"; treat as **not permission to delete**.
  *   - `blocking` if ANY reason carries `blocking`.
  *   - `risky` if no `blocking` but at least one non-unknown `risky`.
  *   - `unknown` if every reason is in the `unknown` category.
+ *
+ * **Example provenance**: an example row carries, when its edge stamped one,
+ * the qualifier that makes the citation specific rather than a family list —
+ * `traversalPath` (the `Parent__r.Field__c` a formula reference was resolved
+ * from), `rollupRole` (`summarizedField` | `summaryForeignKey` |
+ * `summaryFilterItem`), and `firerId` (the Flow / ValidationRule /
+ * WorkflowRule / ApprovalProcess / AssignmentRule / AutoResponseRule /
+ * EscalationRule whose criteria a condition belongs to — the example `id`
+ * itself is a synthetic `ConditionalContext:` node). Each is OMITTED when the
+ * edge did not carry it: the tool never fills in a plausible default, because
+ * a guessed qualifier is a fabricated citation.
  *
  * **Honesty axis** (per the v2.0b spec): when an incoming edge carries
  * `properties.confirmedByApi === true` (stamped by `sfi refresh
@@ -106,7 +122,7 @@ import type {
   Node,
   TrustSummary,
 } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { compareVersions, err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import {
   detectPiiClassification,
@@ -251,6 +267,45 @@ export interface SafeToDeleteFieldExample {
    * verdict.
    */
   readonly apiConfirmed?: true;
+  /**
+   * The relationship path a `formula` citation was resolved from
+   * (`Programme__r.Status__c`), copied verbatim from the
+   * relationship-resolver edge's `properties.traversalPath`.
+   *
+   * The `formula` note has always PROMISED this; without it the reader saw
+   * only the referring formula field's id and could not tell a direct
+   * tokenized reference from a resolved cross-object traversal — nor which
+   * of the formula's several traversals was the one that hit this field.
+   * A note that promises evidence the payload never carries is a fabricated
+   * citation by omission, which is the failure this tool exists to avoid.
+   * Absent on directly-tokenized formula references (there is no path).
+   */
+  readonly traversalPath?: string;
+  /**
+   * WHICH of the three declared roll-up roles couples this field to the
+   * roll-up summary named by `id` — `summarizedField` (the roll-up
+   * aggregates it), `summaryForeignKey` (the roll-up is anchored on it), or
+   * `summaryFilterItem` (the roll-up's filter tests it). Copied from the
+   * rollup-summary edge's `properties.rollupRole`.
+   *
+   * Without it the note could only LIST the possibilities, so every roll-up
+   * citation described three couplings of which at most one was real —
+   * on the reference vault a third of roll-up edges are `summaryFilterItem`,
+   * which the note did not even mention.
+   */
+  readonly rollupRole?: string;
+  /**
+   * The component whose criteria the condition belongs to — the Flow,
+   * ValidationRule, WorkflowRule, ApprovalProcess, AssignmentRule,
+   * AutoResponseRule or EscalationRule — copied from the condition-extractor
+   * edge's `properties.firerId`.
+   *
+   * `id` is the SYNTHETIC `ConditionalContext:…` node, which is not a thing
+   * the admin can open or fix. Naming the firer makes the citation the actual
+   * rule to go change, and stops an approval-process blocker from being
+   * described as a Flow.
+   */
+  readonly firerId?: ComponentId;
 }
 
 /**
@@ -281,6 +336,20 @@ export interface SafeToDeleteFieldOutput {
   readonly verdict: Verdict;
   readonly reasoning: readonly SafeToDeleteFieldReason[];
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * UPGRADE PATH: present when the vault was BUILT by an older sf-intelligence
+   * than the one now running — i.e. the vault predates extractors this build
+   * has. Unlike `coverageCaveat` (which reports what the refresh did not
+   * RETRIEVE), this reports what the refresh could not EXTRACT from what it
+   * did retrieve: the roll-up coupling, condition-firer and resolved
+   * formula-traversal edges added in 0.3.0 are simply absent from an older
+   * vault, so a field whose only dependency is one of those reads as `safe`
+   * with nothing to warn the reader. Verdict-affecting in one direction only:
+   * an otherwise-`safe` verdict is routed to `review` (not proven safe), the
+   * same treatment incomplete coverage gets. Also mirrored into
+   * `trust.limitations` so the proposal artifact discloses it.
+   */
+  readonly builderVersionCaveat?: string;
   /**
    * GROUP-A PII-safety: a non-verdict-lowering compliance escalation present
    * only when the heuristic recognizer classifies the field `pii` / `sensitive`.
@@ -414,7 +483,7 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     apex: 'Apex classes and triggers reference this field. Parsed-confidence matches (the default-on Apex AST pass — dot-access plus inline static SOQL SELECT/WHERE/ORDER BY/GROUP BY fields and constant-string Database.query literals) are real references; heuristic-confidence matches (apex-scanner regex fallback) may include false positives — spot-check those before deleting. String-BUILT dynamic SOQL remains invisible either way.',
     flow: 'Flow definitions read or write this field. The Flow XML names the field literally; deleting the field will break the Flow at runtime.',
     condition:
-      'A condition EVALUATES this field — a Flow entry criterion, a Flow decision, a workflow-rule criterion, or a validation-rule condition. Salesforce refuses to delete a field a live condition tests, so this is a hard blocker even when the field appears on no layout and in no formula. The condition is listed but NOT evaluated: sfi does not know whether any record satisfies it.',
+      'A condition EVALUATES this field. Seven firer families mint these: Flow entry criteria, Flow decisions, validation-rule conditions, workflow-rule criteria, and approval-process, assignment-rule, auto-response-rule and escalation-rule criteria. Each example carries the `firerId` of the component whose criteria it is, so the citation names the actual rule to go change rather than the family list (the example `id` itself is a synthetic ConditionalContext node). Salesforce refuses to delete a field a live condition tests, so this is a hard blocker even when the field appears on no layout and in no formula. The condition is listed but NOT evaluated: sfi does not know whether any record satisfies it.',
     workflow:
       'A WorkflowRule field-update action writes this field. The action will fail at runtime if the field is removed.',
     validation:
@@ -422,9 +491,9 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     layout:
       'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field) or referenced by a QuickAction (whose create/edit form is affected). Review the UI impact before deleting.',
     formula:
-      'Another formula field references this field — either directly (tokenized from the formula body) or through a cross-object relationship traversal (`Parent__r.Field__c`) resolved against the org\u2019s lookup fields. Each reasoning entry carries the referring field id, and a traversal-derived one also carries the `traversalPath` it was resolved from. The referencing formula will fail to compile if this field is removed.',
+      'Another formula field references this field — either directly (tokenized from the formula body) or through a cross-object relationship traversal (`Parent__r.Field__c`) resolved against the org\u2019s lookup fields. Each EXAMPLE carries the referring field id, and a traversal-derived one also carries the `traversalPath` it was resolved from. The referencing formula will fail to compile if this field is removed.',
     rollup:
-      'A roll-up summary field on the PARENT object aggregates this field (as its summarizedField) or is anchored on it (as its summaryForeignKey master-detail field). Salesforce REFUSES the delete outright while the roll-up exists — delete or repoint the roll-up first. The coupling is declared in the parent object’s metadata, not this field’s, so a search restricted to this object cannot find it.',
+      'A roll-up summary field on the PARENT object depends on this field in one of three declared roles: `summarizedField` (the roll-up aggregates this field), `summaryForeignKey` (the roll-up is anchored on this master-detail field), or `summaryFilterItem` (the roll-up’s filter tests this field). Each example carries its own `rollupRole`, so the citation names the coupling that actually exists rather than listing the possibilities. Salesforce REFUSES the delete outright while the roll-up exists — delete or repoint the roll-up first. The coupling is declared in the parent object’s metadata, not this field’s, so a search restricted to this object cannot find it.',
     integration:
       'An integration surface (external data source, external service) references this field. Removing it may break the outbound or inbound contract.',
     permission:
@@ -441,6 +510,25 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
       'An incoming dependency edge was found whose source/type combination is not in the v2.0b classification table. Review the impact via sfi.get_impact before deleting.',
   },
 );
+
+/**
+ * Render ONE example as the citation string the checklist table and the
+ * proposal's evidence comment both show. Shared so the two human-facing
+ * surfaces cannot drift into citing different evidence for the same edge —
+ * the drift that let a note promise a `traversalPath` no renderer emitted.
+ *
+ * Qualifiers are appended ONLY when the edge actually carried them, in a
+ * fixed order so fixtures stay deterministic. A bare id (no qualifier) renders
+ * byte-identically to before.
+ */
+const formatExampleCitation = (e: SafeToDeleteFieldExample): string => {
+  const qualifiers: string[] = [];
+  if (e.rollupRole !== undefined) qualifiers.push(`as ${e.rollupRole}`);
+  if (e.traversalPath !== undefined) qualifiers.push(`via ${e.traversalPath}`);
+  if (e.firerId !== undefined) qualifiers.push(`fired by ${e.firerId}`);
+  if (e.apiConfirmed === true) qualifiers.push('API-confirmed');
+  return qualifiers.length === 0 ? e.id : `${e.id} (${qualifiers.join(', ')})`;
+};
 
 /**
  * Comparator for the deterministic example sort. `id` ASC matches the
@@ -558,6 +646,58 @@ const applyCoverageToVerdict = (
 ): Verdict => applyCoverageToVerdictShared(verdict, caveat, 'safe', 'review');
 
 /**
+ * The release that introduced the dependency edges this tool now cites but a
+ * vault built before it does not hold: roll-up coupling edges
+ * (`source: rollup-summary`), condition field edges (`ConditionalContext ->
+ * CustomField readsFrom`), and import-time resolved formula `__r` traversals
+ * plus FlexiPage related-list aliases (`source: relationship-resolver`).
+ * Named in the caveat so the reader knows WHAT re-refreshing buys them.
+ */
+const EDGE_FAMILIES_ADDED_IN = '0.3.0';
+
+/**
+ * UPGRADE PATH: build the stale-builder caveat for a vault that a previous,
+ * older sf-intelligence built.
+ *
+ * The failure this closes: someone upgrades to a build whose whole point is to
+ * stop false-`safe` verdicts, does NOT re-refresh, and gets exactly the
+ * false-`safe` the release fixes — with no caveat at all, because the
+ * coverage caveat only sees which metadata families were RETRIEVED, and those
+ * were. The missing evidence is the extraction, not the retrieve, so nothing
+ * downstream could tell.
+ *
+ * Reads the running version from `SFI_PLUGIN_VERSION` (set by `sfi mcp` at
+ * startup) exactly as `health_check`'s vault-version nudge does — purely
+ * local, no network. An absent env var or an unparseable version on either
+ * side yields no caveat: `compareVersions` returns false on malformed input,
+ * and a verdict must never be downgraded on a guess.
+ *
+ * RESIDUAL GAP (shared with `health_check`): a host that starts the server
+ * some way other than `sfi mcp` leaves `SFI_PLUGIN_VERSION` unset, so the
+ * drift is undetectable and no caveat fires. Fail-open is the only honest
+ * choice here — the alternative is downgrading every verdict on every host
+ * that does not set the var — but it means absence of this caveat is NOT
+ * proof the vault is current. `sfi.health_check` is the direct check.
+ */
+const buildBuilderVersionCaveat = (ctx: Context): string | undefined => {
+  const runningVersion = process.env['SFI_PLUGIN_VERSION'];
+  const builtByVersion = ctx.manifest.version;
+  if (runningVersion === undefined || runningVersion === '') return undefined;
+  if (typeof builtByVersion !== 'string' || builtByVersion === '') {
+    return undefined;
+  }
+  if (!compareVersions(builtByVersion, runningVersion)) return undefined;
+  return (
+    `This vault was built by sf-intelligence ${builtByVersion}; you are running ${runningVersion}. ` +
+    `Roll-up coupling, condition (Flow / validation-rule / workflow-rule / approval-process / ` +
+    `assignment-rule / auto-response-rule / escalation-rule criteria) and resolved formula-traversal ` +
+    `dependency edges were added in ${EDGE_FAMILIES_ADDED_IN} and are ABSENT until you re-run ` +
+    `\`sfi refresh\` — a field whose only dependency is one of those cannot be seen here. A verdict ` +
+    `of "safe" is therefore reported as "review" (NOT proven safe) on this vault.`
+  );
+};
+
+/**
  * GROUP-A PII-safety: build a non-verdict-lowering PII compliance escalation
  * from the heuristic recognizer. Returns undefined when the field is not
  * recognised as PII / sensitive (NOT a clearance — just no recognised signal).
@@ -619,6 +759,12 @@ export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
       '',
     );
   }
+  // UPGRADE PATH: surfaced ABOVE the verdict for the same reason the coverage
+  // caveat is — the checklist renders no `trust` block, so without this a
+  // stale-vault `review` would print with no stated cause.
+  if (out.builderVersionCaveat !== undefined) {
+    lines.push(`> ⚠️ **Stale vault:** ${out.builderVersionCaveat}`, '');
+  }
   lines.push(`**Verdict: ${out.verdict.toUpperCase()}**`, '');
   const ordered = [...out.reasoning].sort(
     (a, b) => VERDICT_ORDER[a.verdict] - VERDICT_ORDER[b.verdict],
@@ -639,11 +785,7 @@ export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
           r.category,
           r.verdict,
           r.count,
-          r.examples
-            .map((e) =>
-              e.apiConfirmed === true ? `${e.id} (API-confirmed)` : e.id,
-            )
-            .join(', ') || '—',
+          r.examples.map(formatExampleCitation).join('; ') || '—',
         ]),
       ),
     );
@@ -681,9 +823,7 @@ export const buildSafeToDeleteFieldProposal = (
   }
   reasons.push(
     ...out.reasoning.map((r) => {
-      const examples = r.examples
-        .map((e) => (e.apiConfirmed === true ? `${e.id} (API-confirmed)` : e.id))
-        .join(', ');
+      const examples = r.examples.map(formatExampleCitation).join('; ');
       const apiTag = r.apiConfirmed === true ? ', API-confirmed' : '';
       return `${r.category} (${r.verdict}, ${r.count}${apiTag})${examples ? `: ${examples}` : ''} — ${r.note}`;
     }),
@@ -927,11 +1067,26 @@ const coreSafeToDeleteFieldHandler = async (
     }
     const { category, verdict } = classifyEdge(edge, fromNode);
     const apiConfirmed = edge.properties['confirmedByApi'] === true;
+    // Per-example provenance qualifiers. Each is stamped by exactly one
+    // extractor and OMITTED when that extractor did not mint the edge, so the
+    // citation can never claim a coupling the edge does not carry — an
+    // unstamped edge stays a bare id rather than defaulting to a plausible
+    // role. Empty strings are dropped for the same reason.
+    const edgeString = (key: string): string | undefined => {
+      const raw = edge.properties[key];
+      return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+    };
+    const traversalPath = edgeString('traversalPath');
+    const rollupRole = edgeString('rollupRole');
+    const firerId = edgeString('firerId');
     const example: SafeToDeleteFieldExample = {
       id: fromNode.id,
       type: fromNode.type,
       apiName: fromNode.apiName,
       ...(apiConfirmed ? { apiConfirmed: true as const } : {}),
+      ...(traversalPath !== undefined ? { traversalPath } : {}),
+      ...(rollupRole !== undefined ? { rollupRole } : {}),
+      ...(firerId !== undefined ? { firerId } : {}),
     };
     const existing = buckets.get(category);
     if (existing === undefined) {
@@ -991,7 +1146,20 @@ const coreSafeToDeleteFieldHandler = async (
   const coverageCaveat = buildCoverageCaveat(ctx);
   // GROUP-A PII-safety: a non-verdict-lowering compliance escalation.
   const piiCompliance = buildPiiCompliance(nodeResult.value);
-  const staticVerdict = applyCoverageToVerdict(aggregateVerdict(reasoning), coverageCaveat);
+  // UPGRADE PATH: a vault older than the running build is missing whole edge
+  // FAMILIES this tool cites, which the coverage caveat cannot see (the
+  // families were retrieved; the extractor that reads them did not exist).
+  // Applied at the same point, and with the same safe->review demotion, as the
+  // coverage caveat: both mean "not proven safe", not "a dependency exists".
+  const builderVersionCaveat = buildBuilderVersionCaveat(ctx);
+  const coverageVerdict = applyCoverageToVerdict(
+    aggregateVerdict(reasoning),
+    coverageCaveat,
+  );
+  const staticVerdict: Verdict =
+    builderVersionCaveat !== undefined && coverageVerdict === 'safe'
+      ? 'review'
+      : coverageVerdict;
 
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
 
@@ -1006,6 +1174,10 @@ const coreSafeToDeleteFieldHandler = async (
   };
   const baseLimitations: string[] = [
     'Dependency evidence comes from the last offline vault refresh. String-built dynamic SOQL, reflective Apex, and runtime metadata access remain invisible to static analysis; inline static SOQL and constant-string Database.query field references ARE resolved (parsed-confidence Apex AST edges).',
+    // Unconditional when it fires — a `blocking` verdict on a stale vault is
+    // still a verdict computed from incomplete edge families, so the reader is
+    // told even though the verdict did not move.
+    ...(builderVersionCaveat !== undefined ? [builderVersionCaveat] : []),
     REPORT_DASHBOARD_USAGE_CAVEAT,
     ...(flsGrantCount > 0
       ? [
@@ -1062,6 +1234,7 @@ const coreSafeToDeleteFieldHandler = async (
       ...(dataShape !== undefined ? { dataShape } : {}),
       reasoning,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(builderVersionCaveat !== undefined ? { builderVersionCaveat } : {}),
       ...(piiCompliance !== undefined ? { piiCompliance } : {}),
       ...(flsGrantCount > 0 ? { flsGrantCount } : {}),
       ...(livePopulation !== undefined ? { livePopulation } : {}),

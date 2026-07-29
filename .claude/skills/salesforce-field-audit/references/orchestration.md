@@ -6,6 +6,8 @@ This is the machinery. `workflow.md` says *what* each phase does and how to part
 
 The method was derived from an audit of one custom object: 46 custom fields, ~750,000 records, a complete metadata retrieval (4,333 reports, 304 flows, 634 classes, 308 layouts, 99 dashboards, 148 report types), plus an offline metadata knowledge base.
 
+Those figures are the real engagement's, and so is every count and ratio quoted in these reference files — they are what makes the phase sizing and the refutation rate meaningful. Every **name** (object, field, report, file, profile) is an invented placeholder. See the note at the top of [traps.md](traps.md).
+
 | Phase | Agents | Shape |
 |---|---|---|
 | Scout | 0 (inline) | Orchestrator does this directly — must not be parallelised |
@@ -197,7 +199,7 @@ ToolSearch("select:mcp__sf-intelligence__sfi_field_360,mcp__sf-intelligence__sfi
 |---|---|---|
 | Roll-up source coupling not modelled | The hardest blocker on the object returned `reasoning: []` — a field that was a roll-up's `summarizedField`, which the platform refuses to delete | **Closed.** The roll-up triple (`summarizedField`, `summaryForeignKey`, and every `summaryFilterItems` field) is emitted as `references` edges and classified `blocking` under category `rollup` |
 | Formula tokenizer does not resolve `__r` → `__c` | A field read only via relationship traversal showed **zero** referrers | **Closed.** Traversals resolve at import against a relationship map built from every vaulted lookup, single- and multi-hop. Unresolvable hops still mint nothing — see below |
-| Flow **entry criteria** modelled as a different edge type than field reads | Two fields returned "layout only" that the platform refuses to delete | **Closed.** Conditions emit `readsFrom` edges to every field they test, classified `blocking` under category `condition`. Covers Flow entry criteria and decisions, workflow-rule criteria, validation-rule conditions, and the rule-entry firers |
+| Flow **entry criteria** modelled as a different edge type than field reads | Two fields returned "layout only" that the platform refuses to delete | **Closed.** Conditions emit `readsFrom` edges to every field they test, classified `blocking` under category `condition`. Covers Flow entry criteria and decisions, workflow-rule criteria, validation-rule conditions, and the rule-entry firers. Both Flow condition dialects parse — `<leftValueReference>` under `<decisions><rules><conditions>` and `<field>` under `<start><filters>`; reading only the first silently dropped every structured record-trigger entry criterion |
 | Flexipage `relatedListFieldAliases` not modelled | A field appearing twice on a record page returned zero referencers | **Closed.** Dynamic related-list columns are bare field names on the *related* object; they now resolve through the same relationship map |
 | Report pull capped at top-N by usage | 8 reports returned against 17 actual; **zero** returned for a field with 12 | **Open, and disclosed.** `SFI_REPORTS_CAP` defaults to **500**, usage-ranked. See the mitigation below — this one you must handle in the runbook |
 | Dashboard / Report / WorkflowRule declared partial or absent | Local grep is the only route. For classic workflow, grep is strictly better | Open. Read `sfi_coverage_report` and believe it |

@@ -33,13 +33,14 @@ A zero from a tool, a grep, or a query is a statement about the instrument until
 - [ ] Zero → the method is blind. Fix it before recording anything. Do not record the target's zero at all.
 - [ ] Note the control in the caveat block: which field, which surface, what it returned.
 
-War stories from the reference run, shape preserved and detail stripped — all are instrument failures, not org facts. The first three have since been fixed in the tool concerned; they are kept because the *shape* recurs everywhere, and because the fix does not reach a vault built before it:
+War stories from the reference run, shape preserved and detail stripped — all are instrument failures, not org facts. The first four have since been fixed in the tool concerned; they are kept because the *shape* recurs everywhere, and because the fix does not reach a vault built before it:
 
 | Instrument zero | Reality | Cause | Status |
 |---|---|---|---|
 | Two independent KB tools reported "zero dependencies" | The field was the `summarizedField` of a live roll-up on the **parent** object; the platform refuses the delete outright | Roll-up source coupling not modelled; roll-up metadata lives on the parent, so a per-field search never reaches it | Closed |
-| KB reported "review — layout only" on two fields | Both were **flow entry criteria**; the deploy fails | Entry criteria modelled as a fires-when edge, not a reads-from edge | Closed |
+| KB reported "review — layout only" on two fields | Both were **flow entry criteria**; the deploy fails | Entry criteria modelled as a fires-when edge, not a reads-from edge — and the record-trigger `<start><filters>` dialect (`<field>`) was not parsed at all, so those criteria named no field to begin with | Closed |
 | KB reported a field with **no referrers at all** | Two formulas read it — but only via the `__r` relationship spelling | Formula tokenizer did not resolve `__r` → `__c` | Closed |
+| KB reported **zero referencers** for a field rendered twice on a record page | Both were dynamic related-list columns on a flexipage | `relatedListFieldAliases` are *bare* field names on the **related** object; nothing parsed them | Closed |
 | KB report counts of 8 and 0 | Files held 17 and 12 | Report pull capped at the top-N most-used reports | **Open** — raise the cap in Phase 0 |
 | Local grep returned 0 saved reports | Ten reports referenced the field | The org used a **fourth** reference grammar the brief never documented (see the reference-grammar section) | Yours to derive, every time |
 

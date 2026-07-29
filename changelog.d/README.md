@@ -35,6 +35,26 @@ pnpm changelog:assemble   # inserts/replaces [Unreleased] block in CHANGELOG.md
 pnpm changelog:check      # CI guard — exits 1 if a code diff lacks a fragment
 ```
 
+## Lifecycle — delete the fragment once it ships
+
+A fragment lives in this directory only while its change is **unreleased**.
+
+1. Land the change with its fragment.
+2. `pnpm changelog:assemble` folds every fragment into `## [Unreleased]`.
+3. At release, the `[Unreleased]` block is retitled `## [x.y.z] — DATE`.
+4. **Delete the fragments that block went into, in the release commit.**
+
+Step 4 is not tidiness. The assembler *replaces* the `[Unreleased]` block from
+whatever fragments it finds and has no memory of which ones already shipped, so
+a fragment left behind after its release re-emits the whole shipped body into
+`[Unreleased]` on the next assemble — the release notes appear twice in
+`CHANGELOG.md`, once under their version and once as pending work.
+
+An empty `changelog.d/` (this README only) is the correct steady state
+immediately after a release; the assembler exits 0 and leaves `CHANGELOG.md`
+untouched when it finds no fragments.
+
 ## Example
 
-See [`r7-f1.md`](./r7-f1.md) for a complete example.
+The [fragment format](#fragment-format) block above is the complete template;
+the directory is intentionally empty of fragments between releases.

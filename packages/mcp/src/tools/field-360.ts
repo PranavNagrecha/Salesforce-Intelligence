@@ -27,10 +27,10 @@
  *   | formulas      | incoming `references` from formula-tokenizer, plus resolved cross-object `__r` traversals (relationship-resolver, CustomField referrer) | parsed |
  *   | rollups       | incoming `references` from a PARENT roll-up (rollup-summary)   | declared       |
  *   | writers       | incoming `writesTo` from Apex/Flow/Workflow/PB         | mixed            |
- *   | readers       | incoming `readsFrom` from Apex/Flow/LWC/Aura/VF/SOQL   | mixed (heuristic)|
+ *   | readers       | incoming `readsFrom` from Apex/Flow/LWC/Aura/VF/SOQL — CODE reads only; a ConditionalContext `readsFrom` is NOT one (see `automations`) | mixed (heuristic)|
  *   | ui            | incoming `usedInLayout` + frontend `readsFrom` to UI   | declared/heuristic |
  *   | integrations  | incoming `references`/`exposes` from integration tier  | declared/heuristic |
- *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule    | declared/parsed/heuristic |
+ *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule + ConditionalContext `readsFrom` (the fields a Flow/workflow/validation condition TESTS, source condition-extractor) | declared/parsed/heuristic |
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
  *   | dependencies  | OUTGOING `references` for formula fields only          | parsed           |
  *   | listViews     | incoming `references` from ListView (referenceKind: fieldRef column / filterRef predicate / columnAndFilter) | heuristic |
@@ -709,6 +709,32 @@ const classifyIncomingEdge = (
 
   // `readers`: incoming readsFrom from Apex/Flow/LWC/Aura/VF.
   if (edge.edgeType === 'readsFrom') {
+    // A ConditionalContext `readsFrom` names a field a Flow entry criterion,
+    // workflow-rule criterion or validation-rule condition TESTS — a declarative
+    // BLOCKER, not a code read. Without this branch it fell through to `readers`,
+    // a section this module's own doc describes as heuristic Apex/LWC reads, while
+    // `safe_to_delete_field` classifies the SAME edge as {condition, blocking}.
+    // Two tools describing one dependency incompatibly is worse than either being
+    // wrong alone (the reason `rollups` got its own branch this release), and the
+    // mis-file is not rare: 1,488 such edges over 584 distinct fields on the
+    // reference vault. `automations` — not a new section — because the composition
+    // table ALREADY routes this node type there via its `firesWhen` edge, and
+    // splitting one component type across two sections would trade one
+    // inconsistency for another. Scoped to ConditionalContext, not to the whole
+    // AUTOMATION_NODE_TYPES set: it is the only member whose `readsFrom`
+    // classification safe_to_delete_field pins (the rest still fall through there
+    // as {unknown, risky}, so routing them here would MINT a disagreement.)
+    //
+    // This also moves the edge onto the automation risk axis in `computeRisk`,
+    // which is the point: `automations >= 5` escalates to `high` outright, whereas
+    // `readers` only reaches `medium` above 3. Five blocking conditions on one
+    // field IS a high-blast-radius delete. As a side effect a field read ONLY by
+    // conditions no longer emits the "readers cover static SOQL only" boundary —
+    // correct, because a declarative condition is not SOQL at all.
+    if (source.type === 'ConditionalContext') {
+      buckets.automations.push(row);
+      return;
+    }
     // Frontend code types fold into `ui` if the edge marks a UI role.
     if (UI_NODE_TYPES.has(source.type) && CODE_NODE_TYPES.has(source.type)) {
       // LWC/Aura/VF are BOTH code and UI; route to UI bucket here.

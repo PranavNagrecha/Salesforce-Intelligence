@@ -175,11 +175,11 @@ Whatever the delta is, that is the tool's blind-spot profile for this org, and i
 - Roll-up source coupling not modelled at all (the roll-up lives on the **parent** object).
 - Formula tokenizer does not resolve `__r` → `__c`.
 - Flexipage `relatedListFieldAliases` not modelled.
-- Flow **entry criteria** modelled as "fires when" rather than "reads", so a delete-safety verdict comes back "layout only" for a field the platform will refuse to delete.
+- Flow **entry criteria** modelled as "fires when" rather than "reads", so a delete-safety verdict comes back "layout only" for a field the platform will refuse to delete. Test the record-trigger `<start><filters>` shape specifically: it spells a condition triplet `<field>`/`<operator>`/`<value>` while `<decisions>` spells it `<leftValueReference>`/`<operator>`/`<rightValue>`, and a parser that knows only the decision dialect drops every entry criterion in the org while still reporting decisions correctly.
 - Report pull capped (top-N by usage), silently under-counting.
 - Whole families declared uncovered (dashboards, reports, workflow rules) — read the coverage caveat and believe it.
 
-The first four are closed in current `sf-intelligence`; test for them anyway, because you may be pointed at an older vault and because the same four recur in every tool of this kind. The fifth needs an explicit action before Phase 1, not a caveat afterwards:
+The first four are closed in current `sf-intelligence`; test for them anyway, because you may be pointed at an older vault and because the same four recur in every tool of this kind. The report cap is **not** closed — it needs an explicit action before Phase 1, not a caveat afterwards:
 
 ```bash
 # The default pull is the top 500 reports+dashboards BY USAGE. On an org with

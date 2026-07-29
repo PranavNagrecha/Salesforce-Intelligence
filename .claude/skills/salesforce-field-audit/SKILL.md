@@ -40,9 +40,16 @@ Someone who reads only this section is already better at the task.
 
 **A deleted filter fails open.** Deleting a field used as a report or list-view *filter* does not empty the report. It silently widens it. Nothing looks broken, so nobody reports it. This is strictly more dangerous than deleting a display column, and it is why check 4 records role rather than count.
 
-**Tool zeros are not evidence of zero.** Metadata knowledge bases miss things structurally: formula tokenizers that don't resolve relationship traversals, flow *entry criteria* modelled as a different edge type than field reads, report pulls capped at top-N, related-list field aliases not modelled at all. Every one of those was live in `sf-intelligence` itself until recently, and each produced a confident `safe` on a field the platform refuses to delete.
+**Tool zeros are not evidence of zero.** Metadata knowledge bases miss things structurally. Four such gaps were live in `sf-intelligence` itself until 0.3.0, and each produced a confident `safe` on a field the platform refuses to delete:
 
-The dangerous property they shared: all four sat inside metadata families the tool had *fully retrieved*, so no coverage caveat fired and the verdict presented as clean. A tool can only warn you about gaps it knows it has. Before recording "no references", run your method against a field you *know* is referenced and confirm it can see anything at all — the positive control is what tells you which kind of zero you are holding.
+- **Roll-up coupling** held as a node property, never an edge — so an incoming-edge walk from the child field never reached the roll-up declared on the *parent*.
+- **Condition field references** held as a property, never edges — so a field used only in a flow entry criterion, a workflow-rule criterion or a validation-rule condition read "layout only". Flow ships two XML spellings of the same condition triplet (`<leftValueReference>` in `<decisions>`, `<field>` in `<start><filters>`); reading only the first made *every* record-trigger entry criterion parse to nothing.
+- **Formula `__r` traversals** skipped, so a field read only via `Parent__r.Field__c` showed zero referrers.
+- **FlexiPage `relatedListFieldAliases`** unparsed, so a field rendered twice on a record page had zero referencers.
+
+All four are closed in 0.3.0. A fifth gap of the same family — the **usage-ranked report cap** — is still open and is yours to handle in the runbook (see below); it is disclosed rather than fixed.
+
+The dangerous property the four closed ones shared: all sat inside metadata families the tool had *fully retrieved*, so no coverage caveat fired and the verdict presented as clean. A tool can only warn you about gaps it knows it has. Before recording "no references", run your method against a field you *know* is referenced and confirm it can see anything at all — the positive control is what tells you which kind of zero you are holding. The closures narrow the gap; they do not remove the need for the control.
 
 **Undocumented reference grammars.** Field references appear in several distinct textual forms per metadata type, and orgs use forms the documentation doesn't mention. Derive the grammar empirically (see below) instead of assuming it. A search using an incomplete grammar returns zero and certifies a live field as safe.
 

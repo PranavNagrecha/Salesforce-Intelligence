@@ -1,6 +1,6 @@
 ## Traps and failure modes
 
-*Every object, field, report, file and profile name below is an invented placeholder. The numbers keep the shape of a real audit — one custom object, 46 custom fields, ~750k records, 36 of 46 original dispositions surviving review — because the magnitudes are the lesson.*
+*Names and figures are covered by two different rules, so read them differently. Every object, field, report, file and profile **name** below is an invented placeholder — nothing here identifies a real org. Every **number** is real, carried unchanged from the engagement this method came from (one custom object, 46 custom fields, ~750k records, 36 of 46 original dispositions surviving review, and so on down each trap). The magnitudes are the lesson; rounding them would cost the point. Where a worked example is marked "illustrative", that marks the invented naming, not invented arithmetic.*
 
 ### Trap index
 
@@ -304,7 +304,7 @@ Other same-shape misses from the same run:
 | Roll-up source coupling not modeled | Returned an empty reasoning array on the **hardest blocker in the object** | Closed |
 | Formula tokenizer does not resolve `__r` → `__c` | A field's only two referrers were invisible; it looked orphaned | Closed |
 | Flexipage `relatedListFieldAliases` not modeled | Zero referrers for a field appearing twice on a live record page | Closed |
-| Flow **entry criteria** modeled as a "fires when" edge, not a "reads from" edge | Verdict "review / layout only" on two fields the platform refuses to delete | Closed |
+| Flow **entry criteria** modeled as a "fires when" edge, not a "reads from" edge | Verdict "review / layout only" on two fields the platform refuses to delete | Closed — conditions now emit `readsFrom` edges, in both Flow condition dialects (`<leftValueReference>` and `<start><filters>`'s `<field>`) |
 | Report pull capped at top-N by usage | Undercounts of 8-vs-17 and 2-vs-8, and **zero** returned for a field with 12 reports | **Open** — raise the cap before the audit |
 | Declared coverage caveat listing whole metadata families as missing | Dashboards never checked at all by anyone | Open |
 
