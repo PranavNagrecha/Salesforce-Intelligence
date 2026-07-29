@@ -396,7 +396,16 @@ describe('failure injection + convergence (real pipeline, fixture vault)', () =>
       const finalManifest = await loadManifest(vaultRootB);
       if (!finalManifest.ok) throw new Error('final manifest unreadable');
       expect(finalManifest.value.staged).toBeUndefined();
-      expect((finalManifest.value.coverage ?? []).every((c) => c.pending !== true)).toBe(true);
+      // Every STAGED pending row is cleared. Report/Dashboard are excluded:
+      // their graph nodes are folded onto fields and deleted before anything
+      // counts them, so their coverage can only ever be proven by a report
+      // pull (`--no-pull` here ran none) — they stay honestly pending rather
+      // than reading as a confirmed zero (FOLD_ERASED_COVERAGE_TYPES).
+      const stillPending = (finalManifest.value.coverage ?? [])
+        .filter((c) => c.pending === true)
+        .map((c) => c.type)
+        .sort();
+      expect(stillPending).toEqual(['Dashboard', 'Report']);
       const monoManifest = await loadManifest(join(cwdA, 'org-kb'));
       if (!monoManifest.ok) throw new Error('monolithic manifest unreadable');
       expect(finalManifest.value.components).toEqual(monoManifest.value.components);

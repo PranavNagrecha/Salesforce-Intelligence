@@ -2,8 +2,9 @@
 
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
+import type { ComponentType } from '@sf-intelligence/contracts';
 import { closeGraph, openGraph } from '@sf-intelligence/graph';
 import { vaultPaths } from '@sf-intelligence/vault';
 
@@ -112,6 +113,189 @@ describe('reconcileSourceDeletions', () => {
       await expect(
         writeFile(join(sourceDir, 'main/default/flows/Old_Flow.flow-meta.xml'), '', 'utf8'),
       ).resolves.toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+/** Write a file at `root/<relPath>` (POSIX-style rel path), creating parents. */
+const writeAt = async (root: string, relPath: string, body: string): Promise<void> => {
+  const abs = join(root, ...relPath.split('/'));
+  await mkdir(dirname(abs), { recursive: true });
+  await writeFile(abs, body, 'utf8');
+};
+
+/**
+ * The incident's exact shape: an older vault laid out FLAT, and an authoritative
+ * retrieve of the same components laid out under an SFDX package dir.
+ */
+const INCIDENT_FILES: readonly (readonly [string, string])[] = [
+  ['objects/Account/Account.object-meta.xml', '<CustomObject/>'],
+  ['objects/Account/fields/Industry__c.field-meta.xml', '<CustomField/>'],
+  ['objects/Contact/Contact.object-meta.xml', '<CustomObject/>'],
+  ['objects/Contact/fields/Tier__c.field-meta.xml', '<CustomField/>'],
+  ['classes/Keep.cls', 'public class Keep {}'],
+  ['classes/Keep.cls-meta.xml', '<ApexClass/>'],
+  ['reports/Sales/Pipeline.report-meta.xml', '<Report/>'],
+  ['dashboards/Exec/Overview.dashboard-meta.xml', '<Dashboard/>'],
+];
+
+const INCIDENT_TYPES = new Set([
+  'CustomObject',
+  'CustomField',
+  'ApexClass',
+  'Report',
+  'Dashboard',
+] as const);
+
+describe('reconcileSourceDeletions layout normalisation', () => {
+  it('deletes nothing when the vault is flat and the retrieve is package-dir wrapped', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-reconcile-layout-'));
+    try {
+      const sourceDir = join(cwd, 'source');
+      const authoritativeDir = join(cwd, 'authoritative');
+      for (const [rel, body] of INCIDENT_FILES) {
+        await writeAt(sourceDir, rel, body);
+        await writeAt(authoritativeDir, `force-app/main/default/${rel}`, body);
+      }
+
+      const result = await reconcileSourceDeletions(
+        sourceDir,
+        authoritativeDir,
+        INCIDENT_TYPES as ReadonlySet<ComponentType>,
+      );
+
+      // Before the layout fix this reported deletedCount 8 of 8 — the incident.
+      expect(result.deletedPaths).toEqual([]);
+      expect(result.deletedCount).toBe(0);
+      expect(result.refused).toBe(false);
+      for (const [rel] of INCIDENT_FILES) {
+        await expect(access(join(sourceDir, ...rel.split('/')))).resolves.toBeUndefined();
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('is unchanged when both trees already sit under main/default', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-reconcile-samelayout-'));
+    try {
+      const sourceDir = join(cwd, 'source');
+      const authoritativeDir = join(cwd, 'authoritative');
+      for (const [rel, body] of INCIDENT_FILES) {
+        await writeAt(sourceDir, `main/default/${rel}`, body);
+        await writeAt(authoritativeDir, `main/default/${rel}`, body);
+      }
+
+      const result = await reconcileSourceDeletions(
+        sourceDir,
+        authoritativeDir,
+        INCIDENT_TYPES as ReadonlySet<ComponentType>,
+      );
+
+      expect(result.deletedCount).toBe(0);
+      expect(result.refused).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('still deletes a component that really is absent from the retrieve', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-reconcile-genuine-'));
+    try {
+      const sourceDir = join(cwd, 'source');
+      const authoritativeDir = join(cwd, 'authoritative');
+      for (const [rel, body] of INCIDENT_FILES) {
+        await writeAt(sourceDir, rel, body);
+        await writeAt(authoritativeDir, `force-app/main/default/${rel}`, body);
+      }
+      // Present in the vault, absent from the org: one field and one report.
+      await writeAt(sourceDir, 'objects/Account/fields/Dead__c.field-meta.xml', '<CustomField/>');
+      await writeAt(sourceDir, 'reports/Sales/Retired.report-meta.xml', '<Report/>');
+
+      const result = await reconcileSourceDeletions(
+        sourceDir,
+        authoritativeDir,
+        INCIDENT_TYPES as ReadonlySet<ComponentType>,
+      );
+
+      expect(result.deletedCount).toBe(2);
+      expect(result.refused).toBe(false);
+      await expect(
+        access(join(sourceDir, 'objects/Account/fields/Dead__c.field-meta.xml')),
+      ).rejects.toThrow();
+      await expect(
+        access(join(sourceDir, 'reports/Sales/Retired.report-meta.xml')),
+      ).rejects.toThrow();
+      await expect(
+        access(join(sourceDir, 'objects/Account/fields/Industry__c.field-meta.xml')),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('reconcileSourceDeletions safety rail', () => {
+  it('refuses a wholesale mismatch and leaves every file on disk', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-reconcile-rail-'));
+    try {
+      const sourceDir = join(cwd, 'source');
+      const authoritativeDir = join(cwd, 'authoritative');
+      // Vault holds Foo_0..Foo_29; the retrieve holds a disjoint set of the same
+      // type, so a layout-blind comparison would delete all 30.
+      for (let i = 0; i < 30; i += 1) {
+        await writeAt(sourceDir, `classes/Foo_${i}.cls`, `public class Foo_${i} {}`);
+      }
+      for (let i = 0; i < 30; i += 1) {
+        await writeAt(authoritativeDir, `classes/Bar_${i}.cls`, `public class Bar_${i} {}`);
+      }
+
+      const result = await reconcileSourceDeletions(
+        sourceDir,
+        authoritativeDir,
+        new Set(['ApexClass']),
+      );
+
+      expect(result.refused).toBe(true);
+      expect(result.deletedCount).toBe(0);
+      expect(result.consideredCount).toBe(30);
+      expect(result.refusalReason).toMatch(/layout mismatch/i);
+      for (let i = 0; i < 30; i += 1) {
+        await expect(access(join(sourceDir, 'classes', `Foo_${i}.cls`))).resolves.toBeUndefined();
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not trip on a normal small deletion inside a large tree', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-reconcile-rail-ok-'));
+    try {
+      const sourceDir = join(cwd, 'source');
+      const authoritativeDir = join(cwd, 'authoritative');
+      for (let i = 0; i < 30; i += 1) {
+        await writeAt(sourceDir, `classes/Foo_${i}.cls`, `public class Foo_${i} {}`);
+        if (i >= 2) {
+          await writeAt(
+            authoritativeDir,
+            `force-app/main/default/classes/Foo_${i}.cls`,
+            `public class Foo_${i} {}`,
+          );
+        }
+      }
+
+      const result = await reconcileSourceDeletions(
+        sourceDir,
+        authoritativeDir,
+        new Set(['ApexClass']),
+      );
+
+      expect(result.deletedCount).toBe(2);
+      expect(result.refused).toBe(false);
+      await expect(access(join(sourceDir, 'classes/Foo_0.cls'))).rejects.toThrow();
+      await expect(access(join(sourceDir, 'classes/Foo_5.cls'))).resolves.toBeUndefined();
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

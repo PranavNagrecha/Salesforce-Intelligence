@@ -240,12 +240,52 @@ export interface RefreshResult {
     readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
   };
   /**
+   * Present when the best-effort report/dashboard pull ERRORED or lost
+   * batches. See {@link ReportPullDisclosure} — the failure used to reach
+   * stderr only, so the vault came out byte-identical to one whose pull
+   * succeeded and legitimately found nothing.
+   */
+  readonly reportPull?: ReportPullDisclosure;
+  /**
    * Populated only when `--with-audit-trail` (#39) runs. Summary of the
    * SetupAuditTrail JSONL append (`meta/setup-audit-trail.jsonl`). Absent on
    * the default offline refresh.
    */
   readonly auditTrail?: SetupAuditTrailPersistSummary;
 }
+
+/**
+ * A best-effort report/dashboard pull that did NOT deliver what it attempted.
+ *
+ * Regression context (2026-07-28): `runSfRetrieveSmartReports` returned `err`
+ * against an org holding 4,296 reports, the caller logged it to stderr and
+ * carried on, and NOTHING about the resulting vault recorded that the pull had
+ * failed — no manifest key, no coverage signal, identical bytes to a
+ * successful empty pull. Non-fatal is defensible; silent is not. This record
+ * rides on the manifest (`reportPull`) and the CLI summary (stdout) so the
+ * vault itself carries the fact that its report coverage is UNPROVEN.
+ */
+export interface ReportPullDisclosure {
+  /** `smart` = the default usage-ranked pull; `full` = `--with-reports`. */
+  readonly mode: 'smart' | 'full';
+  /**
+   * `failed` — the pull returned an error and nothing landed.
+   * `partial` — the pull was chunked and some batches errored, so an unknown
+   * subset of the requested members is missing (see `REPORT_RETRIEVE_BATCH_SIZE`).
+   */
+  readonly outcome: 'failed' | 'partial';
+  /** The underlying `sf` / SOQL failure, verbatim. */
+  readonly error: string;
+  readonly attemptedAt: string;
+}
+
+/**
+ * Prefix on every report-pull disclosure — the stable string a reader (the CLI
+ * summary, `health_check`, `coverage_report`) can match on, mirroring
+ * `PROFILE_GRANT_DISCLOSURE`.
+ */
+export const REPORT_PULL_DISCLOSURE =
+  'report/dashboard pull did not complete — Report/Dashboard coverage is UNPROVEN, not empty';
 
 /**
  * A refresh-completion pulse (P9-refresh-pulse): the graph growth/shrink plus
@@ -834,6 +874,8 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
   // refresh whose describe succeeded.
   let confirmedTypes: ReadonlySet<ComponentType> | null = null;
   let sourceReconcileDeleted = 0;
+  /** Non-empty when the reconcile guard kept stale files rather than deleting. */
+  let reconcileRefusals: readonly string[] = [];
   let retrieveFailures: readonly RetrieveTypeFailure[] = [];
 
   if (!opts.noPull) {
@@ -862,6 +904,22 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
     if (sourceReconcileDeleted > 0) {
       progress(
         `Reconciled source: removed ${sourceReconcileDeleted} stale file(s) deleted in the org.`,
+      );
+    }
+    // A refused reconcile is NOT "nothing to delete". It means the deletion set
+    // looked like a layout mismatch, so stale files were deliberately kept. Say
+    // so on STDOUT — the guard was added after a silent wholesale deletion that
+    // reported success, and a silent refusal would recreate that blind spot from
+    // the other direction.
+    reconcileRefusals = pulled.value.reconcileRefusals ?? [];
+    if (reconcileRefusals.length > 0) {
+      process.stdout.write(
+        `\nSOURCE RECONCILE REFUSED (${reconcileRefusals.length}) — stale files were KEPT, not deleted.\n` +
+          `This is the layout-mismatch guard: a deletion set that large is far more likely to mean the\n` +
+          `retrieve layout changed than that the org really dropped that much metadata. The vault is\n` +
+          `SAFE but may now carry entries for components that no longer exist.\n` +
+          reconcileRefusals.map((r) => `  - ${r}\n`).join('') +
+          `If the org genuinely purged this much, re-run after confirming; otherwise this is a bug.\n\n`,
       );
     }
     if (retrieveFailures.length > 0) {
@@ -932,16 +990,38 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
         readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
       }
     | undefined;
+  // Set when the pull errored or lost batches. Recorded on the manifest and
+  // reflected in the Report/Dashboard coverage rows — never swallowed.
+  let reportPull: ReportPullDisclosure | undefined;
   if (opts.withReports === true && !opts.noPull) {
     progress('Pulling ALL folder-based Reports / Dashboards (--with-reports)...');
     const pulledReports = await runSfRetrieveFolderedReports(targetOrg, paths.source);
     if (!pulledReports.ok) {
-      progress(`--with-reports pull skipped (non-fatal): ${pulledReports.error}`);
-    } else if (pulledReports.value.reports + pulledReports.value.dashboards > 0) {
-      progress(
-        `Requested ${pulledReports.value.reports} report(s) + ${pulledReports.value.dashboards} dashboard(s); re-extracting...`,
-      );
-      walked = await walkAndExtract(paths.source, requestedTypes, prevCache);
+      reportPull = {
+        mode: 'full',
+        outcome: 'failed',
+        error: pulledReports.error,
+        attemptedAt: new Date().toISOString(),
+      };
+      progress(`--with-reports pull FAILED (non-fatal, recorded): ${pulledReports.error}`);
+    } else {
+      if (pulledReports.value.batchErrors.length > 0) {
+        reportPull = {
+          mode: 'full',
+          outcome: 'partial',
+          error: pulledReports.value.batchErrors.join('; '),
+          attemptedAt: new Date().toISOString(),
+        };
+        progress(
+          `--with-reports pull lost ${pulledReports.value.batchErrors.length} batch(es) (non-fatal, recorded): ${pulledReports.value.batchErrors[0] ?? ''}`,
+        );
+      }
+      if (pulledReports.value.reports + pulledReports.value.dashboards > 0) {
+        progress(
+          `Requested ${pulledReports.value.reports} report(s) + ${pulledReports.value.dashboards} dashboard(s); re-extracting...`,
+        );
+        walked = await walkAndExtract(paths.source, requestedTypes, prevCache);
+      }
     }
   } else if (opts.withReports === undefined && !opts.noPull && requestedTypes === null) {
     const cap = reportsCap();
@@ -949,8 +1029,25 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
       progress(`Pulling top ${cap} Reports / Dashboards by usage (default; --no-reports to skip)...`);
       const smart = await runSfRetrieveSmartReports(targetOrg, paths.source, cap);
       if (!smart.ok) {
-        progress(`smart report pull skipped (non-fatal): ${smart.error}`);
+        reportPull = {
+          mode: 'smart',
+          outcome: 'failed',
+          error: smart.error,
+          attemptedAt: new Date().toISOString(),
+        };
+        progress(`smart report pull FAILED (non-fatal, recorded): ${smart.error}`);
       } else {
+        if (smart.value.batchErrors.length > 0) {
+          reportPull = {
+            mode: 'smart',
+            outcome: 'partial',
+            error: smart.value.batchErrors.join('; '),
+            attemptedAt: new Date().toISOString(),
+          };
+          progress(
+            `smart report pull lost ${smart.value.batchErrors.length} batch(es) (non-fatal, recorded): ${smart.value.batchErrors[0] ?? ''}`,
+          );
+        }
         // P14-USAGE-reports-retrieve-fidelity: `retrieved` records what
         // actually LANDED on disk, not what the manifest requested — the
         // Metadata API can silently drop members (a live run delivered 78 of
@@ -1062,6 +1159,7 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
     ...(reconciledTypes !== null ? { reconciledTypes } : {}),
     ...(apexAstStats !== undefined ? { apexAstStats } : {}),
     ...(reportsCapStats !== undefined ? { reportsCapStats } : {}),
+    ...(reportPull !== undefined ? { reportPull } : {}),
   };
 
   if (!renameOver) {
@@ -1153,6 +1251,8 @@ interface RunWithOpenGraphArgs {
     readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
     readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
   };
+  /** Set when the report/dashboard pull errored or lost batches this run. */
+  readonly reportPull?: ReportPullDisclosure;
   readonly store: GraphStore;
   readonly paths: ReturnType<typeof vaultPaths>;
   readonly started: number;
@@ -1330,7 +1430,31 @@ export const decorateProfileGrantCoverage = (
   });
 };
 
-const buildCoverageEntries = (
+/**
+ * Types whose graph nodes `foldReportDashboardUsageIntoFields` DELETES before
+ * anything counts them: report/dashboard field usage is folded onto the
+ * referenced `CustomField` and no per-report node is persisted. So
+ * `counts.components['Report']` is STRUCTURALLY 0 however many report files
+ * landed — a coverage row built from the node count can never be non-zero.
+ *
+ * Regression context (2026-07-28): a vault stamped `retrieveConfirmed: true,
+ * retrieved: 0` on `Report` for an org holding 4,296 of them — a CONFIRMED
+ * ZERO that no successful pull could ever have contradicted, carried
+ * identically by a 2026-06-30 manifest from a run that DID land 3,076 report
+ * files. For these types the `retrieved` count must come from the RETRIEVE
+ * (`reportsCap.landed` — files that actually hit disk), and with no such
+ * evidence the row stays `pending`: unknown, never confirmed-empty.
+ *
+ * Kept in step with `FOLD_TO_FIELD_USAGE` in `refresh-pipeline.ts` (the set the
+ * fold actually drops); duplicated rather than imported because the pipeline
+ * does not export it.
+ */
+export const FOLD_ERASED_COVERAGE_TYPES: ReadonlySet<string> = new Set<ComponentType>([
+  'Report',
+  'Dashboard',
+]);
+
+export const buildCoverageEntries = (
   counts: RefreshResult['counts'],
   skippedDirectories: Readonly<Record<string, number>>,
   requestedTypes: ReadonlySet<ComponentType> | null,
@@ -1354,8 +1478,14 @@ const buildCoverageEntries = (
     // marks those `pending`, and the classifiers require `pending !== true`
     // before honoring `retrieveConfirmed`, so a capped/dropped pull never reads
     // as confirmed-empty even though it may carry retrieveConfirmed.
+    // See FOLD_ERASED_COVERAGE_TYPES: the node count for these types is 0 by
+    // construction, so this row carries NO evidence of its own. It must never
+    // read as a confirmed-empty org — it starts `pending` (unknown), and only
+    // `decorateReportsCapCoverage` (which knows what actually landed on disk)
+    // can supply a real `retrieved` and clear the flag.
+    const foldErased = FOLD_ERASED_COVERAGE_TYPES.has(type);
     const retrieveConfirmed =
-      confirmedTypes !== null && confirmedTypes.has(type) && !errored;
+      confirmedTypes !== null && confirmedTypes.has(type) && !errored && !foldErased;
     entries.push({
       type,
       requested,
@@ -1363,6 +1493,7 @@ const buildCoverageEntries = (
       errored,
       ...(errored ? { errorReason: failureInfo.sampleReason } : {}),
       neverModeled: false,
+      ...(foldErased ? { pending: true } : {}),
       ...(retrieveConfirmed ? { retrieveConfirmed: true } : {}),
     });
   }
@@ -1410,7 +1541,7 @@ const decoratePendingCoverage = (
  * on disk, so the same `total > retrieved` test now also keeps rows pending
  * when the retrieve silently dropped requested members.
  */
-const decorateReportsCapCoverage = (
+export const decorateReportsCapCoverage = (
   entries: readonly CoverageEntry[],
   stats:
     | {
@@ -1420,19 +1551,64 @@ const decorateReportsCapCoverage = (
     | undefined,
 ): readonly CoverageEntry[] => {
   if (stats === undefined) return entries;
-  const capped = new Map<string, { total: number; retrieved: number }>();
-  if (stats.reports.total > stats.reports.retrieved) capped.set('Report', stats.reports);
-  if (stats.dashboards.total > stats.dashboards.retrieved) capped.set('Dashboard', stats.dashboards);
-  if (capped.size === 0) return entries;
-  const out = entries.map((entry) =>
-    capped.has(entry.type) ? { ...entry, requested: true, pending: true } : entry,
-  );
-  for (const [type, c] of capped) {
-    if (!out.some((entry) => entry.type === type)) {
-      out.push({ type, requested: true, retrieved: c.retrieved, errored: false, neverModeled: false, pending: true });
+  const landed = new Map<string, { readonly total: number; readonly retrieved: number }>([
+    ['Report', stats.reports],
+    ['Dashboard', stats.dashboards],
+  ]);
+  // A fold-erased row is PROVEN only when the pull delivered every one of a
+  // NON-ZERO org total. `total === 0` is not proof: `runSfRetrieveSmartReports`
+  // computes it with a `count()` that swallows a failed SOQL and returns 0, so
+  // "0 reports" there is indistinguishable from "the count query died" — the
+  // same unfalsifiable zero this whole fix exists to remove. An unproven zero
+  // stays `pending`; over-hedging is the safe direction.
+  const proven = (c: { readonly total: number; readonly retrieved: number }): boolean =>
+    c.retrieved > 0 && c.total <= c.retrieved;
+  const decorated = (
+    c: { readonly total: number; readonly retrieved: number },
+  ): Pick<CoverageEntry, 'requested' | 'retrieved' | 'pending' | 'retrieveConfirmed'> => ({
+    requested: true,
+    // This is the ONLY place a fold-erased row gets a truthful `retrieved`:
+    // the files the retrieve actually landed on disk. Overwriting the
+    // structurally-zero node count is the point (FOLD_ERASED_COVERAGE_TYPES).
+    retrieved: c.retrieved,
+    ...(proven(c) ? { retrieveConfirmed: true } : { pending: true }),
+  });
+  const out = entries.map((entry) => {
+    const c = landed.get(entry.type);
+    if (c === undefined || entry.neverModeled) return entry;
+    const { pending: _wasPending, retrieveConfirmed: _wasConfirmed, ...rest } = entry;
+    return { ...rest, ...decorated(c) };
+  });
+  for (const [type, c] of landed) {
+    if (!out.some((entry) => entry.type === type && !entry.neverModeled)) {
+      out.push({ type, errored: false, neverModeled: false, ...decorated(c) });
     }
   }
   return [...out].sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+};
+
+/**
+ * A failed/partial report pull must not leave a row that reads like a
+ * successful empty one. Marks the Report/Dashboard rows `errored` with the
+ * disclosure as `errorReason`, forces `pending`, and strips
+ * `retrieveConfirmed` — the same honest-disclosure machinery
+ * `decorateProfileGrantCoverage` uses, so `summarizeCoverage` /
+ * `coverage_report` route these into `partial` and `health_check` degrades.
+ * No new reader logic. No-op when the pull was clean.
+ */
+export const decorateReportPullCoverage = (
+  entries: readonly CoverageEntry[],
+  disclosure: ReportPullDisclosure | undefined,
+): readonly CoverageEntry[] => {
+  if (disclosure === undefined) return entries;
+  const reason =
+    `${REPORT_PULL_DISCLOSURE} (${disclosure.mode} pull, ${disclosure.outcome} at ` +
+    `${disclosure.attemptedAt}): ${disclosure.error}`;
+  return entries.map((entry) => {
+    if (!FOLD_ERASED_COVERAGE_TYPES.has(entry.type) || entry.neverModeled) return entry;
+    const { retrieveConfirmed: _dropped, ...rest } = entry;
+    return { ...rest, requested: true, pending: true, errored: true, errorReason: reason };
+  });
 };
 
 /**
@@ -1733,7 +1909,15 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
       return failed(started, `countGraphTotals: ${counted.error}`, walked.failures, EMPTY_COUNTS, walked.skippedDirectories);
     }
     return {
-      status: walked.failures.length === 0 && args.retrieveFailures.length === 0 ? 'success' : 'partial',
+      // A report-pull failure forces `partial` for the same reason a
+      // profile-grant disclosure does: the vault built, but a coverage axis it
+      // attempted is unproven. `success` here is what let the failure vanish.
+      status:
+        walked.failures.length === 0 &&
+        args.retrieveFailures.length === 0 &&
+        args.reportPull === undefined
+          ? 'success'
+          : 'partial',
       counts: counted.value,
       skippedDirectories: walked.skippedDirectories,
       errors: walked.failures,
@@ -1741,6 +1925,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
       ...(args.retrieveFailures.length > 0 ? { retrieveFailures: args.retrieveFailures } : {}),
       ...(toolingApiSummary !== undefined ? { toolingApi: toolingApiSummary } : {}),
       ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+      ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     };
   }
 
@@ -1828,20 +2013,29 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     );
   }
 
+  // Decoration order matters. `decorateReportsCapCoverage` CLEARS `pending` on
+  // a fully-landed report pull, so it must run BEFORE the staged-marker pass —
+  // otherwise a mid-tier build's "still queued" pending flag would be erased by
+  // a report pull that only covered its own slice. The report-pull failure pass
+  // runs last of the report-related ones so an errored pull always wins over a
+  // "fully landed" reading.
   const coverage = decorateProfileGrantCoverage(
-    decorateReportsCapCoverage(
-      decoratePendingCoverage(
-        buildCoverageEntries(
-          counts,
-          walked.skippedDirectories,
-          requestedTypes,
-          paths.source,
-          walked.failures,
-          confirmedTypes,
+    decoratePendingCoverage(
+      decorateReportPullCoverage(
+        decorateReportsCapCoverage(
+          buildCoverageEntries(
+            counts,
+            walked.skippedDirectories,
+            requestedTypes,
+            paths.source,
+            walked.failures,
+            confirmedTypes,
+          ),
+          args.reportsCapStats,
         ),
-        opts.stagedMarker,
+        args.reportPull,
       ),
-      args.reportsCapStats,
+      opts.stagedMarker,
     ),
     profileGrantDisclosure,
   );
@@ -1862,7 +2056,12 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     }
   }
 
-  const manifest: ExtendedVaultManifest = {
+  // `reportPull` rides on the manifest the same way `skippedDirectories` does
+  // — the vault-package interface does not declare it, and older readers ignore
+  // unknown JSON keys. Recording it is the whole point: without it a vault
+  // whose report pull ERRORED is byte-identical to one whose pull succeeded and
+  // found nothing, which is exactly how "confirmed 0 reports" shipped.
+  const manifest: ExtendedVaultManifest & { readonly reportPull?: ReportPullDisclosure } = {
     version: PACKAGE_VERSION,
     refreshedAt: new Date().toISOString(),
     sourceOrg: targetOrg,
@@ -1875,6 +2074,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     ...(opts.stagedMarker !== undefined ? { staged: opts.stagedMarker } : {}),
     ...(args.apexAstStats !== undefined ? { apexAst: args.apexAstStats } : {}),
     ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+    ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     ...(profileGrantDisclosure !== null && profileGrantStats !== null
       ? {
           profileGrantIntegrity: {
@@ -2091,10 +2291,15 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   return {
     // A profile-grant integrity disclosure forces `partial`: the vault built,
     // but its permission graph is untrustworthy — never report clean success.
+    // A report-pull failure forces it for the same reason: the pull was
+    // attempted and did not deliver, so Report/Dashboard coverage is unproven.
+    // (`sfi refresh` exits non-zero on non-success, which is the point — the
+    // shipped defect was a clean exit over a pull that had errored.)
     status:
       walked.failures.length === 0 &&
       args.retrieveFailures.length === 0 &&
-      profileGrantDisclosure === null
+      profileGrantDisclosure === null &&
+      args.reportPull === undefined
         ? 'success'
         : 'partial',
     counts,
@@ -2107,6 +2312,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     ...(pulse !== undefined ? { pulse } : {}),
     ...(toolingApiSummary !== undefined ? { toolingApi: toolingApiSummary } : {}),
     ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+    ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     ...(auditTrailSummary !== undefined ? { auditTrail: auditTrailSummary } : {}),
   };
 };
@@ -3235,6 +3441,14 @@ interface SfRetrieveResult {
   /** Types that successfully landed on disk this run (the manifest minus failures). */
   readonly manifestTypes: readonly ComponentType[];
   readonly deletedCount: number;
+  /**
+   * Reasons the source reconcile REFUSED to delete, one per affected batch.
+   * Non-empty means stale files were deliberately LEFT in the vault because the
+   * deletion set looked like a layout mismatch rather than an org purge. The
+   * operator must be told: a silent refusal is the same failure shape as the
+   * silent deletion this guard was added to prevent.
+   */
+  readonly reconcileRefusals?: readonly string[];
   /** Types that failed mid-retrieve and were skipped so the rest could land. */
   readonly failures: readonly RetrieveTypeFailure[];
   /**
@@ -3418,13 +3632,31 @@ export const summarizeRetrieveFailures = (
 /** Retrieve a batch of types: returns the reconcile `deletedCount`, or the sf error. */
 export type RetrieveBatchFn = (
   types: readonly ComponentType[],
-) => Promise<Result<{ readonly deletedCount: number }, string>>;
+) => Promise<
+  Result<
+    {
+      readonly deletedCount: number;
+      /** Set when the reconcile REFUSED to delete — a suspected layout mismatch. */
+      readonly reconcileRefused?: boolean;
+      readonly reconcileRefusalReason?: string;
+    },
+    string
+  >
+>;
 
 export interface RetrieveFallbackOutcome {
   /** Types that landed this run. */
   readonly succeeded: readonly ComponentType[];
   readonly deletedCount: number;
   readonly failures: readonly RetrieveTypeFailure[];
+  /**
+   * Reasons the source reconcile refused to delete, one per affected batch.
+   * Empty on a normal run. Non-empty means stale files were LEFT in the vault
+   * on purpose — surfaced rather than swallowed, because a silent refusal is
+   * the same shape of defect as the silent wholesale deletion the guard exists
+   * to prevent.
+   */
+  readonly reconcileRefusals: readonly string[];
 }
 
 /**
@@ -3457,6 +3689,8 @@ export const retrieveWithFallback = async (
   const succeeded: ComponentType[] = [];
   const failures: RetrieveTypeFailure[] = [];
   let deletedCount = 0;
+  // Accumulated across batches: a refusal in ANY batch must reach the operator.
+  const reconcileRefusals: string[] = [];
 
   const attempt = async (types: readonly ComponentType[]): Promise<void> => {
     if (types.length === 0) return;
@@ -3464,6 +3698,12 @@ export const retrieveWithFallback = async (
     if (result.ok) {
       succeeded.push(...types);
       deletedCount += result.value.deletedCount;
+      if (result.value.reconcileRefused === true) {
+        reconcileRefusals.push(
+          result.value.reconcileRefusalReason ??
+            `reconcile refused for ${types.join(', ')} (suspected layout mismatch)`,
+        );
+      }
       return;
     }
     // Terminal when the batch cannot be divided further — a single type OR a
@@ -3483,7 +3723,7 @@ export const retrieveWithFallback = async (
   };
 
   await attempt(allTypes);
-  return { succeeded, deletedCount, failures };
+  return { succeeded, deletedCount, failures, reconcileRefusals };
 };
 
 /**
@@ -3528,7 +3768,22 @@ const retrieveTypeBatch = async (
     );
     const reconcile = await reconcileSourceDeletions(sourceDir, pkgDir, new Set(types));
     await syncAuthoritativeRetrieveIntoSource(sourceDir, pkgDir);
-    return ok({ deletedCount: reconcile.deletedCount });
+    // A REFUSED reconcile must never look like "nothing to delete". The guard
+    // exists because a wholesale deletion is the fingerprint of a layout
+    // mismatch, not an org purge — and the incident that motivated it was
+    // silent (974 nodes, status: success, exit 0). Swallowing the refusal here
+    // would rebuild exactly that silence one layer up.
+    return ok({
+      deletedCount: reconcile.deletedCount,
+      ...(reconcile.refused === true
+        ? {
+            reconcileRefused: true,
+            ...(reconcile.refusalReason !== undefined
+              ? { reconcileRefusalReason: reconcile.refusalReason }
+              : {}),
+          }
+        : {}),
+    });
   } catch (cause) {
     return err(cause instanceof Error ? cause.message : String(cause));
   } finally {
@@ -3816,6 +4071,103 @@ export const buildFolderedReportManifest = (
   return { membersByType, reports, dashboards, manifestXml };
 };
 
+/**
+ * Members per `sf project retrieve start --manifest` call.
+ *
+ * Regression context (2026-07-28): the smart pull put ~3,373 members / ~243 KB
+ * of package.xml into ONE retrieve, that single call errored, and the whole
+ * pull was lost — 4,296 reports became 0 retrieved, in 3m20s against a 600s
+ * budget (so not a timeout). Batching is the same `sf project retrieve start
+ * --manifest` call with a smaller manifest — no new protocol, nothing that
+ * needs a live org to validate — and its real value is that a batch which dies
+ * costs its own members instead of the entire pull.
+ */
+export const REPORT_RETRIEVE_BATCH_SIZE = 500;
+
+/** One package.xml-sized slice of a foldered Report/Dashboard retrieve. */
+export interface FolderedReportBatch {
+  readonly type: 'Report' | 'Dashboard';
+  readonly members: readonly string[];
+  readonly manifestXml: string;
+}
+
+/** package.xml requesting exactly `members` of one foldered type. */
+const folderedReportPackageXml = (
+  type: 'Report' | 'Dashboard',
+  members: readonly string[],
+): string =>
+  `<?xml version="1.0" encoding="UTF-8"?>\n<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n  <types>\n${members
+    .map((m) => `    <members>${m}</members>`)
+    .join('\n')}\n    <name>${type}</name>\n  </types>\n  <version>${SF_API_VERSION}</version>\n</Package>\n`;
+
+/**
+ * Split the resolved `Folder/Name` members into per-type retrieve batches of at
+ * most `size` members each (see {@link REPORT_RETRIEVE_BATCH_SIZE}). Pure —
+ * the caller runs them and decides what a failed batch means. Types are kept
+ * in separate batches so a type the org rejects cannot poison the other's.
+ */
+export const chunkFolderedReportManifest = (
+  membersByType: Readonly<Record<'Report' | 'Dashboard', readonly string[]>>,
+  size: number = REPORT_RETRIEVE_BATCH_SIZE,
+): readonly FolderedReportBatch[] => {
+  const batchSize = Number.isFinite(size) && size > 0 ? Math.floor(size) : REPORT_RETRIEVE_BATCH_SIZE;
+  const out: FolderedReportBatch[] = [];
+  for (const type of ['Report', 'Dashboard'] as const) {
+    const members = membersByType[type];
+    for (let i = 0; i < members.length; i += batchSize) {
+      const slice = members.slice(i, i + batchSize);
+      out.push({ type, members: slice, manifestXml: folderedReportPackageXml(type, slice) });
+    }
+  }
+  return out;
+};
+
+/** Outcome of a batched foldered retrieve: how many batches ran, which died. */
+interface BatchedRetrieveOutcome {
+  readonly batches: number;
+  /** One human-readable line per batch that errored (empty on a clean pull). */
+  readonly batchErrors: readonly string[];
+}
+
+/**
+ * Run the foldered Report/Dashboard retrieve as a sequence of small additive
+ * batches, collecting per-batch failures instead of losing the pull to the
+ * first error. Still additive: every batch goes through
+ * `retrieveAdditiveManifest`, so nothing reconciles or deletes.
+ */
+const retrieveFolderedReportBatches = async (
+  args: {
+    readonly targetOrg: string;
+    readonly outputDir: string;
+    readonly tempLabel: string;
+    readonly membersByType: Readonly<Record<'Report' | 'Dashboard', readonly string[]>>;
+  },
+  runSfFn: typeof runSf = runSf,
+): Promise<BatchedRetrieveOutcome> => {
+  const batches = chunkFolderedReportManifest(args.membersByType);
+  const batchErrors: string[] = [];
+  for (const [index, batch] of batches.entries()) {
+    try {
+      await retrieveAdditiveManifest(
+        {
+          targetOrg: args.targetOrg,
+          outputDir: args.outputDir,
+          manifestXml: batch.manifestXml,
+          tempLabel: `${args.tempLabel}-${index + 1}`,
+        },
+        runSfFn,
+      );
+    } catch (cause) {
+      batchErrors.push(
+        `${batch.type} batch ${index + 1}/${batches.length} (${batch.members.length} member(s)) failed: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    }
+  }
+  return { batches: batches.length, batchErrors };
+};
+
 /** Per-type requested-vs-landed fidelity of a foldered report/dashboard retrieve. */
 export interface ReportRetrieveFidelity {
   readonly requested: number;
@@ -3896,7 +4248,17 @@ export const runSfRetrieveFolderedReports = async (
   targetOrg: string,
   sourceDir: string,
   runSfFn: typeof runSf = runSf,
-): Promise<Result<{ readonly reports: number; readonly dashboards: number }, string>> => {
+): Promise<
+  Result<
+    {
+      readonly reports: number;
+      readonly dashboards: number;
+      /** One line per retrieve batch that errored; empty on a clean pull. */
+      readonly batchErrors: readonly string[];
+    },
+    string
+  >
+> => {
   const soql = async (
     query: string,
   ): Promise<readonly Record<string, unknown>[]> => {
@@ -3934,26 +4296,28 @@ export const runSfRetrieveFolderedReports = async (
     }
   };
 
-  const { reports, dashboards, manifestXml } = buildFolderedReportManifest({
+  const { reports, dashboards, manifestXml, membersByType } = buildFolderedReportManifest({
     folders,
     reports: await queryRecords('Report'),
     dashboards: await queryRecords('Dashboard'),
   });
-  if (manifestXml === null) return ok({ reports: 0, dashboards: 0 });
+  if (manifestXml === null) return ok({ reports: 0, dashboards: 0, batchErrors: [] });
 
   // Additive retrieve from an isolated project root (P1) — see
   // `retrieveAdditiveManifest`. Must NOT reconcile/sync (narrow member subset).
-  try {
-    await retrieveAdditiveManifest(
-      { targetOrg, outputDir: sourceDir, manifestXml, tempLabel: 'reports' },
-      runSfFn,
-    );
-    return ok({ reports, dashboards });
-  } catch (cause) {
+  // Batched (REPORT_RETRIEVE_BATCH_SIZE) so one bad batch does not cost the
+  // whole uncapped pull; only a total loss is an `err`, and surviving batch
+  // failures ride back so the caller can record them.
+  const outcome = await retrieveFolderedReportBatches(
+    { targetOrg, outputDir: sourceDir, tempLabel: 'reports', membersByType },
+    runSfFn,
+  );
+  if (outcome.batches > 0 && outcome.batchErrors.length === outcome.batches) {
     return err(
-      `report/dashboard retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `report/dashboard retrieve failed: all ${outcome.batches} batch(es) errored — ${outcome.batchErrors[0] ?? ''}`,
     );
   }
+  return ok({ reports, dashboards, batchErrors: outcome.batchErrors });
 };
 
 /** Cap for the default usage-ranked report/dashboard pull (P13-REPORTS-default). */
@@ -3987,6 +4351,8 @@ export const runSfRetrieveSmartReports = async (
       readonly landed: { readonly reports: number; readonly dashboards: number };
       /** `Type:Folder/Name` members requested but not delivered by the retrieve. */
       readonly missing: readonly string[];
+      /** One line per retrieve batch that errored; empty on a clean pull. */
+      readonly batchErrors: readonly string[];
     },
     string
   >
@@ -4053,34 +4419,48 @@ export const runSfRetrieveSmartReports = async (
     dashboards: await ranked('Dashboard', 'LastViewedDate'),
   });
   if (manifestXml === null) {
-    return ok({ reports: 0, dashboards: 0, totals, landed: { reports: 0, dashboards: 0 }, missing: [] });
+    // NOT a successful empty pull: the org may hold thousands of reports whose
+    // folders simply did not resolve (`totals` says so). `landed: 0` against a
+    // non-zero total keeps the coverage rows `pending`, never confirmed-empty.
+    return ok({
+      reports: 0,
+      dashboards: 0,
+      totals,
+      landed: { reports: 0, dashboards: 0 },
+      missing: [],
+      batchErrors: [],
+    });
   }
 
   // Additive retrieve from an isolated project root (P1) — see
   // `retrieveAdditiveManifest`. Must NOT reconcile/sync (narrow member subset).
-  try {
-    await retrieveAdditiveManifest(
-      { targetOrg, outputDir: sourceDir, manifestXml, tempLabel: 'smart-reports' },
-      runSfFn,
-    );
-    // Requested-vs-landed: membership check against the freshly-pulled tree
-    // (raw file counts would be inflated by files from earlier pulls).
-    const fidelity = countLandedReportMembers(membersByType, await collectReportMetaFiles(sourceDir));
-    return ok({
-      reports,
-      dashboards,
-      totals,
-      landed: { reports: fidelity.Report.landed, dashboards: fidelity.Dashboard.landed },
-      missing: [
-        ...fidelity.Report.missing.map((m) => `Report:${m}`),
-        ...fidelity.Dashboard.missing.map((m) => `Dashboard:${m}`),
-      ],
-    });
-  } catch (cause) {
+  // Batched (REPORT_RETRIEVE_BATCH_SIZE): the shipped single ~3,373-member call
+  // lost every report when it errored. Only a total loss is an `err`; surviving
+  // batch failures ride back and the fidelity check below already counts what
+  // actually landed, so a partial pull degrades instead of vanishing.
+  const outcome = await retrieveFolderedReportBatches(
+    { targetOrg, outputDir: sourceDir, tempLabel: 'smart-reports', membersByType },
+    runSfFn,
+  );
+  if (outcome.batches > 0 && outcome.batchErrors.length === outcome.batches) {
     return err(
-      `smart report retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `smart report retrieve failed: all ${outcome.batches} batch(es) errored — ${outcome.batchErrors[0] ?? ''}`,
     );
   }
+  // Requested-vs-landed: membership check against the freshly-pulled tree
+  // (raw file counts would be inflated by files from earlier pulls).
+  const fidelity = countLandedReportMembers(membersByType, await collectReportMetaFiles(sourceDir));
+  return ok({
+    reports,
+    dashboards,
+    totals,
+    landed: { reports: fidelity.Report.landed, dashboards: fidelity.Dashboard.landed },
+    missing: [
+      ...fidelity.Report.missing.map((m) => `Report:${m}`),
+      ...fidelity.Dashboard.missing.map((m) => `Dashboard:${m}`),
+    ],
+    batchErrors: outcome.batchErrors,
+  });
 };
 
 /** Format one extractor failure for the CLI summary line. */
@@ -4173,6 +4553,18 @@ export const formatRefreshSummary = (result: RefreshResult): string => {
   }
   if (result.reportsCap !== undefined) {
     lines.push('', ...formatReportsCapSummary(result.reportsCap));
+  }
+  // STDOUT, not just stderr: `progress` writes to stderr and operators pipe
+  // stdout, which is how a failed report pull against a 4,296-report org left
+  // no trace anyone read. The summary is the stdout surface.
+  if (result.reportPull !== undefined) {
+    lines.push(
+      '',
+      `WARNING — ${REPORT_PULL_DISCLOSURE}.`,
+      `  ${result.reportPull.mode} pull ${result.reportPull.outcome} at ${result.reportPull.attemptedAt}: ${result.reportPull.error}`,
+      '  Report/Dashboard coverage rows are marked errored + pending, and this run is recorded on the manifest as `reportPull`.',
+      '  A "0 reports" answer from this vault means NOT CHECKED, not none. Re-run `sfi refresh` (or `--with-reports`) to prove coverage.',
+    );
   }
   const skippedWarning = formatSkippedWarning(result.skippedDirectories);
   if (skippedWarning !== null) {
@@ -4595,7 +4987,7 @@ export const registerRefreshCommand = (program: Command): void => {
     )
     .option(
       '--no-reports',
-      'Skip the report/dashboard pull entirely. DEFAULT (neither flag): pull the top SFI_REPORTS_CAP (500) reports+dashboards ranked by actual usage (LastRunDate / LastViewedDate, fallback LastModifiedDate) and fold their field references onto fields; when the org holds more than the cap, Report/Dashboard coverage reads `pending` so absence claims stay qualified.',
+      'Skip the report/dashboard pull entirely. DEFAULT (neither flag): pull the top SFI_REPORTS_CAP (500) reports+dashboards ranked by actual usage (LastRunDate / LastViewedDate, fallback LastModifiedDate) and fold their field references onto fields; when the org holds more than the cap, Report/Dashboard coverage reads `pending` so absence claims stay qualified. Report/Dashboard nodes are folded onto fields and never persisted, so their coverage row can only ever be proven by the pull itself — it reads `pending` (not checked), never a confirmed zero. A pull that errors is non-fatal but NOT silent: it is recorded on the manifest as `reportPull`, marks those rows errored, and exits non-zero.',
     )
     .option(
       '--with-reports',
