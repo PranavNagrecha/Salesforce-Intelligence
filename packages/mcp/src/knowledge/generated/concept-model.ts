@@ -168,6 +168,7 @@ export const EDGE_SEMANTICS: EdgeSemantics = Object.freeze({
     {
       source: 'formula-tokenizer',
       edgeType: 'references',
+      fromType: 'CustomField',
       category: 'formula',
       verdict: 'blocking',
     },

@@ -26,7 +26,21 @@ const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
   // made safe_to_delete_field cite a roll-up summary that does not exist for
   // every resolved formula traversal (127 fields on one real vault) — a
   // fabricated citation on an otherwise-correct verdict.
-  if (edge.edgeType === 'references' && edge.source === 'formula-tokenizer') {
+  //
+  // SECOND intentional extension (0.3.0 double-count fix): this case is now
+  // SCOPED to a CustomField referrer. While it was unscoped it also swallowed
+  // every ValidationRule `references` edge — every one of which carries
+  // `source: formula-tokenizer`, because the same tokenizer runs over
+  // `errorConditionFormula` — so the `references`/ValidationRule -> validation
+  // row below was DEAD in production and every validation rule was reported
+  // under the `formula` category, whose note reads "Another formula field
+  // references this field". False for a validation rule, and inconsistent with
+  // field_360, which classifies the identical edge by referrer type first.
+  if (
+    edge.edgeType === 'references' &&
+    edge.source === 'formula-tokenizer' &&
+    fromType === 'CustomField'
+  ) {
     return { category: 'formula', verdict: 'blocking' };
   }
   if (edge.edgeType === 'references' && edge.source === 'rollup-summary') {
@@ -149,9 +163,14 @@ interface Case {
 }
 
 const CASES: readonly Case[] = [
-  // 1. formula-tokenizer special case — beats the references/ValidationRule branch.
-  { name: 'formula special-case (over ValidationRule)', edgeType: 'references', source: 'formula-tokenizer', fromType: 'ValidationRule', expected: { category: 'formula', verdict: 'blocking' } },
-  { name: 'formula special-case (generic source node)', edgeType: 'references', source: 'formula-tokenizer', fromType: 'CustomField', expected: { category: 'formula', verdict: 'blocking' } },
+  // 1. formula-tokenizer special case — scoped to a CustomField referrer.
+  //    DELIBERATE REVERSAL (0.3.0): a ValidationRule referrer must now reach
+  //    `validation`, not `formula`. The tokenizer marker is shared (it runs over
+  //    `errorConditionFormula` too), so keying on it alone made the `validation`
+  //    category unreachable in production and labelled every validation rule
+  //    with the formula note "Another formula field references this field".
+  { name: 'formula special-case does NOT swallow a ValidationRule referrer', edgeType: 'references', source: 'formula-tokenizer', fromType: 'ValidationRule', expected: { category: 'validation', verdict: 'blocking' } },
+  { name: 'formula special-case (CustomField referrer)', edgeType: 'references', source: 'formula-tokenizer', fromType: 'CustomField', expected: { category: 'formula', verdict: 'blocking' } },
   // 2. readsFrom
   { name: 'readsFrom ApexClass', edgeType: 'readsFrom', source: 'apex-scanner', fromType: 'ApexClass', expected: { category: 'apex', verdict: 'risky' } },
   { name: 'readsFrom ApexTrigger', edgeType: 'readsFrom', source: 'apex-scanner', fromType: 'ApexTrigger', expected: { category: 'apex', verdict: 'risky' } },

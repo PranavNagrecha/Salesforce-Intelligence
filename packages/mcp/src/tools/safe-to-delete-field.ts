@@ -26,7 +26,8 @@
  *   | WorkflowRule                 | writesTo    | workflow    | blocking         |
  *   | (any other source)           | writesTo    | unknown     | blocking         |
  *   | ValidationRule               | references  | validation  | blocking         |
- *   | (formula-tokenizer source)   | references  | formula     | blocking         |
+ *   | source=formula-tokenizer     | references  | formula     | blocking         |
+ *   |   (fromType CustomField)     |             |             |                  |
  *   | source=rollup-summary        | references  | rollup      | blocking         |
  *   | source=relationship-resolver | references  | formula     | blocking         |
  *   |   (fromType CustomField)     |             |             |                  |
@@ -63,6 +64,17 @@
  * itself is a synthetic `ConditionalContext:` node). Each is OMITTED when the
  * edge did not carry it: the tool never fills in a plausible default, because
  * a guessed qualifier is a fabricated citation.
+ *
+ * **Referrer collapse** (one referrer, one row): a validation rule reaches the
+ * fields its `errorConditionFormula` names by TWO edges tokenized from that one
+ * string — a direct `references` edge and a `ConditionalContext` `readsFrom`
+ * edge. Reported as-is that is one rule counted as two blockers under two
+ * categories with two examples. The condition row folds into the `validation`
+ * row, and the folded category is disclosed on the surviving example as
+ * `alsoVia: ['condition']` (the only DERIVED example qualifier). Nothing is
+ * dropped: both edges stay in the graph, and any ADDITIVE condition — a rule
+ * testing a field its direct reference could not resolve, a Flow that WRITES
+ * and separately TESTS one field — keeps its own row and its own count.
  *
  * **Honesty axis** (per the v2.0b spec): when an incoming edge carries
  * `properties.confirmedByApi === true` (stamped by `sfi refresh
@@ -162,6 +174,7 @@ import {
   type ReportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
+import { indexRestatedConditionEdges } from './restated-condition-edges.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -306,6 +319,22 @@ export interface SafeToDeleteFieldExample {
    * described as a Flow.
    */
   readonly firerId?: ComponentId;
+  /**
+   * Categories this referrer ALSO reaches the field through, whose rows were
+   * folded into this one so the referrer is counted ONCE.
+   *
+   * DERIVED, not extractor-stamped — the only qualifier on this interface that
+   * is. A validation rule reaches a field its `errorConditionFormula` names by
+   * two edges tokenized from that one string (a direct `references` and a
+   * `ConditionalContext` `readsFrom`); they are two facts about one referrer,
+   * so counting both inflated the referrer count and cited the same rule twice
+   * under two categories. The condition row is suppressed and named here
+   * instead — collapse by disclosure, never by silent deletion. Both edges stay
+   * in the graph and every ADDITIVE condition (a rule that tests a field its
+   * formula reference could not resolve, a Flow that writes AND tests one
+   * field) keeps its own row.
+   */
+  readonly alsoVia?: readonly ReasonCategory[];
 }
 
 /**
@@ -487,7 +516,7 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     workflow:
       'A WorkflowRule field-update action writes this field. The action will fail at runtime if the field is removed.',
     validation:
-      'A Validation Rule formula references this field. The Validation Rule will fail to compile if the field is removed.',
+      'A Validation Rule formula references this field. The Validation Rule will fail to compile if the field is removed, and Salesforce refuses the delete while the rule is live. The rule’s `errorConditionFormula` is BOTH a formula reference and a condition that evaluates this field; those are two edges from one tokenized string, so the rule is counted ONCE here and the folded row is disclosed on the example as `alsoVia: ["condition"]` rather than reported as a second referrer. As with any condition, it is listed but NOT evaluated: sfi does not know whether any record satisfies it.',
     layout:
       'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field) or referenced by a QuickAction (whose create/edit form is affected). Review the UI impact before deleting.',
     formula:
@@ -526,6 +555,13 @@ const formatExampleCitation = (e: SafeToDeleteFieldExample): string => {
   if (e.rollupRole !== undefined) qualifiers.push(`as ${e.rollupRole}`);
   if (e.traversalPath !== undefined) qualifiers.push(`via ${e.traversalPath}`);
   if (e.firerId !== undefined) qualifiers.push(`fired by ${e.firerId}`);
+  // DERIVED (not extractor-stamped): the categories whose duplicate row for
+  // this same referrer was folded into this one. Rendered so the collapse is
+  // visible on the citation itself — a fold the reader cannot see is a
+  // dropped dependency as far as they can tell.
+  if (e.alsoVia !== undefined && e.alsoVia.length > 0) {
+    qualifiers.push(`also via ${[...e.alsoVia].join(', ')}`);
+  }
   if (e.apiConfirmed === true) qualifiers.push('API-confirmed');
   return qualifiers.length === 0 ? e.id : `${e.id} (${qualifiers.join(', ')})`;
 };
@@ -1038,6 +1074,12 @@ const coreSafeToDeleteFieldHandler = async (
   >();
 
   let flsGrantCount = 0;
+  // PASS 1 — resolve every referrer node BEFORE classifying anything. The
+  // referrer-collapse index below must be built over exactly the edges that
+  // will be reported: pairing a condition row against a direct row the
+  // sparse-graph guard then drops would suppress a real dependency instead of
+  // folding a duplicate presentation of one.
+  const resolvedEdges: { edge: Edge; fromNode: Node }[] = [];
   for (const edge of edgesResult.value) {
     // `parentOf` is the structural object→field ownership edge: the parent
     // object OWNS the field, it does not depend on it, so deleting the field
@@ -1065,6 +1107,29 @@ const coreSafeToDeleteFieldHandler = async (
       // other composition tool uses.
       continue;
     }
+    resolvedEdges.push({ edge, fromNode });
+  }
+
+  // One REFERRER must be counted once. A validation rule reaches a field its
+  // `errorConditionFormula` names twice — a direct `references` edge and a
+  // `ConditionalContext` `readsFrom` edge, both tokenized from that one string
+  // in one extractor pass — which reported ONE rule as TWO blockers under TWO
+  // categories with two counts and two examples (681 such pairs on the
+  // reference vault; 17 fields whose ENTIRE non-structural incoming set is one
+  // duplicated pair). Inflated referrer counts are exactly the clone-propagation
+  // double-count this product's own field-audit method warns against. The
+  // duplicate PRESENTATION folds; the graph keeps both edges, every additive
+  // condition keeps its own row, and the folded category is disclosed on the
+  // surviving citation via `alsoVia`. See `restated-condition-edges.ts` for why
+  // the pairing is exact and why a Flow that writes AND tests one field is
+  // structurally incapable of collapsing.
+  const restated = indexRestatedConditionEdges(
+    resolvedEdges.map((r) => r.edge),
+  );
+
+  // PASS 2 — classify and bucket.
+  for (const { edge, fromNode } of resolvedEdges) {
+    if (restated.isRestatingCondition(edge)) continue;
     const { category, verdict } = classifyEdge(edge, fromNode);
     const apiConfirmed = edge.properties['confirmedByApi'] === true;
     // Per-example provenance qualifiers. Each is stamped by exactly one
@@ -1079,6 +1144,14 @@ const coreSafeToDeleteFieldHandler = async (
     const traversalPath = edgeString('traversalPath');
     const rollupRole = edgeString('rollupRole');
     const firerId = edgeString('firerId');
+    // The one DERIVED qualifier: this referrer also reaches the field through a
+    // condition whose row was folded into this one. Present only on the
+    // surviving half of a real pair, so it can never claim a fold that did not
+    // happen.
+    const alsoVia: readonly ReasonCategory[] | undefined = restated
+      .isRestatedDirectReference(edge)
+      ? (['condition'] as const)
+      : undefined;
     const example: SafeToDeleteFieldExample = {
       id: fromNode.id,
       type: fromNode.type,
@@ -1087,6 +1160,7 @@ const coreSafeToDeleteFieldHandler = async (
       ...(traversalPath !== undefined ? { traversalPath } : {}),
       ...(rollupRole !== undefined ? { rollupRole } : {}),
       ...(firerId !== undefined ? { firerId } : {}),
+      ...(alsoVia !== undefined ? { alsoVia } : {}),
     };
     const existing = buckets.get(category);
     if (existing === undefined) {

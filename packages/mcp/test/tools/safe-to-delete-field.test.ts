@@ -1705,3 +1705,246 @@ describe('safeToDeleteFieldHandler — stale-builder upgrade path', () => {
     if (b.ok) expect(b.value.data.verdict).toBe('safe');
   });
 });
+
+// =============================================================================
+// GUARD (0.3.0): ONE referrer must be counted ONCE.
+//
+// FAIL-BEFORE: a ValidationRule reaches every field its `errorConditionFormula`
+// names by TWO edges tokenized from that one string in one extractor pass —
+// `ValidationRule -> CustomField` `references` (source formula-tokenizer) and
+// `ConditionalContext:ValidationRule:X.condition-0 -> CustomField` `readsFrom`
+// (source condition-extractor, firerId = the rule). The graph edge PK is
+// (from_id, to_id, edge_type, source) and the rows differ in three of those
+// four columns, so nothing dedups them — correctly, they are two FACTS. But the
+// per-edge bucket loop counted per EDGE, so ONE rule was reported as TWO
+// blockers under TWO categories with two counts and two examples. On the
+// reference vault: 681 such pairs, and 17 fields whose ENTIRE non-structural
+// incoming set is one duplicated pair (the checklist printed "condition (1)"
+// AND "formula (1)" for a field with one dependency). Inflated referrer counts
+// are precisely the clone-propagation double-count this product's own
+// field-audit method warns against.
+//
+// The three cases below pin the fix AND its two boundaries: an additive
+// condition must still surface, and a Flow that WRITES and separately TESTS one
+// field must still report two rows (that collapse would delete real signal —
+// a write and a condition-test have different remediations).
+// =============================================================================
+describe('safeToDeleteFieldHandler — validation-rule referrer collapse', () => {
+  const BOTH_FIELD = 'CustomField:Account.VrBothPaths__c';
+  const BOTH_RULE = 'ValidationRule:Account.RequiresBothPaths';
+  const BOTH_CONTEXT =
+    'ConditionalContext:ValidationRule:Account.RequiresBothPaths.condition-0';
+
+  const ADDITIVE_FIELD = 'CustomField:Account.VrConditionOnly__c';
+  const ADDITIVE_RULE = 'ValidationRule:Account.CrossObjectRule';
+  const ADDITIVE_CONTEXT =
+    'ConditionalContext:ValidationRule:Account.CrossObjectRule.condition-0';
+
+  const FLOW_BOTH_FIELD = 'CustomField:Account.FlowWritesAndTests__c';
+  const FLOW_BOTH = 'Flow:Account_Stage_Router';
+  const FLOW_BOTH_CONTEXT = 'ConditionalContext:Flow:Account_Stage_Router.condition-0';
+
+  beforeAll(async () => {
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: BOTH_FIELD,
+            apiName: 'VrBothPaths__c',
+            parentId: ACCOUNT_ID,
+          }),
+          makeNode({
+            id: BOTH_RULE,
+            type: 'ValidationRule',
+            apiName: 'RequiresBothPaths',
+          }),
+          makeNode({
+            id: BOTH_CONTEXT,
+            type: 'ConditionalContext',
+            apiName: 'ValidationRule:Account.RequiresBothPaths.condition-0',
+            parentId: BOTH_RULE,
+          }),
+        ],
+        edges: [
+          // Direct tokenized reference (buildReferencesEdges).
+          makeEdge({
+            fromId: BOTH_RULE,
+            toId: BOTH_FIELD,
+            edgeType: 'references',
+            source: 'formula-tokenizer',
+            confidence: 'parsed',
+            properties: { tokenizedFromField: 'errorConditionFormula' },
+          }),
+          // The SAME string, tokenized again by extractConditions.
+          makeEdge({
+            fromId: BOTH_CONTEXT,
+            toId: BOTH_FIELD,
+            edgeType: 'readsFrom',
+            source: 'condition-extractor',
+            confidence: 'parsed',
+            properties: {
+              kind: 'formula',
+              conditionIndex: 0,
+              firerId: BOTH_RULE,
+            },
+          }),
+        ],
+      },
+      {
+        // ADDITIVE: the condition reaches a field the direct tokenizer DROPPED
+        // (it discards dotted cross-object paths; the condition extractor keeps
+        // them verbatim). No direct edge from this rule to this field, so
+        // nothing may collapse.
+        nodes: [
+          makeNode({
+            id: ADDITIVE_FIELD,
+            apiName: 'VrConditionOnly__c',
+            parentId: ACCOUNT_ID,
+          }),
+          makeNode({
+            id: ADDITIVE_RULE,
+            type: 'ValidationRule',
+            apiName: 'CrossObjectRule',
+          }),
+          makeNode({
+            id: ADDITIVE_CONTEXT,
+            type: 'ConditionalContext',
+            apiName: 'ValidationRule:Account.CrossObjectRule.condition-0',
+            parentId: ADDITIVE_RULE,
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: ADDITIVE_CONTEXT,
+            toId: ADDITIVE_FIELD,
+            edgeType: 'readsFrom',
+            source: 'condition-extractor',
+            confidence: 'parsed',
+            properties: {
+              kind: 'formula',
+              conditionIndex: 0,
+              firerId: ADDITIVE_RULE,
+            },
+          }),
+        ],
+      },
+      {
+        // NEGATIVE: a Flow that WRITES the field and separately TESTS it in a
+        // decision. Two facts, two remediations — must stay two rows.
+        nodes: [
+          makeNode({
+            id: FLOW_BOTH_FIELD,
+            apiName: 'FlowWritesAndTests__c',
+            parentId: ACCOUNT_ID,
+          }),
+          makeNode({
+            id: FLOW_BOTH,
+            type: 'Flow',
+            apiName: 'Account_Stage_Router',
+          }),
+          makeNode({
+            id: FLOW_BOTH_CONTEXT,
+            type: 'ConditionalContext',
+            apiName: 'Flow:Account_Stage_Router.condition-0',
+            parentId: FLOW_BOTH,
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: FLOW_BOTH,
+            toId: FLOW_BOTH_FIELD,
+            edgeType: 'writesTo',
+            source: 'flow-extractor',
+            confidence: 'declared',
+          }),
+          makeEdge({
+            fromId: FLOW_BOTH_CONTEXT,
+            toId: FLOW_BOTH_FIELD,
+            edgeType: 'readsFrom',
+            source: 'condition-extractor',
+            confidence: 'declared',
+            properties: {
+              kind: 'flow-decision',
+              conditionIndex: 0,
+              firerId: FLOW_BOTH,
+            },
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+  });
+
+  it('counts a rule that reaches the field BOTH ways once, in the validation category', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: BOTH_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('blocking');
+
+    // ONE reason, ONE referrer, ONE citation — not condition(1) + formula(1).
+    expect(reasoning.map((r) => r.category)).toEqual(['validation']);
+    const validation = reasoning[0];
+    expect(validation?.count).toBe(1);
+    expect(validation?.verdict).toBe('blocking');
+    expect(validation?.examples.map((e) => e.id)).toEqual([BOTH_RULE]);
+
+    // The surviving category is the TRUTHFUL one: a validation rule is not
+    // "another formula field", which is what the unscoped formula-tokenizer
+    // rule used to label it.
+    expect(validation?.note).toContain('Validation Rule');
+    // Collapse by DISCLOSURE: the folded category is named on the citation and
+    // the note keeps the condition honesty hedge.
+    expect(validation?.examples[0]?.alsoVia).toEqual(['condition']);
+    expect(validation?.note).toContain('NOT evaluated');
+  });
+
+  it('renders one checklist item that discloses the folded condition row', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: BOTH_FIELD,
+      format: 'checklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rendered = result.value.data.checklist ?? '';
+    expect(rendered).toContain('**validation** (1)');
+    // FAIL-BEFORE: the checklist printed BOTH of these for one rule.
+    expect(rendered).not.toContain('**condition** (1)');
+    expect(rendered).not.toContain('**formula** (1)');
+    expect(rendered).toContain(`${BOTH_RULE} (also via condition)`);
+  });
+
+  it('keeps an ADDITIVE condition (no direct edge from that rule) as its own blocker', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: ADDITIVE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('blocking');
+    const condition = reasoning.find((r) => r.category === 'condition');
+    expect(condition).toBeDefined();
+    expect(condition?.count).toBe(1);
+    expect(condition?.examples[0]?.id).toBe(ADDITIVE_CONTEXT);
+    expect(condition?.examples[0]?.firerId).toBe(ADDITIVE_RULE);
+    expect(condition?.examples[0]?.alsoVia).toBeUndefined();
+  });
+
+  it('does NOT collapse a Flow that writes AND tests the same field', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: FLOW_BOTH_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { reasoning } = result.value.data;
+    const flow = reasoning.find((r) => r.category === 'flow');
+    const condition = reasoning.find((r) => r.category === 'condition');
+    // A write and a condition-test are different facts with different
+    // remediations. Two rows, one each.
+    expect(flow?.count).toBe(1);
+    expect(condition?.count).toBe(1);
+    expect(condition?.examples[0]?.firerId).toBe(FLOW_BOTH);
+  });
+});

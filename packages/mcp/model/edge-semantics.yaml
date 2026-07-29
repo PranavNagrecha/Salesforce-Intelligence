@@ -43,10 +43,22 @@ edgeSemantics:
   #    roll-up summary that does not exist — a fabricated citation on a correct
   #    verdict. Keying on `source` is what keeps the citation truthful.
   bySource:
-    # A formula field's tokenized reference. Beats the ValidationRule/frontend
-    # `references` rows below, which is why it is evaluated first.
+    # A formula FIELD's tokenized reference. Beats the frontend `references`
+    # rows below, which is why it is evaluated first.
+    #
+    # SCOPED to CustomField. The same tokenizer also runs over a ValidationRule's
+    # `errorConditionFormula`, and while this rule was unscoped EVERY validation
+    # rule reached `formula` — the note for which says "Another formula field
+    # references this field", false for a validation rule. That made the
+    # `references.bySourceType.ValidationRule -> validation` row below DEAD in
+    # production (no extractor mints a ValidationRule `references` edge under any
+    # other source marker), so the truthful `validation` category and its written
+    # note were unreachable, and field_360 — which checks the referrer TYPE first
+    # — labelled the identical edge differently. Scoping here reaches the
+    # ValidationRule row and closes both.
     - source: formula-tokenizer
       edgeType: references
+      fromType: CustomField
       category: formula
       verdict: blocking
     # Roll-up summary coupling: summarizedField / summaryForeignKey /

@@ -1421,3 +1421,201 @@ describe('field360Handler — ConditionalContext readsFrom lands in automations'
     }
   });
 });
+
+// =============================================================================
+// GUARD (0.3.0): `validates` and `automations` must not BOTH hold one rule.
+//
+// FAIL-BEFORE: a ValidationRule reaches a field its `errorConditionFormula`
+// names by two edges tokenized from that one string — a direct `references`
+// edge (filed under `validates`) and a `ConditionalContext` `readsFrom` (filed
+// under `automations`). One referrer occupied two sections and both counts, the
+// same inflated referrer count `safe_to_delete_field` folds.
+//
+// The fold is presentation-only. The second block below is the regression this
+// fix must NOT ship: dropping the folded rows from `computeRisk`'s automation
+// axis would send fields whose blockers are validation-rule conditions to
+// `low` / narrow-footprint (224 fields on the reference vault). The existing
+// guard higher in this file cannot catch that — its firer is a Flow.
+// =============================================================================
+describe('field360Handler — validation-rule condition folds into validates', () => {
+  const FOLD_FIELD = 'CustomField:Enrolment__c.Fold_Status__c';
+  const FOLD_RULE = 'ValidationRule:Enrolment__c.RequireFoldStatus';
+  const FOLD_CONTEXT =
+    'ConditionalContext:ValidationRule:Enrolment__c.RequireFoldStatus.condition-0';
+
+  // Five DISTINCT validation rules, each reaching the field both ways. Pre-fix
+  // this scored `high` on `automations >= 5`; the fold must not change that.
+  const RISK_FIELD = 'CustomField:Enrolment__c.Risk_Status__c';
+
+  // NEGATIVE: a Flow that WRITES the field and separately TESTS it. Two facts,
+  // two remediations — the fold must not touch them.
+  const FLOW_FIELD = 'CustomField:Enrolment__c.Flow_Both__c';
+  const FLOW_ID = 'Flow:Enrolment_Router';
+  const FLOW_CONTEXT = 'ConditionalContext:Flow:Enrolment_Router.condition-0';
+
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  const bothPathEdges = (rule: string, field: string): Edge[] => [
+    makeEdge({
+      fromId: rule,
+      toId: field,
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+      properties: { tokenizedFromField: 'errorConditionFormula' },
+    }),
+    makeEdge({
+      fromId: `ConditionalContext:${rule}.condition-0`,
+      toId: field,
+      edgeType: 'readsFrom',
+      confidence: 'parsed',
+      source: 'condition-extractor',
+      properties: { kind: 'formula', conditionIndex: 0, firerId: rule },
+    }),
+  ];
+
+  const bothPathNodes = (rule: string, apiName: string): Node[] => [
+    makeNode({ id: rule, type: 'ValidationRule', apiName }),
+    makeNode({
+      id: `ConditionalContext:${rule}.condition-0`,
+      type: 'ConditionalContext',
+      apiName: `${apiName}.condition-0`,
+      parentId: rule,
+    }),
+  ];
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-fold-'));
+    const opened = await openGraph(join(dir, 'fold.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+
+    const riskRules = [1, 2, 3, 4, 5].map(
+      (n) => `ValidationRule:Enrolment__c.RiskRule_${n}`,
+    );
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: FOLD_FIELD,
+            type: 'CustomField',
+            apiName: 'Fold_Status__c',
+            parentId: 'CustomObject:Enrolment__c',
+            properties: { dataType: 'Picklist' },
+          }),
+          makeNode({
+            id: RISK_FIELD,
+            type: 'CustomField',
+            apiName: 'Risk_Status__c',
+            parentId: 'CustomObject:Enrolment__c',
+            properties: { dataType: 'Picklist' },
+          }),
+          makeNode({
+            id: FLOW_FIELD,
+            type: 'CustomField',
+            apiName: 'Flow_Both__c',
+            parentId: 'CustomObject:Enrolment__c',
+            properties: { dataType: 'Picklist' },
+          }),
+          makeNode({ id: FLOW_ID, type: 'Flow', apiName: 'Enrolment_Router' }),
+          makeNode({
+            id: FLOW_CONTEXT,
+            type: 'ConditionalContext',
+            apiName: 'Flow:Enrolment_Router.condition-0',
+            parentId: FLOW_ID,
+          }),
+          ...bothPathNodes(FOLD_RULE, 'RequireFoldStatus'),
+          ...riskRules.flatMap((r, i) => bothPathNodes(r, `RiskRule_${i + 1}`)),
+        ],
+        edges: [
+          ...bothPathEdges(FOLD_RULE, FOLD_FIELD),
+          ...riskRules.flatMap((r) => bothPathEdges(r, RISK_FIELD)),
+          makeEdge({
+            fromId: FLOW_ID,
+            toId: FLOW_FIELD,
+            edgeType: 'writesTo',
+            confidence: 'declared',
+            source: 'flow-extractor',
+          }),
+          makeEdge({
+            fromId: FLOW_CONTEXT,
+            toId: FLOW_FIELD,
+            edgeType: 'readsFrom',
+            confidence: 'declared',
+            source: 'condition-extractor',
+            properties: {
+              kind: 'flow-decision',
+              conditionIndex: 0,
+              firerId: FLOW_ID,
+            },
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('lists the rule once, in validates, and discloses the fold', async () => {
+    const result = await field360Handler(ctx, { fieldId: FOLD_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+
+    expect(out.validates?.rows.map((r) => r.componentId)).toEqual([FOLD_RULE]);
+    // FAIL-BEFORE: this held the ConditionalContext for the SAME rule.
+    expect(out.automations?.rows.map((r) => r.componentId)).toEqual([]);
+    expect(out.summary.perSectionCounts['validates']).toBe(1);
+    expect(out.summary.perSectionCounts['automations']).toBe(0);
+    // Collapse by DISCLOSURE — the folded row is named, not silently dropped.
+    expect(
+      out.boundaries.some((b) => b.includes('FOLDED into `validates`')),
+    ).toBe(true);
+    // FOLD_CONTEXT is still in the graph; it is simply not a second referrer.
+    expect(
+      [...(out.validates?.rows ?? []), ...(out.automations?.rows ?? [])].map(
+        (r) => r.componentId,
+      ),
+    ).not.toContain(FOLD_CONTEXT);
+  });
+
+  it('keeps the folded rows on the automation RISK axis (no de-escalation)', async () => {
+    const result = await field360Handler(ctx, { fieldId: RISK_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    // Presentation: five rules, five rows, zero duplicates.
+    expect(out.summary.perSectionCounts['validates']).toBe(5);
+    expect(out.summary.perSectionCounts['automations']).toBe(0);
+    // Risk: five blocking declarative conditions is still a high-blast-radius
+    // delete. A presentation fold must never move a risk level.
+    expect(out.summary.riskLevel).toBe('high');
+    expect(out.summary.riskFactors).toContain(
+      '5-automations-exceeds-threshold-5',
+    );
+    expect(out.summary.riskFactors).not.toContain('narrow-footprint');
+  });
+
+  it('does NOT fold a Flow that writes AND tests the same field', async () => {
+    const result = await field360Handler(ctx, { fieldId: FLOW_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.writers?.rows.map((r) => r.componentId)).toEqual([FLOW_ID]);
+    expect(out.automations?.rows.map((r) => r.componentId)).toEqual([
+      FLOW_CONTEXT,
+    ]);
+    expect(
+      out.boundaries.some((b) => b.includes('FOLDED into `validates`')),
+    ).toBe(false);
+  });
+});

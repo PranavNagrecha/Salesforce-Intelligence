@@ -23,7 +23,7 @@
  *
  *   | Section       | Backing edge / source                                  | Confidence       |
  *   |---------------|--------------------------------------------------------|------------------|
- *   | validates     | incoming `references` from ValidationRule              | declared         |
+ *   | validates     | incoming `references` from ValidationRule — plus the ConditionalContext `readsFrom` row FOLDED into it when the same rule reaches this field both ways (one referrer, one row; disclosed in `boundaries[]`, still counted on the automation risk axis) | declared |
  *   | formulas      | incoming `references` from formula-tokenizer, plus resolved cross-object `__r` traversals (relationship-resolver, CustomField referrer) | parsed |
  *   | rollups       | incoming `references` from a PARENT roll-up (rollup-summary)   | declared       |
  *   | writers       | incoming `writesTo` from Apex/Flow/Workflow/PB         | mixed            |
@@ -99,6 +99,7 @@ import {
   reportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
+import { indexRestatedConditionEdges } from './restated-condition-edges.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -536,12 +537,20 @@ const computeRisk = (
   isPii: boolean,
   isFormula: boolean,
   dependenciesCount: number,
+  foldedConditionCount: number,
 ): { level: 'low' | 'medium' | 'high'; factors: string[] } => {
   const writers = perSectionCounts['writers'] ?? 0;
   const readers = perSectionCounts['readers'] ?? 0;
   const integrations = perSectionCounts['integrations'] ?? 0;
   const emails = perSectionCounts['emails'] ?? 0;
-  const automations = perSectionCounts['automations'] ?? 0;
+  // The automation AXIS counts condition rows that were folded into `validates`
+  // as a duplicate PRESENTATION of one referrer (see the fold at the call site).
+  // The fold is about how many referrers to SHOW, not how many blocking
+  // declarative conditions exist, and a validation-rule condition is a blocking
+  // condition whether or not its row was folded. Adding them back keeps this
+  // axis byte-identical to its pre-fold value, so no field's risk level moves
+  // because of a presentation change.
+  const automations = (perSectionCounts['automations'] ?? 0) + foldedConditionCount;
 
   const factors: string[] = [];
 
@@ -725,6 +734,12 @@ const classifyIncomingEdge = (
     // classification safe_to_delete_field pins (the rest still fall through there
     // as {unknown, risky}, so routing them here would MINT a disagreement.)
     //
+    // A condition row that merely RESTATES this rule's own direct `references`
+    // edge never reaches this branch: the handler folds it into `validates`
+    // before classifying, so one referrer cannot occupy two sections. The fold
+    // is presentation-only — the folded rows are added back onto the automation
+    // risk axis in `computeRisk`, so `riskLevel` does not move.
+    //
     // This also moves the edge onto the automation risk axis in `computeRisk`,
     // which is the point: `automations >= 5` escalates to `high` outright, whereas
     // `readers` only reaches `medium` above 3. Five blocking conditions on one
@@ -863,13 +878,42 @@ export const field360Handler = async (
   const incoming = incomingResult.value;
 
   const buckets = emptyBuckets();
+  // PASS 1 — resolve every referrer BEFORE classifying, so the referrer-collapse
+  // index below sees exactly the edges that will be reported (pairing against a
+  // row the sparse-graph guard then drops would lose a dependency).
+  const resolvedIncoming: { edge: Edge; source: Node }[] = [];
   for (const edge of incoming) {
     // Skip structural parentOf — never part of a forensic answer.
     if (edge.edgeType === 'parentOf') continue;
     const sr = await resolveEdgeSource(ctx, edge);
     if (!sr.ok) return sr;
     if (sr.value === null) continue;
-    classifyIncomingEdge(edge, sr.value, buckets);
+    resolvedIncoming.push({ edge, source: sr.value });
+  }
+
+  // ONE referrer, ONE row. A validation rule reaches a field its
+  // `errorConditionFormula` names by two edges tokenized from that one string —
+  // a direct `references` edge (this tool files it under `validates`) and a
+  // `ConditionalContext` `readsFrom` (filed under `automations`). Reported as-is,
+  // `validates` and `automations` BOTH hold the same rule, which is the inflated
+  // referrer count `safe_to_delete_field` folds for the same reason. The
+  // condition row folds into the `validates` row it duplicates.
+  //
+  // The fold is presentation-only and DELIBERATELY risk-neutral: the suppressed
+  // rows are added back onto `computeRisk`'s automation axis below, so the axis
+  // total is byte-identical to what it was before the fold. Dropping them from
+  // the axis instead would de-escalate 224 fields on the reference vault to
+  // `low` / narrow-footprint — the exact outcome the guard block in
+  // `field-360.test.ts` ("a blocking declarative condition must not read as a
+  // narrow footprint") exists to prevent.
+  const restated = indexRestatedConditionEdges(
+    resolvedIncoming.map((r) => r.edge),
+  );
+
+  // PASS 2 — classify.
+  for (const { edge, source } of resolvedIncoming) {
+    if (restated.isRestatingCondition(edge)) continue;
+    classifyIncomingEdge(edge, source, buckets);
   }
 
   // Supplemental Flow writers from source XML (SObject-variable assignments the
@@ -1046,6 +1090,7 @@ export const field360Handler = async (
     isPii,
     isFormula,
     buckets.dependencies.length,
+    restated.suppressedConditionCount,
   );
 
   const grantedByCount = incoming.filter(
@@ -1071,6 +1116,17 @@ export const field360Handler = async (
     FIELD_360_Q165_DISCLOSURE,
     'list view column AND filter field IDENTITY are composed into the `listViews` section (heuristic regex; a row\'s `referenceKind` is `fieldRef` for a column, `filterRef` for a filter predicate, or `columnAndFilter` for both) — but the saved view\'s runtime filter PREDICATE EVALUATION (whether a given record passes the filter) stays unmodeled and remains in dataNotAvailable as `list-view-filters`',
   ];
+  // Referrer collapse, disclosed rather than silent: a validation rule whose
+  // formula BOTH references and tests this field is one referrer reached by two
+  // edges tokenized from one string, so its `automations` row is folded into the
+  // `validates` row it duplicates. The rows are still counted on the automation
+  // RISK axis (riskLevel is unchanged by the fold) — only the referrer listing
+  // collapses.
+  if (restated.suppressedConditionCount > 0) {
+    boundaries.push(
+      `${restated.suppressedConditionCount} ConditionalContext \`readsFrom\` row(s) were FOLDED into \`validates\`: each restates a validation rule already listed there (the rule's errorConditionFormula is tokenized into BOTH a direct \`references\` edge and a condition edge, so counting both would report one rule as two referrers). Both edges remain in the graph — query them with sfi.get_edges — and the folded rows still count toward the automation risk axis, so \`riskLevel\` is unaffected. Conditions are listed but NOT evaluated: sfi does not know whether any record satisfies them.`,
+    );
+  }
   // CR-CAP-03: report / dashboard usage is folded onto the field as a node
   // property by the reports pull (not an edge — the fold DROPS the report/
   // dashboard nodes), so it appears in no section above. The honest disclosure
