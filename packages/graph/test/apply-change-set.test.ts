@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { DuckDBInstance } from '@duckdb/node-api';
-import type { Edge, ExtractionResult, Node } from '@sf-intelligence/contracts';
+import type {
+  ComponentType,
+  Edge,
+  ExtractionResult,
+  Node,
+} from '@sf-intelligence/contracts';
 
 import {
   applyChangeSet,
