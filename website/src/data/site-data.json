@@ -1,9 +1,10 @@
 {
-  "generatedAt": "2026-07-29T01:49:14.104Z",
+  "generatedAt": "2026-07-29T02:09:39.318Z",
   "version": "0.2.2",
   "toolCount": 203,
   "skillCount": 26,
-  "commandCount": 4,
+  "agentCount": 2,
+  "commandCount": 5,
   "componentTypeCount": 102,
   "edgeTypeCount": 23,
   "tests": {
@@ -11,7 +12,7 @@
       {
         "name": "mcp",
         "files": 262,
-        "cases": 5296
+        "cases": 5298
       },
       {
         "name": "extractors",
@@ -59,7 +60,7 @@
         "cases": 40
       }
     ],
-    "totalCases": 7806,
+    "totalCases": 7808,
     "totalFiles": 447,
     "packageCount": 10,
     "approx": 7800
@@ -88,7 +89,7 @@
     {
       "name": "mcp",
       "files": 262,
-      "cases": 5296,
+      "cases": 5298,
       "description": "The 203 read-only tools + router + grounding layer"
     },
     {

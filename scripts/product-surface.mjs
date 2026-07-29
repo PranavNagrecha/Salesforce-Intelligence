@@ -46,12 +46,21 @@ try {
   slashCommandCount = 0;
 }
 
+const agentsRoot = join(root, '.claude/agents');
+let agentCount = 0;
+try {
+  agentCount = readdirSync(agentsRoot).filter((f) => f.endsWith('.md')).length;
+} catch {
+  agentCount = 0;
+}
+
 const surface = {
   toolCount,
   componentTypeCount,
   edgeTypeCount,
   skillCount,
   slashCommandCount,
+  agentCount,
   generatedAt: new Date().toISOString(),
 };
 

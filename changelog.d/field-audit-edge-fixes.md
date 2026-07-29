@@ -10,6 +10,8 @@
 
 - `sfi.field_audit` — a curated MCP prompt carrying the field-deletion audit method (calibrate before trusting a zero; formula fields have no population figure; record role rather than count; a deleted report *filter* fails the report **open**, silently widening it). Gives non-Claude MCP hosts the discipline the plugin skill gives Claude Code.
 - `salesforce-field-audit` — the 26th Claude Code plugin skill. Decides Keep / Review / Deprecate-then-Remove / Remove with full dependency tracing, and validates an existing field-cleanup analysis.
+- **Subagents.** The plugin now ships agents (`"agents"` in the manifest; first two): `salesforce-field-auditor` batches 4–8 fields into structured verdict records, and `salesforce-field-refuter` attacks one verdict from one assigned lens. They are separate agents because the method's verification pass requires refuters that cannot see each other's reasoning — in the reference run it reverted a third of its own corrections.
+- `/sfi-field-audit <Object>` — orchestrates the run: scout inline (never parallelised, since a divergent evidence base silently invalidates every downstream comparison), fan out auditors, three independent refuters per contested verdict with a 2-of-3 majority, then single-threaded synthesis. Decides Keep / Review / Deprecate-then-Remove / Remove with full dependency tracing, and validates an existing field-cleanup analysis.
 
 ### Changed
 
