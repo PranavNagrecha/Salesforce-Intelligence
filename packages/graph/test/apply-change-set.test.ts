@@ -11,6 +11,7 @@ import {
   applyChangeSet,
   changeSetSize,
   computeChangeSet,
+  pruneStaleNodes,
   type ChangeSet,
 } from '../src/apply-change-set.js';
 import { importExtractionResults } from '../src/import.js';
@@ -420,5 +421,117 @@ describe('incremental reconcile mints relationship-resolver edges (regression)',
     const applied = await applyChangeSet(store, cs.value);
     expect(applied.ok).toBe(true);
     expect(await resolverEdges(store)).toBe(1);
+  });
+});
+
+describe('scoped prune preserves minted edges it cannot re-derive (regression)', () => {
+  /**
+   * The inversion this guards. Mirroring mintRelationshipTraversalEdges into
+   * computeChangeSet put 'relationship-resolver' into `reRanSources` for the
+   * first time, flipping the `sourceReRan && touchesPrunedType` conjunct to
+   * true. On `sfi refresh --types CustomField` the FlexiPage-sourced
+   * related-list alias edges cannot re-mint (no FlexiPage nodes in the change
+   * set), are not orphans (FlexiPage is not in pruneNodeTypes, so those nodes
+   * survive), and their CustomField target IS a pruned type — so they were
+   * deleted. Fixing the whole-graph deletion had opened a scoped-path one.
+   */
+  const flexiNode = makeNode({
+    id: 'FlexiPage:Programme_Record_Page',
+    type: 'FlexiPage',
+    apiName: 'Programme_Record_Page',
+    parentId: null,
+    properties: {
+      sobjectType: 'Programme__c',
+      relatedListFieldRefs: [
+        { relatedListApiName: 'Enrolments__r', fields: ['Outcome__c'] },
+      ],
+    },
+  });
+  const lookupNode = makeNode({
+    id: 'CustomField:Enrolment__c.Programme__c',
+    type: 'CustomField',
+    apiName: 'Programme__c',
+    parentId: 'CustomObject:Enrolment__c',
+    properties: { referenceTo: 'Programme__c', relationshipName: 'Enrolments' },
+  });
+  const childField = makeNode({
+    id: 'CustomField:Enrolment__c.Outcome__c',
+    type: 'CustomField',
+    apiName: 'Outcome__c',
+    parentId: 'CustomObject:Enrolment__c',
+    properties: {},
+  });
+  const targetField = makeNode({
+    id: 'CustomField:Programme__c.Status__c',
+    type: 'CustomField',
+    apiName: 'Status__c',
+    parentId: 'CustomObject:Programme__c',
+    properties: {},
+  });
+  // Load-bearing for this regression: a CustomField->CustomField traversal DOES
+  // re-mint from a CustomField-only view, which is what puts
+  // 'relationship-resolver' into reRanSources and arms the delete conjunct for
+  // the FlexiPage-sourced edge that CANNOT re-mint. Without this node the source
+  // never enters reRanSources and the test passes even with the bug present.
+  const formulaField = makeNode({
+    id: 'CustomField:Enrolment__c.Programme_Status__c',
+    type: 'CustomField',
+    apiName: 'Programme_Status__c',
+    parentId: 'CustomObject:Enrolment__c',
+    properties: {
+      isFormula: true,
+      formulaRelationshipRefs: ['Programme__r.Status__c'],
+    },
+  });
+
+  const resolverRows = async (store: GraphStore): Promise<number> => {
+    const reader = await store.connection.runAndReadAll(
+      "SELECT COUNT(*) AS n FROM edges WHERE source = 'relationship-resolver'",
+    );
+    const rows = reader.getRowObjectsJS() as readonly Record<string, unknown>[];
+    return Number(rows[0]?.['n'] ?? 0);
+  };
+
+  it('FAIL-BEFORE/PASS-AFTER: a --types CustomField prune does not delete the FlexiPage-sourced alias edge', async () => {
+    const store = await makeStore();
+    const cold = await importExtractionResults(store, [
+      {
+        nodes: [flexiNode, lookupNode, childField, targetField, formulaField],
+        edges: [],
+      },
+    ]);
+    expect(cold.ok).toBe(true);
+    // 1 FlexiPage alias + 1 formula traversal.
+    expect(await resolverRows(store)).toBe(2);
+
+    // A CustomField-scoped pull: the FlexiPage node is NOT in the change set,
+    // so the alias edge cannot be re-minted from this view.
+    const scoped = await computeChangeSet(
+      store,
+      [
+        {
+          nodes: [lookupNode, childField, targetField, formulaField],
+          edges: [],
+        },
+      ],
+      { pruneNodeTypes: new Set<ComponentType>(['CustomField']) },
+    );
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+
+    expect(
+      scoped.value.deleteEdgeKeys.filter(
+        (k) => k.source === 'relationship-resolver',
+      ),
+    ).toEqual([]);
+
+    // The scoped WITH-PULL path executes its deletes via pruneStaleNodes, not
+    // applyChangeSet — the latter's post-apply self-check compares GLOBAL counts
+    // against a reconciled-subset desired count and would trip on any multi-type
+    // graph (see pruneStaleNodes' doc). Exercise the path the CLI actually takes.
+    const pruned = await pruneStaleNodes(store, scoped.value);
+    expect(pruned.ok).toBe(true);
+    // BOTH survive: the traversal re-minted, the FlexiPage alias was preserved.
+    expect(await resolverRows(store)).toBe(2);
   });
 });

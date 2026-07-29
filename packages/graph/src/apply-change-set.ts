@@ -16,8 +16,40 @@ import {
   NODE_COLUMN_COUNT,
   nodeRowParams,
 } from './import.js';
-import { mintRelationshipTraversalEdges } from './relationship-refs.js';
+import {
+  mintRelationshipTraversalEdges,
+  RELATIONSHIP_RESOLVER_SOURCE,
+} from './relationship-refs.js';
 import type { GraphError, GraphStore } from './store.js';
+
+/**
+ * Edge `source` markers belonging to import-time MINTING passes rather than to
+ * an extractor. They are graph passes: they derive edges from the node set they
+ * are handed, so "did this emitter re-run?" is not a meaningful question about
+ * them and must never gate a delete.
+ *
+ * This matters because of an inversion. Before these passes were mirrored into
+ * the incremental reconcile their sources could never appear in `desiredEdges`,
+ * so `reRanSources` never held them and their edges were preserved by accident.
+ * Mirroring the passes put the sources INTO `reRanSources` — which switched the
+ * `sourceReRan && touchesPrunedType` conjunct below from false to true and made
+ * a scoped prune (`sfi refresh --types CustomField`) delete exactly the edges a
+ * narrow node view cannot re-mint: the FlexiPage-sourced related-list aliases,
+ * whose FlexiPage nodes are outside the pull and so are neither re-minted nor
+ * deleted-as-orphans. Fixing one deletion path would have opened another.
+ *
+ * Absence of a minted edge under a SCOPED view is an artifact of the view, not
+ * evidence of staleness, so it must not be deleted there. Genuine staleness is
+ * still corrected by the whole-graph incremental path (where `pruneNodeTypes` is
+ * undefined, the guard is skipped, and the pass sees every node) and by a cold
+ * rebuild — both of which re-derive from the complete node set.
+ */
+const SYNTHETIC_MINT_SOURCES: ReadonlySet<string> = new Set([
+  RELATIONSHIP_RESOLVER_SOURCE,
+  // mintFutureDispatchEdges (import.ts) — same hazard, mirrored earlier without
+  // the exclusion; correcting both together keeps the two passes consistent.
+  'graph-future-dispatch',
+]);
 
 /**
  * The 4-column primary key of an `edges` row. Identifies an edge for deletion
@@ -274,7 +306,11 @@ export const computeChangeSet = async (
   // preserve an absent-from-desired edge whose emitter did not re-run when both
   // endpoints survive (the headline inbound-cross-extractor data-loss fix).
   const reRanSources = new Set<string>();
-  for (const e of desiredEdges.values()) reRanSources.add(e.source);
+  for (const e of desiredEdges.values()) {
+    // Synthetic minting passes are excluded — see SYNTHETIC_MINT_SOURCES.
+    if (SYNTHETIC_MINT_SOURCES.has(e.source)) continue;
+    reRanSources.add(e.source);
+  }
 
   let currentNodeKeys: Map<string, string>;
   let currentEdges: Map<string, CurrentEdge>;
