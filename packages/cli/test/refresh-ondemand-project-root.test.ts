@@ -17,17 +17,26 @@ import {
  * project from `process.cwd()` (the repo root, which has no `sfdx-project.json`)
  * and failed every on-demand pull with `InvalidProjectWorkspaceError` — silently,
  * since all three are best-effort. The fix runs each from an isolated throwaway
- * project root (its own `sfdx-project.json`) via `cwd`, while keeping the
- * absolute `--output-dir`.
+ * project root (its own `sfdx-project.json`) via `cwd`.
+ *
+ * P2: this file previously also asserted that `--output-dir` STAYS the absolute
+ * vault source. That assertion pinned a form modern `sf` refuses outright, so it
+ * was encoding the bug rather than guarding against it. Both explicit targets are
+ * rejected:
+ *   --output-dir <vault>/source        -> OutputDirOutsideProjectError
+ *   --output-dir <project>/force-app   -> RetrieveTargetDirOverlapsPackageError
+ * The only accepted form — and the one `retrieveTypeBatch` has always used — is
+ * to name NO output dir, letting `sf` write into the project's default package
+ * directory, after which the helper copies the result into the vault source.
+ * Every on-demand pull failed for the entire life of the old assertion; the
+ * tests passed because they checked the argv, not whether `sf` accepted it.
  *
  * These tests inject a `runSf` spy and assert, FOR THE RETRIEVE CALL:
  *   - `project retrieve start` is invoked,
  *   - `opts.cwd` is set, is a real directory, and is NOT `process.cwd()`,
  *   - that `cwd` contains an `sfdx-project.json` AT CALL TIME (the helper
  *     rm-rf's it in `finally`, so the assertion must run inside the spy),
- *   - `--output-dir` stays the absolute vault source dir (NOT the throwaway).
- * Before the fix the helpers passed no `cwd`, so `opts.cwd === undefined` and
- * every assertion below fails.
+ *   - NO `--output-dir` is passed.
  */
 
 type RunSfArgs = Parameters<typeof runSf>;
@@ -97,14 +106,16 @@ const makeSpy = (
   return { runSfFn, probe };
 };
 
-const assertIsolatedProjectRoot = (probe: RetrieveProbe, sourceDir: string): void => {
+const assertIsolatedProjectRoot = (probe: RetrieveProbe): void => {
   expect(probe.sawRetrieve).toBe(true);
   expect(probe.cwd).toBeDefined();
   expect(probe.cwdIsProcessCwd).toBe(false);
   expect(probe.cwdIsDir).toBe(true);
   expect(probe.cwdHasProjectJson).toBe(true);
-  // --output-dir must stay the absolute vault source, NOT the throwaway root.
-  expect(probe.outputDir).toBe(sourceDir);
+  // No --output-dir at all: `sf` rejects both an outside-the-project target and
+  // one overlapping a package dir, so the retrieve must inherit the project's
+  // default package directory and be copied into the vault afterwards.
+  expect(probe.outputDir).toBeUndefined();
 };
 
 /**
@@ -142,7 +153,7 @@ describe('on-demand retrieves run from an isolated project root (P1)', () => {
     try {
       const r = await runSfRetrieveObjects('myorg', sourceDir, ['Foo__c'], runSfFn);
       expect(r.ok).toBe(true);
-      assertIsolatedProjectRoot(probe, sourceDir);
+      assertIsolatedProjectRoot(probe);
     } finally {
       await rm(sourceDir, { recursive: true, force: true });
     }
@@ -158,7 +169,7 @@ describe('on-demand retrieves run from an isolated project root (P1)', () => {
     try {
       const r = await runSfRetrieveFolderedReports('myorg', sourceDir, runSfFn);
       expect(r.ok).toBe(true);
-      assertIsolatedProjectRoot(probe, sourceDir);
+      assertIsolatedProjectRoot(probe);
     } finally {
       await rm(sourceDir, { recursive: true, force: true });
     }
@@ -174,7 +185,7 @@ describe('on-demand retrieves run from an isolated project root (P1)', () => {
     try {
       const r = await runSfRetrieveSmartReports('myorg', sourceDir, 100, runSfFn);
       expect(r.ok).toBe(true);
-      assertIsolatedProjectRoot(probe, sourceDir);
+      assertIsolatedProjectRoot(probe);
     } finally {
       await rm(sourceDir, { recursive: true, force: true });
     }
