@@ -1,0 +1,224 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "What Does This Salesforce Flow Do? How to Read a Flow You Did Not Build";
+const description =
+  "A method for reading an inherited Salesforce Flow: how to identify its trigger type, why entry conditions matter as much as the trigger, how decision outcomes actually evaluate, how to trace every field it writes, where it lands in the order of execution, and what static reading genuinely cannot tell you.";
+
+const faqs = [
+  {
+    q: "How do I find out what triggers a Salesforce Flow?",
+    a: "Read two values from the Flow metadata: processType and the triggerType inside the start element. A record-triggered flow has triggerType RecordBeforeSave, RecordAfterSave, or RecordBeforeDelete, plus a recordTriggerType of Create, Update, CreateAndUpdate, or Delete. Scheduled flows carry triggerType Scheduled and a schedule block. Platform-event flows carry PlatformEvent. A screen flow has processType Flow and no trigger at all - it runs when a human opens it. An autolaunched flow with no triggerType is invoked by something else entirely: Apex, a quick action, a REST call, or another flow calling it as a subflow.",
+  },
+  {
+    q: "What are Flow entry conditions and why do they matter?",
+    a: "Entry conditions are the filters on a record-triggered flow's start element - either structured filters combined by filterLogic, or a single filterFormula. They decide whether the flow runs at all for a given record, which makes them the real answer to 'when does this run'. The trigger type only tells you which phase. A flow triggered on every Widget__c update but gated on Status__c equals Approved runs on a small fraction of saves, and any reading that stops at the trigger type overstates its blast radius by orders of magnitude.",
+  },
+  {
+    q: "Why does an active Flow sometimes do nothing?",
+    a: "Three common reasons, all visible in metadata. Its entry conditions never match any more, because the field they gate on stopped being written. It has doesRequireRecordChangedToMeetCriteria set, so it fires only on the save that transitions a record into the criteria, not on every save where the criteria hold. Or it assigns values to $Record in an after-save context without performing a record update, so the assignment lives and dies in memory. None of these produce an error, and none show up as a failed flow interview.",
+  },
+  {
+    q: "How do I see every field a Flow writes?",
+    a: "A flow writes through two mechanisms and you have to read both. Record operations - recordCreates, recordUpdates, recordDeletes - are real DML with an explicit target object and field assignments. Assignment elements that set $Record fields are in-memory changes to the triggering record, which persist automatically in a before-save flow but require an explicit whole-record update in an after-save flow. Action calls and subflows are a third surface: they can write anything, and the calling flow's metadata shows only the call, never the write.",
+  },
+  {
+    q: "Do inactive Flow versions still matter?",
+    a: "Yes, for two separate reasons. Salesforce refuses to delete a field while any flow version references it - active, draft, or obsolete - so obsolete versions are load-bearing for cleanup work even though they can never run. And when you are reading automation, only the active version explains current behaviour, so a walkthrough that silently mixes versions is worse than no walkthrough. Any honest flow reading names the version and the status it read, and flags a non-active status before describing behaviour.",
+  },
+  {
+    q: "Can static analysis tell you what a Flow's Apex action does?",
+    a: "Only to the boundary of the call. Static reading gives you the action type, the target class, and the inputs the flow passes. What that class then reads or writes is a separate analysis, and it degrades further if the class builds SOQL from strings or uses reflective field access, because the field names do not exist until runtime. The correct output at that boundary is an explicit unknown attached to the named element, not a plausible guess about the class's behaviour.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "What does this Salesforce Flow do? How to read a flow you did not build",
+    description:
+      "How to identify a Salesforce Flow's trigger type and entry conditions, how decision outcomes evaluate, how to trace every field it writes, where before-save and after-save flows land in the order of execution, the undefined-order problem with two record-triggered flows on one object, and the honest limits of static reading.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    datePublished: "2026-07-29",
+    dateModified: "2026-07-29",
+    inLanguage: "en",
+    keywords:
+      "what does this Salesforce Flow do, read a Salesforce Flow, Flow trigger type, Flow entry conditions, record-triggered flow order, explain Salesforce Flow, inherited Salesforce org, Flow decision outcomes",
+    articleSection: "Engineering",
+    mainEntityOfPage: `${site.url}/blog/what-does-this-salesforce-flow-do`,
+    image: `${site.url}/assets/img/og-image.png`,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog/what-does-this-salesforce-flow-do"
+  heading="What does this Flow do?"
+  intro={`Every guide teaches you how to build a Flow. Almost none teach you how to read one you inherited - undocumented, five versions deep, named after a project nobody remembers. The canvas is not the answer: it shows you one version's elements and hides the three things that decide behaviour - <strong>which version is live, what gates entry, and what else on the object is writing the same fields</strong>. Here is the reading order that works, and the limits of reading at all.`}
+  crumbs={[{ label: "blog", href: "/blog" }, { label: "what-does-this-salesforce-flow-do", href: "/blog/what-does-this-salesforce-flow-do" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "What does this Salesforce Flow do?", path: "/blog/what-does-this-salesforce-flow-do" }]}
+  jsonld={jsonld}
+>
+  <section style="padding-top:clamp(20px,3vw,28px);">
+    <div class="container">
+      <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
+
+        <div class="callout">
+          <p><strong>Short answer:</strong> read five facts, in this order - <strong>active version, trigger type, entry conditions, connector graph, writes</strong>. Each one can make the next irrelevant, which is why the order matters. An obsolete version explains nothing about today. A trigger type without entry conditions overstates scope by orders of magnitude. And a list of writes means nothing until you know what else on that object writes the same fields.</p>
+        </div>
+
+        <h2 id="what-does-it-do">What does this Flow actually do?</h2>
+        <p>The question feels like it should have a single answer, and it does not, because "what it does" is four separate facts that people collapse into one. Answer them in dependency order and the flow resolves quickly. Answer them in canvas order - top-left element first - and you will build a confident description of automation that has not run since 2023.</p>
+        <ol>
+          <li><strong>Which version is active.</strong> A flow is a set of versions; at most one is active. Flow Builder happily opens an obsolete version and the canvas looks identical. Read the status before you read anything else, and if it is not <code>Active</code>, everything downstream describes what the flow <em>would</em> do, not what happens in the org today.</li>
+          <li><strong>What starts it.</strong> Trigger type and, for record-triggered flows, the phase and the DML operations it responds to.</li>
+          <li><strong>What gates it.</strong> Entry conditions on the start element. This is the difference between "runs on every Widget__c save" and "runs on maybe forty saves a month".</li>
+          <li><strong>What path it can take.</strong> The element-to-element connector graph, including decision outcomes, fault paths, loop branches, and reconnects.</li>
+          <li><strong>What it changes.</strong> Record operations, in-memory assignments to the triggering record, and the calls whose insides you cannot see.</li>
+        </ol>
+        <p>Notice what is missing: the <em>label</em> and the description field - the first two things everyone reads. A flow called <code>Widget_Status_Router</code> that was repurposed two releases ago to also send approval requests is not lying on purpose. It is documentation, and documentation drifts while metadata does not.</p>
+
+        <h2 id="trigger-type">How do I tell what triggers a Flow?</h2>
+        <p>Two metadata values settle it: <code>processType</code> on the flow, and <code>triggerType</code> inside the <code>start</code> element. "Record-triggered" is not one thing - it is three, with different capabilities and three different positions in the save order.</p>
+        <table>
+          <thead><tr><th>Kind</th><th>The metadata tell</th><th>What starts it</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Record-triggered, before save</strong></td><td><code>triggerType: RecordBeforeSave</code></td><td>A save on the start object. Can set fields on the triggering record with no extra DML.</td></tr>
+            <tr><td><strong>Record-triggered, after save</strong></td><td><code>triggerType: RecordAfterSave</code></td><td>The same save, later. The record has an ID; related-record work lives here.</td></tr>
+            <tr><td><strong>Record-triggered, before delete</strong></td><td><code>triggerType: RecordBeforeDelete</code></td><td>A delete on the start object. A different execution path entirely - it never contends with save-time automation.</td></tr>
+            <tr><td><strong>Schedule-triggered</strong></td><td><code>triggerType: Scheduled</code> plus a schedule block</td><td>The clock. Optionally iterates an object with its own filters.</td></tr>
+            <tr><td><strong>Platform-event-triggered</strong></td><td><code>triggerType: PlatformEvent</code></td><td>An event message, published from anywhere - Apex, an integration, another flow.</td></tr>
+            <tr><td><strong>Screen flow</strong></td><td><code>processType: Flow</code>, no trigger</td><td>A human. Launched from a quick action, a Lightning page, an experience site, or a URL.</td></tr>
+            <tr><td><strong>Autolaunched, no trigger</strong></td><td><code>processType: AutoLaunchedFlow</code>, no <code>triggerType</code></td><td>Something calls it. This is the one that needs a second search.</td></tr>
+          </tbody>
+        </table>
+        <p>That last row is where readings go wrong. An autolaunched flow with no trigger has no intrinsic "when" - it runs when Apex invokes it, when another flow calls it as a subflow, when a quick action fires it, or when an external system posts to it. Its behaviour is fully determined by callers you cannot see from inside the flow, so the honest reading is "this flow does X to whatever it is handed", followed by a separate hunt for the handers. Two more details worth catching in the same pass: <code>recordTriggerType</code> (<code>Create</code>, <code>Update</code>, <code>CreateAndUpdate</code>, <code>Delete</code>) narrows a record trigger to specific operations, and <code>scheduledPaths</code> on an after-save flow means part of this flow runs <em>asynchronously</em>, minutes or days later, in a different transaction from the save that started it.</p>
+
+        <h2 id="entry-conditions">Why do entry conditions matter as much as the trigger?</h2>
+        <p>The trigger type tells you which phase. The entry conditions tell you whether the flow runs at all. Skip them and every subsequent statement about the flow's reach is inflated - often by two or three orders of magnitude.</p>
+        <p>They live on the <code>start</code> element in one of two shapes, and a reader that knows only one shape will report "no entry criteria" on a flow that is heavily gated. The older shape is structured: a list of <code>filters</code>, each a field / operator / value triplet, combined by <code>filterLogic</code> - <code>and</code>, <code>or</code>, or a custom expression like <code>1 AND (2 OR 3)</code>. The newer shape is a single <code>filterFormula</code>: one formula expression, evaluated as a whole. A flow using a formula gate has an empty <code>filters</code> list, and treating that emptiness as "always enters" is a real and dangerous misreading.</p>
+        <p>Then there is the flag almost nobody checks: <code>doesRequireRecordChangedToMeetCriteria</code>. When it is set, the flow fires only on the save that <em>transitions</em> a record into meeting the criteria - not on subsequent saves where the criteria still hold. This single boolean is the difference between "runs on every edit of an approved widget" and "runs once, at the moment of approval". It is also the most common explanation for the bug report "the flow only worked the first time", and for its mirror image, "the flow fires on every single save and duplicates the task".</p>
+        <p>One more property matters if you are building tooling rather than reading by hand: in Flow metadata, entry conditions are spelled differently from decision conditions. A decision names its left operand <code>leftValueReference</code>; a start filter names it <code>field</code>. A parser handling only the first reports decisions perfectly and silently drops every entry criterion in the org - a failure mode we hit in our own dependency graph and wrote up in <a href="/blog/delete-unused-salesforce-fields">the field-cleanup post</a>.</p>
+
+        <h2 id="decisions">How do decisions and their outcome branches actually evaluate?</h2>
+        <p>A decision element holds an ordered list of rules - what Flow Builder calls outcomes - and a default outcome. Evaluation is first-match-wins: rules are tested in their declared order, the first one whose conditions are satisfied takes its connector, and no later rule is evaluated. If none match, the default outcome's connector is taken, and that connector is frequently null, meaning the path simply ends.</p>
+        <p>The consequence people miss: <strong>outcome order is semantics, not cosmetics</strong>. Dragging an outcome above another in Flow Builder changes behaviour whenever two outcomes can both be true for the same record. Overlapping outcomes are extremely common in inherited flows - <code>Amount__c &gt; 10000</code> and <code>Amount__c &gt; 1000</code> as two separate outcomes is a shape you will meet - and in that flow the second outcome is unreachable for any record above ten thousand, no matter what its name implies. Each rule has its own <code>conditionLogic</code>, so one decision can mix an <code>and</code> outcome with a custom-expression outcome.</p>
+        <p>Four other connector kinds shape the real path and none of them are visible in a naive top-to-bottom read. <strong>Fault connectors</strong> catch errors from DML and action calls; where one is absent, an error unwinds the whole interview. <strong>Loop</strong> elements have two exits, one per iteration and one when the collection is exhausted. <strong>Scheduled paths</strong> leave the start element for a separate asynchronous branch. And <strong>GoTo connectors</strong> reconnect to an element elsewhere on the canvas, which means the graph is a graph - not a tree, not a list. This is precisely why the element-to-element connector list is the authoritative artefact: <code>from</code>, <code>to</code>, and a <code>kind</code> that says whether the edge is the default outcome, a named rule, a fault path, a loop branch, a scheduled path, or a reconnect. Read the edges and the branch structure is unambiguous. Read the canvas and you are inferring it from layout.</p>
+
+        <h2 id="writes">How do I know what a Flow changes?</h2>
+        <p>Flows write through two visible mechanisms and two opaque ones, and conflating them produces both false confidence and false alarm.</p>
+        <p><strong>Record operations</strong> - create, update, delete - are real DML. They name a target object, the fields being set, and for updates the filters selecting which records to hit. These are the writes people find, because they look like writes.</p>
+        <p><strong>Assignment elements</strong> that set <code>$Record</code> fields are the ones that cause arguments, because whether they reach the database depends on context. In a before-save flow, assigning <code>$Record.Status__c</code> persists as part of the save already in flight - no DML element needed, no extra governor cost. In an after-save flow, the same assignment mutates an in-memory copy, and it reaches the database only if the flow then performs a whole-record update of <code>$Record</code>. Without that update the value is computed, held, and discarded. This is the mechanical explanation behind a large share of "the flow ran but the field is blank" tickets, and it is a property of the element's context rather than the element itself - which is why a per-element list of writes, without the persistence question answered, is misleading.</p>
+        <p><strong>Action calls and subflows</strong> are the opaque pair. An action call names its type and target - an invocable Apex method, an email alert, a submit-for-approval - and passes inputs; what happens inside is a different component's analysis. A subflow names its target flow, which is at least followable unless the target is managed or was never retrieved. So an honest write inventory has two parts: the writes you can enumerate, and the named elements past which you cannot see. A single list that omits the second part reads as complete and is not. For the whole-org version of this question on one field rather than one flow, see <a href="/use-cases/where-is-a-field-used">where is this field used</a>.</p>
+
+        <h2 id="which-runs-first">Which Flow runs first when two are on the same object?</h2>
+        <p>Between <em>different</em> automation types the answer is documented and fixed. Before-save flows run before Apex before-triggers. Validation rules run after before-triggers, so they judge the record as your before-automation left it. After-save flows run after after-triggers, after assignment and auto-response rules, and after workflow field updates - which themselves re-fire update triggers. Roll-up summaries recalculate after that, then the transaction commits. The full sequence, with the classic bugs it causes, is in <a href="/blog/salesforce-order-of-execution">Salesforce order of execution, explained</a>.</p>
+        <p>Between <em>two record-triggered flows on the same object in the same phase</em>, there is no answer. Salesforce does not guarantee their relative order unless each one carries an explicit Flow Trigger Order value - an integer from 1 to 2000, generally available since Spring '22. Without it, the ordering is genuinely undefined. Not undocumented; undefined. And the partial case is the sharpest trap: flows that have a trigger order value run first, in ascending order, and every flow <em>without</em> a value runs after them in no guaranteed order. So setting trigger order on two of your three flows fixes less than it appears to.</p>
+        <p>What this costs you: two after-save flows on <code>Widget__c</code> that both write <code>Status__c</code> produce a result decided by an ordering nobody chose. Nothing errors, no log line flags it, and the winner can differ between sandbox and production or change when an unrelated release touches either flow. It is also the one automation problem you cannot test your way out of - a passing test proves one ordering was observed once, not that it is guaranteed. Which is why it is worth surfacing structurally, before it produces a wrong number.</p>
+
+        <h2 id="limits">What can't you tell from reading a Flow?</h2>
+        <p>State these before anyone infers that a thorough metadata reading is a complete one. Every item below fails at <em>runtime</em>, where the metadata has nothing to say.</p>
+        <ul>
+          <li><strong>What an Apex action does.</strong> You get the call, the class, and the inputs. Past that is the class's own analysis - and if it builds SOQL from strings or reaches fields reflectively, the field names do not exist until the moment they are used. That is opaque in a way no parser closes.</li>
+          <li><strong>Which records a lookup returns.</strong> A record-lookup element's filters are readable; its results are data. Every downstream branch depending on them is undecidable from metadata alone.</li>
+          <li><strong>Which branch a given record takes</strong> - unless you supply the field values, and even then only for conditions decidable from what you supplied. The rest is <code>unknown</code>, and it must not collapse into <code>false</code>.</li>
+          <li><strong>Whether the flow is ever invoked.</strong> An autolaunched flow can be called by a quick action, a REST call, an external system, or Apex constructing an interview by name. No static evidence of a caller is not evidence of no caller.</li>
+          <li><strong>Whether a permitted loop fires.</strong> Recursion guards - a flow's own re-trigger setting, workflow re-evaluation limits - are the platform's, not the metadata's. A detected cycle is a shape the org allows, not a proven loop.</li>
+          <li><strong>Anything a managed package does internally</strong>, and anything the last retrieval did not pull. A flow version that was not retrieved is not a flow version that does not exist.</li>
+        </ul>
+        <p>The discipline underneath all six: <strong>never let "checked and found nothing" and "could not check" print the same way.</strong> They are indistinguishable in a summary and they mean opposite things. One is a finding. The other is an open question wearing a finding's clothes - and it is the reason an unhedged tool answer about a flow is worse than a hedged one, even when it happens to be right.</p>
+
+        <h2 id="tooling">Is there a tool that explains a Salesforce Flow?</h2>
+        <p>sf-intelligence is an offline, read-only knowledge base built from one metadata retrieval of your org, exposed to any MCP host as callable tools. Five matter for reading an inherited flow, deliberately layered: a summary, a lossless structure, a projection, a contention check, and a structural implication.</p>
+        <div class="code-block">
+          <div class="cb-head"><span class="fname">reading one flow</span></div>
+          <pre><span class="tok-c"># 1 - the business summary: what is this FOR</span>
+<span class="tok-k">explain_flow</span>(<span class="tok-p">flowId</span>: <span class="tok-s">"Flow:Widget_Status_Router"</span>)
+
+<span class="tok-c"># 2 - the lossless structure: real element names + every connector</span>
+<span class="tok-k">flow_graph</span>(<span class="tok-p">flowRef</span>: <span class="tok-s">"Widget_Status_Router"</span>)
+<span class="tok-k">flow_graph</span>(<span class="tok-p">flowRef</span>: <span class="tok-s">"Widget_Status_Router"</span>,
+           <span class="tok-p">include</span>: [<span class="tok-s">"connectors"</span>, <span class="tok-s">"decisions"</span>])   <span class="tok-c"># narrow a big flow</span>
+
+<span class="tok-c"># 3 - the projection: what happens to THIS record state</span>
+<span class="tok-k">flow_trace</span>(<span class="tok-p">flowRef</span>: <span class="tok-s">"Widget_Status_Router"</span>,
+           <span class="tok-p">recordState</span>: &#123; <span class="tok-s">"Status__c"</span>: <span class="tok-s">"Approved"</span>, <span class="tok-s">"Amount__c"</span>: 25000 &#125;,
+           <span class="tok-p">priorState</span>:  &#123; <span class="tok-s">"Status__c"</span>: <span class="tok-s">"Draft"</span> &#125;)
+
+<span class="tok-c"># 4 - contention: is anything else writing the same fields</span>
+<span class="tok-k">automation_collisions</span>(<span class="tok-p">object</span>: <span class="tok-s">"Widget__c"</span>)
+
+<span class="tok-c"># 5 - implication: what does this structure MEAN</span>
+<span class="tok-k">interpret</span>(<span class="tok-p">componentId</span>: <span class="tok-s">"Flow:Widget_Status_Router"</span>)</pre>
+        </div>
+        <p><code>sfi.explain_flow</code> returns identity, trigger, resolved start object, action and subflow calls, record reads and writes, and the declared decision conditions - a summary a host composes into prose. It is lossy by design and emits no connectors, which is why <code>sfi.flow_graph</code> exists: every element by its <em>real</em> name, the full connector graph with each edge's kind, decision rules, assignment items, record-op filters, loops, formulas, variables, and the <code>start</code> element with its entry filters, formula gate, and scheduled paths. Element types the parser does not model are listed by name in <code>unmodeled</code> rather than dropped.</p>
+        <p><code>sfi.flow_trace</code> answers "what happens to <em>this</em> record". Supply a field-value map; it walks the declared graph from <code>start</code> and returns the path that executes and what it writes:</p>
+        <div class="code-block">
+          <div class="cb-head"><span class="fname">flow_trace - honest output</span></div>
+          <pre><span class="tok-c">→ entered:</span> true       <span class="tok-c"># entry filters evaluated, not assumed</span>
+<span class="tok-c">→ path:</span>
+   Get_Related_Widgets   <span class="tok-c">(recordLookup)</span>
+   Check_Amount          <span class="tok-c">(decision)  matchedRule: High_Value</span>
+   Set_Tier              <span class="tok-c">(assignment)</span>
+   Notify_Owner          <span class="tok-c">(actionCall)</span> — stop
+<span class="tok-c">→ writes:</span>
+   Widget__c.Tier__c = <span class="tok-s">"Platinum"</span>  viaElement: Set_Tier
+                                    valueKind: literal · persists: false
+<span class="tok-c">→ stoppedReason:</span> unevaluated-branch
+<span class="tok-c">→ unevaluated:</span> [Notify_Owner — <span class="tok-s">"apex action; not executed"</span>]
+<span class="tok-c">→ assumptions:</span> [<span class="tok-s">"Get_Related_Widgets results unknown"</span>]
+<span class="tok-c">→ disclosure:</span> Declared-logic projection, NOT a runtime. A branch
+   depending on data not in recordState is unknown, never assumed.</pre>
+        </div>
+        <p>Three details there are the point. <code>persists: false</code> surfaces the after-save in-memory assignment problem instead of glossing it. <code>stoppedReason: unevaluated-branch</code> means the walk stopped honestly at the Apex action rather than inventing what it does. And a flow whose status is not <code>Active</code> comes back flagged not runnable, with every write forced to <code>persists: false</code>, so an obsolete version can never be misread as a live mutation.</p>
+        <p><code>sfi.automation_collisions</code> covers contention. Given an object, it walks every record-triggered flow, Apex trigger, and workflow rule firing on it plus what each one writes, then reports fields written by two or more distinct automations on the same execution path, and write paths that return to the object they started from. Save-timing writers bucket separately from before-delete writers, which never contend. Findings carry the weakest confidence among their contributors - <code>parsed</code> for declared flow and workflow XML, <code>heuristic</code> for the Apex scanner - and conditions are not evaluated, so two writers with mutually exclusive criteria still appear as a collision. That false-positive bias is deliberate and labelled.</p>
+        <p><code>sfi.interpret</code> is the layer above retrieval: a deterministic, offline join of your org's grounded slice against an org-independent concept model, returning cited structural claims. On a stacked-automation object it fires the collision concept, says the run order is undefined unless Flow Trigger Order is set on each - then discloses that <em>it does not extract trigger order</em>, so it cannot confirm whether ordering is already configured. Every claim carries a <code>groundedIn</code> list of the exact component IDs behind it and a confidence no stronger than the edges it matched; where there is no citation there is no claim, and when no rule fires the output says so rather than implying nothing depends on the component. A shorter walkthrough of the summary path is at <a href="/use-cases/explain-a-salesforce-flow">explain a Salesforce flow</a>.</p>
+
+        <div class="callout">
+          <p><strong>Try it without touching your org.</strong> The demo ships a synthetic org - no Salesforce auth, no <code>sf</code> CLI, nothing to connect:</p>
+        </div>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+        <p>Then ask it what a flow does, trace one with a record state you invent, and check an object for collisions. When you want it pointed at real metadata, that is <a href="/getting-started">getting started</a>.</p>
+
+        <h2 id="hardest-question">If it cannot run the Flow, what is it good for?</h2>
+        <p>This is the fair objection, and the answer is not that static reading is nearly as good as running the thing. It is that the two answer different questions, and only one of them is available when you need it.</p>
+        <p>A debug log is the ground truth for <em>one</em> record, on <em>one</em> path, in <em>one</em> org state, at one moment - and to get it you need a reproducible failing record, permission to reproduce it, and a good enough guess about which flow to instrument. Static reading gives you the opposite shape of knowledge: every branch that exists, every field any branch can write, every other automation contending for those fields, across all versions, with no reproduction required. On an inherited org the binding constraint is almost never log fidelity. It is that you do not yet know which of eleven automations to look at, and the cost of guessing wrong is a day.</p>
+        <p>So the honest sequence is: read statically to bound the search and form a hypothesis, then confirm with a log or a sandbox run. Static reading is a filter, not a verdict - high-leverage precisely because it is exhaustive over structure while being silent about data.</p>
+        <p>The failure mode worth fearing is not imprecision - it is imprecision presented as certainty. A tool that says "this flow sets Status__c to Approved" when the real answer is "this flow assigns Status__c in memory, on a path whose entry condition depends on a field value I do not have, and does not persist it" has moved your error from unknown to confidently wrong. That is why every element the walk cannot evaluate is named and returned unevaluated, and why an empty result reads as "no rule fired" rather than "nothing depends on this". The value is not that the reading is complete. It is that the incompleteness is enumerated.</p>
+
+        <h2 id="faq">FAQ</h2>
+        {faqs.map((f) => (
+          <details class="faq-item">
+            <summary>{f.q}</summary>
+            <div class="answer"><p>{f.a}</p></div>
+          </details>
+        ))}
+
+        <div class="cta-box" style="margin-top:32px;">
+          <h2 class="screen-type">Read the flow you inherited.</h2>
+          <p>Free, read-only, offline. Start on the synthetic demo org - no Salesforce auth, no sf CLI - then point it at your own metadata.</p>
+          <div class="cta-actions">
+            <a class="btn btn-solid" href="/getting-started">get started</a>
+            <a class="btn btn-ghost" href="/use-cases/explain-a-salesforce-flow">explain a flow</a>
+            <a class="btn btn-ghost" href="/blog/salesforce-order-of-execution">order of execution</a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

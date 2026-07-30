@@ -1,9 +1,9 @@
 ---
 import DocPage from "../../layouts/DocPage.astro";
 
-const title = "sf-intelligence vs dx0 - sf-intelligence";
+const title = "sf-intelligence vs dx0 for Salesforce Org Analysis";
 const description =
-  "Compare sf-intelligence with dx0: free offline MCP + local dependency graph vs hosted Salesforce org chat (ISO 27001, per-seat SaaS).";
+  "dx0 is a hosted, ISO 27001 certified, per-seat platform for querying a Salesforce org. sf-intelligence is a free, offline, read-only MCP graph.";
 
 const jsonld = [
   {
@@ -14,15 +14,15 @@ const jsonld = [
         name: "What is the difference between sf-intelligence and dx0?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "dx0 is a cloud product that answers Salesforce org questions in a hosted chat experience, with enterprise InfoSec packaging (ISO 27001) and per-seat pricing. sf-intelligence is a free, source-available MCP server that answers from a local confidence-tagged vault in your editor — no vendor cloud for metadata.",
+          text: "dx0 describes itself as a Salesforce intelligence platform that lets teams understand, analyse and govern complex Salesforce environments through natural language. It is a hosted cloud product with a per-user subscription and ISO/IEC 27001 certification. sf-intelligence is a free, source-available MCP server that answers from a local confidence-tagged metadata vault inside your editor, with no vendor cloud in the path and no write access to the org.",
         },
       },
       {
         "@type": "Question",
-        name: "Is dx0 less secure because it is cloud?",
+        name: "Is dx0 less secure because it is hosted?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "Not automatically. dx0 publicly markets ISO/IEC 27001 certification and enterprise security documentation. For many buyers that closes the naive 'cloud is insecure' objection. Choose based on whether metadata may leave your machine, whether you need MCP in Claude/Cursor, and cost — not scare tactics.",
+          text: "No, and it would be dishonest to imply it. dx0 publicly states it is ISO 27001 certified and built around GDPR by design. The real decision is whether your org's metadata is permitted to be processed by a third party at all, whether you need answers inside an MCP client such as Claude Code or Cursor, and what you are willing to pay. Choose on those, not on fear.",
         },
       },
       {
@@ -30,7 +30,7 @@ const jsonld = [
         name: "Does dx0 offer an MCP server?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "As of mid-2026, dx0's public changelog emphasizes hosted product features (change capture, knowledge hub, slash commands) rather than an MCP server. sf-intelligence is built as an MCP server for Claude Code, Cursor, and other hosts.",
+          text: "As of July 2026 dx0's public site and changelog describe hosted product features — automatic change capture, a knowledge hub, org-wide full-text search, natural-language analysis — and do not mention an MCP server. sf-intelligence is built as an MCP server first, so an AI coding agent in Claude Code, Claude Desktop or Cursor can call its tools directly. Verify dx0's current roadmap with them rather than relying on this page.",
         },
       },
     ],
@@ -43,7 +43,7 @@ const jsonld = [
   description={description}
   path="/compare/dx0"
   heading="sf-intelligence vs dx0"
-  intro="dx0 sells polished <strong>hosted</strong> Salesforce org chat. sf-intelligence sells a <strong>local MCP graph</strong>. Do not argue 'their cloud is unsafe' — argue locality, MCP-native workflow, depth, and price."
+  intro="dx0 sells a polished <strong>hosted</strong> way to understand a Salesforce org in natural language. sf-intelligence is a <strong>local MCP graph</strong>. The honest argument is not &quot;their cloud is unsafe&quot; — it is data locality, MCP-native workflow, citation discipline, and price."
   crumbs={[
     { label: "compare", href: "/compare" },
     { label: "vs dx0", href: "/compare/dx0" },
@@ -58,43 +58,87 @@ const jsonld = [
     <div class="container">
       <div class="prose">
         <div class="callout">
-          <p><strong>Short answer:</strong> Prefer <strong>dx0</strong> when you want a hosted chat product with enterprise security paperwork and zero local install. Prefer <strong>sf-intelligence</strong> when metadata must stay local, you already live in an MCP client, you want confidence-tagged impact/permissions tools, or budget is zero. Per dx0's May 2026 changelog: new customers at <strong>€85/user/month</strong>; <strong>ISO/IEC 27001</strong> certified (Certificate 26ISMS-1158) — verify current terms on dx0.io.</p>
+          <p><strong>Short answer:</strong> Prefer <strong>dx0</strong> when you want a hosted product that non-developers will actually open, with enterprise security paperwork already done, automatic change capture, and nothing to install or refresh. Prefer <strong>sf-intelligence</strong> when org metadata must not leave your machine, you already work inside an MCP client, you want every claim tied to a canonical component ID, or the budget is zero. Per dx0's changelog entry of 28 May 2026, new customers are priced at <strong>€85 per user per month</strong>; dx0 states it is <strong>ISO/IEC 27001 certified</strong> and GDPR-by-design. Verify current terms on dx0.io.</p>
         </div>
 
         <h2 id="summary">At a glance</h2>
         <table class="doc-table">
           <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>dx0</th></tr></thead>
           <tbody>
-            <tr><td><strong>Category</strong></td><td>Offline MCP + CLI</td><td>Hosted Salesforce org AI chat</td></tr>
-            <tr><td><strong>Delivery</strong></td><td>Local npm package</td><td>Cloud SaaS</td></tr>
-            <tr><td><strong>Where metadata lives</strong></td><td>Your machine</td><td>Vendor cloud (EU-hosted per their InfoSec page)</td></tr>
-            <tr><td><strong>Cost</strong></td><td>Free</td><td>€85/user/mo for new customers (May 2026; grandfathering for existing)</td></tr>
-            <tr><td><strong>Enterprise cert</strong></td><td>Self-host / audit the code</td><td>ISO 27001 (publicly marketed)</td></tr>
-            <tr><td><strong>MCP in IDE agents</strong></td><td>Native</td><td>Not the public product story (mid-2026)</td></tr>
-            <tr><td><strong>Change capture</strong></td><td>Vault git + optional SetupAuditTrail tools</td><td>Hosted automated change capture (product feature)</td></tr>
-            <tr><td><strong>Write to org</strong></td><td>None</td><td>Product is conversational / analysis-oriented — verify current write scope on their site</td></tr>
+            <tr><td><strong>Category</strong></td><td>Offline MCP server + CLI</td><td>Hosted Salesforce intelligence platform, natural-language interface</td></tr>
+            <tr><td><strong>Delivery</strong></td><td>Local npm package on your machine</td><td>Cloud SaaS — sign in, connect an org, nothing to install</td></tr>
+            <tr><td><strong>Where metadata is processed</strong></td><td>Your machine, offline after one read-only retrieve</td><td>dx0's service — an EU company, GDPR-by-design per their site</td></tr>
+            <tr><td><strong>Cost</strong></td><td>Free</td><td>€85 per user per month for new customers (their changelog, 28 May 2026); free trial on request</td></tr>
+            <tr><td><strong>Licence</strong></td><td>Source-available, MIT + Commons Clause</td><td>Commercial per-seat subscription</td></tr>
+            <tr><td><strong>Security paperwork</strong></td><td>Read the source; you are the auditor</td><td>ISO/IEC 27001 certified per their public statements</td></tr>
+            <tr><td><strong>MCP in IDE agents</strong></td><td>Native — the product <em>is</em> an MCP server</td><td>Not mentioned in their public site or changelog as of July 2026</td></tr>
+            <tr><td><strong>Change tracking</strong></td><td>Vault snapshots you refresh, plus git on the vault directory</td><td>Automatic change capture — before/after diffs with no git and no manual setup</td></tr>
+            <tr><td><strong>Knowledge sharing</strong></td><td>None built in — answers live in one editor session</td><td>Knowledge Hub: turn conversations into articles organised by topic for the team</td></tr>
+            <tr><td><strong>Search</strong></td><td>Graph queries and resolvers over the vault</td><td>Org-wide full-text search across metadata with explanations</td></tr>
+            <tr><td><strong>Writes to the org</strong></td><td><strong>No write path exists</strong></td><td>Positioned as understand / analyse / govern, not deploy — confirm scope with them</td></tr>
+            <tr><td><strong>Who should pick which</strong></td><td>Developers and AI coding agents on teams where metadata cannot be processed by a third party, or where per-seat cost across many people is the blocker</td><td>Platform owners, business-applications leads, RevOps and implementation partners who need a shared hosted tool, procurement-ready certification, and zero local setup</td></tr>
           </tbody>
         </table>
 
+        <h2 id="audience">They are aimed at different people</h2>
+        <p>dx0's own site names its audience: Salesforce platform owners, business-applications leads, RevOps managers, implementation partners, product managers. Those are largely people who will not install a Node package or authenticate a CLI, and for whom a browser tab is the correct interface. Its features follow from that — automatic change capture so nobody has to maintain a repository, a knowledge hub so an answer one person got is reusable by the next, full-text search across the org for people who do not know the metadata names.</p>
+        <p>sf-intelligence is aimed at developers and at the AI coding agents they run. It has no browser interface at all. It is a stdio MCP server plus a CLI, and its natural home is Claude Code or Cursor sitting next to the repository you are about to change. That is a narrower audience, and it is a deliberate trade: a tool with no UI is cheap to ship, easy to audit, and useless to a stakeholder who wanted a link.</p>
+        <p>The consequence for a buying decision is simple. If the people who need answers are not developers, a hosted product wins on adoption regardless of what the feature table says. If the people who need answers are agents in an editor, an MCP server wins because it can be called mid-task without a human copying anything between windows.</p>
+
+        <h2 id="pricing">Pricing and licensing models</h2>
+        <p>dx0 is a <strong>commercial per-seat subscription</strong>. Its changelog entry dated 28 May 2026 states that dx0 is moving to €85 per user per month for new customers, effective that day, with existing customers' rates unchanged until 1 June 2027. There is no public self-serve price list beyond that; the site offers a free trial on request. Per-seat pricing is predictable and easy to expense, and it comes with a vendor who is contractually on the hook — including the ISO 27001 certification and GDPR posture that procurement will ask about.</p>
+        <p>sf-intelligence is <strong>free</strong> and <strong>source-available under MIT + Commons Clause</strong>. It is deliberately not described as open source: the Commons Clause withholds the right to sell the software itself as a service. Practically, you may run it, read it, modify it for internal use and audit exactly what it does with your metadata; you may not resell it as a hosted product. The details are on the <a href="/licensing">licensing page</a>. Nothing is metered, so there is no per-seat maths — but there is also no vendor to escalate to at 2am, which is a real cost, just not a cash one.</p>
+
+        <h2 id="worked">Worked example: a picklist you are about to change</h2>
+        <p>You want to add a value to <code>Widget__c.Status__c</code> and you need to know what already depends on the current value set. A hosted natural-language tool answers this as a narrative — readable, shareable, generated by a model over its ingested view of your org. sf-intelligence answers it as a set of cited claims produced by deterministic rule matching over the local graph:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> what depends on Widget__c.Status__c?
+▸ <span class="tok-s">CustomField:Widget__c.Status__c</span> — picklist, 4 values
+  Flow <span class="tok-s">"Widget_Router"</span> — decision on Status__c  <span class="tok-c">[declared]</span>
+  ValidationRule <span class="tok-s">"Widget_Status_Required"</span>          <span class="tok-c">[declared]</span>
+  ApexClass <span class="tok-s">"WidgetService"</span> — reads Status__c     <span class="tok-c">[parsed]</span>
+  Layout <span class="tok-s">"Widget Layout"</span> — required field        <span class="tok-c">[declared]</span>
+  <span class="tok-c">coverageCaveat: dynamic SOQL and reflective field access not visible</span></pre></div>
+        <p>The bracketed tier is the point. <code>declared</code> means the reference is stated in the metadata; <code>parsed</code> means it came from an AST pass over Apex; <code>heuristic</code> means a pattern matched and you should check. When a verdict rests on <em>absence</em> — "nothing else references this" — a coverage caveat names what was not checked, so absence is never presented as proof. That mechanism, and why it is a rule engine rather than a language model, is described in <a href="/blog/deterministic-reasoning-model">the deterministic reasoning model write-up</a>.</p>
+        <p>Neither shape is universally better. A narrative is more useful in a document; a cited list is more useful when the next step is a deployment and somebody will ask you how you know.</p>
+
         <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
         <ul>
-          <li>Keep org metadata off vendor infrastructure</li>
-          <li>Call tools from Claude Code / Cursor / Agentforce allowlists via MCP</li>
-          <li>Run impact, permissions, SAST, and exposure audits with confidence labels</li>
-          <li>Avoid per-seat cost</li>
+          <li>Keep org metadata off third-party infrastructure entirely — the vault is a directory on your disk</li>
+          <li>Call tools from Claude Code, Claude Desktop or Cursor mid-task, without leaving the editor</li>
+          <li>Run impact, permission-cascade, code-quality and exposure analyses where every claim carries a component ID and a confidence tier</li>
+          <li>Avoid per-seat cost across a large team, or spend nothing at all while evaluating</li>
+          <li>Guarantee no write path — the product cannot deploy, edit or delete anything</li>
         </ul>
 
         <h2 id="when-dx0">Choose dx0 when you want to…</h2>
         <ul>
-          <li>A hosted chat UI with minimal local setup</li>
-          <li>ISO 27001 and a vendor security pack for procurement</li>
-          <li>Their change-capture / knowledge features without maintaining a vault</li>
+          <li>A hosted interface non-developers will open without being talked into it — no Node, no CLI, no local vault to refresh</li>
+          <li>ISO 27001 certification and a vendor security pack to hand to procurement</li>
+          <li>Automatic change capture with before/after comparisons and no git or manual configuration</li>
+          <li>A team-shared knowledge hub, so one person's investigation becomes an article the next person finds</li>
+          <li>Org-wide full-text search for people who do not already know the metadata API names</li>
+          <li>Someone else to be accountable for uptime, freshness and support</li>
         </ul>
 
-        <h2 id="more">More comparisons</h2>
-        <p><a href="/compare">compare hub</a> · <a href="/compare/salesforce-dx-mcp">Salesforce MCP</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/hubbl">Hubbl</a> · <a href="/compare/metazoa">Metazoa</a>.</p>
+        <h2 id="not">When not to use sf-intelligence</h2>
+        <ul>
+          <li><strong>You need it to change something.</strong> There is no deploy, edit or delete path. It explains; a human or a DevOps tool acts.</li>
+          <li><strong>The audience is not technical.</strong> There is no web UI and no shareable link. If the answer needs to land with a stakeholder, a hosted product is the better tool and pretending otherwise wastes everyone's time.</li>
+          <li><strong>You need freshness without effort.</strong> The vault is a point-in-time snapshot; it is stale the moment someone edits the org, and only a refresh fixes that. Automatic continuous change capture is exactly what a hosted service is good at.</li>
+          <li><strong>You want the answers kept as team knowledge.</strong> Nothing is persisted for colleagues — output lives in one chat session unless you paste it somewhere.</li>
+          <li><strong>You need business record data.</strong> The vault holds metadata. An opt-in, consent-gated read-only live plane can return capped counts and samples, but this is not a reporting tool.</li>
+          <li><strong>You need a support contract.</strong> There is no SLA. If an answer is wrong you read the source or file an issue.</li>
+        </ul>
 
-        <div class="callout"><p><strong>Disclaimer:</strong> Pricing and certification cited from dx0's public changelog / InfoSec pages as of mid-2026 — confirm on <a href="https://dx0.io/" rel="noopener">dx0.io</a>. sf-intelligence is independent and not affiliated with dx0.</p></div>
+        <h2 id="demo">Try both — ours needs no org</h2>
+        <p>dx0 offers a free trial on request. sf-intelligence needs nothing at all: no Salesforce org, no authenticated <code>sf</code> CLI, no configuration. One command serves a built-in synthetic org — "Verdant Energy", a fictional solar installer — over MCP, fully offline:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+        <p>Ask the demo org a delete-impact or sharing question and judge the citation discipline on fabricated metadata before deciding whether to point anything at production. When you are ready, <a href="/getting-started">connecting a real org</a> is a single read-only retrieve.</p>
+
+        <h2 id="more">More comparisons</h2>
+        <p>If your requirement is a scored audit and ecosystem benchmarking rather than conversational analysis, <a href="/compare/hubbl">Hubbl</a> is the closer fit. If you also want an official first-party option for live data and DevOps, see <a href="/compare/salesforce-dx-mcp">Salesforce's own MCP servers</a> — many teams register those alongside sf-intelligence. Related reading: <a href="/use-cases/impact-analysis">impact analysis before deployment</a>. Full set: <a href="/compare">compare hub</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/metazoa">Metazoa</a> · <a href="/compare/sweep">Sweep</a>.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> Pricing, certification and features cited from dx0's public site and changelog as of July 2026 — confirm on <a href="https://dx0.io/" rel="noopener">dx0.io</a>, which is the authority on their product. Where dx0 does not publish a figure we describe the model rather than invent a number. sf-intelligence is an independent project, not affiliated with dx0 or Salesforce.</p></div>
 
         <div style="padding-top:36px;">
           <div class="cta-box">

@@ -14,7 +14,7 @@ const jsonld = [
     description: "How sf-intelligence lets AI agents analyze Salesforce metadata from a local, read-only org vault.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: `${site.url}/use-cases/salesforce-metadata-analysis`,
   },
 ];
@@ -33,7 +33,13 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">query a real org vault in 2 minutes - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then ask <em>"give me an overview of this org"</em>, <em>"what fields does the Project object have?"</em>, <em>"explain the <code>Project__c.Margin_Percent__c</code> formula"</em>, or even a misspelling like <em>"where's the <code>paymnet</code> object?"</em> to watch the resolver ask instead of guess. Synthetic "Verdant Energy" org - 12 custom objects, Flows, Apex, profiles, OmniStudio - served fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
+        </div>
+
         <h2 id="what">What metadata analysis means here</h2>
         <p>Most Salesforce search tools stop at file search or raw metadata retrieval. sf-intelligence builds a queryable knowledge base from the retrieved org metadata, then exposes that knowledge through a Salesforce MCP server. The result is plain-language metadata analysis that stays grounded in the org you actually indexed.</p>
 

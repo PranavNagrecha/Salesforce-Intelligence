@@ -6,21 +6,10 @@ const title = "Delete a Salesforce field: what breaks? - sf-intelligence";
 const description =
   "Before you delete a Salesforce field, simulate it - see every dependent Flow, Apex class, layout, and report, with honest caveats on what static analysis misses.";
 
-const faq = [
-  {
-    q: "How do I know what breaks if I delete a Salesforce field?",
-    a: "Trace its dependents first. sf-intelligence's safe_to_delete_field simulates the delete: it collects every component that references the field, weighs them, and returns a verdict with a coverage caveat that tells you which metadata families it did and didn't check. It never gives a confident 'safe' it can't back up with evidence.",
-  },
-  {
-    q: "Is it safe to delete a custom field with no data?",
-    a: "Having no data removes one risk (data loss) but not the other (broken references). A field with no records can still be referenced by a Flow, formula, Apex class, or report that will break on delete. Check the references, not just the row count.",
-  },
-  {
-    q: "What does Salesforce not warn me about when deleting a field?",
-    a: "Salesforce blocks a delete on some hard dependencies but not all - formula text, certain Apex references, and report columns can slip through. A metadata-level simulation surfaces those before you act, and flags dynamic references it can only detect heuristically.",
-  },
-];
-
+// Informational / FAQ intent for this topic lives on the blog post
+// (/blog/delete-unused-salesforce-fields). This page is deliberately the
+// product-surface page: the tool calls, the verdict shape, the caveats.
+// No FAQPage node here - the two pages stopped competing on purpose.
 const jsonld = [
   {
     "@type": "TechArticle",
@@ -28,12 +17,8 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: `${site.url}/use-cases/what-breaks-if-you-delete-a-field`,
-  },
-  {
-    "@type": "FAQPage",
-    mainEntity: faq.map((f) => ({ "@type": "Question", name: f.q, acceptedAnswer: { "@type": "Answer", text: f.a } })),
   },
 ];
 ---
@@ -51,48 +36,64 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
         <div class="callout">
           <p><strong>Short answer:</strong> Don't guess - simulate. Ask sf-intelligence <em>"what breaks if I delete Contact.Legacy_Status__c?"</em> and it collects every dependent component, weighs the impact, and returns a verdict with a <strong>coverage caveat</strong> naming what it did and didn't check. It surfaces the risk before you make the change, and it's read-only - it never deletes anything for you.</p>
         </div>
 
-        <h2 id="how">A delete you can preview</h2>
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">run the delete simulation now - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then ask <em>"is it safe to delete <code>Project__c.Risk_Score__c</code>?"</em> for a clean verdict, and <em>"what breaks if I delete <code>Invoice__c.Amount__c</code>?"</em> for a loaded one - that field is summed by a roll-up, feeds a formula, and is written by Apex, so you see how a real multi-dependent verdict reads. It serves a synthetic "Verdant Energy" org fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
+        </div>
+
+        <h2 id="verdict">The verdict shape</h2>
+        <p>A delete simulation returns three things, in this order: the <strong>coverage caveat</strong>, the <strong>dependent list</strong>, and the <strong>verdict</strong>. The caveat comes first on purpose - a verdict is only as strong as the metadata families behind it, so you read the limits before you read the conclusion.</p>
         <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> is it safe to delete Contact.Legacy_Status__c?
 ▸ verdict: <span class="tok-s">review-first</span> — 4 dependents found
   ValidationRule "Status_Required" · Flow "Contact_Router" · ApexClass "ContactSvc" · Report
-  <span class="tok-c">coverageCaveat: reports & dashboards fully modeled; dynamic Apex not checked</span></pre></div>
+  <span class="tok-c">coverageCaveat: reports &amp; dashboards fully modeled; dynamic Apex not checked</span></pre></div>
+        <p>The verdict is a label, not a permission slip. <code>review-first</code> means dependents exist and a human has to decide what to do about each one. A clean verdict means <em>no static evidence of a dependent was found in the families that were checked</em> - which is a narrower claim than "unused," and the tool words it that way rather than rounding up to reassurance.</p>
 
-        <h2 id="why">Why "no data" isn't the same as "safe"</h2>
+        <h2 id="dependents">What counts as a dependent, and how it was found</h2>
+        <p>Every dependent in the list carries the edge confidence that produced it, so you can tell a fact stated in the XML from a regex match that needs a second look before you act on it.</p>
         <table class="doc-table">
-          <thead><tr><th>Risk</th><th>Removed by "no records"?</th><th>Removed by dependency check?</th></tr></thead>
+          <thead><tr><th>Dependent found in</th><th>Edge confidence</th><th>How to read it</th></tr></thead>
           <tbody>
-            <tr><td>Data loss on delete</td><td>Yes</td><td>-</td></tr>
-            <tr><td>A Flow that reads the field breaking</td><td>No</td><td>Yes - it's surfaced</td></tr>
-            <tr><td>A formula / validation rule referencing it</td><td>No</td><td>Yes - it's surfaced</td></tr>
-            <tr><td>A report column disappearing</td><td>No</td><td>Yes - it's surfaced</td></tr>
+            <tr><td>Validation rules, layouts, field sets, record types, field-level security</td><td><code>declared</code></td><td>Salesforce states the reference directly - highest trust</td></tr>
+            <tr><td>Flows, formulas, roll-up summaries, Apex (parsed source)</td><td><code>parsed</code></td><td>From the AST/XML parse of the real source</td></tr>
+            <tr><td>Dynamic SOQL strings, reflective field access</td><td><code>heuristic</code></td><td>Grep-level only - spot-check before trusting it either way</td></tr>
+            <tr><td>Any family the last refresh didn't retrieve</td><td><code>partial</code></td><td>"Not checked" - never "none in the org"</td></tr>
           </tbody>
         </table>
 
-        <p>Dependents are one half of the answer; the other is the <em>structural consequence</em> of the shape itself. <code>interpret</code> reads that from the graph deterministically: a master-detail field is what makes its child records cascade-delete with the parent, and an object whose two master-detail fields make it a junction (many-to-many) behaves differently again. Those are cited, confidence-tiered claims - not an LLM guess - folded in alongside the dependent list.</p>
+        <h2 id="structure">Structural consequence, not just a dependent count</h2>
+        <p>Dependents are one half of the answer; the other is the <em>structural consequence</em> of the field's own shape. <code>interpret</code> reads that from the graph deterministically: a master-detail field is what makes its child records cascade-delete with the parent, and an object whose two master-detail fields make it a junction (many-to-many) behaves differently again. Those are cited, confidence-tiered claims - joined from an org-independent concept model, not an LLM guess - folded in alongside the dependent list.</p>
+        <p>The claim confidence on an interpretation is a separate axis from the edge confidence on a dependency. An interpretation reports the weakest of its concept rule's ceiling and the grounding edges it matched, and it names the exact component ids it matched under <code>groundedIn</code>. A claim the engine cannot ground is never emitted at all.</p>
 
-        <h2 id="tools">The tools behind it</h2>
+        <h2 id="tools">The exact tool calls</h2>
+        <p>You type the question; the router picks the tool. These are the ones it reaches for on a delete question, in case you want to call them directly:</p>
         <ul>
-          <li><code>safe_to_delete_field</code> - the delete simulation with a verdict and coverage caveat.</li>
-          <li><code>get_impact</code> - the raw dependency subgraph (what references this, N hops out).</li>
-          <li><code>interpret</code> - the structural consequence of the shape (master-detail cascade, junction object), as a cited claim.</li>
-          <li><code>what_if_change_field_type</code> - the sibling question for a type change rather than a delete.</li>
+          <li><code>safe_to_delete_field</code> - the delete simulation itself: verdict, dependent list, coverage caveat.</li>
+          <li><code>get_impact</code> - the raw dependency subgraph (what references this, N hops out), with no verdict layered on top.</li>
+          <li><code>interpret</code> - the structural consequence of the field's shape (master-detail cascade, junction object) as a cited claim.</li>
+          <li><code>what_if_change_field_type</code> - the sibling simulation for a type change rather than a delete.</li>
+          <li><code>what_if_make_field_required</code> - the sibling simulation for tightening a field instead of removing it.</li>
+          <li><code>coverage_report</code> - which metadata families your last refresh actually retrieved, which is what the coverage caveat is computed from.</li>
         </ul>
+        <p>Every one of them is read-only. There is no write path to the org anywhere in this product - the simulation is the whole point, and executing the delete stays your job in Setup or a deploy.</p>
 
         <h2 id="limits">Honest limits</h2>
-        <p>A destructive verdict is only as strong as the coverage behind it. sf-intelligence renders the coverage caveat <em>before</em> the verdict, distinguishes "not in the vault" from "not in the org", and marks dynamic references heuristic. Treat a "safe" verdict as "no static evidence of a dependent", then spot-check. See <a href="/trust">how it's tested</a>.</p>
+        <p>A destructive verdict is only as strong as the coverage behind it. sf-intelligence renders the coverage caveat <em>before</em> the verdict, distinguishes "not in the vault" from "not in the org", and marks dynamic references heuristic. Static analysis cannot see dynamic SOQL, reflective Apex, or a reference added since your last refresh, so treat a clean verdict as "no static evidence of a dependent", then spot-check. See <a href="/trust">how it's tested</a>.</p>
 
-        <h2 id="faq">Frequently asked</h2>
-        {faq.map((f) => (<details class="faq-item"><summary>{f.q}</summary><div class="answer"><p>{f.a}</p></div></details>))}
+        <h2 id="method">The method behind the verdict</h2>
+        <p>This page is the product surface: the tool calls, the verdict shape, the caveats. It deliberately does not re-teach the decision method, because that has its own home. If you want the reasoning - why field population is the wrong evidence, which references block a delete outright versus break something quietly afterwards, the four-verdict taxonomy that makes a cleanup backlog actionable, and what to do with a tool's zero - read <a href="/blog/delete-unused-salesforce-fields">the dependency-first field cleanup method</a>. Run the simulation here; decide with the method there.</p>
+        <p>For the reverse direction - listing every place a field is referenced without asking for a verdict - see <a href="/use-cases/where-is-a-field-used">where is a Salesforce field used</a>. For the same question on an object, Flow, or Apex class rather than a field, see <a href="/use-cases/impact-analysis">Salesforce impact analysis</a>.</p>
 
         <div style="padding-top:36px;"><div class="cta-box">
           <h2 class="screen-type">Preview the delete.</h2>
           <p>Simulate a field change against your real metadata before you make it.</p>
-          <div class="cta-actions"><a class="btn btn-solid" href="/getting-started">get started</a><a class="btn btn-ghost" href="/use-cases/impact-analysis">full impact analysis</a></div>
+          <div class="cta-actions"><a class="btn btn-solid" href="/getting-started">get started</a><a class="btn btn-ghost" href="/blog/delete-unused-salesforce-fields">the full cleanup method</a></div>
         </div></div>
       </div>
     </div>

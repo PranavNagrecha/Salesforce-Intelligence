@@ -14,9 +14,18 @@ interface Props {
   ogImage?: string;
   /** Set false for error pages that must not be indexed. */
   index?: boolean;
+  /** og:type — "article" on blog posts. Forwarded to SeoHead. */
+  ogType?: "website" | "article";
+  /** ISO publish date (blog posts). */
+  datePublished?: string;
+  /** ISO date of the last meaningful content change. */
+  dateModified?: string;
 }
 
-const { title, description, path, breadcrumbs, jsonld, ogImage, index = true } = Astro.props;
+const {
+  title, description, path, breadcrumbs, jsonld, ogImage, index = true,
+  ogType, datePublished, dateModified,
+} = Astro.props;
 ---
 
 <!doctype html>
@@ -30,6 +39,9 @@ const { title, description, path, breadcrumbs, jsonld, ogImage, index = true } =
       jsonld={jsonld}
       ogImage={ogImage}
       index={index}
+      ogType={ogType}
+      datePublished={datePublished}
+      dateModified={dateModified}
     />
   </head>
   <body>

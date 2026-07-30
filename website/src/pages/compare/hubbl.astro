@@ -1,9 +1,9 @@
 ---
 import DocPage from "../../layouts/DocPage.astro";
 
-const title = "sf-intelligence vs Hubbl - sf-intelligence";
+const title = "sf-intelligence vs Hubbl for Salesforce Org Audits";
 const description =
-  "Compare sf-intelligence with Hubbl: free offline MCP graph vs commercial Salesforce Intelligence Layer / AI-readiness org audits.";
+  "Hubbl is a per-org cloud audit platform with ecosystem benchmarking. sf-intelligence is a free, offline, read-only MCP metadata graph. Fair comparison.";
 
 const jsonld = [
   {
@@ -14,7 +14,15 @@ const jsonld = [
         name: "Is sf-intelligence the same as Hubbl's Intelligence Layer?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "No. Hubbl is a commercial cloud platform that brands itself as the Intelligence Layer for Salesforce and sells org audits, health/AI-readiness style packages, and related scanning products. sf-intelligence is a free, offline MCP server that builds a local confidence-tagged metadata graph for editor agents. Similar category language; different delivery and price.",
+          text: "No. Hubbl Technologies is a commercial platform whose homepage reads 'The Intelligence Layer for Salesforce — context, governance, and judgment, built in.' It sells Org Intelligence (org audits and monitoring) and Process Intelligence (process discovery and monitoring), priced per org. sf-intelligence is a free, source-available MCP server that builds a local confidence-tagged metadata graph on your machine and answers questions offline. Similar category language, different product shape and different trust model.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does Hubbl have an MCP server?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Yes. Hubbl's pricing page lists 'API & Hubbl MCP access' as part of its Enterprise plan, and its developer portal describes connecting AI assistants to Hubbl via the Model Context Protocol. MCP access to org intelligence is therefore not unique to sf-intelligence. The remaining contrasts are cost, where the metadata is processed, source availability, and whether every answer carries a component-level citation and confidence tier.",
         },
       },
       {
@@ -22,7 +30,7 @@ const jsonld = [
         name: "Which is better for an AI-readiness audit?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "Hubbl is built as a vendor audit / benchmark product with a shared deliverable. sf-intelligence composes the same job locally from tools like tech_debt_score, org_risk_report, unused_fields_deep, find_dead_code, and ai_exposure_report — free, offline, no dashboard. Choose Hubbl for a packaged commercial assessment; choose sfi for day-to-day grounded questions and a DIY agent-readiness pass.",
+          text: "Hubbl is built as a packaged, scored assessment with ecosystem benchmarking, severity ranking, and scheduled re-scans a whole team can see. sf-intelligence composes a similar job locally from tools like tech_debt_score, org_risk_report, unused_fields_deep, find_dead_code and ai_exposure_report — free, offline, no dashboard, no benchmark set. Pick Hubbl for a deliverable you hand to leadership; pick sf-intelligence for grounded day-to-day questions inside an editor.",
         },
       },
     ],
@@ -35,7 +43,7 @@ const jsonld = [
   description={description}
   path="/compare/hubbl"
   heading="sf-intelligence vs Hubbl"
-  intro="Hubbl's homepage leads with <strong>&quot;the Intelligence Layer for Salesforce&quot;</strong> — the same category phrase this project uses informally. Different products: theirs is a commercial audit/intelligence platform; ours is a free local MCP graph."
+  intro="Hubbl leads with <strong>&quot;the Intelligence Layer for Salesforce&quot;</strong> — the same category phrase this project uses informally. Different products: theirs is a per-org cloud audit and process-intelligence platform with ecosystem benchmarking; ours is a free local MCP graph that answers one question at a time, offline."
   crumbs={[
     { label: "compare", href: "/compare" },
     { label: "vs Hubbl", href: "/compare/hubbl" },
@@ -50,46 +58,89 @@ const jsonld = [
     <div class="container">
       <div class="prose">
         <div class="callout">
-          <p><strong>Short answer:</strong> Use <strong>Hubbl</strong> when you want a vendor-run org / AI-readiness assessment, cross-org benchmarking, or consultant Scan Request workflows with a commercial dashboard. Use <strong>sf-intelligence</strong> when you want a grounded backend in Claude/Cursor for free — we describe the job as <em>offline, confidence-tagged org intelligence for AI agents</em> rather than contesting a trademarked category line.</p>
+          <p><strong>Short answer:</strong> Use <strong>Hubbl</strong> when the output you need is a scored, severity-ranked audit that a team and its leadership can look at together — with ecosystem benchmarks, scheduled re-scans, and process discovery. Use <strong>sf-intelligence</strong> when the output you need is a cited answer to a specific question, in your editor, for free, with the metadata never leaving your machine. Both now speak MCP, so "an agent can talk to it" no longer separates them. Cost, data locality, source availability, and citation discipline do.</p>
         </div>
 
         <h2 id="summary">At a glance</h2>
         <table class="doc-table">
           <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>Hubbl</th></tr></thead>
           <tbody>
-            <tr><td><strong>Category phrase</strong></td><td>Grounded offline backend for Salesforce AI agents</td><td>"Intelligence Layer for Salesforce" (their brand)</td></tr>
-            <tr><td><strong>Delivery</strong></td><td>Local MCP + CLI</td><td>Cloud SaaS / scan products</td></tr>
-            <tr><td><strong>Primary motion</strong></td><td>Day-to-day Q&amp;A in an editor</td><td>Org audits, health / AI-readiness packages</td></tr>
-            <tr><td><strong>Cost</strong></td><td>Free</td><td>Commercial (verify on hubbl.com)</td></tr>
-            <tr><td><strong>Where metadata goes</strong></td><td>Local vault</td><td>Vendor processing for scans / platform</td></tr>
-            <tr><td><strong>MCP</strong></td><td>Native server</td><td>Not the core public product story as of mid-2026</td></tr>
-            <tr><td><strong>Cross-org benchmarks</strong></td><td>Your registered vaults only</td><td>Marketed benchmarking vs many orgs</td></tr>
+            <tr><td><strong>Category</strong></td><td>Offline MCP server + CLI for one org's metadata</td><td>Org Intelligence and Process Intelligence platform</td></tr>
+            <tr><td><strong>Delivery</strong></td><td>Local npm package on your machine</td><td>Cloud service, delivered as a Salesforce-native app</td></tr>
+            <tr><td><strong>Unit of work</strong></td><td>One question, answered on demand</td><td>One scan, scored and re-run on a schedule</td></tr>
+            <tr><td><strong>Pricing basis</strong></td><td>Free</td><td>Per org, not per user (free one-scan tier; Professional and Enterprise quoted)</td></tr>
+            <tr><td><strong>Where metadata is processed</strong></td><td>Your machine, offline after one read-only retrieve</td><td>Vendor-side, which is what makes benchmarking possible — confirm terms with Hubbl</td></tr>
+            <tr><td><strong>Source available</strong></td><td>Yes — MIT + Commons Clause, audit the code</td><td>No</td></tr>
+            <tr><td><strong>MCP</strong></td><td>Native on every install; any MCP host</td><td>Yes — "API &amp; Hubbl MCP access" is listed on the Enterprise plan</td></tr>
+            <tr><td><strong>Ecosystem benchmarking</strong></td><td>No — your own vaults only</td><td>Yes — marketed as a core reason to buy</td></tr>
+            <tr><td><strong>Process discovery</strong></td><td>No</td><td>Yes — a whole second product line</td></tr>
+            <tr><td><strong>Writes to the org</strong></td><td><strong>No write path exists</strong></td><td>Positioned as audit and monitoring, not deployment</td></tr>
+            <tr><td><strong>Per-claim citation</strong></td><td>Canonical component ID + <code>declared</code> / <code>parsed</code> / <code>heuristic</code> tier</td><td>Severity-ranked findings with remediation guidance</td></tr>
+            <tr><td><strong>Who should pick which</strong></td><td>Developers and AI coding agents who need cited, offline answers about one org — and teams that cannot let metadata be processed off-machine</td><td>Admins, platform owners, consulting partners and PE or ISV portfolio teams who need a scored, comparable, shareable audit on a cadence</td></tr>
           </tbody>
         </table>
 
+        <h2 id="unit">The real difference is the unit of work</h2>
+        <p>Hubbl's product is a <em>scan</em>. You connect an org, it audits packages, automations, fields, code and permissions, and returns a prioritised roadmap with issues ranked by severity. Run it monthly and you get a trend line and a number to put in a slide. That number is comparable to other orgs, because Hubbl processes many orgs and markets benchmarking as a headline reason to buy.</p>
+        <p>sf-intelligence's product is a <em>question</em>. There is no score, no dashboard and no benchmark. You retrieve your org's metadata once, read-only, into a local vault, and from then on an MCP host — Claude Code, Claude Desktop, Cursor — asks the graph things like "what breaks if I delete this field" or "why can't this profile edit that". Every claim comes back attached to a canonical component ID and a confidence tier, so you can see whether a dependency was <code>declared</code> in metadata, <code>parsed</code> out of Apex, or matched by <code>heuristic</code> pattern.</p>
+        <p>Those are not competing answers to one question. They are different questions. A scored audit tells you where to look across an org; a cited graph tells you what is actually true about the one component you are about to change.</p>
+
+        <h2 id="pricing">Pricing and licensing models</h2>
+        <p>Hubbl is priced <strong>per org rather than per user</strong>. Its pricing page describes a free tier — one scan of one org, covering usage and recommendations across packages, automations, fields, code and permissions — plus a Professional plan with unlimited users, unlimited scans and process views, scheduled scans and ongoing monitoring, and an Enterprise plan that adds API and Hubbl MCP access, SSO, included sandboxes and premier support. List prices for the paid plans are not published; you request a quote. For a large admin team the per-org basis is a genuine advantage: adding twenty more users costs nothing.</p>
+        <p>sf-intelligence is <strong>free</strong> and <strong>source-available under MIT + Commons Clause</strong> — deliberately not "open source", because the Commons Clause withholds the right to sell the software itself as a service. You can read it, run it, fork it for internal use and audit exactly what it does with your metadata. There is no seat count, no org count, no contract and no vendor to notify. See <a href="/licensing">what the licence does and does not permit</a> before you build anything commercial on top of it.</p>
+
+        <h2 id="worked">Worked example: one field, two workflows</h2>
+        <p>Say <code>Widget__c.Status__c</code> looks dead and you want it gone. In an audit-shaped tool, the field shows up in an unused-fields section of a scan with a severity and a recommendation — useful for building the cleanup backlog in the first place. In sf-intelligence you interrogate that one field directly, before touching it:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> is it safe to delete Widget__c.Status__c?
+▸ verdict: <span class="tok-s">review-first</span> — 3 dependents found
+  ValidationRule <span class="tok-s">"Widget_Status_Required"</span> · Flow <span class="tok-s">"Widget_Router"</span> · Layout <span class="tok-s">"Widget Layout"</span>
+  cited: <span class="tok-s">CustomField:Widget__c.Status__c</span>
+  <span class="tok-c">coverageCaveat: layouts and validation rules fully modeled; dynamic Apex not checked</span></pre></div>
+        <p>The two motions compose cleanly. A scan is good at <em>finding candidates across the whole org</em>; a graph is good at <em>clearing a specific candidate</em>. If you run both, use the audit to produce the list and the graph to defend each deletion. The method is written up in full in <a href="/blog/delete-unused-salesforce-fields">the dependency-first field cleanup guide</a>.</p>
+
         <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
         <ul>
-          <li>Ask impact / permissions / debt questions every day in an MCP client</li>
-          <li>Keep the vault local and source-available</li>
-          <li>Run a DIY <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a> without a SaaS contract</li>
+          <li>Ask impact, permission and debt questions every day from inside an MCP client, at no cost</li>
+          <li>Keep org metadata on the machine — nothing is uploaded, and the vault is a directory you own</li>
+          <li>Get a canonical component ID and a confidence tier on every claim, and an explicit coverage caveat when a verdict rests on absence</li>
+          <li>Guarantee no write path: the product has no deploy, edit or delete capability to misconfigure</li>
+          <li>Run a DIY <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a> without a contract or a procurement cycle</li>
         </ul>
 
         <h2 id="when-hubbl">Choose Hubbl when you want to…</h2>
         <ul>
-          <li>A packaged commercial audit deliverable for leadership</li>
-          <li>Consultant-friendly scan motions (e.g. Scan Requests) with clear customer control of credentials</li>
-          <li>Benchmarking and process-intelligence product lines beyond a single local graph</li>
+          <li>Benchmark your org's health and complexity against the wider ecosystem — we genuinely cannot do this, and no local single-org tool can</li>
+          <li>Discover and monitor business <em>processes</em>, not just metadata structure — a capability sf-intelligence has nothing equivalent to</li>
+          <li>Hand leadership a scored, severity-ranked deliverable with a step-by-step remediation roadmap</li>
+          <li>Re-scan on a schedule and watch a trend, with no local install and nothing to refresh by hand</li>
+          <li>Cover an unlimited number of users on a per-org price, or work partner, ISV and portfolio motions across many customer orgs</li>
         </ul>
 
-        <h2 id="more">More comparisons</h2>
-        <p><a href="/compare">compare hub</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/dx0">dx0</a> · <a href="/compare/metazoa">Metazoa</a> · <a href="/compare/salesforce-dx-mcp">Salesforce MCP</a>.</p>
+        <h2 id="not">When not to use sf-intelligence</h2>
+        <p>Worth saying plainly, because it is the fastest way to avoid wasting your afternoon:</p>
+        <ul>
+          <li><strong>You need to change something.</strong> There is no write path — no deploy, no bulk edit, no rollback. It reads and explains; you make the change yourself in Salesforce or your DevOps tooling.</li>
+          <li><strong>You need a shared dashboard.</strong> Answers live in whoever's editor session asked. There is no web UI, no scheduled report and no place for a non-technical stakeholder to log in.</li>
+          <li><strong>You need comparison against other orgs.</strong> The graph knows only the vaults you built. Any "how do we compare to similar companies" question is out of scope by construction.</li>
+          <li><strong>You need continuous change capture.</strong> The vault is a point-in-time snapshot and goes stale the moment someone edits the org; freshness depends on you re-running a refresh.</li>
+          <li><strong>Nobody on the team will use a terminal.</strong> It is an MCP server driven from a CLI and an AI host. An admin-only team with no developer is better served by a hosted product.</li>
+          <li><strong>You need record data.</strong> The vault holds metadata, not business records. "How many open Widgets" is a report, not a graph query.</li>
+        </ul>
 
-        <div class="callout"><p><strong>Disclaimer:</strong> Fair comparison from public Hubbl positioning as of mid-2026. Feature sets and compliance claims evolve — verify on hubbl.com. sf-intelligence is independent and not affiliated with Hubbl Technologies.</p></div>
+        <h2 id="demo">Try it before you decide — no org required</h2>
+        <p>You do not need a Salesforce org, an authenticated <code>sf</code> CLI or any configuration to see what the answers look like. One command registers a server that ships with a synthetic org — "Verdant Energy", a fictional solar installer — entirely offline:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+        <p>Ask it a delete-impact or permissions question and judge the citation discipline on fabricated metadata, with nothing of yours at risk. When you are ready for the real thing, <a href="/getting-started">connecting your own org</a> is one read-only retrieve.</p>
+
+        <h2 id="more">More comparisons</h2>
+        <p>The closest enterprise peer to Hubbl in this set is <a href="/compare/elements-cloud">Elements.cloud</a>, which also pairs hosted change intelligence with an MCP story. If your interest is a hosted natural-language chat over the org instead of a scored audit, see <a href="/compare/dx0">dx0</a>. Full set: <a href="/compare">compare hub</a> · <a href="/compare/dx0">dx0</a> · <a href="/compare/metazoa">Metazoa</a> · <a href="/compare/salesforce-dx-mcp">Salesforce MCP</a> · <a href="/compare/sweep">Sweep</a>.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> Written to be fair, from Hubbl's public homepage, pricing page, org-audits page and developer portal as of July 2026. Plans, prices and capabilities change — verify on hubbl.com. Where Hubbl does not publish a figure we describe the model rather than guess at a number. sf-intelligence is an independent project, not affiliated with Hubbl Technologies or Salesforce.</p></div>
 
         <div style="padding-top:36px;">
           <div class="cta-box">
             <h2 class="screen-type">Editor-native. Free. Local.</h2>
-            <p>Same buying trigger (AI-ready org) — different shape of product.</p>
+            <p>Same buying trigger — an AI-ready org — different shape of product.</p>
             <div class="cta-actions">
               <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
               <a class="btn btn-ghost" href="/use-cases/agent-readiness-audit">agent-readiness audit</a>

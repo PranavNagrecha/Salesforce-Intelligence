@@ -25,8 +25,8 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
-  id-token: write # required for npm Trusted Publishing (OIDC) + provenance
+  contents: write # create/update the GitHub release for the tag
+  id-token: write # npm Trusted Publishing (OIDC) + provenance, and MCP Registry OIDC
 
 jobs:
   publish:
@@ -76,6 +76,66 @@ jobs:
           pnpm guard
           rm -f scripts/forbidden-names.local.json
 
+      # Idempotent: a re-run (or a workflow_dispatch against an already-released
+      # tag) must not fail the whole job just because this version is on npm.
+      # The later steps — GitHub release and MCP registry — are the ones that
+      # historically drifted, so they need to be reachable on a re-run.
       - name: Publish sf-intelligence (keyless, with provenance)
         working-directory: packages/cli
-        run: npm publish --provenance --access public
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "sf-intelligence@${VERSION}" version >/dev/null 2>&1; then
+            echo "sf-intelligence@${VERSION} is already on npm — skipping publish."
+          else
+            npm publish --provenance --access public
+          fi
+
+      # Publish the server manifest to the official MCP Registry, keyless via the
+      # same GitHub Actions OIDC identity. Previously this was a MANUAL step and
+      # so it silently rotted: the registry sat at 0.1.26 while npm was at 0.2.5,
+      # and downstream MCP directories crawl the registry record, propagating the
+      # stale version across the ecosystem. Automating it here is the fix.
+      - name: Publish to the official MCP Registry (keyless OIDC)
+        working-directory: packages/cli
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          MANIFEST_VERSION="$(node -p "require('./server.json').version")"
+          if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::server.json version ($MANIFEST_VERSION) != package.json version ($VERSION). Bump server.json before tagging."
+            exit 1
+          fi
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+            | tar -xz mcp-publisher
+          ./mcp-publisher validate
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
+
+      # Cut the GitHub release. This step did not exist before, which is why
+      # every previous release had to be created by hand — a tag would publish to
+      # npm and GitHub would keep showing an older release as "Latest". Notes are
+      # lifted from the matching CHANGELOG section so they cannot drift from it.
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "Not a version tag ($TAG) — skipping release."; exit 0 ;;
+          esac
+          VERSION="${TAG#v}"
+          NOTES_FILE="$(mktemp)"
+          # Extract just this version's CHANGELOG section (## [x.y.z] ... next ##).
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "No CHANGELOG section for $VERSION — falling back to generated notes."
+            gh release create "$TAG" --title "$TAG" --generate-notes --latest || \
+              gh release edit "$TAG" --title "$TAG" --latest
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest || \
+              gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest
+          fi

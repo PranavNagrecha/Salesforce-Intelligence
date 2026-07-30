@@ -6,10 +6,13 @@ const title = "Explain a Salesforce flow in plain English - sf-intelligence";
 const description =
   "Ask an AI agent what a specific Salesforce Flow actually does - its trigger, decisions, and the fields, objects, and Apex it touches - grounded in the real metadata.";
 
+// Informational "how to read a flow" intent lives on the blog post
+// (/blog/what-does-this-salesforce-flow-do). The FAQ here is deliberately
+// scoped to tool behaviour so the two pages don't compete on the same query.
 const faq = [
   {
-    q: "How do I understand what a Salesforce Flow does?",
-    a: "Instead of opening Flow Builder and tracing every element by hand, ask sf-intelligence to explain the specific Flow. It reads the Flow metadata and describes its trigger, decision branches, and every field, object, and Apex action it references - in plain language, with links to the components it touches.",
+    q: "Which tool explains a Salesforce Flow, and what does it return?",
+    a: "sfi.explain_flow. Give it a Flow and it returns the trigger type and object, the decision branches, and the fields, records, and Apex actions the Flow reads or writes, each referenced component cited by canonical id with its edge confidence. It is a static read of the Flow metadata in your local vault - no live org call, and no LLM inventing the walkthrough.",
   },
   {
     q: "Can it explain what runs when a record is saved?",
@@ -28,7 +31,7 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: `${site.url}/use-cases/explain-a-salesforce-flow`,
   },
   {
@@ -51,9 +54,15 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
         <div class="callout">
           <p><strong>Short answer:</strong> Ask sf-intelligence <em>"explain the Opportunity_Router flow"</em> and it summarizes what the Flow does - its trigger and object, its decision branches, and the fields, records, and Apex it reads or writes - from the Flow metadata, with every referenced component linked. It's a static, read-only explanation: it does not run the Flow.</p>
+        </div>
+
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">read a real flow in 2 minutes - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then ask <em>"explain the <code>Project_On_Approve</code> flow"</em> for one flow in isolation, and <em>"what happens when I save a Project?"</em> for the whole save-time sequence around it - validation rule, record-triggered flows, trigger, and approval process in order. Synthetic "Verdant Energy" org, served fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
         </div>
 
         <h2 id="how">From metadata to plain English</h2>
@@ -65,6 +74,8 @@ const jsonld = [
   provenance offline_snapshot · confidence: parsed</pre></div>
 
         <h2 id="also">Related questions it answers</h2>
+        <p>One Flow in isolation rarely explains the bug you are chasing. The reason a field is the wrong value by the time your Flow reads it is usually sequence, not logic - so if you are debugging rather than documenting, start with <a href="/blog/salesforce-order-of-execution">what actually runs when you save a Salesforce record, step by step</a>, then come back and read the individual Flow.</p>
+        <p>This page is the product surface: the tool call, the output shape, and the limits. If you want the reading method itself - how to tell a before-save trigger from an after-save one, why entry conditions matter more than the trigger type, why an active Flow sometimes does nothing at all, and why obsolete Flow versions are still load-bearing for cleanup - read <a href="/blog/what-does-this-salesforce-flow-do">how to read a Salesforce Flow you did not build</a>. Ask the tool here; learn the method there.</p>
         <ul>
           <li><strong>What runs when this record is saved?</strong> - the full order of execution across validation rules, flows, triggers, and workflow, not just one Flow.</li>
           <li><strong>What depends on this Flow?</strong> - what breaks if you deactivate it, via impact analysis.</li>

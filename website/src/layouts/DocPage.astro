@@ -14,12 +14,30 @@ interface Props {
   jsonld?: Record<string, unknown>[];
   /** Visible breadcrumb trail links (label + href). Home is prepended. */
   crumbs?: { label: string; href: string }[];
+  /** og:type — pass "article" on blog posts. Forwarded to SeoHead. */
+  ogType?: "website" | "article";
+  /** ISO publish date (blog posts). Feeds og/article + the WebPage node. */
+  datePublished?: string;
+  /** ISO date of the last meaningful content change. */
+  dateModified?: string;
 }
 
-const { title, description, path, heading, intro, breadcrumbs, jsonld, crumbs } = Astro.props;
+const {
+  title, description, path, heading, intro, breadcrumbs, jsonld, crumbs,
+  ogType, datePublished, dateModified,
+} = Astro.props;
 ---
 
-<Base title={title} description={description} path={path} breadcrumbs={breadcrumbs} jsonld={jsonld}>
+<Base
+  title={title}
+  description={description}
+  path={path}
+  breadcrumbs={breadcrumbs}
+  jsonld={jsonld}
+  ogType={ogType}
+  datePublished={datePublished}
+  dateModified={dateModified}
+>
   <section class="subhero">
     <div class="container">
       {crumbs && (

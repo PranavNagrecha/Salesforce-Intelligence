@@ -89,6 +89,24 @@ const advertisedCount = tools.length;
 const toolCount = V01_TOOLS.length;
 log(`• tools registered (V01_TOOLS): ${toolCount}  (advertised ${advertisedCount})`);
 
+// Concept Model size. Read from the BUILT generated model, the same authoritative
+// route used for V01_TOOLS above — not counted out of the curator YAML, so the
+// number the site prints is always the one the shipped engine actually loads.
+// These figures appear in prose on several pages and in llms.txt; before this was
+// computed they drifted (llms.txt carried 142/193 and a stale 94/143 six lines
+// apart), which is a citation bug on the one file published for machine citation.
+let conceptCount = null;
+let conceptRuleCount = null;
+try {
+  const distModel = path.join(PRODUCT, "packages/mcp/dist/src/knowledge/generated/concept-model.js");
+  const { CONCEPTS, CONCEPT_RULES } = await import(pathToFileURL(distModel).href);
+  conceptCount = Object.keys(CONCEPTS).length;
+  conceptRuleCount = CONCEPT_RULES.length;
+  log(`• concept model:                ${conceptCount} concepts / ${conceptRuleCount} rules`);
+} catch (e) {
+  warn("built concept-model not found; concept/rule counts left untouched.", e.message);
+}
+
 let surface = {};
 try {
   surface = JSON.parse(execSync("node scripts/product-surface.mjs", { cwd: PRODUCT, encoding: "utf8" }));
@@ -148,6 +166,8 @@ const stats = {
   commandCount: surface.slashCommandCount ?? null,
   componentTypeCount: surface.componentTypeCount ?? null,
   edgeTypeCount: surface.edgeTypeCount ?? null,
+  conceptCount,
+  conceptRuleCount,
   tests: { packages, totalCases, totalFiles, packageCount, approx: approxTests },
   integrationSuiteCount,
   gates: GATES, gateCount: GATES.length,
@@ -224,6 +244,16 @@ const llmsRules = [
 if (stats.commandCount != null) llmsRules.push([/(\*\*)\d+( slash commands\*\*)/, `$1${stats.commandCount}$2`]);
 if (stats.skillCount != null) llmsRules.push([/(ships \*\*)\d+( skills\*\*)/, `$1${stats.skillCount}$2`]);
 llmsRules.push([/(~)[\d,]+( automated tests across )\d+( packages)/g, `$1${approxStr}$2${packageCount}$3`]);
+// Concept Model size, stated as "(142 concepts / 193 rules)". Anchored on the
+// parenthesised pair so a historical figure written in prose ("when the Concept
+// Model held 94 concepts / 143 rules") is deliberately NOT rewritten — only the
+// current-fact form is kept in sync.
+if (conceptCount != null && conceptRuleCount != null) {
+  llmsRules.push([
+    /(Concept Model \()\d+( concepts \/ )\d+( rules\))/g,
+    `$1${conceptCount}$2${conceptRuleCount}$3`,
+  ]);
+}
 patch("llms.txt", llmsRules);
 
 const llms = fs.readFileSync(path.join(pub, "llms.txt"), "utf8").trimEnd();

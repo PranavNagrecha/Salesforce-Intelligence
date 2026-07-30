@@ -53,6 +53,12 @@ const jsonld = [
           <p><strong>Short answer:</strong> Refresh a vault, then run debt → unused → risk → exposure tools in order. Every answer stays on your machine, read-only, with confidence labels. For safety framing see <a href="/ai-safety">is AI safe on my org?</a>.</p>
         </div>
 
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">run the audit pass on a demo org - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then walk the playbook against a synthetic org that has debt planted in it on purpose: <em>"which Apex has governor-limit risk?"</em> (a batch class queries inside a loop), <em>"find hardcoded IDs in the Apex"</em>, and <em>"which test classes don't really assert anything?"</em>. It shows you the report shape and the honest exclusions before you point it at an org anyone will read the numbers from. Fully offline: no Salesforce login, no <code>sf</code> CLI. <a href="/getting-started#demo">more on the demo →</a></p>
+        </div>
+
         <h2 id="why">Why this framing</h2>
         <p>Industry commentary in 2026 treats technical debt as a top admin pain and "get AI-ready" as a budget line (Hubbl and Elements sell into it). The capabilities below already exist in the roster — packaging them as one narrative is the GTM move, not inventing new analysis.</p>
 
