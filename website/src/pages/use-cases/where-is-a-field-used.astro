@@ -28,7 +28,7 @@ const jsonld = [
     description,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: `${site.url}/use-cases/where-is-a-field-used`,
   },
   {
@@ -51,9 +51,15 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
         <div class="callout">
           <p><strong>Short answer:</strong> Ask sf-intelligence <em>"where is Account.Industry__c used?"</em> and it returns every component that references the field - Flows, Apex, layouts, validation rules, reports - from a dependency graph plus a source grep of your retrieved metadata, each reference labelled with its confidence. One question replaces a field-by-field crawl through Setup.</p>
+        </div>
+
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">trace a field across a real org in 2 minutes - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then ask <em>"where is <code>Invoice__c.Amount__c</code> used across the org?"</em> - in the demo org that field is summed by a roll-up on the parent, feeds a formula, and is written by Apex, so you see the declared, parsed, and heuristic tiers side by side in one answer. Synthetic "Verdant Energy" org, served fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
         </div>
 
         <h2 id="how">How it works</h2>
@@ -82,6 +88,7 @@ const jsonld = [
 
         <h2 id="limits">Honest limits</h2>
         <p>Usage answers are only as complete as your last refresh and the metadata you retrieved. Dynamic field access is invisible to static analysis, so it labels heuristic matches and never reports a confident "unused" it can't back up. See <a href="/trust">how it's tested</a>.</p>
+        <p>That distinction matters most when you are planning a cleanup, because a usage result of zero is the exact moment people over-read the evidence. For what a zero does and doesn't license - which references block a delete outright, which ones break something quietly weeks later, and why field population is the wrong signal to sort a backlog by - read <a href="/blog/delete-unused-salesforce-fields">the dependency-first method for deciding whether a Salesforce field is safe to delete</a>.</p>
 
         <h2 id="faq">Frequently asked</h2>
         {faq.map((f) => (<details class="faq-item"><summary>{f.q}</summary><div class="answer"><p>{f.a}</p></div></details>))}

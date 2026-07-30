@@ -14,7 +14,7 @@ const jsonld = [
     description: "How to register sf-intelligence as a read-only Salesforce MCP server for Claude Code, Claude Desktop, Cursor, Codex, and other MCP clients.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: `${site.url}/use-cases/claude-salesforce-mcp`,
   },
 ];
@@ -33,7 +33,13 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">wire up a client in 2 minutes - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Register this first and your client is talking to a working server before any Salesforce credential is involved - it serves a synthetic "Verdant Energy" org offline, so there is no auth step, no <code>sf</code> CLI, and no DX project to be in. Run <code>/mcp</code> to confirm it connected, ask <em>"what can I ask you?"</em> or <em>"give me an overview of this org"</em>, then add the real-org server below once you know the wiring is good. <a href="/getting-started#demo">more on the demo →</a></p>
+        </div>
+
         <h2 id="command">Claude Code setup</h2>
         <p>From a Salesforce DX project, register the server once:</p>
         <pre><code>claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</code></pre>

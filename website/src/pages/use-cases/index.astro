@@ -49,6 +49,11 @@ const jsonld = [
 >
   <section>
     <div class="container">
+      <div class="hero-demo" style="margin:0 0 34px;">
+        <p class="hero-demo-kicker">try any of these on a demo org first - no org, no auth</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+        <p class="hero-demo-note">One command serves a synthetic "Verdant Energy" org over MCP - 12 custom objects with Flows, Apex, profiles, sharing rules, and OmniStudio wired up - so every use case below has something real to answer against. Fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
+      </div>
       <div class="grid cols-3">
         {cases.map((c) => (
           <article class="card">

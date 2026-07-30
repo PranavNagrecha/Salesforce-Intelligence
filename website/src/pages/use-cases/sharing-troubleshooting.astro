@@ -1,9 +1,22 @@
 ---
 import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
 
 const title = "Salesforce Sharing & Permission Troubleshooting with Org Intelligence";
 const description =
   "Trace Salesforce object, field and sharing access, identify granting sources and understand when record-level checks require opt-in live reads.";
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Why can't this user see this record? Salesforce sharing troubleshooting",
+    description,
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-29",
+    mainEntityOfPage: `${site.url}/use-cases/sharing-troubleshooting`,
+  },
+];
 ---
 
 <DocPage
@@ -14,33 +27,96 @@ const description =
   intro={`Support tickets like "why can't this user see this record?" need more than generic advice. sf-intelligence traces the visibility cascade - Profiles, Permission Sets, OWD, sharing rules, restriction rules - from metadata retrieved from <em>your</em> org.`}
   crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "sharing-troubleshooting", href: "/use-cases/sharing-troubleshooting" }]}
   breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Sharing troubleshooting", path: "/use-cases/sharing-troubleshooting" }]}
+  jsonld={jsonld}
 >
   <section>
     <div class="container">
       <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
+        <div class="callout">
+          <p><strong>Short answer:</strong> Ask sf-intelligence <em>"why can't a Support Agent see this Widget record?"</em> and it walks the sharing cascade stage by stage - org-wide default, then object and field grants, then system permissions, then the role hierarchy, then owner and criteria sharing rules, then restriction and scoping rules - and names the stage that decided the outcome. Any stage your retrieved metadata can't settle comes back <code>unknown</code> instead of a guess.</p>
+        </div>
 
-        <h2 id="questions">Questions admins and support ask</h2>
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">trace a real visibility cascade in 2 minutes - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then ask <em>"why can't a <code>Verdant_Installer</code> see an Invoice?"</em>, <em>"who can access the <code>Payment__c</code> object?"</em>, and <em>"what can the <code>Verdant_Read_Only</code> profile actually do?"</em>. The demo serves a synthetic "Verdant Energy" org with real profiles, permission sets, roles, groups, queues and sharing rules wired up, fully offline - no Salesforce login, no <code>sf</code> CLI. <a href="/getting-started#demo">more on the demo →</a></p>
+        </div>
+
+        <h2 id="questions">What questions does this answer?</h2>
+        <p>Sharing tickets arrive as one-line complaints and turn into an afternoon of clicking. These are the shapes sf-intelligence takes directly:</p>
         <ul>
-          <li>"Why can't User X see this Contact record?"</li>
-          <li>"Who can edit the SSN field on Account?"</li>
-          <li>"Who can access the Case object?"</li>
+          <li>"Why can't User X see this Widget record?"</li>
+          <li>"Who can edit the Status field on Widget__c?"</li>
+          <li>"Who can access the Case object at all?"</li>
           <li>"What permission sets grant delete on Opportunity?"</li>
           <li>"Does this Profile have View All Data?"</li>
+          <li>"What would change if I assigned this permission set to that user?"</li>
         </ul>
 
-        <h2 id="how">How sf-intelligence answers</h2>
-        <p>The permissions plane models object access, field-level security, and the sharing stack from retrieved Profiles, Permission Sets, Permission Set Groups, and sharing metadata. Tools like <code>who_can_access_object</code>, <code>why_cant</code>, and <code>field_access_audit</code> return structured results with caveats when restriction rules or scoping rules apply.</p>
-        <p>Every answer carries provenance (<code>offline_snapshot</code> by default) and flags blind spots - for example, when a RestrictionRule was not retrieved and visibility cannot be fully determined.</p>
+        <h2 id="cascade">Why can't this user see this record?</h2>
+        <p>Salesforce visibility is not one setting, it is a cascade, and the reason a ticket is slow to close is that the answer can live at any layer of it. <code>why_cant_user_see_record</code> walks the layers in the order Salesforce itself applies them and reports which one produced the outcome:</p>
+        <ol>
+          <li><strong>Org-wide default</strong> - the object's <code>sharingModel</code>. A Private object starts from "owner and hierarchy only"; a Public Read/Write object starts from "everyone with object access."</li>
+          <li><strong>Object and field grants</strong> - the Profile plus every assigned Permission Set, unioned with max-wins, so a grant anywhere in the stack is a grant.</li>
+          <li><strong>System permissions</strong> - View All Data, Modify All Data, and the per-object View All / Modify All, which short-circuit everything below them.</li>
+          <li><strong>Role hierarchy</strong> - whether the user sits above the record owner's role, which is the quiet reason a manager can see something their peer cannot.</li>
+          <li><strong>Owner-based sharing rules</strong> - shares driven by who owns the record, typically to a role, group, or queue.</li>
+          <li><strong>Criteria-based sharing rules</strong> - shares driven by field values on the record itself.</li>
+          <li><strong>Restriction and scoping rules</strong> - the layers that can take visibility away again after everything above granted it.</li>
+        </ol>
+        <p>Each stage is reported with what it found in <em>your</em> retrieved metadata, and each carries a verdict of granted, blocked, or <code>unknown</code>. That third value is the important one. A stage that needs record-level data or runtime membership to settle is marked <code>unknown</code> and handed back to you to verify, rather than being quietly resolved in whichever direction would make the answer look complete.</p>
 
-        <h2 id="vs-chatbot">Not the same as asking a chatbot</h2>
-        <p>A general model knows how Salesforce sharing <em>works in theory</em>. sf-intelligence knows which Profiles and Permission Sets <em>exist in your org</em>, which fields they expose, and whether a restriction rule blocks access. When it cannot determine an outcome, it says <code>unknown</code> rather than guessing <code>visible</code>.</p>
+        <h2 id="worked">What does the answer actually look like?</h2>
+        <p>Take the everyday version of the ticket. A support agent says they cannot open a Widget record that a colleague sent them, and <code>Widget__c</code> has an org-wide default of Private.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> why can't the Support Agent profile see Widget records?
+▸ <span class="tok-k">CustomObject:Widget__c</span> — OWD <span class="tok-s">Private</span>
+  1 org-wide default ............ blocked   <span class="tok-c">Private: owner + hierarchy only</span>
+  2 object grants ............... granted   <span class="tok-c">Profile:Support_Agent → Read</span>
+  3 system permissions .......... blocked   <span class="tok-c">no View All Data, no View All on Widget__c</span>
+  4 role hierarchy .............. blocked   <span class="tok-c">Role:Support_Agent not above Role:Sales_Rep (owner)</span>
+  5 owner sharing rules ......... blocked   <span class="tok-c">1 rule found, shares to Group:Ops_Group only</span>
+  6 criteria sharing rules ...... granted*  <span class="tok-c">rule on Status__c = "Escalated" — depends on this record's value</span>
+  7 restriction rules ........... <span class="tok-s">unknown</span>   <span class="tok-c">RestrictionRule not retrieved this refresh</span>
+▸ verdict: <span class="tok-s">object access yes, record access unproven</span>
+  <span class="tok-c">deciding stage: criteria sharing rule needs the record's Status__c value</span>
+  provenance offline_snapshot · completeness: partial</pre></div>
+        <p>Read what that actually tells you. The profile is not the problem - object-level Read is granted. The reason the agent is stuck is that <code>Widget__c</code> is Private, they are not above the owner in the role hierarchy, and the only sharing rule that could reach them is criteria-based on a field value the vault cannot evaluate for one specific record. That is a two-minute answer to a question that normally means opening the object's sharing settings, the profile, every permission set the user holds, the role hierarchy, and the sharing rules list in separate tabs.</p>
+        <p>Note the asterisk and the <code>unknown</code>. The criteria rule is reported as a conditional grant, not a grant, because whether it fires depends on record data. The restriction-rule stage is <code>unknown</code> because that metadata family was not in the last retrieve, and "not retrieved" is reported as not checked rather than as none in the org.</p>
 
-        <h2 id="limits">What it cannot do</h2>
+        <h2 id="reverse">Who can see this - and who can edit this field?</h2>
+        <p>The same permission model answers the question from the other end, which is usually the audit version rather than the ticket version. <code>who_can_access_object</code> enumerates every Profile, Permission Set, role, and group that statically grants access to an object, so you can see the full reachable population instead of checking one user at a time. <code>field_access_audit</code> does the field-level equivalent: give it a field and it cross-walks every container that grants read or edit on it through the <code>grantedBy</code> edges, which is the fastest way to answer "who can edit this sensitive field" without trusting an org chart. <code>effective_permissions</code> flips to a single user and computes the union of their profile and assigned permission sets with each permission attributed back to the container that granted it - so when something is over-granted you know which container to fix.</p>
+        <p>Two more are worth knowing about because they answer questions people rarely think to ask. <code>user_ability</code> covers what a profile or permission set can <em>run or do</em> beyond record CRUD, which is where app, tab, and system-level capability questions live. <code>layout_for_user</code> walks the layout-routing cascade - profile lookup, then layout assignment, then record-type resolution - for the "this user sees the wrong page layout" ticket, which looks like a sharing problem and is not one.</p>
+
+        <h2 id="vs-chatbot">Why doesn't a general AI model get this right?</h2>
+        <p>A general model knows how Salesforce sharing <em>works in theory</em>, and will happily produce a plausible-sounding cascade walkthrough with invented profile names. sf-intelligence knows which Profiles and Permission Sets <em>exist in your org</em>, which fields they expose, which sharing rules were actually written, and whether a restriction rule was retrieved at all. Every answer carries provenance (<code>offline_snapshot</code> by default) and a completeness marker, and when it cannot determine an outcome it returns <code>unknown</code> rather than guessing <code>visible</code>. A confident wrong answer about who can see a record is worse than no answer, because it ends the investigation.</p>
+
+        <h2 id="live">What needs the opt-in live plane?</h2>
+        <p>The vault answers the <em>structure</em> of access offline, from metadata. Some sharing questions are not structural - they are about runtime rows that never appear in metadata XML at all, and those need the read-only <a href="/configuration#live">live plane</a> turned on explicitly.</p>
+        <table class="doc-table">
+          <thead><tr><th>Question</th><th>Answered by</th><th>Needs live?</th></tr></thead>
+          <tbody>
+            <tr><td>Which containers grant access to this object or field?</td><td><code>who_can_access_object</code>, <code>field_access_audit</code></td><td>No - offline vault</td></tr>
+            <tr><td>Why is this profile blocked on this object?</td><td><code>why_cant_user_see_record</code></td><td>No - offline vault</td></tr>
+            <tr><td>What does this profile plus its permission sets add up to?</td><td><code>effective_permissions</code></td><td>No - offline vault</td></tr>
+            <tr><td>Who actually <em>holds</em> this permission set or profile, by name?</td><td><code>live_permset_holders</code></td><td>Yes - assignments are runtime rows</td></tr>
+            <tr><td>Who is actually in this queue or public group?</td><td><code>live_group_members</code></td><td>Yes - XML carries declared members only</td></tr>
+            <tr><td>What does this one user hold right now?</td><td><code>live_user_permsets</code></td><td>Yes</td></tr>
+            <tr><td>Can this user read <em>this specific record</em>, right now?</td><td><code>live_record_access</code></td><td>Yes - the org's own sharing calculation</td></tr>
+            <tr><td>Who is this one record explicitly shared with, and why?</td><td><code>live_record_shares</code></td><td>Yes - reads the object's Share table</td></tr>
+          </tbody>
+        </table>
+        <p>The live plane is off by default, consent-gated, budget-capped, and read-only - a curated roster of SOQL reads, not arbitrary query access. It exists precisely so the offline answer never has to bluff about assignment data it cannot see. When a vault tool hits one of these boundaries it names the live tool that would close the gap instead of estimating.</p>
+
+        <h2 id="limits">What can it still not tell you?</h2>
         <ul>
-          <li><strong>No record-level data</strong> - it analyzes permission containers, not "does User X own this specific record?" (that needs the opt-in live plane or direct SOQL)</li>
-          <li><strong>Static metadata only</strong> - manual shares and team membership changes since the last refresh may be stale</li>
-          <li><strong>Restriction rules require retrieval</strong> - if the rule metadata was not pulled, the answer includes an explicit blind spot</li>
+          <li><strong>Record-level outcomes, offline</strong> - it analyses permission containers and rule definitions, not "does User X own this particular record." A criteria sharing rule's outcome depends on that record's field values, so the offline answer is conditional by construction.</li>
+          <li><strong>Manual shares, sharing sets, and team membership</strong> - these are runtime rows, not metadata. Offline they are <code>unknown</code>; <code>live_record_shares</code> reads them from the Share table when the live plane is enabled.</li>
+          <li><strong>Anything added since your last refresh</strong> - the vault is a point-in-time snapshot. A permission set created this morning is not in last week's answer, which is why <code>health_check</code> reports vault age and flags staleness.</li>
+          <li><strong>Families the retrieve skipped</strong> - if restriction or scoping rule metadata was not pulled, the answer carries an explicit blind spot for that stage. Run <code>coverage_report</code> to see what the last refresh actually retrieved before you rely on an absence.</li>
+          <li><strong>No write path</strong> - it will tell you which container to change and never change it. Granting the access stays a deliberate human action in Setup or a deploy.</li>
         </ul>
+        <p>For the full boundary list and how each of these is tested, see the <a href="/trust">trust page</a>. To trace what a permission-set change would touch elsewhere before you make it, see <a href="/use-cases/impact-analysis">Salesforce impact analysis</a>.</p>
 
         <div style="padding-top:36px;">
           <div class="cta-box">

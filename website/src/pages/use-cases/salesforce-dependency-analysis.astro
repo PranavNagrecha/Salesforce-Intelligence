@@ -13,7 +13,7 @@ const jsonld = [
     description: "How sf-intelligence traces Salesforce metadata dependencies for fields, Flows, Apex, objects, layouts, and permissions.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: `${site.url}/use-cases/salesforce-dependency-analysis`,
   },
 ];
@@ -32,7 +32,13 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">trace dependencies both ways in 2 minutes - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then run the three worked examples below against real (synthetic) metadata: <em>"what depends on <code>Invoice__c.Amount__c</code>?"</em> for a field, <em>"what does the <code>Installation_On_Complete</code> flow depend on, and what depends on it?"</em> for a Flow traced both directions, and <em>"what does <code>PaymentService</code> depend on, and what calls it?"</em> for an Apex call graph with its blind spots named. Synthetic "Verdant Energy" org, served fully offline: no Salesforce login, no <code>sf</code> CLI. <a href="/getting-started#demo">more on the demo →</a></p>
+        </div>
+
         <h2 id="why">Why Salesforce dependencies are hard to see</h2>
         <p>Salesforce dependencies live across XML metadata, Apex source, formulas, Flow definitions, Profile and Permission Set grants, page layouts, packages, and integration configuration. A single field can be referenced by automation, code, reports, validation rules, and external systems. sf-intelligence collects those signals into a local graph and reports how each dependency was found.</p>
 

@@ -27,6 +27,15 @@ interface Props {
   ogImage?: string;
   /** Set false for error pages (404) — emits noindex and omits canonical. */
   index?: boolean;
+  /**
+   * og:type. Defaults to "website"; pass "article" on blog posts so social and
+   * answer-engine crawlers classify them as writing rather than as landing pages.
+   */
+  ogType?: "website" | "article";
+  /** ISO date this page's content was published (blog posts). Feeds the WebPage node. */
+  datePublished?: string;
+  /** ISO date this page's content was last meaningfully changed. */
+  dateModified?: string;
 }
 
 const {
@@ -37,14 +46,26 @@ const {
   jsonld = [],
   ogImage,
   index = true,
+  ogType = "website",
+  datePublished,
+  dateModified,
 } = Astro.props;
 
 const canonicalClean = path === "/" ? site.url + "/" : new URL(path, site.url).href;
 const image = new URL(ogImage ?? "/assets/img/og-image.png", site.url).href;
 
 // ---- structured-data @graph, cross-referenced by @id ----
+// @id scope is PER-DOCUMENT: a consumer parsing one URL cannot resolve an @id
+// defined on another page. So every node a page's graph references must also be
+// emitted in that same graph — which is why Organization, WebSite, Person and
+// WebPage below are unconditional rather than "defined once on the home page".
 const ORG_ID = `${site.url}/#org`;
 const WEBSITE_ID = `${site.url}/#website`;
+const PERSON_ID = `${site.url}/#author`;
+const WEBPAGE_ID = `${canonicalClean}#webpage`;
+const BREADCRUMB_ID = `${canonicalClean}#breadcrumb`;
+
+const hasCrumbs = Boolean(breadcrumbs && breadcrumbs.length);
 
 const graph: Record<string, unknown>[] = [
   {
@@ -54,8 +75,18 @@ const graph: Record<string, unknown>[] = [
     url: `${site.url}/`,
     logo: `${site.url}/assets/img/icon-512.png`,
     sameAs: site.sameAs,
+    founder: { "@id": PERSON_ID },
     description:
       "Independent, source-available project (MIT + Commons Clause). Not affiliated with Salesforce, Inc.",
+  },
+  // The maintainer as a real entity. Only name + verifiable public profiles —
+  // no invented job title, employer, image or location.
+  {
+    "@type": "Person",
+    "@id": PERSON_ID,
+    name: site.author,
+    url: site.github,
+    sameAs: [site.github],
   },
   {
     "@type": "WebSite",
@@ -68,15 +99,44 @@ const graph: Record<string, unknown>[] = [
   },
 ];
 
-if (breadcrumbs && breadcrumbs.length) {
+if (hasCrumbs) {
   graph.push({
     "@type": "BreadcrumbList",
-    itemListElement: [{ name: "Home", path: "/" }, ...breadcrumbs].map((b, i) => ({
+    "@id": BREADCRUMB_ID,
+    itemListElement: [{ name: "Home", path: "/" }, ...breadcrumbs!].map((b, i) => ({
       "@type": "ListItem",
       position: i + 1,
       name: b.name,
       item: new URL(b.path, site.url).href,
     })),
+  });
+}
+
+// WebPage binds the whole graph to THIS url. Without it nothing in the graph is
+// anchored to the document being parsed, so a consumer sees a set of floating
+// entities with no statement about the page it is actually looking at.
+if (index) {
+  graph.push({
+    "@type": "WebPage",
+    "@id": WEBPAGE_ID,
+    url: canonicalClean,
+    name: title,
+    description,
+    isPartOf: { "@id": WEBSITE_ID },
+    about: { "@id": ORG_ID },
+    primaryImageOfPage: { "@id": `${canonicalClean}#primaryimage` },
+    inLanguage: "en",
+    ...(hasCrumbs ? { breadcrumb: { "@id": BREADCRUMB_ID } } : {}),
+    ...(datePublished ? { datePublished } : {}),
+    ...((dateModified ?? datePublished) ? { dateModified: dateModified ?? datePublished } : {}),
+  });
+  graph.push({
+    "@type": "ImageObject",
+    "@id": `${canonicalClean}#primaryimage`,
+    url: image,
+    contentUrl: image,
+    width: 1200,
+    height: 630,
   });
 }
 
@@ -99,7 +159,7 @@ for (const node of jsonld) graph.push(node);
 <meta name="theme-color" content="#05070A" />
 
 {/* ===== Open Graph ===== */}
-<meta property="og:type" content="website" />
+<meta property="og:type" content={ogType} />
 <meta property="og:site_name" content={site.name} />
 <meta property="og:title" content={title} />
 <meta property="og:description" content={description} />

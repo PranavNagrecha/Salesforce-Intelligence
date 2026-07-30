@@ -16,9 +16,13 @@ const SOFTWARE_ID = `${site.url}/#software`;
 const intro =
   `<strong>sf-intelligence</strong> is a free, source-available, read-only Salesforce MCP server. It answers metadata, dependency, permission, Apex, Flow and impact questions from a local, offline vault - never writing to your org. Choose it over DevOps-focused MCP servers when you need grounded, evidence-labelled understanding, not deploys. Then <a href="/getting-started">install sf-intelligence</a> and ask your first org question.`;
 
-// The one canonical #software entity is fully defined on the home page; here we
-// only reference it by @id and lead this page's graph with a TechArticle
-// (schema dedupe item 12 + TechArticle enrichment item 13).
+// `@id` scope is PER-DOCUMENT — a consumer parsing /mcp cannot resolve an @id
+// that is only defined on the home page, and schema.org has no cross-URL merge.
+// This page previously emitted `{"@type": "SoftwareApplication", "@id": ...}` as
+// a bare "reference", but because it carries a @type it parses as a DEFINITION
+// with every required property missing, which made it the only invalid item on
+// the site — on the site's best-ranking page. So define the entity properly here
+// too. The @id stays identical to the home page's so the two describe one entity.
 const jsonld = [
   {
     "@type": "TechArticle",
@@ -27,11 +31,29 @@ const jsonld = [
     description,
     author: { "@id": ORG_ID },
     publisher: { "@id": ORG_ID },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: canonical,
     about: { "@id": SOFTWARE_ID },
   },
-  { "@type": "SoftwareApplication", "@id": SOFTWARE_ID },
+  {
+    "@type": "SoftwareApplication",
+    "@id": SOFTWARE_ID,
+    name: "sf-intelligence",
+    applicationCategory: "DeveloperApplication",
+    applicationSubCategory: "Salesforce org intelligence MCP server",
+    operatingSystem: "macOS, Linux, Windows (Node.js 20+)",
+    softwareVersion: siteData.version,
+    description:
+      "An offline, read-only Salesforce org intelligence MCP server. Ask questions in plain language and get answers grounded in real org metadata: schema, dependencies, permissions, Apex, Flows, integrations, and OmniStudio.",
+    license: `${site.url}/licensing`,
+    url: `${site.url}/`,
+    downloadUrl: site.npm,
+    codeRepository: site.github,
+    softwareHelp: `${site.url}/getting-started`,
+    author: { "@id": ORG_ID },
+    publisher: { "@id": ORG_ID },
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  },
 ];
 ---
 
@@ -67,6 +89,21 @@ const jsonld = [
           </tbody>
         </table>
         <p>See detailed comparisons on the <a href="/compare">compare hub</a> — start with <a href="/compare/salesforce-dx-mcp">vs Salesforce MCP</a> (hosted + DX + Agentforce-as-client).</p>
+
+        <h2 id="demo">Try it without a Salesforce org</h2>
+        <p>You do not need an org, an authenticated CLI, or any configuration to evaluate this. One command serves a built-in <strong>synthetic org</strong> - "Verdant Energy", a fictional solar installer - over MCP. Fully offline, no Salesforce auth, no <code>sf</code> CLI, nothing to connect.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+        <p>For Claude Desktop, Cursor, Codex, or any other MCP client, the same demo server registers through ordinary stdio config:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">mcp config</span></div><pre>{'{'}
+  <span class="tok-s">"mcpServers"</span>: {'{'}
+    <span class="tok-s">"sf-intelligence-demo"</span>: {'{'}
+      <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
+      <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
+      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"demo"</span>]
+    {'}'}
+  {'}'}
+{'}'}</pre></div>
+        <p>Then ask it something a real org question would look like - <em>"what breaks if I delete <code>Widget__c.Status__c</code>?"</em> - and read the citations it returns. When you want it pointed at your own org, the requirements below apply.</p>
 
         <h2 id="clients">Works with Claude, Cursor, Codex, and more</h2>
         <p>Register once via stdio transport. The server resolves the vault from your Salesforce DX repo's working directory. For a step-by-step walkthrough, see <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>.</p>

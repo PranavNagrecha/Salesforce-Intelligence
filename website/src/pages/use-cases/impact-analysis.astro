@@ -15,7 +15,7 @@ const jsonld = [
     description: "Ask what breaks if you delete or change a Salesforce field, object, Flow, or Apex class using read-only dependency analysis.",
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-23",
+    dateModified: "2026-07-29",
     mainEntityOfPage: `${site.url}/use-cases/impact-analysis`,
   },
 ];
@@ -34,7 +34,13 @@ const jsonld = [
   <section>
     <div class="container">
       <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-23</p>
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
+
+        <div class="hero-demo" style="margin:0 0 30px;">
+          <p class="hero-demo-kicker">run a blast-radius question in 2 minutes - no org, no auth</p>
+          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+          <p class="hero-demo-note">Then try all three shapes of the question: <em>"what breaks if I delete <code>Invoice__c.Amount__c</code>?"</em> (a field with a roll-up, a formula, and Apex on it), <em>"what if I make <code>Permit__c.Approved_Date__c</code> required?"</em>, and <em>"what breaks if I deactivate the <code>Installation_On_Complete</code> flow?"</em>. Synthetic "Verdant Energy" org, served fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
+        </div>
 
         <h2 id="problem">The problem with guessing</h2>
         <p>A general AI model will list "typical" references - validation rules, page layouts, reports - but cannot know which ones exist in <em>your</em> org. sf-intelligence builds a DuckDB dependency graph from a read-only metadata retrieve and traces edges with confidence tags: <code>declared</code> (from Salesforce metadata), <code>parsed</code> (from AST/XML analysis), or <code>heuristic</code> (regex - spot-check these).</p>
@@ -65,6 +71,7 @@ const jsonld = [
 
         <h2 id="limits">Honest boundaries</h2>
         <p>sf-intelligence performs <strong>static analysis</strong>. Dynamic SOQL, reflective Apex, and runtime-only references are invisible. "No references found" means <strong>no static evidence</strong>, not "definitely unused." See the full boundary list on the <a href="/trust">trust page</a>.</p>
+        <p>Blast radius is evidence, not a decision. Turning a dependent list into an actual change plan means knowing which references block a change outright, which ones succeed and break something quietly afterwards, and how to rank a backlog when a tool returns zero - which is the subject of <a href="/blog/delete-unused-salesforce-fields">the dependency-first method for deciding whether a Salesforce field is safe to delete</a>. For the field-specific simulation with a verdict attached, see <a href="/use-cases/what-breaks-if-you-delete-a-field">what breaks if you delete a field</a>.</p>
 
         <div style="padding-top:36px;">
           <div class="cta-box">
