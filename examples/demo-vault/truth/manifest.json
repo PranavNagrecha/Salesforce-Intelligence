@@ -1,0 +1,72 @@
+{
+  "_comment": "AUDIT-F7 — independent Verdant truth. Authored from DEMO-ORG-SPEC / demo-questions.md; NOT dumped from DuckDB. Rebuild the vault with `sfi refresh --no-pull` when source changes; update this file when design-goal facts change.",
+  "org": "Verdant Energy",
+  "version": 1,
+  "mustExist": [
+    "CustomObject:Project__c",
+    "CustomObject:Invoice__c",
+    "CustomObject:Payment__c",
+    "CustomField:Invoice__c.Amount__c",
+    "CustomField:Invoice__c.Balance__c",
+    "CustomField:Project__c.Margin_Percent__c",
+    "CustomField:Project__c.Total_Invoiced__c",
+    "ApexClass:IncentiveBatch",
+    "ApexClass:PaymentService",
+    "Profile:Verdant_Installer",
+    "Profile:Verdant_Sales_Rep",
+    "Profile:Verdant_Read_Only"
+  ],
+  "mustHaveInboundEdges": [
+    {
+      "toId": "CustomField:Invoice__c.Amount__c",
+      "anyOf": [
+        { "edgeType": "readsFrom", "fromId": "ApexClass:PaymentService" },
+        { "edgeType": "references", "fromId": "CustomField:Invoice__c.Balance__c" }
+      ]
+    }
+  ],
+  "toolExpectations": [
+    {
+      "id": "delete-amount-blocking",
+      "tool": "sfi.safe_to_delete_field",
+      "args": { "fieldId": "CustomField:Invoice__c.Amount__c" },
+      "expect": { "verdict": "blocking" }
+    },
+    {
+      "id": "governor-incentive-batch",
+      "tool": "sfi.governor_limit_risks",
+      "args": {},
+      "expect": { "classesInclude": ["ApexClass:IncentiveBatch"] }
+    },
+    {
+      "id": "hardcoded-incentive-batch",
+      "tool": "sfi.find_hardcoded_values",
+      "args": {},
+      "expect": { "matchesInclude": ["ApexClass:IncentiveBatch"] }
+    },
+    {
+      "id": "resolve-paymnet-typo",
+      "tool": "sfi.resolve",
+      "args": { "query": "paymnet" },
+      "expect": {
+        "disposition": "exact",
+        "topCandidateId": "CustomObject:Payment__c"
+      }
+    },
+    {
+      "id": "save-project-insert",
+      "tool": "sfi.what_happens_on_save",
+      "args": { "objectApiName": "Project__c", "event": "insert" },
+      "expect": {
+        "objectModeled": true,
+        "minActiveComponents": 1
+      }
+    }
+  ],
+  "sourceOnlyFamilies": [
+    "Bot",
+    "Network",
+    "CustomSite",
+    "SamlSsoConfig"
+  ]
+}
