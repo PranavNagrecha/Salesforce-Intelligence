@@ -55,6 +55,28 @@ describe('capabilitiesHandler', () => {
     expect(r.value.data.toolCount).toBeGreaterThan(50);
   });
 
+  it('exposes a registry-backed productManifest (registered total + concept model)', async () => {
+    const r = await capabilitiesHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const m = r.value.data.productManifest;
+    expect(m.schemaVersion).toBe('1.0');
+    expect(m.tools.total).toBe(V01_TOOLS.length);
+    expect(m.tools.advertised).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
+    expect(m.tools.hidden).toBe(V01_TOOLS.length - m.tools.advertised);
+    expect(m.tools.coreProfileSize).toBe(18);
+    expect(m.conceptModel.concepts).toBeGreaterThan(0);
+    expect(m.conceptModel.rules).toBeGreaterThan(0);
+    expect(m.conceptModel.contentHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(m.catalogHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(m.graph.tables).toEqual([
+      'nodes',
+      'edges',
+      'facts',
+      'schema_version',
+    ]);
+  });
+
   it('every tool referenced in a category actually exists in the registry', async () => {
     const r = await capabilitiesHandler(ctx, {});
     expect(r.ok).toBe(true);

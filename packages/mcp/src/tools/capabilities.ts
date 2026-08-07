@@ -34,6 +34,10 @@ import {
   routeGapsNudge,
   type RouteGapsNudge,
 } from '../intent-router.js';
+import {
+  buildProductManifestSummary,
+  type ProductManifestSummary,
+} from '../product-manifest-summary.js';
 import type { Context } from '../server.js';
 
 /**
@@ -160,6 +164,12 @@ export interface CapabilitiesOutput {
    * Category/count only — never includes question text.
    */
   readonly routeGaps: RouteGapsNudge;
+  /**
+   * Registry-derived product facts (tool / graph / concept-model counts +
+   * catalog hash). Same source as `eval/product-manifest.json` — never
+   * handwritten documentation numbers.
+   */
+  readonly productManifest: ProductManifestSummary;
 }
 
 /** The npm-update sub-report of {@link CapabilitiesOutput}. */
@@ -739,6 +749,7 @@ export const capabilitiesHandler = async (
   // resolves at call-time, when both modules are fully initialized.
   const { V01_TOOLS } = await import('./index.js');
   const routeGaps = await routeGapsNudge(opts?.gapLogFile ?? gapLogPath());
+  const productManifest = buildProductManifestSummary();
 
   return ok({
     data: {
@@ -746,9 +757,10 @@ export const capabilitiesHandler = async (
       tagline:
         'Offline, MCP-first knowledge base for one Salesforce org — ask questions in plain language, get answers grounded in the org’s real metadata.',
       // ADVERTISED count: the distinct tools a host sees via tools/list — the
-      // 4 hidden back-compat aliases are excluded (matches website/recalibrate.mjs
+      // hidden back-compat aliases are excluded (matches website/recalibrate.mjs
       // and the roster convention). Profile-independent headline (always the full
-      // advertised set, not the core-narrowed 18).
+      // advertised set, not the core-narrowed 18). Registered total + concept
+      // model size live on `productManifest` so hosts never confuse the two.
       toolCount: V01_TOOLS.filter((t) => !t.hidden).length,
       commandCount: COMMANDS.length,
       intelligencePlanes: INTELLIGENCE_PLANES,
@@ -762,6 +774,7 @@ export const capabilitiesHandler = async (
       update: toUpdateAvailability(update),
       trustGlossary: TRUST_GLOSSARY,
       routeGaps,
+      productManifest,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

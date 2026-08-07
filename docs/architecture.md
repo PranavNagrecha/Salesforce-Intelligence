@@ -49,7 +49,8 @@ enters reasoning *only* through the grounded slice passed to the engine at query
 time.
 
 `sfi.interpret` joins the two at query time — the grounded org slice (Graph A)
-against the org-independent Concept Model (Graph B):
+against the org-independent Concept Model (Graph B — 142 concepts / 193 rules;
+pinned by `eval/product-manifest.json`):
 
 ```
    Graph A · org vault slice          Graph B · Concept Model
@@ -226,10 +227,13 @@ Commit policy, enforced by the `.gitignore` that `/sfi-init` writes:
 | `org-kb/source/`      | gitignored | Large; regenerable by re-running refresh. |
 | `org-kb/graph/graph.duckdb` | gitignored | Build artifact; regenerable from `source/` + extractors. |
 
-The graph itself is a single DuckDB file with two tables and an index pack:
+The graph itself is a single DuckDB file with four tables and an index pack
+(see `ProductManifest.graph.tables` / `eval/product-manifest.json`):
 
 - `nodes(id, type, api_name, label, parent_id, source_path, last_modified_date, last_modified_by, api_version, properties_json)`
 - `edges(from_id, to_id, edge_type, confidence, source, properties_json)` with `PRIMARY KEY (from_id, to_id, edge_type, source)`
+- `facts(subject_id, metric, value_json, captured_at, method, source)` — record-DATA observations outside the metadata graph (refresh imports never touch it)
+- `schema_version(id, version)` — integer schema ledger for migrations
 - Indexes on `nodes(type)`, `nodes(parent_id)`, `edges(to_id)`, `edges(from_id)`.
 
 DuckDB is embedded; there is no separate database server to run.

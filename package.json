@@ -45,6 +45,8 @@
     "check:public-interface": "node scripts/check-public-interface.mjs",
     "check:version-consistency": "node scripts/check-version-consistency.mjs",
     "product-surface": "node scripts/product-surface.mjs",
+    "product-manifest": "node scripts/generate-product-manifest.mjs",
+    "product-manifest:check": "node scripts/generate-product-manifest.mjs --check",
     "snapshot": "node scripts/release-snapshot.mjs",
     "release": "pnpm -r build && pnpm -r publish --access public",
     "sast": "node scripts/sast-gate.mjs",

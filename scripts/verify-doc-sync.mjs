@@ -1,19 +1,28 @@
 #!/usr/bin/env node
 /**
- * Fast documentation drift gate.
+ * Fast documentation / product-fact drift gate.
  *
- * This script intentionally checks facts the product can prove cheaply:
+ * Failures (objective, registry-backed):
  * - every registered MCP tool has a description
- * - website calibrated counts match the built product surface
+ * - committed eval/product-manifest.json matches runtime registries
+ * - website calibrated counts match the ProductManifest
+ * - README / CLAUDE / architecture current-fact concept counts match
+ * - configuration.md advertised/registered tool counts match
+ * - architecture.md graph table inventory matches the manifest
  * - known stale boundary phrases are absent from active skills/docs
  *
- * It also reports, but does not yet fail on, tool names missing from skills.
- * That coverage audit is useful, but the current skills describe many tools by
- * family rather than by exact tool name.
+ * Warnings (reported, non-blocking):
+ * - tool names missing from skills
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  GRAPH_TABLES,
+  buildProductManifest,
+  manifestDrift,
+} from './lib/build-product-manifest.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const failures = [];
@@ -31,13 +40,21 @@ function warn(message) {
   warnings.push(message);
 }
 
-let V01_TOOLS;
+let manifest;
 try {
-  ({ V01_TOOLS } = await import(join(root, 'packages/mcp/dist/src/tools/index.js')));
+  manifest = await buildProductManifest(root);
 } catch (error) {
-  fail(`Could not import built V01_TOOLS. Run pnpm -r build first. ${error.message}`);
-  V01_TOOLS = [];
+  fail(`Could not build ProductManifest. Run pnpm -r build first. ${error.message}`);
+  manifest = null;
 }
+
+const V01_TOOLS = manifest
+  ? (
+      await import(
+        join(root, 'packages/mcp/dist/src/tools/index.js')
+      )
+    ).V01_TOOLS
+  : [];
 
 const names = new Set();
 for (const tool of V01_TOOLS) {
@@ -54,24 +71,180 @@ for (const tool of V01_TOOLS) {
   }
 }
 
-// recalibrate.mjs writes the calibrated snapshot here (post-Astro location).
-const websiteDataPath = join(root, 'website/src/data/site-data.json');
-if (existsSync(websiteDataPath)) {
-  const siteData = JSON.parse(read(websiteDataPath));
-  if (siteData.toolCount !== V01_TOOLS.length) {
+// ── ProductManifest committed artifact ──────────────────────────────────────
+const manifestPath = join(root, 'eval/product-manifest.json');
+if (!manifest) {
+  // Already failed above.
+} else if (!existsSync(manifestPath)) {
+  fail(
+    'eval/product-manifest.json missing. Run: node scripts/generate-product-manifest.mjs',
+  );
+} else {
+  const committed = JSON.parse(read(manifestPath));
+  const drift = manifestDrift(committed, manifest);
+  if (drift) {
     fail(
-      `website/src/data/site-data.json toolCount=${siteData.toolCount} but V01_TOOLS has ${V01_TOOLS.length}. Run website/recalibrate.mjs before release.`,
+      `eval/product-manifest.json drifted from runtime registries ` +
+        `(committed ${committed.identityHash} vs live ${manifest.identityHash}). ` +
+        `Run: node scripts/generate-product-manifest.mjs`,
     );
   }
-} else {
+  if (committed.tools.total !== V01_TOOLS.length) {
+    fail(
+      `product-manifest tools.total=${committed.tools.total} but V01_TOOLS has ${V01_TOOLS.length}`,
+    );
+  }
+}
+
+// ── Website calibrated snapshot (Astro path) ────────────────────────────────
+const websiteDataPaths = [
+  join(root, 'website/src/data/site-data.json'),
+  join(root, 'website/site-data.json'), // legacy pre-Astro path
+];
+const websiteDataPath = websiteDataPaths.find((p) => existsSync(p));
+if (websiteDataPath && manifest) {
+  const siteData = JSON.parse(read(websiteDataPath));
+  if (siteData.toolCount !== manifest.tools.total) {
+    fail(
+      `${websiteDataPath} toolCount=${siteData.toolCount} but ProductManifest tools.total=${manifest.tools.total}. Run website/recalibrate.mjs.`,
+    );
+  }
+  if (
+    siteData.conceptCount != null &&
+    siteData.conceptCount !== manifest.conceptModel.concepts
+  ) {
+    fail(
+      `${websiteDataPath} conceptCount=${siteData.conceptCount} but ProductManifest concepts=${manifest.conceptModel.concepts}. Run website/recalibrate.mjs.`,
+    );
+  }
+  if (
+    siteData.conceptRuleCount != null &&
+    siteData.conceptRuleCount !== manifest.conceptModel.rules
+  ) {
+    fail(
+      `${websiteDataPath} conceptRuleCount=${siteData.conceptRuleCount} but ProductManifest rules=${manifest.conceptModel.rules}. Run website/recalibrate.mjs.`,
+    );
+  }
+  if (
+    siteData.componentTypeCount != null &&
+    siteData.componentTypeCount !== manifest.graph.componentTypeCount
+  ) {
+    fail(
+      `${websiteDataPath} componentTypeCount=${siteData.componentTypeCount} but ProductManifest has ${manifest.graph.componentTypeCount}.`,
+    );
+  }
+  if (
+    siteData.edgeTypeCount != null &&
+    siteData.edgeTypeCount !== manifest.graph.edgeTypeCount
+  ) {
+    fail(
+      `${websiteDataPath} edgeTypeCount=${siteData.edgeTypeCount} but ProductManifest has ${manifest.graph.edgeTypeCount}.`,
+    );
+  }
+} else if (!websiteDataPath) {
   warn('website/src/data/site-data.json not found; skipping website count check.');
+}
+
+// ── Current-fact concept counts in instructional docs ───────────────────────
+if (manifest && manifest.conceptModel.concepts > 0) {
+  const { concepts, rules } = manifest.conceptModel;
+  // Allow optional markdown bold around the integers: **142** concepts / **193** rules
+  const currentFactRe =
+    /(?:Concept Model|Graph B)[^\n]{0,120}?\b(\d+)\*?\*?\s*concepts\s*\/\s*\*?\*?(\d+)\*?\*?\s*rules/gi;
+  const docsToPin = [
+    join(root, 'README.md'),
+    join(root, 'CLAUDE.md'),
+    join(root, 'docs/architecture.md'),
+  ];
+  for (const path of docsToPin) {
+    if (!existsSync(path)) continue;
+    const text = read(path);
+    let match;
+    let found = false;
+    currentFactRe.lastIndex = 0;
+    while ((match = currentFactRe.exec(text)) !== null) {
+      found = true;
+      const c = Number(match[1]);
+      const r = Number(match[2]);
+      // Historical prose ("when the Concept Model held 94…") is allowed only
+      // outside these instructional files — here every pair must be current.
+      if (c !== concepts || r !== rules) {
+        fail(
+          `${path} states ${c} concepts / ${r} rules but ProductManifest has ${concepts}/${rules}`,
+        );
+      }
+    }
+    if (!found) {
+      warn(
+        `${path} has no "N concepts / M rules" current-fact form to pin.`,
+      );
+    }
+  }
+}
+
+// ── configuration.md tool counts ────────────────────────────────────────────
+const configurationMd = join(root, 'docs/configuration.md');
+if (existsSync(configurationMd) && manifest) {
+  const configText = read(configurationMd);
+  const rosterRe =
+    /(\d+)\s+advertised tool schemas\s*\((\d+)\s+registered;\s*(\d+)\s+back-compat/;
+  const m = configText.match(rosterRe);
+  if (!m) {
+    fail(
+      'docs/configuration.md missing "N advertised tool schemas (M registered; K back-compat" pin.',
+    );
+  } else {
+    const advertised = Number(m[1]);
+    const registered = Number(m[2]);
+    const backCompat = Number(m[3]);
+    if (advertised !== manifest.tools.advertised) {
+      fail(
+        `docs/configuration.md advertised=${advertised} but ProductManifest advertised=${manifest.tools.advertised}`,
+      );
+    }
+    if (registered !== manifest.tools.total) {
+      fail(
+        `docs/configuration.md registered=${registered} but ProductManifest total=${manifest.tools.total}`,
+      );
+    }
+    if (backCompat !== manifest.tools.hidden) {
+      fail(
+        `docs/configuration.md back-compat=${backCompat} but ProductManifest hidden=${manifest.tools.hidden}`,
+      );
+    }
+  }
+}
+
+// ── architecture.md graph tables ────────────────────────────────────────────
+const architectureMd = join(root, 'docs/architecture.md');
+if (existsSync(architectureMd) && manifest) {
+  const arch = read(architectureMd);
+  if (/with two tables/.test(arch)) {
+    fail(
+      'docs/architecture.md still says the DuckDB graph has "two tables"; ' +
+        `ProductManifest.graph.tables = [${GRAPH_TABLES.join(', ')}].`,
+    );
+  }
+  for (const table of GRAPH_TABLES) {
+    if (table === 'schema_version') {
+      // May be described as schema_version ledger rather than inline column list.
+      if (!arch.includes('schema_version') && !arch.includes('facts')) {
+        fail(`docs/architecture.md missing graph table mention: ${table}`);
+      }
+      continue;
+    }
+    if (!new RegExp(`\`${table}\\b`).test(arch) && !arch.includes(`\`${table}`)) {
+      // Accept either `nodes(...)` column form or a bullet naming the table.
+      if (!arch.includes(table)) {
+        fail(`docs/architecture.md missing graph table: ${table}`);
+      }
+    }
+  }
 }
 
 // Instructional docs Claude reads to decide boundary disclosures — these must
 // not carry a stale claim. CHANGELOG.md is deliberately excluded: it is a
-// historical log that legitimately QUOTES removed phrasings (e.g. "removed the
-// 'no LWC/Aura references' claim"), which a substring scan can't tell apart
-// from making the claim.
+// historical log that legitimately QUOTES removed phrasings.
 const activeDocs = [
   join(root, 'README.md'),
   join(root, 'CLAUDE.md'),
@@ -178,7 +351,6 @@ if (!read(join(root, 'README.md')).includes('sfi.capabilities')) {
   warn('README.md does not mention sfi.capabilities.');
 }
 
-const configurationMd = join(root, 'docs/configuration.md');
 const requiredConfigurationPhrases = [
   'sfi register-vault',
   'SF_INTELLIGENCE_REGISTRY_PATH',
@@ -200,6 +372,10 @@ if (existsSync(configurationMd)) {
 
 const result = {
   toolCount: V01_TOOLS.length,
+  advertisedToolCount: manifest?.tools.advertised ?? null,
+  conceptCount: manifest?.conceptModel.concepts ?? null,
+  conceptRuleCount: manifest?.conceptModel.rules ?? null,
+  identityHash: manifest?.identityHash ?? null,
   skillFileCount: skillFiles.length,
   warnings,
   failures,

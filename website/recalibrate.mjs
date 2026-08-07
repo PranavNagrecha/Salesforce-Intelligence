@@ -117,6 +117,10 @@ try {
   log(`• slash commands:               ${surface.slashCommandCount}`);
   if (surface.toolCount && surface.toolCount !== toolCount)
     warn(`product-surface toolCount (${surface.toolCount}) != V01_TOOLS length (${toolCount}); trusting V01_TOOLS.`);
+  // Prefer ProductManifest concept counts when present (same registries as
+  // eval/product-manifest.json) so site-data cannot disagree with the SSOT.
+  if (surface.conceptCount != null) conceptCount = surface.conceptCount;
+  if (surface.conceptRuleCount != null) conceptRuleCount = surface.conceptRuleCount;
 } catch (e) {
   warn("product-surface.mjs failed; skill/command/type counts will be left untouched.", e.message);
 }

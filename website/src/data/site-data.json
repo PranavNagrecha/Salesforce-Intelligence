@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-29T16:16:50.387Z",
+  "generatedAt": "2026-08-07T13:40:41.938Z",
   "version": "0.2.5",
   "toolCount": 209,
   "skillCount": 26,
@@ -7,17 +7,19 @@
   "commandCount": 5,
   "componentTypeCount": 102,
   "edgeTypeCount": 23,
+  "conceptCount": 142,
+  "conceptRuleCount": 193,
   "tests": {
     "packages": [
       {
         "name": "mcp",
         "files": 271,
-        "cases": 5458
+        "cases": 5462
       },
       {
         "name": "extractors",
-        "files": 83,
-        "cases": 1110
+        "files": 88,
+        "cases": 1185
       },
       {
         "name": "cli",
@@ -60,12 +62,12 @@
         "cases": 40
       }
     ],
-    "totalCases": 8047,
-    "totalFiles": 459,
+    "totalCases": 8126,
+    "totalFiles": 464,
     "packageCount": 10,
-    "approx": 8000
+    "approx": 8100
   },
-  "integrationSuiteCount": 3,
+  "integrationSuiteCount": 7,
   "gates": [
     "Type-check",
     "Lint",
@@ -89,13 +91,13 @@
     {
       "name": "mcp",
       "files": 271,
-      "cases": 5458,
+      "cases": 5462,
       "description": "The 209 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 83,
-      "cases": 1110,
+      "files": 88,
+      "cases": 1185,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
