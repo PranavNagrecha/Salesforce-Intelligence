@@ -275,17 +275,15 @@ field.
 
 The full roster's 205 advertised tool schemas (209 registered; 4 back-compat
 aliases stay hidden) cost tens of thousands of context tokens in MCP clients
-that do not defer tool definitions. `SFI_TOOL_PROFILE=core` advertises only
-the 18-schema core roster (orientation, resolve/route, the universal graph
-reads, and the catalog gateway `list_analyses` / `describe_analysis` /
-`run_analysis` through which EVERY other analysis stays reachable with
-byte-identical output). The profile is fixed at server boot — clients fetch
-`tools/list` once — and dispatch is never narrowed: a non-advertised tool
-called directly still works.
+that do not defer tool definitions. **Default is `core`** (AUDIT-F6): only the
+18-schema spine is advertised and directly invokable. Everything else stays
+reachable via `sfi.run_analysis` with byte-identical output. Set
+`SFI_TOOL_PROFILE=full` to advertise and directly invoke the entire roster.
+The profile is fixed at server boot — clients fetch `tools/list` once.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SFI_TOOL_PROFILE` | `full` | `core` advertises the 18-schema roster; anything else (or unset) advertises everything. Zero behavior change under the default. |
+| `SFI_TOOL_PROFILE` | `core` | Default `core` advertises (and directly invokes) the 18-schema spine; non-core tools run via `sfi.run_analysis`. Set `full` to advertise/invoke the entire roster. Unknown values fall back to `full`. |
 
 ## Input scope & selectors
 

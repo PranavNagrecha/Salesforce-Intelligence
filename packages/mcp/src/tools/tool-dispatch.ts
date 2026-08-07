@@ -847,16 +847,8 @@ export const dispatchTool = async (
           .join('; ');
         return jsonResult({ error: { kind: 'invalid-query', message } });
       }
-      const resolved = resolveRunAnalysis(parsed.data);
+      const resolved = resolveRunAnalysis(parsed.data, KNOWN_TOOL_NAMES);
       if (!resolved.ok) return jsonResult({ error: resolved.error });
-      if (!KNOWN_TOOL_NAMES.has(resolved.value.name)) {
-        return jsonResult({
-          error: {
-            kind: 'invalid-query',
-            message: `Unknown analysis '${parsed.data.name}'. Call sfi.list_analyses for the catalog.`,
-          },
-        });
-      }
       return dispatchTool(ctx, resolved.value.name, resolved.value.args);
     }
     case 'sfi.guidance':

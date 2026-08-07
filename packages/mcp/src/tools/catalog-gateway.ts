@@ -30,6 +30,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { toolProfile } from './tool-profile.js';
 
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
@@ -168,6 +169,14 @@ export const listAnalysesHandler = async (
 
 export const describeAnalysisInputSchema = z.object({
   name: z.string().min(1),
+  /**
+   * AUDIT-F6 progressive discovery:
+   *   - `summary` — name, category, one-liner, required arg keys (default under core)
+   *   - `schema`  — summary + full inputSchema
+   *   - `full`    — today's payload (description + inputSchema)
+   * When omitted: `summary` under core profile, `full` under full profile.
+   */
+  detail: z.enum(['summary', 'schema', 'full']).optional(),
 });
 
 export type DescribeAnalysisInput = z.infer<typeof describeAnalysisInputSchema>;
@@ -175,11 +184,25 @@ export type DescribeAnalysisInput = z.infer<typeof describeAnalysisInputSchema>;
 export interface DescribeAnalysisOutput {
   readonly name: string;
   readonly category: string;
-  readonly description: string;
-  readonly inputSchema: unknown;
+  readonly detail: 'summary' | 'schema' | 'full';
+  readonly summary: string;
+  readonly required?: readonly string[];
+  readonly description?: string;
+  readonly inputSchema?: unknown;
 }
 
-/** The `sfi.describe_analysis` MCP tool — one schema, on demand. */
+const requiredKeys = (schema: unknown): readonly string[] => {
+  if (
+    typeof schema === 'object' &&
+    schema !== null &&
+    Array.isArray((schema as { required?: unknown }).required)
+  ) {
+    return (schema as { required: readonly string[] }).required;
+  }
+  return [];
+};
+
+/** The `sfi.describe_analysis` MCP tool — progressive schema discovery. */
 export const describeAnalysisHandler = async (
   ctx: Context,
   input: DescribeAnalysisInput,
@@ -193,13 +216,29 @@ export const describeAnalysisHandler = async (
       message: `Unknown analysis '${input.name}'. Call sfi.list_analyses for the catalog (names are exact, e.g. 'sfi.org_card').`,
     });
   }
+  const detail =
+    input.detail ?? (toolProfile() === 'core' ? 'summary' : 'full');
+  const summary = oneLiner(tool.description);
+  const required = requiredKeys(tool.inputSchema);
+  const base = {
+    name: tool.name,
+    category: analysisCategory(tool.name),
+    detail,
+    summary,
+    ...(required.length > 0 ? { required } : {}),
+  };
+  const data: DescribeAnalysisOutput =
+    detail === 'summary'
+      ? base
+      : detail === 'schema'
+        ? { ...base, inputSchema: tool.inputSchema }
+        : {
+            ...base,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+          };
   return ok({
-    data: {
-      name: tool.name,
-      category: analysisCategory(tool.name),
-      description: tool.description,
-      inputSchema: tool.inputSchema,
-    },
+    data,
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,
@@ -227,12 +266,22 @@ export const GATEWAY_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 export const resolveRunAnalysis = (
   input: RunAnalysisInput,
+  knownToolNames?: ReadonlySet<string>,
 ): Result<{ readonly name: string; readonly args: Readonly<Record<string, unknown>> }, McpError> => {
   const name = input.name.startsWith('sfi.') ? input.name : `sfi.${input.name}`;
   if (GATEWAY_TOOL_NAMES.has(name)) {
     return err({
       kind: 'invalid-query',
       message: 'run_analysis cannot dispatch itself — name a concrete analysis (see sfi.list_analyses).',
+    });
+  }
+  // AUDIT-F6: authorize the gateway target against the registered roster.
+  // Profile does not shrink gateway reachability — non-core tools are WHY
+  // run_analysis exists under core — but unknown names fail closed here.
+  if (knownToolNames !== undefined && !knownToolNames.has(name)) {
+    return err({
+      kind: 'invalid-query',
+      message: `Unknown analysis '${input.name}'. Call sfi.list_analyses for the catalog.`,
     });
   }
   let args: Readonly<Record<string, unknown>> = {};

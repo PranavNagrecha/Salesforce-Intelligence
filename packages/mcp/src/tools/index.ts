@@ -24,9 +24,11 @@ import type { Context } from '../server.js';
 import { maybeReopenOnEpochChange } from '../server.js';
 
 import { V01_TOOLS } from './roster.js';
-import { dispatchTool } from './tool-dispatch.js';
+import { dispatchTool, jsonResult } from './tool-dispatch.js';
 import {
   CORE_PROFILE_TOOLS as CORE_TOOLS_SET,
+  directInvokeDeniedError,
+  isDirectlyInvokable,
   toolProfile as resolveToolProfile,
 } from './tool-profile.js';
 
@@ -53,14 +55,21 @@ export {
 // ── Re-exports: tool profile primitives ───────────────────────────────────────
 // P13-GW profile primitives live in tool-profile.ts (cycle-free for
 // route-question's gateway envelopes); re-exported here as the public API.
-export { CORE_PROFILE_TOOLS, toolProfile } from './tool-profile.js';
+export {
+  CORE_PROFILE_TOOLS,
+  directInvokeDeniedError,
+  isDirectlyInvokable,
+  toolProfile,
+} from './tool-profile.js';
 
 /**
  * The roster a server with the given profile ADVERTISES on tools/list.
  *
  * Hidden tools (`hidden: true` — back-compat aliases whose capability folded
- * into a survivor) are filtered out of BOTH profiles: they stay dispatchable
- * (the switch below is un-narrowed) but never occupy a `tools/list` schema slot.
+ * into a survivor) are filtered out of BOTH profiles: they stay reachable via
+ * `sfi.run_analysis` / internal `dispatchTool`, but never occupy a `tools/list`
+ * schema slot. Under `core`, non-advertised tools are also not directly
+ * invokable via `tools/call` (AUDIT-F6).
  */
 export const advertisedTools = (
   profile: 'core' | 'full' = resolveToolProfile(),
@@ -74,11 +83,12 @@ export const registerTools = (server: Server, ctx: Context): void => {
   // a refresh while this server is open swaps in a fresh graph connection on
   // the NEXT call (no restart). Held mutably here; tools never see the swap.
   let currentCtx = ctx;
-  // Profile is FIXED here, at boot (see toolProfile). Under `core`, only the
-  // 18 core schemas are advertised — dispatch below stays un-narrowed, so a
-  // direct call to a non-advertised tool (or via run_analysis) still works:
-  // the profile reduces schema tokens, never capability.
-  const roster = advertisedTools();
+  // AUDIT-F6: profile is FIXED at boot. Under `core`, only the 18 core schemas
+  // are advertised AND directly invokable. Non-core tools stay reachable via
+  // sfi.run_analysis (gateway) — advertise ≠ direct-invoke. CLI/internal
+  // dispatchTool callers remain un-narrowed.
+  const profile = resolveToolProfile();
+  const roster = advertisedTools(profile);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: roster.map((tool) => ({
       name: tool.name,
@@ -109,6 +119,11 @@ export const registerTools = (server: Server, ctx: Context): void => {
     // nor in runTool, which misses the unknown-tool early-return). Returns the
     // CallToolResult unchanged; emits one metric only when SFI_METRICS_LOG set.
     const name = request.params.name;
-    return instrumentDispatch(name, () => dispatchTool(currentCtx, name, args));
+    return instrumentDispatch(name, async () => {
+      if (!isDirectlyInvokable(name, profile)) {
+        return jsonResult({ error: directInvokeDeniedError(name) });
+      }
+      return dispatchTool(currentCtx, name, args);
+    });
   });
 };

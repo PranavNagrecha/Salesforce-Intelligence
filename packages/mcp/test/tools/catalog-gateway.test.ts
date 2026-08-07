@@ -151,12 +151,35 @@ describe('sfi.list_analyses', () => {
 });
 
 describe('sfi.describe_analysis', () => {
-  it('returns one schema on demand, with or without the sfi. prefix', async () => {
+  const prevProfile = process.env['SFI_TOOL_PROFILE'];
+  afterEach(() => {
+    if (prevProfile === undefined) delete process.env['SFI_TOOL_PROFILE'];
+    else process.env['SFI_TOOL_PROFILE'] = prevProfile;
+  });
+
+  it('defaults to summary under core (progressive discovery)', async () => {
+    process.env['SFI_TOOL_PROFILE'] = 'core';
     const r = await describeAnalysisHandler(ctx, { name: 'org_card' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.name).toBe('sfi.org_card');
+    expect(r.value.data.detail).toBe('summary');
+    expect(r.value.data.summary.length).toBeGreaterThan(0);
+    expect(r.value.data.inputSchema).toBeUndefined();
+    expect(r.value.data.description).toBeUndefined();
+  });
+
+  it('returns full schema when detail=full (with or without sfi. prefix)', async () => {
+    const r = await describeAnalysisHandler(ctx, {
+      name: 'org_card',
+      detail: 'full',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.name).toBe('sfi.org_card');
+    expect(r.value.data.detail).toBe('full');
     expect(r.value.data.inputSchema).toBeDefined();
+    expect(r.value.data.description).toBeDefined();
   });
 
   it('answers an unknown name with an honest catalog pointer', async () => {

@@ -488,16 +488,11 @@ for the live tool map.
 
 ### Optional: full roster vs compact core
 
-Every `sfi.*` tool schema is advertised by default — most MCP hosts pay a real
-token tax for that (~250 KB of `tools/list` JSON) if they don't defer tool
-definitions. Set `SFI_TOOL_PROFILE=core` on the server process to advertise
-only an **18-tool core roster** instead (orientation, resolve/route, the
-universal graph reads, and a catalog gateway — `list_analyses` /
-`describe_analysis` / `run_analysis` — that reaches every other tool with
-byte-identical output). Dispatch is never narrowed — a non-advertised tool
-still works if called directly; only what's *advertised* at boot changes. Add
-`"env": { "SFI_TOOL_PROFILE": "core" }` alongside `"command"` in the config
-block above. Default stays `full` — this is purely opt-in. See
+**Default is the 18-tool core roster** (AUDIT-F6) so MCP hosts don't pay a
+~250 KB `tools/list` tax. Non-core tools stay reachable via `sfi.run_analysis`
+(byte-identical) and are not directly invokable under core. Set
+`SFI_TOOL_PROFILE=full` (or add `"env": { "SFI_TOOL_PROFILE": "full" }` in the
+config block above) to advertise and directly invoke the entire roster. See
 [docs/configuration.md](./docs/configuration.md) for the full reference.
 
 ### Install as a Claude Code plugin

@@ -493,11 +493,15 @@ describe('tool profiles (P13-GW-profiles)', () => {
     delete process.env['SFI_TOOL_PROFILE'];
   });
 
-  it('defaults to the FULL roster minus hidden aliases — zero behavior change without the env', () => {
+  it('defaults to the CORE roster (AUDIT-F6) — opt into full with SFI_TOOL_PROFILE=full', () => {
     delete process.env['SFI_TOOL_PROFILE'];
+    expect(toolProfile()).toBe('core');
+    expect(advertisedTools()).toHaveLength(18);
+  });
+
+  it('full advertises the entire non-hidden roster', () => {
+    process.env['SFI_TOOL_PROFILE'] = 'full';
     expect(toolProfile()).toBe('full');
-    // `advertisedTools()` excludes hidden back-compat aliases; equal to the full
-    // roster with hidden filtered out (identical to V01_TOOLS when none hidden).
     expect(advertisedTools()).toEqual(V01_TOOLS.filter((t) => !t.hidden));
   });
 

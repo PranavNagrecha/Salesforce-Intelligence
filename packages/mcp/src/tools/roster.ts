@@ -247,6 +247,12 @@ const DESCRIBE_ANALYSIS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object
   type: 'object',
   properties: {
     name: { type: 'string', minLength: 1 },
+    detail: {
+      type: 'string',
+      enum: ['summary', 'schema', 'full'],
+      description:
+        'Progressive discovery: summary (default under core), schema (+ inputSchema), or full (description + schema).',
+    },
   },
   required: ['name'],
 });
