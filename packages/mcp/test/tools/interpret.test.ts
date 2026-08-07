@@ -1216,6 +1216,8 @@ describe('interpretHandler — hub-cap truncation e2e', () => {
   let tStore: GraphStore;
   let tCtx: Context;
 
+  // 1001-edge fixture import regularly exceeds vitest's 10s default under
+  // parallel package test load — pin an explicit budget so the suite is stable.
   beforeAll(async () => {
     tDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-interpret-trunc-'));
     const opened = await openGraph(join(tDir, 't.db'));
@@ -1243,12 +1245,12 @@ describe('interpretHandler — hub-cap truncation e2e', () => {
     const imp = await importExtractionResults(tStore, [{ nodes, edges }]);
     if (!imp.ok) throw new Error(imp.error.message);
     tCtx = { vaultRoot: tDir, manifest: COVERED_MANIFEST, graph: tStore };
-  });
+  }, 60_000);
 
   afterAll(async () => {
     await closeGraph(tStore);
     rmSync(tDir, { recursive: true, force: true });
-  });
+  }, 30_000);
 
   it('control: a NON-truncated slice under complete coverage reports complete', async () => {
     const r = await interpretHandler(tCtx, { componentId: SMALL_OBJ, ruleIds: [STATUS_RULE] });
