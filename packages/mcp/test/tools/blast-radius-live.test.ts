@@ -19,11 +19,11 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
-import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import type { Context } from '../../src/server.js';
 import { blastRadiusLiveHandler } from '../../src/tools/blast-radius-live.js';
 import { STALE_CHECK_TYPES } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',

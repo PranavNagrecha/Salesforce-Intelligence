@@ -18,7 +18,6 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
-import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import type { Context } from '../../src/server.js';
 import {
   liveCountHandler,
@@ -26,6 +25,7 @@ import {
   liveSampleHandler,
 } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -103,7 +103,7 @@ beforeEach(async () => {
   process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
   delete process.env.SFI_LIVE_PLANE_ENABLED;
   // AUDIT-F3: liveEnabled is not consent — seed a full-scope test grant.
-  await grantTestLiveAccess('test-org');
+  await grantTestLiveAccess('test');
 });
 
 afterEach(() => {

@@ -2,6 +2,10 @@
 /**
  * AUDIT-F5 — family epochs + mixed freshness + retrieval ledger.
  */
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import type { CoverageEntry, VaultManifest } from '@sf-intelligence/contracts';
 
 import {
@@ -10,9 +14,6 @@ import {
   stampFamilyEpochs,
 } from '../src/family-freshness.js';
 import { appendTombstones, readTombstones } from '../src/tombstones.js';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 const row = (
   type: string,

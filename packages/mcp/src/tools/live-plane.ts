@@ -28,7 +28,6 @@ import {
   getLiveGrant,
   grantHasScopes,
   grantLiveConsent,
-  hasLiveConsent,
   listConsentedOrgs,
   requiredScopesForTool,
   revokeLiveConsent,

@@ -60,7 +60,15 @@ const httpClient = async (bearer?: string): Promise<Client> => {
   return client;
 };
 
+let prevToolProfile: string | undefined;
+
 beforeAll(async () => {
+  // AUDIT-F6 defaulted SFI_TOOL_PROFILE=core; this suite exercises non-core
+  // tools (get_manifest / live_count) and the live-plane refusal — pin full
+  // so assertions hit the intended gate, not the profile gate.
+  prevToolProfile = process.env['SFI_TOOL_PROFILE'];
+  process.env['SFI_TOOL_PROFILE'] = 'full';
+
   vaultRoot = mkdtempSync(join(tmpdir(), 'sfi-serve-http-'));
   mkdirSync(join(vaultRoot, 'meta'), { recursive: true });
   mkdirSync(join(vaultRoot, 'graph'), { recursive: true });
@@ -93,6 +101,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await server.close();
   delete process.env['SFI_TRANSPORT'];
+  if (prevToolProfile === undefined) delete process.env['SFI_TOOL_PROFILE'];
+  else process.env['SFI_TOOL_PROFILE'] = prevToolProfile;
   rmSync(vaultRoot, { recursive: true, force: true });
 });
 
@@ -149,6 +159,57 @@ describe('live plane HARD-DISABLED over HTTP (the test, not a doc line)', () => 
     } finally {
       delete process.env['SFI_LIVE_PLANE_ENABLED'];
       await client.close();
+    }
+  });
+});
+
+describe('core profile over HTTP (AUDIT-F6)', () => {
+  it('refuses non-core tools with the profile denial (not the live-plane denial)', async () => {
+    const prev = process.env['SFI_TOOL_PROFILE'];
+    process.env['SFI_TOOL_PROFILE'] = 'core';
+    const coreToken = generateToken();
+    const coreServer = await startHttpServer({
+      vaultRoot,
+      port: 0,
+      host: '127.0.0.1',
+      token: coreToken,
+    });
+    try {
+      const transport = new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${coreServer.port}/`),
+        {
+          requestInit: {
+            headers: { Authorization: `Bearer ${coreToken}` },
+          },
+        },
+      );
+      const client = new Client(
+        { name: 'serve-http-core-test', version: '1' },
+        { capabilities: {} },
+      );
+      await client.connect(transport as never);
+      try {
+        const r = await client.callTool({
+          name: 'sfi.get_manifest',
+          arguments: {},
+        });
+        const body = JSON.parse(
+          (r.content as { text: string }[])[0]?.text ?? '{}',
+        );
+        expect(body.data).toBeUndefined();
+        expect(body.error?.message ?? '').toContain(
+          'not directly invokable under SFI_TOOL_PROFILE=core',
+        );
+        expect(body.error?.message ?? '').not.toContain(
+          'Live org plane is not enabled',
+        );
+      } finally {
+        await client.close();
+      }
+    } finally {
+      await coreServer.close();
+      if (prev === undefined) delete process.env['SFI_TOOL_PROFILE'];
+      else process.env['SFI_TOOL_PROFILE'] = prev;
     }
   });
 });

@@ -705,7 +705,9 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     ]);
   });
 
-  it('omits invoke entirely under the default full profile (zero change)', async () => {
+  it('omits invoke entirely under an explicit full profile', async () => {
+    // Unset no longer means full (AUDIT-F6 defaulted SFI_TOOL_PROFILE=core).
+    process.env['SFI_TOOL_PROFILE'] = 'full';
     const r = await routeQuestionHandler(ctx, {
       question: 'What happens when an Account is updated?',
       logGap: false,
@@ -1123,18 +1125,22 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
     expect((toolCandidates ?? [])[0]?.tool).toBe('sfi.get_naming_convention_report');
   });
 
-  it('NEGATIVE (threshold): top below FUNNEL_PRIMARY_MIN_SCORE stays honestly unrouted', async () => {
-    // Real candidates exist (top ~0.08) but none clears the bar.
+  it('THRESHOLD (owner-accepted): vague vibe/setup ask advisories above FUNNEL_PRIMARY_MIN_SCORE', async () => {
+    // After the AUDIT-F9 description scrub, TF-IDF IDF weights shifted so this
+    // question's top candidate clears 0.26 (measured ~0.275 → live_setup_audit_trail).
+    // Owner accepted funnel-advisory here rather than raising the threshold.
     const r = await routeQuestionHandler(ctx, {
       question: 'any thoughts on the general vibe of the setup here',
       logGap: false,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.route.intent).toBe('unrouted');
-    expect(r.value.data.route.plane).toBe('unknown');
-    expect(r.value.data.route.gap).not.toBeNull();
-    expect((r.value.data.toolCandidates ?? []).length).toBeGreaterThan(0);
+    expect(r.value.data.route.intent).toBe('funnel-advisory');
+    expect(r.value.data.route.confidence).toBe('low');
+    expect(r.value.data.route.reason).toContain('FUNNEL-DERIVED');
+    const top = (r.value.data.toolCandidates ?? [])[0];
+    expect(top).toBeDefined();
+    expect(top!.score).toBeGreaterThanOrEqual(FUNNEL_PRIMARY_MIN_SCORE);
   });
 
   it('NEGATIVE (margin gate wins): a risk near-tie clarifies instead of advisory-routing', async () => {

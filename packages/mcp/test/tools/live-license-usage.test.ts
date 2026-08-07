@@ -6,13 +6,13 @@ import { join } from 'node:path';
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
-import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import {
   liveLicenseUsageHandler,
   liveLicenseUsageInputSchema,
 } from '../../src/tools/live-plane.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',

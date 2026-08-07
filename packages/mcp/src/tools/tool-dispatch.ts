@@ -2361,7 +2361,6 @@ export const jsonResult = (
     }
   }
 
-  const baseBytes = utf8Bytes(body);
   // AUDIT-F8: stamp content policy on success envelopes so hosts treat org
   // metadata in `data` as untrusted data (never instructions / consent).
   const withContentPolicy = (
@@ -2370,6 +2369,10 @@ export const jsonResult = (
     isErrorEnvelope || !('data' in value)
       ? value
       : { ...value, contentPolicy: ORG_METADATA_CONTENT_POLICY };
+  // Report the ORIGINAL stamped payload size (incl. contentPolicy). Trimmed
+  // envelopes keep that number so hosts see pre-trim magnitude; fits() still
+  // checks the final serialized text.
+  const baseBytes = utf8Bytes(withContentPolicy(body as Record<string, unknown>));
   const toEnvelope = (
     value: Record<string, unknown>,
   ): Record<string, unknown> => ({

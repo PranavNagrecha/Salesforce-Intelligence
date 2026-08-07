@@ -9,11 +9,11 @@ import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { registerVault } from '@sf-intelligence/vault';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
-import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import type { Context } from '../../src/server.js';
 import { fleetDriftRankingHandler } from '../../src/tools/fleet-drift-ranking.js';
 import { STALE_CHECK_TYPES } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 // Synthetic-only fixtures (no real org names): two registered vaults whose
 // `sourceOrg` differs in live drift; a mocked `sf` CLI returns the drift count.

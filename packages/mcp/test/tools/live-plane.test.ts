@@ -11,7 +11,6 @@ import type { ExecCommand, ToolingApiAuth } from '@sf-intelligence/tooling-api';
 import { mintLiveCapability } from '../../src/live-capability.js';
 import { revokeLiveConsent } from '../../src/live-consent.js';
 import type { Context } from '../../src/server.js';
-import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import {
   apiPath,
   assertSoqlIdentifier,
@@ -53,6 +52,7 @@ import {
   liveBudgetStatus,
   resetLiveSession,
 } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
