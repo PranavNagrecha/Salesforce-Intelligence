@@ -17,21 +17,193 @@ name: Publish (npm Trusted Publishing)
 #
 # To release: push an annotated tag `vX.Y.Z` whose version matches
 # packages/cli/package.json (the prepublishOnly guard enforces the match).
+# The tagged COMMIT must already have a green CI run — see the CI-green gate
+# below. CI (ci.yml) triggers on push to `main` / `release/**` and on
+# pull_request; it does NOT trigger on tags. Tag a commit that CI has covered.
 
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      bypass_ci_check:
+        description: 'DANGER — publish WITHOUT a verified green CI run on this commit. Only for re-driving a release whose CI history has aged out. Logged loudly.'
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: write # create/update the GitHub release for the tag
   id-token: write # npm Trusted Publishing (OIDC) + provenance, and MCP Registry OIDC
+  actions: read # CI-green gate: list ci.yml workflow runs for the tagged SHA
+  checks: read # CI-green gate: informational check-run roll-up for the SHA
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      # ── CI-GREEN GATE — MUST STAY THE FIRST STEP IN THIS JOB ──────────────
+      # This workflow fires on a TAG push. ci.yml fires on push to
+      # main/release/** and on pull_request — never on tags. So the two are
+      # completely decoupled: before this gate, `git tag v9.9.9 <any-sha> &&
+      # git push --tags` published that SHA to npm and the MCP Registry with
+      # no guarantee CI had ever run on it, let alone passed.
+      #
+      # `needs:` CANNOT close that hole: it only orders jobs WITHIN one
+      # workflow file, so `needs: [build-test]` here would reference a job
+      # that does not exist in this file (a parse error, not a gate). The
+      # only cross-workflow mechanism is to ask the API what CI actually did
+      # on this exact commit — which is what this step does, and it FAILS
+      # CLOSED on every answer except a clean "success".
+      #
+      #   CI succeeded  -> proceed
+      #   CI failed     -> hard fail (named conclusion)
+      #   CI running    -> poll up to MAX_WAIT_SECONDS, then hard fail
+      #   CI never ran  -> hard fail after NO_RUN_GRACE_SECONDS. This is the
+      #                    actual hole; "no run found" is NEVER success.
+      #   API unreadable/ci.yml missing -> hard fail (cannot verify == no)
+      #
+      # Needs no checkout: `gh` and `jq` are preinstalled on ubuntu-latest and
+      # every query is by ${{ github.repository }} + $GITHUB_SHA. Runs before
+      # install/build so an ungated tag burns seconds, not a publish.
+      - name: Require a green CI run on the tagged commit
+        timeout-minutes: 40
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Renders 'false' on a tag push (short-circuit), 'true' only when a
+          # human ticked the box on a manual run. Empty/absent => not 'true'.
+          CI_GATE_BYPASS: ${{ github.event_name == 'workflow_dispatch' && inputs.bypass_ci_check }}
+        run: |
+          set -euo pipefail
+
+          REPO="${GITHUB_REPOSITORY}"
+          SHA="${GITHUB_SHA}"
+          WORKFLOW_FILE="ci.yml"
+          # Grace for a run to APPEAR — covers tagging seconds after a merge,
+          # before GitHub has registered the push run.
+          NO_RUN_GRACE_SECONDS=300
+          # Total budget for CI to FINISH once a run exists (the full gate
+          # runs evals; ~20-25 min is normal).
+          MAX_WAIT_SECONDS=1800
+          POLL_INTERVAL_SECONDS=20
+
+          if [ "${CI_GATE_BYPASS:-}" = "true" ]; then
+            echo "::warning title=CI GATE BYPASSED::Manual run with bypass_ci_check=true — publishing ${SHA} WITHOUT a verified green CI run."
+            {
+              echo "### :warning: CI gate BYPASSED"
+              echo
+              echo "\`bypass_ci_check=true\` was passed to a manual \`workflow_dispatch\`."
+              echo "Commit \`${SHA}\` is being published **without** a verified green CI run."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          # The gate is only worth anything if the workflow it points at still
+          # exists. A rename/delete must FAIL the publish, never silently pass.
+          wf_ok=0
+          for attempt in 1 2 3; do
+            if gh api "repos/${REPO}/actions/workflows/${WORKFLOW_FILE}" --jq '.id' >/dev/null 2>&1; then
+              wf_ok=1
+              break
+            fi
+            echo "Could not read workflow '${WORKFLOW_FILE}' from the API (attempt ${attempt}/3)."
+            if [ "${attempt}" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          if [ "${wf_ok}" -ne 1 ]; then
+            echo "::error title=CI gate cannot verify::Workflow '${WORKFLOW_FILE}' not found in ${REPO} (renamed, deleted, or API unreachable). Refusing to publish an unverified commit."
+            exit 1
+          fi
+
+          echo "Checking CI ('${WORKFLOW_FILE}') for ${REPO}@${SHA}"
+          start_ts="$(date +%s)"
+          api_errors=0
+          runs_json=""
+
+          while :; do
+            elapsed=$(( $(date +%s) - start_ts ))
+
+            if runs_json="$(gh api "repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?head_sha=${SHA}&per_page=100" 2>/dev/null)"; then
+              api_errors=0
+            else
+              api_errors=$(( api_errors + 1 ))
+              echo "GitHub API read failed (${api_errors} consecutive)."
+              if [ "${api_errors}" -ge 5 ]; then
+                echo "::error title=CI gate cannot verify::5 consecutive GitHub API failures while reading CI status for ${SHA}. Refusing to publish."
+                exit 1
+              fi
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            total="$(jq '.workflow_runs | length' <<<"${runs_json}")"
+
+            # CI NEVER RAN — the exact hole this gate exists to close.
+            if [ "${total}" -eq 0 ]; then
+              if [ "${elapsed}" -ge "${NO_RUN_GRACE_SECONDS}" ]; then
+                echo "::error title=CI never ran on this commit::No '${WORKFLOW_FILE}' run exists for ${SHA} after ${NO_RUN_GRACE_SECONDS}s. CI only runs on push to main / release/** and on pull_request — a tag on any other commit is NOT covered by it. Refusing to publish unverified code."
+                exit 1
+              fi
+              echo "No CI run for ${SHA} yet (${elapsed}s of ${NO_RUN_GRACE_SECONDS}s grace) — waiting."
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            # CI STILL RUNNING — a tag pushed right after a merge races the
+            # push run, so wait it out rather than failing instantly.
+            pending="$(jq '[.workflow_runs[] | select(.status != "completed")] | length' <<<"${runs_json}")"
+            if [ "${pending}" -gt 0 ]; then
+              if [ "${elapsed}" -ge "${MAX_WAIT_SECONDS}" ]; then
+                echo "::error title=CI still running::${pending} '${WORKFLOW_FILE}' run(s) for ${SHA} were still in progress after ${MAX_WAIT_SECONDS}s. Refusing to publish on an unfinished CI result — re-run this workflow once CI is green."
+                exit 1
+              fi
+              jq -r '.workflow_runs[] | select(.status != "completed") | "  waiting on run #\(.run_number) [\(.status)] \(.html_url)"' <<<"${runs_json}"
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            break
+          done
+
+          echo "CI runs found for ${SHA}:"
+          jq -r '.workflow_runs | sort_by((.run_started_at // .created_at), .id) | reverse | .[] | "  run #\(.run_number) event=\(.event) conclusion=\(.conclusion // "none") \(.html_url)"' <<<"${runs_json}"
+
+          # CI FAILED — any hard-red run on this SHA blocks, even if a later
+          # run went green (a genuine re-run mutates the SAME run in place, so
+          # a lingering red run means a different, still-failing attempt).
+          red="$(jq '[.workflow_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure")] | length' <<<"${runs_json}")"
+          if [ "${red}" -gt 0 ]; then
+            echo "::error title=CI is red on this commit::${red} '${WORKFLOW_FILE}' run(s) for ${SHA} concluded failure/timed_out/startup_failure (listed above). Fix and re-run CI to green on this exact commit, then re-run this workflow. Refusing to publish."
+            exit 1
+          fi
+
+          # ...and the newest run must be an outright success. cancelled /
+          # skipped / neutral are NOT success and must not publish.
+          latest_conclusion="$(jq -r '.workflow_runs | sort_by((.run_started_at // .created_at), .id) | last | (.conclusion // "none")' <<<"${runs_json}")"
+          if [ "${latest_conclusion}" != "success" ]; then
+            echo "::error title=CI did not succeed::The newest '${WORKFLOW_FILE}' run for ${SHA} concluded '${latest_conclusion}', not 'success'. Only a successful CI run may publish."
+            exit 1
+          fi
+
+          latest_url="$(jq -r '.workflow_runs | sort_by((.run_started_at // .created_at), .id) | last | .html_url' <<<"${runs_json}")"
+          echo "CI is GREEN on ${SHA} — ${latest_url}"
+
+          # Informational only (never fatal): the wider check-run picture for
+          # this commit, so a red third-party check is at least visible in the
+          # log even though it does not gate the publish.
+          echo "Check-runs on ${SHA} (informational):"
+          gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
+            --jq '.check_runs[] | "  \(.name): \(.status)/\(.conclusion // "pending")"' 2>/dev/null || \
+            echo "  (check-run roll-up unavailable)"
+
+          {
+            echo "### :white_check_mark: CI gate passed"
+            echo
+            echo "Commit \`${SHA}\` has a green \`${WORKFLOW_FILE}\` run: ${latest_url}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # full history so the org-leak guard can scan past commits

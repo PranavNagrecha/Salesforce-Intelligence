@@ -94,13 +94,26 @@ use `npm sbom` in this workspace — it is empty/unavailable under pnpm):
 
 ```sh
 pnpm sbom
-# → sbom.cdx.json at the repo root (fails closed if empty / zero components)
+# → sbom.cdx.json at the repo root
 ```
 
+**Scope:** the transitive **runtime** closure of the published package —
+the 7 direct runtime dependencies plus everything they pull in (~137
+components, with a populated `dependencies` graph), resolved from
+`pnpm-lock.yaml`. devDependencies are excluded on purpose: consumers never
+install them. The artifact records its own scope under `metadata.properties`
+(`sfi:sbom:scope`, `sfi:sbom:resolved-from`), so you can check what you are
+reading rather than trusting this page.
+
+It fails closed — missing, empty, too few components, or an empty dependency
+graph all abort. (A previous generator ran against `packages/cli`, which has
+no lockfile, and silently emitted 19 direct-only components with no graph;
+the component floor exists to catch exactly that.)
+
 Tag-triggered publishes (`.github/workflows/publish.yml`) run the same
-command and **fail the job** if the SBOM is missing or empty, then attach
-`sbom.cdx.json` to the GitHub Release. The SBOM is a release artifact for
-consumers — it is **not** shipped inside the npm tarball.
+command, **fail the job** on a bad SBOM, then attach `sbom.cdx.json` to the
+GitHub Release. The SBOM is a release artifact for consumers — it is **not**
+shipped inside the npm tarball.
 
 ## What this does not cover
 

@@ -75,11 +75,16 @@ trust boundary.
 - **Tarball allowlist** is `packages/cli/package.json#files`, enforced by
   `pnpm pack:check` / `scripts/check-pack-allowlist.mjs` (also in
   `prepublishOnly`).
-- **SBOM** (CycloneDX 1.5) is generated with `@cyclonedx/cdxgen` against the
-  pnpm workspace (`pnpm sbom` / `scripts/generate-sbom.mjs`) and attached to
-  the GitHub Release on tag publish. The publish job fails closed if the SBOM
-  is missing, empty, or has zero components. It is not shipped inside the npm
-  tarball.
+- **SBOM** (CycloneDX 1.5) is generated with `@cyclonedx/cdxgen`
+  (`pnpm sbom` / `scripts/generate-sbom.mjs`) and attached to the GitHub
+  Release on tag publish. Scope is the **transitive runtime closure of the
+  published package** — the 7 direct runtime dependencies and everything they
+  pull in (~137 components with a populated dependency graph), resolved from
+  `pnpm-lock.yaml`. devDependencies are deliberately excluded; they are not
+  installed by consumers. The artifact self-documents this in
+  `metadata.properties`. The publish job fails closed if the SBOM is missing,
+  empty, has too few components, or has an empty dependency graph. It is not
+  shipped inside the npm tarball.
 
 ## Dependency advisories
 

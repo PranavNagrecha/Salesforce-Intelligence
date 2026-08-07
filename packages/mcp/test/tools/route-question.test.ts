@@ -14,11 +14,14 @@ import {
 import { appendAnnotationEvent } from '@sf-intelligence/vault';
 
 import { classifyQuestion, type RouteResult } from '../../src/intent-router.js';
+import { semanticCandidates } from '../../src/semantic-funnel.js';
 import type { Context } from '../../src/server.js';
 import {
   buildFunnelCandidates,
   buildRouteToolArgsMap,
+  FUNNEL_MIN_EVIDENCE_BREADTH,
   FUNNEL_PRIMARY_MIN_SCORE,
+  funnelEvidenceBreadth,
   looksLikeComponentName,
   routeQuestionHandler,
 } from '../../src/tools/route-question.js';
@@ -1125,28 +1128,78 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
     expect((toolCandidates ?? [])[0]?.tool).toBe('sfi.get_naming_convention_report');
   });
 
-  it('THRESHOLD (owner-accepted): vague vibe/setup ask advisories above FUNNEL_PRIMARY_MIN_SCORE', async () => {
-    // After the AUDIT-F9 description scrub, TF-IDF IDF weights shifted so this
-    // question's top candidate clears 0.26 (measured ~0.275 → live_setup_audit_trail).
-    // Owner accepted funnel-advisory here rather than raising the threshold.
+  it('NEGATIVE (intent gate): a vague vibe/setup ask stays honestly unrouted', async () => {
+    // The negative control for "empty is not none". A pure-noise question with
+    // no Salesforce intent must NOT produce an advisory route.
+    //
+    // It CLEARS the score threshold (0.275 >= 0.26) — score alone cannot stop
+    // it, because the noise ceiling (0.436) sits ABOVE the advisory signal
+    // floor (0.261); see FUNNEL_PRIMARY_MIN_SCORE. What stops it is evidence
+    // BREADTH: rank-3-8 mass 0.277, under FUNNEL_MIN_EVIDENCE_BREADTH (0.32).
+    // Both halves are asserted below so a regression names WHICH axis moved.
     const r = await routeQuestionHandler(ctx, {
       question: 'any thoughts on the general vibe of the setup here',
       logGap: false,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.route.intent).toBe('funnel-advisory');
-    expect(r.value.data.route.confidence).toBe('low');
-    expect(r.value.data.route.reason).toContain('FUNNEL-DERIVED');
-    const top = (r.value.data.toolCandidates ?? [])[0];
-    expect(top).toBeDefined();
-    expect(top!.score).toBeGreaterThanOrEqual(FUNNEL_PRIMARY_MIN_SCORE);
-    // Pin WHICH tool wins, not just that something cleared the bar. The reason
-    // this case was accepted is the specific coupling: "setup" in the question
-    // attracts setup-audit vocabulary. If the top candidate drifts to some
-    // other tool, that is a different product decision and must re-surface
-    // rather than ride on this exemption.
-    expect(top!.tool).toBe('sfi.live_setup_audit_trail');
+    expect(r.value.data.route.intent).toBe('unrouted');
+    expect(r.value.data.route.plane).toBe('unknown');
+
+    // The score gate would have LET THIS THROUGH — pinned so nobody "simplifies"
+    // the breadth gate away believing the threshold was doing the work.
+    const cands = semanticCandidates(
+      'any thoughts on the general vibe of the setup here',
+      10,
+    );
+    expect(cands[0]?.tool).toBe('sfi.live_setup_audit_trail');
+    expect(cands[0]?.score).toBeGreaterThanOrEqual(FUNNEL_PRIMARY_MIN_SCORE);
+    expect(cands[0]?.score).toBeCloseTo(0.275, 3);
+    // …and the breadth gate is what actually refuses it.
+    expect(funnelEvidenceBreadth(cands)).toBeLessThan(
+      FUNNEL_MIN_EVIDENCE_BREADTH,
+    );
+    expect(funnelEvidenceBreadth(cands)).toBeCloseTo(0.277, 3);
+  });
+
+  it('POSITIVE (intent gate): a real advisory-tier question still routes', async () => {
+    // The other half of the gate. This question sits at the MEASURED SIGNAL
+    // FLOOR (0.261) — barely over the score bar — so if the breadth gate were
+    // set too high it would be the first genuine advisory to die. Its breadth
+    // (1.244) clears 0.32 by 4x, which is the separation the gate relies on.
+    const q =
+      'contact has many active record-triggered flows - is their execution order deterministic, and what is the risk?';
+    const cands = semanticCandidates(q, 10);
+    expect(cands[0]?.score).toBeGreaterThanOrEqual(FUNNEL_PRIMARY_MIN_SCORE);
+    expect(funnelEvidenceBreadth(cands)).toBeGreaterThan(
+      FUNNEL_MIN_EVIDENCE_BREADTH,
+    );
+  });
+
+  it('the cause is bare-token attraction, not meaning (pins the gate rationale)', () => {
+    // The score is a pure function of the single token "setup": the bare word
+    // alone produces the SAME ranked list at a HIGHER score than the full
+    // question, because every other word ("thoughts", "general", "vibe",
+    // "opinions") is a stopword or absent from the funnel index. This is the
+    // evidence that no threshold can fix the case — a shorter, emptier noise
+    // question scores HIGHER, since length normalisation divides the longer
+    // one down. Pinned so that any funnel-index change that breaks the
+    // diagnosis (or accidentally fixes it) surfaces here.
+    const bare = semanticCandidates('setup', 5);
+    expect(bare[0]?.tool).toBe('sfi.live_setup_audit_trail');
+    expect(bare[0]?.score).toBeCloseTo(0.436, 3);
+
+    // Same list, same score, from a question that merely CONTAINS the token.
+    const noise = semanticCandidates('the setup here — any opinions', 5);
+    expect(noise.map((c) => c.tool)).toEqual(bare.map((c) => c.tool));
+    expect(noise[0]?.score).toBeCloseTo(bare[0]?.score ?? 0, 6);
+    // …and the noise ceiling is ABOVE the advisory-tier signal floor (0.261),
+    // which is precisely why raising FUNNEL_PRIMARY_MIN_SCORE cannot work.
+    expect(noise[0]?.score ?? 0).toBeGreaterThan(0.261);
+
+    // Drop the token and the question scores NOTHING — there was never any
+    // Salesforce meaning in it, only the one word.
+    expect(semanticCandidates('the office here — any opinions', 5)).toHaveLength(0);
   });
 
   it('NEGATIVE (margin gate wins): a risk near-tie clarifies instead of advisory-routing', async () => {
