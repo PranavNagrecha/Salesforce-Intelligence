@@ -91,6 +91,9 @@ docs/plans/CLAUDE-CODE-MASTER-PROMPT.md
 # ~14 days; periodic capture is required. Aggregate counts only — never commit.
 .sfi-local/adoption/
 
+# Local agent / release-manager scratch under the product tree (never commit).
+.sfi/
+
 # transient agent worktrees + local embedding model cache (never commit)
 .claude/worktrees/
 **/.sfi-embed-cache/

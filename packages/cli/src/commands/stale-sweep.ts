@@ -22,6 +22,7 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { withNetworkMode } from '@sf-intelligence/core';
 import {
   checkVaultStaleness,
   resetLiveSession,
@@ -52,6 +53,15 @@ const SOURCE_MEMBER_TYPE_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
  * `exec` is injectable for mocked-tick tests; `now` for deterministic stamps.
  */
 export const runStaleSweep = async (options: {
+  readonly cwd: string;
+  readonly targetOrg?: string;
+  readonly exec?: ExecCommand;
+  readonly now?: string;
+}): Promise<{ readonly ok: true; readonly snapshot: StalenessSnapshot } | { readonly ok: false; readonly message: string }> =>
+  // AUDIT-F2: stale-sweep is an intentional Salesforce-read CLI path.
+  withNetworkMode('salesforce-read', () => runStaleSweepBody(options));
+
+const runStaleSweepBody = async (options: {
   readonly cwd: string;
   readonly targetOrg?: string;
   readonly exec?: ExecCommand;

@@ -9,6 +9,7 @@
 
 import { createHash } from 'node:crypto';
 
+import { describeNetworkPolicy } from '@sf-intelligence/core';
 import { CURRENT_SCHEMA_VERSION } from '@sf-intelligence/graph';
 
 import { CONCEPT_RULES, CONCEPTS, MODEL_VERSION } from './knowledge/loader.js';
@@ -56,6 +57,11 @@ export interface ProductManifestSummary {
     readonly modelVersion: string;
   };
   readonly catalogHash: string;
+  /** Active process network posture (AUDIT-F2). */
+  readonly network: {
+    readonly mode: string;
+    readonly updateCheckOptedIn: boolean;
+  };
 }
 
 export const buildProductManifestSummary = (): ProductManifestSummary => {
@@ -79,6 +85,7 @@ export const buildProductManifestSummary = (): ProductManifestSummary => {
       .join('\n---\n'),
   );
 
+  const network = describeNetworkPolicy();
   return {
     schemaVersion: '1.0',
     tools: {
@@ -100,5 +107,9 @@ export const buildProductManifestSummary = (): ProductManifestSummary => {
       modelVersion: MODEL_VERSION,
     },
     catalogHash: `sha256:${catalogHash}`,
+    network: {
+      mode: network.mode,
+      updateCheckOptedIn: network.updateCheckOptedIn,
+    },
   };
 };

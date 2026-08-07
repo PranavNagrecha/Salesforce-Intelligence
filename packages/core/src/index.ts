@@ -40,3 +40,17 @@ export {
   type VersionCheckCounterPayload,
   type VersionCheckCounterPoster,
 } from './update-notifier.js';
+
+export {
+  assertNetworkAllowed,
+  describeNetworkPolicy,
+  getNetworkMode,
+  isUpdateCheckForcedOff,
+  isUpdateCheckOptedIn,
+  withNetworkMode,
+  withNetworkModeSync,
+  type NetworkDenied,
+  type NetworkMode,
+  type NetworkPurpose,
+  type NetworkRequestContext,
+} from './network-policy.js';

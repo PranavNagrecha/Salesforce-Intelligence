@@ -23,7 +23,13 @@
  */
 
 import type { McpError } from '@sf-intelligence/contracts';
-import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
+import {
+  assertNetworkAllowed,
+  err,
+  execHelper,
+  ok,
+  type Result,
+} from '@sf-intelligence/core';
 import {
   getAuthFromSfCli,
   type ExecCommand,
@@ -86,6 +92,13 @@ export const runSfJson = async (
   args: readonly string[],
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<unknown, McpError>> => {
+  const network = assertNetworkAllowed({ purpose: 'live-query' });
+  if (!network.ok) {
+    return err({
+      kind: 'invalid-query',
+      message: network.error.message,
+    });
+  }
   const fullArgs = [...args, '--target-org', org, '--json'];
   try {
     const { stdout } = await exec('sf', fullArgs);
@@ -115,6 +128,13 @@ export const restGet = async (
   auth: ToolingApiAuth,
   path: string,
 ): Promise<Result<unknown, McpError>> => {
+  const network = assertNetworkAllowed({ purpose: 'live-query' });
+  if (!network.ok) {
+    return err({
+      kind: 'invalid-query',
+      message: network.error.message,
+    });
+  }
   try {
     const response = await fetch(path, {
       headers: { Authorization: `Bearer ${auth.accessToken}` },

@@ -7,8 +7,9 @@
  * `sf-intelligence` and, when one exists, surface a one-line "update available"
  * nudge. The check is:
  *
- *   - **Opt-out** via `SFI_NO_UPDATE_CHECK=1`, and **auto-off in CI** (any of the
- *     usual CI env markers) so a build machine never reaches out to the network.
+ *   - **Opt-IN** (AUDIT-F2): off by default. Enable with `SFI_UPDATE_CHECK=1` or
+ *     `SFI_NETWORK_MODE=updates-only`. Still force-disabled by
+ *     `SFI_NO_UPDATE_CHECK=1` and CI markers.
  *   - **Fail-silent**: a network error, timeout, or malformed response returns a
  *     "no update" result with the error attached — it NEVER throws and NEVER
  *     fails the server or command.
@@ -40,6 +41,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { get as httpsGet, request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+
+import { assertNetworkAllowed } from './network-policy.js';
 
 /**
  * The outcome of a version check: the latest version discovered, whether it is
@@ -400,15 +403,27 @@ const CI_ENV_MARKERS: readonly string[] = [
 ];
 
 /**
- * Whether the update check should be skipped: explicit opt-out
- * (`SFI_NO_UPDATE_CHECK=1`) or any CI marker being set to a non-empty value.
+ * Whether the update check should be skipped (AUDIT-F2 — opt-IN by default).
+ *
+ * Runs only when the operator opted in (`SFI_UPDATE_CHECK=1` or
+ * `SFI_NETWORK_MODE=updates-only`) AND has not force-disabled via
+ * `SFI_NO_UPDATE_CHECK=1` / CI markers. The MCP server default network mode is
+ * `off`, so startup no longer phones npm unless explicitly enabled.
  */
 const shouldDisableCheck = (): boolean => {
   if (process.env['SFI_NO_UPDATE_CHECK'] === '1') return true;
-  return CI_ENV_MARKERS.some((v) => {
-    const val = process.env[v];
-    return val !== undefined && val !== '';
-  });
+  if (
+    CI_ENV_MARKERS.some((v) => {
+      const val = process.env[v];
+      return val !== undefined && val !== '';
+    })
+  ) {
+    return true;
+  }
+  // Opt-in: explicit flag OR updates-only network mode.
+  if (process.env['SFI_UPDATE_CHECK'] === '1') return false;
+  if (process.env['SFI_NETWORK_MODE'] === 'updates-only') return false;
+  return true;
 };
 
 /**
@@ -460,6 +475,12 @@ export const checkForUpdate = async (
       cached: true,
       error: null,
     };
+  }
+
+  // Defense-in-depth: same choke point as live/retrieve (AUDIT-F2).
+  const network = assertNetworkAllowed({ purpose: 'update-check' });
+  if (!network.ok) {
+    return { shouldUpdate: false, latestVersion: null, cached: false, error: null };
   }
 
   let latest: string | null = null;

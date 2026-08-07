@@ -144,12 +144,30 @@ See [`guides/asking-questions.md`](./guides/asking-questions.md) § live data.
 
 ---
 
+## Network policy (AUDIT-F2)
+
+Outbound network is governed by one mode (`SFI_NETWORK_MODE`):
+
+| Mode | Meaning |
+| --- | --- |
+| `off` **(default)** | No outbound network from the MCP process |
+| `updates-only` | npm registry update-check only |
+| `salesforce-read` | Salesforce retrieve + live reads |
+
+`sfi refresh` and `sfi stale-sweep` (and the watch daemon tick) temporarily
+elevate to `salesforce-read` for the command. Authorized `sfi.live_*` calls
+elevate for the duration of each org read. Runtime model download is always
+denied.
+
+The offline data plane performs no network requests. Refresh, update checking,
+model acquisition, and live reads are separately controlled network operations.
+
 ## Update checking
 
 On MCP-server startup (`sfi mcp`) the plugin can check npm for a newer
 published `sf-intelligence` and, when one exists, print a one-line
 "update available" nudge to **stderr** (stdout is reserved for MCP JSON-RPC).
-The check is **off in CI**, **opt-out** everywhere, and never blocks the
+The check is **off by default (opt-in)**, **off in CI**, and never blocks the
 server.
 
 ### Offline vault-version nudge
@@ -162,7 +180,14 @@ extractors — e.g. the CustomPermission / permission-set record-type work in
 0.1.19) is rebuilt rather than silently under-reporting. It is a pure local
 version comparison: no network, no org data.
 
-### Opt out
+### Opt in (required)
+
+| Method | How |
+| --- | --- |
+| Explicit opt-in | Set `SFI_UPDATE_CHECK=1` |
+| Network mode | Set `SFI_NETWORK_MODE=updates-only` |
+
+### Force off
 
 | Method | How |
 | --- | --- |

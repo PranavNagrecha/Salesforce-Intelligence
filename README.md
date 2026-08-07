@@ -619,9 +619,13 @@ never an error.
 ## Privacy
 
 Everything stays on your machine. The vault (`org-kb/`) is local; the MCP server
-makes no network calls while answering. This public repository ships **zero org
-data** — a release privacy guard scans the shipping set on every release and
-fails the build if a real org identifier leaks. What you vault is yours.
+defaults to `SFI_NETWORK_MODE=off` and makes no network calls while answering
+vault questions. Optional egress is explicit: npm update-check only when
+`SFI_UPDATE_CHECK=1` (or `updates-only` mode); Salesforce retrieve/live only
+when refresh or an authorized live tool elevates to `salesforce-read`. This
+public repository ships **zero org data** — a release privacy guard scans the
+shipping set on every release and fails the build if a real org identifier
+leaks. What you vault is yours.
 
 ## Roadmap
 

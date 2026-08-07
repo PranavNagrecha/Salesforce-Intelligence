@@ -13,7 +13,13 @@ import type {
   PhantomClassification,
   VaultManifest,
 } from '@sf-intelligence/contracts';
-import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
+import {
+  err,
+  execHelper,
+  ok,
+  withNetworkMode,
+  type Result,
+} from '@sf-intelligence/core';
 import {
   buildDescribeFieldExtraction,
   existingCustomFieldIds,
@@ -851,7 +857,17 @@ const applyApexAstEdges = async (
   };
 };
 
-export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult> => {
+/**
+ * Full vault refresh. Elevates {@link withNetworkMode} to `salesforce-read`
+ * for the duration (AUDIT-F2) so retrieve / Tooling enrichment / live data-shape
+ * may reach Salesforce; the MCP server default remains `off`.
+ */
+export const runRefresh = async (
+  opts: RunRefreshOptions,
+): Promise<RefreshResult> =>
+  withNetworkMode('salesforce-read', () => runRefreshBody(opts));
+
+const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> => {
   const started = Date.now();
 
   const configResult = await loadVaultConfig(opts.cwd);

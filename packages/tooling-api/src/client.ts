@@ -27,7 +27,12 @@
  *     general query but typed as `Dependency` for the consumer.
  */
 
-import { err, ok, type Result } from '@sf-intelligence/core';
+import {
+  assertNetworkAllowed,
+  err,
+  ok,
+  type Result,
+} from '@sf-intelligence/core';
 
 import type { ToolingApiAuth } from './auth.js';
 
@@ -167,6 +172,13 @@ export const createToolingApiClient = (
   const fetchAt = async (
     relativeUrl: string,
   ): Promise<Result<FetchResponse, ToolingApiError>> => {
+    const network = assertNetworkAllowed({ purpose: 'metadata-retrieve' });
+    if (!network.ok) {
+      return err({
+        kind: 'network-error',
+        message: network.error.message,
+      });
+    }
     const fullUrl = relativeUrl.startsWith('http')
       ? relativeUrl
       : `${auth.instanceUrl}${relativeUrl}`;

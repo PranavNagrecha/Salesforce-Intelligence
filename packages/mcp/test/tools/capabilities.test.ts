@@ -75,6 +75,9 @@ describe('capabilitiesHandler', () => {
       'facts',
       'schema_version',
     ]);
+    // AUDIT-F2: process network posture is disclosed on the capabilities surface.
+    expect(m.network.mode).toMatch(/^(off|updates-only|salesforce-read)$/);
+    expect(typeof m.network.updateCheckOptedIn).toBe('boolean');
   });
 
   it('every tool referenced in a category actually exists in the registry', async () => {
