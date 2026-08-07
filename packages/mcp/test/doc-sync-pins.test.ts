@@ -47,8 +47,13 @@ describe('doc-sync core-roster size pin', () => {
       ['advertises a <strong>19-tool core roster</strong>', 19],
       ['only a <strong>19-schema core roster</strong> is advertised', 19],
       ['Default is a 19-tool <code>core</code> roster (token-friendly)', 19],
-      ['default is `core` (19 directly invokable tools). That spine', 19],
+      ['default is `core` (19 directly invokable tools).', 19],
       ['Default advertise/invoke profile is **`core` (19 tools)** including', 19],
+      // "spine" phrasing — docs/configuration.md, configuration.astro and
+      // tool-profile.ts state the count this way. It was NOT matched before,
+      // so a stale 18 in docs/configuration.md passed the gate.
+      ['**Default is `core`**: only that 19-schema spine is advertised', 19],
+      ['advertise the 19-tool spine, incl. live_consent', 19],
     ] as const;
     for (const [sample, n] of samples) {
       const hits = matchCoreRosterCountFacts(sample);
@@ -72,6 +77,25 @@ describe('doc-sync core-roster size pin', () => {
       true,
     );
     expect(failures.some((m: string) => m.includes('CLAUDE.md'))).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  it('fails on a stale "N-schema spine" — the form that slipped docs/configuration.md', () => {
+    const { failures, warnings } = checkCoreRosterCountPins(
+      {
+        'docs/configuration.md':
+          '**Default is `core`** (AUDIT-F6): only that 18-schema spine is advertised',
+        'packages/mcp/src/tools/tool-profile.ts':
+          ' * AUDIT-F6: default is `core` (advertise the 19-tool spine, incl. live_consent).',
+      },
+      19,
+    );
+    expect(
+      failures.some(
+        (m: string) => m.includes('docs/configuration.md') && m.includes('18'),
+      ),
+    ).toBe(true);
+    expect(failures.some((m: string) => m.includes('tool-profile.ts'))).toBe(false);
     expect(warnings).toEqual([]);
   });
 

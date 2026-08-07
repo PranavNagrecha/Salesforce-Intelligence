@@ -264,6 +264,16 @@ if (manifest) {
     const corePinFiles = {
       'README.md': join(root, 'README.md'),
       'CLAUDE.md': join(root, 'CLAUDE.md'),
+      // The canonical configuration reference states the same integer as
+      // "N-schema spine"; it carries the advertised/registered pins already but
+      // was NOT core-count pinned, so a stale 18 passed the gate here.
+      'docs/configuration.md': join(root, 'docs/configuration.md'),
+      // Definition site of CORE_PROFILE_TOOLS — a stale JSDoc here misleads the
+      // next maintainer more than any doc does.
+      'packages/mcp/src/tools/tool-profile.ts': join(
+        root,
+        'packages/mcp/src/tools/tool-profile.ts',
+      ),
       'website/src/pages/getting-started.astro': join(
         root,
         'website/src/pages/getting-started.astro',

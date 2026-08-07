@@ -73,11 +73,15 @@ export function matchConceptCountFacts(text) {
  *   - `N-tool core roster` / `N-tool <code>core</code> roster`
  *   - `N-schema core roster`
  *   - `core (N tools)` / `core` (N tools)` / `core` (N directly invokable tools)`
+ *   - `N-schema spine` / `N-tool spine` — the phrasing docs/configuration.md,
+ *     configuration.astro and tool-profile.ts use for the same fact. Omitting
+ *     it is how a stale 18 survived in a file that DID state the count.
  */
 export const CORE_ROSTER_COUNT_RES = Object.freeze([
   /(\d+)-tool\s+(?:<[^>]+>\s*)?core(?:\s+roster)?/gi,
   /(\d+)-schema\s+core(?:\s+roster)?/gi,
   /core[`'"]?\s*\((\d+)\s+(?:directly\s+invokable\s+)?tools\)/gi,
+  /(\d+)-(?:tool|schema)\s+spine/gi,
 ]);
 
 /** @returns {{ count: number, match: string }[]} */

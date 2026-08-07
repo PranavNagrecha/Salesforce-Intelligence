@@ -1141,6 +1141,12 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
     const top = (r.value.data.toolCandidates ?? [])[0];
     expect(top).toBeDefined();
     expect(top!.score).toBeGreaterThanOrEqual(FUNNEL_PRIMARY_MIN_SCORE);
+    // Pin WHICH tool wins, not just that something cleared the bar. The reason
+    // this case was accepted is the specific coupling: "setup" in the question
+    // attracts setup-audit vocabulary. If the top candidate drifts to some
+    // other tool, that is a different product decision and must re-surface
+    // rather than ride on this exemption.
+    expect(top!.tool).toBe('sfi.live_setup_audit_trail');
   });
 
   it('NEGATIVE (margin gate wins): a risk near-tie clarifies instead of advisory-routing', async () => {
