@@ -3,7 +3,7 @@
  */
 
 import type { TrustSummary } from '@sf-intelligence/contracts';
-import { summarizeCoverage } from '@sf-intelligence/vault';
+import { buildMixedFreshness, summarizeCoverage } from '@sf-intelligence/vault';
 
 import type { Context } from '../server.js';
 
@@ -90,10 +90,11 @@ export interface WhatIfEnvelope {
 export const offlineTrust = (
   ctx: Context,
   completeness: TrustSummary['completeness'],
+  involvedTypes?: readonly string[],
 ): TrustSummary => ({
   provenance: 'offline_snapshot',
   confidence: 'declared',
-  freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+  freshness: buildMixedFreshness(ctx.manifest, involvedTypes),
   completeness,
   limitations: [],
 });

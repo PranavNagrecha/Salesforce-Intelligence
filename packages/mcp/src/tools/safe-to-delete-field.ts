@@ -159,6 +159,7 @@ import {
   type PiiCategory,
 } from '@sf-intelligence/patterns';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
+import { buildMixedFreshness } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { mdTable } from '../answer-render.js';
@@ -1319,19 +1320,35 @@ const coreSafeToDeleteFieldHandler = async (
     }
   }
 
+  const familyFreshness = buildMixedFreshness(ctx.manifest);
   const trust =
     liveQueriedAt !== undefined
-      ? hybridTrust({
-          vaultRefreshedAt: ctx.manifest.refreshedAt,
-          liveQueriedAt,
-          vaultConfidence: baseConfidence,
-          completeness: baseCompleteness,
-          limitations: baseLimitations,
-        })
+      ? {
+          ...hybridTrust({
+            vaultRefreshedAt: ctx.manifest.refreshedAt,
+            liveQueriedAt,
+            vaultConfidence: baseConfidence,
+            completeness: baseCompleteness,
+            limitations: baseLimitations,
+          }),
+          freshness: {
+            snapshotRefreshedAt: ctx.manifest.refreshedAt,
+            liveQueriedAt,
+            ...(familyFreshness.overall !== undefined
+              ? { overall: familyFreshness.overall }
+              : {}),
+            ...(familyFreshness.families !== undefined
+              ? { families: familyFreshness.families }
+              : {}),
+            ...(familyFreshness.oldestEvidenceAt !== undefined
+              ? { oldestEvidenceAt: familyFreshness.oldestEvidenceAt }
+              : {}),
+          },
+        }
       : {
           provenance: 'offline_snapshot' as const,
           confidence: baseConfidence,
-          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+          freshness: familyFreshness,
           completeness: baseCompleteness,
           limitations: baseLimitations,
         };

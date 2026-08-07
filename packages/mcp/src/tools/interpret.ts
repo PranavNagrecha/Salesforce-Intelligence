@@ -65,7 +65,11 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdgesForNodes, listNodesByIds } from '@sf-intelligence/graph';
-import { type CoverageSummary, summarizeCoverage } from '@sf-intelligence/vault';
+import {
+  buildMixedFreshness,
+  type CoverageSummary,
+  summarizeCoverage,
+} from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { renderInterpretationsMarkdown } from '../answer-render.js';
@@ -879,7 +883,7 @@ export const interpretHandler = async (
   const trust: TrustSummary = {
     provenance: 'offline_snapshot',
     confidence: overallConfidence,
-    freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+    freshness: buildMixedFreshness(ctx.manifest, unionCoverageTypes),
     completeness: {
       status: completenessStatus,
       ...(aggSummary.missingCoverage.length > 0

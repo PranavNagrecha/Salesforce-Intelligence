@@ -551,6 +551,16 @@ export interface TrustSummary {
   readonly freshness: Readonly<{
     readonly snapshotRefreshedAt?: string;
     readonly liveQueriedAt?: string;
+    /**
+     * AUDIT-F5 — when involved families were retrieved at different times
+     * (scoped refresh), `mixed`; otherwise `uniform`. Optional so pre-F5
+     * answers stay byte-stable until a producer opts in.
+     */
+    readonly overall?: 'uniform' | 'mixed';
+    /** Per-family `retrievedAt` (ISO) for the families an answer depended on. */
+    readonly families?: Readonly<Record<string, string>>;
+    /** Oldest `retrievedAt` among {@link families} — the weak link. */
+    readonly oldestEvidenceAt?: string;
   }>;
   readonly completeness: Readonly<{
     readonly status: 'complete' | 'partial' | 'unknown';
@@ -929,6 +939,18 @@ export interface CoverageEntry {
    * and NEVER for a capped/dropped (`pending`) type.
    */
   readonly retrieveConfirmed?: boolean;
+  /**
+   * AUDIT-F5 — ISO-8601 when THIS family was last retrieved (not the vault-wide
+   * `refreshedAt`). Preserved across scoped `--types` refreshes for families
+   * that were not pulled. Absent on pre-F5 manifests / `--no-pull` rebuilds.
+   */
+  readonly retrievedAt?: string;
+  /**
+   * AUDIT-F5 — monotonic per-family retrieve generation. Bumped only when that
+   * family is actually pulled; scoped refreshes leave other families' epochs
+   * unchanged so mixed-freshness is detectable.
+   */
+  readonly epoch?: number;
 }
 
 // ============================================================================
