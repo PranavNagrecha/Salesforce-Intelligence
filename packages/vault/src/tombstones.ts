@@ -48,7 +48,11 @@ export const appendTombstones = async (
   return deletedPaths.length;
 };
 
-/** Best-effort read of tombstone records (empty on missing/corrupt). */
+/**
+ * Best-effort read of the most recent tombstone records (empty on
+ * missing/corrupt). The JSONL is append-only; "recent" means newest-first
+ * by `deletedAt`, then file order for ties.
+ */
 export const readTombstones = async (
   vaultRoot: string,
   limit = 200,
@@ -66,13 +70,16 @@ export const readTombstones = async (
           row.reason === 'reconciled-absent'
         ) {
           out.push(row);
-          if (out.length >= limit) break;
         }
       } catch {
         // skip corrupt lines
       }
     }
-    return out;
+    out.sort((a, b) => {
+      if (a.deletedAt === b.deletedAt) return 0;
+      return a.deletedAt < b.deletedAt ? 1 : -1;
+    });
+    return out.slice(0, Math.max(0, limit));
   } catch {
     return [];
   }

@@ -42,7 +42,7 @@ import { get as httpsGet, request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { assertNetworkAllowed } from './network-policy.js';
+import { assertNetworkAllowed, getNetworkMode } from './network-policy.js';
 
 /**
  * The outcome of a version check: the latest version discovered, whether it is
@@ -420,9 +420,9 @@ const shouldDisableCheck = (): boolean => {
   ) {
     return true;
   }
-  // Opt-in: explicit flag OR updates-only network mode.
+  // Opt-in: explicit flag OR updates-only network mode (respect ALS override).
   if (process.env['SFI_UPDATE_CHECK'] === '1') return false;
-  if (process.env['SFI_NETWORK_MODE'] === 'updates-only') return false;
+  if (getNetworkMode() === 'updates-only') return false;
   return true;
 };
 

@@ -152,14 +152,16 @@ Outbound network is governed by one mode (`SFI_NETWORK_MODE`):
 
 | Mode | Meaning |
 | --- | --- |
-| `off` **(default)** | No outbound network from the MCP process |
+| `off` **(default)** | No outbound network from the MCP process unless a command or authorized live call temporarily elevates (see below) |
 | `updates-only` | npm registry update-check only |
 | `salesforce-read` | Salesforce retrieve + live reads |
 
 `sfi refresh` and `sfi stale-sweep` (and the watch daemon tick) temporarily
 elevate to `salesforce-read` for the command. Authorized `sfi.live_*` calls
-elevate for the duration of each org read. Runtime model download is always
-denied.
+(and the one-shot `sf org display` used to bind/verify live consent) elevate
+for the duration of each org read. Runtime model download is always denied.
+A process that stays at `off` with no elevation performs no Salesforce or npm
+egress.
 
 The offline data plane performs no network requests. Refresh, update checking,
 model acquisition, and live reads are separately controlled network operations.

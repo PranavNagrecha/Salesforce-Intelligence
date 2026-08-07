@@ -6,6 +6,12 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     globals: true,
     pool: 'threads',
+    // Hermetic unit tests stub `sf data query` but not `sf org display`.
+    // Production gateLive re-verifies OrgId+principal against the CLI; tests
+    // skip that re-bind unless a case explicitly unsets this env var.
+    env: {
+      SFI_LIVE_SKIP_IDENTITY_VERIFY: '1',
+    },
     // The bounded-graph-query tests open real DuckDB connections; under the
     // parallel thread pool on constrained CI runners the default 5s ceiling can
     // be exceeded, and a vitest-killed DuckDB query aborts the worker (Napi

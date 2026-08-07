@@ -400,7 +400,13 @@ export const liveBudgetHandler = async (
   // cycle. Pull it lazily here (the only consumer of it in live-session) so the
   // static dependency graph stays acyclic.
   const { resolveLiveAccess } = await import('./live-plane.js');
-  const access = await resolveLiveAccess(org, input.liveEnabled, ctx.liveCapability);
+  const { requiredScopesForTool } = await import('../live-consent.js');
+  const access = await resolveLiveAccess(
+    org,
+    input.liveEnabled,
+    ctx.liveCapability,
+    requiredScopesForTool(ctx.liveToolName ?? 'sfi.live_budget'),
+  );
   if (access.allowed) {
     // `sf org limits list` goes through the CLI (runSfJson), not the REST/fetch
     // path, so it is mockable and does NOT decrement the live-query budget — a

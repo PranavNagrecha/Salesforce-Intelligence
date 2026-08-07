@@ -16,7 +16,13 @@
  * stdout bounded, so the buffered exec is appropriate here).
  */
 
-import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
+import {
+  assertNetworkAllowed,
+  err,
+  execHelper,
+  ok,
+  type Result,
+} from '@sf-intelligence/core';
 
 /**
  * Auth bundle returned on successful delegation. The accessToken /
@@ -139,6 +145,14 @@ export const getAuthFromSfCli = async (
     return err({
       kind: 'sf-cli-failed',
       message: 'targetOrg must be a non-empty alias',
+    });
+  }
+
+  const network = assertNetworkAllowed({ purpose: 'live-query' });
+  if (!network.ok) {
+    return err({
+      kind: 'sf-cli-failed',
+      message: network.error.message,
     });
   }
 

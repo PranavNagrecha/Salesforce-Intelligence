@@ -160,4 +160,26 @@ describe('buildRetrievalLedger + tombstones', () => {
       await rm(vault, { recursive: true, force: true });
     }
   });
+
+  it('readTombstones returns newest-first (recent), not the oldest head', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'sfi-tomb-recent-'));
+    try {
+      await appendTombstones(vault, ['classes/Old.cls'], {
+        deletedAt: '2026-01-01T00:00:00.000Z',
+      });
+      await appendTombstones(vault, ['classes/Mid.cls'], {
+        deletedAt: '2026-06-01T00:00:00.000Z',
+      });
+      await appendTombstones(vault, ['classes/New.cls'], {
+        deletedAt: '2026-08-01T00:00:00.000Z',
+      });
+      const rows = await readTombstones(vault, 2);
+      expect(rows.map((r) => r.componentPath)).toEqual([
+        'classes/New.cls',
+        'classes/Mid.cls',
+      ]);
+    } finally {
+      await rm(vault, { recursive: true, force: true });
+    }
+  });
 });

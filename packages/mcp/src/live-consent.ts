@@ -15,11 +15,16 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { err, ok, type Result } from '@sf-intelligence/core';
+
+/** Consent dir must not be world-traversable (holds OrgId + principal). */
+const CONSENT_DIR_MODE = 0o700;
+/** Consent file must not be world-readable. */
+const CONSENT_FILE_MODE = 0o600;
 
 /** Bumped on breaking on-disk shape changes (v1 → v2 for AUDIT-F3). */
 const STORE_VERSION = 2;
@@ -98,8 +103,42 @@ export const consentStorePath = (): string => {
 
 const normalizeOrg = (org: string): string => org.trim().toLowerCase();
 
+/**
+ * Normalize Salesforce Ids for 15-vs-18 comparison (case-sensitive prefix).
+ * Returns null when the value is missing or not a plausible Id.
+ */
+export const normalizeSalesforceId = (id: string | null | undefined): string | null => {
+  if (typeof id !== 'string') return null;
+  const trimmed = id.trim();
+  if (trimmed.length < 15) return null;
+  return trimmed.slice(0, 15);
+};
+
+/** True when two OrgIds refer to the same org (15- or 18-char forms). */
+export const orgIdsMatch = (
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean => {
+  const na = normalizeSalesforceId(a);
+  const nb = normalizeSalesforceId(b);
+  return na !== null && nb !== null && na === nb;
+};
+
 const isLiveScope = (value: unknown): value is LiveScope =>
   value === 'aggregate' || value === 'sample' || value === 'users';
+
+const hardenConsentPath = async (path: string): Promise<void> => {
+  try {
+    await chmod(dirname(path), CONSENT_DIR_MODE);
+  } catch {
+    // Best-effort (Windows / unusual FS).
+  }
+  try {
+    await chmod(path, CONSENT_FILE_MODE);
+  } catch {
+    // Best-effort.
+  }
+};
 
 const normalizeScopes = (scopes: readonly LiveScope[] | undefined): LiveScope[] => {
   const raw = scopes === undefined || scopes.length === 0 ? (['aggregate'] as LiveScope[]) : [...scopes];
@@ -149,6 +188,7 @@ export const loadConsentStore = async (
 ): Promise<ConsentStore> => {
   try {
     const raw = await readFile(path, 'utf8');
+    await hardenConsentPath(path);
     const parsed = JSON.parse(raw) as unknown;
     if (
       parsed === null ||
@@ -218,10 +258,14 @@ const writeStore = async (
   path: string,
 ): Promise<Result<ConsentStore, ConsentError>> => {
   try {
-    await mkdir(dirname(path), { recursive: true });
+    await mkdir(dirname(path), { recursive: true, mode: CONSENT_DIR_MODE });
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, 'utf8');
+    await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: CONSENT_FILE_MODE,
+    });
     await rename(tmp, path);
+    await hardenConsentPath(path);
     return ok(store);
   } catch (cause) {
     return err({
@@ -276,8 +320,29 @@ export const grantLiveConsent = async (
   const existing = store.orgs[key];
   const merge = opts.mergeScopes !== false;
   const incoming = normalizeScopes(opts.scopes);
+  // Never inherit scopes from a prior grant bound to a different OrgId.
+  const sameOrgBinding =
+    existing === undefined ||
+    existing.orgId === null ||
+    opts.orgId === undefined ||
+    opts.orgId === null ||
+    orgIdsMatch(existing.orgId, opts.orgId);
+  if (
+    merge &&
+    existing !== undefined &&
+    !isExpired(existing, now) &&
+    !sameOrgBinding
+  ) {
+    return err({
+      kind: 'invalid-grant',
+      message:
+        `Refusing to merge live consent for '${org}': stored OrgId ` +
+        `${existing.orgId ?? '(none)'} does not match the authenticated OrgId ` +
+        `${opts.orgId ?? '(none)'}. Revoke the prior grant and re-grant.`,
+    });
+  }
   const scopes =
-    merge && existing !== undefined && !isExpired(existing, now)
+    merge && existing !== undefined && !isExpired(existing, now) && sameOrgBinding
       ? normalizeScopes([...existing.scopes, ...incoming])
       : incoming;
 
@@ -352,23 +417,71 @@ export const describeLiveGrant = (
 };
 
 /**
- * Map a live / hybrid tool name to the scopes it requires.
- * Unknown live_* tools default to `aggregate` (fail-closed for sample/users).
+ * Explicit scope allowlist for live / hybrid tools (AUDIT Wave 3).
+ * Unmapped tools are DENIED — never defaulted to aggregate (fail-open).
  */
-export const requiredScopesForTool = (toolName: string): readonly LiveScope[] => {
-  switch (toolName) {
-    case 'sfi.live_sample':
-      return ['sample'];
-    case 'sfi.live_inactive_users':
-    case 'sfi.live_permset_holders':
-    case 'sfi.live_user_permsets':
-    case 'sfi.live_zombie_accounts':
-    case 'sfi.live_group_members':
-    case 'sfi.live_record_access':
-    case 'sfi.live_record_shares':
-    case 'sfi.live_owner_breakdown':
-      return ['users'];
-    default:
-      return ['aggregate'];
-  }
+export const LIVE_TOOL_REQUIRED_SCOPES: Readonly<
+  Record<string, readonly LiveScope[]>
+> = Object.freeze({
+  // sample — arbitrary / record-level row reads
+  'sfi.live_sample': Object.freeze(['sample'] as const),
+  'sfi.live_field_history': Object.freeze(['sample'] as const),
+
+  // users — person-identifying rosters / named individuals
+  'sfi.live_inactive_users': Object.freeze(['users'] as const),
+  'sfi.live_permset_holders': Object.freeze(['users'] as const),
+  'sfi.live_user_permsets': Object.freeze(['users'] as const),
+  'sfi.live_zombie_accounts': Object.freeze(['users'] as const),
+  'sfi.live_group_members': Object.freeze(['users'] as const),
+  'sfi.live_record_access': Object.freeze(['users'] as const),
+  'sfi.live_record_shares': Object.freeze(['users'] as const),
+  'sfi.live_owner_breakdown': Object.freeze(['users'] as const),
+  'sfi.live_setup_audit_trail': Object.freeze(['users'] as const),
+  'sfi.live_license_usage': Object.freeze(['users'] as const),
+
+  // aggregate — counts / limits / non-PII aggregates
+  'sfi.live_describe': Object.freeze(['aggregate'] as const),
+  'sfi.live_stale_check': Object.freeze(['aggregate'] as const),
+  'sfi.live_count': Object.freeze(['aggregate'] as const),
+  'sfi.live_field_population': Object.freeze(['aggregate'] as const),
+  'sfi.live_group_count': Object.freeze(['aggregate'] as const),
+  'sfi.live_stale_records': Object.freeze(['aggregate'] as const),
+  'sfi.live_recent_activity': Object.freeze(['aggregate'] as const),
+  'sfi.live_aggregate': Object.freeze(['aggregate'] as const),
+  'sfi.live_duplicate_check': Object.freeze(['aggregate'] as const),
+  'sfi.live_scheduled_jobs': Object.freeze(['aggregate'] as const),
+  'sfi.live_storage_by_object': Object.freeze(['aggregate'] as const),
+  'sfi.live_org_limits': Object.freeze(['aggregate'] as const),
+  'sfi.live_data_skew': Object.freeze(['aggregate'] as const),
+  'sfi.live_security_exposure': Object.freeze(['aggregate'] as const),
+  'sfi.live_consent': Object.freeze(['aggregate'] as const),
+  'sfi.live_report_usage': Object.freeze(['aggregate'] as const),
+  'sfi.live_folder_access': Object.freeze(['aggregate'] as const),
+  'sfi.live_email_template_usage': Object.freeze(['aggregate'] as const),
+  'sfi.live_org_health': Object.freeze(['aggregate'] as const),
+  'sfi.live_automation_fired': Object.freeze(['aggregate'] as const),
+  'sfi.live_picklist_usage': Object.freeze(['aggregate'] as const),
+  'sfi.live_budget': Object.freeze(['aggregate'] as const),
+  'sfi.live_drift_check': Object.freeze(['aggregate'] as const),
+
+  // hybrid / live-primary non-live_* tools that call probeLiveAccess
+  'sfi.blast_radius_live': Object.freeze(['aggregate'] as const),
+  'sfi.fleet_drift_ranking': Object.freeze(['aggregate'] as const),
+  'sfi.coverage_report': Object.freeze(['aggregate'] as const),
+  'sfi.unused_fields_deep': Object.freeze(['aggregate'] as const),
+  'sfi.field_cleanup_candidates': Object.freeze(['aggregate'] as const),
+  'sfi.what_if_make_field_required': Object.freeze(['aggregate'] as const),
+  'sfi.safe_to_delete_field': Object.freeze(['aggregate'] as const),
+  'sfi.field_change_advisor': Object.freeze(['aggregate'] as const),
+});
+
+/**
+ * Map a live / hybrid tool name to the scopes it requires.
+ * Returns `null` when the tool has no explicit mapping (fail-closed).
+ */
+export const requiredScopesForTool = (
+  toolName: string,
+): readonly LiveScope[] | null => {
+  const mapped = LIVE_TOOL_REQUIRED_SCOPES[toolName];
+  return mapped === undefined ? null : mapped;
 };
