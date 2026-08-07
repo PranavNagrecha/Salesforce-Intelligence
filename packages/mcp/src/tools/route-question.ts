@@ -1497,11 +1497,21 @@ export const FUNNEL_PRIMARY_MIN_SCORE = 0.26;
  * sits ABOVE the signal floor (0.261) and no cut exists — this one separates
  * cleanly, which is why the gate moved here instead of the threshold moving up.
  *
- * HONEST LIMIT: the margin was measured on a 50-question hand-built corpus,
- * not the 133/334 over-route tripwires FUNNEL_PRIMARY_MIN_SCORE was originally
- * calibrated against. It ships because the repo's real tripwires — the
- * funnel-recall suite, the router goldset, and the routing gate — all stay
- * green with it. Re-run those before moving it.
+ * HONEST LIMITS — two, and neither is a reason to raise the number:
+ *
+ * 1. PARTIAL BY CONSTRUCTION. On a 30-question no-intent set this cuts
+ *    spurious advisories 6 -> 2. It closes the SINGLE-TOKEN collision class
+ *    ("setup", "audit"). It does NOT close multi-token conversational asks —
+ *    "how does this compare" (breadth 1.126 -> compare_components) and "can
+ *    you help me out" (0.563 -> doc_coverage_report) survive, because those
+ *    words genuinely spread across the index and land their breadth INSIDE
+ *    the range real questions occupy. Raising the cut past them would cut
+ *    measured signal (floor 0.376). That class needs an intent classifier,
+ *    not a threshold — do not "fix" it by moving this constant.
+ * 2. The margin was measured on a 50-question hand-built corpus, not the
+ *    133/334 over-route tripwires FUNNEL_PRIMARY_MIN_SCORE was calibrated
+ *    against. It ships because the repo's real tripwires — funnel-recall, the
+ *    router goldset, the routing gate — all stay green. Re-run those first.
  */
 export const FUNNEL_MIN_EVIDENCE_BREADTH = 0.32;
 
