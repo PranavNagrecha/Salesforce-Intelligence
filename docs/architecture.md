@@ -41,8 +41,8 @@ generators and what-if simulations sit on top of that graph.
 ### Two graphs: the org vault and the Concept Model
 
 There is a second, much smaller graph that never touches your org. The
-**Concept Model** is a curated, org-independent set of **94** reasoning
-concepts and **143** rules encoding general Salesforce truth — save-order
+**Concept Model** is a curated, org-independent set of **142** reasoning
+concepts and **193** rules encoding general Salesforce truth — save-order
 phases, relationship semantics, sharing posture, code-shape signals. It holds
 **no org data**: no canonical ids, no counts, nothing org-specific. The org
 enters reasoning *only* through the grounded slice passed to the engine at query

@@ -96,6 +96,12 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: Product manifest + doc sync
+        run: |
+          pnpm product-manifest:check
+          pnpm product-surface:check
+          pnpm doc-sync
+
       # Unit tests run on Node 20+22 in the unit-test job (INFRA-09).
 
       - name: NL routing gate (front-door router → real tools, deterministic)

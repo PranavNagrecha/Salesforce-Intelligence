@@ -5,7 +5,7 @@
  * marketing docs, the website, sfi.capabilities, and eval reports must agree on.
  *
  * Consumers:
- *   - scripts/product-surface.mjs          (compat surface + --write)
+ *   - scripts/product-surface.mjs          (compat surface + --write / --check)
  *   - scripts/generate-product-manifest.mjs
  *   - scripts/verify-doc-sync.mjs          (CI drift gate)
  *   - website/recalibrate.mjs
@@ -40,21 +40,103 @@ export const GRAPH_TABLES = Object.freeze([
   'schema_version',
 ]);
 
+/**
+ * Current-fact concept-count pin.
+ * Matches Concept Model / Graph B prose with `/`, `,`, or `and` separators,
+ * optional markdown bold around the integers, and optional "reasoning" adjective.
+ */
+export const CONCEPT_COUNT_FACT_RE =
+  /(?:Concept Model|Graph B)[^\n]{0,160}?\*{0,2}(\d+)\*{0,2}\s+(?:reasoning\s+)?concepts\s*(?:\/|,|and)\s*\*{0,2}(\d+)\*{0,2}\s+rules/gi;
+
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
 
+/** @returns {{ concepts: number, rules: number, match: string }[]} */
+export function matchConceptCountFacts(text) {
+  const re = new RegExp(CONCEPT_COUNT_FACT_RE.source, CONCEPT_COUNT_FACT_RE.flags);
+  const out = [];
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    out.push({
+      concepts: Number(match[1]),
+      rules: Number(match[2]),
+      match: match[0],
+    });
+  }
+  return out;
+}
+
+/**
+ * Require backtick-delimited table mentions so bare substrings (e.g. "artifacts"
+ * containing "facts") cannot satisfy the architecture inventory pin.
+ * @param {string} archMarkdown
+ * @param {readonly string[]} [tables]
+ * @returns {string[]} failure messages (empty = pass)
+ */
+export function checkArchitectureGraphTables(archMarkdown, tables = GRAPH_TABLES) {
+  const failures = [];
+  if (/with two tables/.test(archMarkdown)) {
+    failures.push(
+      'docs/architecture.md still says the DuckDB graph has "two tables"; ' +
+        `ProductManifest.graph.tables = [${tables.join(', ')}].`,
+    );
+  }
+  for (const table of tables) {
+    if (!new RegExp(`\`${table}\\b`).test(archMarkdown)) {
+      failures.push(
+        `docs/architecture.md missing graph table mention: \`${table}\``,
+      );
+    }
+  }
+  return failures;
+}
+
+const extractUnionBlock = (src, startMarker, endMarker) => {
+  const escapedStart = startMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedEnd = endMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const block = src.match(
+    new RegExp(`${escapedStart}([\\s\\S]*?)\\n${escapedEnd}`),
+  )?.[1];
+  if (block == null || block.trim().length === 0) {
+    throw new Error(
+      `Contract union block empty or missing between "${startMarker}" and "${endMarker}". ` +
+        'Markers must match packages/contracts/src/index.ts exactly.',
+    );
+  }
+  return block;
+};
+
 const countUnionMembers = (src, startMarker, endMarker) => {
-  const block = src.match(new RegExp(`${startMarker}([\\s\\S]*?)\\n${endMarker}`))?.[1] ?? '';
-  return (block.match(/\| '[^']+'/g) ?? []).length;
+  const block = extractUnionBlock(src, startMarker, endMarker);
+  const count = (block.match(/\| '[^']+'/g) ?? []).length;
+  if (count === 0) {
+    throw new Error(
+      `Contract union between "${startMarker}" and "${endMarker}" has zero members.`,
+    );
+  }
+  return count;
 };
 
 const listUnionMembers = (src, startMarker, endMarker) => {
-  const block = src.match(new RegExp(`${startMarker}([\\s\\S]*?)\\n${endMarker}`))?.[1] ?? '';
-  return [...block.matchAll(/\| '([^']+)'/g)].map((m) => m[1]);
+  const block = extractUnionBlock(src, startMarker, endMarker);
+  const members = [...block.matchAll(/\| '([^']+)'/g)].map((m) => m[1]);
+  if (members.length === 0) {
+    throw new Error(
+      `Contract union between "${startMarker}" and "${endMarker}" has zero members.`,
+    );
+  }
+  return members;
 };
 
 const countDirEntries = (dir, predicate) => {
   if (!existsSync(dir)) return 0;
   return readdirSync(dir, { withFileTypes: true }).filter(predicate).length;
+};
+
+const requireDist = (path, label) => {
+  if (!existsSync(path)) {
+    throw new Error(`Built ${label} missing: ${path}. Run pnpm -r build first.`);
+  }
+  return path;
 };
 
 /**
@@ -85,12 +167,10 @@ export async function buildProductManifest(productRoot) {
     'export const EDGE_TYPES',
   );
 
-  const toolsDist = join(root, 'packages/mcp/dist/src/tools/index.js');
-  if (!existsSync(toolsDist)) {
-    throw new Error(
-      `Built tool registry missing: ${toolsDist}. Run pnpm -r build first.`,
-    );
-  }
+  const toolsDist = requireDist(
+    join(root, 'packages/mcp/dist/src/tools/index.js'),
+    'tool registry',
+  );
   const { V01_TOOLS, CORE_PROFILE_TOOLS } = await import(
     pathToFileURL(toolsDist).href
   );
@@ -98,19 +178,15 @@ export async function buildProductManifest(productRoot) {
     throw new Error('V01_TOOLS not found in the built registry.');
   }
 
-  let livePlaneForTool = (name) =>
-    name.startsWith('sfi.live_') ? 'primary' : 'never';
-  try {
-    const liveCapDist = join(root, 'packages/mcp/dist/src/live-capability.js');
-    if (existsSync(liveCapDist)) {
-      const liveMod = await import(pathToFileURL(liveCapDist).href);
-      if (typeof liveMod.livePlaneForTool === 'function') {
-        livePlaneForTool = liveMod.livePlaneForTool;
-      }
-    }
-  } catch {
-    // Fallback above remains.
+  const liveCapDist = requireDist(
+    join(root, 'packages/mcp/dist/src/live-capability.js'),
+    'live-capability module',
+  );
+  const liveMod = await import(pathToFileURL(liveCapDist).href);
+  if (typeof liveMod.livePlaneForTool !== 'function') {
+    throw new Error('livePlaneForTool not found in the built live-capability module.');
   }
+  const livePlaneForTool = liveMod.livePlaneForTool;
 
   const registered = [...V01_TOOLS].map((t) => t.name).sort();
   const advertised = V01_TOOLS.filter((t) => !t.hidden).map((t) => t.name).sort();
@@ -133,37 +209,36 @@ export async function buildProductManifest(productRoot) {
       .join('\n---\n'),
   );
 
-  let schemaVersion = 1;
-  try {
-    const graphDist = join(root, 'packages/graph/dist/src/migrations.js');
-    if (existsSync(graphDist)) {
-      const mod = await import(pathToFileURL(graphDist).href);
-      if (typeof mod.CURRENT_SCHEMA_VERSION === 'number') {
-        schemaVersion = mod.CURRENT_SCHEMA_VERSION;
-      }
-    }
-  } catch {
-    // Keep default; verify-doc-sync will still pin GRAPH_TABLES prose.
-  }
-
-  let concepts = 0;
-  let rules = 0;
-  let modelVersion = 'unknown';
-  let conceptIds = [];
-  let ruleIds = [];
-  const conceptDist = join(
-    root,
-    'packages/mcp/dist/src/knowledge/generated/concept-model.js',
+  const graphDist = requireDist(
+    join(root, 'packages/graph/dist/src/migrations.js'),
+    'graph migrations module',
   );
-  if (existsSync(conceptDist)) {
-    const mod = await import(pathToFileURL(conceptDist).href);
-    const CONCEPTS = mod.CONCEPTS ?? {};
-    const CONCEPT_RULES = mod.CONCEPT_RULES ?? [];
-    conceptIds = Object.keys(CONCEPTS).sort();
-    ruleIds = CONCEPT_RULES.map((r) => r.id).sort();
-    concepts = conceptIds.length;
-    rules = ruleIds.length;
-    modelVersion = mod.MODEL_VERSION ?? 'unknown';
+  const graphMod = await import(pathToFileURL(graphDist).href);
+  if (typeof graphMod.CURRENT_SCHEMA_VERSION !== 'number') {
+    throw new Error('CURRENT_SCHEMA_VERSION not found in the built graph migrations module.');
+  }
+  const schemaVersion = graphMod.CURRENT_SCHEMA_VERSION;
+
+  const conceptDist = requireDist(
+    join(root, 'packages/mcp/dist/src/knowledge/generated/concept-model.js'),
+    'concept-model module',
+  );
+  const conceptMod = await import(pathToFileURL(conceptDist).href);
+  const CONCEPTS = conceptMod.CONCEPTS ?? {};
+  const CONCEPT_RULES = conceptMod.CONCEPT_RULES ?? [];
+  const conceptIds = Object.keys(CONCEPTS).sort();
+  const ruleIds = CONCEPT_RULES.map((r) => r.id).sort();
+  const concepts = conceptIds.length;
+  const rules = ruleIds.length;
+  const modelVersion = conceptMod.MODEL_VERSION ?? 'unknown';
+  if (concepts === 0 || rules === 0) {
+    throw new Error(
+      `Concept model is empty (concepts=${concepts}, rules=${rules}). ` +
+        'Run pnpm -r build (and regen:concept-model if needed) first.',
+    );
+  }
+  if (modelVersion === 'unknown') {
+    throw new Error('MODEL_VERSION missing from the built concept-model module.');
   }
 
   const contentHash = sha256(
@@ -231,6 +306,7 @@ export async function buildProductManifest(productRoot) {
     agentCount,
     catalogHash: `sha256:${catalogHash}`,
     identityHash: `sha256:${catalogIdentity}`,
+    /** Volatile; omit from committed artifacts via stripVolatile. */
     generatedAt: new Date().toISOString(),
   };
 }
@@ -249,20 +325,31 @@ export function toProductSurface(manifest) {
     agentCount: manifest.agentCount,
     catalogHash: manifest.catalogHash,
     identityHash: manifest.identityHash,
-    generatedAt: manifest.generatedAt,
   };
+}
+
+/** Drop volatile fields before commit / compare. */
+export function stripVolatile(manifestOrSurface) {
+  const { generatedAt: _g, ...rest } = manifestOrSurface;
+  return rest;
 }
 
 /** Compare two manifests ignoring volatile timestamps. */
 export function manifestDrift(expected, actual) {
-  const strip = (m) => {
-    const { generatedAt: _g, ...rest } = m;
-    return rest;
-  };
-  const a = JSON.stringify(strip(expected), null, 2);
-  const b = JSON.stringify(strip(actual), null, 2);
+  const aObj = stripVolatile(expected);
+  const bObj = stripVolatile(actual);
+  const a = JSON.stringify(aObj, null, 2);
+  const b = JSON.stringify(bObj, null, 2);
   if (a === b) return null;
-  return { expectedHash: sha256(a), actualHash: sha256(b) };
+  const keys = new Set([...Object.keys(aObj), ...Object.keys(bObj)]);
+  const changedKeys = [...keys].filter(
+    (k) => JSON.stringify(aObj[k]) !== JSON.stringify(bObj[k]),
+  );
+  return {
+    expectedHash: sha256(a),
+    actualHash: sha256(b),
+    changedKeys,
+  };
 }
 
 export function countContractUnions(productRoot) {

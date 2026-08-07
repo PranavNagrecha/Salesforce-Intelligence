@@ -111,9 +111,12 @@ const newClient = (cwd, env) => {
 console.log('e2e MCP smoke\n');
 
 // === Scenario 1: WITH a vault — graph queries must return data ===
+// Pin full here: default advertise profile is core (18 tools); the dedicated
+// "# core profile" block below asserts that default. This block exercises the
+// full roster + graph-backed tools that are not in core.
 console.log('# with vault');
 const { vaultParent } = await buildVault();
-const a = newClient(vaultParent);
+const a = newClient(vaultParent, { SFI_TOOL_PROFILE: 'full' });
 try {
   await a.client.connect(a.transport);
   const tools = await a.client.listTools();

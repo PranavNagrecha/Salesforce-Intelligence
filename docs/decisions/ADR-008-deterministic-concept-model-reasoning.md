@@ -28,8 +28,9 @@ Ship a curated, org-independent **Concept Model** and a deterministic engine tha
 folded into `sfi.synthesize_answer`.
 
 1. **Two graphs, one join.** The org vault graph (grounded, org-specific) stays
-   as-is. A second graph — the Concept Model — holds **94** org-independent
-   concepts and **143** rules of general Salesforce truth (save-order phases,
+   as-is. A second graph — the Concept Model — held **94** org-independent
+   concepts and **143** rules of general Salesforce truth at decision time
+   (current size is pinned by `eval/product-manifest.json`: save-order phases,
    relationship semantics, sharing posture, code-shape signals). It carries **no
    org data**: no canonical ids, no counts. The model lives in curator-owned YAML
    (`packages/mcp/model/concepts.yaml`, `concept-rules.yaml`) compiled to a frozen

@@ -110,6 +110,21 @@ describe('product surface counts', () => {
     });
   });
 
+  it('committed product-surface.json is a pure projection of the manifest', () => {
+    const path = join(repoRoot, 'eval/product-surface.json');
+    expect(existsSync(path), 'eval/product-surface.json must be committed').toBe(
+      true,
+    );
+    const surface = JSON.parse(readRepoFile('eval/product-surface.json')) as {
+      generatedAt?: string;
+    };
+    expect(surface.generatedAt, 'generatedAt must not be committed').toBeUndefined();
+    execSync('node scripts/product-surface.mjs --check', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+  });
+
   it('marketing docs do not hard-code stale MCP tool counts', () => {
     const files = [
       'README.md',

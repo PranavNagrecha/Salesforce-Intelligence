@@ -5,6 +5,7 @@
  * Failures (objective, registry-backed):
  * - every registered MCP tool has a description
  * - committed eval/product-manifest.json matches runtime registries
+ * - committed eval/product-surface.json matches the manifest projection
  * - website calibrated counts match the ProductManifest
  * - README / CLAUDE / architecture current-fact concept counts match
  * - configuration.md advertised/registered tool counts match
@@ -16,12 +17,16 @@
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   GRAPH_TABLES,
   buildProductManifest,
+  checkArchitectureGraphTables,
+  matchConceptCountFacts,
   manifestDrift,
+  stripVolatile,
+  toProductSurface,
 } from './lib/build-product-manifest.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,7 +56,7 @@ try {
 const V01_TOOLS = manifest
   ? (
       await import(
-        join(root, 'packages/mcp/dist/src/tools/index.js')
+        pathToFileURL(join(root, 'packages/mcp/dist/src/tools/index.js')).href
       )
     ).V01_TOOLS
   : [];
@@ -85,14 +90,53 @@ if (!manifest) {
   if (drift) {
     fail(
       `eval/product-manifest.json drifted from runtime registries ` +
-        `(committed ${committed.identityHash} vs live ${manifest.identityHash}). ` +
-        `Run: node scripts/generate-product-manifest.mjs`,
+        `(committed content sha256:${drift.expectedHash}, live sha256:${drift.actualHash}` +
+        (drift.changedKeys.length
+          ? `; changed keys: ${drift.changedKeys.join(', ')}`
+          : '') +
+        `). Run: node scripts/generate-product-manifest.mjs`,
     );
   }
   if (committed.tools.total !== V01_TOOLS.length) {
     fail(
       `product-manifest tools.total=${committed.tools.total} but V01_TOOLS has ${V01_TOOLS.length}`,
     );
+  }
+}
+
+// ── Product surface must stay a pure projection of the manifest ─────────────
+const surfacePath = join(root, 'eval/product-surface.json');
+if (manifest && existsSync(manifestPath)) {
+  if (!existsSync(surfacePath)) {
+    fail(
+      'eval/product-surface.json missing. Run: node scripts/product-surface.mjs --write',
+    );
+  } else {
+    const committedSurface = stripVolatile(JSON.parse(read(surfacePath)));
+    const committedManifest = JSON.parse(read(manifestPath));
+    const projected = toProductSurface(committedManifest);
+    const vsManifest = manifestDrift(committedSurface, projected);
+    if (vsManifest) {
+      fail(
+        `eval/product-surface.json drifted from eval/product-manifest.json ` +
+          `(surface sha256:${vsManifest.expectedHash}, projection sha256:${vsManifest.actualHash}` +
+          (vsManifest.changedKeys.length
+            ? `; changed keys: ${vsManifest.changedKeys.join(', ')}`
+            : '') +
+          `). Run: node scripts/product-surface.mjs --write`,
+      );
+    }
+    const vsLive = manifestDrift(committedSurface, toProductSurface(manifest));
+    if (vsLive) {
+      fail(
+        `eval/product-surface.json drifted from runtime registries ` +
+          `(committed sha256:${vsLive.expectedHash}, live sha256:${vsLive.actualHash}` +
+          (vsLive.changedKeys.length
+            ? `; changed keys: ${vsLive.changedKeys.join(', ')}`
+            : '') +
+          `). Run: node scripts/product-surface.mjs --write`,
+      );
+    }
   }
 }
 
@@ -148,9 +192,6 @@ if (websiteDataPath && manifest) {
 // ── Current-fact concept counts in instructional docs ───────────────────────
 if (manifest && manifest.conceptModel.concepts > 0) {
   const { concepts, rules } = manifest.conceptModel;
-  // Allow optional markdown bold around the integers: **142** concepts / **193** rules
-  const currentFactRe =
-    /(?:Concept Model|Graph B)[^\n]{0,120}?\b(\d+)\*?\*?\s*concepts\s*\/\s*\*?\*?(\d+)\*?\*?\s*rules/gi;
   const docsToPin = [
     join(root, 'README.md'),
     join(root, 'CLAUDE.md'),
@@ -159,25 +200,21 @@ if (manifest && manifest.conceptModel.concepts > 0) {
   for (const path of docsToPin) {
     if (!existsSync(path)) continue;
     const text = read(path);
-    let match;
-    let found = false;
-    currentFactRe.lastIndex = 0;
-    while ((match = currentFactRe.exec(text)) !== null) {
-      found = true;
-      const c = Number(match[1]);
-      const r = Number(match[2]);
+    const matches = matchConceptCountFacts(text);
+    if (matches.length === 0) {
+      warn(
+        `${path} has no "N concepts /|,|and M rules" current-fact form to pin.`,
+      );
+      continue;
+    }
+    for (const m of matches) {
       // Historical prose ("when the Concept Model held 94…") is allowed only
       // outside these instructional files — here every pair must be current.
-      if (c !== concepts || r !== rules) {
+      if (m.concepts !== concepts || m.rules !== rules) {
         fail(
-          `${path} states ${c} concepts / ${r} rules but ProductManifest has ${concepts}/${rules}`,
+          `${path} states ${m.concepts} concepts / ${m.rules} rules but ProductManifest has ${concepts}/${rules}`,
         );
       }
-    }
-    if (!found) {
-      warn(
-        `${path} has no "N concepts / M rules" current-fact form to pin.`,
-      );
     }
   }
 }
@@ -218,27 +255,8 @@ if (existsSync(configurationMd) && manifest) {
 // ── architecture.md graph tables ────────────────────────────────────────────
 const architectureMd = join(root, 'docs/architecture.md');
 if (existsSync(architectureMd) && manifest) {
-  const arch = read(architectureMd);
-  if (/with two tables/.test(arch)) {
-    fail(
-      'docs/architecture.md still says the DuckDB graph has "two tables"; ' +
-        `ProductManifest.graph.tables = [${GRAPH_TABLES.join(', ')}].`,
-    );
-  }
-  for (const table of GRAPH_TABLES) {
-    if (table === 'schema_version') {
-      // May be described as schema_version ledger rather than inline column list.
-      if (!arch.includes('schema_version') && !arch.includes('facts')) {
-        fail(`docs/architecture.md missing graph table mention: ${table}`);
-      }
-      continue;
-    }
-    if (!new RegExp(`\`${table}\\b`).test(arch) && !arch.includes(`\`${table}`)) {
-      // Accept either `nodes(...)` column form or a bullet naming the table.
-      if (!arch.includes(table)) {
-        fail(`docs/architecture.md missing graph table: ${table}`);
-      }
-    }
+  for (const message of checkArchitectureGraphTables(read(architectureMd), GRAPH_TABLES)) {
+    fail(message);
   }
 }
 
