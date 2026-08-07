@@ -26,6 +26,10 @@ export {
   type CsvFitResult,
 } from './csv.js';
 export { renderFlowMarkdown } from './flow-markdown.js';
+export {
+  escapeMarkdownBlockText,
+  escapeMarkdownInline,
+} from './markdown-table.js';
 export { buildSafeMermaidIdMap, safeMermaidLabel } from './mermaid-id.js';
 export {
   ORG_CARD_MAX_BYTES,

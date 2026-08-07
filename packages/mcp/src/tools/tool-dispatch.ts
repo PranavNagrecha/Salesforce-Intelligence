@@ -15,6 +15,7 @@ import {
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
+  ORG_METADATA_CONTENT_POLICY,
   type McpError,
   type McpResponse,
 } from '@sf-intelligence/contracts';
@@ -2361,10 +2362,18 @@ export const jsonResult = (
   }
 
   const baseBytes = utf8Bytes(body);
+  // AUDIT-F8: stamp content policy on success envelopes so hosts treat org
+  // metadata in `data` as untrusted data (never instructions / consent).
+  const withContentPolicy = (
+    value: Record<string, unknown>,
+  ): Record<string, unknown> =>
+    isErrorEnvelope || !('data' in value)
+      ? value
+      : { ...value, contentPolicy: ORG_METADATA_CONTENT_POLICY };
   const toEnvelope = (
     value: Record<string, unknown>,
   ): Record<string, unknown> => ({
-    ...value,
+    ...withContentPolicy(value),
     estimatedPayloadBytes: baseBytes,
   });
   const original = toEnvelope(body as Record<string, unknown>);
