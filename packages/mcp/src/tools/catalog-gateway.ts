@@ -92,7 +92,12 @@ export interface ListAnalysesOutput {
 
 /** Lazy roster access (cycle-safe): tools/index.ts owns `V01_TOOLS`. */
 const loadRoster = async (): Promise<
-  ReadonlyArray<{ readonly name: string; readonly description: string; readonly inputSchema: unknown }>
+  ReadonlyArray<{
+    readonly name: string;
+    readonly description: string;
+    readonly inputSchema: unknown;
+    readonly hidden?: boolean;
+  }>
 > => {
   const mod = await import('./index.js');
   return mod.V01_TOOLS;
@@ -104,11 +109,15 @@ export const listAnalysesHandler = async (
   input: ListAnalysesInput,
 ): Promise<Result<McpResponse<ListAnalysesOutput>, McpError>> => {
   const roster = await loadRoster();
-  const all = roster.map((t) => ({
-    name: t.name,
-    oneLiner: oneLiner(t.description),
-    category: analysisCategory(t.name),
-  }));
+  // AUDIT-F9: hide retired aliases from the catalog (same advertise contract as
+  // tools/list). They remain invokable via `sfi.run_analysis` / describe.
+  const all = roster
+    .filter((t) => !t.hidden)
+    .map((t) => ({
+      name: t.name,
+      oneLiner: oneLiner(t.description),
+      category: analysisCategory(t.name),
+    }));
   const categories = [...new Set(all.map((a) => a.category))].sort((a, b) => a.localeCompare(b));
   const filtered =
     input.category === undefined ? all : all.filter((a) => a.category === input.category);

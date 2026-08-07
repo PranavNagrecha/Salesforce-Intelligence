@@ -65,7 +65,7 @@ describe('sfi.list_analyses', () => {
     const r = await listAnalysesHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.total).toBe(V01_TOOLS.length);
+    expect(r.value.data.total).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
     expect(r.value.data.analyses.length).toBeLessThanOrEqual(50); // default page
     for (const a of r.value.data.analyses.slice(0, 5)) {
       expect(a.name).toMatch(/^sfi\./);
@@ -113,8 +113,8 @@ describe('sfi.list_analyses', () => {
         cursor = d.nextCursor;
         if (++guard > 1000) throw new Error('cursor did not terminate');
       }
-      // Every roster tool surfaced exactly once across the pages.
-      expect(seen.size).toBe(V01_TOOLS.length);
+      // Every advertised (non-hidden) roster tool surfaced exactly once.
+      expect(seen.size).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
     });
 
     it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
