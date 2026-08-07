@@ -1,6 +1,10 @@
 {
   "toolCount": 209,
-  "advertisedToolCount": 205,
+  "advertisedToolCount": 19,
+  "defaultProfile": "core",
+  "activeProfile": "core",
+  "coreProfileSize": 19,
+  "fullAdvertisedToolCount": 205,
   "componentTypeCount": 102,
   "edgeTypeCount": 23,
   "conceptCount": 142,
@@ -8,6 +12,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 2,
-  "catalogHash": "sha256:b57a7ee22405dd933be43eb973e033940aa1c83e73373d1ad87f7753b7934ecc",
-  "identityHash": "sha256:d3ef0429a639c65e22338453d7fb068df2072314c869fc589a6d0941f85c4af0"
+  "catalogHash": "sha256:2c419cd5b2d6c0c4556b6139c8af817b283415bd3f7beb91bfbdbc7a3cccf497",
+  "identityHash": "sha256:d4f010f427fb862b817aae5c92e26c4e8ace2afa5a489d66ea3f5776dbb48f10"
 }

@@ -639,7 +639,7 @@ describe('safeToDeleteFieldHandler', () => {
     expect(coverageCaveat).toBeUndefined();
     expect(trust.completeness.status).toBe('complete');
     expect(evidenceEnvelope.envelopeVersion).toBe(2);
-    expect(evidenceEnvelope.absence?.status).toBe('proven-none');
+    expect(evidenceEnvelope.absence?.status).toBe('unknown');
     expect(evidenceEnvelope.trust).toEqual(trust);
     // The vaultState comes from the manifest.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');

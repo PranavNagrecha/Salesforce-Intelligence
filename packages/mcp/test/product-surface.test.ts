@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 import { CONCEPT_RULES, CONCEPTS } from '../src/knowledge/loader.js';
 import { buildProductManifestSummary } from '../src/product-manifest-summary.js';
-import { V01_TOOLS } from '../src/tools/index.js';
+import { CORE_PROFILE_TOOLS, V01_TOOLS } from '../src/tools/index.js';
+import { toolProfile } from '../src/tools/tool-profile.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -60,7 +61,9 @@ describe('product surface counts', () => {
     const surface = surfaceFromScript();
     expect(surface.toolCount).toBe(V01_TOOLS.length);
     expect(surface.advertisedToolCount).toBe(
-      V01_TOOLS.filter((t) => !t.hidden).length,
+      toolProfile() === 'core'
+        ? CORE_PROFILE_TOOLS.size
+        : V01_TOOLS.filter((t) => !t.hidden).length,
     );
   });
 

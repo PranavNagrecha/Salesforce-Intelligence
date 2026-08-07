@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-07T13:40:41.938Z",
-  "version": "0.2.5",
+  "generatedAt": "2026-08-07T17:06:15.764Z",
+  "version": "0.3.0",
   "toolCount": 209,
   "skillCount": 26,
   "agentCount": 2,
@@ -13,13 +13,13 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 271,
-        "cases": 5462
+        "files": 276,
+        "cases": 5504
       },
       {
         "name": "extractors",
-        "files": 88,
-        "cases": 1185
+        "files": 83,
+        "cases": 1110
       },
       {
         "name": "cli",
@@ -48,8 +48,8 @@
       },
       {
         "name": "vault",
-        "files": 8,
-        "cases": 92
+        "files": 9,
+        "cases": 100
       },
       {
         "name": "tooling-api",
@@ -58,12 +58,12 @@
       },
       {
         "name": "core",
-        "files": 2,
-        "cases": 40
+        "files": 3,
+        "cases": 50
       }
     ],
-    "totalCases": 8126,
-    "totalFiles": 464,
+    "totalCases": 8111,
+    "totalFiles": 466,
     "packageCount": 10,
     "approx": 8100
   },
@@ -90,14 +90,14 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 271,
-      "cases": 5462,
+      "files": 276,
+      "cases": 5504,
       "description": "The 209 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 88,
-      "cases": 1185,
+      "files": 83,
+      "cases": 1110,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
@@ -132,8 +132,8 @@
     },
     {
       "name": "vault",
-      "files": 8,
-      "cases": 92,
+      "files": 9,
+      "cases": 100,
       "description": "Vault layout, manifest, freshness"
     },
     {
@@ -144,8 +144,8 @@
     },
     {
       "name": "core",
-      "files": 2,
-      "cases": 40,
+      "files": 3,
+      "cases": 50,
       "description": "core package tests"
     }
   ]

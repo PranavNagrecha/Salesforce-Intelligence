@@ -8,7 +8,7 @@
  * handlers — and `live-plane.ts` can in turn import the budgeted seam from
  * `live-session.ts` without forming an import cycle.
  *
- *   live-exec.ts (leaf, no live imports)
+ *   live-exec.ts (leaf; may import live-consent + live-grant-context only)
  *        ▲                    ▲
  *        │                    │
  *   live-session.ts ◀─────────┤   (imports runSfJson/restGet from the leaf)
@@ -28,6 +28,7 @@ import {
   err,
   execHelper,
   ok,
+  withNetworkMode,
   type Result,
 } from '@sf-intelligence/core';
 import {
@@ -36,7 +37,10 @@ import {
   type ToolingApiAuth,
 } from '@sf-intelligence/tooling-api';
 
+import { orgIdsMatch } from '../live-consent.js';
+
 import { formatSfCliFailure } from './input-aliases.js';
+import { getActiveLiveGrant } from './live-grant-context.js';
 
 /**
  * The production `sf` exec for this leaf: the shared cross-platform
@@ -73,7 +77,10 @@ export const getLiveAuth = async (
   org: string,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<ToolingApiAuth, McpError>> => {
-  const authResult = await getAuthFromSfCli(org, exec);
+  // Elevate for auth resolve (MCP default networkMode is `off`).
+  const authResult = await withNetworkMode('salesforce-read', () =>
+    getAuthFromSfCli(org, exec),
+  );
   if (!authResult.ok) {
     return err({
       kind: 'internal',
@@ -83,6 +90,25 @@ export const getLiveAuth = async (
         ),
       ),
     });
+  }
+  // Use-time OrgId binding: refuse REST/auth even if an earlier gate skipped
+  // verify (or an env bypass stamped a stored OrgId). Consent grants only.
+  if (process.env['SFI_LIVE_SKIP_IDENTITY_VERIFY'] !== '1') {
+    const grant = getActiveLiveGrant();
+    if (
+      grant !== null &&
+      grant.source === 'consent' &&
+      grant.orgId !== null &&
+      !orgIdsMatch(grant.orgId, authResult.value.orgId)
+    ) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          `Live org plane grant for '${org}' is bound to a different Salesforce OrgId ` +
+          `than the currently authenticated org. Revoke and re-grant with ` +
+          `sfi.live_consent { grant: true } after \`sf org login\`.`,
+      });
+    }
   }
   return ok(authResult.value);
 };

@@ -76,18 +76,16 @@ describe('EvidenceEnvelope v2 (AUDIT-F4)', () => {
     expect(envelope.disclosure).toBe('offline only');
   });
 
-  it('buildSafeToDeleteEvidenceEnvelope maps proven-none vs not-checked', () => {
+  it('buildSafeToDeleteEvidenceEnvelope maps safe to unknown (not proven-none)', () => {
     const safe = buildSafeToDeleteEvidenceEnvelope({
       fieldId: 'CustomField:Account.Unused__c',
       verdict: 'safe',
       reasoning: [],
       trust: trust('complete'),
     });
-    expect(safe.absence).toEqual({
-      status: 'proven-none',
-      verdict: 'safe',
-      note: 'No static referrers found under complete coverage for the families this tool checks.',
-    });
+    expect(safe.absence?.status).toBe('unknown');
+    expect(safe.absence?.verdict).toBe('safe');
+    expect(safe.absence?.note).toMatch(/not a proven-none claim/i);
 
     const partial = buildSafeToDeleteEvidenceEnvelope({
       fieldId: 'CustomField:Account.Unused__c',

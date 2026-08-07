@@ -241,11 +241,12 @@ export interface SafeToDeleteEnvelopeSource {
 }
 
 const absenceStatusForDelete = (
-  verdict: EvidenceVerdictV2,
+  _verdict: EvidenceVerdictV2,
   caveat: CoverageCaveat | undefined,
 ): EvidenceAbsenceStatusV2 => {
   if (caveat !== undefined) return 'not-checked';
-  if (verdict === 'safe') return 'proven-none';
+  // Static "safe" means no referrers in the families this tool checks — not
+  // absolute provenance absence. Do not overclaim with proven-none.
   return 'unknown';
 };
 
@@ -290,10 +291,10 @@ export const buildSafeToDeleteEvidenceEnvelope = (
       status,
       verdict: source.verdict,
       note:
-        status === 'proven-none'
-          ? 'No static referrers found under complete coverage for the families this tool checks.'
-          : status === 'not-checked'
-            ? 'Absence of referrers is not proven — treat as "not checked", not "none".'
+        status === 'not-checked'
+          ? 'Absence of referrers is not proven — treat as "not checked", not "none".'
+          : source.verdict === 'safe'
+            ? 'No static referrers found in the families this tool checks under the current coverage — not a proven-none claim across the whole org.'
             : 'Presence / severity evidence answered the ask; absence is not the primary claim.',
     },
   };

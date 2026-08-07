@@ -62,9 +62,12 @@ describe('capabilitiesHandler', () => {
     const m = r.value.data.productManifest;
     expect(m.schemaVersion).toBe('1.0');
     expect(m.tools.total).toBe(V01_TOOLS.length);
-    expect(m.tools.advertised).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
-    expect(m.tools.hidden).toBe(V01_TOOLS.length - m.tools.advertised);
-    expect(m.tools.coreProfileSize).toBe(18);
+    expect(m.tools.defaultProfile).toBe('core');
+    expect(m.tools.activeProfile).toBe('core');
+    expect(m.tools.advertised).toBe(m.tools.coreProfileSize);
+    expect(m.tools.fullAdvertised).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
+    expect(m.tools.hidden).toBe(V01_TOOLS.filter((t) => t.hidden).length);
+    expect(m.tools.coreProfileSize).toBe(19);
     expect(m.conceptModel.concepts).toBeGreaterThan(0);
     expect(m.conceptModel.rules).toBeGreaterThan(0);
     expect(m.conceptModel.contentHash).toMatch(/^sha256:[0-9a-f]{64}$/);

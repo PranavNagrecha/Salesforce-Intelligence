@@ -33,12 +33,13 @@ const STORE_VERSION = 2;
  * Live-plane scopes. Default grant is `aggregate` only; sample/user tools
  * require an explicit step-up via `sfi.live_consent { grant: true, scopes: [...] }`.
  */
-export type LiveScope = 'aggregate' | 'sample' | 'users';
+export type LiveScope = 'aggregate' | 'sample' | 'users' | 'audit';
 
 export const LIVE_SCOPES: readonly LiveScope[] = Object.freeze([
   'aggregate',
   'sample',
   'users',
+  'audit',
 ]);
 
 /** Default grant TTL when the caller does not pass `expiresInHours`. */
@@ -125,7 +126,10 @@ export const orgIdsMatch = (
 };
 
 const isLiveScope = (value: unknown): value is LiveScope =>
-  value === 'aggregate' || value === 'sample' || value === 'users';
+  value === 'aggregate' ||
+  value === 'sample' ||
+  value === 'users' ||
+  value === 'audit';
 
 const hardenConsentPath = async (path: string): Promise<void> => {
   try {
@@ -294,7 +298,8 @@ export interface GrantLiveConsentOptions {
   readonly now?: Date;
   /**
    * When true (default), step-up merges scopes with any existing non-expired
-   * grant for the same org key. Binding identity is refreshed from opts.
+   * grant for the same OrgId binding. Cross-OrgId merge is always refused;
+   * overwriting with mergeScopes:false mints a new grantId.
    */
   readonly mergeScopes?: boolean;
 }
@@ -353,6 +358,8 @@ export const grantLiveConsent = async (
         (opts.expiresInHours ?? DEFAULT_GRANT_TTL_HOURS) * 60 * 60 * 1000,
     ).toISOString();
 
+  const reuseGrantId =
+    sameOrgBinding && existing !== undefined && !isExpired(existing, now);
   const next: ConsentStore = {
     version: STORE_VERSION,
     orgs: {
@@ -360,7 +367,7 @@ export const grantLiveConsent = async (
       [key]: {
         grantedAt: now.toISOString(),
         grantedBy: opts.grantedBy ?? 'user',
-        grantId: opts.grantId ?? existing?.grantId ?? randomUUID(),
+        grantId: opts.grantId ?? (reuseGrantId ? existing.grantId : randomUUID()),
         orgId: opts.orgId !== undefined ? opts.orgId : (existing?.orgId ?? null),
         principalUsername:
           opts.principalUsername !== undefined
@@ -396,10 +403,11 @@ export const describeLiveGrant = (
   source: 'consent' | 'env',
 ): LiveGrantDisclosure | null => {
   if (source === 'env') {
+    // Env bypass does not verify a stored OrgId — never cite one as if it did.
     return {
       grantId: 'env:SFI_LIVE_PLANE_ENABLED',
-      orgId: grant?.orgId ?? null,
-      principalUsername: grant?.principalUsername ?? null,
+      orgId: null,
+      principalUsername: null,
       scopes: grant?.scopes ?? [...LIVE_SCOPES],
       expiresAt: grant?.expiresAt ?? 'session',
       source: 'env',
@@ -436,7 +444,7 @@ export const LIVE_TOOL_REQUIRED_SCOPES: Readonly<
   'sfi.live_record_access': Object.freeze(['users'] as const),
   'sfi.live_record_shares': Object.freeze(['users'] as const),
   'sfi.live_owner_breakdown': Object.freeze(['users'] as const),
-  'sfi.live_setup_audit_trail': Object.freeze(['users'] as const),
+  'sfi.live_setup_audit_trail': Object.freeze(['audit'] as const),
   'sfi.live_license_usage': Object.freeze(['users'] as const),
 
   // aggregate — counts / limits / non-PII aggregates

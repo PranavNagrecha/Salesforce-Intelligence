@@ -9,9 +9,10 @@
 import type { McpError } from '@sf-intelligence/contracts';
 
 /**
- * The ~18-schema CORE roster — orientation, resolution, routing, the
- * universal graph reads, and the catalog gateway through which everything
- * else stays reachable. Selected by `SFI_TOOL_PROFILE=core` (also the default).
+ * The CORE roster — orientation, resolution, routing, the universal graph
+ * reads, the catalog gateway, and live-consent (the tool that turns the live
+ * plane on must not sit behind the gateway). Selected by
+ * `SFI_TOOL_PROFILE=core` (also the default).
  */
 export const CORE_PROFILE_TOOLS: ReadonlySet<string> = new Set([
   'sfi.resolve',
@@ -32,6 +33,9 @@ export const CORE_PROFILE_TOOLS: ReadonlySet<string> = new Set([
   'sfi.list_analyses',
   'sfi.describe_analysis',
   'sfi.run_analysis',
+  // Consent must be directly invokable under core — otherwise the feature that
+  // enables live tools is unreachable without already knowing the gateway.
+  'sfi.live_consent',
 ]);
 
 /**

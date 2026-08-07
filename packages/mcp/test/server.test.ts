@@ -496,7 +496,7 @@ describe('tool profiles (P13-GW-profiles)', () => {
   it('defaults to the CORE roster (AUDIT-F6) — opt into full with SFI_TOOL_PROFILE=full', () => {
     delete process.env['SFI_TOOL_PROFILE'];
     expect(toolProfile()).toBe('core');
-    expect(advertisedTools()).toHaveLength(18);
+    expect(advertisedTools()).toHaveLength(19);
   });
 
   it('full advertises the entire non-hidden roster', () => {
@@ -505,11 +505,11 @@ describe('tool profiles (P13-GW-profiles)', () => {
     expect(advertisedTools()).toEqual(V01_TOOLS.filter((t) => !t.hidden));
   });
 
-  it('core advertises exactly the 18 core schemas, in V01 order', () => {
+  it('core advertises exactly the 19 core schemas, in V01 order', () => {
     process.env['SFI_TOOL_PROFILE'] = 'core';
     expect(toolProfile()).toBe('core');
     const names = advertisedTools().map((t) => t.name);
-    expect(names).toHaveLength(18);
+    expect(names).toHaveLength(19);
     // V01 order preserved (filter, not re-sort):
     const fullOrder = V01_TOOLS.map((t) => t.name).filter((n) => names.includes(n));
     expect(names).toEqual(fullOrder);
@@ -517,7 +517,7 @@ describe('tool profiles (P13-GW-profiles)', () => {
     for (const must of [
       'sfi.resolve', 'sfi.route_question', 'sfi.org_card', 'sfi.capabilities',
       'sfi.list_analyses', 'sfi.describe_analysis', 'sfi.run_analysis',
-      'sfi.health_check', 'sfi.synthesize_answer',
+      'sfi.health_check', 'sfi.synthesize_answer', 'sfi.live_consent',
     ]) {
       expect(names).toContain(must);
     }

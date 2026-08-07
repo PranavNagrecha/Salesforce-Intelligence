@@ -189,7 +189,7 @@ export async function buildProductManifest(productRoot) {
   const livePlaneForTool = liveMod.livePlaneForTool;
 
   const registered = [...V01_TOOLS].map((t) => t.name).sort();
-  const advertised = V01_TOOLS.filter((t) => !t.hidden).map((t) => t.name).sort();
+  const fullAdvertised = V01_TOOLS.filter((t) => !t.hidden).map((t) => t.name).sort();
   const hidden = V01_TOOLS.filter((t) => t.hidden).map((t) => t.name).sort();
   const live = V01_TOOLS.filter((t) => livePlaneForTool(t.name) !== 'never')
     .map((t) => t.name)
@@ -198,6 +198,13 @@ export async function buildProductManifest(productRoot) {
   const coreProfile = CORE_PROFILE_TOOLS
     ? [...CORE_PROFILE_TOOLS].sort()
     : [];
+  // Match tools/list under the active profile (default core). Full roster stays
+  // in profiles.full — never report 205 as "advertised" when default is core.
+  const rawProfile = (process.env.SFI_TOOL_PROFILE ?? '').trim().toLowerCase();
+  const activeProfile =
+    rawProfile === '' || rawProfile === 'core' ? 'core' : 'full';
+  const advertisedNames =
+    activeProfile === 'core' ? coreProfile : fullAdvertised;
 
   const localMutation = LOCAL_MUTATION_TOOLS.filter((name) =>
     V01_TOOLS.some((t) => t.name === name),
@@ -276,10 +283,12 @@ export async function buildProductManifest(productRoot) {
     protocolVersion: 'mcp',
     tools: {
       total: V01_TOOLS.length,
-      advertised: advertised.length,
+      advertised: advertisedNames.length,
       hidden: hidden.length,
+      defaultProfile: 'core',
+      activeProfile,
       profiles: {
-        full: advertised,
+        full: fullAdvertised,
         core: coreProfile,
       },
       live,
@@ -316,6 +325,10 @@ export function toProductSurface(manifest) {
   return {
     toolCount: manifest.tools.total,
     advertisedToolCount: manifest.tools.advertised,
+    defaultProfile: manifest.tools.defaultProfile ?? 'core',
+    activeProfile: manifest.tools.activeProfile ?? 'core',
+    coreProfileSize: manifest.tools.profiles?.core?.length ?? null,
+    fullAdvertisedToolCount: manifest.tools.profiles?.full?.length ?? null,
     componentTypeCount: manifest.graph.componentTypeCount,
     edgeTypeCount: manifest.graph.edgeTypeCount,
     conceptCount: manifest.conceptModel.concepts,

@@ -1,9 +1,10 @@
 /**
  * Shared helpers for the core-profile skill gateway contract (Decision 2=C).
  *
- * Default SFI_TOOL_PROFILE=core advertises 18 tools. Every other sfi.* analysis
- * must be invoked via sfi.run_analysis { name, args }. Skills may still *name*
- * non-core tools for routing/meaning; they must not instruct a direct call.
+ * Default SFI_TOOL_PROFILE=core advertises the core spine (incl. live_consent).
+ * Every other sfi.* analysis must be invoked via sfi.run_analysis { name, args }.
+ * Skills may still *name* non-core tools for routing/meaning; they must not
+ * instruct a direct call.
  */
 
 /** Mirrors packages/mcp/src/tools/tool-profile.ts CORE_PROFILE_TOOLS. */
@@ -27,6 +28,7 @@ export const CORE_PROFILE_TOOLS = Object.freeze(
     'sfi.list_analyses',
     'sfi.describe_analysis',
     'sfi.run_analysis',
+    'sfi.live_consent',
   ]),
 );
 
@@ -35,14 +37,14 @@ export const GATEWAY_FOOTER = [
   '`sfi.route_question` first — in the default hybrid mode it returns a',
   'meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a',
   'suggested plane and a `route` hint (and whether to `sfi.resolve` a name',
-  'first). **Default tool profile is `core`:** only the 18 core tools are',
-  'directly invokable. For every other `sfi.*` analysis, call',
-  '`sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow',
-  '`route_question.invoke`, which already wraps non-core steps). Optional:',
-  '`sfi.describe_analysis` first when args are unclear. Every org fact must',
-  'come from an `sfi.*` tool call, cited by its canonical id — never from',
-  'memory. Build the answer only from what the tools returned, then pass it',
-  'through `sfi.synthesize_answer`, which flags any `hallucinatedIds`',
+  'first). **Default tool profile is `core`:** only the core spine (including',
+  '`sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis,',
+  'call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or',
+  'follow `route_question.invoke`, which already wraps non-core steps).',
+  'Optional: `sfi.describe_analysis` first when args are unclear. Every org',
+  'fact must come from an `sfi.*` tool call, cited by its canonical id — never',
+  'from memory. Build the answer only from what the tools returned, then pass',
+  'it through `sfi.synthesize_answer`, which flags any `hallucinatedIds`',
   '(canonical ids no tool produced). Full cascade: `using-sf-intelligence`.',
 ].join(' ');
 

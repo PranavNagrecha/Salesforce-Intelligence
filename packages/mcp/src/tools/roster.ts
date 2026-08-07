@@ -1065,7 +1065,7 @@ const LIVE_CONSENT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.free
     revoke: { type: 'boolean' },
     scopes: {
       type: 'array',
-      items: { type: 'string', enum: ['aggregate', 'sample', 'users'] },
+      items: { type: 'string', enum: ['aggregate', 'sample', 'users', 'audit'] },
     },
     expiresInHours: { type: 'integer', minimum: 1, maximum: 2160 },
   },
@@ -4732,7 +4732,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   },
   {
     name: 'sfi.live_consent',
-    description: "Manage per-org live-plane grants. Default (no args) REPORTS grant status — it never silently enables anything. grant: true binds OrgId+principal via read-only `sf org display`, records scopes (default aggregate; step up with scopes:[\"sample\"] / [\"users\"]) and expiry (default 7 days), and persists locally. revoke: true removes the grant. Per-call liveEnabled: true is NOT a consent substitute. Granting never mutates Salesforce records.",
+    description: "Manage per-org live-plane grants (in the core profile). Default (no args) REPORTS grant status — it never silently enables anything. grant: true binds OrgId+principal via read-only `sf org display`, records scopes (default aggregate; step up with scopes:[\"sample\"] / [\"users\"] / [\"audit\"]) and expiry (default 7 days), and persists locally. revoke: true removes the grant. Per-call liveEnabled is NOT a consent substitute. Granting never mutates Salesforce records.",
     inputSchema: LIVE_CONSENT_INPUT_SCHEMA,
   },
   {

@@ -15,7 +15,7 @@ import { CURRENT_SCHEMA_VERSION } from '@sf-intelligence/graph';
 import { CONCEPT_RULES, CONCEPTS, MODEL_VERSION } from './knowledge/loader.js';
 import { livePlaneForTool } from './live-capability.js';
 import { V01_TOOLS } from './tools/roster.js';
-import { CORE_PROFILE_TOOLS } from './tools/tool-profile.js';
+import { CORE_PROFILE_TOOLS, toolProfile } from './tools/tool-profile.js';
 
 const sha256 = (text: string): string =>
   createHash('sha256').update(text, 'utf8').digest('hex');
@@ -40,9 +40,13 @@ export interface ProductManifestSummary {
   readonly schemaVersion: '1.0';
   readonly tools: {
     readonly total: number;
+    /** Count matching tools/list under {@link activeProfile}. */
     readonly advertised: number;
     readonly hidden: number;
+    readonly defaultProfile: 'core';
+    readonly activeProfile: 'core' | 'full';
     readonly coreProfileSize: number;
+    readonly fullAdvertised: number;
     readonly liveCount: number;
     readonly localMutation: readonly string[];
   };
@@ -65,8 +69,11 @@ export interface ProductManifestSummary {
 }
 
 export const buildProductManifestSummary = (): ProductManifestSummary => {
-  const advertised = V01_TOOLS.filter((t) => !t.hidden);
+  const fullAdvertised = V01_TOOLS.filter((t) => !t.hidden);
   const hidden = V01_TOOLS.filter((t) => t.hidden);
+  const active = toolProfile();
+  const advertised =
+    active === 'core' ? CORE_PROFILE_TOOLS.size : fullAdvertised.length;
   const liveCount = V01_TOOLS.filter(
     (t) => livePlaneForTool(t.name) !== 'never',
   ).length;
@@ -90,9 +97,12 @@ export const buildProductManifestSummary = (): ProductManifestSummary => {
     schemaVersion: '1.0',
     tools: {
       total: V01_TOOLS.length,
-      advertised: advertised.length,
+      advertised,
       hidden: hidden.length,
+      defaultProfile: 'core',
+      activeProfile: active,
       coreProfileSize: CORE_PROFILE_TOOLS.size,
+      fullAdvertised: fullAdvertised.length,
       liveCount,
       localMutation,
     },

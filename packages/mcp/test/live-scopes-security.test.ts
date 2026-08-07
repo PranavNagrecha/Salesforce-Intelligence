@@ -187,7 +187,7 @@ describe('3.2 requiredScopesForTool is an explicit allowlist', () => {
   });
 
   it('setup_audit_trail requires users, not aggregate', () => {
-    expect(requiredScopesForTool('sfi.live_setup_audit_trail')).toEqual(['users']);
+    expect(requiredScopesForTool('sfi.live_setup_audit_trail')).toEqual(['audit']);
   });
 });
 
@@ -220,6 +220,31 @@ describe('3.3 OrgId binding enforced at use time', () => {
       if (r.ok) return;
       expect(r.error.message).toMatch(/different Salesforce OrgId|re-grant/i);
     } finally {
+      process.env.SFI_LIVE_SKIP_IDENTITY_VERIFY = prev ?? '1';
+    }
+  });
+
+  it('getLiveAuth refuses OrgId mismatch at REST auth time', async () => {
+    const { getLiveAuth } = await import('../src/tools/live-exec.js');
+    const { enterLiveGrant } = await import('../src/tools/live-grant-context.js');
+    const prev = process.env.SFI_LIVE_SKIP_IDENTITY_VERIFY;
+    delete process.env.SFI_LIVE_SKIP_IDENTITY_VERIFY;
+    enterLiveGrant({
+      grantId: 'g',
+      orgId: '00DOTHERORG00001AAA',
+      principalUsername: 'scope@example.com',
+      scopes: ['aggregate'],
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      source: 'consent',
+    });
+    try {
+      const r = await getLiveAuth('scope-org', queryExec);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+      expect(r.error.message).toMatch(/different Salesforce OrgId|re-grant/i);
+    } finally {
+      enterLiveGrant(null);
       process.env.SFI_LIVE_SKIP_IDENTITY_VERIFY = prev ?? '1';
     }
   });

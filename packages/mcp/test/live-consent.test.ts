@@ -144,6 +144,28 @@ describe('consent store', () => {
     );
   });
 
+  it('overwrite across OrgIds mints a new grantId and does not keep old scopes', async () => {
+    await grantLiveConsent('overwrite-org', {
+      orgId: '00DOLD000000001AAA',
+      principalUsername: 'u@x.dev',
+      scopes: ['aggregate', 'users'],
+      grantId: 'grant-old',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    });
+    const r = await grantLiveConsent('overwrite-org', {
+      orgId: '00DNEW000000001AAA',
+      principalUsername: 'u@x.dev',
+      scopes: ['aggregate'],
+      mergeScopes: false,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    });
+    expect(r.ok).toBe(true);
+    const g = await getLiveGrant('overwrite-org');
+    expect(g?.orgId).toBe('00DNEW000000001AAA');
+    expect(g?.scopes).toEqual(['aggregate']);
+    expect(g?.grantId).not.toBe('grant-old');
+  });
+
   it('revoke is idempotent on an absent org', async () => {
     const r = await revokeLiveConsent('never-granted');
     expect(r.ok).toBe(true);

@@ -1,7 +1,7 @@
 {
   "name": "sf-intelligence",
-  "version": "0.2.5",
-  "description": "MCP-first, offline-first hybrid knowledge base for a Salesforce org. Resolve-first routing, coverage-aware destructive verdicts, opt-in live read-only plane. Ask sfi.capabilities for the live tool map. Default tool profile is core (18 tools); non-core analyses run via sfi.run_analysis.",
+  "version": "0.3.0",
+  "description": "MCP-first, offline-first hybrid knowledge base for a Salesforce org. Resolve-first routing, coverage-aware destructive verdicts, opt-in live read-only plane. Ask sfi.capabilities for the live tool map. Default tool profile is core (incl. sfi.live_consent); non-core analyses run via sfi.run_analysis.",
   "author": {
     "name": "sf-intelligence contributors"
   },
@@ -14,7 +14,7 @@
     "sf-intelligence": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "sf-intelligence@0.2.5", "mcp"]
+      "args": ["-y", "sf-intelligence@0.3.0", "mcp"]
     }
   }
 }

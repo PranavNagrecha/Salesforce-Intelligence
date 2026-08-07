@@ -111,7 +111,7 @@ const newClient = (cwd, env) => {
 console.log('e2e MCP smoke\n');
 
 // === Scenario 1: WITH a vault — graph queries must return data ===
-// Pin full here: default advertise profile is core (18 tools); the dedicated
+// Pin full here: default advertise profile is core (19 tools); the dedicated
 // "# core profile" block below asserts that default. This block exercises the
 // full roster + graph-backed tools that are not in core.
 console.log('# with vault');
@@ -147,14 +147,14 @@ try {
 } finally {
   await a.client.close().catch(() => {});
 }
-// === Scenario 1b: core profile (AUDIT-F6) — 18 schemas advertised AND
+// === Scenario 1b: core profile (AUDIT-F6) — 19 schemas advertised AND
 // directly invokable; non-core tools only via sfi.run_analysis.
 console.log('\n# core profile');
 const cp = newClient(vaultParent, { SFI_TOOL_PROFILE: 'core' });
 try {
   await cp.client.connect(cp.transport);
   const coreTools = await cp.client.listTools();
-  check('core profile advertises exactly 18 schemas', coreTools.tools.length === 18, `got ${coreTools.tools.length}`);
+  check('core profile advertises exactly 19 schemas', coreTools.tools.length === 19, `got ${coreTools.tools.length}`);
   const denied = await callText(cp.client, 'sfi.org_overview', {});
   check(
     'non-advertised tool is NOT directly invokable under core',

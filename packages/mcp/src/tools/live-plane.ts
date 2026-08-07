@@ -7,8 +7,6 @@
  * vault data on failure.
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
-
 import type { ComponentId, McpError, McpResponse, TrustSummary } from '@sf-intelligence/contracts';
 import { err, ok, withNetworkMode, type Result } from '@sf-intelligence/core';
 import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
@@ -49,6 +47,7 @@ import { renderHybridStalenessWarning, type HybridStaleness } from './hybrid-tru
 // rest (apiPath/getLiveAuth/restGet/runSfJson) are re-exported below for
 // back-compat without being pulled into scope (avoids unused-import lint).
 import { LIVE_PLANE_DISCLOSURE, nodeExecFile, redactSecrets } from './live-exec.js';
+import { enterLiveGrant, getActiveLiveGrant } from './live-grant-context.js';
 // The single budgeted/consented/cached seam. Importing it here (now acyclic via
 // the leaf above) is what routes EVERY live read in this module through the
 // per-session query budget (CR-09).
@@ -99,11 +98,8 @@ export const isLivePlaneEnabled = (): boolean => {
   return env === '1' || env === 'true';
 };
 
-/** Active grant for the current live handler (set by {@link gateLive}). */
-const LIVE_GRANT_ALS = new AsyncLocalStorage<LiveGrantDisclosure | null>();
-
 const liveTrust = (queriedAt: string): TrustSummary => {
-  const grant = LIVE_GRANT_ALS.getStore() ?? null;
+  const grant = getActiveLiveGrant();
   const grantLine =
     grant === null
       ? null
@@ -356,7 +352,7 @@ export const gateLive = async (
   const identity = await verifyGrantIdentity(probed.org, probed.grant, exec);
   if (!identity.ok) return identity;
   // Bind grant into the current async context so liveTrust() can disclose it.
-  LIVE_GRANT_ALS.enterWith(probed.grant);
+  enterLiveGrant(probed.grant);
   return ok(probed.org);
 };
 
@@ -702,7 +698,7 @@ export const liveCountHandler = async (
   if (!soqlCheck.ok) return soqlCheck;
   const scopeGate = assertSoqlWithinLiveScopes(
     soqlCheck.value,
-    LIVE_GRANT_ALS.getStore() ?? null,
+    getActiveLiveGrant(),
   );
   if (!scopeGate.ok) return scopeGate;
   const org = resolveOrg(ctx, input.orgAlias);
@@ -1055,7 +1051,7 @@ export const liveSampleHandler = async (
   if (!gate.ok) return gate;
   const scopeGate = assertSoqlWithinLiveScopes(
     input.soql,
-    LIVE_GRANT_ALS.getStore() ?? null,
+    getActiveLiveGrant(),
   );
   if (!scopeGate.ok) return scopeGate;
   const limit = input.limit ?? MAX_SAMPLE_ROWS;
@@ -1704,7 +1700,7 @@ export const liveConsentInputSchema = z.object({
    * Use `sample` for row samples; `users` for inactive-user / permset-holder /
    * owner / share tools. Re-granting merges scopes into the existing grant.
    */
-  scopes: z.array(z.enum(['aggregate', 'sample', 'users'])).optional(),
+  scopes: z.array(z.enum(['aggregate', 'sample', 'users', 'audit'])).optional(),
   /** Hours until the grant expires (default 168 = 7 days). */
   expiresInHours: z.number().int().positive().max(24 * 90).optional(),
 });
