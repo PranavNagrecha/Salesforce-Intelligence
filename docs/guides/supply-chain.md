@@ -89,17 +89,18 @@ Privacy scanning of the shipping *tree* remains separate (`pnpm guard`,
 
 ## SBOM
 
-Generate a CycloneDX SBOM for the published package (npm ≥ 10):
+Generate a CycloneDX 1.5 SBOM with the pnpm-aware generator (do **not**
+use `npm sbom` in this workspace — it is empty/unavailable under pnpm):
 
 ```sh
-cd packages/cli
-npm sbom --sbom-format cyclonedx > ../../sbom.cdx.json
+pnpm sbom
+# → sbom.cdx.json at the repo root (fails closed if empty / zero components)
 ```
 
-Tag-triggered publishes (`.github/workflows/publish.yml`) attach
-`sbom.cdx.json` to the GitHub Release for that version when generation
-succeeds. The SBOM is a release artifact for consumers — it is **not**
-shipped inside the npm tarball.
+Tag-triggered publishes (`.github/workflows/publish.yml`) run the same
+command and **fail the job** if the SBOM is missing or empty, then attach
+`sbom.cdx.json` to the GitHub Release. The SBOM is a release artifact for
+consumers — it is **not** shipped inside the npm tarball.
 
 ## What this does not cover
 

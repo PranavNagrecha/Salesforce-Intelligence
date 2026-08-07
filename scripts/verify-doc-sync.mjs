@@ -278,6 +278,26 @@ const skillFiles = existsSync(skillsRoot)
 
 const stalePhrases = [
   {
+    phrase: 'full roster stays the default',
+    reason: 'AUDIT-F6 / Wave 4: default tool profile is core, not full.',
+  },
+  {
+    phrase: 'Zero behavior change under the default',
+    reason: 'Default is core; unset no longer means full.',
+  },
+  {
+    phrase: 'a non-advertised tool called directly still works',
+    reason: 'Under core, non-core tools are refused unless called via run_analysis.',
+  },
+  {
+    phrase: 'a non-advertised tool still works if called directly',
+    reason: 'Under core, non-core tools are refused unless called via run_analysis.',
+  },
+  {
+    phrase: 'Default stays `full`',
+    reason: 'Default tool profile is core.',
+  },
+  {
     phrase: 'no LWC/Aura references',
     reason: 'LWC/Aura references are now modeled by the frontend reference tier.',
   },
@@ -339,7 +359,20 @@ const honestyConstantPaths = [
   join(root, 'packages/mcp/src/tools/find-dead-code.ts'),
 ];
 
-for (const path of [...activeDocs, ...skillFiles, ...honestyConstantPaths]) {
+const websiteProfilePaths = [
+  join(root, 'website/src/pages/configuration.astro'),
+  join(root, 'website/src/pages/getting-started.astro'),
+  join(root, 'website/src/pages/index.astro'),
+  join(root, 'website/public/llms.txt'),
+  join(root, 'website/public/llms-full.txt'),
+];
+
+for (const path of [
+  ...activeDocs,
+  ...skillFiles,
+  ...honestyConstantPaths,
+  ...websiteProfilePaths,
+]) {
   if (!existsSync(path)) continue;
   const content = read(path);
   for (const { phrase, reason } of stalePhrases) {

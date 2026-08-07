@@ -7,7 +7,7 @@ description: |
   "what runs async in this org", "where does this external data
   source connect", "what is our external API surface", "which
   external services use this named credential", "audit our auth
-  providers". Calls `sfi.integration_map` (organized map of auth +
+  providers". Call `sfi.run_analysis` with `{ "name": "sfi.integration_map", "args": { … } }` (organized map of auth +
   endpoints + APIs + access lists) and `sfi.event_subscribers`
   (given a platform event, return all Apex/Flow subscribers). Plus
   `sfi.list_components` with the new v1.5 property filters
@@ -501,7 +501,7 @@ User: *"Draw me our integration map."*
 Claude's flow:
 
 1. **Classify** → Category (a), topology map.
-2. **Call** `sfi.integration_map` with `{ filter: 'all' }`.
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.integration_map", "args": { … } }` with `{ filter: 'all' }`.
 3. **Receive** (illustrative):
 
 ```json
@@ -731,7 +731,7 @@ User: *"Draw me our integration map."*
 Claude's flow:
 
 1. **Classify** → Category (a), topology map.
-2. **Fire** `sfi.integration_map` with `{ filter: 'all' }`.
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.integration_map", "args": { … } }` with `{ filter: 'all' }`.
 3. **Receive** the populated 8-category response (see
    *Reporting format* above for the full transcript).
 4. **Present** the eight categorized sections + cross-type
@@ -753,7 +753,7 @@ Claude's flow:
 2. **Translate** the user's phrasing to the canonical event id:
    `CustomObject:Account_Change__e`. Validate the `__e` suffix
    before firing.
-3. **Fire** `sfi.event_subscribers` with
+3. **Fire** `sfi.run_analysis` with `{ "name": "sfi.event_subscribers", "args": { … } }` with
    `{ eventId: 'CustomObject:Account_Change__e' }`.
 4. **Receive** (illustrative):
 
@@ -860,7 +860,7 @@ Claude's flow:
 1. **Classify** — this is a topology-shape question, but the
    target is an LWC outbound HTTP call, NOT a v1.5-modeled
    integration surface.
-2. **Stop.** Do not fire `sfi.integration_map` or
+2. **Stop.** Do not fire `sfi.run_analysis` with `{ "name": "sfi.integration_map", "args": { … } }` or
    `sfi.list_components` — the answer isn't in the v1.5 graph.
 3. **Respond:**
 
@@ -936,7 +936,7 @@ Before sending a response, confirm:
 - [ ] I classified the question into one of the four
       categories (topology map, event subscribers, async / job
       classifier, API surface) before firing any tool.
-- [ ] For a topology question, I called `sfi.integration_map`
+- [ ] For a topology question, I called `sfi.run_analysis` for `sfi.integration_map`
       with the right `filter` value (`all` / `auth` / `sites` /
       `sources` / `services` / `access`).
 - [ ] For an event-subscribers question, I validated the
@@ -985,4 +985,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

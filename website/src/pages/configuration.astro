@@ -152,14 +152,14 @@ const description = "Configure sf-intelligence MCP clients, tool profiles, vault
         </table>
 
         <h2 id="tool-profile">Tool profile (advertised roster)</h2>
-        <p>Every <code>sfi.*</code> tool schema is advertised to the MCP client by default - tens of thousands of context tokens (~250 KB of <code>tools/list</code> JSON) in hosts that don't defer tool definitions. <code>SFI_TOOL_PROFILE=core</code> advertises only an <strong>18-schema core roster</strong> instead: orientation, resolve/route, the universal graph reads, and the catalog gateway (<code>list_analyses</code> / <code>describe_analysis</code> / <code>run_analysis</code>) through which every other analysis stays reachable with byte-identical output. The profile is fixed at server boot - clients fetch <code>tools/list</code> once - and dispatch is never narrowed: a non-advertised tool called directly still works.</p>
+        <p>The default is <code>SFI_TOOL_PROFILE=core</code>: only an <strong>18-schema core roster</strong> is advertised and directly invokable (orientation, resolve/route, universal graph reads, and the catalog gateway). Every other analysis stays reachable with byte-identical output via <code>sfi.run_analysis</code> (or <code>route_question.invoke</code>, which already wraps non-core steps). A direct call to a non-core tool under <code>core</code> is refused. Set <code>full</code> to advertise and directly invoke the entire roster.</p>
         <table class="doc-table">
           <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
           <tbody>
-            <tr><td><code>SFI_TOOL_PROFILE</code></td><td><code>full</code></td><td><code>core</code> advertises the 18-schema roster; anything else (or unset) advertises everything. Zero behavior change under the default.</td></tr>
+            <tr><td><code>SFI_TOOL_PROFILE</code></td><td><code>core</code></td><td>Default <code>core</code> advertises/invokes the 18-schema spine; non-core tools run via <code>sfi.run_analysis</code>. Set <code>full</code> for the entire roster. Unknown values fall back to <code>full</code>.</td></tr>
           </tbody>
         </table>
-        <p>Set it alongside <code>command</code> in your MCP client config: <code>"env": {'{'} "SFI_TOOL_PROFILE": "core" {'}'}</code>. See the <a href="/getting-started#install">install guide</a> for the full config block.</p>
+        <p>Core is already the default — no env var required. Opt into the full roster with <code>"env": {'{'} "SFI_TOOL_PROFILE": "full" {'}'}</code>. See the <a href="/getting-started#install">install guide</a> for the full config block.</p>
 
         <h2 id="input-scope">Input scope &amp; selectors</h2>
         <p>Around 40 analysis tools accept a <strong>scope selector</strong> so an answer can be narrowed to one component, object, profile, or namespace. It is built to fail loudly rather than answer the wrong question.</p>

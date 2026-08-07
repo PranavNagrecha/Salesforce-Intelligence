@@ -223,11 +223,11 @@ count — never present a stale or partial diagram; tell the user the
 count exceeded the cap and narrow with `hops` / `edgeTypes` if they
 want a diagram-sized slice.
 
-### Step 4 — Optionally call `sfi.find_formula_references`
+### Step 4 — Optionally call `sfi.run_analysis` with `{ "name": "sfi.find_formula_references", "args": { … } }`
 
 If the user specifically asked about **formulas** ("find formulas
 using X", "which formula fields touch this?", "show me the formula
-references"), also call `sfi.find_formula_references` for a focused
+references"), also call `sfi.run_analysis` with `{ "name": "sfi.find_formula_references", "args": { … } }` for a focused
 list. Default invocation:
 
 ```json
@@ -467,7 +467,7 @@ Stop and surface the issue, or fire another skill, when:
   not method-level. Say so; offer class-level impact and route the
   method-precise question to `sfi.call_graph` / `sfi.method_reachability`.
 - **The user wants impact analysis on a metadata type the refresh
-  didn't model.** Don't guess — call `sfi.coverage_report` to see which
+  didn't model.** Don't guess — call `sfi.run_analysis` with `{ "name": "sfi.coverage_report", "args": { … } }` to see which
   families this vault actually retrieved, say which is missing, and offer
   the closest partial via `sfi.search_apex_source` or
   `sfi.search_flow_metadata`.
@@ -514,4 +514,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

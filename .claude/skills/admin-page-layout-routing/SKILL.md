@@ -7,7 +7,7 @@ description: |
   "why is this user seeing this layout", "which record type does
   this profile default to", "what's the layout for record type Y",
   "user reports wrong layout", "page layout assignments for profile
-  X". Calls `sfi.layout_for_user` (cascade over profile lookup,
+  X". Call `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }` (cascade over profile lookup,
   layoutAssignment matching, recordType resolution) and explains
   the routing decision honestly: stages return `unknown` rather
   than fabricating when v1.2's metadata model can't tell (e.g.,
@@ -166,7 +166,7 @@ If the user names a profile by display label rather than API name
 'Profile' })` or `sfi.search_components({ query: 'Sales User',
 types: ['Profile'] })` to confirm the canonical id before firing.
 
-### Step 2 — Call `sfi.layout_for_user`
+### Step 2 — Call `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }`
 
 Default invocation, full triple:
 
@@ -316,7 +316,7 @@ Claude's flow:
 1. **Parse** → `profileId: 'Profile:System Administrator'`,
    `objectApiName: 'Account'`, `recordTypeId:
    'RecordType:Account.PartnerAccount'`. All three present.
-2. **Call** `sfi.layout_for_user` with the triple.
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }` with the triple.
 3. **Receive** (illustrative):
 
 ```json
@@ -369,7 +369,7 @@ Claude's flow:
 1. **Parse** → `profileId: 'Profile:Marketing User'`,
    `objectApiName: 'Affiliate__c'`, `recordTypeId:
    'RecordType:Affiliate__c.Premium'`.
-2. **Call** `sfi.layout_for_user`.
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }`.
 3. **Receive** (illustrative):
 
 ```json
@@ -430,7 +430,7 @@ Claude's flow:
 
 1. **Parse** → typo'd profile id (`Sale_Rep` vs the real
    `Sales_Rep`).
-2. **Call** `sfi.layout_for_user` — returns `{ error: { kind:
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }` — returns `{ error: { kind:
    'component-not-found', message: 'Profile not found:
    Profile:Sale_Rep' } }`.
 3. **Recover** → call `sfi.list_components({ type: 'Profile' })`.
@@ -552,7 +552,7 @@ Claude's flow:
 1. **Parse** → `profileId: 'Profile:System Administrator'`,
    `objectApiName: 'Account'`, `recordTypeId:
    'RecordType:Account.PartnerAccount'`.
-2. **Fire** `sfi.layout_for_user` with the triple.
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }` with the triple.
 3. **Present** the single `ProfileLayoutAssignment` step with
    `verdict: 'matched'` and the layout id (see *Reporting format*
    above for the full transcript).
@@ -569,7 +569,7 @@ Claude's flow:
 
 1. **Parse** → `profileId: 'Profile:Sales_User'`, `objectApiName:
    'Opportunity'`, `recordTypeId` **omitted**.
-2. **Fire** `sfi.layout_for_user`.
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }`.
 3. **Receive** a 3-step cascade: (1) `ProfileLayoutAssignment` with
    `verdict: 'no-match'` for the bare `(Opportunity, null)` tuple,
    (2) `ProfileDefaultRecordType` with `verdict: 'resolved'`
@@ -609,7 +609,7 @@ Claude's flow:
 
 1. **Classify** → Lightning record page question, not Classic
    layout routing.
-2. **Stop.** Do not fire `sfi.layout_for_user`.
+2. **Stop.** Do not fire `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }`.
 3. **Respond:**
 
 > Lightning record pages (FlexiPages) aren't extracted in v1.2.
@@ -657,7 +657,7 @@ Before sending a response, confirm:
       `001xx...`), I disclosed the shift and asked for the
       record's `recordTypeId` before firing — or refused and
       pointed to the record in Salesforce.
-- [ ] I called `sfi.layout_for_user` exactly once per triple.
+- [ ] I called `sfi.run_analysis` for `sfi.layout_for_user` exactly once per triple.
       (If the admin corrected an input, I re-fired.)
 - [ ] I presented every step in `reasoning[]` — including
       `no-match` and `unknown` steps — as a bulleted trace with
@@ -689,4 +689,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

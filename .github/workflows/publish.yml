@@ -110,18 +110,11 @@ jobs:
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
 
-      # AUDIT-F10: CycloneDX SBOM for the published package (release asset only;
-      # not shipped inside the npm tarball). Best-effort — a missing npm sbom
-      # subcommand must not block publish.
+      # AUDIT-F10 / Wave 4: real CycloneDX SBOM via cdxgen (pnpm-aware).
+      # Fails the publish job if the artifact is missing/empty — SECURITY.md
+      # promises an SBOM on the GitHub Release.
       - name: Generate CycloneDX SBOM (AUDIT-F10)
-        working-directory: packages/cli
-        run: |
-          if npm sbom --help >/dev/null 2>&1; then
-            npm sbom --sbom-format cyclonedx > ../../sbom.cdx.json
-            echo "Wrote sbom.cdx.json"
-          else
-            echo "npm sbom unavailable — skipping SBOM artifact"
-          fi
+        run: pnpm sbom
 
       # Cut the GitHub release. This step did not exist before, which is why
       # every previous release had to be created by hand — a tag would publish to
@@ -156,6 +149,8 @@ jobs:
             gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest "${SBOM_ARGS[@]}" || \
               gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest
           fi
-          if [ -f sbom.cdx.json ]; then
-            gh release upload "$TAG" sbom.cdx.json --clobber || true
+          if [ ! -s sbom.cdx.json ]; then
+            echo "::error::sbom.cdx.json missing or empty after generate-sbom"
+            exit 1
           fi
+          gh release upload "$TAG" sbom.cdx.json --clobber

@@ -527,7 +527,7 @@ Claude's flow:
 
 1. **Classify** → FlexCard breakdown shape (the entry point is the
    card; the button launches a downstream flow).
-2. **Fire** `sfi.omniuicard_widget_breakdown` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.omniuicard_widget_breakdown", "args": { … } }` with
    `{ "omniUiCardId": "OmniUiCard:AccountLinkingIntro_Developer_1" }`.
 3. **Receive** (illustrative): `metadata.omniUiCardType: "Parent"`;
    one `Active` state with one `Action` widget (`StartLinking`);
@@ -537,7 +537,7 @@ Claude's flow:
    "parsed"`; `boundaries[]` carrying the propertySetConfig-parsing
    and Native-vs-Vlocity disclosures.
 4. **Follow the dispatch** — the Start Linking action launches an
-   OmniScript. Fire `sfi.omniscript_flow` with
+   OmniScript. Fire `sfi.run_analysis` with `{ "name": "sfi.omniscript_flow", "args": { … } }` with
    `{ "omniScriptId": "OmniScript:AccountLinking_Existing_English_1" }`
    to walk what happens next.
 5. **Respond:**
@@ -594,7 +594,7 @@ Claude's flow:
 > Follow-up suggestions:
 >
 > 1. To see the REST endpoints / response shape behind
->    `UserSearch_Existing`, run `sfi.integration_procedure_chain`.
+>    `UserSearch_Existing`, run `sfi.run_analysis` with `{ "name": "sfi.integration_procedure_chain", "args": { … } }`.
 > 2. To see what `ExtractContactMPPMapper` reads, run
 >    `sfi.datatransform_field_map`.
 
@@ -689,4 +689,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

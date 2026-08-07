@@ -17,6 +17,11 @@ confidence (the weakest of the concept rule's ceiling and its grounding
 edges); keep the two axes distinct (see Capability boundary). Do not
 answer org questions without it.
 
+**Tool profile:** default is `core` (18 directly invokable tools). For
+non-core analyses — including `sfi.interpret`, `sfi.coverage_report`, and
+`sfi.live_*` — call `sfi.run_analysis` with
+`{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`).
+
 ## Where the metadata lives
 
 - `org-kb/components/` — Markdown vault, one file per component.
@@ -81,7 +86,9 @@ For "what does this **imply**" questions — does deleting this parent
 cascade-delete children, do these two flows run in a defined order, is
 this class an unenforced entry point — go one step past retrieval:
 **resolve → interpret → synthesize**. `sfi.resolve` fixes the component;
-`sfi.interpret` joins the org's grounded vault slice against a curated,
+run interpret via the gateway
+(`sfi.run_analysis { "name": "sfi.interpret", "args": { "componentId": "…" } }`)
+— it joins the org's grounded vault slice against a curated,
 org-independent **Concept Model** (142 concepts / 193 rules of general
 Salesforce truth) and returns **cited, confidence-tiered structural
 claims**; `sfi.synthesize_answer` folds those claims into the answer,

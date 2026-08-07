@@ -22,7 +22,7 @@ description: |
 ## Usage & discovery (§C3 contract)
 
 For "where is X used / who references X / what depends on X" — for ANY component
-type — call `sfi.find_component_usages`, or the family specialist
+type — call `sfi.run_analysis` with `{ "name": "sfi.find_component_usages", "args": { … } }`, or the family specialist
 (`find_field_anywhere` for a field, `find_code_usages` for code,
 `layout_assignments` for a layout). Route by VERB: *describe* questions (what is /
 list / what values) use describe tools, NOT usage tools. Never improvise a
@@ -485,7 +485,7 @@ Claude's flow:
 >   `CustomField:Account.Customer_Health_Score__c`.
 > - For "where is `Customer_Health_Score__c` used anywhere in the
 >   org?" — every Apex / Flow / Layout / Validation / Workflow
->   referrer in one call — run `sfi.find_field_anywhere`.
+>   referrer in one call — run `sfi.run_analysis` with `{ "name": "sfi.find_field_anywhere", "args": { … } }`.
 > - To distinguish `Customer_Health_Score__c` from
 >   `Customer_Score__c` (the legacy field), run
 >   `sfi.disambiguate_concepts` with
@@ -562,4 +562,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

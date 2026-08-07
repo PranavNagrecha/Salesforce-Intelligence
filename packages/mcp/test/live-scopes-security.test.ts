@@ -103,7 +103,7 @@ describe('3.1 live_sample cannot bypass users scope via SOQL', () => {
     });
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.error.message).toMatch(/users/i);
+    expect(r.error.message.toLowerCase()).toContain('users');
   });
 
   it('allows identity FROM when users scope is present', () => {
@@ -132,7 +132,7 @@ describe('3.1 live_sample cannot bypass users scope via SOQL', () => {
     );
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.error.message).toMatch(/users/i);
+    expect(r.error.message.toLowerCase()).toContain('users');
   });
 
   it('live_count refuses COUNT() FROM User under aggregate-only grant', async () => {
@@ -149,7 +149,7 @@ describe('3.1 live_sample cannot bypass users scope via SOQL', () => {
     );
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.error.message).toMatch(/users/i);
+    expect(r.error.message.toLowerCase()).toContain('users');
   });
 
   it('fails closed when FROM cannot be parsed', () => {

@@ -170,7 +170,7 @@ node itself (when present in both vaults) plus every field paired by
 api-name (present in both vaults, independent of whether its own
 properties matched). If the user asks "did Account's dependencies
 change between sandbox and prod?" or "does Discount__c reference
-anything new in prod?", call `sfi.compare_object_across_vaults` and
+anything new in prod?", call `sfi.run_analysis` with `{ "name": "sfi.compare_object_across_vaults", "args": { … } }` and
 read `edgeDrift` directly — no need to fall back to
 `sfi.compare_vaults({ objectFilter })` for a single-object ask anymore
 (that whole-vault route still works and returns the identical shape for
@@ -356,4 +356,4 @@ Unpaired from Lead: (none). Unpaired from Contact: (none)."
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

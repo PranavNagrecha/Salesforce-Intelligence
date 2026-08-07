@@ -74,8 +74,11 @@ trust boundary.
 - **Tarball allowlist** is `packages/cli/package.json#files`, enforced by
   `pnpm pack:check` / `scripts/check-pack-allowlist.mjs` (also in
   `prepublishOnly`).
-- **SBOM** (CycloneDX) is generated for the CLI package and attached to the
-  GitHub Release on tag publish; it is not shipped inside the npm tarball.
+- **SBOM** (CycloneDX 1.5) is generated with `@cyclonedx/cdxgen` against the
+  pnpm workspace (`pnpm sbom` / `scripts/generate-sbom.mjs`) and attached to
+  the GitHub Release on tag publish. The publish job fails closed if the SBOM
+  is missing, empty, or has zero components. It is not shipped inside the npm
+  tarball.
 
 ## Dependency advisories
 

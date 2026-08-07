@@ -448,7 +448,7 @@ How deep does it go?"*
 Claude's flow:
 
 1. **Classify** → async chain depth shape.
-2. **Fire** `sfi.async_chain_depth` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.async_chain_depth", "args": { … } }` with
    `{ "rootApexClassId": "ApexClass:AccountIndexer", "maxDepth": 10 }`.
 3. **Receive** (illustrative):
 
@@ -527,7 +527,7 @@ Claude's flow:
 >    `sfi.get_edges` with `edgeType: 'dispatchesAsync'`,
 >    `direction: 'in'`.
 > 2. To audit all scheduled jobs in this org (a sibling concern),
->    run `sfi.scheduled_job_catalog`.
+>    run `sfi.run_analysis` with `{ "name": "sfi.scheduled_job_catalog", "args": { … } }`.
 > 3. To check if `EmailLogger` or `RetryHandler` end up calling
 >    out to an external system, follow up with
 >    `sfi.endpoint_catalog` and cross-reference the
@@ -626,4 +626,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

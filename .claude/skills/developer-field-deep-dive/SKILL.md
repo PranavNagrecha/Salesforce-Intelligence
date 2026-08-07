@@ -255,7 +255,7 @@ literal when the edge carries one.
 Cycle detection: keyed by `(fromId, toId, edgeType)` tuples.
 Truncation rules inherit v2.7's discipline.
 
-Fire `sfi.field_lineage` when the user asks the trace question
+Fire `sfi.run_analysis` with `{ "name": "sfi.field_lineage", "args": { … } }` when the user asks the trace question
 specifically (where does data come from, what fires on change) —
 the answer is the walk tree with per-step `sourceKind` /
 `effectKind` and `firesWhen` literal where applicable. Fire
@@ -369,7 +369,7 @@ User: *"Show me everything about `Account.Industry__c`."*
 Claude's flow:
 
 1. **Classify** → full profile, use `sfi.field_360`.
-2. **Fire** `sfi.field_360` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.field_360", "args": { … } }` with
    `{ "fieldId": "CustomField:Account.Industry__c" }`.
 3. **Receive** (illustrative):
 
@@ -561,4 +561,4 @@ five-item `dataNotAvailable` list spelled out.
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the 18 core tools are directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

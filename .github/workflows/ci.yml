@@ -101,6 +101,7 @@ jobs:
           pnpm product-manifest:check
           pnpm product-surface:check
           pnpm doc-sync
+          pnpm skill-gateway
 
       # Unit tests run on Node 20+22 in the unit-test job (INFRA-09).
 

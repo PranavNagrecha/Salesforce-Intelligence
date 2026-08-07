@@ -50,6 +50,8 @@
     "product-manifest": "node scripts/generate-product-manifest.mjs",
     "product-manifest:check": "node scripts/generate-product-manifest.mjs --check",
     "doc-sync": "node scripts/verify-doc-sync.mjs",
+    "skill-gateway": "node scripts/check-skill-gateway.mjs",
+    "sbom": "node scripts/generate-sbom.mjs",
     "snapshot": "node scripts/release-snapshot.mjs",
     "release": "pnpm -r build && pnpm -r publish --access public",
     "sast": "node scripts/sast-gate.mjs",
