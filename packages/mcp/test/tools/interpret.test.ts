@@ -1112,13 +1112,18 @@ describe('interpretHandler — honesty', () => {
     const r = await interpretHandler(ctx, { componentId: PLAIN_FIELD });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const { interpretations, disclosure, rendered, trust } = r.value.data;
+    const { interpretations, disclosure, rendered, trust, evidenceEnvelope } =
+      r.value.data;
     expect(interpretations).toHaveLength(0);
     expect(disclosure.toLowerCase()).toContain('no concept rule fired');
     expect(disclosure.toLowerCase()).toContain('not a claim that nothing depends');
     expect(rendered.toLowerCase()).toContain('no concept rule fired');
     // No rule fired ⇒ confidence is unknown by construction, never asserted.
     expect(trust.confidence).toBe('unknown');
+    expect(evidenceEnvelope.envelopeVersion).toBe(2);
+    expect(evidenceEnvelope.absence?.status).toBe('unknown');
+    expect(evidenceEnvelope.claims).toHaveLength(0);
+    expect(evidenceEnvelope.trust).toEqual(trust);
   });
 
   it('returns a phantom-aware component-not-found for an unknown id', async () => {

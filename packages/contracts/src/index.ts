@@ -1169,6 +1169,86 @@ export interface PageInfo {
 }
 
 // ============================================================================
+// EvidenceEnvelope v2 (AUDIT-F4) — shared output contract
+// ============================================================================
+
+/**
+ * Unified severity vocabulary for envelope-level absence / destructive
+ * verdicts. Matches the MCP `what_if_*` / safe-to-delete family (kept here so
+ * the shared wire shape does not depend on the MCP package).
+ */
+export type EvidenceVerdictV2 =
+  | 'safe'
+  | 'review'
+  | 'risky'
+  | 'blocking'
+  | 'unknown';
+
+/**
+ * How to read an empty / "none found" conclusion.
+ *
+ *   - `proven-none` — coverage was complete enough to treat absence as real.
+ *   - `not-checked` — a required family was missing / partial; absence is not
+ *     proof.
+ *   - `unknown` — the tool did not assert an absence claim (e.g. interpret
+ *     with zero rules fired), or presence evidence already answered the ask.
+ */
+export type EvidenceAbsenceStatusV2 = 'proven-none' | 'not-checked' | 'unknown';
+
+/** One cited claim inside {@link EvidenceEnvelopeV2}. */
+export interface EvidenceClaimV2 {
+  readonly claim: string;
+  readonly groundedIn: readonly ComponentId[];
+  readonly confidence: ConfidenceLevel | 'unknown';
+  /** Optional per-claim coverage honesty (string form — tools vary). */
+  readonly coverageCaveat?: string | null;
+  readonly ruleId?: string;
+  readonly concept?: string;
+}
+
+/** One structured evidence pointer (canonical id + optional role). */
+export interface EvidenceRefV2 {
+  readonly componentId: ComponentId;
+  readonly role?: string;
+  readonly note?: string;
+}
+
+/** Coverage honesty block for {@link EvidenceEnvelopeV2}. */
+export interface EvidenceCoverageV2 {
+  readonly status: 'complete' | 'partial' | 'unknown';
+  readonly missingCoverage?: readonly string[];
+  readonly message?: string;
+}
+
+/** Absence / destructive verdict block for {@link EvidenceEnvelopeV2}. */
+export interface EvidenceAbsenceV2 {
+  readonly status: EvidenceAbsenceStatusV2;
+  readonly verdict?: EvidenceVerdictV2;
+  readonly note?: string;
+}
+
+/**
+ * Shared output contract for tools that surface claims + evidence + honesty
+ * axes (AUDIT-F4). Additive under `data.evidenceEnvelope` — legacy tool-specific
+ * keys (`interpretations`, `reasoning`, `verdict`, `trust`, …) stay byte-stable.
+ *
+ * Migrated tools MUST set `envelopeVersion: 2` and populate `claims`,
+ * `evidence`, `coverage`, `freshness`, and `trust`. Pagination and absence are
+ * optional (omit when the tool has no page / no absence claim).
+ */
+export interface EvidenceEnvelopeV2 {
+  readonly envelopeVersion: 2;
+  readonly claims: readonly EvidenceClaimV2[];
+  readonly evidence: readonly EvidenceRefV2[];
+  readonly coverage: EvidenceCoverageV2;
+  readonly freshness: TrustSummary['freshness'];
+  readonly trust: TrustSummary;
+  readonly pagination?: PageInfo | null;
+  readonly absence?: EvidenceAbsenceV2;
+  readonly disclosure?: string;
+}
+
+// ============================================================================
 // Reasoning model (RM-1a) — Concept / ConceptRule / Interpretation
 // ============================================================================
 

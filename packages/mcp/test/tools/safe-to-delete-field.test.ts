@@ -631,12 +631,16 @@ describe('safeToDeleteFieldHandler', () => {
     const result = await safeToDeleteFieldHandler(ctx, { fieldId: SAFE_FIELD });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { verdict, reasoning, fieldId, coverageCaveat, trust } = result.value.data;
+    const { verdict, reasoning, fieldId, coverageCaveat, trust, evidenceEnvelope } =
+      result.value.data;
     expect(verdict).toBe('safe');
     expect(reasoning.length).toBe(0);
     expect(fieldId).toBe(SAFE_FIELD);
     expect(coverageCaveat).toBeUndefined();
     expect(trust.completeness.status).toBe('complete');
+    expect(evidenceEnvelope.envelopeVersion).toBe(2);
+    expect(evidenceEnvelope.absence?.status).toBe('proven-none');
+    expect(evidenceEnvelope.trust).toEqual(trust);
     // The vaultState comes from the manifest.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });

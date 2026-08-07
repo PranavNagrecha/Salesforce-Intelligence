@@ -56,6 +56,7 @@ import type {
   ConfidenceLevel,
   Edge,
   EdgeType,
+  EvidenceEnvelopeV2,
   Interpretation,
   McpError,
   McpResponse,
@@ -85,6 +86,7 @@ import {
 } from '../knowledge/index.js';
 import type { Context } from '../server.js';
 
+import { buildInterpretEvidenceEnvelope } from './evidence-envelope.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /**
@@ -141,6 +143,11 @@ export interface InterpretOutput {
   readonly coverageCaveat?: string;
   readonly disclosure: string;
   readonly rendered: string;
+  /**
+   * AUDIT-F4 — shared EvidenceEnvelope v2 projection of the fields above.
+   * Additive; legacy keys remain the primary surface.
+   */
+  readonly evidenceEnvelope: EvidenceEnvelopeV2;
 }
 
 /** Base disclosure — always present. */
@@ -912,6 +919,12 @@ export const interpretHandler = async (
     ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
     disclosure,
     rendered,
+    evidenceEnvelope: buildInterpretEvidenceEnvelope({
+      interpretations: interpretationsReconciled,
+      trust,
+      ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
+      disclosure,
+    }),
   };
 
   return ok({
