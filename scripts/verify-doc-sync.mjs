@@ -302,6 +302,38 @@ if (manifest) {
   }
 }
 
+// ── pinned install commands must name the shipping version ──────────────────
+// llms.txt / llms-full.txt are published for verbatim machine citation and
+// carry `npx -y sf-intelligence@X.Y.Z` install commands. recalibrate.mjs
+// rewrites the COUNT blocks in those files but not these lines, so the pin is
+// hand-maintained and silently rotted a full minor behind (0.2.5 while the
+// same file's header announced 0.3.0). Any assistant citing the site would
+// hand users an install command for the previous release.
+if (manifest) {
+  const versionPinFiles = [
+    'website/public/llms.txt',
+    'website/public/llms-full.txt',
+    'README.md',
+    'docs/guides/installation.md',
+    '.claude-plugin/plugin.json',
+  ];
+  const pinRe = /sf-intelligence@(\d+\.\d+\.\d+)/g;
+  for (const rel of versionPinFiles) {
+    const path = join(root, rel);
+    if (!existsSync(path)) continue;
+    const text = read(path);
+    pinRe.lastIndex = 0;
+    let match;
+    while ((match = pinRe.exec(text)) !== null) {
+      if (match[1] !== manifest.version) {
+        fail(
+          `${rel} pins ${match[0]} but the shipping version is ${manifest.version}`,
+        );
+      }
+    }
+  }
+}
+
 // ── architecture.md graph tables ────────────────────────────────────────────
 const architectureMd = join(root, 'docs/architecture.md');
 if (existsSync(architectureMd) && manifest) {

@@ -122,10 +122,10 @@ A few of the foundational edge types (every edge carries a confidence —
 | `callsApex`   | `Flow`                      | `ApexClass`                 |
 | `readsFrom` / `writesTo` | Apex / Flow      | `CustomField`               |
 
-The graph models 23 edge types in total across 102 component types —
+The graph models 23 edge types in total across 101 component types —
 including Apex call edges, Flow-to-Apex invocations, and formula field
-references. (That 102 is the count of org-metadata *component* types in the
-graph; it is unrelated to the 94 curated reasoning *concepts* in the Concept
+references. (That 101 is the count of org-metadata *component* types in the
+graph; it is unrelated to the 142 curated reasoning *concepts* in the Concept
 Model — see §2b.) The confidence word on an edge (`declared` / `parsed` /
 `heuristic`) is **edge confidence** — it grades that one relationship. A
 reasoning *claim* from `sfi.interpret` (§2b) carries a **separate** claim

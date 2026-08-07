@@ -95,7 +95,15 @@ jobs:
       # so it silently rotted: the registry sat at 0.1.26 while npm was at 0.2.5,
       # and downstream MCP directories crawl the registry record, propagating the
       # stale version across the ecosystem. Automating it here is the fix.
+      # NOT job-fatal: `npm publish` above is guarded against re-runs, but the
+      # registry rejects a duplicate version outright. Without this, re-running
+      # a partially-failed publish dies HERE — after npm already has the version
+      # — and never reaches the SBOM or the GitHub release, stranding the very
+      # release this workflow was added to stop cutting by hand. A failure still
+      # shows as a red step; the version-mismatch guard below is a hard exit
+      # because that one means the tag itself is wrong.
       - name: Publish to the official MCP Registry (keyless OIDC)
+        continue-on-error: true
         working-directory: packages/cli
         run: |
           VERSION="$(node -p "require('./package.json').version")"

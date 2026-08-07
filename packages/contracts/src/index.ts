@@ -385,7 +385,10 @@ export type ComponentType =
   // ApexClass node, so it is modeled as a `references` edge (declared — an
   // explicit metadata pointer) rather than a bare property string.
   | 'TransactionSecurityPolicy' // Event-triggered security policy (`.transactionSecurityPolicy-meta.xml`). Carries `eventName`, `active`, and `action` (`{ block, endSession, freezeUser, twoFactorAuthentication, notificationCount }` — omitted when no `<action>` block). Emits a `declared references` edge to `ApexClass:{apexClass}` (referenceKind `conditionClass`) when `<apexClass>` is present. Id `TransactionSecurityPolicy:{DeveloperName}`. Flat, no parent scope.
-  | 'StandardValueSet' //           Org-wide standard-picklist value set (`.standardValueSet-meta.xml`). Carries `sorted`, `valueCount`, and `values` (array of `{ apiName, active }` — the Metadata API's `StandardValue` has no separate `label` field, so `apiName` doubles as the display value). Id `StandardValueSet:{Name}` (e.g. `StandardValueSet:LeadSource`). Node-only; no edges.
+  // NOTE: 'StandardValueSet' is declared once, in the picklist tier above.
+  // A duplicate literal here was invisible to TypeScript (a union dedupes) but
+  // the manifest generator counted regex matches, inflating componentTypeCount
+  // to 102 and propagating that into README / site-data / llms.txt.
   // R6-13 — Agentforce / Einstein GenAI tier. The org's OWN generative-AI
   // surface, previously entirely unmodeled (zero ComponentType, zero
   // extraction) — the gap the "the backend your Salesforce AI can trust"

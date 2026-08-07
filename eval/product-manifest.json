@@ -383,7 +383,6 @@
       "QueueRoutingConfig",
       "Certificate",
       "TransactionSecurityPolicy",
-      "StandardValueSet",
       "GenAiFunction",
       "GenAiPlugin",
       "GenAiPlannerBundle",
@@ -433,7 +432,7 @@
       "schema_version"
     ],
     "schemaVersion": 1,
-    "componentTypeCount": 102,
+    "componentTypeCount": 101,
     "edgeTypeCount": 23
   },
   "conceptModel": {
@@ -452,5 +451,5 @@
   "slashCommandCount": 5,
   "agentCount": 2,
   "catalogHash": "sha256:2c419cd5b2d6c0c4556b6139c8af817b283415bd3f7beb91bfbdbc7a3cccf497",
-  "identityHash": "sha256:d4f010f427fb862b817aae5c92e26c4e8ace2afa5a489d66ea3f5776dbb48f10"
+  "identityHash": "sha256:289066b047c74f3344abcbf292f1fc9d409245b0d4b1e006a3d1ce055d71bcd7"
 }

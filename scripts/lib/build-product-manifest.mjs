@@ -170,16 +170,11 @@ const extractUnionBlock = (src, startMarker, endMarker) => {
   return block;
 };
 
-const countUnionMembers = (src, startMarker, endMarker) => {
-  const block = extractUnionBlock(src, startMarker, endMarker);
-  const count = (block.match(/\| '[^']+'/g) ?? []).length;
-  if (count === 0) {
-    throw new Error(
-      `Contract union between "${startMarker}" and "${endMarker}" has zero members.`,
-    );
-  }
-  return count;
-};
+// Delegates so both paths share the zero-member AND duplicate-literal guards.
+// Counting matches independently is what let a repeated literal inflate the
+// count in one code path while the other listed it correctly.
+const countUnionMembers = (src, startMarker, endMarker) =>
+  listUnionMembers(src, startMarker, endMarker).length;
 
 const listUnionMembers = (src, startMarker, endMarker) => {
   const block = extractUnionBlock(src, startMarker, endMarker);
@@ -187,6 +182,23 @@ const listUnionMembers = (src, startMarker, endMarker) => {
   if (members.length === 0) {
     throw new Error(
       `Contract union between "${startMarker}" and "${endMarker}" has zero members.`,
+    );
+  }
+  // A TypeScript union silently dedupes, so a repeated literal is invisible at
+  // the type level but inflates every count derived from this source. That is
+  // how componentTypeCount shipped as 102 when there were 101 distinct types.
+  // Refuse rather than dedupe quietly: the contract itself should be fixed.
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const member of members) {
+    if (seen.has(member)) duplicates.add(member);
+    seen.add(member);
+  }
+  if (duplicates.size > 0) {
+    throw new Error(
+      `Contract union between "${startMarker}" and "${endMarker}" declares ` +
+        `duplicate literal(s): ${[...duplicates].join(', ')}. ` +
+        'Remove the repeat — counts derived from this union would over-report.',
     );
   }
   return members;
