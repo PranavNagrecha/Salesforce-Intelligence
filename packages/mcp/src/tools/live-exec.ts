@@ -67,7 +67,7 @@ export const redactSecrets = (message: string): string =>
     .replace(/\b00D[A-Za-z0-9]{12,}![A-Za-z0-9._~+/=-]{20,}\b/g, '[REDACTED_TOKEN]');
 
 export const LIVE_PLANE_DISCLOSURE =
-  'Live org data is read-only, queried at call time via the Salesforce CLI. It does not update the vault. Enable with SFI_LIVE_PLANE_ENABLED=1 or pass liveEnabled: true.';
+  'Live org data is read-only, queried at call time via the Salesforce CLI. It does not update the vault. Enable with sfi.live_consent { grant: true } (persisted, OrgId+principal-bound grant with scopes/expiry) or SFI_LIVE_PLANE_ENABLED=1. Per-call liveEnabled: true is intent only — it is not a consent substitute.';
 
 export const getLiveAuth = async (
   org: string,

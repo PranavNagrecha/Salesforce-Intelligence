@@ -1,33 +1,60 @@
 /**
- * One-time, per-org consent for the read-only live plane.
+ * One-time, per-org consent for the read-only live plane (AUDIT-F3).
  *
  * The live plane never mutates the org — but it *queries the authenticated org
  * at call time*, so, unlike the offline vault, it must never run without
  * explicit user intent. Consent is granted once per org and persisted to a
- * vault-independent, user-level store, so it survives across sessions and is
- * available even before a vault exists (the install -> ask path).
+ * vault-independent, user-level store, so it survives across sessions.
  *
- * Trust posture: this store is the *only* thing that flips the live plane from
- * fail-closed to allowed (besides an explicit per-call `liveEnabled: true` or
- * the `SFI_LIVE_PLANE_ENABLED` env). It never auto-grants. A missing or corrupt
- * store reads as "no consent" — the gate stays closed. No function here throws.
+ * Trust posture (AUDIT-F3):
+ *   - A stored grant is the primary allow path (plus operator env override).
+ *   - Per-call `liveEnabled: true` is **not** a consent substitute.
+ *   - Grants bind OrgId + principal username, carry scopes + expiry, and are
+ *     disclosed on live results via {@link describeLiveGrant}.
+ *   - A missing, corrupt, expired, or under-scoped grant fail-closes.
  */
 
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { err, ok, type Result } from '@sf-intelligence/core';
 
-/** Bumped only on a breaking change to the on-disk shape. */
-const STORE_VERSION = 1;
+/** Bumped on breaking on-disk shape changes (v1 → v2 for AUDIT-F3). */
+const STORE_VERSION = 2;
 
-/** One org's consent record. */
+/**
+ * Live-plane scopes. Default grant is `aggregate` only; sample/user tools
+ * require an explicit step-up via `sfi.live_consent { grant: true, scopes: [...] }`.
+ */
+export type LiveScope = 'aggregate' | 'sample' | 'users';
+
+export const LIVE_SCOPES: readonly LiveScope[] = Object.freeze([
+  'aggregate',
+  'sample',
+  'users',
+]);
+
+/** Default grant TTL when the caller does not pass `expiresInHours`. */
+export const DEFAULT_GRANT_TTL_HOURS = 24 * 7; // 7 days
+
+/** One org's consent record (store v2). */
 export interface ConsentRecord {
-  /** ISO-8601 timestamp the consent was granted. */
+  /** ISO-8601 timestamp the consent was granted (or last stepped up). */
   readonly grantedAt: string;
   /** Who granted it (default `user`); free-form provenance label. */
   readonly grantedBy: string;
+  /** Opaque id stamped on live results for audit/disclosure. */
+  readonly grantId: string;
+  /** Salesforce Org Id (`00D…`) bound at grant time; null only for env bypass. */
+  readonly orgId: string | null;
+  /** Authenticated Salesforce username bound at grant time. */
+  readonly principalUsername: string | null;
+  /** Authorized scopes (subset of {@link LIVE_SCOPES}). */
+  readonly scopes: readonly LiveScope[];
+  /** ISO-8601 expiry; past → treat as no consent. */
+  readonly expiresAt: string;
 }
 
 /** The whole persisted store: a map of normalized org key -> record. */
@@ -38,8 +65,18 @@ export interface ConsentStore {
 
 /** Failure shape for the mutating operations. */
 export interface ConsentError {
-  readonly kind: 'write-failed';
+  readonly kind: 'write-failed' | 'invalid-grant';
   readonly message: string;
+}
+
+/** Structured grant disclosure for live tool trust surfaces. */
+export interface LiveGrantDisclosure {
+  readonly grantId: string;
+  readonly orgId: string | null;
+  readonly principalUsername: string | null;
+  readonly scopes: readonly LiveScope[];
+  readonly expiresAt: string;
+  readonly source: 'consent' | 'env';
 }
 
 const EMPTY_STORE: ConsentStore = Object.freeze({
@@ -51,9 +88,7 @@ const EMPTY_STORE: ConsentStore = Object.freeze({
  * Absolute path of the consent store.
  *
  * `SFI_CONSENT_PATH` overrides it (tests point it at a temp file for
- * determinism); otherwise it is `~/.sf-intelligence/live-consent.json`. The
- * location is deliberately vault-independent so consent works in the no-vault
- * install -> ask path and is shared across every vault for the same org.
+ * determinism); otherwise it is `~/.sf-intelligence/live-consent.json`.
  */
 export const consentStorePath = (): string => {
   const override = process.env['SFI_CONSENT_PATH'];
@@ -61,16 +96,53 @@ export const consentStorePath = (): string => {
   return join(homedir(), '.sf-intelligence', 'live-consent.json');
 };
 
-/**
- * Normalize an org alias/username to a stable key. Salesforce usernames are
- * case-insensitive, and `resolveOrg` yields whatever the caller passed or the
- * vault's `sourceOrg`; lower-casing + trimming avoids spurious misses.
- */
 const normalizeOrg = (org: string): string => org.trim().toLowerCase();
+
+const isLiveScope = (value: unknown): value is LiveScope =>
+  value === 'aggregate' || value === 'sample' || value === 'users';
+
+const normalizeScopes = (scopes: readonly LiveScope[] | undefined): LiveScope[] => {
+  const raw = scopes === undefined || scopes.length === 0 ? (['aggregate'] as LiveScope[]) : [...scopes];
+  const uniq = [...new Set(raw.filter(isLiveScope))];
+  return uniq.length > 0 ? uniq : ['aggregate'];
+};
+
+const parseRecord = (raw: unknown): ConsentRecord | null => {
+  if (raw === null || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  // v1 shape: only grantedAt/grantedBy — treat as expired (force re-grant).
+  if (typeof r['grantId'] !== 'string' || typeof r['expiresAt'] !== 'string') {
+    return null;
+  }
+  if (typeof r['grantedAt'] !== 'string' || typeof r['grantedBy'] !== 'string') {
+    return null;
+  }
+  const scopesRaw = r['scopes'];
+  const scopes = Array.isArray(scopesRaw)
+    ? scopesRaw.filter(isLiveScope)
+    : (['aggregate'] as LiveScope[]);
+  return {
+    grantedAt: r['grantedAt'],
+    grantedBy: r['grantedBy'],
+    grantId: r['grantId'],
+    orgId: typeof r['orgId'] === 'string' ? r['orgId'] : null,
+    principalUsername:
+      typeof r['principalUsername'] === 'string' ? r['principalUsername'] : null,
+    scopes: scopes.length > 0 ? scopes : ['aggregate'],
+    expiresAt: r['expiresAt'],
+  };
+};
+
+const isExpired = (record: ConsentRecord, now: Date = new Date()): boolean => {
+  const exp = Date.parse(record.expiresAt);
+  if (!Number.isFinite(exp)) return true;
+  return exp <= now.getTime();
+};
 
 /**
  * Read and parse the store. Returns an empty store on any failure (missing
  * file, unreadable, malformed JSON, wrong shape) — fail-closed by design.
+ * v1 records without grantId/expiry are dropped (force re-grant).
  */
 export const loadConsentStore = async (
   path: string = consentStorePath(),
@@ -87,32 +159,57 @@ export const loadConsentStore = async (
     ) {
       return EMPTY_STORE;
     }
-    const obj = parsed as { version?: unknown; orgs: Record<string, ConsentRecord> };
+    const obj = parsed as { version?: unknown; orgs: Record<string, unknown> };
+    const orgs: Record<string, ConsentRecord> = {};
+    for (const [key, value] of Object.entries(obj.orgs)) {
+      const record = parseRecord(value);
+      if (record !== null) orgs[key] = record;
+    }
     return {
-      version: typeof obj.version === 'number' ? obj.version : STORE_VERSION,
-      orgs: obj.orgs,
+      version: STORE_VERSION,
+      orgs,
     };
   } catch {
     return EMPTY_STORE;
   }
 };
 
-/** True iff `org` has standing live-plane consent. Empty org -> false. */
+/** Load the active (non-expired) grant for `org`, or null. */
+export const getLiveGrant = async (
+  org: string,
+  path: string = consentStorePath(),
+  now: Date = new Date(),
+): Promise<ConsentRecord | null> => {
+  if (org.trim().length === 0) return null;
+  const store = await loadConsentStore(path);
+  const record = store.orgs[normalizeOrg(org)];
+  if (record === undefined) return null;
+  if (isExpired(record, now)) return null;
+  return record;
+};
+
+/** True iff `org` has a non-expired standing live-plane grant. */
 export const hasLiveConsent = async (
   org: string,
   path: string = consentStorePath(),
-): Promise<boolean> => {
-  if (org.trim().length === 0) return false;
-  const store = await loadConsentStore(path);
-  return Object.prototype.hasOwnProperty.call(store.orgs, normalizeOrg(org));
-};
+): Promise<boolean> => (await getLiveGrant(org, path)) !== null;
 
-/** Sorted list of orgs that currently hold consent (normalized keys). */
+/** True iff the grant covers every required scope. */
+export const grantHasScopes = (
+  grant: ConsentRecord,
+  required: readonly LiveScope[],
+): boolean => required.every((s) => grant.scopes.includes(s));
+
+/** Sorted list of orgs that currently hold a non-expired grant. */
 export const listConsentedOrgs = async (
   path: string = consentStorePath(),
+  now: Date = new Date(),
 ): Promise<readonly string[]> => {
   const store = await loadConsentStore(path);
-  return Object.keys(store.orgs).sort();
+  return Object.entries(store.orgs)
+    .filter(([, record]) => !isExpired(record, now))
+    .map(([key]) => key)
+    .sort();
 };
 
 /** Atomically write the store (temp file + rename), creating the dir. */
@@ -134,25 +231,79 @@ const writeStore = async (
   }
 };
 
+export interface GrantLiveConsentOptions {
+  readonly grantedBy?: string;
+  readonly path?: string;
+  /** Salesforce Org Id bound at grant (`00D…`). Required outside tests. */
+  readonly orgId?: string | null;
+  /** Authenticated username bound at grant. */
+  readonly principalUsername?: string | null;
+  /** Scopes to authorize (default `['aggregate']`). Step-up merges with existing. */
+  readonly scopes?: readonly LiveScope[];
+  /** Hours until expiry (default {@link DEFAULT_GRANT_TTL_HOURS}). */
+  readonly expiresInHours?: number;
+  /** Absolute expiry override (ISO). Wins over expiresInHours when set. */
+  readonly expiresAt?: string;
+  /** Fixed grant id (tests). */
+  readonly grantId?: string;
+  /** Clock override (tests). */
+  readonly now?: Date;
+  /**
+   * When true (default), step-up merges scopes with any existing non-expired
+   * grant for the same org key. Binding identity is refreshed from opts.
+   */
+  readonly mergeScopes?: boolean;
+}
+
 /**
- * Grant standing live-plane consent for `org`. Idempotent (re-granting just
- * refreshes the timestamp). Persists immediately.
+ * Grant standing live-plane consent for `org`. Persists immediately.
+ * Step-up: re-grant with additional scopes merges into the existing record.
  */
 export const grantLiveConsent = async (
   org: string,
-  opts: { readonly grantedBy?: string; readonly path?: string } = {},
+  opts: GrantLiveConsentOptions = {},
 ): Promise<Result<ConsentStore, ConsentError>> => {
   const key = normalizeOrg(org);
   if (key.length === 0) {
-    return err({ kind: 'write-failed', message: 'Cannot grant consent for an empty org alias.' });
+    return err({
+      kind: 'invalid-grant',
+      message: 'Cannot grant consent for an empty org alias.',
+    });
   }
   const path = opts.path ?? consentStorePath();
+  const now = opts.now ?? new Date();
   const store = await loadConsentStore(path);
+  const existing = store.orgs[key];
+  const merge = opts.mergeScopes !== false;
+  const incoming = normalizeScopes(opts.scopes);
+  const scopes =
+    merge && existing !== undefined && !isExpired(existing, now)
+      ? normalizeScopes([...existing.scopes, ...incoming])
+      : incoming;
+
+  const expiresAt =
+    opts.expiresAt ??
+    new Date(
+      now.getTime() +
+        (opts.expiresInHours ?? DEFAULT_GRANT_TTL_HOURS) * 60 * 60 * 1000,
+    ).toISOString();
+
   const next: ConsentStore = {
     version: STORE_VERSION,
     orgs: {
       ...store.orgs,
-      [key]: { grantedAt: new Date().toISOString(), grantedBy: opts.grantedBy ?? 'user' },
+      [key]: {
+        grantedAt: now.toISOString(),
+        grantedBy: opts.grantedBy ?? 'user',
+        grantId: opts.grantId ?? existing?.grantId ?? randomUUID(),
+        orgId: opts.orgId !== undefined ? opts.orgId : (existing?.orgId ?? null),
+        principalUsername:
+          opts.principalUsername !== undefined
+            ? opts.principalUsername
+            : (existing?.principalUsername ?? null),
+        scopes,
+        expiresAt,
+      },
     },
   };
   return writeStore(next, path);
@@ -172,4 +323,52 @@ export const revokeLiveConsent = async (
   const nextOrgs = { ...store.orgs };
   delete nextOrgs[key];
   return writeStore({ version: STORE_VERSION, orgs: nextOrgs }, path);
+};
+
+/** Build the disclosure block stamped onto live results. */
+export const describeLiveGrant = (
+  grant: ConsentRecord | null,
+  source: 'consent' | 'env',
+): LiveGrantDisclosure | null => {
+  if (source === 'env') {
+    return {
+      grantId: 'env:SFI_LIVE_PLANE_ENABLED',
+      orgId: grant?.orgId ?? null,
+      principalUsername: grant?.principalUsername ?? null,
+      scopes: grant?.scopes ?? [...LIVE_SCOPES],
+      expiresAt: grant?.expiresAt ?? 'session',
+      source: 'env',
+    };
+  }
+  if (grant === null) return null;
+  return {
+    grantId: grant.grantId,
+    orgId: grant.orgId,
+    principalUsername: grant.principalUsername,
+    scopes: grant.scopes,
+    expiresAt: grant.expiresAt,
+    source: 'consent',
+  };
+};
+
+/**
+ * Map a live / hybrid tool name to the scopes it requires.
+ * Unknown live_* tools default to `aggregate` (fail-closed for sample/users).
+ */
+export const requiredScopesForTool = (toolName: string): readonly LiveScope[] => {
+  switch (toolName) {
+    case 'sfi.live_sample':
+      return ['sample'];
+    case 'sfi.live_inactive_users':
+    case 'sfi.live_permset_holders':
+    case 'sfi.live_user_permsets':
+    case 'sfi.live_zombie_accounts':
+    case 'sfi.live_group_members':
+    case 'sfi.live_record_access':
+    case 'sfi.live_record_shares':
+    case 'sfi.live_owner_breakdown':
+      return ['users'];
+    default:
+      return ['aggregate'];
+  }
 };

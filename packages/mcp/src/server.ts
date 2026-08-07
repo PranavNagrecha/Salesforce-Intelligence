@@ -129,6 +129,13 @@ export interface Context {
    * this token from the top-level invoke (they never mint their own).
    */
   readonly liveCapability?: LiveCapability;
+  /**
+   * AUDIT-F3 — top-level tool name bound at `dispatchTool` so scope checks
+   * (`requiredScopesForTool`) can step-up sample/user tools without each
+   * handler hard-coding its scope. Absent in unit tests that call handlers
+   * directly → treated as aggregate-only.
+   */
+  readonly liveToolName?: string;
 }
 
 /**
@@ -153,9 +160,14 @@ export const bindCallerIdentity = (
           callerIdentity: identity,
         };
   // exactOptionalPropertyTypes: omit the key when absent (do not assign undefined).
-  return ctx.liveCapability === undefined
-    ? base
-    : { ...base, liveCapability: ctx.liveCapability };
+  let out: Context = base;
+  if (ctx.liveCapability !== undefined) {
+    out = { ...out, liveCapability: ctx.liveCapability };
+  }
+  if (ctx.liveToolName !== undefined) {
+    out = { ...out, liveToolName: ctx.liveToolName };
+  }
+  return out;
 };
 
 /**

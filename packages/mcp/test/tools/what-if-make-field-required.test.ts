@@ -20,6 +20,7 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import type { Context } from '../../src/server.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 import {

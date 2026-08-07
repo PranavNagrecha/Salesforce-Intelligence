@@ -21,6 +21,8 @@ const AUTH: ToolingApiAuth = {
   accessToken: 'TOKEN_xxx',
   instanceUrl: 'https://my-org.my.salesforce.com',
   apiVersion: '60.0',
+  orgId: '00D000000000001AAA',
+  username: 'user@example.com',
 };
 
 const makeResponse = (

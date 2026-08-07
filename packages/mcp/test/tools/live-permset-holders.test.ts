@@ -26,6 +26,8 @@ import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { revokeLiveConsent } from '../../src/live-consent.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import type { Context } from '../../src/server.js';
 import { livePermsetHoldersHandler } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
@@ -113,12 +115,14 @@ const makePermsetExec = (queries: string[]): ExecCommand => async (_bin, args) =
 };
 
 let consentDir: string;
-beforeEach(() => {
+beforeEach(async () => {
   resetLiveSession();
   consentDir = mkdtempSync(join(tmpdir(), 'sfi-holders-consent-'));
   process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
   delete process.env.SFI_LIVE_PLANE_ENABLED;
   delete process.env.SFI_LIVE_QUERY_BUDGET;
+  // AUDIT-F3: liveEnabled is not consent — seed a full-scope test grant.
+  await grantTestLiveAccess('test-org');
 });
 afterEach(() => {
   resetLiveSession();
@@ -129,6 +133,7 @@ afterEach(() => {
 
 describe('livePermsetHoldersHandler — consent gate', () => {
   it('fails closed without consent (no liveEnabled, no env, no standing grant)', async () => {
+    await revokeLiveConsent('test-org');
     const r = await livePermsetHoldersHandler(ctx, { name: 'PS_Test' }, makePermsetExec([]));
     expect(r.ok).toBe(false);
     if (r.ok) return;

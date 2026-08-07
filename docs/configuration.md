@@ -11,24 +11,26 @@ For install and first run, start with [`guides/installation.md`](./guides/instal
 
 The live plane is **off by default**. Vault tools never call Salesforce.
 
-### Enablement (any one of)
+### Enablement (AUDIT-F3)
 
 | Method | Scope | How |
 | --- | --- | --- |
-| Standing consent | Per org, persists | `sfi.live_consent { grant: true, orgAlias: "my-org" }` |
-| Environment | All live tools in the MCP process | `SFI_LIVE_PLANE_ENABLED=1` or `true` |
-| Per-call flag | Single tool invocation | Pass `liveEnabled: true` in tool args |
+| Standing grant | Per org, persists | `sfi.live_consent { grant: true }` — binds OrgId + principal via read-only `sf org display`, default scope `aggregate`, 7-day expiry |
+| Step-up scopes | Same grant | Re-grant with `scopes: ["sample"]` and/or `["users"]` (merged into the existing grant) |
+| Environment | Operator override for the MCP process | `SFI_LIVE_PLANE_ENABLED=1` or `true` |
 
-Revoke standing consent: `sfi.live_consent { grant: false }`.
+**Per-call `liveEnabled: true` is not a consent substitute.** Hybrid tools may still accept it as *intent* ("please enrich if a grant exists"), but it never opens the live plane by itself.
+
+Revoke: `sfi.live_consent { revoke: true }`.
 
 ### Consent store
 
 | Variable / path | Default | Purpose |
 | --- | --- | --- |
 | `SFI_CONSENT_PATH` | *(unset)* | Override consent file path (tests) |
-| Default file | `~/.sf-intelligence/live-consent.json` | Persisted per-org consent |
+| Default file | `~/.sf-intelligence/live-consent.json` | Persisted per-org v2 grants |
 
-Consent is vault-independent so it works before `/sfi-init`.
+Consent is vault-independent so it works before `/sfi-init`. v1 records (pre-F3) are ignored — re-grant once. Live results disclose the active grant id / OrgId / principal / scopes / expiry in `trust.limitations`.
 
 ### Live tools (curated roster)
 

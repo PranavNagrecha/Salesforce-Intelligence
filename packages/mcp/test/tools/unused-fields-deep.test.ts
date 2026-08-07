@@ -19,6 +19,7 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import type { Context } from '../../src/server.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 import {
@@ -726,8 +727,19 @@ describe('unusedFieldsDeepHandler — live population cross-check (CR-CAP-L5)', 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  beforeEach(() => resetLiveSession());
-  afterEach(() => resetLiveSession());
+  let consentDir: string;
+  beforeEach(async () => {
+    resetLiveSession();
+    consentDir = mkdtempSync(join(tmpdir(), 'sfi-ufd-consent-'));
+    process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
+    delete process.env.SFI_LIVE_PLANE_ENABLED;
+    await grantTestLiveAccess('me@example.com');
+  });
+  afterEach(() => {
+    resetLiveSession();
+    delete process.env.SFI_CONSENT_PATH;
+    rmSync(consentDir, { recursive: true, force: true });
+  });
 
   /** 100 total records; `populatedCount` controls how many are non-null. */
   const makePopulationExec = (populatedCount: number): ExecCommand =>
@@ -780,6 +792,8 @@ describe('unusedFieldsDeepHandler — live population cross-check (CR-CAP-L5)', 
   });
 
   it('live unavailable (no consent, no liveEnabled) → static confidence stands with a disclosure', async () => {
+    const { revokeLiveConsent } = await import('../../src/live-consent.js');
+    await revokeLiveConsent('me@example.com');
     const throwExec: ExecCommand = (async () => {
       throw new Error('sf must NOT be spawned — live plane is not enabled');
     }) as ExecCommand;
@@ -909,8 +923,19 @@ describe('unusedFieldsDeepHandler — live cross-check is bounded (CR-CAP-L5 tim
     rmSync(dir, { recursive: true, force: true });
   });
 
-  beforeEach(() => resetLiveSession());
-  afterEach(() => resetLiveSession());
+  let consentDirCap: string;
+  beforeEach(async () => {
+    resetLiveSession();
+    consentDirCap = mkdtempSync(join(tmpdir(), 'sfi-ufd-cap-consent-'));
+    process.env.SFI_CONSENT_PATH = join(consentDirCap, 'c.json');
+    delete process.env.SFI_LIVE_PLANE_ENABLED;
+    await grantTestLiveAccess('me@example.com');
+  });
+  afterEach(() => {
+    resetLiveSession();
+    delete process.env.SFI_CONSENT_PATH;
+    rmSync(consentDirCap, { recursive: true, force: true });
+  });
 
   it('FIX B: at most LIVE_CROSS_CHECK_CAP live cross-checks fire even when the page holds more high-confidence fields', async () => {
     // Count the null-population probes (one per cross-checked field). The

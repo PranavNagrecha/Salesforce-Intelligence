@@ -373,12 +373,14 @@ rather than papering over the gap with general Salesforce knowledge:
 - **Offline by default.** Vault tools never call Salesforce mid-conversation.
   Run `/sfi-refresh` to update metadata. **Opt-in live tools** (`sfi.live_*`)
   run read-only SOQL with strict caps and label answers `provenance: live_org`.
-  The live plane is **off until you enable it once per org** — grant standing
-  consent with `sfi.live_consent { grant: true }` (read-only, persists), or set
-  `SFI_LIVE_PLANE_ENABLED=1`, or pass `liveEnabled: true` for a single call.
-  **Hybrid** answers fuse vault + live and disclose both provenances. Live never
-  backfills stale vault claims, and the product never auto-picks which org to
-  query.
+  The live plane is **off until you grant once per org** with
+  `sfi.live_consent { grant: true }` (binds OrgId+principal, scopes+expiry;
+  persists locally) or set `SFI_LIVE_PLANE_ENABLED=1`. Per-call
+  `liveEnabled: true` is intent only — not a consent substitute. Step up
+  `sample` / `users` scopes for row samples and user-identity tools.
+  **Hybrid** answers fuse vault + live and disclose both provenances plus the
+  active grant. Live never backfills stale vault claims, and the product never
+  auto-picks which org to query.
 - **No record-level data.** The vault stores schema and source, not rows. "How
   many Opportunities closed last quarter" is a question for your org directly.
 - **Static analysis, not runtime.** Dependency edges are derived from metadata

@@ -796,12 +796,15 @@ export const dispatchTool = async (
   // parent/test capability by accident; run_analysis re-entry rebinds for
   // the *target* tool. Under exactOptionalPropertyTypes, omit the field
   // entirely when the tag is `never` (do not assign `undefined`).
-  const { liveCapability: _ignored, ...ctxBase } = ctxIn;
+  // AUDIT-F3: also bind liveToolName so scope step-up can resolve per tool.
+  const { liveCapability: _ignored, liveToolName: _ignoredTool, ...ctxBase } =
+    ctxIn;
   const capability = mintLiveCapability(def.livePlane);
+  const withTool: Context = { ...ctxBase, liveToolName: toolName };
   const ctx: Context =
     capability === undefined
-      ? ctxBase
-      : { ...ctxBase, liveCapability: capability };
+      ? withTool
+      : { ...withTool, liveCapability: capability };
 
   // Governance: append-only audit of the call (no-op unless
   // SF_INTELLIGENCE_AUDIT_LOG is set). Arg keys only — never values.

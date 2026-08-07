@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import {
@@ -30,8 +31,9 @@ const ISOLATED_CONSENT = join(
   tmpdir(),
   `sfi-consent-license-test-${process.pid}-never.json`,
 );
-beforeAll(() => {
+beforeAll(async () => {
   process.env.SFI_CONSENT_PATH = ISOLATED_CONSENT;
+  await grantTestLiveAccess('test-org');
 });
 afterAll(() => {
   delete process.env.SFI_CONSENT_PATH;
@@ -133,6 +135,8 @@ describe('liveLicenseUsageHandler', () => {
   });
 
   it('is fail-closed when the live plane is not enabled', async () => {
+    const { revokeLiveConsent } = await import('../../src/live-consent.js');
+    await revokeLiveConsent('test-org');
     const r = await liveLicenseUsageHandler(ctx, {}, fakeExec);
     expect(r.ok).toBe(false);
     if (r.ok) return;

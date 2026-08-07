@@ -630,7 +630,7 @@ const INTELLIGENCE_PLANES: readonly IntelligencePlane[] = [
       'SOQL counts, samples, describe, and limits against the authenticated org. Fail-closed when disabled — no fallback to stale vault claims.',
     default: false,
     enablement:
-      'Opt-in per org: grant one-time consent with sfi.live_consent { grant: true } (persists across sessions; strictly read-only), or set SFI_LIVE_PLANE_ENABLED=1, or pass liveEnabled: true on a single sfi.live_* call.',
+      'Opt-in per org: grant with sfi.live_consent { grant: true } (binds OrgId+principal; scopes+expiry; persists). Step up sample/users scopes as needed. Or set SFI_LIVE_PLANE_ENABLED=1. Per-call liveEnabled: true is not a consent substitute.',
     tools: [
       'sfi.live_count',
       'sfi.live_sample',
@@ -701,9 +701,9 @@ const COMMANDS: readonly CommandInfo[] = [
  */
 const ROUTING_GUIDANCE: ConversationalGuidance = {
   startHere:
-    'On a vague or broad question, call sfi.route_question first — it returns the plane (vault | live | hybrid | unknown) and the tools to run. Default to the offline vault. Use sfi.live_* only for record counts, samples, population, describe, org limits, or inactive users — and only when the org has live consent (sfi.live_consent), SFI_LIVE_PLANE_ENABLED=1, or liveEnabled: true. Before destructive verdicts, call sfi.coverage_report.',
+    'On a vague or broad question, call sfi.route_question first — it returns the plane (vault | live | hybrid | unknown) and the tools to run. Default to the offline vault. Use sfi.live_* only for record counts, samples, population, describe, org limits, or inactive users — and only when the org has a live grant (sfi.live_consent) or SFI_LIVE_PLANE_ENABLED=1. Before destructive verdicts, call sfi.coverage_report.',
   onAmbiguous:
-    'On ambiguous resolution, clarify the component first. If the user wants live data and live is disabled, say so and offer to enable it once with sfi.live_consent { grant: true } (read-only) — do not guess from the vault.',
+    'On ambiguous resolution, clarify the component first. If the user wants live data and live is disabled, say so and offer to grant with sfi.live_consent { grant: true } (OrgId-bound, read-only) — do not guess from the vault.',
   onNone:
     'On none, offer /sfi-refresh for metadata gaps. For live-record questions when offline, name sfi.live_count or sfi.live_sample and the consent requirement — never invent counts. When route_question returns toolCandidates (no rule placed the question, or it matched only weakly), follow its `guidance`: those candidates are an advisory shortlist — pick the right tool(s) from them, resolve any named component, run them, then synthesize. Do NOT say the capability is unbuilt when candidates are offered. Only a true unknown with NO candidates means the capability is not built yet (the gap is logged).',
   groundAnswer:

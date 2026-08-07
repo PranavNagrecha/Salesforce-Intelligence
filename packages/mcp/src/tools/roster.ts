@@ -1057,6 +1057,11 @@ const LIVE_CONSENT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.free
     orgAlias: { type: 'string', minLength: 1 },
     grant: { type: 'boolean' },
     revoke: { type: 'boolean' },
+    scopes: {
+      type: 'array',
+      items: { type: 'string', enum: ['aggregate', 'sample', 'users'] },
+    },
+    expiresInHours: { type: 'integer', minimum: 1, maximum: 2160 },
   },
 });
 
@@ -4726,7 +4731,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.live_consent',
     description:
-      "Manage one-time, per-org consent for the read-only live plane. Default (no args) REPORTS whether live is enabled for the org and which orgs are consented — it never silently enables anything. grant: true records standing consent so future sessions can run sfi.live_* without re-asking; revoke: true removes it. Granting writes only a LOCAL user-level preference — it never reads or writes the Salesforce org. This is the explicit opt-in the live tools require; call it (with grant: true) after the user agrees to enable live answers for their org.",
+      "Manage per-org live-plane grants (AUDIT-F3). Default (no args) REPORTS grant status — it never silently enables anything. grant: true binds OrgId+principal via read-only `sf org display`, records scopes (default aggregate; step up with scopes:[\"sample\"] / [\"users\"]) and expiry (default 7 days), and persists locally. revoke: true removes the grant. Per-call liveEnabled: true is NOT a consent substitute. Granting never mutates Salesforce records.",
     inputSchema: LIVE_CONSENT_INPUT_SCHEMA,
   },
   {

@@ -415,9 +415,14 @@ export const liveBudgetHandler = async (
             : await runSfJson(org, ['org', 'limits', 'list'], exec);
         if (!limits.ok) return null;
         const rows = (limits.value as {
-          result?: readonly { name?: string; max?: number; remaining?: number }[];
+          result?: unknown;
         }).result;
-        const daily = rows?.find((row) => row.name === 'DailyApiRequests');
+        // `sf org limits list --json` returns an array; mocked execs in budget
+        // tests often return a SOQL-shaped `{ totalSize }` — ignore non-arrays.
+        if (!Array.isArray(rows)) return null;
+        const daily = (
+          rows as readonly { name?: string; max?: number; remaining?: number }[]
+        ).find((row) => row.name === 'DailyApiRequests');
         if (daily?.remaining === undefined || daily.max === undefined) return null;
         return {
           dailyApiRequestsRemaining: daily.remaining,

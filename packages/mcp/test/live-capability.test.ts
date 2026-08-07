@@ -150,8 +150,13 @@ describe('INFRA-12-DEEP — LiveCapability gates ambient consent', () => {
     process.env['SFI_CONSENT_PATH'] = consentPath;
     delete process.env['SFI_LIVE_PLANE_ENABLED'];
     delete process.env['SFI_TRANSPORT'];
-    writeFileSync(consentPath, '{"orgs":[]}\n', 'utf8');
-    const granted = await grantLiveConsent('capability-test-org');
+    writeFileSync(consentPath, '{"version":2,"orgs":{}}\n', 'utf8');
+    const granted = await grantLiveConsent('capability-test-org', {
+      orgId: '00DCAPTEST000001AAA',
+      principalUsername: 'cap@example.com',
+      scopes: ['aggregate'],
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    });
     expect(granted.ok).toBe(true);
   });
 
@@ -167,7 +172,7 @@ describe('INFRA-12-DEEP — LiveCapability gates ambient consent', () => {
 
   it('refuse ambient standing consent when capability is missing (never tool)', async () => {
     const decision = await resolveLiveAccess('capability-test-org');
-    expect(decision).toEqual({ allowed: false, source: 'none' });
+    expect(decision).toMatchObject({ allowed: false, source: 'none' });
   });
 
   it('honors standing consent when capability is present (opt-in / primary)', async () => {
@@ -178,7 +183,8 @@ describe('INFRA-12-DEEP — LiveCapability gates ambient consent', () => {
       undefined,
       cap,
     );
-    expect(decision).toEqual({ allowed: true, source: 'consent' });
+    expect(decision).toMatchObject({ allowed: true, source: 'consent' });
+    expect(decision.grant?.orgId).toBe('00DCAPTEST000001AAA');
   });
 
   it('probeLiveAccess inherits Context.liveCapability (composed never stays closed)', async () => {

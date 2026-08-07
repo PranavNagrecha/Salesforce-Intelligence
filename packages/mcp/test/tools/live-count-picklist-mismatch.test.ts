@@ -18,6 +18,7 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 import type { Context } from '../../src/server.js';
 import {
   liveCountHandler,
@@ -96,11 +97,13 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   resetLiveSession();
   consentDir = mkdtempSync(join(tmpdir(), 'sfi-pmm-consent-'));
   process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
   delete process.env.SFI_LIVE_PLANE_ENABLED;
+  // AUDIT-F3: liveEnabled is not consent — seed a full-scope test grant.
+  await grantTestLiveAccess('test-org');
 });
 
 afterEach(() => {

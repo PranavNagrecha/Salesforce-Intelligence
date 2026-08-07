@@ -19,15 +19,20 @@
 import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
 
 /**
- * Auth bundle returned on successful delegation. The three fields are
- * what the `ToolingApiClient` constructor consumes — the URL prefix
- * builder, the `Authorization: Bearer {accessToken}` header builder,
- * and the per-org `/services/data/vXX.0/tooling/` versioning anchor.
+ * Auth bundle returned on successful delegation. The accessToken /
+ * instanceUrl / apiVersion fields are what the `ToolingApiClient`
+ * constructor consumes. `orgId` + `username` are identity fields used by
+ * live-plane consent binding (AUDIT-F3) — they are never required by the
+ * HTTP client itself.
  */
 export interface ToolingApiAuth {
   readonly accessToken: string;
   readonly instanceUrl: string;
   readonly apiVersion: string;
+  /** Salesforce Org Id (`00D…`) from `sf org display`, when present. */
+  readonly orgId: string | null;
+  /** Authenticated Salesforce username from `sf org display`, when present. */
+  readonly username: string | null;
 }
 
 /**
@@ -110,6 +115,8 @@ interface SfOrgDisplayJson {
     readonly accessToken?: unknown;
     readonly instanceUrl?: unknown;
     readonly apiVersion?: unknown;
+    readonly id?: unknown;
+    readonly username?: unknown;
   };
   readonly message?: string;
 }
@@ -202,7 +209,7 @@ export const getAuthFromSfCli = async (
     });
   }
 
-  const { accessToken, instanceUrl, apiVersion } = parsed.result;
+  const { accessToken, instanceUrl, apiVersion, id, username } = parsed.result;
   if (typeof accessToken !== 'string' || accessToken.length === 0) {
     return err({
       kind: 'parse-error',
@@ -230,5 +237,7 @@ export const getAuthFromSfCli = async (
     accessToken,
     instanceUrl: instanceUrl.replace(/\/+$/, ''),
     apiVersion: resolvedApiVersion,
+    orgId: typeof id === 'string' && id.length > 0 ? id : null,
+    username: typeof username === 'string' && username.length > 0 ? username : null,
   });
 };

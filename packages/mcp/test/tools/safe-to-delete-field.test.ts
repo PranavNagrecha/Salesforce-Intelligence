@@ -1199,8 +1199,24 @@ describe('safeToDeleteFieldInputSchema', () => {
 // always `safe` — the fixture the live cross-check is designed to run against.
 // =============================================================================
 describe('safeToDeleteFieldHandler — live population cross-check (CR-CAP-L5)', () => {
-  beforeEach(() => resetLiveSession());
-  afterEach(() => resetLiveSession());
+  let consentDir: string;
+  beforeEach(async () => {
+    resetLiveSession();
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { grantTestLiveAccess } = await import('../helpers/live-test-grant.js');
+    consentDir = mkdtempSync(join(tmpdir(), 'sfi-stdf-consent-'));
+    process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
+    delete process.env.SFI_LIVE_PLANE_ENABLED;
+    await grantTestLiveAccess('me@example.com');
+  });
+  afterEach(async () => {
+    resetLiveSession();
+    delete process.env.SFI_CONSENT_PATH;
+    const { rmSync } = await import('node:fs');
+    rmSync(consentDir, { recursive: true, force: true });
+  });
 
   /** 100 total records; `populatedCount` controls how many are non-null. */
   const makePopulationExec = (populatedCount: number): ExecCommand =>
@@ -1249,6 +1265,8 @@ describe('safeToDeleteFieldHandler — live population cross-check (CR-CAP-L5)',
   });
 
   it('live unavailable (no consent, no liveEnabled) → static verdict stands with a disclosure', async () => {
+    const { revokeLiveConsent } = await import('../../src/live-consent.js');
+    await revokeLiveConsent('me@example.com');
     const throwExec: ExecCommand = (async () => {
       throw new Error('sf must NOT be spawned — live plane is not enabled');
     }) as ExecCommand;
