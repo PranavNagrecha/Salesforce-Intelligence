@@ -39,7 +39,8 @@ hard boundaries: **no writes to Salesforce**, **runtime / dynamic analysis
 is invisible** (dynamic SOQL, reflective Apex). **Record-level data** is
 available only via the **opt-in, per-org live plane** (`sfi.live_*`): enable
 it once with `sfi.live_consent { grant: true }` (read-only, persists across
-sessions), or `SFI_LIVE_PLANE_ENABLED=1`, or `liveEnabled: true` — never silent
+sessions), or `SFI_LIVE_PLANE_ENABLED=1` — per-call `liveEnabled` is intent
+only, not consent — never silent
 fallback from stale vault data.
 
 **Orient first: load the org card.** On the first org-touching turn of a
@@ -50,12 +51,30 @@ automation density, permissions posture, integration surface, naming
 conventions, and the how-to-ask rules. It replaces the old
 `get_manifest` + `list_components` warm-up. When it returns
 `available: false` (a vault refreshed by an older version), follow its
-`remedy` (suggest `/sfi-refresh`) and fall back to `sfi.get_manifest`.
+`remedy` (suggest `/sfi-refresh`) and fall back via the gateway:
+`sfi.run_analysis { "name": "sfi.get_manifest", "args": {} }`.
 
 If you ever need the map of what the product can answer, call
 `sfi.capabilities` (no arguments) — it returns the categorized
 capability list, example questions, the conversational pattern, and the
 slash commands.
+
+## Tool profile (core by default)
+
+The MCP server defaults to **`SFI_TOOL_PROFILE=core`**: only **18** tools are
+advertised and directly invokable (`sfi.resolve`, `sfi.health_check`,
+`sfi.route_question`, `sfi.run_analysis`, `sfi.org_card`, … — see
+`sfi.capabilities`). Every other analysis still exists; it is reached through
+the catalog gateway:
+
+1. `sfi.list_analyses` — browse names (optional)
+2. `sfi.describe_analysis` — confirm args (optional)
+3. **`sfi.run_analysis`** — `{ "name": "sfi.<tool>", "args": { … } }`
+
+`sfi.route_question` already wraps non-core steps in `invoke[]` as
+`sfi.run_analysis` calls — prefer following that envelope. Do **not** call
+non-core tools directly; the server refuses them under core. Opt into the full
+advertised roster only when the operator sets `SFI_TOOL_PROFILE=full`.
 
 ## Start here: route the question
 
@@ -73,13 +92,16 @@ makes the route authoritative for no-LLM hosts.) Then orchestrate:
 2. **Resolve** — if `needsResolve`, run `sfi.resolve` and act on its disposition
    (Step 2). Never guess a canonical ID.
 3. **Consent** — if `liveRequired` and the live plane is off, do NOT infer from
-   the vault. Offer to enable it once: `sfi.live_consent { grant: true }`
+   the vault. Offer to enable it once via the gateway:
+   `sfi.run_analysis { "name": "sfi.live_consent", "args": { "grant": true } }`
    (read-only, persists per org). Proceed live only after consent /
-   `SFI_LIVE_PLANE_ENABLED=1` / `liveEnabled: true`.
-4. **Execute** — pick the tool(s) from the `toolCandidates` (or follow the route
-   hint when it agrees) and call them. When neither the candidates nor the route
-   place the question (`plane: 'unknown'` or a `gap`), say the capability isn't
-   built yet — the question is logged — and offer the closest thing. Never fabricate.
+   `SFI_LIVE_PLANE_ENABLED=1`.
+4. **Execute** — pick the tool(s) from the `toolCandidates` (or follow
+   `route_question.invoke`). Core tools: call directly. Non-core: call
+   `sfi.run_analysis` with `{ "name", "args" }`. When neither the candidates nor
+   the route place the question (`plane: 'unknown'` or a `gap`), say the
+   capability isn't built yet — the question is logged — and offer the closest
+   thing. Never fabricate.
 5. **Render** — when a tool result carries a **`rendered`** field (live answers,
    `resolve`, `org_overview`, `route_question`), use it as the prose/table
    answer and keep the provenance + freshness stamp it carries.
@@ -243,7 +265,7 @@ answer — don't dump raw lines.
 
 ### Step 7 — naming-convention report
 
-For convention questions, call `sfi.get_naming_convention_report` with a
+For convention questions, call `sfi.run_analysis` with `{ "name": "sfi.get_naming_convention_report", "args": { … } }` with a
 scope. Pass results through with their confidence and evidence (see the
 `recognizing-naming-conventions` skill).
 
@@ -290,7 +312,7 @@ provenance (`offline_snapshot` / `live_org` / `hybrid`) and freshness stamp.
 | "`search_components` returned nothing, so the answer is no." | Try `sfi.resolve` (typo/synonym tolerant) and `search_apex_source`/`search_flow_metadata`. Only after all routes are dry do you say "not found in vault". |
 | "I'll just answer from general Salesforce knowledge." | The vault has org-specific names. Cite vaulted IDs. General knowledge can't tell you whether THIS org has a `Custom_Stage__c`. |
 | "The user wants live data; I'll write a SOQL example as if it runs." | Use `sfi.live_*` when enabled; otherwise state the boundary and give `sf data query`. Never imply the vault proved runtime facts. |
-| "Coverage is probably fine; I'll say safe to delete." | Call `sfi.coverage_report` first. Partial coverage → never unqualified `safe`. |
+| "Coverage is probably fine; I'll say safe to delete." | Call `sfi.run_analysis` with `{ "name": "sfi.coverage_report", "args": { … } }` first. Partial coverage → never unqualified `safe`. |
 | "I'll combine this with web search for richer answers." | Don't. The org is private. Stay in the vault. |
 | "Apex/Flow analysis isn't supported." | It is. Use `sfi.call_graph`, `sfi.explain_flow`, `sfi.method_reachability`, etc. Only **runtime/dynamic** behavior is out of scope. |
 | "The manifest is two weeks old; probably fine." | If `health_check` flags it stale, tell the user to `/sfi-refresh`. |

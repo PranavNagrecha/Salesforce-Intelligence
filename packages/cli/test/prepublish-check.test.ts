@@ -23,6 +23,7 @@ describe('prepublishOnly hook', () => {
     expect(text).toContain('release-guard.mjs');
     expect(text).toContain('check-version-consistency.mjs');
     expect(text).toContain('check-cli-bundle.mjs');
+    expect(text).toContain('check-pack-allowlist.mjs');
   });
 });
 

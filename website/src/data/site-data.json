@@ -1,18 +1,20 @@
 {
-  "generatedAt": "2026-07-29T16:16:50.387Z",
-  "version": "0.2.5",
+  "generatedAt": "2026-08-07T19:27:34.625Z",
+  "version": "0.3.0",
   "toolCount": 209,
   "skillCount": 26,
   "agentCount": 2,
   "commandCount": 5,
-  "componentTypeCount": 102,
+  "componentTypeCount": 101,
   "edgeTypeCount": 23,
+  "conceptCount": 142,
+  "conceptRuleCount": 193,
   "tests": {
     "packages": [
       {
         "name": "mcp",
-        "files": 271,
-        "cases": 5458
+        "files": 276,
+        "cases": 5508
       },
       {
         "name": "extractors",
@@ -46,8 +48,8 @@
       },
       {
         "name": "vault",
-        "files": 8,
-        "cases": 92
+        "files": 9,
+        "cases": 100
       },
       {
         "name": "tooling-api",
@@ -56,16 +58,16 @@
       },
       {
         "name": "core",
-        "files": 2,
-        "cases": 40
+        "files": 3,
+        "cases": 50
       }
     ],
-    "totalCases": 8047,
-    "totalFiles": 459,
+    "totalCases": 8115,
+    "totalFiles": 466,
     "packageCount": 10,
-    "approx": 8000
+    "approx": 8100
   },
-  "integrationSuiteCount": 3,
+  "integrationSuiteCount": 7,
   "gates": [
     "Type-check",
     "Lint",
@@ -88,8 +90,8 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 271,
-      "cases": 5458,
+      "files": 276,
+      "cases": 5508,
       "description": "The 209 read-only tools + router + grounding layer"
     },
     {
@@ -130,8 +132,8 @@
     },
     {
       "name": "vault",
-      "files": 8,
-      "cases": 92,
+      "files": 9,
+      "cases": 100,
       "description": "Vault layout, manifest, freshness"
     },
     {
@@ -142,8 +144,8 @@
     },
     {
       "name": "core",
-      "files": 2,
-      "cases": 40,
+      "files": 3,
+      "cases": 50,
       "description": "core package tests"
     }
   ]

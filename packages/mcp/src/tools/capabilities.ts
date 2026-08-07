@@ -34,6 +34,10 @@ import {
   routeGapsNudge,
   type RouteGapsNudge,
 } from '../intent-router.js';
+import {
+  buildProductManifestSummary,
+  type ProductManifestSummary,
+} from '../product-manifest-summary.js';
 import type { Context } from '../server.js';
 
 /**
@@ -160,6 +164,12 @@ export interface CapabilitiesOutput {
    * Category/count only — never includes question text.
    */
   readonly routeGaps: RouteGapsNudge;
+  /**
+   * Registry-derived product facts (tool / graph / concept-model counts +
+   * catalog hash). Same source as `eval/product-manifest.json` — never
+   * handwritten documentation numbers.
+   */
+  readonly productManifest: ProductManifestSummary;
 }
 
 /** The npm-update sub-report of {@link CapabilitiesOutput}. */
@@ -620,7 +630,7 @@ const INTELLIGENCE_PLANES: readonly IntelligencePlane[] = [
       'SOQL counts, samples, describe, and limits against the authenticated org. Fail-closed when disabled — no fallback to stale vault claims.',
     default: false,
     enablement:
-      'Opt-in per org: grant one-time consent with sfi.live_consent { grant: true } (persists across sessions; strictly read-only), or set SFI_LIVE_PLANE_ENABLED=1, or pass liveEnabled: true on a single sfi.live_* call.',
+      'Opt-in per org: grant with sfi.live_consent { grant: true } (in the core profile; binds OrgId+principal; scopes+expiry; persists). Step up sample, users, or audit scopes as needed. Or set SFI_LIVE_PLANE_ENABLED=1. Per-call liveEnabled is intent-only — not a consent path. Non-core live_* tools run via sfi.run_analysis under the default core profile.',
     tools: [
       'sfi.live_count',
       'sfi.live_sample',
@@ -691,13 +701,13 @@ const COMMANDS: readonly CommandInfo[] = [
  */
 const ROUTING_GUIDANCE: ConversationalGuidance = {
   startHere:
-    'On a vague or broad question, call sfi.route_question first — it returns the plane (vault | live | hybrid | unknown) and the tools to run. Default to the offline vault. Use sfi.live_* only for record counts, samples, population, describe, org limits, or inactive users — and only when the org has live consent (sfi.live_consent), SFI_LIVE_PLANE_ENABLED=1, or liveEnabled: true. Before destructive verdicts, call sfi.coverage_report.',
+    'Default SFI_TOOL_PROFILE=core advertises the core spine (resolve/search/graph reads/routing/capabilities/list+describe+run_analysis/live_consent). On a vague or broad question, call sfi.route_question first — it returns toolCandidates plus a plane/route hint. Default to the offline vault. For any non-core tool (including sfi.interpret and sfi.live_*), call sfi.run_analysis { name, args }. Live data requires sfi.live_consent { grant: true } or SFI_LIVE_PLANE_ENABLED=1 — not per-call liveEnabled. Before destructive verdicts, call sfi.coverage_report via run_analysis.',
   onAmbiguous:
-    'On ambiguous resolution, clarify the component first. If the user wants live data and live is disabled, say so and offer to enable it once with sfi.live_consent { grant: true } (read-only) — do not guess from the vault.',
+    'On ambiguous resolution, clarify the component first. If the user wants live data and live is disabled, say so and offer to grant with sfi.live_consent { grant: true } (in core; OrgId-bound, read-only) — do not guess from the vault.',
   onNone:
-    'On none, offer /sfi-refresh for metadata gaps. For live-record questions when offline, name sfi.live_count or sfi.live_sample and the consent requirement — never invent counts. When route_question returns toolCandidates (no rule placed the question, or it matched only weakly), follow its `guidance`: those candidates are an advisory shortlist — pick the right tool(s) from them, resolve any named component, run them, then synthesize. Do NOT say the capability is unbuilt when candidates are offered. Only a true unknown with NO candidates means the capability is not built yet (the gap is logged).',
+    'On none, offer /sfi-refresh for metadata gaps. For live-record questions when offline, name sfi.live_count or sfi.live_sample (via run_analysis) and the consent requirement — never invent counts. When route_question returns toolCandidates (no rule placed the question, or it matched only weakly), follow its `guidance`: those candidates are an advisory shortlist — pick the right tool(s) from them, resolve any named component, invoke non-core tools via run_analysis, then synthesize. Do NOT say the capability is unbuilt when candidates are offered. Only a true unknown with NO candidates means the capability is not built yet (the gap is logged).',
   groundAnswer:
-    'Run the routed tools, then synthesize ONE answer from their output via sfi.synthesize_answer { question, draft }. It returns hallucinatedIds — any canonical id you wrote that no tool returned. Strip those before answering; cite only ids the tools produced, with their provenance.',
+    'Run the routed tools (core directly; everything else via sfi.run_analysis), then synthesize ONE answer from their output via sfi.synthesize_answer { question, draft }. It returns hallucinatedIds — any canonical id you wrote that no tool returned. Strip those before answering; cite only ids the tools produced, with their provenance.',
 };
 
 const BOUNDARIES: readonly string[] = [
@@ -739,6 +749,7 @@ export const capabilitiesHandler = async (
   // resolves at call-time, when both modules are fully initialized.
   const { V01_TOOLS } = await import('./index.js');
   const routeGaps = await routeGapsNudge(opts?.gapLogFile ?? gapLogPath());
+  const productManifest = buildProductManifestSummary();
 
   return ok({
     data: {
@@ -746,9 +757,10 @@ export const capabilitiesHandler = async (
       tagline:
         'Offline, MCP-first knowledge base for one Salesforce org — ask questions in plain language, get answers grounded in the org’s real metadata.',
       // ADVERTISED count: the distinct tools a host sees via tools/list — the
-      // 4 hidden back-compat aliases are excluded (matches website/recalibrate.mjs
+      // hidden back-compat aliases are excluded (matches website/recalibrate.mjs
       // and the roster convention). Profile-independent headline (always the full
-      // advertised set, not the core-narrowed 18).
+      // advertised set, not the core-narrowed 18). Registered total + concept
+      // model size live on `productManifest` so hosts never confuse the two.
       toolCount: V01_TOOLS.filter((t) => !t.hidden).length,
       commandCount: COMMANDS.length,
       intelligencePlanes: INTELLIGENCE_PLANES,
@@ -762,6 +774,7 @@ export const capabilitiesHandler = async (
       update: toUpdateAvailability(update),
       trustGlossary: TRUST_GLOSSARY,
       routeGaps,
+      productManifest,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

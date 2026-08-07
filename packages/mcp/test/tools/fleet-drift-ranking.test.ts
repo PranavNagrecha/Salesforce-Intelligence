@@ -13,6 +13,7 @@ import type { Context } from '../../src/server.js';
 import { fleetDriftRankingHandler } from '../../src/tools/fleet-drift-ranking.js';
 import { STALE_CHECK_TYPES } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 // Synthetic-only fixtures (no real org names): two registered vaults whose
 // `sourceOrg` differs in live drift; a mocked `sf` CLI returns the drift count.
@@ -108,41 +109,65 @@ describe('fleetDriftRankingHandler', () => {
     expect(d.trust.provenance).toBe('offline_snapshot');
   });
 
+  const withFleetConsent = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-fleet-consent-'));
+    const prev = process.env.SFI_CONSENT_PATH;
+    process.env.SFI_CONSENT_PATH = join(dir, 'c.json');
+    await grantTestLiveAccess('acme-prod');
+    await grantTestLiveAccess('acme-sandbox');
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env.SFI_CONSENT_PATH;
+      else process.env.SFI_CONSENT_PATH = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
   it('with liveEnabled, ranks vaults by drift descending and recommends the most-behind', async () => {
-    const r = await fleetDriftRankingHandler(ctx, { liveEnabled: true }, mockExec);
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    const d = r.value.data;
-    expect(d.ranking.map((x) => x.alias)).toEqual(['acme-prod', 'acme-sandbox']);
-    expect(d.ranking[0]?.driftCount).toBe(5 * STALE_CHECK_TYPES.length); // 5 per checked type
-    expect(d.ranking[0]?.vaultStale).toBe(true);
-    expect(d.ranking[0]?.provenance).toBe('live_org');
-    expect(d.ranking[1]?.driftCount).toBe(0);
-    expect(d.mostDrifted).toEqual({ alias: 'acme-prod', driftCount: 5 * STALE_CHECK_TYPES.length });
-    expect(d.recommendation).toMatch(/acme-prod/);
-    expect(d.trust.provenance).toBe('live_org');
+    await withFleetConsent(async () => {
+      const r = await fleetDriftRankingHandler(ctx, { liveEnabled: true }, mockExec);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.ranking.map((x) => x.alias)).toEqual(['acme-prod', 'acme-sandbox']);
+      expect(d.ranking[0]?.driftCount).toBe(5 * STALE_CHECK_TYPES.length); // 5 per checked type
+      expect(d.ranking[0]?.vaultStale).toBe(true);
+      expect(d.ranking[0]?.provenance).toBe('live_org');
+      expect(d.ranking[1]?.driftCount).toBe(0);
+      expect(d.mostDrifted).toEqual({ alias: 'acme-prod', driftCount: 5 * STALE_CHECK_TYPES.length });
+      expect(d.recommendation).toMatch(/acme-prod/);
+      expect(d.trust.provenance).toBe('live_org');
+    });
   });
 
   it('degrades to a budget-exhausted skip instead of overrunning the API budget', async () => {
-    process.env[ENV_BUDGET] = String(STALE_CHECK_TYPES.length); // enough for exactly ONE vault (one query per checked type)
-    resetLiveSession();
-    const r = await fleetDriftRankingHandler(ctx, { liveEnabled: true }, mockExec);
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    const d = r.value.data;
-    expect(d.ranking.length).toBe(1);
-    expect(d.skipped.some((s) => s.reason === 'budget-exhausted')).toBe(true);
-    expect(d.trust.completeness.status).toBe('partial');
+    await withFleetConsent(async () => {
+      process.env[ENV_BUDGET] = String(STALE_CHECK_TYPES.length); // enough for exactly ONE vault
+      resetLiveSession();
+      const r = await fleetDriftRankingHandler(ctx, { liveEnabled: true }, mockExec);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.ranking.length).toBe(1);
+      expect(d.skipped.some((s) => s.reason === 'budget-exhausted')).toBe(true);
+      expect(d.trust.completeness.status).toBe('partial');
+    });
   });
 
   it('the `vaults` subset narrows the sweep', async () => {
-    const r = await fleetDriftRankingHandler(
-      ctx,
-      { liveEnabled: true, vaults: ['acme-sandbox'] },
-      mockExec,
-    );
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.ranking.map((x) => x.alias)).toEqual(['acme-sandbox']);
+    await withFleetConsent(async () => {
+      const r = await fleetDriftRankingHandler(
+        ctx,
+        { liveEnabled: true, vaults: ['acme-sandbox'] },
+        mockExec,
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.ranking.map((x) => x.alias)).toEqual(['acme-sandbox']);
+    });
   });
 });

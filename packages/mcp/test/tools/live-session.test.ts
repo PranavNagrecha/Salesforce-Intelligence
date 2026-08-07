@@ -243,19 +243,33 @@ describe('sfi.live_budget (disclosure surface)', () => {
   });
 
   it('cross-checks org API headroom when the live plane is enabled', async () => {
-    const exec: ExecCommand = async () => ({
-      stdout: JSON.stringify({
-        result: [
-          { name: 'DailyApiRequests', max: 15000, remaining: 14990 },
-          { name: 'DataStorageMB', max: 1024, remaining: 900 },
-        ],
-      }),
-      stderr: '',
-    });
-    const r = await liveBudgetHandler(ctx, { liveEnabled: true }, exec);
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.orgApiHeadroom?.dailyApiRequestsRemaining).toBe(14990);
-    expect(r.value.data.interpretation).toContain('14990');
+    const { grantTestLiveAccess } = await import('../helpers/live-test-grant.js');
+    const prevConsent = process.env.SFI_CONSENT_PATH;
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-budget-consent-'));
+    process.env.SFI_CONSENT_PATH = join(dir, 'live-consent.json');
+    await grantTestLiveAccess(ctx.manifest.sourceOrg);
+    try {
+      const exec: ExecCommand = async () => ({
+        stdout: JSON.stringify({
+          result: [
+            { name: 'DailyApiRequests', max: 15000, remaining: 14990 },
+            { name: 'DataStorageMB', max: 1024, remaining: 900 },
+          ],
+        }),
+        stderr: '',
+      });
+      const r = await liveBudgetHandler(ctx, {}, exec);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.orgApiHeadroom?.dailyApiRequestsRemaining).toBe(14990);
+      expect(r.value.data.interpretation).toContain('14990');
+    } finally {
+      if (prevConsent === undefined) delete process.env.SFI_CONSENT_PATH;
+      else process.env.SFI_CONSENT_PATH = prevConsent;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

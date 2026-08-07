@@ -91,6 +91,9 @@ docs/plans/CLAUDE-CODE-MASTER-PROMPT.md
 # ~14 days; periodic capture is required. Aggregate counts only — never commit.
 .sfi-local/adoption/
 
+# Local agent / release-manager scratch under the product tree (never commit).
+.sfi/
+
 # transient agent worktrees + local embedding model cache (never commit)
 .claude/worktrees/
 **/.sfi-embed-cache/
@@ -104,6 +107,9 @@ packages/mcp/data/static-embedding-table.bin
 packages/mcp/data/static-embedding-meta.json
 packages/mcp/data/static-embedding-index.json
 org-kb
+
+# CycloneDX SBOM — generated at publish / `pnpm sbom`; release asset only.
+/sbom.cdx.json
 
 # Agent/debug scratch scripts dropped into a package root. Twice now these were
 # swept in by `git add -A` — once shipping an absolute home path that the release

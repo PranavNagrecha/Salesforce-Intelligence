@@ -6,5 +6,9 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     globals: true,
     pool: 'threads',
+    // Auth tests stub `sf org display`; allow the spawn under policy.
+    env: {
+      SFI_NETWORK_MODE: 'salesforce-read',
+    },
   },
 });

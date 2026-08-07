@@ -1,6 +1,8 @@
-# sf-intelligence 0.2.5 — release notes (PREPARED, NOT SHIPPED)
+# sf-intelligence 0.2.5 — release notes (SHIPPED)
 
-**Status: staged locally. Nothing pushed, nothing published, no tag cut.** Awaiting owner approval.
+**Status: SHIPPED.** Published to npm as `sf-intelligence@0.2.5` and listed on the
+MCP Registry. Superseded by 0.3.0 — see [`CHANGELOG.md`](./CHANGELOG.md) for the
+current release, including the 0.3.0 breaking changes.
 
 ---
 

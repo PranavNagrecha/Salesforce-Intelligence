@@ -19,8 +19,11 @@ import {
 } from '@sf-intelligence/graph';
 import {
   buildCoverageEntries,
+  buildMixedFreshness,
   rankUncoveredFamilies,
+  readTombstones,
   summarizeCoverage,
+  type TombstoneRecord,
   type UncoveredFamily,
 } from '@sf-intelligence/vault';
 import { z } from 'zod';
@@ -78,6 +81,11 @@ export interface CoverageReportOutput {
    * offline counts snapshot exists.
    */
   readonly assignmentData: AssignmentDataCoverage;
+  /**
+   * AUDIT-F5 — recent reconciled-absent tombstones (confirmed source deletions).
+   * Empty when none recorded; never invents deletions from a refused reconcile.
+   */
+  readonly tombstones: readonly TombstoneRecord[];
   readonly trust: TrustSummary;
   readonly disclosure: string;
 }
@@ -197,6 +205,14 @@ export const coverageReportHandler = async (
     TOP_UNCOVERED_FAMILIES_CAP,
   );
   const assignmentData = await buildAssignmentDataCoverage(ctx);
+  const involvedTypes =
+    input.type === undefined ? undefined : ([input.type] as readonly string[]);
+  const freshness = buildMixedFreshness(ctx.manifest, involvedTypes);
+  const tombstones = await readTombstones(ctx.vaultRoot, 50);
+  const mixedNote =
+    freshness.overall === 'mixed'
+      ? `Mixed family freshness: oldest evidence at ${freshness.oldestEvidenceAt ?? 'unknown'} — a scoped refresh left some families older than the vault-wide refreshedAt.`
+      : null;
 
   return ok({
     data: {
@@ -209,15 +225,19 @@ export const coverageReportHandler = async (
       summary,
       topUncoveredFamilies,
       assignmentData,
+      tombstones,
       trust: {
         provenance: 'offline_snapshot',
         confidence: summary.coverageKnown ? 'declared' : 'unknown',
-        freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+        freshness,
         completeness: {
           status: summary.status,
           ...(missingCoverage.length > 0 ? { missingCoverage } : {}),
         },
-        limitations: [COVERAGE_DISCLOSURE],
+        limitations: [
+          COVERAGE_DISCLOSURE,
+          ...(mixedNote !== null ? [mixedNote] : []),
+        ],
       },
       disclosure: COVERAGE_DISCLOSURE,
     },

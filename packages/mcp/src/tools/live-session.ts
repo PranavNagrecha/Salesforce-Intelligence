@@ -42,7 +42,7 @@
  */
 
 import type { McpError, McpResponse } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, withNetworkMode, type Result } from '@sf-intelligence/core';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { z } from 'zod';
 
@@ -191,26 +191,30 @@ export const runLiveQuery = async (
   budgetUsed += 1;
 
   const work = (async (): Promise<Result<LiveQueryOk, McpError>> => {
-    const queriedAt = new Date().toISOString();
-    const parsed = exec === undefined
-      ? await runSfJson(org, args)
-      : await runSfJson(org, args, exec);
-    if (!parsed.ok) {
-      // CR-P3 refund: a FAILED call is not cached, so refund the budget unit —
-      // a flapping alias must not drain the whole per-session budget.
-      budgetUsed -= 1;
-      return parsed;
-    }
+    // AUDIT-F2: an authorized live call temporarily elevates to salesforce-read
+    // (MCP default networkMode is `off`). Consent/capability already gated above.
+    return withNetworkMode('salesforce-read', async () => {
+      const queriedAt = new Date().toISOString();
+      const parsed = exec === undefined
+        ? await runSfJson(org, args)
+        : await runSfJson(org, args, exec);
+      if (!parsed.ok) {
+        // CR-P3 refund: a FAILED call is not cached, so refund the budget unit —
+        // a flapping alias must not drain the whole per-session budget.
+        budgetUsed -= 1;
+        return parsed;
+      }
 
-    const ttl = cacheTtlMs();
-    if (ttl > 0) {
-      cache.set(key, { value: parsed.value, queriedAt, expiresAt: now + ttl });
-    }
-    return ok({
-      value: parsed.value,
-      cached: false,
-      queriedAt,
-      remainingBudget: liveBudgetStatus().remaining,
+      const ttl = cacheTtlMs();
+      if (ttl > 0) {
+        cache.set(key, { value: parsed.value, queriedAt, expiresAt: now + ttl });
+      }
+      return ok({
+        value: parsed.value,
+        cached: false,
+        queriedAt,
+        remainingBudget: liveBudgetStatus().remaining,
+      });
     });
   })();
 
@@ -282,31 +286,34 @@ export const runLiveRest = async (
   budgetUsed += 1;
 
   const work = (async (): Promise<Result<LiveRestOk, McpError>> => {
-    const queriedAt = new Date().toISOString();
-    const authResult = exec === undefined
-      ? await getLiveAuth(org)
-      : await getLiveAuth(org, exec);
-    if (!authResult.ok) {
-      // CR-P3 refund: auth failure is not cached — refund the budget unit.
-      budgetUsed -= 1;
-      return authResult;
-    }
-    const body = await restGet(authResult.value, apiPath(authResult.value, suffix));
-    if (!body.ok) {
-      // CR-P3 refund: a failed REST read is not cached — refund the budget unit.
-      budgetUsed -= 1;
-      return body;
-    }
+    // AUDIT-F2: authorized live REST elevates to salesforce-read for the call.
+    return withNetworkMode('salesforce-read', async () => {
+      const queriedAt = new Date().toISOString();
+      const authResult = exec === undefined
+        ? await getLiveAuth(org)
+        : await getLiveAuth(org, exec);
+      if (!authResult.ok) {
+        // CR-P3 refund: auth failure is not cached — refund the budget unit.
+        budgetUsed -= 1;
+        return authResult;
+      }
+      const body = await restGet(authResult.value, apiPath(authResult.value, suffix));
+      if (!body.ok) {
+        // CR-P3 refund: a failed REST read is not cached — refund the budget unit.
+        budgetUsed -= 1;
+        return body;
+      }
 
-    const ttl = cacheTtlMs();
-    if (ttl > 0) {
-      cache.set(key, { value: body.value, queriedAt, expiresAt: now + ttl });
-    }
-    return ok({
-      value: body.value,
-      cached: false,
-      queriedAt,
-      remainingBudget: liveBudgetStatus().remaining,
+      const ttl = cacheTtlMs();
+      if (ttl > 0) {
+        cache.set(key, { value: body.value, queriedAt, expiresAt: now + ttl });
+      }
+      return ok({
+        value: body.value,
+        cached: false,
+        queriedAt,
+        remainingBudget: liveBudgetStatus().remaining,
+      });
     });
   })();
 
@@ -393,21 +400,37 @@ export const liveBudgetHandler = async (
   // cycle. Pull it lazily here (the only consumer of it in live-session) so the
   // static dependency graph stays acyclic.
   const { resolveLiveAccess } = await import('./live-plane.js');
-  const access = await resolveLiveAccess(org, input.liveEnabled, ctx.liveCapability);
+  const { requiredScopesForTool } = await import('../live-consent.js');
+  const access = await resolveLiveAccess(
+    org,
+    input.liveEnabled,
+    ctx.liveCapability,
+    requiredScopesForTool(ctx.liveToolName ?? 'sfi.live_budget'),
+  );
   if (access.allowed) {
     // `sf org limits list` goes through the CLI (runSfJson), not the REST/fetch
     // path, so it is mockable and does NOT decrement the live-query budget — a
-    // budget check must never consume budget.
-    const limits = exec === undefined
-      ? await runSfJson(org, ['org', 'limits', 'list'])
-      : await runSfJson(org, ['org', 'limits', 'list'], exec);
-    if (limits.ok) {
-      const rows = (limits.value as {
-        result?: readonly { name?: string; max?: number; remaining?: number }[];
-      }).result;
-      const daily = rows?.find((row) => row.name === 'DailyApiRequests');
-      if (daily?.remaining !== undefined && daily.max !== undefined) {
-        orgApiHeadroom = {
+    // budget check must never consume budget. Elevate network mode the same way
+    // runLiveQuery does (AUDIT-F2); raw runSfJson is fail-closed under mode=off.
+    orgApiHeadroom = await withNetworkMode(
+      'salesforce-read',
+      async (): Promise<OrgApiHeadroom | null> => {
+        const limits =
+          exec === undefined
+            ? await runSfJson(org, ['org', 'limits', 'list'])
+            : await runSfJson(org, ['org', 'limits', 'list'], exec);
+        if (!limits.ok) return null;
+        const rows = (limits.value as {
+          result?: unknown;
+        }).result;
+        // `sf org limits list --json` returns an array; mocked execs in budget
+        // tests often return a SOQL-shaped `{ totalSize }` — ignore non-arrays.
+        if (!Array.isArray(rows)) return null;
+        const daily = (
+          rows as readonly { name?: string; max?: number; remaining?: number }[]
+        ).find((row) => row.name === 'DailyApiRequests');
+        if (daily?.remaining === undefined || daily.max === undefined) return null;
+        return {
           dailyApiRequestsRemaining: daily.remaining,
           dailyApiRequestsMax: daily.max,
           sessionBudgetFractionOfRemaining:
@@ -415,8 +438,8 @@ export const liveBudgetHandler = async (
               ? Math.round((budget.limit / daily.remaining) * 10_000) / 10_000
               : 1,
         };
-      }
-    }
+      },
+    );
   }
 
   const interpretation =

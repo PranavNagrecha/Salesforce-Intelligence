@@ -1,5 +1,7 @@
 /// <reference types="vitest/globals" />
 
+import { afterEach, beforeEach, vi } from 'vitest';
+
 import type { ToolingApiAuth } from '../src/auth.js';
 import {
   createToolingApiClient,
@@ -7,10 +9,20 @@ import {
   type FetchResponse,
 } from '../src/client.js';
 
+beforeEach(() => {
+  // AUDIT-F2: Tooling HTTP requires salesforce-read (refresh elevates in prod).
+  vi.stubEnv('SFI_NETWORK_MODE', 'salesforce-read');
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 const AUTH: ToolingApiAuth = {
   accessToken: 'TOKEN_xxx',
   instanceUrl: 'https://my-org.my.salesforce.com',
   apiVersion: '60.0',
+  orgId: '00D000000000001AAA',
+  username: 'user@example.com',
 };
 
 const makeResponse = (

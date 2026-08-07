@@ -8,7 +8,7 @@ description: |
   Apex from VF", "Aura references to this object", "who reads/writes
   this field from code", "what classes call MyClass.someMethod", "is
   it safe to rename this method", "find all Apex references to this",
-  "what Apex/LWC/VF touches this object". Calls `sfi.find_code_usages`
+  "what Apex/LWC/VF touches this object". Call `sfi.run_analysis` with `{ "name": "sfi.find_code_usages", "args": { … } }`
   (incoming readsFrom/writesTo/callsApex/references edges from
   ApexClass, ApexTrigger, LightningComponentBundle,
   AuraDefinitionBundle, VisualforcePage, or VisualforceComponent
@@ -30,7 +30,7 @@ description: |
 ## Usage & discovery (§C3 contract)
 
 For "where is X used / who references X / what depends on X" — for ANY component
-type — call `sfi.find_component_usages`, or the family specialist
+type — call `sfi.run_analysis` with `{ "name": "sfi.find_component_usages", "args": { … } }`, or the family specialist
 (`find_code_usages` for code, `find_field_anywhere` for a
 field, `layout_assignments` for a layout). Route by VERB: *describe* questions
 (what is / list / what values) use describe tools, NOT usage tools. Never
@@ -123,7 +123,7 @@ Key confidence rules to cite when reporting v1.4 results:
 When the user's question is broad ("what touches this from code?"),
 default to `sfi.find_code_usages` and surface the per-tier breakdown.
 When the user pins to a single tier ("what *LWC* components touch
-this?"), call `sfi.find_code_usages` with `nodeTypes:
+this?"), call `sfi.run_analysis` with `{ "name": "sfi.find_code_usages", "args": { … } }` with `nodeTypes:
 ['LightningComponentBundle']`. Only narrow to `nodeTypes:
 ['ApexClass','ApexTrigger']` when the user is explicit about Apex-only.
 
@@ -215,7 +215,7 @@ If the user's phrasing is unambiguous, translate directly. If it
 could match multiple components, run `sfi.search_components` first
 and confirm the top match with the user before proceeding.
 
-### Step 2 — Call `sfi.find_code_usages`
+### Step 2 — Call `sfi.run_analysis` with `{ "name": "sfi.find_code_usages", "args": { … } }`
 
 Default invocation (broad — the v1.4 tool):
 
@@ -314,7 +314,7 @@ LWC/Aura/VF field reads, `declared` for LWC apex imports and VF
 controller/extension attributes. Never blanket-label the bucket
 `heuristic`.
 
-### Step 4 — Optionally call `sfi.search_apex_source` to surface lines
+### Step 4 — Optionally call `sfi.run_analysis` with `{ "name": "sfi.search_apex_source", "args": { … } }` to surface lines
 
 The scanner gives you the *file* that referenced the target. To
 surface the actual line, follow up with `sfi.search_apex_source`
@@ -501,9 +501,9 @@ Claude's flow:
 1. **Translate** → `targetId: 'ApexClass:OpportunityService'`,
    `edgeTypes: ['callsApex']` (the question pins to call sites),
    `nodeTypes: ['ApexClass','ApexTrigger']` (pinned to Apex callers).
-2. **Call** `sfi.find_code_usages` with that input.
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.find_code_usages", "args": { … } }` with that input.
 3. **Receive** (hypothetical): two `callsApex` referrers.
-4. **Call** `sfi.search_apex_source` with `query:
+4. **Call** `sfi.run_analysis` with `{ "name": "sfi.search_apex_source", "args": { … } }` with `query:
    'OpportunityService.processOpportunity'` to surface the lines.
 5. **Respond:**
 
@@ -540,11 +540,11 @@ Claude's flow:
 1. **Translate** → `targetId: 'CustomField:Account.Industry__c'`. The
    question is code-broad ("anywhere in code"), so call the broader
    tool with default edges.
-2. **Call** `sfi.find_code_usages` with `{ targetId:
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.find_code_usages", "args": { … } }` with `{ targetId:
    'CustomField:Account.Industry__c' }`.
 3. **Receive** (hypothetical): one Apex read, one LWC read via
    `@wire(getRecord)`, one VF page binding.
-4. **Call** `sfi.search_apex_source` with `query: 'Industry__c',
+4. **Call** `sfi.run_analysis` with `{ "name": "sfi.search_apex_source", "args": { … } }` with `query: 'Industry__c',
    limit: 25` to surface the Apex lines.
 5. **Respond:**
 
@@ -593,7 +593,7 @@ Claude's flow:
 1. **Translate** → `targetId: 'CustomField:Account.Industry__c'`,
    `nodeTypes: ['LightningComponentBundle']`, `edgeTypes:
    ['readsFrom']` (the question pins both axes).
-2. **Call** `sfi.find_code_usages` with that input.
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.find_code_usages", "args": { … } }` with that input.
 3. **Receive** (hypothetical): one LWC bundle.
 4. **Respond:**
 
@@ -661,4 +661,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

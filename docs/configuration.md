@@ -11,24 +11,26 @@ For install and first run, start with [`guides/installation.md`](./guides/instal
 
 The live plane is **off by default**. Vault tools never call Salesforce.
 
-### Enablement (any one of)
+### Enablement (AUDIT-F3)
 
 | Method | Scope | How |
 | --- | --- | --- |
-| Standing consent | Per org, persists | `sfi.live_consent { grant: true, orgAlias: "my-org" }` |
-| Environment | All live tools in the MCP process | `SFI_LIVE_PLANE_ENABLED=1` or `true` |
-| Per-call flag | Single tool invocation | Pass `liveEnabled: true` in tool args |
+| Standing grant | Per org, persists | `sfi.live_consent { grant: true }` — binds OrgId + principal via read-only `sf org display`, default scope `aggregate`, 7-day expiry |
+| Step-up scopes | Same grant | Re-grant with `scopes: ["sample"]` and/or `["users"]` (merged into the existing grant) |
+| Environment | Operator override for the MCP process | `SFI_LIVE_PLANE_ENABLED=1` or `true` |
 
-Revoke standing consent: `sfi.live_consent { grant: false }`.
+**Per-call `liveEnabled: true` is not a consent substitute.** Hybrid tools may still accept it as *intent* ("please enrich if a grant exists"), but it never opens the live plane by itself.
+
+Revoke: `sfi.live_consent { revoke: true }`.
 
 ### Consent store
 
 | Variable / path | Default | Purpose |
 | --- | --- | --- |
 | `SFI_CONSENT_PATH` | *(unset)* | Override consent file path (tests) |
-| Default file | `~/.sf-intelligence/live-consent.json` | Persisted per-org consent |
+| Default file | `~/.sf-intelligence/live-consent.json` | Persisted per-org v2 grants |
 
-Consent is vault-independent so it works before `/sfi-init`.
+Consent is vault-independent so it works before `/sfi-init`. v1 records (pre-F3) are ignored — re-grant once. Live results disclose the active grant id / OrgId / principal / scopes / expiry in `trust.limitations`.
 
 ### Live tools (curated roster)
 
@@ -144,12 +146,32 @@ See [`guides/asking-questions.md`](./guides/asking-questions.md) § live data.
 
 ---
 
+## Network policy (AUDIT-F2)
+
+Outbound network is governed by one mode (`SFI_NETWORK_MODE`):
+
+| Mode | Meaning |
+| --- | --- |
+| `off` **(default)** | No outbound network from the MCP process unless a command or authorized live call temporarily elevates (see below) |
+| `updates-only` | npm registry update-check only |
+| `salesforce-read` | Salesforce retrieve + live reads |
+
+`sfi refresh` and `sfi stale-sweep` (and the watch daemon tick) temporarily
+elevate to `salesforce-read` for the command. Authorized `sfi.live_*` calls
+(and the one-shot `sf org display` used to bind/verify live consent) elevate
+for the duration of each org read. Runtime model download is always denied.
+A process that stays at `off` with no elevation performs no Salesforce or npm
+egress.
+
+The offline data plane performs no network requests. Refresh, update checking,
+model acquisition, and live reads are separately controlled network operations.
+
 ## Update checking
 
 On MCP-server startup (`sfi mcp`) the plugin can check npm for a newer
 published `sf-intelligence` and, when one exists, print a one-line
 "update available" nudge to **stderr** (stdout is reserved for MCP JSON-RPC).
-The check is **off in CI**, **opt-out** everywhere, and never blocks the
+The check is **off by default (opt-in)**, **off in CI**, and never blocks the
 server.
 
 ### Offline vault-version nudge
@@ -162,7 +184,14 @@ extractors — e.g. the CustomPermission / permission-set record-type work in
 0.1.19) is rebuilt rather than silently under-reporting. It is a pure local
 version comparison: no network, no org data.
 
-### Opt out
+### Opt in (required)
+
+| Method | How |
+| --- | --- |
+| Explicit opt-in | Set `SFI_UPDATE_CHECK=1` |
+| Network mode | Set `SFI_NETWORK_MODE=updates-only` |
+
+### Force off
 
 | Method | How |
 | --- | --- |
@@ -246,19 +275,19 @@ field.
 
 ## Tool profile (advertised roster)
 
-The full roster's 205 advertised tool schemas (209 registered; 4 back-compat
-aliases stay hidden) cost tens of thousands of context tokens in MCP clients
-that do not defer tool definitions. `SFI_TOOL_PROFILE=core` advertises only
-the 18-schema core roster (orientation, resolve/route, the universal graph
-reads, and the catalog gateway `list_analyses` / `describe_analysis` /
-`run_analysis` through which EVERY other analysis stays reachable with
-byte-identical output). The profile is fixed at server boot — clients fetch
-`tools/list` once — and dispatch is never narrowed: a non-advertised tool
-called directly still works.
+Under the default profile, 19 advertised tool schemas (209 registered; 4
+back-compat aliases stay hidden) form the core spine — including
+`sfi.live_consent`. The full non-hidden roster is 205 schemas and costs tens
+of thousands of context tokens in MCP clients that do not defer tool
+definitions. **Default is `core`** (AUDIT-F6): only that 19-schema spine is
+advertised and directly invokable. Everything else stays reachable via
+`sfi.run_analysis` with byte-identical output. Set `SFI_TOOL_PROFILE=full` to
+advertise and directly invoke the entire roster. The profile is fixed at
+server boot — clients fetch `tools/list` once.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SFI_TOOL_PROFILE` | `full` | `core` advertises the 18-schema roster; anything else (or unset) advertises everything. Zero behavior change under the default. |
+| `SFI_TOOL_PROFILE` | `core` | Default `core` advertises (and directly invokes) the 19-schema spine (incl. `sfi.live_consent`); non-core tools run via `sfi.run_analysis`. Set `full` to advertise/invoke the entire roster. Unknown values fall back to `full`. |
 
 ## Input scope & selectors
 
@@ -581,7 +610,7 @@ so a team running many orgs knows which vault to `/sfi-refresh` first. It is a
 LIVE sweep, so two safeties apply per the live-plane rules above:
 
 - **Consent is per org.** Each vault's `sourceOrg` is gated independently
-  (`sfi.live_consent`, `SFI_LIVE_PLANE_ENABLED`, or `liveEnabled: true`). A vault
+  (`sfi.live_consent` grant, or `SFI_LIVE_PLANE_ENABLED` — not `liveEnabled`). A vault
   whose org isn't consented is an honest `no-consent` *skip* — never a silent
   live call.
 - **The session budget bounds the sweep.** Every per-org staleness query

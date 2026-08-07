@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-29T16:16:50.387Z",
+  "generatedAt": "2026-08-07T19:27:34.625Z",
   "toolCount": 209,
   "sections": [
     {
@@ -27,7 +27,7 @@
         },
         {
           "name": "sfi.disambiguate_concepts",
-          "description": "v2.9 vocabulary + semantic-disambiguation tier - the 'is `Status` the same as `Stage` here?' surface."
+          "description": "Vocabulary + semantic-disambiguation tier - the 'is `Status` the same as `Stage` here?' surface."
         }
       ]
     },
@@ -76,15 +76,15 @@
         },
         {
           "name": "sfi.find_field_anywhere",
-          "description": "v2.2 universal-search surface - answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field..."
+          "description": "Universal-search surface - answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field-tool..."
         },
         {
           "name": "sfi.find_semantic_field",
-          "description": "v2.2 semantic-discovery surface - answers 'do we already have a field for X?'."
+          "description": "Semantic-discovery surface - answers 'do we already have a field for X?'."
         },
         {
           "name": "sfi.find_hardcoded_values_anywhere",
-          "description": "v2.2 cross-corpus hardcoded-value surface - extends v2.1's `sfi.find_hardcoded_values` (Apex-only) with formula expressions (CustomField.formula), ValidationRule...."
+          "description": "Cross-corpus hardcoded-value surface - extends `sfi.find_hardcoded_values` (Apex-only) with formula expressions (CustomField.formula), ValidationRule.errorConditi..."
         },
         {
           "name": "sfi.find_clone_patterns",
@@ -92,7 +92,7 @@
         },
         {
           "name": "sfi.find_dead_code",
-          "description": "v2.2 cross-cutting dead-code surface - composes v2.7 `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedu..."
+          "description": "Cross-cutting dead-code surface - composes `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedulable / tr..."
         },
         {
           "name": "sfi.find_component_usages",
@@ -129,11 +129,11 @@
         },
         {
           "name": "sfi.field_meaning",
-          "description": "v2.9 vocabulary + semantic-disambiguation tier - the 'what does this field actually mean in our org?' surface."
+          "description": "Vocabulary + semantic-disambiguation tier - the 'what does this field actually mean in our org?' surface."
         },
         {
           "name": "sfi.field_provenance",
-          "description": "v2.9 vocabulary + semantic-disambiguation tier - the 'is this field manually entered or automated?' surface."
+          "description": "Vocabulary + semantic-disambiguation tier - the 'is this field manually entered or automated?' surface."
         },
         {
           "name": "sfi.interpret",
@@ -166,7 +166,7 @@
         },
         {
           "name": "sfi.blast_radius_live",
-          "description": "P6-blast-radius-live (HYBRID ⭐): fuse the static impact graph with LIVE record magnitude - \"what breaks if I change/remove X, and how much is at stake?\"."
+          "description": "Fuse the static impact graph with LIVE record magnitude - \"what breaks if I change/remove X, and how much is at stake?\"."
         },
         {
           "name": "sfi.safe_to_delete_field",
@@ -190,35 +190,35 @@
         },
         {
           "name": "sfi.what_if_change_field_type",
-          "description": "v2.3 R2a what-if tool: given a CustomField canonical id (`CustomField:{Object}.{Field}`) and a proposed new field type, returns the structured impact across every..."
+          "description": "Given a CustomField canonical id (`CustomField:{Object}.{Field}`) and a proposed new field type, returns the structured impact across every incoming dependency edge."
         },
         {
           "name": "sfi.what_if_remove_picklist_value",
-          "description": "v2.3 R2a what-if tool: given a Picklist or MultiselectPicklist CustomField id (`CustomField:{Object}.{Field}`) and a value to remove, returns the structured impac..."
+          "description": "Given a Picklist or MultiselectPicklist CustomField id (`CustomField:{Object}.{Field}`) and a value to remove, returns the structured impact across formula source..."
         },
         {
           "name": "sfi.what_if_make_field_required",
-          "description": "v2.3 R2a what-if tool: given a CustomField id (`CustomField:{Object}.{Field}`), walks the parent object's write paths and flags incomplete writes that would fail..."
+          "description": "Given a CustomField id (`CustomField:{Object}.{Field}`), walks the parent object's write paths and flags incomplete writes that would fail at runtime once the fie..."
         },
         {
           "name": "sfi.what_if_deactivate_flow",
-          "description": "v2.3 R2b component-level what-if tool: given a Flow canonical id (`Flow:{ApiName}`), bare API name, or flow label / partial name (e.g."
+          "description": "Given a Flow canonical id (`Flow:{ApiName}`), bare API name, or flow label / partial name (e.g."
         },
         {
           "name": "sfi.what_if_disable_trigger",
-          "description": "v2.3 R2b component-level what-if tool: given an ApexTrigger canonical id (`ApexTrigger:{Name}`), enumerates the downstream impact of disabling the trigger by walk..."
+          "description": "Given an ApexTrigger canonical id (`ApexTrigger:{Name}`), enumerates the downstream impact of disabling the trigger by walking every outgoing edge."
         },
         {
           "name": "sfi.what_if_change_method_signature",
-          "description": "v2.3 R2b component-level what-if tool: given an ApexClass (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` id, interchangeable, resolv..."
+          "description": "Given an ApexClass (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` id, interchangeable, resolved + echoed as `appliedScope`), a metho..."
         },
         {
           "name": "sfi.what_if_merge_profiles",
-          "description": "v2.3 R2c profile what-if tool: given two Profile canonical ids (`Profile:{Name}`), walks both profiles' grants and visibility settings, groups them by `(settingTy..."
+          "description": "Given two Profile canonical ids (`Profile:{Name}`), walks both profiles' grants and visibility settings, groups them by `(settingType, settingId)`, and surfaces e..."
         },
         {
           "name": "sfi.what_if_split_profile",
-          "description": "v2.3 R2c profile what-if tool: given a Profile id (`Profile:{Name}`) and an ordered array of target PermissionSet ids (`PermissionSet:{Name}`), proposes a per-gra..."
+          "description": "Given a Profile id (`Profile:{Name}`) and an ordered array of target PermissionSet ids (`PermissionSet:{Name}`), proposes a per-grant assignment via a greedy keyw..."
         },
         {
           "name": "sfi.what_if_assign_permset",
@@ -234,11 +234,11 @@
         },
         {
           "name": "sfi.downstream_effects",
-          "description": "v2.7 R2 deep code tool: given an `ApexClass:`, `ApexTrigger:`, OR `CustomObject:` id, surfaces what downstream automation and side effects are reachable."
+          "description": "Given an `ApexClass:`, `ApexTrigger:`, OR `CustomObject:` id, surfaces what downstream automation and side effects are reachable."
         },
         {
           "name": "sfi.method_reachability",
-          "description": "v2.7 R2 deep code tool: given an ApexClass / ApexTrigger (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` / `ApexTrigger:` id, interch..."
+          "description": "Given an ApexClass / ApexTrigger (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` / `ApexTrigger:` id, interchangeable, resolved + ech..."
         },
         {
           "name": "sfi.tests_for_change",
@@ -287,15 +287,15 @@
         },
         {
           "name": "sfi.unassigned_permission_sets",
-          "description": "v2.4 hygiene tool: list PermissionSets unassigned to users."
+          "description": "List PermissionSets unassigned to users."
         },
         {
           "name": "sfi.crud_fls_audit",
-          "description": "v2.1 R3 CRUD/FLS enforcement audit."
+          "description": "CRUD/FLS enforcement audit."
         },
         {
           "name": "sfi.generate_sharing_summary",
-          "description": "v2.5 documentation-generation tier: composes a structured markdown sharing summary covering every CustomObject's OWD (`properties.sharingModel`), the SharingRules..."
+          "description": "Composes a structured markdown sharing summary covering every CustomObject's OWD (`properties.sharingModel`), the SharingRules that apply (matched on `properties...."
         }
       ]
     },
@@ -312,19 +312,19 @@
         },
         {
           "name": "sfi.process_builder_migration_candidates",
-          "description": "v2.4 legacy-automation tool: list active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates wi..."
+          "description": "List active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simp..."
         },
         {
           "name": "sfi.code_quality_audit",
-          "description": "v2.1 R3 general-purpose code-quality entry point."
+          "description": "General-purpose code-quality entry point."
         },
         {
           "name": "sfi.governor_limit_risks",
-          "description": "v2.1 R3 Apex-specific narrowing for governor-limit-relevant patterns - the performance/scale subset of the v2.1 quality catalog."
+          "description": "Apex-specific narrowing for governor-limit-relevant patterns - the performance/scale subset of the quality catalog."
         },
         {
           "name": "sfi.test_coverage_gaps",
-          "description": "v2.1 R3 test-coverage-gap surface."
+          "description": "(1) `properties.isTest === true` identifies test classes (excluded from the scan), (2) BFS over incoming `callsApex` edges (capped at depth 3) collects the test c..."
         },
         {
           "name": "sfi.test_coverage_for_method",
@@ -332,7 +332,7 @@
         },
         {
           "name": "sfi.meaningful_test_audit",
-          "description": "v2.7 R2 deep code tool: lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score."
+          "description": "Lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score."
         }
       ]
     },
@@ -357,23 +357,23 @@
         },
         {
           "name": "sfi.cdc_subscribers",
-          "description": "v2.8 async-deep-tier surface: given an optional `sObjectFilter` (e.g., 'Account', 'Order__c'), enumerate every ApexTrigger, ApexClass, and Flow that emits an inco..."
+          "description": "Given an optional `sObjectFilter` (e.g., 'Account', 'Order__c'), enumerate every ApexTrigger, ApexClass, and Flow that emits an incoming `listensTo` edge into a C..."
         },
         {
           "name": "sfi.async_chain_depth",
-          "description": "v2.8 async-deep-tier walker: given an ApexClass canonical id (`ApexClass:{Name}`), walks the transitive async chain via outgoing `dispatchesAsync` edges, capped a..."
+          "description": "Given an ApexClass canonical id (`ApexClass:{Name}`), walks the transitive async chain via outgoing `dispatchesAsync` edges, capped at 10 hops."
         },
         {
           "name": "sfi.scheduled_job_catalog",
-          "description": "v2.8 async-deep-tier surface: returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from..."
+          "description": "Returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from inbound `dispatchesAsync` edge..."
         },
         {
           "name": "sfi.outbound_message_catalog",
-          "description": "v2.8 async-deep-tier surface: returns one entry per OutboundMessage node (the v2.8 promotion of the v1.3 dangling-by-design `<outboundMessages>` references) with..."
+          "description": "Returns one entry per OutboundMessage node (the promotion of the dangling-by-design `<outboundMessages>` references) with the endpoint URL, payload shape (fields..."
         },
         {
           "name": "sfi.endpoint_catalog",
-          "description": "v2.8 async-deep-tier composite: returns every URL / endpoint participating in an integration in one structured response, split four ways - `inboundApis` (from v1...."
+          "description": "Returns every URL / endpoint participating in an integration in one structured response, split four ways - `inboundApis` (from `exposes` edges to synthetic Extern..."
         }
       ]
     },
@@ -382,35 +382,35 @@
       "tools": [
         {
           "name": "sfi.cpq_rule_chain",
-          "description": "v2.6a R2 CPQ-specialist tool: given a CpqProductRule or CpqPriceRule canonical id, returns the chain of rules of the same type sharing the same parent CustomObjec..."
+          "description": "Given a CpqProductRule or CpqPriceRule canonical id, returns the chain of rules of the same type sharing the same parent CustomObject (the SBQQ__ rule object defi..."
         },
         {
           "name": "sfi.cpq_quote_template_breakdown",
-          "description": "v2.6a R2 CPQ-specialist tool: given a CpqQuoteTemplate canonical id, returns the template's top-level configuration (`templateContentReference` from the `SBQQ__Te..."
+          "description": "Given a CpqQuoteTemplate canonical id, returns the template's top-level configuration (`templateContentReference` from the `SBQQ__Template__c` field, `documentFor..."
         },
         {
           "name": "sfi.cpq_dependency_map",
-          "description": "v2.6a R2 CPQ-specialist tool: walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a h..."
+          "description": "Walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a heuristic dependency entry."
         },
         {
           "name": "sfi.datatransform_field_map",
-          "description": "v3.2 OmniStudio tool: given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mappin..."
+          "description": "Given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mapping plus the operation-t..."
         },
         {
           "name": "sfi.decision_table_browse",
-          "description": "v3.2 OmniStudio tool: given a DecisionTable canonical id (`DecisionTable:{SetupName}`), returns the table's parameter shape - `dataSourceType` (`CsvUpload` | `SOb..."
+          "description": "Given a DecisionTable canonical id (`DecisionTable:{SetupName}`), returns the table's parameter shape - `dataSourceType` (`CsvUpload` | `SObject` | `Manual`), `ex..."
         },
         {
           "name": "sfi.integration_procedure_chain",
-          "description": "v3.2 R3b OmniStudio composer tool: given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata (`omniProcessKey`, `versionNumber`, `subType..."
+          "description": "Given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata (`omniProcessKey`, `versionNumber`, `subType`, `type`, `uniqueName`, `isActive`..."
         },
         {
           "name": "sfi.omniscript_flow",
-          "description": "v3.2 OmniStudio tool: given an OmniScript canonical id (`OmniScript:{ApiName}`), returns the parsed step sequence (the `<omniProcessElements>` children walked rec..."
+          "description": "Given an OmniScript canonical id (`OmniScript:{ApiName}`), returns the parsed step sequence (the `<omniProcessElements>` children walked recursively, sorted by `l..."
         },
         {
           "name": "sfi.omniuicard_widget_breakdown",
-          "description": "v3.2 OmniStudio tool: given an OmniUiCard canonical id (`OmniUiCard:{ApiName}`), returns the FlexCard's identity metadata (`omniUiCardType`, `authorName`, `versio..."
+          "description": "Given an OmniUiCard canonical id (`OmniUiCard:{ApiName}`), returns the FlexCard's identity metadata (`omniUiCardType`, `authorName`, `versionNumber`, `isActive`,..."
         }
       ]
     },
@@ -435,23 +435,23 @@
         },
         {
           "name": "sfi.generate_data_dictionary",
-          "description": "v2.5 documentation-generation tier: given a CustomObject (the `objectId` accepts either the canonical id `CustomObject:{ApiName}` or a bare object api name like `..."
+          "description": "Given a CustomObject (the `objectId` accepts either the canonical id `CustomObject:{ApiName}` or a bare object api name like `Account`, coerced to the id - consis..."
         },
         {
           "name": "sfi.generate_admin_handbook",
-          "description": "v2.5 documentation-generation tier: composes a structured markdown admin handbook covering the org's purpose, main objects, automation summary, permission structu..."
+          "description": "Composes a structured markdown admin handbook covering the org's purpose, main objects, automation summary, permission structure, integration topology, and recent..."
         },
         {
           "name": "sfi.generate_architecture_overview",
-          "description": "v2.5 documentation-generation tier: composes a 3-4 page architecture document chaining `sfi.org_overview` + `sfi.domain_clusters` + `sfi.integration_map`."
+          "description": "Composes a 3-4 page architecture document chaining `sfi.org_overview` + `sfi.domain_clusters` + `sfi.integration_map`."
         },
         {
           "name": "sfi.generate_compliance_report",
-          "description": "v2.5 documentation-generation tier: composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per top-PII-field, c..."
+          "description": "Composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per top-PII-field, capped at 25) + per-object `sharingMo..."
         },
         {
           "name": "sfi.generate_onboarding_doc",
-          "description": "v2.5 documentation-generation tier: composes a structured markdown new-admin / new-developer tour chaining `sfi.generate_admin_handbook` + `sfi.generate_architect..."
+          "description": "Composes a structured markdown new-admin / new-developer tour chaining `sfi.generate_admin_handbook` + `sfi.generate_architecture_overview` + `sfi.org_overview` f..."
         },
         {
           "name": "sfi.field_mapping_between_objects",
@@ -500,7 +500,7 @@
         },
         {
           "name": "sfi.what_changed_since_refresh",
-          "description": "P5-what-changed: 'since my last refresh, which component TYPES changed?'."
+          "description": "'since my last refresh, which component TYPES changed?'."
         },
         {
           "name": "sfi.org_history",
@@ -516,7 +516,7 @@
         },
         {
           "name": "sfi.pii_inventory",
-          "description": "Enumerate every CustomField in the vault, classify each with the v2.0d `pii-detection` recognizer (which inspects API name, declared data type, and description te..."
+          "description": "Enumerate every CustomField in the vault, classify each with the `pii-detection` recognizer (which inspects API name, declared data type, and description text), t..."
         },
         {
           "name": "sfi.changed_since",
@@ -528,15 +528,15 @@
         },
         {
           "name": "sfi.unused_fields_deep",
-          "description": "v2.4 deep-hygiene tool: optional `objectId` narrows the scan to one CustomObject - accepts the canonical id (`CustomObject:Account`) or a bare api name (`Account`..."
+          "description": "Optional `objectId` narrows the scan to one CustomObject - accepts the canonical id (`CustomObject:Account`) or a bare api name (`Account`); without it the scan i..."
         },
         {
           "name": "sfi.empty_queues_and_groups",
-          "description": "v2.4 hygiene tool: list Queue and Group nodes with zero members."
+          "description": "List Queue and Group nodes with zero members."
         },
         {
           "name": "sfi.tech_debt_score",
-          "description": "v2.4 composite: aggregate the v2.0b unused_components, v2.4 unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_..."
+          "description": "Aggregate the unused_components, unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_and_groups, qualityIssues d..."
         },
         {
           "name": "sfi.promotion_readiness",
@@ -561,15 +561,15 @@
         },
         {
           "name": "sfi.compare_vaults",
-          "description": "v3.1 cross-org tool: given two registered vault aliases, returns a structured diff identifying `added` (in B only), `removed` (in A only), and `shapeModified` (in..."
+          "description": "Given two registered vault aliases, returns a structured diff identifying `added` (in B only), `removed` (in A only), and `shapeModified` (in both with at least o..."
         },
         {
           "name": "sfi.compare_object_across_vaults",
-          "description": "v3.1 cross-org tool: given a CustomObject api-name and two registered vault aliases, returns the field-by-field diff - `addedFields` (in B only), `removedFields`..."
+          "description": "Given a CustomObject api-name and two registered vault aliases, returns the field-by-field diff - `addedFields` (in B only), `removedFields` (in A only), `shapeMo..."
         },
         {
           "name": "sfi.compare_profile_across_vaults",
-          "description": "v3.1 cross-org tool: given a Profile name and two registered vault aliases, returns per-grant-category drift - `grantDiffs.objectPermissions`, `.fieldPermissions`..."
+          "description": "Given a Profile name and two registered vault aliases, returns per-grant-category drift - `grantDiffs.objectPermissions`, `.fieldPermissions`, `.tabVisibilities`,..."
         }
       ]
     },
@@ -582,7 +582,7 @@
         },
         {
           "name": "sfi.live_stale_check",
-          "description": "Opt-in live org (P5-stale-detection): \"is the org AHEAD of the vault?\"."
+          "description": "Opt-in live org: \"is the org AHEAD of the vault?\"."
         },
         {
           "name": "sfi.live_count",
@@ -674,7 +674,7 @@
         },
         {
           "name": "sfi.live_setup_audit_trail",
-          "description": "Opt-in live org (R6-27): WHO CHANGED WHAT in Setup - the SetupAuditTrail roster (profile/permission-set edits, field changes, org-wide-default flips, and every ot..."
+          "description": "Opt-in live org: WHO CHANGED WHAT in Setup - the SetupAuditTrail roster (profile/permission-set edits, field changes, org-wide-default flips, and every other trac..."
         },
         {
           "name": "sfi.live_license_usage",
@@ -682,7 +682,7 @@
         },
         {
           "name": "sfi.live_consent",
-          "description": "Manage one-time, per-org consent for the read-only live plane."
+          "description": "Manage per-org live-plane grants (in the core profile)."
         },
         {
           "name": "sfi.live_report_usage",
@@ -702,15 +702,15 @@
         },
         {
           "name": "sfi.live_automation_fired",
-          "description": "P6-live-automation-fired (HYBRID, HEURISTIC): does this record-triggered automation actually run in production? Given an ApexTrigger / record-triggered Flow / Wor..."
+          "description": "Does this record-triggered automation actually run in production? Given an ApexTrigger / record-triggered Flow / WorkflowRule `componentId`, resolves its trigger..."
         },
         {
           "name": "sfi.live_picklist_usage",
-          "description": "P6-live-picklist-usage (HYBRID): which picklist VALUES are actually used in production."
+          "description": "Which picklist VALUES are actually used in production."
         },
         {
           "name": "sfi.live_budget",
-          "description": "P6-live-budget-guard: disclose this session's live-query budget and result-cache state."
+          "description": "Disclose this session's live-query budget and result-cache state."
         },
         {
           "name": "sfi.live_drift_check",
@@ -799,11 +799,11 @@
         },
         {
           "name": "sfi.ai_exposure_report",
-          "description": "AI-exposure audit (the R6-13 flagship): 'what data can my org's own AI see?'."
+          "description": "AI-exposure audit (the flagship): 'what data can my org's own AI see?'."
         },
         {
           "name": "sfi.export_manifest",
-          "description": "Group a set of canonical component ids into a well-formed `package.xml` snippet (P8-manifest-export) a human can hand to Gearset / Copado / `sf project deploy`."
+          "description": "Group a set of canonical component ids into a well-formed `package.xml` snippet a human can hand to Gearset / Copado / `sf project deploy`."
         },
         {
           "name": "sfi.object_access_audit",

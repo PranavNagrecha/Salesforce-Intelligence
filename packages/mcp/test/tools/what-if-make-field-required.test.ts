@@ -26,6 +26,7 @@ import {
   whatIfMakeFieldRequiredHandler,
   whatIfMakeFieldRequiredInputSchema,
 } from '../../src/tools/what-if-make-field-required.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 import { measureGraphQueries } from './_graph-query-budget.js';
 
@@ -731,8 +732,19 @@ describe('whatIfMakeFieldRequiredHandler — live null-rate (P6-required-field-w
     return { stdout: JSON.stringify({ result: { totalSize: count } }), stderr: '' };
   };
 
-  beforeEach(() => resetLiveSession());
-  afterEach(() => resetLiveSession());
+  let consentDir: string;
+  beforeEach(() => {
+    resetLiveSession();
+    // Isolate consent so a grant from another suite cannot enable hybrid live.
+    consentDir = mkdtempSync(join(tmpdir(), 'sfi-wi-mfr-consent-'));
+    process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
+    delete process.env.SFI_LIVE_PLANE_ENABLED;
+  });
+  afterEach(() => {
+    resetLiveSession();
+    delete process.env.SFI_CONSENT_PATH;
+    rmSync(consentDir, { recursive: true, force: true });
+  });
 
   it('without the live plane returns the offline verdict — no null-rate, offline_snapshot', async () => {
     const r = await whatIfMakeFieldRequiredHandler(ctx, { fieldId: TARGET_FIELD }, liveExec);
@@ -743,6 +755,8 @@ describe('whatIfMakeFieldRequiredHandler — live null-rate (P6-required-field-w
   });
 
   it('with liveEnabled adds the production null-rate and stamps hybrid trust', async () => {
+    // AUDIT-F3: liveEnabled is not consent — seed a grant for sourceOrg.
+    await grantTestLiveAccess('me@example.com');
     const r = await whatIfMakeFieldRequiredHandler(
       ctx,
       { fieldId: TARGET_FIELD, liveEnabled: true },

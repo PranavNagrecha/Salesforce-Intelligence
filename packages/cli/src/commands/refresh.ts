@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import type {
   ComponentId,
@@ -13,7 +13,13 @@ import type {
   PhantomClassification,
   VaultManifest,
 } from '@sf-intelligence/contracts';
-import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
+import {
+  err,
+  execHelper,
+  ok,
+  withNetworkMode,
+  type Result,
+} from '@sf-intelligence/core';
 import {
   buildDescribeFieldExtraction,
   existingCustomFieldIds,
@@ -59,13 +65,16 @@ import {
 } from '@sf-intelligence/tooling-api';
 import {
   appendDrainResult,
+  appendTombstones,
   buildCoverageEntries as manifestCoverageEntries,
+  buildRetrievalLedger,
   computeSourceTreeHash,
   loadManifest,
   queuedDrainIds,
   readAnnotations,
   readDemandQueue,
   saveManifest,
+  stampFamilyEpochs,
   vaultPaths,
   type ExtendedVaultManifest,
   type StagedBuildMarker,
@@ -851,7 +860,17 @@ const applyApexAstEdges = async (
   };
 };
 
-export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult> => {
+/**
+ * Full vault refresh. Elevates {@link withNetworkMode} to `salesforce-read`
+ * for the duration (AUDIT-F2) so retrieve / Tooling enrichment / live data-shape
+ * may reach Salesforce; the MCP server default remains `off`.
+ */
+export const runRefresh = async (
+  opts: RunRefreshOptions,
+): Promise<RefreshResult> =>
+  withNetworkMode('salesforce-read', () => runRefreshBody(opts));
+
+const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> => {
   const started = Date.now();
 
   const configResult = await loadVaultConfig(opts.cwd);
@@ -2019,25 +2038,35 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // a report pull that only covered its own slice. The report-pull failure pass
   // runs last of the report-related ones so an errored pull always wins over a
   // "fully landed" reading.
-  const coverage = decorateProfileGrantCoverage(
-    decoratePendingCoverage(
-      decorateReportPullCoverage(
-        decorateReportsCapCoverage(
-          buildCoverageEntries(
-            counts,
-            walked.skippedDirectories,
-            requestedTypes,
-            paths.source,
-            walked.failures,
-            confirmedTypes,
+  const coverageComputedAt = new Date().toISOString();
+  // AUDIT-F5: bump per-family epoch/retrievedAt only when a real pull ran
+  // (`confirmedTypes !== null`); scoped / --no-pull / pending rows preserve
+  // prior family clocks so mixed-freshness is detectable.
+  const pullRan = confirmedTypes !== null;
+  const coverage = stampFamilyEpochs(
+    decorateProfileGrantCoverage(
+      decoratePendingCoverage(
+        decorateReportPullCoverage(
+          decorateReportsCapCoverage(
+            buildCoverageEntries(
+              counts,
+              walked.skippedDirectories,
+              requestedTypes,
+              paths.source,
+              walked.failures,
+              confirmedTypes,
+            ),
+            args.reportsCapStats,
           ),
-          args.reportsCapStats,
+          args.reportPull,
         ),
-        args.reportPull,
+        opts.stagedMarker,
       ),
-      opts.stagedMarker,
+      profileGrantDisclosure,
     ),
-    profileGrantDisclosure,
+    previousManifest?.coverage,
+    coverageComputedAt,
+    pullRan,
   );
 
   let phantomSummary: ExtendedVaultManifest['phantomSummary'];
@@ -2063,13 +2092,13 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // found nothing, which is exactly how "confirmed 0 reports" shipped.
   const manifest: ExtendedVaultManifest & { readonly reportPull?: ReportPullDisclosure } = {
     version: PACKAGE_VERSION,
-    refreshedAt: new Date().toISOString(),
+    refreshedAt: coverageComputedAt,
     sourceOrg: targetOrg,
     components: counts.components,
     edges: counts.edges,
     sourceTreeHash: hashResult.value,
     coverage,
-    coverageComputedAt: new Date().toISOString(),
+    coverageComputedAt,
     skippedDirectories: walked.skippedDirectories,
     ...(opts.stagedMarker !== undefined ? { staged: opts.stagedMarker } : {}),
     ...(args.apexAstStats !== undefined ? { apexAst: args.apexAstStats } : {}),
@@ -2114,6 +2143,18 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
       counts,
       walked.skippedDirectories,
     );
+  }
+
+  // AUDIT-F5 — ops-facing retrieval ledger (mirror of coverage epochs). Non-fatal.
+  try {
+    const ledger = buildRetrievalLedger(manifest, pullRan);
+    await writeFile(
+      join(paths.meta, 'retrieval-ledger.json'),
+      `${JSON.stringify(ledger, null, 2)}\n`,
+      'utf8',
+    );
+  } catch {
+    // non-fatal
   }
 
   if (!midBuild) {
@@ -3768,6 +3809,17 @@ const retrieveTypeBatch = async (
     );
     const reconcile = await reconcileSourceDeletions(sourceDir, pkgDir, new Set(types));
     await syncAuthoritativeRetrieveIntoSource(sourceDir, pkgDir);
+    // AUDIT-F5: record confirmed deletions only (never on refuse — stale kept ≠ gone).
+    if (reconcile.refused !== true && reconcile.deletedPaths.length > 0) {
+      try {
+        await appendTombstones(dirname(sourceDir), reconcile.deletedPaths, {
+          deletedAt: new Date().toISOString(),
+          sourceOrg: targetOrg,
+        });
+      } catch {
+        // non-fatal — reconcile already removed the files
+      }
+    }
     // A REFUSED reconcile must never look like "nothing to delete". The guard
     // exists because a wholesale deletion is the fingerprint of a layout
     // mismatch, not an org purge — and the incident that motivated it was

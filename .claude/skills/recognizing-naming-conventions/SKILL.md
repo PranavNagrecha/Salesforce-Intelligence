@@ -136,7 +136,7 @@ When the user proposes a name for a new field, the flow is:
    `Account`", scope = `'CustomField:Account.*'`. If they didn't say
    a parent ("a new custom field"), ask which object — naming
    patterns are per-parent.
-2. **Call `sfi.get_naming_convention_report`** for that scope.
+2. **Call `sfi.run_analysis` with `{ "name": "sfi.get_naming_convention_report", "args": { … } }`** for that scope.
 3. **Compare the proposal against the observations.**
    - Does the proposed name match the observed prefix (if any)?
    - Does it match the observed suffix (if any)?
@@ -228,7 +228,7 @@ Stop and ask the user, or surface a limit, when:
 
 Before sending a response, confirm:
 
-- [ ] I called `sfi.get_naming_convention_report` with a valid scope
+- [ ] I called `sfi.run_analysis` for `sfi.get_naming_convention_report` with a valid scope
       (`'all'` or `'CustomField:{ObjectApiName}.*'`), and I picked
       the scope from the user's question — not a guess.
 - [ ] I reported every observation in the response, with its
@@ -248,4 +248,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

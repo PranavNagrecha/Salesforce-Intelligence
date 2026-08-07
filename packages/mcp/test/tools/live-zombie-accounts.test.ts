@@ -25,12 +25,14 @@ import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { revokeLiveConsent } from '../../src/live-consent.js';
 import type { Context } from '../../src/server.js';
 import {
   liveZombieAccountsHandler,
   ZOMBIE_ACCOUNTS_DISCLOSURE,
 } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -89,12 +91,14 @@ const makeClientDiffExec = (queries: string[]): ExecCommand => async (_bin, args
 };
 
 let consentDir: string;
-beforeEach(() => {
+beforeEach(async () => {
   resetLiveSession();
   consentDir = mkdtempSync(join(tmpdir(), 'sfi-zombie-consent-'));
   process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
   delete process.env.SFI_LIVE_PLANE_ENABLED;
   delete process.env.SFI_LIVE_QUERY_BUDGET;
+  // AUDIT-F3: liveEnabled is not consent — seed a full-scope test grant.
+  await grantTestLiveAccess('test-org');
 });
 afterEach(() => {
   resetLiveSession();
@@ -105,6 +109,7 @@ afterEach(() => {
 
 describe('liveZombieAccountsHandler — consent gate', () => {
   it('fails closed without consent', async () => {
+    await revokeLiveConsent('test-org');
     const r = await liveZombieAccountsHandler(ctx, {}, makeAntiJoinExec([]));
     expect(r.ok).toBe(false);
     if (r.ok) return;

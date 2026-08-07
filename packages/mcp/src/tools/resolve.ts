@@ -20,6 +20,7 @@ import type {
   ComponentType,
   McpError,
   McpResponse,
+  UntrustedOrgText,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
@@ -42,6 +43,8 @@ import {
   type NextAction,
 } from '../clarify.js';
 import type { Context } from '../server.js';
+
+import { brandOrgText } from './untrusted-org-text.js';
 
 /** Hard cap mirrored from the graph resolver. */
 const RESOLVE_MAX_LIMIT = 50;
@@ -79,6 +82,11 @@ export interface ResolveToolCandidate {
   readonly apiName: string;
   readonly label: string | null;
   /**
+   * AUDIT-F8 — same string as {@link label}, branded as untrusted org text.
+   * Prefer this over treating `label` as product prose.
+   */
+  readonly labelOrgText?: UntrustedOrgText;
+  /**
    * Parent object's API name (e.g. the object a field lives on), or null for
    * top-level components. The qualifier that distinguishes same-named
    * candidates without parsing the canonical id — relay it to the user when
@@ -98,6 +106,15 @@ export interface ResolveToolCandidate {
   readonly matchKind: MatchKind | 'glossary-alias';
   readonly evidence: string;
 }
+
+const withLabelOrgText = (
+  candidate: ResolveToolCandidate,
+): ResolveToolCandidate => {
+  const labelOrgText = brandOrgText(candidate.label);
+  return labelOrgText === undefined
+    ? candidate
+    : { ...candidate, labelOrgText };
+};
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ResolveOutput {
@@ -155,18 +172,20 @@ export const resolveGlossaryAlias = async (
     if (!node.ok || node.value === null) continue;
     const n = node.value;
     if (types.length > 0 && !types.includes(n.type)) continue;
-    out.push({
-      componentId: n.id,
-      type: n.type,
-      apiName: n.apiName,
-      label: n.label,
-      parentApiName:
-        n.parentId === null ? null : n.parentId.slice(n.parentId.indexOf(':') + 1),
-      score: 1,
-      base: 1,
-      matchKind: 'glossary-alias',
-      evidence: `glossary-alias: curated synonym "${hit.value}" (annotation by ${hit.author}, confirmed)`,
-    });
+    out.push(
+      withLabelOrgText({
+        componentId: n.id,
+        type: n.type,
+        apiName: n.apiName,
+        label: n.label,
+        parentApiName:
+          n.parentId === null ? null : n.parentId.slice(n.parentId.indexOf(':') + 1),
+        score: 1,
+        base: 1,
+        matchKind: 'glossary-alias',
+        evidence: `glossary-alias: curated synonym "${hit.value}" (annotation by ${hit.author}, confirmed)`,
+      }),
+    );
   }
   return out.sort((a, b) => (a.componentId < b.componentId ? -1 : 1));
 };
@@ -203,17 +222,18 @@ export const resolveHandler = async (
   }
 
   let baseCandidates: readonly ResolveToolCandidate[] = result.value.candidates.map(
-    (c) => ({
-      componentId: c.id,
-      type: c.type,
-      apiName: c.apiName,
-      label: c.label,
-      parentApiName: c.parentApiName,
-      score: c.score,
-      base: c.base,
-      matchKind: c.matchKind,
-      evidence: c.evidence,
-    }),
+    (c) =>
+      withLabelOrgText({
+        componentId: c.id,
+        type: c.type,
+        apiName: c.apiName,
+        label: c.label,
+        parentApiName: c.parentApiName,
+        score: c.score,
+        base: c.base,
+        matchKind: c.matchKind,
+        evidence: c.evidence,
+      }),
   );
 
   // P13-ANNOT-glossary-resolve: curated glossary synonyms feed resolution —

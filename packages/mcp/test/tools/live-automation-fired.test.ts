@@ -14,9 +14,11 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { revokeLiveConsent } from '../../src/live-consent.js';
 import type { Context } from '../../src/server.js';
 import { liveAutomationFiredHandler } from '../../src/tools/live-automation-fired.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -88,11 +90,13 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   resetLiveSession();
   consentDir = mkdtempSync(join(tmpdir(), 'sfi-autom-consent-'));
   process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
   delete process.env.SFI_LIVE_PLANE_ENABLED;
+  // AUDIT-F3: liveEnabled is not consent — seed a full-scope test grant.
+  await grantTestLiveAccess('test');
 });
 
 afterEach(() => {
@@ -116,6 +120,7 @@ describe('liveAutomationFiredHandler (P6-live-automation-fired)', () => {
   });
 
   it('without consent returns the resolved trigger object + caveat', async () => {
+    await revokeLiveConsent('test');
     const r = await liveAutomationFiredHandler(ctx, { componentId: TRIGGER }, makeExec(5, 5));
     expect(r.ok).toBe(true);
     if (!r.ok) return;

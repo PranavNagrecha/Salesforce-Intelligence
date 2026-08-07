@@ -4,7 +4,7 @@ description: |
   Answers Salesforce admin/architect freshness questions like
   "when was X modified?", "who built this?", "what changed since
   last week?", "has this been touched since go-live?", "what
-  changed in the last sprint?". Calls `sfi.last_modified` and
+  changed in the last sprint?". Call `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }` and
   `sfi.changed_since`. Discloses v1.7 honesty axis: when Tooling
   API enrichment hasn't run, returns `enriched: false` with
   explicit guidance to run `sfi refresh --with-tooling-api`;
@@ -99,7 +99,7 @@ Fire this skill on freshness-shaped phrasing. Concrete triggers:
    not the cumulative contributor — a developer who edited a class
    in v1, v2, and v3 only shows up in v3's `lastModifiedBy`.
 9. **"What's the freshness coverage in this vault?"** — meta
-   question. Call `sfi.changed_since` with a far-past `since` and
+   question. Call `sfi.run_analysis` with `{ "name": "sfi.changed_since", "args": { … } }` with a far-past `since` and
    report the `unenrichedCount` alongside the enriched count.
 10. **"When did X stop being maintained?"** — last-touch + extrapolate
     question. The skill answers the literal data point (last
@@ -148,7 +148,7 @@ next.
 The user's question maps to one of two shapes:
 
 - **Component target** ("when was X modified?", "who built X?") —
-  call `sfi.last_modified` against the canonical id. Translate
+  call `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }` against the canonical id. Translate
   "the AccountController class" → `ApexClass:AccountController`;
   "the Industry field on Account" →
   `CustomField:Account.Industry__c` (note the `__c` for custom
@@ -157,7 +157,7 @@ The user's question maps to one of two shapes:
   `sfi.search_components` to resolve the canonical id before
   firing the freshness lookup.
 - **Time-range target** ("what changed since X?", "what's new this
-  sprint?") — call `sfi.changed_since` with the `since` boundary in
+  sprint?") — call `sfi.run_analysis` with `{ "name": "sfi.changed_since", "args": { … } }` with the `since` boundary in
   ISO 8601 (date-only `YYYY-MM-DD` or full
   `YYYY-MM-DDTHH:mm:ssZ`). Translate "last Tuesday" → the actual
   date relative to today's date; "the deploy on May 15" →
@@ -171,7 +171,7 @@ Apex layer since last sprint?"), the range scan answers the
 "since" axis and the type filter (`types: ['ApexClass',
 'ApexTrigger']`) narrows the scan.
 
-### Step 2 — Component target: call `sfi.last_modified`
+### Step 2 — Component target: call `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }`
 
 Default invocation:
 
@@ -211,7 +211,7 @@ a concrete next step (run the enricher). When the user pushes back
 auth/enrichment prerequisite — the v1.7 honesty axis is
 constitutional, not a courtesy.
 
-### Step 3 — Time-range target: call `sfi.changed_since`
+### Step 3 — Time-range target: call `sfi.run_analysis` with `{ "name": "sfi.changed_since", "args": { … } }`
 
 Default invocation:
 
@@ -470,7 +470,7 @@ User: *"When was the `AccountController` Apex class last modified?"*
 Claude's flow:
 
 1. **Parse.** Component target = `ApexClass:AccountController`.
-2. **Fire** `sfi.last_modified` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }` with
    `{ componentId: 'ApexClass:AccountController' }`.
 3. The tool returns `enriched: false`, every freshness field
    `null`, and the verbatim disclosure.
@@ -491,7 +491,7 @@ Claude's flow:
 
 1. **Parse.** Time-range target. `since = '2026-05-01'`,
    `types = ['Flow']`.
-2. **Fire** `sfi.changed_since` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.changed_since", "args": { … } }` with
    `{ since: '2026-05-01', types: ['Flow'] }`.
 3. The tool returns
    `changed: [{ id: 'Flow:Lead_Nurture', lastModifiedDate: '...', lastModifiedBy: {...} }, ...]`,
@@ -512,7 +512,7 @@ Claude's flow:
 
 1. **Parse.** Component target = `Profile:Sales_Manager`. Note:
    Profile is NOT in v1.7's enriched-type list.
-2. **Fire** `sfi.last_modified` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }` with
    `{ componentId: 'Profile:Sales_Manager' }`.
 3. The tool returns `enriched: false` even if the vault was
    refreshed with `--with-tooling-api` (Profile is uncovered).
@@ -536,7 +536,7 @@ Claude's flow:
 1. **Parse.** Component target = `Flow:Lead_Nurture`. The
    question shape is *authorship* — distinct from
    `lastModifiedBy`.
-2. **Fire** `sfi.last_modified` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }` with
    `{ componentId: 'Flow:Lead_Nurture' }`.
 3. The tool returns `enriched: true`,
    `lastModifiedBy: { id: '005xx...', name: 'Alice Adams' }`.
@@ -563,7 +563,7 @@ Before sending a response, confirm:
       ("last Tuesday", "the deploy") into a concrete ISO 8601
       `since`, asking the user when the phrasing was genuinely
       vague.
-- [ ] I called `sfi.last_modified` or `sfi.changed_since` exactly
+- [ ] I called `sfi.run_analysis` for `sfi.last_modified` or `sfi.changed_since` exactly
       once per coherent question. (Component-by-component
       iteration for a list is acceptable; round-tripping the same
       id is not.)
@@ -587,4 +587,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

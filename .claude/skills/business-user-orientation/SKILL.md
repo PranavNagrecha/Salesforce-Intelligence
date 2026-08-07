@@ -26,7 +26,7 @@ description: |
 ## "Where is this used?" (§C3 contract)
 
 When a business user asks "where is this field/report/thing used" or "what would
-this affect", call `sfi.find_component_usages` (resolve the name first) — it
+this affect", call `sfi.run_analysis` with `{ "name": "sfi.find_component_usages", "args": { … } }` (resolve the name first) — it
 returns where the component is referenced with plain evidence, or an honest "no
 static evidence in the vault" (NEVER "nothing uses it"). Don't confuse this with
 *describe* questions ("what is this field", "what values does it have") which use
@@ -788,4 +788,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

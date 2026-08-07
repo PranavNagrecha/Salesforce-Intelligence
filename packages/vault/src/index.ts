@@ -9,6 +9,21 @@
 
 export { checkFreshness } from './freshness.js';
 export type { FreshnessState } from './freshness.js';
+export {
+  buildMixedFreshness,
+  buildRetrievalLedger,
+  stampFamilyEpochs,
+} from './family-freshness.js';
+export type {
+  RetrievalLedger,
+  RetrievalLedgerFamily,
+} from './family-freshness.js';
+export {
+  appendTombstones,
+  readTombstones,
+  tombstonesPath,
+} from './tombstones.js';
+export type { TombstoneReason, TombstoneRecord } from './tombstones.js';
 export { computeSourceTreeHash } from './hash.js';
 export type { HashError } from './hash.js';
 export { componentPath, snapshotPath, vaultPaths } from './layout.js';

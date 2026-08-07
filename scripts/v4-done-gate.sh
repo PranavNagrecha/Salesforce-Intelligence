@@ -6,6 +6,10 @@ cd "$(dirname "$0")/.."
 echo "=== v4.0 done gate ==="
 pnpm -r build
 pnpm lint
+pnpm product-manifest:check
+pnpm product-surface:check
+pnpm doc-sync
+pnpm skill-gateway
 pnpm -r test
 pnpm test:integration:gate
 pnpm e2e

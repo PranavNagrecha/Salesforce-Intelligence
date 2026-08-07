@@ -57,6 +57,8 @@ import type {
   ComponentType,
   McpError,
   McpResponse,
+  Node,
+  UntrustedOrgText,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
@@ -74,6 +76,10 @@ import { tryReadComponentDoc } from './component-doc-fallback.js';
 import { mergeInputAliases } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { buildReferenceStub } from './phantom-taxonomy.js';
+import {
+  brandOrgText,
+  descriptionFromProperties,
+} from './untrusted-org-text.js';
 
 /**
  * Synthetic, file-less graph node types. `ConditionalContext` (a `firesWhen`
@@ -246,7 +252,27 @@ export interface GetComponentOutput {
    * (see referenceCount)." Present only when `metadataOnly` is true.
    */
   readonly disclosure?: string;
+  /**
+   * AUDIT-F8 — graph label branded as untrusted org text. Legacy string
+   * fields stay elsewhere; hosts that understand the brand should prefer this.
+   */
+  readonly labelOrgText?: UntrustedOrgText;
+  /** AUDIT-F8 — description / inlineHelpText from node properties, branded. */
+  readonly descriptionOrgText?: UntrustedOrgText;
 }
+
+const orgTextFields = (
+  node: Node,
+): Pick<GetComponentOutput, 'labelOrgText' | 'descriptionOrgText'> => {
+  const labelOrgText = brandOrgText(node.label);
+  const descriptionOrgText = brandOrgText(
+    descriptionFromProperties(node.properties),
+  );
+  return {
+    ...(labelOrgText !== undefined ? { labelOrgText } : {}),
+    ...(descriptionOrgText !== undefined ? { descriptionOrgText } : {}),
+  };
+};
 
 /**
  * The `sfi.get_component` MCP tool. Returns a vault component's rendered
@@ -489,6 +515,7 @@ export const getComponentHandler = async (
           totalReferenceCount: allReferenceIds.length,
         }),
         ...(annotations !== undefined ? { annotations } : {}),
+        ...orgTextFields(node),
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -516,6 +543,7 @@ export const getComponentHandler = async (
       omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
       maxBodyBytes,
       ...(annotations !== undefined ? { annotations } : {}),
+      ...orgTextFields(node),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -106,7 +106,7 @@ const FLEET_REPORT_MANIFEST_DISCLOSURE =
   "Per-org component counts, product version, and last-refresh timestamp are read from each vault's OWN meta/manifest.json — a cheap file read, no graph open. A vault whose manifest could not be read is listed with status `unreadable` and its counts show as unknown, never silently dropped or treated as zero.";
 
 const FLEET_REPORT_LIVE_DRIFT_SKIPPED_DISCLOSURE =
-  'Live drift is SKIPPED in this report — it takes no org/consent arguments, so no Tooling-API calls are made. "Most behind" below is an OFFLINE proxy (oldest `refreshedAt`, with a never-refreshed/unreadable vault ranked worst of all) — it is NOT the live "components changed since refresh" count `sfi.fleet_drift_ranking` computes. For that live comparison, call `sfi.fleet_drift_ranking` with per-org consent (`sfi.live_consent` or `liveEnabled: true`).';
+  'Live drift is SKIPPED in this report — it takes no org/consent arguments, so no Tooling-API calls are made. "Most behind" below is an OFFLINE proxy (oldest `refreshedAt`, with a never-refreshed/unreadable vault ranked worst of all) — it is NOT the live "components changed since refresh" count `sfi.fleet_drift_ranking` computes. For that live comparison, call `sfi.fleet_drift_ranking` with a per-org `sfi.live_consent` grant (or SFI_LIVE_PLANE_ENABLED=1).';
 
 const fleetReportPulseScopeDisclosure = (
   consideredCount: number,

@@ -58,17 +58,35 @@ describe('responseBudgetBytes', () => {
 });
 
 describe('jsonResult global response budget', () => {
-  it('passes an under-budget success body through byte-identical apart from estimatedPayloadBytes', () => {
+  it('passes an under-budget success body through with contentPolicy + estimatedPayloadBytes', () => {
     const body: McpResponse<{ readonly rows: readonly number[] }> = {
       data: { rows: [1, 2, 3] },
       vaultState: VAULT_STATE,
     };
     const text = envelopeText(jsonResult(body));
-    const expected = JSON.stringify({
+    const parsed = JSON.parse(text) as {
+      readonly data: unknown;
+      readonly contentPolicy: {
+        readonly orgMetadata: string;
+        readonly disclosure: string;
+      };
+      readonly estimatedPayloadBytes: number;
+    };
+    expect(parsed.data).toEqual(body.data);
+    expect(parsed.contentPolicy.orgMetadata).toBe('untrusted-data');
+    expect(parsed.contentPolicy.disclosure).toContain('untrusted DATA');
+    // estimatedPayloadBytes is the stamped payload (incl. contentPolicy), not
+    // the bare handler body — contentPolicy alone is ~286 bytes.
+    const stampedWithoutEstimate = {
       ...body,
-      estimatedPayloadBytes: bytesOf(JSON.stringify(body)),
-    });
-    expect(text).toBe(expected); // identity property — proves no behavior change
+      contentPolicy: parsed.contentPolicy,
+    };
+    expect(parsed.estimatedPayloadBytes).toBe(
+      bytesOf(JSON.stringify(stampedWithoutEstimate)),
+    );
+    expect(parsed.estimatedPayloadBytes).toBeGreaterThan(
+      bytesOf(JSON.stringify(body)),
+    );
   });
 
   it('bounds oversized error envelopes while preserving their error kind', () => {

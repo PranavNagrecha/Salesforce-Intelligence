@@ -117,6 +117,10 @@ describe('checkForUpdate', () => {
     // marker they exercise.
     for (const marker of CI_MARKERS) vi.stubEnv(marker, '');
     vi.stubEnv('SFI_NO_UPDATE_CHECK', '');
+    // AUDIT-F2: update check is opt-IN. Tests that exercise fetch/cache opt in
+    // explicitly; the default-off path has its own cases below.
+    vi.stubEnv('SFI_UPDATE_CHECK', '1');
+    vi.stubEnv('SFI_NETWORK_MODE', '');
     // Default-off telemetry: clear opt-in gates so unrelated tests never ping.
     vi.stubEnv('SFI_TELEMETRY_OPTIN', '');
     vi.stubEnv('SFI_TELEMETRY_ENDPOINT', '');
@@ -141,6 +145,30 @@ describe('checkForUpdate', () => {
       cached: false,
       error: null,
     });
+  });
+
+  it('AUDIT-F2: short-circuits by default (opt-IN — no SFI_UPDATE_CHECK, mode off)', async () => {
+    vi.stubEnv('CI', '');
+    vi.stubEnv('SFI_UPDATE_CHECK', '');
+    vi.stubEnv('SFI_NETWORK_MODE', 'off');
+    const r = await checkForUpdate('0.1.0', async () => {
+      throw new Error('fetcher must not run when update check is not opted in');
+    });
+    expect(r).toEqual({
+      shouldUpdate: false,
+      latestVersion: null,
+      cached: false,
+      error: null,
+    });
+  });
+
+  it('AUDIT-F2: SFI_NETWORK_MODE=updates-only opts in without SFI_UPDATE_CHECK', async () => {
+    vi.stubEnv('CI', '');
+    vi.stubEnv('SFI_UPDATE_CHECK', '');
+    vi.stubEnv('SFI_NETWORK_MODE', 'updates-only');
+    const r = await checkForUpdate('0.1.0', async () => '0.2.0');
+    expect(r.latestVersion).toBe('0.2.0');
+    expect(r.shouldUpdate).toBe(true);
   });
 
   it('short-circuits when a CI marker is set', async () => {
@@ -334,6 +362,9 @@ describe('checkForUpdate + opt-in counter seam', () => {
     vi.stubEnv('SFI_UPDATE_CACHE_PATH', cachePath);
     for (const marker of CI_MARKERS) vi.stubEnv(marker, '');
     vi.stubEnv('SFI_NO_UPDATE_CHECK', '');
+    // Fresh registry checks require AUDIT-F2 opt-in; counter tests need that path.
+    vi.stubEnv('SFI_UPDATE_CHECK', '1');
+    vi.stubEnv('SFI_NETWORK_MODE', '');
   });
 
   afterEach(async () => {

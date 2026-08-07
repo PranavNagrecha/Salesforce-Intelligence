@@ -8,6 +8,7 @@
  */
 import type { ComponentId, ComponentType, TrustSummary } from '@sf-intelligence/contracts';
 
+import { buildSafeToDeleteEvidenceEnvelope } from '../../src/tools/evidence-envelope.js';
 import {
   renderDeleteChecklist,
   type SafeToDeleteFieldOutput,
@@ -21,34 +22,42 @@ const TRUST: TrustSummary = {
   limitations: [],
 };
 
-const sample = (withCaveat: boolean): SafeToDeleteFieldOutput => ({
-  fieldId: 'CustomField:Account.Acme__c' as ComponentId,
-  verdict: 'blocking',
-  reasoning: [
-    {
-      category: 'layout',
-      verdict: 'review',
-      count: 2,
-      examples: [
-        { id: 'Layout:Account-L' as ComponentId, type: 'Layout' as ComponentType, apiName: 'Account-L' },
-      ],
-      note: 'Appears on 2 page layouts.',
-    },
-    {
-      category: 'flow',
-      verdict: 'blocking',
-      count: 1,
-      examples: [
-        { id: 'Flow:Acme_Flow' as ComponentId, type: 'Flow' as ComponentType, apiName: 'Acme_Flow' },
-      ],
-      note: 'A Flow writes this field.',
-    },
-  ],
-  ...(withCaveat
-    ? { coverageCaveat: { status: 'partial', missingCoverage: ['Flow'], message: 'Flow coverage is partial.' } }
-    : {}),
-  trust: TRUST,
+const withEnvelope = (
+  data: Omit<SafeToDeleteFieldOutput, 'evidenceEnvelope'>,
+): SafeToDeleteFieldOutput => ({
+  ...data,
+  evidenceEnvelope: buildSafeToDeleteEvidenceEnvelope(data),
 });
+
+const sample = (withCaveat: boolean): SafeToDeleteFieldOutput =>
+  withEnvelope({
+    fieldId: 'CustomField:Account.Acme__c' as ComponentId,
+    verdict: 'blocking',
+    reasoning: [
+      {
+        category: 'layout',
+        verdict: 'review',
+        count: 2,
+        examples: [
+          { id: 'Layout:Account-L' as ComponentId, type: 'Layout' as ComponentType, apiName: 'Account-L' },
+        ],
+        note: 'Appears on 2 page layouts.',
+      },
+      {
+        category: 'flow',
+        verdict: 'blocking',
+        count: 1,
+        examples: [
+          { id: 'Flow:Acme_Flow' as ComponentId, type: 'Flow' as ComponentType, apiName: 'Acme_Flow' },
+        ],
+        note: 'A Flow writes this field.',
+      },
+    ],
+    ...(withCaveat
+      ? { coverageCaveat: { status: 'partial', missingCoverage: ['Flow'], message: 'Flow coverage is partial.' } }
+      : {}),
+    trust: TRUST,
+  });
 
 describe('P8-destructive-checklist — renderDeleteChecklist', () => {
   it('surfaces the coverageCaveat BEFORE the verdict and renders ordered checklist items', () => {
@@ -74,12 +83,12 @@ describe('P8-destructive-checklist — renderDeleteChecklist', () => {
   });
 
   it('handles a field with no dependencies', () => {
-    const clean: SafeToDeleteFieldOutput = {
+    const clean = withEnvelope({
       fieldId: 'CustomField:Account.Unused__c' as ComponentId,
       verdict: 'safe',
       reasoning: [],
       trust: TRUST,
-    };
+    });
     const md = renderDeleteChecklist(clean);
     expect(md).toContain('No inbound dependencies');
     expect(md).not.toContain('- [ ]');

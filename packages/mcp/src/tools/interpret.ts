@@ -56,6 +56,7 @@ import type {
   ConfidenceLevel,
   Edge,
   EdgeType,
+  EvidenceEnvelopeV2,
   Interpretation,
   McpError,
   McpResponse,
@@ -64,7 +65,11 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdgesForNodes, listNodesByIds } from '@sf-intelligence/graph';
-import { type CoverageSummary, summarizeCoverage } from '@sf-intelligence/vault';
+import {
+  buildMixedFreshness,
+  type CoverageSummary,
+  summarizeCoverage,
+} from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { renderInterpretationsMarkdown } from '../answer-render.js';
@@ -85,6 +90,7 @@ import {
 } from '../knowledge/index.js';
 import type { Context } from '../server.js';
 
+import { buildInterpretEvidenceEnvelope } from './evidence-envelope.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /**
@@ -141,6 +147,11 @@ export interface InterpretOutput {
   readonly coverageCaveat?: string;
   readonly disclosure: string;
   readonly rendered: string;
+  /**
+   * AUDIT-F4 — shared EvidenceEnvelope v2 projection of the fields above.
+   * Additive; legacy keys remain the primary surface.
+   */
+  readonly evidenceEnvelope: EvidenceEnvelopeV2;
 }
 
 /** Base disclosure — always present. */
@@ -872,7 +883,7 @@ export const interpretHandler = async (
   const trust: TrustSummary = {
     provenance: 'offline_snapshot',
     confidence: overallConfidence,
-    freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+    freshness: buildMixedFreshness(ctx.manifest, unionCoverageTypes),
     completeness: {
       status: completenessStatus,
       ...(aggSummary.missingCoverage.length > 0
@@ -912,6 +923,12 @@ export const interpretHandler = async (
     ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
     disclosure,
     rendered,
+    evidenceEnvelope: buildInterpretEvidenceEnvelope({
+      interpretations: interpretationsReconciled,
+      trust,
+      ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
+      disclosure,
+    }),
   };
 
   return ok({

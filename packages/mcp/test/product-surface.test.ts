@@ -1,11 +1,14 @@
 /// <reference types="vitest/globals" />
 
 import { execSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { V01_TOOLS } from '../src/tools/index.js';
+import { CONCEPT_RULES, CONCEPTS } from '../src/knowledge/loader.js';
+import { buildProductManifestSummary } from '../src/product-manifest-summary.js';
+import { CORE_PROFILE_TOOLS, V01_TOOLS } from '../src/tools/index.js';
+import { toolProfile } from '../src/tools/tool-profile.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -23,9 +26,13 @@ const FORBIDDEN_TOOL_COUNT_PATTERNS = [
 
 const surfaceFromScript = (): {
   toolCount: number;
+  advertisedToolCount: number;
   componentTypeCount: number;
   edgeTypeCount: number;
   skillCount: number;
+  conceptCount: number;
+  conceptRuleCount: number;
+  catalogHash: string;
 } => {
   const out = execSync('node scripts/product-surface.mjs', {
     cwd: repoRoot,
@@ -33,9 +40,13 @@ const surfaceFromScript = (): {
   });
   return JSON.parse(out) as {
     toolCount: number;
+    advertisedToolCount: number;
     componentTypeCount: number;
     edgeTypeCount: number;
     skillCount: number;
+    conceptCount: number;
+    conceptRuleCount: number;
+    catalogHash: string;
   };
 };
 
@@ -49,6 +60,11 @@ describe('product surface counts', () => {
   it('V01_TOOLS.length matches product-surface script', () => {
     const surface = surfaceFromScript();
     expect(surface.toolCount).toBe(V01_TOOLS.length);
+    expect(surface.advertisedToolCount).toBe(
+      toolProfile() === 'core'
+        ? CORE_PROFILE_TOOLS.size
+        : V01_TOOLS.filter((t) => !t.hidden).length,
+    );
   });
 
   it('component and edge type counts match contracts unions', () => {
@@ -68,6 +84,48 @@ describe('product surface counts', () => {
     expect(componentTypes).toBeGreaterThan(50);
     // CR-CAP-12 added the `hasMember` EdgeType (Group → member), 22 → 23.
     expect(edgeTypes).toBe(23);
+  });
+
+  it('concept model counts match the built CONCEPTS / CONCEPT_RULES', () => {
+    const surface = surfaceFromScript();
+    expect(surface.conceptCount).toBe(Object.keys(CONCEPTS).length);
+    expect(surface.conceptRuleCount).toBe(CONCEPT_RULES.length);
+  });
+
+  it('runtime productManifest summary agrees with the surface script', () => {
+    const surface = surfaceFromScript();
+    const summary = buildProductManifestSummary();
+    expect(summary.tools.total).toBe(surface.toolCount);
+    expect(summary.tools.advertised).toBe(surface.advertisedToolCount);
+    expect(summary.conceptModel.concepts).toBe(surface.conceptCount);
+    expect(summary.conceptModel.rules).toBe(surface.conceptRuleCount);
+    expect(summary.catalogHash).toBe(surface.catalogHash);
+  });
+
+  it('committed product-manifest.json matches runtime registries', () => {
+    const path = join(repoRoot, 'eval/product-manifest.json');
+    expect(existsSync(path), 'eval/product-manifest.json must be committed').toBe(
+      true,
+    );
+    execSync('node scripts/generate-product-manifest.mjs --check', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+  });
+
+  it('committed product-surface.json is a pure projection of the manifest', () => {
+    const path = join(repoRoot, 'eval/product-surface.json');
+    expect(existsSync(path), 'eval/product-surface.json must be committed').toBe(
+      true,
+    );
+    const surface = JSON.parse(readRepoFile('eval/product-surface.json')) as {
+      generatedAt?: string;
+    };
+    expect(surface.generatedAt, 'generatedAt must not be committed').toBeUndefined();
+    execSync('node scripts/product-surface.mjs --check', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
   });
 
   it('marketing docs do not hard-code stale MCP tool counts', () => {

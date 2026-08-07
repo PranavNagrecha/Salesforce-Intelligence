@@ -1436,16 +1436,94 @@ export const MARGIN = 0.05;
  *
  * The floor mass sits at exactly 0.25 (`REGEX_BONUS` fused over cosine 0 —
  * pure regex assertion, zero semantic evidence): 37/133 labeled over-routes
- * vs 8/529 misses sat there, so the threshold must be strictly above it. The
- * funnel-primary path only ever sees PURE cosines (the merge short-circuits
- * for an unrouted intent — pinned by a regression test), so this is a real
- * semantic threshold. 0.26 was adopted in the Phase-7 calibration (was 0.30):
- * labeled cleanToGold 85 → 123 with the over-route tripwire flat (11
- * executables on the 133-list, 21 confident routes on the full 334 honesty
- * primaries — unchanged from 0.30) and sweep-blocked flat at 8 (clean
- * 414 → 425). Re-run those tripwires before moving it again.
+ * vs 8/529 misses sat there, so the threshold must be strictly above it. That
+ * floor relationship is pinned ONCE, by the P2 §4 pure-cosine test — NOT
+ * re-checked at the decision site, so the gate reads exactly one threshold
+ * and two numbers can never drift apart. The funnel-primary path only ever
+ * sees PURE cosines (the merge short-circuits for an unrouted intent — pinned
+ * by the same test), so this is a real semantic threshold. 0.26 was adopted
+ * in the Phase-7 calibration (was 0.30): labeled cleanToGold 85 → 123 with
+ * the over-route tripwire flat (11 executables on the 133-list, 21 confident
+ * routes on the full 334 honesty primaries — unchanged from 0.30) and
+ * sweep-blocked flat at 8 (clean 414 → 425). Re-run those tripwires before
+ * moving it again.
+ *
+ * WHAT THIS NUMBER CANNOT SEPARATE — measured 2026-08-07 over 30 no-intent
+ * questions × 20 advisory-tier real questions (funnel-recall corpus + the
+ * P2 §3 positives). A no-intent question carrying ONE high-IDF Salesforce
+ * token is not separable from real signal by score, in either direction:
+ *
+ *   noise  ceiling 0.436  ("the setup here — any opinions")
+ *   signal floor   0.261  ("contact has many active record-triggered flows —
+ *                           is their execution order deterministic…")
+ *
+ * The noise ceiling sits ABOVE the signal floor, so NO value of this constant
+ * both drops the vibe/setup ask and keeps the advisory tier: raising it past
+ * 0.436 leaves ~7/21 real advisories alive. The cause is word-sense collision,
+ * not calibration — "setup" the English noun vs Setup the Salesforce menu.
+ * `semanticCandidates('setup')`, the bare token, already returns
+ * `sfi.live_setup_audit_trail` at 0.436, and "the setup here — any opinions"
+ * returns the byte-identical candidate list at the identical score because
+ * every other word is a stopword or absent from the index. A bag-of-words
+ * cosine cannot resolve that; only a minimum-INTENT gate can.
+ *
+ * The measured discriminator is evidence BREADTH, not height: summing the
+ * candidate scores at ranks 3-8, noise that clears 0.26 spans [0.249, 0.277]
+ * while signal that clears 0.26 spans [0.376, 1.672] — a clean 0.099 margin,
+ * because a one-token match leaves everything below rank 2 collapsed near
+ * zero while a real question spreads support across many index terms. That
+ * gate is NOW implemented, as {@link FUNNEL_MIN_EVIDENCE_BREADTH} — this
+ * constant stays 0.26 precisely because the fix does not belong on this axis.
  */
 export const FUNNEL_PRIMARY_MIN_SCORE = 0.26;
+
+/**
+ * Minimum evidence BREADTH for a funnel-advisory upgrade — the second axis of
+ * the gate, and the one that actually separates intent from lexical accident.
+ *
+ * Read as: "does anything BELOW the top two candidates have real support?"
+ * Summed over ranks 3-8. A question that merely collides with one high-IDF
+ * token lights up one tool and leaves the tail collapsed near zero; a question
+ * with genuine Salesforce intent spreads support across many index terms.
+ *
+ * Measured 2026-08-07, 30 no-intent × 20 advisory-tier questions, over the
+ * candidates that ALREADY clear {@link FUNNEL_PRIMARY_MIN_SCORE}:
+ *
+ *   noise  [0.249, 0.277]
+ *   signal [0.376, 1.672]
+ *
+ * Disjoint, margin 0.099. 0.32 is the centre of that gap, so both sides carry
+ * roughly equal slack. Unlike the score axis — where the noise ceiling (0.436)
+ * sits ABOVE the signal floor (0.261) and no cut exists — this one separates
+ * cleanly, which is why the gate moved here instead of the threshold moving up.
+ *
+ * HONEST LIMITS — two, and neither is a reason to raise the number:
+ *
+ * 1. PARTIAL BY CONSTRUCTION. On a 30-question no-intent set this cuts
+ *    spurious advisories 6 -> 2. It closes the SINGLE-TOKEN collision class
+ *    ("setup", "audit"). It does NOT close multi-token conversational asks —
+ *    "how does this compare" (breadth 1.126 -> compare_components) and "can
+ *    you help me out" (0.563 -> doc_coverage_report) survive, because those
+ *    words genuinely spread across the index and land their breadth INSIDE
+ *    the range real questions occupy. Raising the cut past them would cut
+ *    measured signal (floor 0.376). That class needs an intent classifier,
+ *    not a threshold — do not "fix" it by moving this constant.
+ * 2. The margin was measured on a 50-question hand-built corpus, not the
+ *    133/334 over-route tripwires FUNNEL_PRIMARY_MIN_SCORE was calibrated
+ *    against. It ships because the repo's real tripwires — funnel-recall, the
+ *    router goldset, the routing gate — all stay green. Re-run those first.
+ */
+export const FUNNEL_MIN_EVIDENCE_BREADTH = 0.32;
+
+/**
+ * Evidence breadth of a ranked candidate list: the score mass at ranks 3-8.
+ * Ranks 1-2 are deliberately excluded — they are what a single token-collision
+ * lights up, so including them would measure the very thing being filtered.
+ */
+export const funnelEvidenceBreadth = (
+  candidates: readonly { readonly score: number }[],
+): number =>
+  candidates.slice(2, 8).reduce((sum, candidate) => sum + candidate.score, 0);
 
 /**
  * A candidate whose tool MUTATES the org if the host acts on the plan it
@@ -3009,10 +3087,14 @@ export const routeQuestionHandler = async (
   // existence-negative that disclosed above must never advisory-route. It
   // never overrides an intent match. The candidates here are PURE cosines
   // (the merge short-circuits for an unrouted intent — no regex bonus, no
-  // 0.25 floor mass), so FUNNEL_PRIMARY_MIN_SCORE is a real semantic bar;
-  // the fromRoute / >0.25 guards are assert-style drift protection. Computed
-  // ONCE and reused for the final response so gate and output cannot
-  // disagree.
+  // 0.25 floor mass), so FUNNEL_PRIMARY_MIN_SCORE is a real semantic bar and
+  // is the SINGLE threshold this gate reads. A redundant `top.score > 0.25`
+  // used to sit alongside it as assert-style floor protection; two numbers
+  // that can disagree is a worse failure mode than the one it guarded, so the
+  // floor is now pinned once as an invariant by the P2 §4 test instead. The
+  // `fromRoute` guard stays — it is a different assertion (pure-cosine path),
+  // not a second threshold. Computed ONCE and reused for the final response
+  // so gate and output cannot disagree.
   let advisoryCandidates: readonly ToolCandidate[] | null = null;
   // R3 catch-all narrowing: an ANAPHOR-ONLY fragment with NO host context
   // ("does it call an invocable apex at least?", "if it doesn't exist just
@@ -3057,7 +3139,13 @@ export const routeQuestionHandler = async (
       top !== undefined &&
       top.score >= FUNNEL_PRIMARY_MIN_SCORE &&
       top.fromRoute !== true &&
-      top.score > 0.25
+      // Minimum-INTENT gate. Height alone cannot tell a real question from a
+      // one-token lexical collision ("…the setup here" → live_setup_audit_trail
+      // at 0.436, above every genuine advisory). Breadth can: see
+      // FUNNEL_MIN_EVIDENCE_BREADTH. Without this, "empty is not none" leaks —
+      // a question the product genuinely cannot place gets dressed up as an
+      // advisory route instead of an honest unrouted.
+      funnelEvidenceBreadth(usable) >= FUNNEL_MIN_EVIDENCE_BREADTH
     ) {
       const tools = usable.slice(0, 3).map((candidate) => candidate.tool);
       // Bind the stage-3 resolver output only when it is EXACT and the key is

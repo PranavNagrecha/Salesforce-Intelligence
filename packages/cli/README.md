@@ -19,6 +19,25 @@ follow-ups resolve through an optional host-passed `context.previous` param —
 the server itself stores no conversation state. An opt-in live read-only plane
 can answer record counts and samples. MIT + Commons Clause.
 
+## Upgrading to 0.3.0 (breaking)
+
+0.3.0 changes defaults. If you are coming from 0.2.x, read this before upgrading —
+full detail in [CHANGELOG.md](https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/CHANGELOG.md).
+
+- **`SFI_TOOL_PROFILE` now defaults to `core`.** 19 tools are advertised and
+  directly invokable; the other ~190 are reached with
+  `sfi.run_analysis { name: 'sfi.<tool>', args }`. Set `SFI_TOOL_PROFILE=full`
+  to restore the previous advertise-and-invoke-everything behavior.
+- **`liveEnabled: true` no longer opens the live plane.** Grant standing consent
+  with `sfi.live_consent { grant: true }` (OrgId + principal bound, scoped,
+  7-day expiry) or set `SFI_LIVE_PLANE_ENABLED=1`.
+- **Existing on-disk live grants stop working** — v1 consent records are dropped.
+  Re-grant once.
+- **The update check is now opt-in.** Set `SFI_UPDATE_CHECK=1` (default network
+  mode is `off`).
+- **Every success envelope gains a `contentPolicy` block** (~280 bytes) marking
+  org metadata as untrusted data for hosts.
+
 ## Install
 
 Requires **Node.js 20+** and an authenticated **Salesforce CLI** (`sf`).

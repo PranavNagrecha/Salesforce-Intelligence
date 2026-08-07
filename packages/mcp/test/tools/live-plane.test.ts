@@ -9,6 +9,7 @@ import { importExtractionResults, openGraph, type GraphStore } from '@sf-intelli
 import type { ExecCommand, ToolingApiAuth } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { revokeLiveConsent } from '../../src/live-consent.js';
 import type { Context } from '../../src/server.js';
 import {
   apiPath,
@@ -51,6 +52,7 @@ import {
   liveBudgetStatus,
   resetLiveSession,
 } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -69,28 +71,29 @@ const ctx = {
 } as Context;
 
 // Isolate the per-org consent store so the live gate is hermetic — the real
-// ~/.sf-intelligence/live-consent.json must never leak into these tests. Point
-// it at a temp path that is never written, so `test-org` is always un-consented
-// and the "refuses when disabled" tests stay fail-closed deterministically.
-const ISOLATED_CONSENT = join(
-  tmpdir(),
-  `sfi-consent-test-${process.pid}-never.json`,
-);
+// ~/.sf-intelligence/live-consent.json must never leak into these tests.
+// AUDIT-F3: most handlers need a stored grant (liveEnabled is not consent);
+// beforeEach writes a full-scope test grant for `test-org`.
+let consentDir: string;
 beforeAll(() => {
-  process.env.SFI_CONSENT_PATH = ISOLATED_CONSENT;
+  consentDir = mkdtempSync(join(tmpdir(), 'sfi-consent-live-plane-'));
+  process.env.SFI_CONSENT_PATH = join(consentDir, 'live-consent.json');
 });
 afterAll(() => {
   delete process.env.SFI_CONSENT_PATH;
+  rmSync(consentDir, { recursive: true, force: true });
 });
 
 // CR-09: every live read now routes through the shared per-session budget +
 // result cache. Reset both before each test so (a) cumulative spend across the
 // file's many handler calls never trips budgetExceededError, and (b) a prior
 // test's cached result for a reused (org, SOQL) key cannot leak into the next.
-beforeEach(() => {
+beforeEach(async () => {
   resetLiveSession();
   delete process.env.SFI_LIVE_QUERY_BUDGET;
   delete process.env.SFI_LIVE_CACHE_TTL_MS;
+  delete process.env.SFI_LIVE_PLANE_ENABLED;
+  await grantTestLiveAccess('test-org');
 });
 afterEach(() => {
   resetLiveSession();
@@ -106,8 +109,11 @@ describe('isLivePlaneEnabled', () => {
     if (prev !== undefined) process.env.SFI_LIVE_PLANE_ENABLED = prev;
   });
 
-  it('honors liveEnabled input', () => {
-    expect(isLivePlaneEnabled(true)).toBe(true);
+  it('honors SFI_LIVE_PLANE_ENABLED env only (AUDIT-F3 — not liveEnabled param)', () => {
+    process.env.SFI_LIVE_PLANE_ENABLED = '1';
+    expect(isLivePlaneEnabled()).toBe(true);
+    delete process.env.SFI_LIVE_PLANE_ENABLED;
+    expect(isLivePlaneEnabled()).toBe(false);
   });
 });
 
@@ -144,8 +150,8 @@ describe('live plane handlers', () => {
   });
 
   it('refuses live_describe when disabled', async () => {
-    const prev = process.env.SFI_LIVE_PLANE_ENABLED;
     delete process.env.SFI_LIVE_PLANE_ENABLED;
+    await revokeLiveConsent('test-org');
     const exec: ExecCommand = async () => {
       throw new Error('sf must not be spawned when live plane is disabled');
     };
@@ -157,19 +163,21 @@ describe('live plane handlers', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.kind).toBe('invalid-query');
-    if (prev !== undefined) process.env.SFI_LIVE_PLANE_ENABLED = prev;
   });
 
-  it('runs live_count when liveEnabled is true', async () => {
+  it('runs live_count with a stored grant (AUDIT-F3)', async () => {
     const result = await liveCountHandler(
       ctx,
-      { liveEnabled: true, soql: 'SELECT COUNT() FROM Account' },
+      { soql: 'SELECT COUNT() FROM Account' },
       okExec,
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.count).toBe(3);
     expect(result.value.data.trust.provenance).toBe('live_org');
+    expect(
+      result.value.data.trust.limitations.some((l) => l.includes('Live grant')),
+    ).toBe(true);
   });
 
   it('rejects non-count SOQL for live_count', async () => {
@@ -267,15 +275,14 @@ describe('liveInactiveUsersHandler', () => {
     };
 
   it('refuses when the live plane is disabled', async () => {
-    const prev = process.env.SFI_LIVE_PLANE_ENABLED;
     delete process.env.SFI_LIVE_PLANE_ENABLED;
+    await revokeLiveConsent('test-org');
     const exec: ExecCommand = async () => {
       throw new Error('must not spawn sf when disabled');
     };
     const r = await liveInactiveUsersHandler(ctx, {}, exec);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.kind).toBe('invalid-query');
-    if (prev !== undefined) process.env.SFI_LIVE_PLANE_ENABLED = prev;
   });
 
   it('reports the true total, parses rows, and flags never-logged-in users', async () => {
@@ -1345,16 +1352,15 @@ describe('liveReportUsageHandler', () => {
   });
 
   it('fails CLOSED without the live plane — never queries the org (P6-live-report-usage)', async () => {
-    const prev = process.env.SFI_LIVE_PLANE_ENABLED;
     delete process.env.SFI_LIVE_PLANE_ENABLED;
+    await revokeLiveConsent('test-org');
     let queried = false;
     const spy: ExecCommand = async (...a) => { queried = true; return exec(...a); };
     const r = await liveReportUsageHandler(ctx, {}, spy);
-    if (prev !== undefined) process.env.SFI_LIVE_PLANE_ENABLED = prev;
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
-    expect(r.error.message).toContain('consent');
+    expect(r.error.message).toMatch(/consent|not enabled/i);
     expect(queried).toBe(false); // gate blocked it before any org call
   });
 
@@ -1717,6 +1723,7 @@ describe('liveOrgHealthHandler', () => {
 
 describe('liveStaleCheckHandler (P5-stale-detection)', () => {
   it('refuses when the live plane is disabled (fail-closed)', async () => {
+    await revokeLiveConsent('test-org');
     const exec: ExecCommand = async () => {
       throw new Error('exec must not run when the plane is disabled');
     };
@@ -1948,8 +1955,8 @@ describe('CR-09 — live-plane budget routing (H9)', () => {
   });
 
   it('every rerouted live_* handler still fails CLOSED without consent — the throwing exec is never reached', async () => {
-    const prev = process.env.SFI_LIVE_PLANE_ENABLED;
     delete process.env.SFI_LIVE_PLANE_ENABLED;
+    await revokeLiveConsent('test-org');
     const throwExec: ExecCommand = async () => {
       throw new Error('sf must NOT be spawned without consent — gateLive must block first');
     };
@@ -1988,6 +1995,5 @@ describe('CR-09 — live-plane budget routing (H9)', () => {
     }
     // No budget was spent — gateLive returned before any read.
     expect(liveBudgetStatus().used).toBe(0);
-    if (prev !== undefined) process.env.SFI_LIVE_PLANE_ENABLED = prev;
   });
 });

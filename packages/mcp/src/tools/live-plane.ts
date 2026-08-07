@@ -1,14 +1,16 @@
 /**
- * Opt-in read-only live org plane (v4.0 R5).
+ * Opt-in read-only live org plane (v4.0 R5 / AUDIT-F3).
  *
- * Disabled unless `SFI_LIVE_PLANE_ENABLED=1` or the caller passes
- * `liveEnabled: true`. Never falls back to vault data on failure.
+ * Disabled unless a stored grant exists (`sfi.live_consent { grant: true }`)
+ * or `SFI_LIVE_PLANE_ENABLED=1`. Per-call `liveEnabled: true` is intent only
+ * for hybrid tools — it is **not** a consent substitute. Never falls back to
+ * vault data on failure.
  */
 
 import type { ComponentId, McpError, McpResponse, TrustSummary } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, withNetworkMode, type Result } from '@sf-intelligence/core';
 import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
-import type { ExecCommand } from '@sf-intelligence/tooling-api';
+import { getAuthFromSfCli, type ExecCommand } from '@sf-intelligence/tooling-api';
 import { z } from 'zod';
 
 import {
@@ -20,10 +22,16 @@ import {
 } from '../answer-render.js';
 import type { LiveCapability } from '../live-capability.js';
 import {
+  describeLiveGrant,
+  getLiveGrant,
+  grantHasScopes,
   grantLiveConsent,
-  hasLiveConsent,
   listConsentedOrgs,
+  orgIdsMatch,
+  requiredScopesForTool,
   revokeLiveConsent,
+  type LiveGrantDisclosure,
+  type LiveScope,
 } from '../live-consent.js';
 import type { Context } from '../server.js';
 
@@ -39,6 +47,7 @@ import { renderHybridStalenessWarning, type HybridStaleness } from './hybrid-tru
 // rest (apiPath/getLiveAuth/restGet/runSfJson) are re-exported below for
 // back-compat without being pulled into scope (avoids unused-import lint).
 import { LIVE_PLANE_DISCLOSURE, nodeExecFile, redactSecrets } from './live-exec.js';
+import { enterLiveGrant, getActiveLiveGrant } from './live-grant-context.js';
 // The single budgeted/consented/cached seam. Importing it here (now acyclic via
 // the leaf above) is what routes EVERY live read in this module through the
 // per-session query budget (CR-09).
@@ -83,63 +92,117 @@ const liveEnabledSchema = z.object({
   liveEnabled: z.boolean().optional(),
 });
 
-export const isLivePlaneEnabled = (input?: boolean): boolean => {
-  if (input === true) return true;
+/** Operator env override — not a substitute for a stored grant in product docs. */
+export const isLivePlaneEnabled = (): boolean => {
   const env = process.env.SFI_LIVE_PLANE_ENABLED;
   return env === '1' || env === 'true';
 };
 
-const liveTrust = (queriedAt: string): TrustSummary => ({
-  provenance: 'live_org',
-  confidence: 'declared',
-  freshness: { liveQueriedAt: queriedAt },
-  completeness: { status: 'unknown' },
-  limitations: [LIVE_PLANE_DISCLOSURE],
-});
+const liveTrust = (queriedAt: string): TrustSummary => {
+  const grant = getActiveLiveGrant();
+  const grantLine =
+    grant === null
+      ? null
+      : `Live grant ${grant.grantId} (source=${grant.source}` +
+        (grant.orgId !== null ? `; orgId=${grant.orgId}` : '') +
+        (grant.principalUsername !== null
+          ? `; principal=${grant.principalUsername}`
+          : '') +
+        `; scopes=${grant.scopes.join(',')}; expires=${grant.expiresAt}).`;
+  return {
+    provenance: 'live_org',
+    confidence: 'declared',
+    freshness: { liveQueriedAt: queriedAt },
+    completeness: { status: 'unknown' },
+    limitations: grantLine
+      ? [LIVE_PLANE_DISCLOSURE, grantLine]
+      : [LIVE_PLANE_DISCLOSURE],
+  };
+};
 
 const resolveOrg = (ctx: Context, orgAlias?: string): string =>
   orgAlias?.trim() || ctx.manifest.sourceOrg;
 
 /** Why the live plane is (or isn't) allowed to run for an org. */
-export type LiveAccessSource = 'param' | 'env' | 'consent' | 'none';
+export type LiveAccessSource = 'env' | 'consent' | 'none';
 
 export interface LiveAccessDecision {
   readonly allowed: boolean;
   readonly source: LiveAccessSource;
+  /** Active grant when source is consent (or env with a grant on file). */
+  readonly grant: LiveGrantDisclosure | null;
+  /** Why access was denied (scope/expiry/missing), when not allowed. */
+  readonly denial?: string;
 }
 
 /**
  * Decide whether the read-only live plane may run for `org`.
  *
- * INFRA-12-DEEP: a {@link LiveCapability} token (minted from the invoked tool's
- * registry `livePlane` tag and threaded on `Context`) is REQUIRED before any
- * path — param, env, or ambient standing consent — can allow live. A `never`
- * tool (no capability) fail-closes even when consent is on file. Prefer
- * {@link probeLiveAccess} / {@link gateLive} from tool handlers; this function
- * is the sanctioned seam that alone may call {@link hasLiveConsent}.
+ * INFRA-12-DEEP: a {@link LiveCapability} token is REQUIRED. AUDIT-F3: per-call
+ * `liveEnabled` is ignored for access. Allowed paths: `SFI_LIVE_PLANE_ENABLED`
+ * (operator override) or a non-expired stored grant covering `requiredScopes`.
  *
- * Three ways in once capability is present, checked in order: an explicit
- * per-call `liveEnabled: true`, the `SFI_LIVE_PLANE_ENABLED` env, or standing
- * one-time consent persisted for the org. Fail-closed — no match means not
- * allowed; never auto-grants.
+ * Pass `requiredScopes: null` when the tool has no explicit scope mapping —
+ * access is denied (`unmapped-tool`).
  */
 export const resolveLiveAccess = async (
   org: string,
-  inputLiveEnabled?: boolean,
+  _inputLiveEnabled?: boolean,
   capability?: LiveCapability,
+  requiredScopes: readonly LiveScope[] | null = ['aggregate'],
 ): Promise<LiveAccessDecision> => {
-  // P13-REMOTE-http: over HTTP the live plane is HARD-DISABLED regardless of
-  // params, env, or the HOST machine's standing consent — a remote caller
-  // must never spend the host's Salesforce API budget or reach its org.
-  // Pinned by test, not by documentation.
-  if (process.env['SFI_TRANSPORT'] === 'http') return { allowed: false, source: 'none' };
-  // INFRA-12-DEEP: no registry capability → cannot read ambient consent (or
-  // honor param/env). Structural guard against offline handlers going live.
-  if (!capability) return { allowed: false, source: 'none' };
-  if (inputLiveEnabled === true) return { allowed: true, source: 'param' };
-  if (isLivePlaneEnabled()) return { allowed: true, source: 'env' };
-  if (await hasLiveConsent(org)) return { allowed: true, source: 'consent' };
-  return { allowed: false, source: 'none' };
+  // P13-REMOTE-http: over HTTP the live plane is HARD-DISABLED.
+  if (process.env['SFI_TRANSPORT'] === 'http') {
+    return { allowed: false, source: 'none', grant: null, denial: 'http-transport' };
+  }
+  if (!capability) {
+    return { allowed: false, source: 'none', grant: null, denial: 'no-capability' };
+  }
+  if (requiredScopes === null) {
+    return { allowed: false, source: 'none', grant: null, denial: 'unmapped-tool' };
+  }
+
+  const stored = await getLiveGrant(org);
+
+  if (isLivePlaneEnabled()) {
+    // Env override still honors required scopes when a grant is on file; with
+    // no grant it authorizes the mapped scopes for the session only.
+    if (stored !== null && !grantHasScopes(stored, requiredScopes)) {
+      return {
+        allowed: false,
+        source: 'none',
+        grant: describeLiveGrant(stored, 'env'),
+        denial: `missing-scopes:${requiredScopes.filter((s) => !stored.scopes.includes(s)).join(',')}`,
+      };
+    }
+    return {
+      allowed: true,
+      source: 'env',
+      grant: describeLiveGrant(stored, 'env'),
+    };
+  }
+
+  if (stored === null) {
+    return {
+      allowed: false,
+      source: 'none',
+      grant: null,
+      denial: 'no-grant',
+    };
+  }
+  if (!grantHasScopes(stored, requiredScopes)) {
+    return {
+      allowed: false,
+      source: 'none',
+      grant: describeLiveGrant(stored, 'consent'),
+      denial: `missing-scopes:${requiredScopes.filter((s) => !stored.scopes.includes(s)).join(',')}`,
+    };
+  }
+  return {
+    allowed: true,
+    source: 'consent',
+    grant: describeLiveGrant(stored, 'consent'),
+  };
 };
 
 /**
@@ -156,23 +219,118 @@ export const probeLiveAccess = async (
   },
 ): Promise<LiveAccessDecision & { readonly org: string }> => {
   const org = resolveOrg(ctx, input?.orgAlias);
+  const toolName = ctx.liveToolName ?? 'sfi.live_count';
+  const required = requiredScopesForTool(toolName);
   const access = await resolveLiveAccess(
     org,
     input?.liveEnabled,
     ctx.liveCapability,
+    required,
   );
   return { ...access, org };
 };
 
 /** Structured fail-closed error naming the org + the one-time grant path. */
-const liveConsentRequiredError = (org: string): McpError => ({
-  kind: 'invalid-query',
-  message:
-    `Live org plane is not enabled for '${org}' — record counts and live data values ` +
-    `require querying the live org and are not available offline. Grant read-only access with ` +
-    `sfi.live_consent { grant: true }, pass liveEnabled: true for one call, or set ` +
-    `SFI_LIVE_PLANE_ENABLED=1.`,
-});
+const liveConsentRequiredError = (
+  org: string,
+  denial?: string,
+): McpError => {
+  if (denial !== undefined && denial.startsWith('missing-scopes:')) {
+    const missing = denial.slice('missing-scopes:'.length);
+    return {
+      kind: 'invalid-query',
+      message:
+        `Live org plane grant for '${org}' lacks required scope(s) [${missing}]. ` +
+        `Step up with sfi.live_consent { grant: true, scopes: [${missing
+          .split(',')
+          .map((s) => `"${s}"`)
+          .join(', ')}] }.`,
+    };
+  }
+  if (denial === 'org-mismatch') {
+    return {
+      kind: 'invalid-query',
+      message:
+        `Live org plane grant for '${org}' is bound to a different Salesforce OrgId ` +
+        `than the currently authenticated org. Revoke and re-grant with ` +
+        `sfi.live_consent { grant: true } after \`sf org login\`.`,
+    };
+  }
+  if (denial === 'principal-mismatch') {
+    return {
+      kind: 'invalid-query',
+      message:
+        `Live org plane grant for '${org}' is bound to a different authenticated ` +
+        `username than the current CLI session. Revoke and re-grant with ` +
+        `sfi.live_consent { grant: true }.`,
+    };
+  }
+  if (denial === 'unmapped-tool') {
+    return {
+      kind: 'invalid-query',
+      message:
+        `Live org plane refused: this tool has no explicit scope mapping ` +
+        `(fail-closed). Add it to LIVE_TOOL_REQUIRED_SCOPES before enabling.`,
+    };
+  }
+  return {
+    kind: 'invalid-query',
+    message:
+      `Live org plane is not enabled for '${org}' — record counts and live data values ` +
+      `require querying the live org and are not available offline. Grant read-only access with ` +
+      `sfi.live_consent { grant: true } (OrgId+principal-bound; default scope aggregate, 7-day expiry), ` +
+      `or set SFI_LIVE_PLANE_ENABLED=1. Per-call liveEnabled: true is not a consent substitute.`,
+  };
+};
+
+/**
+ * Re-resolve the authenticated org and refuse when it no longer matches the
+ * grant's OrgId (+ principal). Skipped when `SFI_LIVE_SKIP_IDENTITY_VERIFY=1`
+ * (hermetic unit tests); production/e2e leave that unset.
+ */
+export const verifyGrantIdentity = async (
+  org: string,
+  grant: LiveGrantDisclosure | null,
+  exec: ExecCommand,
+): Promise<Result<void, McpError>> => {
+  if (process.env['SFI_LIVE_SKIP_IDENTITY_VERIFY'] === '1') {
+    return ok(undefined);
+  }
+  if (grant === null || grant.source !== 'consent') {
+    return ok(undefined);
+  }
+  if (grant.orgId === null) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `Live org plane grant for '${org}' has no bound OrgId — revoke and ` +
+        `re-grant with sfi.live_consent { grant: true }.`,
+    });
+  }
+  const auth = await withNetworkMode('salesforce-read', () =>
+    getAuthFromSfCli(org, exec),
+  );
+  if (!auth.ok) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `Cannot verify live consent binding for '${org}': ${auth.error.message}. ` +
+        `Authenticate the org with \`sf org login\` and retry.`,
+    });
+  }
+  if (!orgIdsMatch(grant.orgId, auth.value.orgId)) {
+    return err(liveConsentRequiredError(org, 'org-mismatch'));
+  }
+  if (
+    grant.principalUsername !== null &&
+    auth.value.username !== null &&
+    grant.principalUsername.trim().toLowerCase() !==
+      auth.value.username.trim().toLowerCase()
+  ) {
+    return err(liveConsentRequiredError(org, 'principal-mismatch'));
+  }
+  return ok(undefined);
+};
 
 /**
  * Resolve the target org and confirm the live plane may run for it. Replaces
@@ -185,9 +343,16 @@ export const gateLive = async (
     readonly liveEnabled?: boolean | undefined;
     readonly orgAlias?: string | undefined;
   },
+  exec: ExecCommand = nodeExecFile,
 ): Promise<Result<string, McpError>> => {
   const probed = await probeLiveAccess(ctx, input);
-  if (!probed.allowed) return err(liveConsentRequiredError(probed.org));
+  if (!probed.allowed) {
+    return err(liveConsentRequiredError(probed.org, probed.denial));
+  }
+  const identity = await verifyGrantIdentity(probed.org, probed.grant, exec);
+  if (!identity.ok) return identity;
+  // Bind grant into the current async context so liveTrust() can disclose it.
+  enterLiveGrant(probed.grant);
   return ok(probed.org);
 };
 
@@ -213,7 +378,7 @@ export const liveDescribeHandler = async (
   input: LiveDescribeInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveDescribeOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
@@ -362,6 +527,80 @@ const fromObjectOf = (soql: string): string | null => {
   return m === null || m[1] === undefined ? null : m[1];
 };
 
+/**
+ * All FROM targets in a SOQL string (including subqueries). Fail-closed
+ * callers treat an empty list as unparseable.
+ */
+export const soqlFromObjects = (soql: string): readonly string[] => {
+  const out: string[] = [];
+  const re = /\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(soql)) !== null) {
+    if (match[1] !== undefined) out.push(match[1]);
+  }
+  return out;
+};
+
+/**
+ * Objects whose row samples / counts require the `users` step-up scope.
+ * Keeps `sample`/`aggregate` grants from reading identity tables.
+ */
+export const LIVE_IDENTITY_OBJECTS: ReadonlySet<string> = new Set(
+  [
+    'User',
+    'UserLogin',
+    'LoginHistory',
+    'AuthSession',
+    'OauthToken',
+    'TwoFactorInfo',
+    'UserAppInfo',
+    'PermissionSetAssignment',
+    'PermissionSetLicenseAssign',
+    'UserPackageLicense',
+    'GroupMember',
+    'UserRole',
+    'SetupAuditTrail',
+    'UserRecordAccess',
+    'NetworkMember',
+    'CollaborationGroupMember',
+    'UserTerritory2Association',
+  ].map((name) => name.toLowerCase()),
+);
+
+/**
+ * Refuse SOQL that targets identity objects unless the active grant includes
+ * `users`. Unparseable FROM clauses fail closed.
+ */
+export const assertSoqlWithinLiveScopes = (
+  soql: string,
+  grant: LiveGrantDisclosure | null,
+): Result<void, McpError> => {
+  const fromObjects = soqlFromObjects(soql);
+  if (fromObjects.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'Could not parse a FROM object from the SOQL — refusing to run an ' +
+        'unscoped live query. Pass a standard SELECT … FROM ObjectName query.',
+      path: 'soql',
+    });
+  }
+  const identityHits = fromObjects.filter((name) =>
+    LIVE_IDENTITY_OBJECTS.has(name.toLowerCase()),
+  );
+  if (identityHits.length === 0) return ok(undefined);
+  const scopes = grant?.scopes ?? [];
+  if (scopes.includes('users')) return ok(undefined);
+  return err({
+    kind: 'invalid-query',
+    message:
+      `SOQL targets identity object(s) [${[...new Set(identityHits)].join(', ')}] ` +
+      `which require the live \`users\` scope. Step up with ` +
+      `sfi.live_consent { grant: true, scopes: ["users"] }.`,
+    path: 'soql',
+  });
+};
+
 /** Outcome of the offline picklist pre-validation pass for one live SOQL. */
 interface PicklistValidationResult {
   /** Literals that match no DEFINED picklist value on a vault-KNOWN field. */
@@ -451,12 +690,17 @@ export const liveCountHandler = async (
   input: LiveCountInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveCountOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const soqlResult = resolveCountSoql(input);
   if (!soqlResult.ok) return soqlResult;
   const soqlCheck = assertCountSoql(soqlResult.value);
   if (!soqlCheck.ok) return soqlCheck;
+  const scopeGate = assertSoqlWithinLiveScopes(
+    soqlCheck.value,
+    getActiveLiveGrant(),
+  );
+  if (!scopeGate.ok) return scopeGate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
   // CR-09: budgeted/cached count read (one unit per org call / cache miss).
@@ -706,7 +950,7 @@ export const liveStaleCheckHandler = async (
   input: LiveStaleCheckInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveStaleCheckOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const refreshedAt = ctx.manifest.refreshedAt;
@@ -803,8 +1047,13 @@ export const liveSampleHandler = async (
   input: LiveSampleInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveSampleOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
+  const scopeGate = assertSoqlWithinLiveScopes(
+    input.soql,
+    getActiveLiveGrant(),
+  );
+  if (!scopeGate.ok) return scopeGate;
   const limit = input.limit ?? MAX_SAMPLE_ROWS;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
@@ -891,7 +1140,7 @@ export const liveFieldPopulationHandler = async (
   input: LiveFieldPopulationInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveFieldPopulationOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   resolveOrg(ctx, input.orgAlias);
   // Validate the interpolated names BEFORE building SOQL. This handler hands a
@@ -973,7 +1222,7 @@ export const liveOrgLimitsHandler = async (
   input: LiveOrgLimitsInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveOrgLimitsOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
@@ -1122,7 +1371,7 @@ export const liveInactiveUsersHandler = async (
   input: LiveInactiveUsersInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveInactiveUsersOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
@@ -1353,7 +1602,7 @@ export const liveLicenseUsageHandler = async (
   input: LiveLicenseUsageInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveLicenseUsageOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
@@ -1446,6 +1695,14 @@ export const liveConsentInputSchema = z.object({
   grant: z.boolean().optional(),
   /** Revoke standing consent for the org. */
   revoke: z.boolean().optional(),
+  /**
+   * Scopes to authorize on grant / step-up (AUDIT-F3). Default `['aggregate']`.
+   * Use `sample` for row samples; `users` for inactive-user / permset-holder /
+   * owner / share tools. Re-granting merges scopes into the existing grant.
+   */
+  scopes: z.array(z.enum(['aggregate', 'sample', 'users', 'audit'])).optional(),
+  /** Hours until the grant expires (default 168 = 7 days). */
+  expiresInHours: z.number().int().positive().max(24 * 90).optional(),
 });
 
 export type LiveConsentInput = z.infer<typeof liveConsentInputSchema>;
@@ -1458,6 +1715,8 @@ export interface LiveConsentOutput {
   readonly consentedOrgs: readonly string[];
   /** Whether SFI_LIVE_PLANE_ENABLED would also enable live regardless of consent. */
   readonly envEnabled: boolean;
+  /** Active grant disclosure when consented (AUDIT-F3). */
+  readonly grant: LiveGrantDisclosure | null;
   readonly note: string;
   readonly trust: TrustSummary;
 }
@@ -1468,13 +1727,14 @@ const consentTrust = (): TrustSummary => ({
   freshness: {},
   completeness: { status: 'complete' },
   limitations: [
-    'Consent is a local, user-level preference; it never reads or writes the Salesforce org.',
+    'Consent is a local, user-level preference. Granting binds OrgId+principal via a read-only `sf org display` and never mutates Salesforce records.',
   ],
 });
 
 export const liveConsentHandler = async (
   ctx: Context,
   input: LiveConsentInput,
+  exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveConsentOutput>, McpError>> => {
   const org = resolveOrg(ctx, input.orgAlias);
 
@@ -1487,8 +1747,39 @@ export const liveConsentHandler = async (
 
   let action: 'granted' | 'revoked' | 'status' = 'status';
   if (input.grant === true) {
-    const granted = await grantLiveConsent(org);
-    if (!granted.ok) return err({ kind: 'internal', message: granted.error.message });
+    // Bind OrgId + principal from the authenticated CLI org (AUDIT-F3).
+    // Elevate network for the one-shot `sf org display` under MCP's default off.
+    const auth = await withNetworkMode('salesforce-read', () =>
+      getAuthFromSfCli(org, exec),
+    );
+    if (!auth.ok) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          `Cannot bind live consent for '${org}': ${auth.error.message}. ` +
+          `Authenticate the org with \`sf org login\` and retry.`,
+      });
+    }
+    if (auth.value.orgId === null || auth.value.username === null) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          `Cannot bind live consent for '${org}': sf org display did not return ` +
+          `org id and username. Re-authenticate the org and retry.`,
+      });
+    }
+    const scopes = (input.scopes ?? ['aggregate']) as LiveScope[];
+    const granted = await grantLiveConsent(org, {
+      orgId: auth.value.orgId,
+      principalUsername: auth.value.username,
+      scopes,
+      ...(input.expiresInHours !== undefined
+        ? { expiresInHours: input.expiresInHours }
+        : {}),
+    });
+    if (!granted.ok) {
+      return err({ kind: 'internal', message: granted.error.message });
+    }
     action = 'granted';
   } else if (input.revoke === true) {
     const revoked = await revokeLiveConsent(org);
@@ -1496,22 +1787,37 @@ export const liveConsentHandler = async (
     action = 'revoked';
   }
 
-  const consented = await hasLiveConsent(org);
+  const stored = await getLiveGrant(org);
+  const consented = stored !== null;
   const consentedOrgs = await listConsentedOrgs();
   const envEnabled = isLivePlaneEnabled();
+  const grant = describeLiveGrant(stored, 'consent');
   const note =
     action === 'granted'
-      ? `Live plane enabled for '${org}'. Future sessions can run sfi.live_* against it without re-asking. Still strictly read-only; revoke any time with sfi.live_consent { revoke: true }.`
+      ? `Live plane grant recorded for '${org}'` +
+        (grant !== null
+          ? ` (orgId=${grant.orgId ?? '?'}; principal=${grant.principalUsername ?? '?'}; scopes=${grant.scopes.join(',')}; expires=${grant.expiresAt})`
+          : '') +
+        `. Still strictly read-only; revoke with sfi.live_consent { revoke: true }. Step up sample/users with scopes: ["sample"] / ["users"].`
       : action === 'revoked'
         ? `Live plane consent removed for '${org}'. sfi.live_* fail-closed for it until re-granted.`
-        : consented
-          ? `Live plane is enabled for '${org}' (one-time consent on file).`
+        : consented && grant !== null
+          ? `Live plane grant on file for '${org}' (scopes=${grant.scopes.join(',')}; expires=${grant.expiresAt}).`
           : envEnabled
             ? `Live plane is enabled globally via SFI_LIVE_PLANE_ENABLED; no per-org consent on file for '${org}'.`
-            : `Live plane is NOT enabled for '${org}'. To allow read-only live queries, grant one-time consent with sfi.live_consent { grant: true } — it persists and never mutates the org.`;
+            : `Live plane is NOT enabled for '${org}'. Grant with sfi.live_consent { grant: true } (binds OrgId+principal; default scope aggregate, 7-day expiry). Per-call liveEnabled: true is not a consent substitute.`;
 
   return ok({
-    data: { org, consented, action, consentedOrgs, envEnabled, note, trust: consentTrust() },
+    data: {
+      org,
+      consented,
+      action,
+      consentedOrgs,
+      envEnabled,
+      grant,
+      note,
+      trust: consentTrust(),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,
@@ -1666,7 +1972,7 @@ export const liveGroupCountHandler = async (
   input: LiveGroupCountInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveGroupCountOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
@@ -1777,7 +2083,7 @@ export const liveStaleRecordsHandler = async (
   input: LiveStaleRecordsInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveStaleRecordsOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
@@ -1881,7 +2187,7 @@ export const liveRecentActivityHandler = async (
   input: LiveRecentActivityInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveRecentActivityOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
@@ -2002,7 +2308,7 @@ export const liveAggregateHandler = async (
   input: LiveAggregateInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveAggregateOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
@@ -2099,7 +2405,7 @@ export const liveDuplicateCheckHandler = async (
   input: LiveDuplicateCheckInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveDuplicateCheckOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
@@ -2191,7 +2497,7 @@ export const liveOwnerBreakdownHandler = async (
   input: LiveOwnerBreakdownInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveOwnerBreakdownOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
@@ -2359,7 +2665,7 @@ export const liveReportUsageHandler = async (
   input: LiveReportUsageInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveReportUsageOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -2525,7 +2831,7 @@ export const liveFolderAccessHandler = async (
   input: LiveFolderAccessInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveFolderAccessOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -2687,7 +2993,7 @@ export const liveEmailTemplateUsageHandler = async (
   input: LiveEmailTemplateUsageInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveEmailTemplateUsageOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -2820,7 +3126,7 @@ export const liveOrgHealthHandler = async (
   input: LiveOrgHealthInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveOrgHealthOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -2937,7 +3243,7 @@ export const liveStorageByObjectHandler = async (
   input: LiveStorageByObjectInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveStorageByObjectOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -3013,7 +3319,7 @@ export const liveDataSkewHandler = async (
   input: LiveDataSkewInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveDataSkewOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
@@ -3103,7 +3409,7 @@ export const liveSetupAuditTrailHandler = async (
   input: LiveSetupAuditTrailInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveSetupAuditTrailOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const days = input.days ?? DEFAULT_AUDIT_DAYS;
@@ -3186,7 +3492,7 @@ export const liveSecurityExposureHandler = async (
   input: LiveSecurityExposureInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveSecurityExposureOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -3528,7 +3834,7 @@ export const livePermsetHoldersHandler = async (
   input: LivePermsetHoldersInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LivePermsetHoldersOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -3942,7 +4248,7 @@ export const liveZombieAccountsHandler = async (
   input: LiveZombieAccountsInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveZombieAccountsOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -4329,7 +4635,7 @@ export const liveGroupMembersHandler = async (
   input: LiveGroupMembersInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveGroupMembersOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -4730,7 +5036,7 @@ export const liveUserPermsetsHandler = async (
   input: LiveUserPermsetsInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveUserPermsetsOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -5002,7 +5308,7 @@ export const liveRecordAccessHandler = async (
   input: LiveRecordAccessInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveRecordAccessOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const recordCheck = assertRecordId(input.recordId, 'recordId');
@@ -5181,7 +5487,7 @@ export const liveRecordSharesHandler = async (
   input: LiveRecordSharesInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveRecordSharesOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const recordCheck = assertRecordId(input.recordId, 'recordId');
@@ -5421,7 +5727,7 @@ export const liveScheduledJobsHandler = async (
   input: LiveScheduledJobsInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveScheduledJobsOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const queriedAt = new Date().toISOString();
@@ -5717,7 +6023,7 @@ export const liveFieldHistoryHandler = async (
   input: LiveFieldHistoryInput,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<McpResponse<LiveFieldHistoryOutput>, McpError>> => {
-  const gate = await gateLive(ctx, input);
+  const gate = await gateLive(ctx, input, exec);
   if (!gate.ok) return gate;
   const org = gate.value;
   const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');

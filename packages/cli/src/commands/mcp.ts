@@ -300,10 +300,9 @@ export const registerMcpCommand = (program: Command): void => {
       // One-time "update available" nudge on stderr (stdout is reserved for
       // JSON-RPC). Fire-and-forget: do NOT await — a cache miss triggers a
       // ~3s registry GET that would otherwise delay `startServer` and make the
-      // server appear unresponsive to the MCP client. The result arrives
-      // whenever the network responds; the server is already serving by then.
-      // Fail-silent end-to-end (cached ~24h, opt-out via SFI_NO_UPDATE_CHECK=1,
-      // auto-off in CI — see `checkForUpdate`).
+      // server appear unresponsive to the MCP client. AUDIT-F2: opt-IN — no
+      // network unless SFI_UPDATE_CHECK=1 or SFI_NETWORK_MODE=updates-only
+      // (default networkMode=off). Still force-off via SFI_NO_UPDATE_CHECK=1 / CI.
       void checkForUpdate(readCliPackageVersion()).then(
         (result) => {
           const notice = formatUpdateNotice(result);

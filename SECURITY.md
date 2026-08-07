@@ -8,7 +8,10 @@
 | Pre-0.1 / maintainer-only snapshots | No |
 
 Security fixes land on the latest release tag. Pin your install to a tagged
-version in production workflows.
+version in production workflows — see
+[`docs/guides/supply-chain.md`](./docs/guides/supply-chain.md) for exact
+`npx` / `package.json` pin examples, npm provenance verification, the
+published tarball allowlist (`pnpm pack:check`), and SBOM generation.
 
 ## Reporting a vulnerability
 
@@ -48,9 +51,10 @@ SfIntelligence is **local-first**:
 
 - **Vault tools** never call Salesforce during a conversation.
 - **Live tools** (`sfi.live_*`) are **opt-in and fail-closed**. They run
-  read-only Salesforce CLI queries only when enabled via standing consent
-  (`sfi.live_consent`), `SFI_LIVE_PLANE_ENABLED=1`, or a per-call
-  `liveEnabled: true` flag.
+  read-only Salesforce CLI queries only when enabled via a standing grant
+  (`sfi.live_consent`, OrgId- and principal-bound, scoped, expiring) or the
+  operator override `SFI_LIVE_PLANE_ENABLED=1`. A per-call `liveEnabled: true`
+  is **not** a consent path and never opens the live plane by itself.
 - The product has **no write path** to Salesforce metadata or records.
 - MCP tool arguments are **not** written to the audit log — only tool names,
   argument *keys*, and vault hash (`SF_INTELLIGENCE_AUDIT_LOG`).
@@ -60,6 +64,27 @@ SfIntelligence is **local-first**:
 See [`docs/configuration.md`](./docs/configuration.md) for environment
 variables and [`docs/architecture.md`](./docs/architecture.md) for the full
 trust boundary.
+
+## Supply chain
+
+- **Pin** production installs to `sf-intelligence@X.Y.Z` (see
+  [`docs/guides/supply-chain.md`](./docs/guides/supply-chain.md)).
+- **Publish** uses GitHub Actions OIDC + `npm publish --provenance` (no
+  long-lived npm token in the workflow). Consumers can run
+  `npm audit signatures` after install.
+- **Tarball allowlist** is `packages/cli/package.json#files`, enforced by
+  `pnpm pack:check` / `scripts/check-pack-allowlist.mjs` (also in
+  `prepublishOnly`).
+- **SBOM** (CycloneDX 1.5) is generated with `@cyclonedx/cdxgen`
+  (`pnpm sbom` / `scripts/generate-sbom.mjs`) and attached to the GitHub
+  Release on tag publish. Scope is the **transitive runtime closure of the
+  published package** — the 7 direct runtime dependencies and everything they
+  pull in (~137 components with a populated dependency graph), resolved from
+  `pnpm-lock.yaml`. devDependencies are deliberately excluded; they are not
+  installed by consumers. The artifact self-documents this in
+  `metadata.properties`. The publish job fails closed if the SBOM is missing,
+  empty, has too few components, or has an empty dependency graph. It is not
+  shipped inside the npm tarball.
 
 ## Dependency advisories
 

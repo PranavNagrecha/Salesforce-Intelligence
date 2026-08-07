@@ -23,6 +23,7 @@ import type { Context } from '../../src/server.js';
 import { blastRadiusLiveHandler } from '../../src/tools/blast-radius-live.js';
 import { STALE_CHECK_TYPES } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -109,13 +110,15 @@ afterAll(async () => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   resetLiveSession();
   consentDir = mkdtempSync(join(tmpdir(), 'sfi-blast-consent-'));
   process.env.SFI_CONSENT_PATH = join(consentDir, 'consent.json');
   delete process.env.SFI_LIVE_PLANE_ENABLED;
   delete process.env.SFI_LIVE_QUERY_BUDGET;
   delete process.env.SFI_BLAST_RADIUS_MAX_LIVE;
+  // AUDIT-F3: liveEnabled is not consent — seed a full-scope test grant.
+  await grantTestLiveAccess('me@example.com');
 });
 
 afterEach(() => {
@@ -128,6 +131,8 @@ const ROOT = 'CustomField:Account.Industry__c';
 
 describe('blastRadiusLiveHandler (P6-blast-radius-live)', () => {
   it('without consent returns the static impact with a caveat — never blocked on live', async () => {
+    const { revokeLiveConsent } = await import('../../src/live-consent.js');
+    await revokeLiveConsent('me@example.com');
     const { exec, soqls } = makeExec();
     const r = await blastRadiusLiveHandler(ctx, { componentId: ROOT, hops: 1 }, exec);
     expect(r.ok).toBe(true);

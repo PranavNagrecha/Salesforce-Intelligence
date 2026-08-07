@@ -14,9 +14,11 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
+import { revokeLiveConsent } from '../../src/live-consent.js';
 import type { Context } from '../../src/server.js';
 import { fieldChangeAdvisorHandler } from '../../src/tools/field-change-advisor.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -82,11 +84,23 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => resetLiveSession());
-afterEach(() => resetLiveSession());
+let consentDir: string;
+beforeEach(async () => {
+  resetLiveSession();
+  consentDir = mkdtempSync(join(tmpdir(), 'sfi-advisor-consent-'));
+  process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
+  delete process.env.SFI_LIVE_PLANE_ENABLED;
+  await grantTestLiveAccess('test');
+});
+afterEach(() => {
+  resetLiveSession();
+  delete process.env.SFI_CONSENT_PATH;
+  rmSync(consentDir, { recursive: true, force: true });
+});
 
 describe('fieldChangeAdvisorHandler — live wiring (P6-live-advisor-wire)', () => {
   it('offline: no live null-rate, recommendations cite only the vault', async () => {
+    await revokeLiveConsent('test');
     const r = await fieldChangeAdvisorHandler(ctx, { fieldId: FIELD }, liveExec);
     expect(r.ok).toBe(true);
     if (!r.ok) return;

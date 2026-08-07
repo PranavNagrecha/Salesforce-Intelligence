@@ -145,6 +145,7 @@ import type {
   ComponentId,
   ComponentType,
   Edge,
+  EvidenceEnvelopeV2,
   McpError,
   McpResponse,
   Node,
@@ -158,6 +159,7 @@ import {
   type PiiCategory,
 } from '@sf-intelligence/patterns';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
+import { buildMixedFreshness } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { mdTable } from '../answer-render.js';
@@ -169,6 +171,7 @@ import {
   buildUsageSourceCoverageCaveat,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import { buildSafeToDeleteEvidenceEnvelope } from './evidence-envelope.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { hybridTrust } from './hybrid-trust.js';
@@ -430,8 +433,9 @@ export interface SafeToDeleteFieldOutput {
   readonly flsGrantCount?: number;
   /**
    * CR-CAP-L5: live production population evidence, present ONLY when the
-   * static verdict was `safe` AND the live plane answered (consent granted
-   * or `liveEnabled: true`). A `populatedCount > 0` DOWNGRADES `verdict` from
+   * static verdict was `safe` AND the live plane answered (a standing grant
+   * covers the org, or `SFI_LIVE_PLANE_ENABLED=1`; per-call `liveEnabled` is
+   * intent only). A `populatedCount > 0` DOWNGRADES `verdict` from
    * `safe` to `review` — real data despite zero static references is a
    * signal, not proof of a bug, but "no references found" should not read as
    * "safe to delete" when the field is actively populated. Absence of this
@@ -448,7 +452,22 @@ export interface SafeToDeleteFieldOutput {
    * would break, not just a boolean.
    */
   readonly reportUsage?: ReportDashboardUsageDetail;
+  /**
+   * AUDIT-F4 — shared EvidenceEnvelope v2 projection of verdict / reasoning /
+   * coverage / trust. Additive; legacy keys remain the primary surface.
+   */
+  readonly evidenceEnvelope: EvidenceEnvelopeV2;
 }
+
+/** Core handler payload before the public wrapper stamps `evidenceEnvelope`. */
+type SafeToDeleteFieldCoreData = Omit<SafeToDeleteFieldOutput, 'evidenceEnvelope'>;
+
+const withEvidenceEnvelope = (
+  data: SafeToDeleteFieldCoreData,
+): SafeToDeleteFieldOutput => ({
+  ...data,
+  evidenceEnvelope: buildSafeToDeleteEvidenceEnvelope(data),
+});
 
 /**
  * GROUP-A PII-safety: a heuristic PII/sensitive compliance escalation for a
@@ -904,7 +923,7 @@ const coreSafeToDeleteFieldHandler = async (
   ctx: Context,
   rawInput: SafeToDeleteFieldInput,
   exec?: ExecCommand,
-): Promise<Result<McpResponse<SafeToDeleteFieldOutput>, McpError>> => {
+): Promise<Result<McpResponse<SafeToDeleteFieldCoreData>, McpError>> => {
   // L2 Alias OS: accept the `componentId` alias for `fieldId`. Disagreeing
   // values -> invalid-query (never a silent pick). Normalize into `fieldId`.
   const fieldAlias = resolveFieldAlias(rawInput);
@@ -915,7 +934,7 @@ const coreSafeToDeleteFieldHandler = async (
   if (!suggestionResult.ok) return suggestionResult;
   if (suggestionResult.value !== null) {
     return ok(
-      suggestionResult.value as unknown as McpResponse<SafeToDeleteFieldOutput>,
+      suggestionResult.value as unknown as McpResponse<SafeToDeleteFieldCoreData>,
     );
   }
 
@@ -1302,19 +1321,35 @@ const coreSafeToDeleteFieldHandler = async (
     }
   }
 
+  const familyFreshness = buildMixedFreshness(ctx.manifest);
   const trust =
     liveQueriedAt !== undefined
-      ? hybridTrust({
-          vaultRefreshedAt: ctx.manifest.refreshedAt,
-          liveQueriedAt,
-          vaultConfidence: baseConfidence,
-          completeness: baseCompleteness,
-          limitations: baseLimitations,
-        })
+      ? {
+          ...hybridTrust({
+            vaultRefreshedAt: ctx.manifest.refreshedAt,
+            liveQueriedAt,
+            vaultConfidence: baseConfidence,
+            completeness: baseCompleteness,
+            limitations: baseLimitations,
+          }),
+          freshness: {
+            snapshotRefreshedAt: ctx.manifest.refreshedAt,
+            liveQueriedAt,
+            ...(familyFreshness.overall !== undefined
+              ? { overall: familyFreshness.overall }
+              : {}),
+            ...(familyFreshness.families !== undefined
+              ? { families: familyFreshness.families }
+              : {}),
+            ...(familyFreshness.oldestEvidenceAt !== undefined
+              ? { oldestEvidenceAt: familyFreshness.oldestEvidenceAt }
+              : {}),
+          },
+        }
       : {
           provenance: 'offline_snapshot' as const,
           confidence: baseConfidence,
-          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+          freshness: familyFreshness,
           completeness: baseCompleteness,
           limitations: baseLimitations,
         };
@@ -1358,26 +1393,28 @@ export const safeToDeleteFieldHandler = async (
 ): Promise<Result<McpResponse<SafeToDeleteFieldOutput>, McpError>> => {
   const result = await coreSafeToDeleteFieldHandler(ctx, input, exec);
   if (!result.ok) return result;
+  // FLD-02: object→field routing returns a suggestion payload (no verdict) —
+  // leave it untouched; EvidenceEnvelope applies only to delete verdicts.
+  const raw = result.value.data as SafeToDeleteFieldCoreData | Record<string, unknown>;
+  if (
+    !('verdict' in raw) ||
+    !('reasoning' in raw) ||
+    !('trust' in raw) ||
+    !('fieldId' in raw)
+  ) {
+    return ok(result.value as McpResponse<SafeToDeleteFieldOutput>);
+  }
+  let data = withEvidenceEnvelope(raw as SafeToDeleteFieldCoreData);
   if (input.format === 'checklist') {
-    return ok({
-      ...result.value,
-      data: {
-        ...result.value.data,
-        checklist: renderDeleteChecklist(result.value.data),
-      },
-    });
+    data = { ...data, checklist: renderDeleteChecklist(data) };
+  } else if (input.format === 'proposal') {
+    data = {
+      ...data,
+      proposal: buildSafeToDeleteFieldProposal(data, result.value.vaultState),
+    };
   }
-  if (input.format === 'proposal') {
-    return ok({
-      ...result.value,
-      data: {
-        ...result.value.data,
-        proposal: buildSafeToDeleteFieldProposal(
-          result.value.data,
-          result.value.vaultState,
-        ),
-      },
-    });
-  }
-  return result;
+  return ok({
+    ...result.value,
+    data,
+  });
 };

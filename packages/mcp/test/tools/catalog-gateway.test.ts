@@ -65,7 +65,7 @@ describe('sfi.list_analyses', () => {
     const r = await listAnalysesHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.total).toBe(V01_TOOLS.length);
+    expect(r.value.data.total).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
     expect(r.value.data.analyses.length).toBeLessThanOrEqual(50); // default page
     for (const a of r.value.data.analyses.slice(0, 5)) {
       expect(a.name).toMatch(/^sfi\./);
@@ -113,8 +113,8 @@ describe('sfi.list_analyses', () => {
         cursor = d.nextCursor;
         if (++guard > 1000) throw new Error('cursor did not terminate');
       }
-      // Every roster tool surfaced exactly once across the pages.
-      expect(seen.size).toBe(V01_TOOLS.length);
+      // Every advertised (non-hidden) roster tool surfaced exactly once.
+      expect(seen.size).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
     });
 
     it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
@@ -151,12 +151,35 @@ describe('sfi.list_analyses', () => {
 });
 
 describe('sfi.describe_analysis', () => {
-  it('returns one schema on demand, with or without the sfi. prefix', async () => {
+  const prevProfile = process.env['SFI_TOOL_PROFILE'];
+  afterEach(() => {
+    if (prevProfile === undefined) delete process.env['SFI_TOOL_PROFILE'];
+    else process.env['SFI_TOOL_PROFILE'] = prevProfile;
+  });
+
+  it('defaults to summary under core (progressive discovery)', async () => {
+    process.env['SFI_TOOL_PROFILE'] = 'core';
     const r = await describeAnalysisHandler(ctx, { name: 'org_card' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.name).toBe('sfi.org_card');
+    expect(r.value.data.detail).toBe('summary');
+    expect(r.value.data.summary.length).toBeGreaterThan(0);
+    expect(r.value.data.inputSchema).toBeUndefined();
+    expect(r.value.data.description).toBeUndefined();
+  });
+
+  it('returns full schema when detail=full (with or without sfi. prefix)', async () => {
+    const r = await describeAnalysisHandler(ctx, {
+      name: 'org_card',
+      detail: 'full',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.name).toBe('sfi.org_card');
+    expect(r.value.data.detail).toBe('full');
     expect(r.value.data.inputSchema).toBeDefined();
+    expect(r.value.data.description).toBeDefined();
   });
 
   it('answers an unknown name with an honest catalog pointer', async () => {

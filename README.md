@@ -360,9 +360,9 @@ answer carries a known-coverage caveat instead of a silent blind spot.
 
 | | |
 | --- | --- |
-| **MCP roster** | Every `sfi.*` tool is registered in code; run `sfi.capabilities` for the live count and workflow map |
-| **Graph model** | A broad `ComponentType` union across **102** component types (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by **23** typed edge types — see `sfi.capabilities` for how tools group those families |
-| **Concept Model** | **142** org-independent, curated reasoning concepts and **193** rules that JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret` — no org data lives in the model |
+| **MCP roster** | Every `sfi.*` tool is registered in code; run `sfi.capabilities` (see `productManifest`) for the live registered/advertised counts — never a handwritten number |
+| **Graph model** | A broad `ComponentType` union across **101** component types (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by **23** typed edge types — see `sfi.capabilities` for how tools group those families. Counts are pinned by `eval/product-manifest.json`. |
+| **Concept Model** | Concept Model (142 concepts / 193 rules) — org-independent, curated — JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret`. No org data lives in the model. Same figures in `eval/product-manifest.json`. |
 | **26** | skills + **5** slash commands + **2** subagents (Claude Code plugin layer) that auto-activate in a session |
 
 ## What it does NOT do
@@ -373,12 +373,14 @@ rather than papering over the gap with general Salesforce knowledge:
 - **Offline by default.** Vault tools never call Salesforce mid-conversation.
   Run `/sfi-refresh` to update metadata. **Opt-in live tools** (`sfi.live_*`)
   run read-only SOQL with strict caps and label answers `provenance: live_org`.
-  The live plane is **off until you enable it once per org** — grant standing
-  consent with `sfi.live_consent { grant: true }` (read-only, persists), or set
-  `SFI_LIVE_PLANE_ENABLED=1`, or pass `liveEnabled: true` for a single call.
-  **Hybrid** answers fuse vault + live and disclose both provenances. Live never
-  backfills stale vault claims, and the product never auto-picks which org to
-  query.
+  The live plane is **off until you grant once per org** with
+  `sfi.live_consent { grant: true }` (binds OrgId+principal, scopes+expiry;
+  persists locally) or set `SFI_LIVE_PLANE_ENABLED=1`. Per-call
+  `liveEnabled: true` is intent only — not a consent substitute. Step up
+  `sample` / `users` scopes for row samples and user-identity tools.
+  **Hybrid** answers fuse vault + live and disclose both provenances plus the
+  active grant. Live never backfills stale vault claims, and the product never
+  auto-picks which org to query.
 - **No record-level data.** The vault stores schema and source, not rows. "How
   many Opportunities closed last quarter" is a question for your org directly.
 - **Static analysis, not runtime.** Dependency edges are derived from metadata
@@ -486,16 +488,12 @@ for the live tool map.
 
 ### Optional: full roster vs compact core
 
-Every `sfi.*` tool schema is advertised by default — most MCP hosts pay a real
-token tax for that (~250 KB of `tools/list` JSON) if they don't defer tool
-definitions. Set `SFI_TOOL_PROFILE=core` on the server process to advertise
-only an **18-tool core roster** instead (orientation, resolve/route, the
-universal graph reads, and a catalog gateway — `list_analyses` /
-`describe_analysis` / `run_analysis` — that reaches every other tool with
-byte-identical output). Dispatch is never narrowed — a non-advertised tool
-still works if called directly; only what's *advertised* at boot changes. Add
-`"env": { "SFI_TOOL_PROFILE": "core" }` alongside `"command"` in the config
-block above. Default stays `full` — this is purely opt-in. See
+**Default is the 19-tool core roster** (AUDIT-F6; includes `sfi.live_consent`)
+so MCP hosts don't pay a ~250 KB `tools/list` tax. Non-core tools stay
+reachable via `sfi.run_analysis` (byte-identical) and are not directly
+invokable under core. Set `SFI_TOOL_PROFILE=full` (or add
+`"env": { "SFI_TOOL_PROFILE": "full" }` in the config block above) to advertise
+and directly invoke the entire roster. See
 [docs/configuration.md](./docs/configuration.md) for the full reference.
 
 ### Install as a Claude Code plugin
@@ -619,9 +617,13 @@ never an error.
 ## Privacy
 
 Everything stays on your machine. The vault (`org-kb/`) is local; the MCP server
-makes no network calls while answering. This public repository ships **zero org
-data** — a release privacy guard scans the shipping set on every release and
-fails the build if a real org identifier leaks. What you vault is yours.
+defaults to `SFI_NETWORK_MODE=off` and makes no network calls while answering
+vault questions. Optional egress is explicit: npm update-check only when
+`SFI_UPDATE_CHECK=1` (or `updates-only` mode); Salesforce retrieve/live only
+when refresh or an authorized live tool elevates to `salesforce-read`. This
+public repository ships **zero org data** — a release privacy guard scans the
+shipping set on every release and fails the build if a real org identifier
+leaks. What you vault is yours.
 
 ## Roadmap
 

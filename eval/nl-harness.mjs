@@ -13,10 +13,37 @@
 // No org identifiers or machine paths are committed here; a real run always sets
 // STRESS_VAULTS / NL_VAULTS.
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 
 import { buildContext, shutdown } from '../packages/mcp/dist/src/server.js';
 import { dispatchTool, V01_TOOLS } from '../packages/mcp/dist/src/tools/index.js';
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const productManifestIdentity = () => {
+  try {
+    const m = JSON.parse(
+      readFileSync(join(repoRoot, 'eval/product-manifest.json'), 'utf8'),
+    );
+    return {
+      identityHash: m.identityHash ?? null,
+      catalogHash: m.catalogHash ?? null,
+      toolCount: m.tools?.total ?? V01_TOOLS.length,
+      conceptCount: m.conceptModel?.concepts ?? null,
+      conceptRuleCount: m.conceptModel?.rules ?? null,
+    };
+  } catch {
+    return {
+      identityHash: null,
+      catalogHash: null,
+      toolCount: V01_TOOLS.length,
+      conceptCount: null,
+      conceptRuleCount: null,
+    };
+  }
+};
 
 // The battery — the owner's catalog + the reference questions. Each must route
 // the same way on every org and never BUG.
@@ -232,6 +259,15 @@ const main = async () => {
       const realTools = a.tools.every((t) => registered.has(t));
       if (!deterministic || !realTools) { bad++; console.log(`✗ ${q} -> ${a.intent}/${a.plane} [${a.tools.join(', ')}]`); }
     }
+    const manifest = productManifestIdentity();
+    console.log(
+      `product-manifest: tools=${manifest.toolCount}` +
+        (manifest.conceptCount != null
+          ? ` concepts=${manifest.conceptCount}/${manifest.conceptRuleCount}`
+          : '') +
+        (manifest.identityHash ? ` identity=${manifest.identityHash}` : '') +
+        (manifest.catalogHash ? ` catalog=${manifest.catalogHash}` : ''),
+    );
     console.log(`routing-only gate: ${QUESTIONS.length} questions · ${allRoutableTools().length} routable tools`);
     console.log(`dead router targets: ${dead.length}${dead.length ? ` (${dead.join(', ')})` : ''}`);
     console.log(`bad routes: ${bad}  ${bad === 0 && dead.length === 0 ? '✅' : '❌'}`);
@@ -273,7 +309,12 @@ const main = async () => {
     console.log(`• ${q}\n    → ${r0.plane}/${r0.intent} via ${r0.tool}${r0.gap ? ` [gap:${r0.gap}]` : ''}${flag}\n    ${outcomesByVault}`);
   }
 
+  const manifest = productManifestIdentity();
   console.log('\n==== SUMMARY ====');
+  console.log(
+    `product-manifest: tools=${manifest.toolCount}` +
+      (manifest.identityHash ? ` identity=${manifest.identityHash}` : ''),
+  );
   console.log(`questions: ${QUESTIONS.length} | vaults: ${results.length} | LIVE=${LIVE}`);
   console.log(`routing consistent across vaults: ${QUESTIONS.length - routingInconsistent}/${QUESTIONS.length}`);
   console.log(`returned data on every vault: ${dataBoth}/${QUESTIONS.length}`);

@@ -25,6 +25,7 @@ import {
   liveSampleHandler,
 } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
+import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -96,11 +97,13 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   resetLiveSession();
   consentDir = mkdtempSync(join(tmpdir(), 'sfi-pmm-consent-'));
   process.env.SFI_CONSENT_PATH = join(consentDir, 'c.json');
   delete process.env.SFI_LIVE_PLANE_ENABLED;
+  // AUDIT-F3: liveEnabled is not consent — seed a full-scope test grant.
+  await grantTestLiveAccess('test');
 });
 
 afterEach(() => {

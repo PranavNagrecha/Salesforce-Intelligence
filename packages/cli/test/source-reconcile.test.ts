@@ -6,7 +6,11 @@ import { dirname, join } from 'node:path';
 
 import type { ComponentType } from '@sf-intelligence/contracts';
 import { closeGraph, openGraph } from '@sf-intelligence/graph';
-import { vaultPaths } from '@sf-intelligence/vault';
+import {
+  appendTombstones,
+  readTombstones,
+  vaultPaths,
+} from '@sf-intelligence/vault';
 
 import { runRefresh } from '../src/commands/refresh.js';
 import {
@@ -81,6 +85,13 @@ describe('reconcileSourceDeletions', () => {
       await expect(
         access(join(sourceDir, 'main/default/classes/Gone.cls-meta.xml')),
       ).rejects.toThrow();
+      // AUDIT-F5: confirmed deletions get tombstones (refresh wires the same call).
+      expect(result.refused).toBe(false);
+      await appendTombstones(cwd, result.deletedPaths, {
+        deletedAt: '2026-08-07T12:00:00.000Z',
+      });
+      const tombs = await readTombstones(cwd);
+      expect(tombs.some((t) => t.componentPath.includes('Gone.cls'))).toBe(true);
       await syncAuthoritativeRetrieveIntoSource(sourceDir, authoritativeDir);
       await expect(
         writeFile(join(sourceDir, 'main/default/classes/Keep.cls'), 'public class Keep {}', 'utf8'),
@@ -260,8 +271,11 @@ describe('reconcileSourceDeletions safety rail', () => {
 
       expect(result.refused).toBe(true);
       expect(result.deletedCount).toBe(0);
+      expect(result.deletedPaths).toEqual([]);
       expect(result.consideredCount).toBe(30);
       expect(result.refusalReason).toMatch(/layout mismatch/i);
+      // AUDIT-F5: refuse must not invent tombstones (stale kept ≠ deleted).
+      expect(await readTombstones(cwd)).toEqual([]);
       for (let i = 0; i < 30; i += 1) {
         await expect(access(join(sourceDir, 'classes', `Foo_${i}.cls`))).resolves.toBeUndefined();
       }

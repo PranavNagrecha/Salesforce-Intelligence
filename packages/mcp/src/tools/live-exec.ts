@@ -8,7 +8,7 @@
  * handlers — and `live-plane.ts` can in turn import the budgeted seam from
  * `live-session.ts` without forming an import cycle.
  *
- *   live-exec.ts (leaf, no live imports)
+ *   live-exec.ts (leaf; may import live-consent + live-grant-context only)
  *        ▲                    ▲
  *        │                    │
  *   live-session.ts ◀─────────┤   (imports runSfJson/restGet from the leaf)
@@ -23,14 +23,24 @@
  */
 
 import type { McpError } from '@sf-intelligence/contracts';
-import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
+import {
+  assertNetworkAllowed,
+  err,
+  execHelper,
+  ok,
+  withNetworkMode,
+  type Result,
+} from '@sf-intelligence/core';
 import {
   getAuthFromSfCli,
   type ExecCommand,
   type ToolingApiAuth,
 } from '@sf-intelligence/tooling-api';
 
+import { orgIdsMatch } from '../live-consent.js';
+
 import { formatSfCliFailure } from './input-aliases.js';
+import { getActiveLiveGrant } from './live-grant-context.js';
 
 /**
  * The production `sf` exec for this leaf: the shared cross-platform
@@ -61,13 +71,16 @@ export const redactSecrets = (message: string): string =>
     .replace(/\b00D[A-Za-z0-9]{12,}![A-Za-z0-9._~+/=-]{20,}\b/g, '[REDACTED_TOKEN]');
 
 export const LIVE_PLANE_DISCLOSURE =
-  'Live org data is read-only, queried at call time via the Salesforce CLI. It does not update the vault. Enable with SFI_LIVE_PLANE_ENABLED=1 or pass liveEnabled: true.';
+  'Live org data is read-only, queried at call time via the Salesforce CLI. It does not update the vault. Enable with sfi.live_consent { grant: true } (persisted, OrgId+principal-bound grant with scopes/expiry) or SFI_LIVE_PLANE_ENABLED=1. Per-call liveEnabled: true is intent only — it is not a consent substitute.';
 
 export const getLiveAuth = async (
   org: string,
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<ToolingApiAuth, McpError>> => {
-  const authResult = await getAuthFromSfCli(org, exec);
+  // Elevate for auth resolve (MCP default networkMode is `off`).
+  const authResult = await withNetworkMode('salesforce-read', () =>
+    getAuthFromSfCli(org, exec),
+  );
   if (!authResult.ok) {
     return err({
       kind: 'internal',
@@ -78,6 +91,25 @@ export const getLiveAuth = async (
       ),
     });
   }
+  // Use-time OrgId binding: refuse REST/auth even if an earlier gate skipped
+  // verify (or an env bypass stamped a stored OrgId). Consent grants only.
+  if (process.env['SFI_LIVE_SKIP_IDENTITY_VERIFY'] !== '1') {
+    const grant = getActiveLiveGrant();
+    if (
+      grant !== null &&
+      grant.source === 'consent' &&
+      grant.orgId !== null &&
+      !orgIdsMatch(grant.orgId, authResult.value.orgId)
+    ) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          `Live org plane grant for '${org}' is bound to a different Salesforce OrgId ` +
+          `than the currently authenticated org. Revoke and re-grant with ` +
+          `sfi.live_consent { grant: true } after \`sf org login\`.`,
+      });
+    }
+  }
   return ok(authResult.value);
 };
 
@@ -86,6 +118,13 @@ export const runSfJson = async (
   args: readonly string[],
   exec: ExecCommand = nodeExecFile,
 ): Promise<Result<unknown, McpError>> => {
+  const network = assertNetworkAllowed({ purpose: 'live-query' });
+  if (!network.ok) {
+    return err({
+      kind: 'invalid-query',
+      message: network.error.message,
+    });
+  }
   const fullArgs = [...args, '--target-org', org, '--json'];
   try {
     const { stdout } = await exec('sf', fullArgs);
@@ -115,6 +154,13 @@ export const restGet = async (
   auth: ToolingApiAuth,
   path: string,
 ): Promise<Result<unknown, McpError>> => {
+  const network = assertNetworkAllowed({ purpose: 'live-query' });
+  if (!network.ok) {
+    return err({
+      kind: 'invalid-query',
+      message: network.error.message,
+    });
+  }
   try {
     const response = await fetch(path, {
       headers: { Authorization: `Bearer ${auth.accessToken}` },

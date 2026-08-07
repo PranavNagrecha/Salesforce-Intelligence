@@ -18,7 +18,7 @@ description: |
 ## Usage & discovery (§C3 contract)
 
 For "where is X used / who references X / what depends on X" — for ANY component
-type — call `sfi.find_component_usages`, or the family specialist
+type — call `sfi.run_analysis` with `{ "name": "sfi.find_component_usages", "args": { … } }`, or the family specialist
 (`find_field_anywhere` for a field, `find_code_usages` for code,
 `layout_assignments` for a layout). Route by VERB: *describe* questions (what is /
 list / what values) use describe tools, NOT usage tools. Never improvise a
@@ -261,7 +261,7 @@ confidence), most date fields in this scope use suffix X."
 Before `sfi.safe_to_delete_field`, destructive `what_if_*` tools, or
 high-stakes SAST answers (`sfi.crud_fls_audit`, `sfi.governor_limit_risks`):
 
-1. Call `sfi.coverage_report` (or read `coverage` from `sfi.health_check`) when
+1. Call `sfi.run_analysis` with `{ "name": "sfi.coverage_report", "args": { … } }` (or read `coverage` from `sfi.health_check`) when
    completeness is unknown.
 2. Run the destructive or audit tool.
 3. If the response includes `coverageCaveat`, render it **before** the verdict.

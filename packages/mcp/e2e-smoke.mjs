@@ -111,9 +111,12 @@ const newClient = (cwd, env) => {
 console.log('e2e MCP smoke\n');
 
 // === Scenario 1: WITH a vault — graph queries must return data ===
+// Pin full here: default advertise profile is core (19 tools); the dedicated
+// "# core profile" block below asserts that default. This block exercises the
+// full roster + graph-backed tools that are not in core.
 console.log('# with vault');
 const { vaultParent } = await buildVault();
-const a = newClient(vaultParent);
+const a = newClient(vaultParent, { SFI_TOOL_PROFILE: 'full' });
 try {
   await a.client.connect(a.transport);
   const tools = await a.client.listTools();
@@ -144,19 +147,32 @@ try {
 } finally {
   await a.client.close().catch(() => {});
 }
-// === Scenario 1b: core profile (P13-GW-profiles) — 18 schemas advertised,
-// full capability still reachable (dispatch is un-narrowed; the gateway
-// covers the rest). Profile is fixed at boot via SFI_TOOL_PROFILE.
+// === Scenario 1b: core profile (AUDIT-F6) — 19 schemas advertised AND
+// directly invokable; non-core tools only via sfi.run_analysis.
 console.log('\n# core profile');
 const cp = newClient(vaultParent, { SFI_TOOL_PROFILE: 'core' });
 try {
   await cp.client.connect(cp.transport);
   const coreTools = await cp.client.listTools();
-  check('core profile advertises exactly 18 schemas', coreTools.tools.length === 18, `got ${coreTools.tools.length}`);
-  const direct = await callText(cp.client, 'sfi.org_overview', {});
-  check('non-advertised tool still callable directly under core', direct.includes('"data"'), direct.slice(0, 100));
+  check('core profile advertises exactly 19 schemas', coreTools.tools.length === 19, `got ${coreTools.tools.length}`);
+  const denied = await callText(cp.client, 'sfi.org_overview', {});
+  check(
+    'non-advertised tool is NOT directly invokable under core',
+    denied.includes('not directly invokable') || denied.includes('invalid-query'),
+    denied.slice(0, 160),
+  );
   const viaGateway = await callText(cp.client, 'sfi.run_analysis', { name: 'sfi.org_overview', args: {} });
-  check('run_analysis reaches the full roster under core (byte-identical)', viaGateway === direct, viaGateway.slice(0, 100));
+  check('run_analysis reaches non-core tools under core', viaGateway.includes('"data"'), viaGateway.slice(0, 100));
+  const full = newClient(vaultParent, { SFI_TOOL_PROFILE: 'full' });
+  try {
+    await full.client.connect(full.transport);
+    const direct = await callText(full.client, 'sfi.org_overview', {});
+    check('full profile allows direct non-core calls', direct.includes('"data"'), direct.slice(0, 100));
+    const viaFullGw = await callText(full.client, 'sfi.run_analysis', { name: 'sfi.org_overview', args: {} });
+    check('run_analysis byte-identical under full', viaFullGw === direct, viaFullGw.slice(0, 100));
+  } finally {
+    await full.client.close().catch(() => {});
+  }
 } catch (e) {
   check('core-profile scenario ran', false, e.message);
 } finally {

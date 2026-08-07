@@ -407,7 +407,7 @@ const jsonld = [
   {'}'}
 {'}'}</pre>
       </div>
-      <p class="hero-demo-note" style="margin-top:8px;">Most MCP hosts pay a real token tax on <code>{toolCount}</code> tool schemas. Add <code>"env": {'{'} "SFI_TOOL_PROFILE": "core" {'}'}</code> to either block above for an 18-tool compact roster instead - full roster stays the default. <a href="/configuration">details →</a></p>
+      <p class="hero-demo-note" style="margin-top:8px;">Default is a 19-tool <code>core</code> roster (token-friendly, includes <code>sfi.live_consent</code>); every other analysis stays reachable via <code>sfi.run_analysis</code>. Set <code>"env": {'{'} "SFI_TOOL_PROFILE": "full" {'}'}</code> only if you want all <code>{toolCount}</code> schemas advertised. <a href="/configuration">details →</a></p>
 
       <h3 class="mono" style="color:var(--green-soft); margin-top:26px; font-size:.92rem;">// first run, from your Salesforce DX repo</h3>
       <div class="code-block">

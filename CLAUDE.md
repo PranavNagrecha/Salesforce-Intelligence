@@ -17,6 +17,11 @@ confidence (the weakest of the concept rule's ceiling and its grounding
 edges); keep the two axes distinct (see Capability boundary). Do not
 answer org questions without it.
 
+**Tool profile:** default is `core` (19 directly invokable tools). That spine
+includes `sfi.live_consent`. For non-core analyses — including `sfi.interpret`,
+`sfi.coverage_report`, and other `sfi.live_*` — call `sfi.run_analysis` with
+`{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`).
+
 ## Where the metadata lives
 
 - `org-kb/components/` — Markdown vault, one file per component.
@@ -42,8 +47,9 @@ queue or public group (`sfi.live_group_members`), everything a user holds
 non-profile permission sets (`sfi.live_zombie_accounts`). All are read-only,
 consent- and budget-gated SOQL — see `docs/configuration.md`. It does NOT:
 
-- Call Salesforce unless the live plane is enabled (`sfi.live_consent`,
-  `SFI_LIVE_PLANE_ENABLED=1`, or `liveEnabled: true`) **and** the invoked
+- Call Salesforce unless the live plane is enabled (`sfi.live_consent` grant,
+  or `SFI_LIVE_PLANE_ENABLED=1` — per-call `liveEnabled: true` is intent
+  only and is NOT a consent path) **and** the invoked
   tool is registry-tagged `livePlane: 'opt-in' | 'primary'` (INFRA-12-DEEP —
   `dispatchTool` mints a `LiveCapability` onto Context; `never` tools cannot
   read ambient standing consent even when consent is on file). Vault tools
@@ -81,7 +87,9 @@ For "what does this **imply**" questions — does deleting this parent
 cascade-delete children, do these two flows run in a defined order, is
 this class an unenforced entry point — go one step past retrieval:
 **resolve → interpret → synthesize**. `sfi.resolve` fixes the component;
-`sfi.interpret` joins the org's grounded vault slice against a curated,
+run interpret via the gateway
+(`sfi.run_analysis { "name": "sfi.interpret", "args": { "componentId": "…" } }`)
+— it joins the org's grounded vault slice against a curated,
 org-independent **Concept Model** (142 concepts / 193 rules of general
 Salesforce truth) and returns **cited, confidence-tiered structural
 claims**; `sfi.synthesize_answer` folds those claims into the answer,

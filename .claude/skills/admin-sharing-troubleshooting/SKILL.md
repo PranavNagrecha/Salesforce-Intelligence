@@ -144,7 +144,7 @@ If you need to disambiguate a component name, fall back to
 `sfi.list_components` (filter by `type: 'CustomObject'` or
 `type: 'Role'`) or `sfi.get_component` for the canonical ID.
 
-### Step 2 — Call `sfi.why_cant_user_see_record`
+### Step 2 — Call `sfi.run_analysis` with `{ "name": "sfi.why_cant_user_see_record", "args": { … } }`
 
 Default invocation:
 
@@ -424,7 +424,7 @@ Claude's flow:
    is overridden by OWD on `Private` standard objects.
 2. **Confirm** Janet's bundle (assume the admin says: "Role
    `Sales_Rep`, no extra perm sets, not in any public group").
-3. **Fire** `sfi.why_cant_user_see_record` with `{ userId:
+3. **Fire** `sfi.run_analysis` with `{ "name": "sfi.why_cant_user_see_record", "args": { … } }` with `{ userId:
    'User:janet@example.com', recordId: 'CustomObject:Account' }`.
 4. **Present** the cascade timeline (see *Reporting format* above):
    OWD `restricted`, role hierarchy `restricted`, the two existing
@@ -460,7 +460,7 @@ Before sending a response, confirm:
 - [ ] If the user supplied a record-row ID (`001xx...`), I
       translated to the object shape **and disclosed the shift**
       before firing.
-- [ ] I called `sfi.why_cant_user_see_record` exactly once per
+- [ ] I called `sfi.run_analysis` for `sfi.why_cant_user_see_record` exactly once per
       bundle. (If the admin corrected context, I refired.)
 - [ ] I presented every step in `reasoning[]` — including
       `unknown` steps — as a bulleted timeline with rule, verdict,
@@ -481,4 +481,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

@@ -14,6 +14,11 @@ consulted only as XML-shape references.
 **Layout:** standard SFDX under `examples/demo-vault/source/main/default/`. Build with
 `sfi refresh --no-pull` (no org/network). Verify: `status: success`, `errors: []`.
 
+**Truth SoT (AUDIT-F7):** `truth/manifest.json` is the independent, hand-authored
+correctness contract (not dumped from DuckDB). Gate:
+`node sf-intelligence-qa/scripts/verdant-truth.mjs`. Update truth when design-goal
+facts change; rebuild the vault when source changes.
+
 API version for every `-meta.xml`: `<apiVersion>61.0</apiVersion>` where applicable.
 
 ## Design goals (each maps to moat tools the demo must showcase)

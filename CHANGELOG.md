@@ -5,21 +5,131 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-### Fixed
-- **The release pipeline never published to the MCP Registry, and never cut a GitHub release.** Both were manual, so both rotted: the official registry sat at **0.1.26** while npm served **0.2.5** — and because downstream MCP directories crawl that registry record, one stale entry propagated the wrong version across the ecosystem. Separately, a tag would publish to npm while GitHub kept showing an older release as "Latest", because no step ever created one. `publish.yml` now publishes `server.json` to the registry keyless via the same GitHub Actions OIDC identity npm already uses, and creates/updates the GitHub release with notes extracted from this file's matching version section. The npm step is now idempotent so a re-run reaches those later steps instead of failing on "version already exists", and the registry step **fails the job** if `server.json` and `packages/cli/package.json` disagree on the version.
-- **Concept Model size was hand-maintained on the website and had drifted.** `website/public/llms.txt` — the file published specifically so AI engines cite this project accurately — stated the model size twice with two different figures six lines apart (142/193 and a stale 94/143). `website/recalibrate.mjs` now reads the counts from the **built** generated model (`CONCEPTS` / `CONCEPT_RULES`), the same authoritative route already used for the tool registry, and patches only the current-fact form so a deliberately historical figure in prose is left intact.
+## [0.3.0] — 2026-08-07
 
 ### Added
+- **Supply-chain hardening (AUDIT-F10).** Consumer guide
+  `docs/guides/supply-chain.md` (pinned install, provenance verify, SBOM);
+  `scripts/check-pack-allowlist.mjs` / `pnpm pack:check` enforces
+  `packages/cli` `files` as the published tarball allowlist (wired into
+  `prepublishOnly`); tag publish attaches a CycloneDX SBOM to the GitHub
+  Release.
+- **Verdant public truth gate (AUDIT-F7).** Hand-authored
+  `examples/demo-vault/truth/manifest.json` plus
+  `sf-intelligence-qa/scripts/verdant-truth.mjs` (inventory + design-goal tool
+  pins + mutation self-test). Wired as `harness:verdant-truth` in the commit
+  gate. Multi-org expansion and full scorecards deferred.
+- **Untrusted org-metadata branding (AUDIT-F8).** Contracts expose
+  `UntrustedOrgText` / `ContentPolicy` / `ORG_METADATA_CONTENT_POLICY`.
+  `sfi.get_component` and `sfi.resolve` add additive `labelOrgText` /
+  `descriptionOrgText` fields; the MCP dispatcher stamps `contentPolicy` on
+  success envelopes so hosts treat org strings as data, never instructions or
+  consent. Markdown escaping remains a renderer concern
+  (`escapeMarkdownInline` exported from `@sf-intelligence/renderers`).
 - **The zero-friction demo is now discoverable.** `npx -y sf-intelligence demo` serves a synthetic org with no Salesforce auth, no `sf` CLI and nothing to configure, but it appeared on only 2 of 34 site pages and in **zero** occurrences across `llms.txt`/`llms-full.txt` — so an assistant reading the site saw only a three-prerequisite wall and had reason to hedge before recommending the tool. It is now on `/mcp`, every use-case page, all comparison pages and in `llms.txt`, including a **generic stdio config for Claude Desktop, Cursor and Codex** that previously existed nowhere (the demo was documented for Claude Code only).
 - Sitemap entries now carry `lastmod`, sourced from each page's real git commit date — the one sitemap signal Google uses for recrawl scheduling, previously absent on all 34 URLs while `changefreq` and `priority` (both documented as ignored) were set on every one. Deliberately falls back to filesystem mtime and then to omitting the field rather than stamping build time, which would make the signal a lie Google learns to discount.
 - Structured data: `WebPage`, `Person` and `ImageObject` nodes on every page, so a graph is actually bound to the URL being parsed. Fixes `/mcp` emitting a typed-but-empty `SoftwareApplication` — `@id` scope is per-document, so referencing the home page's entity by id produced the site's only invalid item, on its best-ranking page. `og:type`, `datePublished` and `dateModified` are now threadable from any page through `DocPage` and `Base`.
 - Supply-chain provenance is now stated on the site: npm publishing is keyless OIDC with Sigstore attestations, verifiable via `npm audit signatures`.
 
 ### Changed
+- **EvidenceEnvelope v2 (AUDIT-F4).** Shared output contract
+  (`EvidenceEnvelopeV2` in `@sf-intelligence/contracts`) for claims, evidence,
+  coverage, freshness, pagination, and absence verdicts. Opt-in projection
+  under `data.evidenceEnvelope` on `sfi.interpret` and `sfi.safe_to_delete_field`
+  (legacy keys unchanged). Runtime `assertEvidenceEnvelopeV2` guards those
+  handlers; not applied roster-wide.
+- **Retrieval ledger + family epochs (AUDIT-F5).** Coverage rows carry per-family
+  `retrievedAt` / `epoch` (preserved across scoped `--types` refreshes). Refresh
+  writes `meta/retrieval-ledger.json` and appends `meta/tombstones.jsonl` for
+  confirmed reconcile deletions (never on refuse). `TrustSummary.freshness`
+  can disclose `overall: 'mixed'` with `families` / `oldestEvidenceAt`.
+  `sfi.coverage_report` surfaces tombstones + mixed-freshness limitations.
+- **Core-by-default + strict invocation (AUDIT-F6).** Default `SFI_TOOL_PROFILE`
+  is `core` (19-tool spine, incl. `sfi.live_consent`). Direct `tools/call` outside the advertised set is
+  denied under core — use `sfi.run_analysis` (target must be a registered tool).
+  `sfi.describe_analysis` gains progressive `detail` (`summary` | `schema` |
+  `full`; default `summary` under core). Set `SFI_TOOL_PROFILE=full` for the
+  previous advertise-everything behavior.
+- **Tool catalog hygiene (AUDIT-F9).** Scrubbed internal milestone / wave
+  language (`R6-*`, `AUDIT-*`, `v2.x R2a…`, `P5-*`, …) from MCP tool
+  descriptions so `tools/list` and `list_analyses` one-liners read as product
+  jobs. `list_analyses` now omits `hidden` retired aliases (same advertise
+  contract as `tools/list`; still invokable via `run_analysis`). Structural
+  consolidations (−4 hidden aliases) were already shipped; further handler
+  merges deferred.
+- **ProductManifest / `sfi.capabilities`** report `defaultProfile: 'core'`, `activeProfile`, and an `advertised` count that matches `tools/list` under the active profile (full roster remains under `profiles.full`).
+- **SERVER_INSTRUCTIONS and capabilities routing guidance** teach the core profile + `run_analysis` gateway; they no longer tell hosts to call `sfi.interpret` / `sfi.live_consent` directly or to use `liveEnabled: true` as consent.
+- **Skills / agents / commands under default `SFI_TOOL_PROFILE=core`** now
+  instruct hosts to invoke non-core analyses through `sfi.run_analysis`
+  `{ name, args }` (Decision 2=C). Shared grounding footer + entry skill teach
+  the gateway; `pnpm skill-gateway` fails CI on direct non-core Call/Fire
+  instructions. `llms.txt` / `llms-full.txt` and `.claude-plugin/plugin.json`
+  pin `sf-intelligence@0.3.0` (gated by `verify-doc-sync`); the website's own
+  install snippets stay unpinned so `npx -y` resolves latest. Every surface
+  states core as the default, not full.
+- **SBOM** generation uses `@cyclonedx/cdxgen` via `pnpm sbom` (pnpm-aware,
+  fail-closed). Tag publish attaches a non-empty CycloneDX 1.5 artifact or
+  fails the job — no more empty `npm sbom` skip.
 - New article: **"What does this Salesforce Flow do?"** — reading a Flow you did not build. Documents that the concept model does not extract `triggerOrder` and therefore cannot confirm whether Flow Trigger Order is configured, rather than implying the order is undefined.
 - The three thinnest comparison pages (`hubbl`, `dx0`, `metazoa` — 314/328/347 words, all with zero search impressions) expanded past 1,150 prose words each, and **a false claim corrected**: the Hubbl page said MCP was "not the core public product story", but Hubbl ships an MCP server and documents it ("Connect AI assistants to Hubbl via the Model Context Protocol"). An unverifiable dx0 ISO certificate number was removed, and Metazoa pricing is now described qualitatively because they publish no list price.
 - `/use-cases/what-breaks-if-you-delete-a-field` and `/blog/delete-unused-salesforce-fields` were competing for the same query with overlapping `FAQPage` questions. The use-case page is narrowed to the product surface and its `FAQPage` block removed; the blog keeps informational intent. Sitewide there are now **zero duplicate FAQ questions** across 15 pages and 58 questions.
 - `/use-cases/sharing-troubleshooting` expanded from ~230 to ~1,450 prose words, and a wrong tool name (`why_cant`) corrected to `why_cant_user_see_record`.
+
+### Fixed
+- **A no-intent question could be dressed up as an advisory route.** "any thoughts on the general vibe of the setup here" upgraded from an honest `unrouted` to `funnel-advisory`, topped by `sfi.live_setup_audit_trail` — attraction to the bare token "setup" (the English noun vs the Salesforce menu), not meaning. Measuring 30 no-intent × 20 advisory-tier questions showed the score threshold **cannot** fix it: the noise ceiling (0.436) sits *above* the advisory signal floor (0.261), and raising the bar past the noise leaves ~7 of 21 genuine advisories alive. The separable axis is evidence **breadth** — candidate mass at ranks 3-8, where noise spans [0.249, 0.277] and signal spans [0.376, 1.672]. A new `FUNNEL_MIN_EVIDENCE_BREADTH` (0.32, the centre of that gap) is now a second condition on the advisory upgrade: one lexical collision lights up a single tool and leaves the tail flat, while a real question spreads support across many index terms. `FUNNEL_PRIMARY_MIN_SCORE` stays 0.26 — the fix does not belong on that axis. Funnel-recall, the router goldset and the routing gate are unchanged. **Partial, and measured as such:** on a 30-question no-intent set this cuts spurious advisories from 6 to 2. It closes the single-token-collision class ("setup", "audit"). It does **not** close multi-token conversational asks — "how does this compare" still reaches `compare_components`, "can you help me out" still reaches `doc_coverage_report` — because those words genuinely spread across the tool index, putting their breadth inside the range real questions occupy. Tightening past them would cut measured signal, so the remaining class needs an intent classifier, not a threshold.
+- **A version tag published without any guarantee CI had run.** `publish.yml` fires on tag push; `ci.yml` fires on push-to-`main`/`release/**` and pull_request — never on tags. The two were fully decoupled, so tagging any commit shipped it to npm and the MCP Registry unverified. (`needs:` cannot close this — it only orders jobs *within* one workflow file.) The publish job's first step now asks the API what CI actually did on the tagged SHA and **fails closed on everything except a clean success**, including the real hole — "CI never ran" is never treated as a pass. It waits out an in-flight run rather than racing a fresh merge.
+- **The published SBOM under-reported what consumers install.** `cdxgen` was pointed at `packages/cli`, which has no `pnpm-lock.yaml` — with nothing to resolve it fell back to that package.json alone and emitted 19 direct entries with an **empty dependency graph**. It now resolves the transitive runtime closure from the workspace lockfile: **137 components, 138 graph nodes**. A component floor and a non-empty-graph check fail the publish rather than shipping a hollow artifact again.
+- **Flow record-trigger ENTRY CRITERIA minted no dependency edges at all.** Flow ships two XML spellings of the same condition triplet — `<leftValueReference>` inside `<decisions>`, and `<field>` inside `<start><filters>`. `parseFlowConditionTriplet` understood only the first and returned `null` for the second, so every record-trigger entry criterion parsed to nothing: no criteria item, no field refs, no edge. On the reference org that was **449 entry-criteria filters across 160 of 275 flows, 100% in the unparsed dialect**. The case this release names as closed in the skill, the article and these notes was the one case still fully open. Now aliased, with the `<leftValueReference>` spelling tried first so decision parsing stays byte-identical — yielding **442 edges across 222 fields** that previously had none.
+- **`safe_to_delete_field` promised evidence it never returned.** The `formula` note advertised a `traversalPath` that no type carried, nothing populated and no renderer emitted — the same defect class as the fabricated roll-up citation caught earlier in this release. It is now surfaced per example, so a reader can tell a directly-tokenized formula reference from a resolved cross-object traversal.
+- **Roll-up citations described two of three roles.** 32 of 98 roll-up edges are `summaryFilterItem` (the roll-up's *filter* tests the field), so a third of citations named a coupling that was not the one present. Each example now carries its own `rollupRole`.
+- **Condition citations named 4 of 7 wired firer families**, so an ApprovalProcess blocker was described as a Flow or workflow-rule criterion. Every example now carries its `firerId` — naming the rule to actually go change, since the example id is a synthetic `ConditionalContext:` node nobody can open.
+- **A pre-0.3.0 vault silently returned the false-`safe` this release exists to fix.** Upgrading without re-refreshing leaves a graph with none of the new edges. An older builder version now adds a trust limitation and routes an otherwise-`safe` verdict to `review` — the same not-proven-safe treatment incomplete coverage already gets. Fails open on an unparseable version: a verdict is never downgraded on a guess.
+- **FlexiPage related-list aliases were stamped `declared`** while the formula-traversal branch of the same function used `parsed`. Both are a regex scrape plus an inferred relationship join; no file declares that a page column is a given field. `declared` is the tier this product asks users to trust when a delete is on the line, so an inferred join must not borrow it. Both branches are now `parsed`, with the rationale stated symmetrically and pinned by tests.
+- The parentward relationship map gained the AMBIGUOUS-drop guard the childward map already had. Last-writer-wins was a guess with node iteration order as its only justification, and a guessed hop silently retargets every traversal through it.
+- `field_360` filed condition dependencies under `readers`, a section documented as heuristic *code* reads, while `safe_to_delete_field` called the same edge a declarative blocker. They now agree.
+- **One validation rule was counted as two blockers.** A rule reaches the fields its `errorConditionFormula` names by two edges tokenized from that one string — a direct `references` edge and its condition's `ConditionalContext` `readsFrom` — so `safe_to_delete_field` reported one rule under two categories with two counts and two examples, and `field_360` put the same rule in both `validates` and `automations`. On the reference org that is **681 duplicated pairs**, including 17 fields whose entire dependency set is one rule printed twice. Inflated referrer counts are exactly the clone-propagation double-count this product's own field-audit method warns against, so committing it was a credibility defect even though the blocking verdict was right. The duplicate *presentation* now folds onto one referrer and the folded category is disclosed (`alsoVia: ['condition']` on the citation; a named `boundaries[]` line in `field_360`) — nothing is deleted from the graph, every additive condition keeps its own row and count, a Flow that *writes* and separately *tests* one field still reports both, and `field_360`'s risk level is unchanged because the folded rows stay on the automation risk axis. Report-time only: it works on vaults already on disk, with no re-refresh.
+- **Every validation rule was labelled `formula`** — note text: "Another formula field references this field", which a validation rule is not. The `formula-tokenizer` source marker is shared (the same tokenizer runs over `errorConditionFormula`), and the rule keyed on it was unscoped, so the truthful `validation` category was unreachable in production and `field_360` — which checks the referrer *type* first — labelled the identical edge differently. The marker rule is now scoped to a `CustomField` referrer and the `validation` note carries the condition honesty hedge.
+- **A refresh could delete the entire vault source and report success.** `reconcileSourceDeletions` compared raw tree-relative paths: the authoritative retrieve lands under `<pkgDir>/main/default/<type>/…` while an older vault stores files flat as `<type>/…`, so **nothing ever matched and every in-scope file was removed as "deleted in the org."** Reproduced by executing the shipped code against a synthetic fixture: 8 of 8 files deleted while byte-identical copies sat in the authoritative output. On a real vault it destroyed 974 nodes (8,641 → 7,667, including 850 CustomFields) with `status: success` and exit 0. It also recurred by construction: additive pulls (reports, dashboards, auto-expanded objects) write flat while the authoritative tree is `main/default/…`, so every additively-pulled file was deleted by the *next* refresh before the re-pull ran. Path comparison is now layout-agnostic — a key derived by probing for the shortest trailing path segments that still resolve to a ComponentType, so any future wrapper directory falls off by construction rather than needing a new special case.
+- **Added a wholesale-deletion guard.** A reconcile that would remove all in-scope files while the retrieve *did* return files of those types — or more than half the considered set — now REFUSES, deletes nothing, and reports why. A deletion set that large is far more likely to mean the layout changed than that the org dropped that much metadata. The refusal is surfaced on stdout and carried through the retrieve result, because a silent refusal would recreate the same blind spot from the opposite direction.
+- **The report pull failed silently and the coverage row asserted a confirmed zero.** A failed pull was swallowed as non-fatal with its message on stderr, leaving a vault byte-identical to a successful one. Separately, `retrieved` for Report/Dashboard was counted *after* those nodes are dropped by the usage fold, so the row could never be non-zero — and `retrieveConfirmed: true` was stamped anyway. The vault asserted "confirmed: this org has 0 reports" about an org with 4,296. Failures are now recorded in the manifest and printed to stdout, and a Report row can no longer claim a confirmed zero.
+- **The release pipeline never published to the MCP Registry, and never cut a GitHub release.** Both were manual, so both rotted: the official registry sat at **0.1.26** while npm served **0.2.5** — and because downstream MCP directories crawl that registry record, one stale entry propagated the wrong version across the ecosystem. Separately, a tag would publish to npm while GitHub kept showing an older release as "Latest", because no step ever created one. `publish.yml` now publishes `server.json` to the registry keyless via the same GitHub Actions OIDC identity npm already uses, and creates/updates the GitHub release with notes extracted from this file's matching version section. The npm step is now idempotent so a re-run reaches those later steps instead of failing on "version already exists", and the registry step **fails the job** if `server.json` and `packages/cli/package.json` disagree on the version.
+- **Concept Model size was hand-maintained on the website and had drifted.** `website/public/llms.txt` — the file published specifically so AI engines cite this project accurately — stated the model size twice with two different figures six lines apart (142/193 and a stale 94/143). `website/recalibrate.mjs` now reads the counts from the **built** generated model (`CONCEPTS` / `CONCEPT_RULES`), the same authoritative route already used for the tool registry, and patches only the current-fact form so a deliberately historical figure in prose is left intact.
+
+### Security
+- **Explicit network policy (AUDIT-F2).** Outbound egress is gated by
+  `SFI_NETWORK_MODE` (`off` \| `updates-only` \| `salesforce-read`), default
+  **`off`**. npm update-check is now **opt-in** (`SFI_UPDATE_CHECK=1` or
+  `updates-only` mode) — `sfi mcp` no longer phones the registry by default.
+  `sfi refresh` and authorized live reads temporarily elevate to
+  `salesforce-read`. Runtime model download is always denied. One adapter in
+  `@sf-intelligence/core` (`assertNetworkAllowed` / `withNetworkMode`) is the
+  choke point for update-check, Tooling HTTP, and live CLI/REST.
+- **Scoped live grants (AUDIT-F3).** Live consent is a v2 grant bound to
+  Salesforce OrgId + principal (via read-only `sf org display`), with scopes
+  (`aggregate` / `sample` / `users`), expiry (default 7 days), and a grant id
+  disclosed on live answers. Per-call `liveEnabled: true` is no longer a
+  consent substitute. Sample/user tools require an explicit scope step-up.
+  Legacy v1 consent records are ignored (re-grant once).
+
+### Breaking
+- **Default tool profile is `core` (19 directly invokable schemas including `sfi.live_consent`).** Unset / empty `SFI_TOOL_PROFILE` no longer means `full`. Non-core tools must be called via `sfi.run_analysis { name, args }` (or set `SFI_TOOL_PROFILE=full`).
+- **`liveEnabled: true` is not a live-access path.** Standing consent (`sfi.live_consent`) or `SFI_LIVE_PLANE_ENABLED=1` is required; per-call `liveEnabled` is intent-only and ignored for access.
+- **v1 consent records are dropped.** Existing on-disk grants without `grantId` / `expiresAt` stop working — re-grant with `sfi.live_consent { grant: true }`.
+- **Grants expire** (`DEFAULT_GRANT_TTL_HOURS = 168` / 7 days) and bind OrgId + principal; re-pointing an alias to another org refuses the grant until re-grant.
+- **Update check is opt-in.** Set `SFI_UPDATE_CHECK=1` or `SFI_NETWORK_MODE=updates-only`; the MCP default network mode is `off`.
+- **Every success envelope stamps `contentPolicy`** (~280 bytes) marking org metadata as untrusted data for hosts.
+
+### Trust
+- **Generated ProductManifest + drift gate.** Product capability facts (tool
+  registered/advertised counts, core profile, live/local-mutation rosters, graph
+  tables + schema version, Concept Model size + content hash, catalog hash) are
+  now derived from runtime registries into `eval/product-manifest.json`.
+  `sfi.capabilities` exposes the same facts as `productManifest`.
+  `scripts/verify-doc-sync.mjs` fails CI when the committed manifest, website
+  `site-data.json`, README/CLAUDE concept counts, or `docs/configuration.md`
+  roster pins disagree with the registries — closing the 196/209 and 94/143 vs
+  142/193 trust-contract drift class. Regenerate with
+  `pnpm product-manifest` (or `node scripts/generate-product-manifest.mjs`).
 
 ## [0.2.5] — 2026-07-29
 

@@ -15,6 +15,7 @@ import {
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
+  ORG_METADATA_CONTENT_POLICY,
   type McpError,
   type McpResponse,
 } from '@sf-intelligence/contracts';
@@ -796,12 +797,15 @@ export const dispatchTool = async (
   // parent/test capability by accident; run_analysis re-entry rebinds for
   // the *target* tool. Under exactOptionalPropertyTypes, omit the field
   // entirely when the tag is `never` (do not assign `undefined`).
-  const { liveCapability: _ignored, ...ctxBase } = ctxIn;
+  // AUDIT-F3: also bind liveToolName so scope step-up can resolve per tool.
+  const { liveCapability: _ignored, liveToolName: _ignoredTool, ...ctxBase } =
+    ctxIn;
   const capability = mintLiveCapability(def.livePlane);
+  const withTool: Context = { ...ctxBase, liveToolName: toolName };
   const ctx: Context =
     capability === undefined
-      ? ctxBase
-      : { ...ctxBase, liveCapability: capability };
+      ? withTool
+      : { ...withTool, liveCapability: capability };
 
   // Governance: append-only audit of the call (no-op unless
   // SF_INTELLIGENCE_AUDIT_LOG is set). Arg keys only — never values.
@@ -844,16 +848,8 @@ export const dispatchTool = async (
           .join('; ');
         return jsonResult({ error: { kind: 'invalid-query', message } });
       }
-      const resolved = resolveRunAnalysis(parsed.data);
+      const resolved = resolveRunAnalysis(parsed.data, KNOWN_TOOL_NAMES);
       if (!resolved.ok) return jsonResult({ error: resolved.error });
-      if (!KNOWN_TOOL_NAMES.has(resolved.value.name)) {
-        return jsonResult({
-          error: {
-            kind: 'invalid-query',
-            message: `Unknown analysis '${parsed.data.name}'. Call sfi.list_analyses for the catalog.`,
-          },
-        });
-      }
       return dispatchTool(ctx, resolved.value.name, resolved.value.args);
     }
     case 'sfi.guidance':
@@ -2365,11 +2361,22 @@ export const jsonResult = (
     }
   }
 
-  const baseBytes = utf8Bytes(body);
+  // AUDIT-F8: stamp content policy on success envelopes so hosts treat org
+  // metadata in `data` as untrusted data (never instructions / consent).
+  const withContentPolicy = (
+    value: Record<string, unknown>,
+  ): Record<string, unknown> =>
+    isErrorEnvelope || !('data' in value)
+      ? value
+      : { ...value, contentPolicy: ORG_METADATA_CONTENT_POLICY };
+  // Report the ORIGINAL stamped payload size (incl. contentPolicy). Trimmed
+  // envelopes keep that number so hosts see pre-trim magnitude; fits() still
+  // checks the final serialized text.
+  const baseBytes = utf8Bytes(withContentPolicy(body as Record<string, unknown>));
   const toEnvelope = (
     value: Record<string, unknown>,
   ): Record<string, unknown> => ({
-    ...value,
+    ...withContentPolicy(value),
     estimatedPayloadBytes: baseBytes,
   });
   const original = toEnvelope(body as Record<string, unknown>);
