@@ -51,9 +51,10 @@ SfIntelligence is **local-first**:
 
 - **Vault tools** never call Salesforce during a conversation.
 - **Live tools** (`sfi.live_*`) are **opt-in and fail-closed**. They run
-  read-only Salesforce CLI queries only when enabled via standing consent
-  (`sfi.live_consent`), `SFI_LIVE_PLANE_ENABLED=1`, or a per-call
-  `liveEnabled: true` flag.
+  read-only Salesforce CLI queries only when enabled via a standing grant
+  (`sfi.live_consent`, OrgId- and principal-bound, scoped, expiring) or the
+  operator override `SFI_LIVE_PLANE_ENABLED=1`. A per-call `liveEnabled: true`
+  is **not** a consent path and never opens the live plane by itself.
 - The product has **no write path** to Salesforce metadata or records.
 - MCP tool arguments are **not** written to the audit log — only tool names,
   argument *keys*, and vault hash (`SF_INTELLIGENCE_AUDIT_LOG`).

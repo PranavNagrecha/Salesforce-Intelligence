@@ -315,8 +315,8 @@ Examples:
 > I have no record-level data in the vault — it is metadata only. Query
 > your org directly, or enable the opt-in live plane.
 
-**When live is enabled** (`SFI_LIVE_PLANE_ENABLED=1` or `liveEnabled: true` on
-the tool call):
+**When live is enabled** (a `sfi.live_consent` grant covers the org, or
+`SFI_LIVE_PLANE_ENABLED=1`):
 
 | Question shape | Tool |
 |----------------|------|

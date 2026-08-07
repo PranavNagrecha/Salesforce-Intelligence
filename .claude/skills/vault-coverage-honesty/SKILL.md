@@ -52,7 +52,7 @@ v4.0+ vaults model Reports, Dashboards, List Views, Report Types, FlexiPages, Pe
 
 - **`freshness-tracking`**: freshness = how old; coverage = how whole.
 - **`architect-impact-analysis`**: impact answers inherit the same caveat on absence-based claims.
-- **Live plane** (`sfi.live_*`): live data does not repair offline coverage gaps; it answers runtime questions only when `SFI_LIVE_PLANE_ENABLED=1` or `liveEnabled: true`.
+- **Live plane** (`sfi.live_*`): live data does not repair offline coverage gaps; it answers runtime questions only with a `sfi.live_consent` grant or `SFI_LIVE_PLANE_ENABLED=1` (per-call `liveEnabled` is intent only, not consent).
 
 ## Trust fields
 

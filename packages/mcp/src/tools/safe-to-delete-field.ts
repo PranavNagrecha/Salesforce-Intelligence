@@ -433,8 +433,9 @@ export interface SafeToDeleteFieldOutput {
   readonly flsGrantCount?: number;
   /**
    * CR-CAP-L5: live production population evidence, present ONLY when the
-   * static verdict was `safe` AND the live plane answered (consent granted
-   * or `liveEnabled: true`). A `populatedCount > 0` DOWNGRADES `verdict` from
+   * static verdict was `safe` AND the live plane answered (a standing grant
+   * covers the org, or `SFI_LIVE_PLANE_ENABLED=1`; per-call `liveEnabled` is
+   * intent only). A `populatedCount > 0` DOWNGRADES `verdict` from
    * `safe` to `review` — real data despite zero static references is a
    * signal, not proof of a bug, but "no references found" should not read as
    * "safe to delete" when the field is actively populated. Absence of this

@@ -610,7 +610,7 @@ so a team running many orgs knows which vault to `/sfi-refresh` first. It is a
 LIVE sweep, so two safeties apply per the live-plane rules above:
 
 - **Consent is per org.** Each vault's `sourceOrg` is gated independently
-  (`sfi.live_consent`, `SFI_LIVE_PLANE_ENABLED`, or `liveEnabled: true`). A vault
+  (`sfi.live_consent` grant, or `SFI_LIVE_PLANE_ENABLED` — not `liveEnabled`). A vault
   whose org isn't consented is an honest `no-consent` *skip* — never a silent
   live call.
 - **The session budget bounds the sweep.** Every per-org staleness query

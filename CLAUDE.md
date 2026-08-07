@@ -47,8 +47,9 @@ queue or public group (`sfi.live_group_members`), everything a user holds
 non-profile permission sets (`sfi.live_zombie_accounts`). All are read-only,
 consent- and budget-gated SOQL — see `docs/configuration.md`. It does NOT:
 
-- Call Salesforce unless the live plane is enabled (`sfi.live_consent`,
-  `SFI_LIVE_PLANE_ENABLED=1`, or `liveEnabled: true`) **and** the invoked
+- Call Salesforce unless the live plane is enabled (`sfi.live_consent` grant,
+  or `SFI_LIVE_PLANE_ENABLED=1` — per-call `liveEnabled: true` is intent
+  only and is NOT a consent path) **and** the invoked
   tool is registry-tagged `livePlane: 'opt-in' | 'primary'` (INFRA-12-DEEP —
   `dispatchTool` mints a `LiveCapability` onto Context; `never` tools cannot
   read ambient standing consent even when consent is on file). Vault tools

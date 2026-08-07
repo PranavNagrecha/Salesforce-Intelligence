@@ -348,6 +348,14 @@ if (existsSync(architectureMd) && manifest) {
 const activeDocs = [
   join(root, 'README.md'),
   join(root, 'CLAUDE.md'),
+  // 0.3.0 removed `liveEnabled: true` as a live-access path, but the security
+  // policy and the guides still listed it as one of three ways to open the
+  // live plane. Scanning only README/CLAUDE is how that survived — the docs a
+  // security reviewer actually reads were never in the set.
+  join(root, 'SECURITY.md'),
+  join(root, 'docs/architecture.md'),
+  join(root, 'docs/configuration.md'),
+  join(root, 'docs/guides/installation.md'),
 ];
 
 const skillsRoot = join(root, '.claude/skills');
@@ -359,6 +367,23 @@ const skillFiles = existsSync(skillsRoot)
   : [];
 
 const stalePhrases = [
+  {
+    // AUDIT-F3: resolveLiveAccess takes `_inputLiveEnabled` and never reads it.
+    // Any doc offering it as a third way to enable the plane is now false.
+    phrase: 'or pass `liveEnabled: true`',
+    reason:
+      'AUDIT-F3: per-call liveEnabled is intent only and is NOT a consent path.',
+  },
+  {
+    phrase: 'or `liveEnabled: true`)',
+    reason:
+      'AUDIT-F3: per-call liveEnabled is intent only and is NOT a consent path.',
+  },
+  {
+    phrase: 'or a per-call\n  `liveEnabled: true` flag',
+    reason:
+      'AUDIT-F3: per-call liveEnabled is intent only and is NOT a consent path.',
+  },
   {
     phrase: 'full roster stays the default',
     reason: 'AUDIT-F6 / Wave 4: default tool profile is core, not full.',

@@ -39,7 +39,8 @@ hard boundaries: **no writes to Salesforce**, **runtime / dynamic analysis
 is invisible** (dynamic SOQL, reflective Apex). **Record-level data** is
 available only via the **opt-in, per-org live plane** (`sfi.live_*`): enable
 it once with `sfi.live_consent { grant: true }` (read-only, persists across
-sessions), or `SFI_LIVE_PLANE_ENABLED=1`, or `liveEnabled: true` — never silent
+sessions), or `SFI_LIVE_PLANE_ENABLED=1` — per-call `liveEnabled` is intent
+only, not consent — never silent
 fallback from stale vault data.
 
 **Orient first: load the org card.** On the first org-touching turn of a

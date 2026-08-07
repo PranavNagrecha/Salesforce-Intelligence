@@ -354,7 +354,8 @@ export interface UnusedFieldDeepEntry {
   /**
    * CR-CAP-L5: live production population evidence, present ONLY when this
    * field's static `confidence` was `high` AND the live plane answered
-   * (consent granted or `liveEnabled: true`) for it. A `populatedCount > 0`
+   * (a standing grant covers the org, or `SFI_LIVE_PLANE_ENABLED=1`; per-call
+   * `liveEnabled` is intent only) for it. A `populatedCount > 0`
    * DOWNGRADES `confidence` from `high` to `medium` — real data despite zero
    * static references across all eight tiers is exactly the "a blind spot
    * may be hiding a reference" signal `medium` already means (see module

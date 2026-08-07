@@ -299,9 +299,10 @@ query time.
 ### Opt-in live read-only plane
 
 Live tools are **off by default**. Enable once per org via `sfi.live_consent
-{ grant: true }`, set `SFI_LIVE_PLANE_ENABLED=1`, or pass `liveEnabled: true`
-on a single call. See [`docs/configuration.md`](./configuration.md) for the
-full matrix.
+{ grant: true }`, or set `SFI_LIVE_PLANE_ENABLED=1`. Per-call
+`liveEnabled: true` is intent only — hybrid tools read it as "enrich if a
+grant exists", and it never opens the live plane on its own. See
+[`docs/configuration.md`](./configuration.md) for the full matrix.
 
 | Tool | Purpose |
 | --- | --- |

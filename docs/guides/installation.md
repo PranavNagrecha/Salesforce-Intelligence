@@ -194,9 +194,10 @@ never presented as current:
   with a plain-language `interpretation`. It is the one tool that reads both
   planes at once, and it never mutates the org. Because it queries the org, it
   needs the **opt-in live plane** — enable it once per org
-  (`sfi.live_consent { grant: true }`), set `SFI_LIVE_PLANE_ENABLED=1`, or pass
-  `liveEnabled: true` on the call; without consent it returns a clear
-  "live plane disabled" error rather than calling Salesforce. See
+  (`sfi.live_consent { grant: true }`) or set `SFI_LIVE_PLANE_ENABLED=1`
+  (per-call `liveEnabled: true` is intent only, not consent); without a grant
+  it returns a clear "live plane disabled" error rather than calling
+  Salesforce. See
   [`configuration.md`](../configuration.md).
 
 When either flags drift, run `sfi refresh --target-org my-org-alias` to re-pull
@@ -269,8 +270,9 @@ deliberate, and the product names them plainly rather than guessing:
   Run `sfi refresh` to update metadata.
 - **Opt-in live plane** — curated read-only tools (`sfi.live_count`,
   `sfi.live_sample`, `sfi.live_describe`, and others) can query the org when you
-  enable them once per org (`sfi.live_consent { grant: true }`), set
-  `SFI_LIVE_PLANE_ENABLED=1`, or pass `liveEnabled: true` on a call. See
+  enable them once per org (`sfi.live_consent { grant: true }`) or set
+  `SFI_LIVE_PLANE_ENABLED=1`. Per-call `liveEnabled: true` is intent only and
+  does not grant access. See
   [`configuration.md`](../configuration.md).
 - **No arbitrary live SOQL** — only the curated `sfi.live_*` roster; no generic
   query tool.
