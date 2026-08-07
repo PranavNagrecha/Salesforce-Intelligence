@@ -134,6 +134,15 @@ npm install sf-intelligence      # adds it to the repo's package.json
 npx sf-intelligence --version    # resolves node_modules/.bin/sfi
 ```
 
+### Production pin (required for shared / CI installs)
+
+Floating on `latest` is fine for a quick try-out. For production MCP configs and
+shared DX repos, **pin an exact version** (`sf-intelligence@X.Y.Z` in `npx`
+args, or an exact version in `package.json` — no `^` / `~`). See
+[Supply chain — pin, verify, SBOM](./supply-chain.md) for pinned MCP JSON,
+provenance verification (`npm audit signatures`), the published tarball
+allowlist, and SBOM generation.
+
 ## 3. Verify the install
 
 In a session with your MCP client, confirm the server connected and answers:

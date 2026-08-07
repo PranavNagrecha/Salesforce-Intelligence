@@ -39,6 +39,7 @@
     "check:slash-parity": "node scripts/check-slash-parity.mjs",
     "check:response-consistency": "node scripts/check-response-consistency.mjs",
     "check:cli-bundle": "node scripts/check-cli-bundle.mjs",
+    "pack:check": "node scripts/check-pack-allowlist.mjs",
     "guard": "node scripts/release-guard.mjs",
     "scan:leaks": "node scripts/scan-org-leaks.mjs --strict",
     "scan:leaks:history": "node scripts/scan-org-leaks.mjs --git-history --strict",

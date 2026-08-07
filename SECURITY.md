@@ -8,7 +8,10 @@
 | Pre-0.1 / maintainer-only snapshots | No |
 
 Security fixes land on the latest release tag. Pin your install to a tagged
-version in production workflows.
+version in production workflows — see
+[`docs/guides/supply-chain.md`](./docs/guides/supply-chain.md) for exact
+`npx` / `package.json` pin examples, npm provenance verification, the
+published tarball allowlist (`pnpm pack:check`), and SBOM generation.
 
 ## Reporting a vulnerability
 
@@ -60,6 +63,19 @@ SfIntelligence is **local-first**:
 See [`docs/configuration.md`](./docs/configuration.md) for environment
 variables and [`docs/architecture.md`](./docs/architecture.md) for the full
 trust boundary.
+
+## Supply chain
+
+- **Pin** production installs to `sf-intelligence@X.Y.Z` (see
+  [`docs/guides/supply-chain.md`](./docs/guides/supply-chain.md)).
+- **Publish** uses GitHub Actions OIDC + `npm publish --provenance` (no
+  long-lived npm token in the workflow). Consumers can run
+  `npm audit signatures` after install.
+- **Tarball allowlist** is `packages/cli/package.json#files`, enforced by
+  `pnpm pack:check` / `scripts/check-pack-allowlist.mjs` (also in
+  `prepublishOnly`).
+- **SBOM** (CycloneDX) is generated for the CLI package and attached to the
+  GitHub Release on tag publish; it is not shipped inside the npm tarball.
 
 ## Dependency advisories
 

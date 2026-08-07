@@ -110,6 +110,19 @@ jobs:
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
 
+      # AUDIT-F10: CycloneDX SBOM for the published package (release asset only;
+      # not shipped inside the npm tarball). Best-effort — a missing npm sbom
+      # subcommand must not block publish.
+      - name: Generate CycloneDX SBOM (AUDIT-F10)
+        working-directory: packages/cli
+        run: |
+          if npm sbom --help >/dev/null 2>&1; then
+            npm sbom --sbom-format cyclonedx > ../../sbom.cdx.json
+            echo "Wrote sbom.cdx.json"
+          else
+            echo "npm sbom unavailable — skipping SBOM artifact"
+          fi
+
       # Cut the GitHub release. This step did not exist before, which is why
       # every previous release had to be created by hand — a tag would publish to
       # npm and GitHub would keep showing an older release as "Latest". Notes are
@@ -131,11 +144,18 @@ jobs:
             inside && /^## / { exit }
             inside { print }
           ' CHANGELOG.md > "$NOTES_FILE"
+          SBOM_ARGS=()
+          if [ -f sbom.cdx.json ]; then
+            SBOM_ARGS+=(sbom.cdx.json)
+          fi
           if [ ! -s "$NOTES_FILE" ]; then
             echo "No CHANGELOG section for $VERSION — falling back to generated notes."
-            gh release create "$TAG" --title "$TAG" --generate-notes --latest || \
+            gh release create "$TAG" --title "$TAG" --generate-notes --latest "${SBOM_ARGS[@]}" || \
               gh release edit "$TAG" --title "$TAG" --latest
           else
-            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest || \
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest "${SBOM_ARGS[@]}" || \
               gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest
+          fi
+          if [ -f sbom.cdx.json ]; then
+            gh release upload "$TAG" sbom.cdx.json --clobber || true
           fi

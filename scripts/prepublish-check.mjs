@@ -25,4 +25,5 @@ run(
   'node scripts/check-version-consistency.mjs',
 );
 run('check-cli-bundle (INFRA-11)', 'node scripts/check-cli-bundle.mjs');
+run('check-pack-allowlist (AUDIT-F10)', 'node scripts/check-pack-allowlist.mjs');
 console.error('\nprepublish: OK — safe to pack/publish sf-intelligence.');
