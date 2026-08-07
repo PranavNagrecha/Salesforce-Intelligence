@@ -23,6 +23,7 @@ import {
   GRAPH_TABLES,
   buildProductManifest,
   checkArchitectureGraphTables,
+  checkCoreRosterCountPins,
   matchConceptCountFacts,
   manifestDrift,
   stripVolatile,
@@ -252,6 +253,45 @@ if (existsSync(configurationMd) && manifest) {
   }
 }
 
+// ── core-roster size pin (AUDIT-F6 / live_consent in core → 19) ─────────────
+// The advertised/registered pin above does not watch the core-roster integer
+// that surfaces teach hosts. A silent pass with no match is how 18 survived.
+if (manifest) {
+  const expectedCore = manifest.tools.profiles?.core?.length ?? null;
+  if (typeof expectedCore !== 'number' || expectedCore < 1) {
+    fail('ProductManifest missing tools.profiles.core for core-roster pin.');
+  } else {
+    const corePinFiles = {
+      'README.md': join(root, 'README.md'),
+      'CLAUDE.md': join(root, 'CLAUDE.md'),
+      'website/src/pages/getting-started.astro': join(
+        root,
+        'website/src/pages/getting-started.astro',
+      ),
+      'website/src/pages/configuration.astro': join(
+        root,
+        'website/src/pages/configuration.astro',
+      ),
+      'website/public/llms.txt': join(root, 'website/public/llms.txt'),
+      'website/public/llms-full.txt': join(root, 'website/public/llms-full.txt'),
+    };
+    const texts = {};
+    for (const [label, path] of Object.entries(corePinFiles)) {
+      if (!existsSync(path)) {
+        warn(`${label} missing — cannot pin core-roster size.`);
+        continue;
+      }
+      texts[label] = read(path);
+    }
+    const { failures: coreFails, warnings: coreWarns } = checkCoreRosterCountPins(
+      texts,
+      expectedCore,
+    );
+    for (const message of coreFails) fail(message);
+    for (const message of coreWarns) warn(message);
+  }
+}
+
 // ── architecture.md graph tables ────────────────────────────────────────────
 const architectureMd = join(root, 'docs/architecture.md');
 if (existsSync(architectureMd) && manifest) {
@@ -296,6 +336,10 @@ const stalePhrases = [
   {
     phrase: 'Default stays `full`',
     reason: 'Default tool profile is core.',
+  },
+  {
+    phrase: 'Default stays <code>full</code>',
+    reason: 'Default tool profile is core (HTML phrasing).',
   },
   {
     phrase: 'no LWC/Aura references',

@@ -7,7 +7,9 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 
 const {
   matchConceptCountFacts,
+  matchCoreRosterCountFacts,
   checkArchitectureGraphTables,
+  checkCoreRosterCountPins,
 } = await import(
   pathToFileURL(join(repoRoot, 'scripts/lib/build-product-manifest.mjs')).href
 );
@@ -35,6 +37,53 @@ describe('doc-sync concept-count pin regex', () => {
     expect(matches).toHaveLength(1);
     expect(matches[0]?.concepts).toBe(94);
     expect(matches[0]?.rules).toBe(143);
+  });
+});
+
+describe('doc-sync core-roster size pin', () => {
+  it('matches the phrasings used across README / CLAUDE / website / llms', () => {
+    const samples = [
+      ['**Default is the 19-tool core roster** (AUDIT-F6)', 19],
+      ['advertises a <strong>19-tool core roster</strong>', 19],
+      ['only a <strong>19-schema core roster</strong> is advertised', 19],
+      ['Default is a 19-tool <code>core</code> roster (token-friendly)', 19],
+      ['default is `core` (19 directly invokable tools). That spine', 19],
+      ['Default advertise/invoke profile is **`core` (19 tools)** including', 19],
+    ] as const;
+    for (const [sample, n] of samples) {
+      const hits = matchCoreRosterCountFacts(sample);
+      expect(hits.length, sample).toBeGreaterThanOrEqual(1);
+      expect(
+        hits.every((h: { count: number }) => h.count === n),
+        sample,
+      ).toBe(true);
+    }
+  });
+
+  it('fails when a listed surface still teaches 18 after live_consent joined core', () => {
+    const { failures, warnings } = checkCoreRosterCountPins(
+      {
+        'README.md': '**Default is the 18-tool core roster** (AUDIT-F6)',
+        'CLAUDE.md': 'default is `core` (19 directly invokable tools)',
+      },
+      19,
+    );
+    expect(failures.some((m: string) => m.includes('README.md') && m.includes('18'))).toBe(
+      true,
+    );
+    expect(failures.some((m: string) => m.includes('CLAUDE.md'))).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  it('warns when a listed surface has no core-count phrase at all', () => {
+    const { failures, warnings } = checkCoreRosterCountPins(
+      { 'website/public/llms.txt': 'It exposes 209 read-only tools across eight areas.' },
+      19,
+    );
+    expect(failures).toEqual([]);
+    expect(warnings.some((m: string) => m.includes('llms.txt') && m.includes('no core-roster'))).toBe(
+      true,
+    );
   });
 });
 

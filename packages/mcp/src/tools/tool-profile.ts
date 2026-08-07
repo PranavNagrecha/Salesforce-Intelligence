@@ -41,9 +41,9 @@ export const CORE_PROFILE_TOOLS: ReadonlySet<string> = new Set([
 /**
  * Tool profile from `SFI_TOOL_PROFILE`.
  *
- * AUDIT-F6: default is `core` (advertise the 18-tool spine). Opt into the full
- * roster with `SFI_TOOL_PROFILE=full`. Unknown values fall back to `full` so a
- * typo never produces an empty roster.
+ * AUDIT-F6: default is `core` (advertise the 19-tool spine, incl. live_consent).
+ * Opt into the full roster with `SFI_TOOL_PROFILE=full`. Unknown values fall
+ * back to `full` so a typo never produces an empty roster.
  */
 export const toolProfile = (): 'core' | 'full' => {
   const raw = process.env['SFI_TOOL_PROFILE']?.trim().toLowerCase();

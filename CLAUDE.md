@@ -17,9 +17,9 @@ confidence (the weakest of the concept rule's ceiling and its grounding
 edges); keep the two axes distinct (see Capability boundary). Do not
 answer org questions without it.
 
-**Tool profile:** default is `core` (18 directly invokable tools). For
-non-core analyses — including `sfi.interpret`, `sfi.coverage_report`, and
-`sfi.live_*` — call `sfi.run_analysis` with
+**Tool profile:** default is `core` (19 directly invokable tools). That spine
+includes `sfi.live_consent`. For non-core analyses — including `sfi.interpret`,
+`sfi.coverage_report`, and other `sfi.live_*` — call `sfi.run_analysis` with
 `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`).
 
 ## Where the metadata lives

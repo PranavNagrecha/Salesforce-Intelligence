@@ -488,11 +488,12 @@ for the live tool map.
 
 ### Optional: full roster vs compact core
 
-**Default is the 18-tool core roster** (AUDIT-F6) so MCP hosts don't pay a
-~250 KB `tools/list` tax. Non-core tools stay reachable via `sfi.run_analysis`
-(byte-identical) and are not directly invokable under core. Set
-`SFI_TOOL_PROFILE=full` (or add `"env": { "SFI_TOOL_PROFILE": "full" }` in the
-config block above) to advertise and directly invoke the entire roster. See
+**Default is the 19-tool core roster** (AUDIT-F6; includes `sfi.live_consent`)
+so MCP hosts don't pay a ~250 KB `tools/list` tax. Non-core tools stay
+reachable via `sfi.run_analysis` (byte-identical) and are not directly
+invokable under core. Set `SFI_TOOL_PROFILE=full` (or add
+`"env": { "SFI_TOOL_PROFILE": "full" }` in the config block above) to advertise
+and directly invoke the entire roster. See
 [docs/configuration.md](./docs/configuration.md) for the full reference.
 
 ### Install as a Claude Code plugin

@@ -66,6 +66,67 @@ export function matchConceptCountFacts(text) {
 }
 
 /**
+ * Phrasings that state the default core-roster size next to a core-roster cue.
+ * Matches numbers adjacent to core-roster language — never a bare integer.
+ *
+ * Accepted forms (N is the count):
+ *   - `N-tool core roster` / `N-tool <code>core</code> roster`
+ *   - `N-schema core roster`
+ *   - `core (N tools)` / `core` (N tools)` / `core` (N directly invokable tools)`
+ */
+export const CORE_ROSTER_COUNT_RES = Object.freeze([
+  /(\d+)-tool\s+(?:<[^>]+>\s*)?core(?:\s+roster)?/gi,
+  /(\d+)-schema\s+core(?:\s+roster)?/gi,
+  /core[`'"]?\s*\((\d+)\s+(?:directly\s+invokable\s+)?tools\)/gi,
+]);
+
+/** @returns {{ count: number, match: string }[]} */
+export function matchCoreRosterCountFacts(text) {
+  const out = [];
+  for (const pattern of CORE_ROSTER_COUNT_RES) {
+    const re = new RegExp(pattern.source, pattern.flags);
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      out.push({ count: Number(match[1]), match: match[0] });
+    }
+  }
+  return out;
+}
+
+/**
+ * Fail when a listed surface states a core-roster size that disagrees with
+ * `profiles.core.length`. Warn when a listed surface has no core-count phrase
+ * at all (a pin that matches nothing is how stale counts survive).
+ *
+ * @param {Readonly<Record<string, string>>} filesByLabel label → file text
+ * @param {number} expectedCoreSize
+ * @returns {{ failures: string[], warnings: string[] }}
+ */
+export function checkCoreRosterCountPins(filesByLabel, expectedCoreSize) {
+  const failures = [];
+  const warnings = [];
+  for (const [label, text] of Object.entries(filesByLabel)) {
+    const hits = matchCoreRosterCountFacts(text);
+    if (hits.length === 0) {
+      warnings.push(
+        `${label} has no core-roster size phrase ` +
+          '(`N-tool core roster` / `N-schema core roster` / `core (N tools)`).',
+      );
+      continue;
+    }
+    for (const hit of hits) {
+      if (hit.count !== expectedCoreSize) {
+        failures.push(
+          `${label} states core roster size ${hit.count} ` +
+            `("${hit.match.trim()}") but ProductManifest profiles.core.length=${expectedCoreSize}`,
+        );
+      }
+    }
+  }
+  return { failures, warnings };
+}
+
+/**
  * Require backtick-delimited table mentions so bare substrings (e.g. "artifacts"
  * containing "facts") cannot satisfy the architecture inventory pin.
  * @param {string} archMarkdown

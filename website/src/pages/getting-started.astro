@@ -107,7 +107,7 @@ const jsonld = [
         <div class="callout"><p><strong>Cursor &amp; other IDE clients:</strong> after editing the MCP config you must reload it - Cursor does not pick up <code>.cursor/mcp.json</code> changes live. Toggle the server off/on in Settings → MCP (or restart the IDE), or the <code>sfi.*</code> tools won't appear.</p></div>
 
         <h3>Tool roster (<code>SFI_TOOL_PROFILE</code>, default <code>core</code>)</h3>
-        <p>By default the server advertises an <strong>18-tool core roster</strong> - orientation, resolve/route, the universal graph reads, and a catalog gateway (<code>list_analyses</code> / <code>describe_analysis</code> / <code>run_analysis</code>) that reaches every other tool with byte-identical output. Non-core tools are <em>not</em> directly invokable under <code>core</code> — call them through <code>sfi.run_analysis</code>. Set <code>full</code> only when you want every schema advertised and directly callable:</p>
+        <p>By default the server advertises a <strong>19-tool core roster</strong> - orientation, resolve/route, the universal graph reads, <code>sfi.live_consent</code> (so live access can be granted without the gateway), and a catalog gateway (<code>list_analyses</code> / <code>describe_analysis</code> / <code>run_analysis</code>) that reaches every other tool with byte-identical output. Non-core tools are <em>not</em> directly invokable under <code>core</code> — call them through <code>sfi.run_analysis</code>. Opt into <code>full</code> only when you want every schema advertised and directly callable:</p>
         <div class="code-block"><div class="cb-head"><span class="fname">claude_desktop_config.json</span></div><pre>{'{'}
   <span class="tok-s">"mcpServers"</span>: {'{'}
     <span class="tok-s">"sf-intelligence"</span>: {'{'}
@@ -118,7 +118,7 @@ const jsonld = [
     {'}'}
   {'}'}
 {'}'}</pre></div>
-        <p>Default stays <code>full</code> - this is purely opt-in. See the <a href="/configuration">configuration reference</a> for the full tool-profile details.</p>
+        <p>Default is <code>core</code>. Set <code>SFI_TOOL_PROFILE=full</code> (as in the sample above) to advertise and directly invoke the entire roster. See the <a href="/configuration">configuration reference</a> for the full tool-profile details.</p>
 
         <h3>Optional: a shorter <code>sfi</code> command</h3>
         <p><code>npx -y sf-intelligence …</code> works without installing anything, but it's verbose and re-checks the registry each run. A global install gives you a short <code>sfi</code> command for setup; or add it to the repo and call it via <code>npx</code> (which resolves the local copy, no re-download):</p>
