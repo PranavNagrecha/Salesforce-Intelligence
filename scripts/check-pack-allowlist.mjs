@@ -72,16 +72,33 @@ try {
     console.error(pack.stdout);
     process.exit(1);
   }
-  const first = Array.isArray(meta) ? meta[0] : meta;
-  tarball = join(staging, first.filename ?? first.name);
-  if (!existsSync(tarball)) {
-    // npm pack --json sometimes returns basename only; find the sole .tgz
-    const tgz = readdirSync(staging).find((f) => f.endsWith('.tgz'));
-    if (!tgz) {
-      console.error('check-pack-allowlist: no .tgz in staging', staging);
+  // Resolve the tarball WITHOUT trusting the JSON shape. npm 10 reports
+  // `filename`; the npm 11 the publish workflow upgrades to for OIDC reports
+  // neither `filename` nor `name` here, so `join(staging, undefined)` threw
+  // ERR_INVALID_ARG_TYPE before the directory-scan fallback below could run —
+  // and it threw only in CI, because local pnpm pins npm 10. Compute the
+  // candidate first, join only when it is actually a string, and let the
+  // staging-dir scan (which needs no JSON at all) be the real answer.
+  const first = (Array.isArray(meta) ? meta[0] : meta) ?? {};
+  const reported =
+    typeof first.filename === 'string'
+      ? first.filename
+      : typeof first.name === 'string'
+        ? first.name
+        : null;
+  tarball = reported === null ? null : join(staging, reported);
+  if (tarball === null || !existsSync(tarball)) {
+    // Authoritative path: we packed into an empty temp dir, so the sole .tgz
+    // in it IS the tarball, whatever npm chose to print.
+    const tgz = readdirSync(staging).filter((f) => f.endsWith('.tgz'));
+    if (tgz.length !== 1) {
+      console.error(
+        `check-pack-allowlist: expected exactly 1 .tgz in ${staging}, found ${tgz.length}` +
+          (tgz.length > 1 ? ` (${tgz.join(', ')})` : ''),
+      );
       process.exit(1);
     }
-    tarball = join(staging, tgz);
+    tarball = join(staging, tgz[0]);
   }
 
   const list = spawnSync('tar', ['-tzf', tarball], { encoding: 'utf8' });
