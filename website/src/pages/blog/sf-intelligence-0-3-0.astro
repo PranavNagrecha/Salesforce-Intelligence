@@ -1,0 +1,272 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "sf-intelligence 0.3.0 - core-by-default tools, scoped consent, and the upgrade path";
+const description =
+  "What shipped in sf-intelligence 0.3.0: a 19-tool core profile, live consent as an expiring scoped grant, egress off by default, and every breaking change to plan for.";
+
+const faqs = [
+  {
+    q: "What breaks when you upgrade sf-intelligence to 0.3.0?",
+    a: "Six things, all deliberate. The default tool profile is now core, so only 19 tools are directly invokable and a tools/call outside that set is denied. Per-call liveEnabled: true is no longer a consent path. Existing v1 consent records without a grantId are ignored. Grants now expire after 7 days and bind to a Salesforce OrgId and principal. The npm update check is opt-in rather than automatic. And every success envelope carries a contentPolicy stamp of roughly 280 bytes. Nothing else about tool inputs or outputs changed; legacy response keys are untouched.",
+  },
+  {
+    q: "Why does sf-intelligence advertise 19 tools instead of 209?",
+    a: "209 is the number of registered tools; 19 is the number advertised to the host by default. Publishing 205 schemas into an MCP host's tool list costs context on every single turn and makes the host's own routing worse, because most of those tools are specialist analyses that a general question should never be choosing between. The core profile is a 19-tool spine covering resolve and search, component and edge retrieval, impact, effective permissions, order of execution, org overview and history, health, routing and synthesis, tool discovery, and live consent - and everything else is reached through sfi.run_analysis by name. Set SFI_TOOL_PROFILE=full to restore the previous advertise-everything behaviour.",
+  },
+  {
+    q: "How do I call a non-core sf-intelligence tool after 0.3.0?",
+    a: "Call sfi.run_analysis with a name and an args object, for example { name: 'sfi.interpret', args: { componentId: 'CustomField:Account.Industry__c' } }. The target must be a registered tool, and the gateway validates it against that tool's real schema, so this is a routing change rather than an escape hatch. Use sfi.describe_analysis to get a tool's schema first; under the core profile it defaults to a summary detail level, with schema and full available on request.",
+  },
+  {
+    q: "Do you need to re-refresh the vault after upgrading to 0.3.0?",
+    a: "Yes, if you rely on delete-safety verdicts. A vault built by a pre-0.3.0 builder is missing edges that this release added, so a safe verdict from it is not trustworthy. Rather than silently serve the old answer, 0.3.0 detects the older builder version, attaches a trust limitation, and routes an otherwise-safe verdict to review - the same not-proven-safe treatment that incomplete coverage already receives. It fails open on an unparseable version, because a verdict should never be downgraded on a guess. Run sfi refresh against your org alias to clear it.",
+  },
+  {
+    q: "Why did live consent stop working after upgrading sf-intelligence?",
+    a: "Live consent became a v2 grant and v1 records are ignored by design, so you re-grant once with sfi.live_consent { grant: true }. The new grant binds to the Salesforce OrgId and the principal read from sf org display, carries scopes for aggregate, sample and users access, and expires after 7 days by default. Re-pointing an alias at a different org refuses the grant rather than silently answering about the new org. Sample and user-level tools additionally require an explicit scope step-up.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "sf-intelligence 0.3.0: core-by-default tools, scoped consent, and the upgrade path",
+    description:
+      "The 0.3.0 release of sf-intelligence: a 19-tool core profile by default with sfi.run_analysis as the gateway, live consent as an OrgId-bound expiring grant, outbound network egress off by default, the refresh bug that could delete a vault and report success, and the generated ProductManifest that makes capability drift a build failure.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    datePublished: "2026-08-10",
+    dateModified: "2026-08-10",
+    inLanguage: "en",
+    keywords:
+      "sf-intelligence 0.3.0, Salesforce MCP release notes, core tool profile, sfi.run_analysis, scoped live consent, MCP least privilege, Salesforce metadata vault refresh, ProductManifest drift gate",
+    articleSection: "Engineering",
+    mainEntityOfPage: `${site.url}/blog/sf-intelligence-0-3-0`,
+    image: `${site.url}/assets/img/og-image.png`,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog/sf-intelligence-0-3-0"
+  heading="0.3.0 — safer defaults, and claims that have to prove themselves"
+  intro={`0.3.0 is not a capability release. It narrows what the server exposes by default, turns consent and network access into things you grant rather than things you inherit, and takes back a set of claims the product was making without the evidence to back them. <strong>Six breaking changes</strong>, all of them defaults tightening. Here is what changed and what you need to do.`}
+  crumbs={[{ label: "blog", href: "/blog" }, { label: "sf-intelligence-0-3-0", href: "/blog/sf-intelligence-0-3-0" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "sf-intelligence 0.3.0", path: "/blog/sf-intelligence-0-3-0" }]}
+  jsonld={jsonld}
+  ogType="article"
+  datePublished="2026-08-10"
+  dateModified="2026-08-10"
+>
+  <section style="padding-top:clamp(20px,3vw,28px); padding-bottom:0;">
+    <div class="container">
+      <div class="hero-meta">
+        <span class="chip">v0.3.0</span>
+        <span class="chip"><b>19</b> tools advertised</span>
+        <span class="chip"><b>209</b> registered</span>
+        <span class="chip"><b>6</b> breaking changes</span>
+        <span class="chip">egress off by default</span>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top:clamp(18px,3vw,26px);">
+    <div class="container">
+      <div class="prose">
+        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Released 2026-08-07 · published 2026-08-10</p>
+
+        <div class="callout">
+          <p><strong>In one line:</strong> the server now advertises <strong>19 tools instead of 205</strong> and routes the rest through <code>sfi.run_analysis</code>; live access needs a <strong>scoped, expiring, org-bound grant</strong> rather than a per-call flag; outbound network is <strong>off unless you ask for it</strong>; and a set of over-claims - a refresh that could delete a vault and report success, a coverage row that asserted a confirmed zero about an org with 4,296 reports, one validation rule counted as two blockers - were fixed and fenced off by a generated manifest that fails the build when the product's stated facts drift from its real registries.</p>
+        </div>
+
+        <h2 id="breaking">What breaks when you upgrade</h2>
+        <p>Every breaking change in 0.3.0 is a default getting stricter. None of them change a tool's inputs or outputs, and legacy response keys are untouched - so if you consume this server programmatically, your parsing is safe and your <em>access</em> is what needs attention.</p>
+        <table class="doc-table">
+          <thead><tr><th>What changed</th><th>What you do</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Default tool profile is <code>core</code></strong> - 19 directly invokable schemas. A <code>tools/call</code> outside the advertised set is denied.</td>
+              <td>Call non-core tools via <code>sfi.run_analysis {"{ name, args }"}</code>, or set <code>SFI_TOOL_PROFILE=full</code>.</td>
+            </tr>
+            <tr>
+              <td><strong><code>liveEnabled: true</code> is no longer a live-access path.</strong> It is intent only, and ignored for access.</td>
+              <td>Grant standing consent with <code>sfi.live_consent</code>, or set <code>SFI_LIVE_PLANE_ENABLED=1</code>.</td>
+            </tr>
+            <tr>
+              <td><strong>v1 consent records are dropped.</strong> On-disk grants without a <code>grantId</code> / <code>expiresAt</code> stop working.</td>
+              <td>Re-grant once: <code>sfi.live_consent {"{"} grant: true {"}"}</code>.</td>
+            </tr>
+            <tr>
+              <td><strong>Grants expire and bind to an org.</strong> Default TTL is 7 days, bound to Salesforce OrgId + principal.</td>
+              <td>Expect periodic re-grants. Re-pointing an alias at another org refuses until you re-grant.</td>
+            </tr>
+            <tr>
+              <td><strong>The npm update check is opt-in.</strong> <code>sfi mcp</code> no longer contacts the registry by default.</td>
+              <td>Set <code>SFI_UPDATE_CHECK=1</code> or <code>SFI_NETWORK_MODE=updates-only</code> if you want it.</td>
+            </tr>
+            <tr>
+              <td><strong>Success envelopes stamp <code>contentPolicy</code></strong> - about 280 bytes marking org strings as untrusted data.</td>
+              <td>Nothing, unless you assert on exact envelope shape in tests.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="core-profile">Why 205 advertised tools became 19</h2>
+        <p>The tool count was a number this project used to quote with some pride, and advertising all of it was a mistake. An MCP host pays for every advertised schema on every turn: the list goes into context, and the host's routing gets harder as the list grows. Most of those 205 are specialist analyses that a general question should never be choosing between - the cost was paid constantly, the benefit arrived rarely.</p>
+        <p>So 0.3.0 splits <em>registered</em> from <em>advertised</em>. There are still <strong>209 registered tools</strong>. The default <code>core</code> profile advertises a <strong>19-tool spine</strong> - resolve and search, component and edge retrieval, impact, effective permissions, order of execution, org overview and history, health, routing and synthesis, the three discovery tools, and <code>sfi.live_consent</code> - and everything else is reached by name through one gateway:</p>
+
+        <div class="code-block">
+          <div class="cb-head"><span class="fname">the gateway</span></div>
+          <pre><span class="tok-c"># before 0.3.0 — direct call, one of 205 advertised schemas</span>
+<span class="tok-k">interpret</span>(<span class="tok-p">componentId</span>: <span class="tok-s">"CustomField:Account.Industry__c"</span>)
+
+<span class="tok-c"># 0.3.0 — same tool, same args, reached through the gateway</span>
+<span class="tok-k">run_analysis</span>(
+  <span class="tok-p">name</span>: <span class="tok-s">"sfi.interpret"</span>,
+  <span class="tok-p">args</span>: {"{"}<span class="tok-p">componentId</span>: <span class="tok-s">"CustomField:Account.Industry__c"</span>{"}"}
+)
+
+<span class="tok-c"># restore the old behaviour entirely</span>
+<span class="tok-k">export</span> SFI_TOOL_PROFILE=full</pre>
+        </div>
+
+        <p>The gateway is a routing change, not an escape hatch: the target must be a registered tool and its args are validated against that tool's real schema. <code>sfi.describe_analysis</code> gained a progressive <code>detail</code> level (<code>summary</code> | <code>schema</code> | <code>full</code>, defaulting to <code>summary</code> under core) so a host can discover a tool's shape without paying for the full schema up front. The skills, agents and slash commands shipped with the package all teach the gateway, and a <code>pnpm skill-gateway</code> check fails CI if any of them go back to instructing a direct non-core call.</p>
+
+        <h2 id="consent">Consent became a grant, not a flag</h2>
+        <p>The opt-in live plane - the read-only SOQL surface that answers assignment questions an offline vault genuinely cannot - previously accepted <code>liveEnabled: true</code> on a call as a consent signal. That is a bad shape: the thing being authorised was also the thing asking for authorisation, on every call, with no record and no boundary.</p>
+        <p>Live consent is now a <strong>v2 grant</strong>. It binds to the Salesforce <strong>OrgId and principal</strong> (read via a read-only <code>sf org display</code>), carries <strong>scopes</strong> - <code>aggregate</code>, <code>sample</code>, <code>users</code> - <strong>expires</strong> after 7 days by default, and the grant id is disclosed on every live answer so an answer can be traced to the authorisation that permitted it. Sample and user-level reads require an explicit scope step-up rather than riding on a general grant. Re-pointing an alias at a different org refuses the grant instead of quietly answering about the new one.</p>
+
+        <h2 id="network">The network is off unless you ask for it</h2>
+        <p>"Offline by default" was true of the analysis path and not quite true of the process. The CLI phoned the npm registry for an update check on startup. That is a small thing, and it is also exactly the kind of small thing that makes a security review of an org-metadata tool go badly.</p>
+        <p>Outbound egress is now gated by <code>SFI_NETWORK_MODE</code>, defaulting to <strong><code>off</code></strong>, with <code>updates-only</code> and <code>salesforce-read</code> as the other two settings. <code>sfi refresh</code> and authorised live reads temporarily elevate to <code>salesforce-read</code> and drop back down. Runtime model download is always denied. One adapter in the core package is the choke point for all three callers - update check, Tooling API, and the live CLI/REST path - so the policy is enforced in one place rather than remembered in three.</p>
+
+        <h2 id="refresh-bug">The refresh that deleted a vault and reported success</h2>
+        <p>This is the most serious bug this project has shipped, and it deserves to be described plainly.</p>
+        <p><code>reconcileSourceDeletions</code> - the step that removes vault files for metadata deleted in the org - compared raw tree-relative paths. The authoritative retrieve lands files under <code>&lt;pkgDir&gt;/main/default/&lt;type&gt;/…</code>, while an older vault stores them flat as <code>&lt;type&gt;/…</code>. Those never match. So on a vault with the older layout, <strong>every in-scope file was classified as "deleted in the org" and removed</strong>, while byte-identical copies sat in the authoritative output directory.</p>
+        <p>Reproduced against a synthetic fixture by executing the shipped code: 8 of 8 files deleted. On a real org it destroyed <strong>974 nodes</strong> - 8,641 down to 7,667, including 850 CustomFields - and reported <code>status: success</code> with exit code 0. It also recurred by construction: additive pulls (reports, dashboards, auto-expanded objects) write flat while the authoritative tree is nested, so every additively-pulled file was deleted by the <em>next</em> refresh, before the re-pull ran.</p>
+        <p>Two fixes, because one was not enough:</p>
+        <ul>
+          <li><strong>Path comparison is now layout-agnostic.</strong> The key is derived by probing for the shortest trailing path segments that still resolve to a ComponentType, so a future wrapper directory falls off by construction instead of needing another special case.</li>
+          <li><strong>A wholesale-deletion guard.</strong> A reconcile that would remove every in-scope file while the retrieve <em>did</em> return files of those types - or more than half the considered set - now <strong>refuses, deletes nothing, and says why</strong>. A deletion set that large is far more likely to mean the layout changed than that the org dropped that much metadata. The refusal is printed to stdout and carried through the retrieve result, because a silent refusal recreates the same blind spot from the other direction.</li>
+        </ul>
+
+        <h2 id="honest-counts">Claims that had to be taken back</h2>
+        <p>The rest of the fix list is one theme: the product asserting something it could not back. Each of these was individually small and collectively the thing that decides whether output like this is usable when a delete is on the line.</p>
+        <table class="doc-table">
+          <thead><tr><th>The claim</th><th>The reality</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>A coverage row read <code>retrieveConfirmed: true</code> with zero reports.</td>
+              <td>The report pull had failed silently, and <code>retrieved</code> was counted <em>after</em> the usage fold drops those nodes, so the row could never be non-zero. The vault asserted a confirmed zero about an org with <strong>4,296 reports</strong>. Failures are now recorded in the manifest and printed; a Report row can no longer claim a confirmed zero.</td>
+            </tr>
+            <tr>
+              <td>One validation rule reported as two separate blockers.</td>
+              <td>A rule reaches its fields by two edges tokenized from one string, so it was printed under two categories with two counts. On the reference org that is <strong>681 duplicated pairs</strong>, including 17 fields whose entire dependency set was one rule printed twice - the same inflated-referrer-count error this product's own field-audit method warns against. The presentation now folds onto one referrer and discloses the folded category; nothing is removed from the graph.</td>
+            </tr>
+            <tr>
+              <td>Every validation rule was labelled <code>formula</code>, with note text about "another formula field".</td>
+              <td>The source marker is shared with the formula tokenizer and the rule keyed on it was unscoped, so the truthful <code>validation</code> category was unreachable in production. Now scoped to a <code>CustomField</code> referrer.</td>
+            </tr>
+            <tr>
+              <td><code>safe_to_delete_field</code> advertised a <code>traversalPath</code> in its formula note.</td>
+              <td>No type carried it, nothing populated it, no renderer emitted it. It is now surfaced per example, so a directly-tokenized formula reference is distinguishable from a resolved cross-object traversal.</td>
+            </tr>
+            <tr>
+              <td>Roll-up citations described the coupling.</td>
+              <td>They described two of three roles - <strong>32 of 98</strong> roll-up edges are <code>summaryFilterItem</code>, where the roll-up's <em>filter</em> tests the field. Each example now carries its own <code>rollupRole</code>.</td>
+            </tr>
+            <tr>
+              <td>Condition citations named the firing rule.</td>
+              <td>They named <strong>4 of 7</strong> wired firer families, so an ApprovalProcess blocker could be described as a Flow criterion. Every example now carries its <code>firerId</code> - the rule you actually go change.</td>
+            </tr>
+            <tr>
+              <td>FlexiPage related-list aliases were stamped <code>declared</code>.</td>
+              <td>Both that and the formula-traversal branch are a regex scrape plus an inferred relationship join. No file declares that a page column is a given field. <code>declared</code> is the tier this product asks you to trust when a delete is on the line, so both branches are now <code>parsed</code>.</td>
+            </tr>
+            <tr>
+              <td>The published SBOM described what you install.</td>
+              <td>It was generated against a package with no lockfile, so it emitted 19 direct entries and an <strong>empty dependency graph</strong>. It now resolves the transitive runtime closure from the workspace lockfile: <strong>137 components, 138 graph nodes</strong>, with a component floor and a non-empty-graph check that fail the publish rather than shipping a hollow artifact.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="drift-gate">Making the whole class a build failure</h2>
+        <p>Fixing eight over-claims individually is worth little if the ninth ships next month. Two of the worst offenders were not analysis bugs at all - they were the project describing itself inaccurately. The official MCP Registry sat at <strong>0.1.26 while npm served 0.2.5</strong>, and because downstream MCP directories crawl that registry record, one stale entry propagated the wrong version across the ecosystem. And <code>llms.txt</code> - the file published specifically so AI engines cite this project accurately - stated the Concept Model size twice, with two different figures, six lines apart.</p>
+        <p>0.3.0 closes the class structurally:</p>
+        <ul>
+          <li><strong>A generated ProductManifest.</strong> Tool counts, the core profile, live and local-mutation rosters, graph tables and schema version, Concept Model size and content hash, and a catalog hash are all derived from the runtime registries into <code>eval/product-manifest.json</code>, and exposed on <code>sfi.capabilities</code>. <code>verify-doc-sync</code> fails CI when the committed manifest, the website's data file, the README concept counts or the docs roster pins disagree with the registries. The 196-vs-209 and 94/143-vs-142/193 drift class cannot recur silently.</li>
+          <li><strong>A tag can no longer publish unverified.</strong> The publish workflow fires on tag push; CI fires on push-to-main and pull request - never on tags. The two were fully decoupled, so tagging any commit shipped it to npm and the registry with no guarantee CI had ever run. (<code>needs:</code> cannot fix this; it only orders jobs within one workflow file.) The publish job now asks the API what CI actually did on the tagged SHA and <strong>fails closed on everything except a clean success</strong> - including the real hole, where CI never ran at all - and waits out an in-flight run rather than racing a fresh merge.</li>
+          <li><strong>A pre-0.3.0 vault stops returning the false <code>safe</code>.</strong> Upgrading without re-refreshing leaves a graph missing this release's edges, so an older builder version now adds a trust limitation and routes an otherwise-<code>safe</code> verdict to <code>review</code>. It fails open on an unparseable version - a verdict is never downgraded on a guess.</li>
+        </ul>
+
+        <h2 id="untrusted">Org metadata is data, never instructions</h2>
+        <p>Field labels, descriptions and help text are strings someone in your org typed. Anything that reads them into an assistant's context is handling attacker-influenceable text. 0.3.0 makes that explicit rather than implicit: contracts expose <code>UntrustedOrgText</code> and a content policy, <code>sfi.get_component</code> and <code>sfi.resolve</code> carry additive <code>labelOrgText</code> / <code>descriptionOrgText</code> fields, and the MCP dispatcher stamps <code>contentPolicy</code> on every success envelope so a host treats org strings as data - never as instructions, and never as consent.</p>
+        <p>This is a labelling guarantee at the protocol boundary, not a claim that the host will honour it. For the full threat model - what a read-only server can and cannot promise about prompt injection - see <a href="/ai-safety">AI safety and the security model</a>.</p>
+
+        <h2 id="upgrade">Upgrade checklist</h2>
+        <div class="code-block">
+          <div class="cb-head"><span class="fname">upgrading to 0.3.0</span></div>
+          <pre><span class="tok-c"># 1. Take the new version (npx -y always resolves latest)</span>
+npx -y sf-intelligence@0.3.0 mcp
+
+<span class="tok-c"># 2. Re-refresh — a pre-0.3.0 vault downgrades `safe` verdicts to `review`</span>
+sfi refresh --target-org &lt;alias&gt;
+
+<span class="tok-c"># 3. Re-grant live consent, if you use the live plane at all</span>
+<span class="tok-c">#    v1 records are ignored; the new grant expires in 7 days</span>
+<span class="tok-k">live_consent</span>(<span class="tok-p">grant</span>: <span class="tok-s">true</span>)
+
+<span class="tok-c"># 4. Point any direct non-core calls at the gateway</span>
+<span class="tok-k">run_analysis</span>(<span class="tok-p">name</span>: <span class="tok-s">"sfi.coverage_report"</span>, <span class="tok-p">args</span>: {"{}"})
+
+<span class="tok-c"># — or opt out of all of the above routing changes —</span>
+<span class="tok-k">export</span> SFI_TOOL_PROFILE=full
+
+<span class="tok-c"># 5. Verify what you installed came from the tagged commit</span>
+npm audit signatures</pre>
+        </div>
+        <p>If you only read the vault offline and never touched the live plane, steps 2 and 4 are the whole upgrade. If you script against the server, step 4 is the one that will surface as a denied <code>tools/call</code>.</p>
+
+        <h2 id="faq">FAQ</h2>
+        {faqs.map((f) => (
+          <details class="faq-item">
+            <summary>{f.q}</summary>
+            <div class="answer"><p>{f.a}</p></div>
+          </details>
+        ))}
+
+        <h2 id="learn-more">Related reading</h2>
+        <ul>
+          <li><a href="/blog/deterministic-reasoning-model">The deterministic reasoning model</a> - how <code>sfi.interpret</code> turns metadata into cited structural claims, and what 0.2.0 and 0.2.1 shipped.</li>
+          <li><a href="/trust">Quality &amp; trust</a> - the full CI gate, the per-answer trust model, and the boundaries static analysis does not cross.</li>
+          <li><a href="/configuration">Configuration</a> - <code>SFI_TOOL_PROFILE</code>, <code>SFI_NETWORK_MODE</code>, the live plane, and every other environment variable.</li>
+          <li><a href="/capabilities">Capability map</a> - the eight question areas behind the 19-tool core spine.</li>
+        </ul>
+
+        <div class="cta-box" style="margin-top:32px;">
+          <h2 class="screen-type">Run 0.3.0 against your own org.</h2>
+          <p>Free, read-only, offline. Start on the synthetic demo org - no Salesforce auth, no sf CLI, nothing to configure - then point it at your own metadata.</p>
+          <div class="cta-actions">
+            <a class="btn btn-solid" href="/getting-started">get started</a>
+            <a class="btn btn-ghost" href="/mcp">try the demo org</a>
+            <a class="btn btn-ghost" href={site.github} rel="noopener">changelog on GitHub</a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

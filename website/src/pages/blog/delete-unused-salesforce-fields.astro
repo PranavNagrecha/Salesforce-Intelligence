@@ -4,7 +4,7 @@ import site from "../../data/site.ts";
 
 const title = "Can I Delete This Salesforce Field? A Dependency-First Field Cleanup Method";
 const description =
-  "Field population tells you how much data is in a field. It never tells you what depends on it. Here is the method for deciding whether a Salesforce custom field is safe to delete - what blocks a delete, what breaks silently, the four verdicts that make cleanup actionable, and the blind spots no static analysis closes.";
+  "Field population never tells you what depends on a field. The dependency-first method for deciding if a Salesforce custom field is safe to delete.";
 
 const faqs = [
   {
@@ -67,6 +67,9 @@ const jsonld = [
   crumbs={[{ label: "blog", href: "/blog" }, { label: "delete-unused-salesforce-fields", href: "/blog/delete-unused-salesforce-fields" }]}
   breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "Deleting unused Salesforce fields", path: "/blog/delete-unused-salesforce-fields" }]}
   jsonld={jsonld}
+  ogType="article"
+  datePublished="2026-07-28"
+  dateModified="2026-07-28"
 >
   <section style="padding-top:clamp(20px,3vw,28px);">
     <div class="container">
