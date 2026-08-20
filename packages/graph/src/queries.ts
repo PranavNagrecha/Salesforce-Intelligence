@@ -132,10 +132,24 @@ const appendNodePropertyFilters = (
   // folds those plus empty-string into one "absent" bucket, so enterprise types
   // (key omitted) and custom extractors (`description: null`) behave identically.
   // Literal JSON path, no user input interpolated (mirrors `recordTriggered`).
+  //
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: `Report`/`Dashboard` nodes deliberately
+  // persist NO description TEXT (it is freeform admin prose on a high-volume,
+  // now-persisted node family — see the extractor's `descriptionPresenceOnly`
+  // note). They carry a `descriptionPresent` BOOLEAN instead. Without honoring
+  // it here, `missingDescription: true` would return every report in the org
+  // and `hasDescription: true` none of them — a filter that answers confidently
+  // and wrongly. Any node WITHOUT `descriptionPresent` is unaffected: the
+  // added disjunct/conjunct is false/true respectively for a missing key, so
+  // every pre-existing type's result set is byte-identical.
   if (options?.descriptionPresence === 'present') {
-    out += ` AND coalesce(json_extract_string(properties_json, '$.description'), '') <> ''`;
+    out +=
+      ` AND (coalesce(json_extract_string(properties_json, '$.description'), '') <> ''` +
+      ` OR coalesce(json_extract_string(properties_json, '$.descriptionPresent'), '') = 'true')`;
   } else if (options?.descriptionPresence === 'absent') {
-    out += ` AND coalesce(json_extract_string(properties_json, '$.description'), '') = ''`;
+    out +=
+      ` AND coalesce(json_extract_string(properties_json, '$.description'), '') = ''` +
+      ` AND coalesce(json_extract_string(properties_json, '$.descriptionPresent'), '') <> 'true'`;
   }
   return out;
 };

@@ -90,7 +90,7 @@ import { captureDataShape } from '../data-shape-capture.js';
 import { buildOrgCardInput } from '../org-card-input.js';
 import { readCliPackageVersion } from '../package-version.js';
 import {
-  foldReportDashboardUsageIntoFields,
+  applyReportDashboardPersistence,
   parseTypeFilter,
   renderVault,
   resolveRestrictionRuleProfileEdges,
@@ -100,6 +100,8 @@ import {
   EXTRACT_CACHE_VERSION,
   type ExtractCache,
   type RefreshExtractionFailure,
+  type ReportDashboardPersistStats,
+  type ReportDashboardTypeStats,
 } from '../refresh-pipeline.js';
 import {
   createSfSetupAuditTrailSoql,
@@ -252,6 +254,13 @@ export interface RefreshResult {
     readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
     readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
   };
+  /**
+   * REPORT-DASHBOARD-GRAPH-PERSISTENCE: per type, how many Report/Dashboard
+   * nodes the extractors produced vs how many were PERSISTED into the graph,
+   * and the cap in force. `persisted < extracted` is the honest signal that
+   * the graph holds a subset (the coverage row also goes `pending`).
+   */
+  readonly reportNodeCap?: ReportDashboardPersistStats;
   /**
    * Present when the best-effort report/dashboard pull ERRORED or lost
    * batches. See {@link ReportPullDisclosure} — the failure used to reach
@@ -1138,10 +1147,26 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
     }
   }
 
-  // Fold report/dashboard field usage onto the referenced fields and drop the
-  // (folder-based, high-volume) report/dashboard nodes — the usage lives on the
-  // field, with no per-report node bloat. No-op when none were retrieved.
-  walked = { ...walked, results: foldReportDashboardUsageIntoFields(walked.results) };
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: fold report/dashboard field usage onto
+  // the referenced fields (unchanged) AND persist the Report/Dashboard nodes
+  // themselves — redacted through a property allow-list and capped per type.
+  // `stats` carries extracted-vs-persisted so a capped capture is DISCLOSED on
+  // the manifest's coverage rows rather than reading as complete. No-op when
+  // none were retrieved.
+  const reportDashboardPersistence = applyReportDashboardPersistence(walked.results);
+  // Only disclose when there was something to disclose. The pass is pure and
+  // always returns stats, but stamping `reportNodeCap: {extracted: 0,
+  // persisted: 0, cap: 5000}` onto a `--no-reports` (or reports-free) vault
+  // invents a report-persistence story for a run that never pulled a report —
+  // noise in the manifest, and a reader could mistake a structural zero for a
+  // measured one.
+  const reportNodeStats =
+    reportDashboardPersistence.stats.reports.extracted +
+      reportDashboardPersistence.stats.dashboards.extracted >
+    0
+      ? reportDashboardPersistence.stats
+      : undefined;
+  walked = { ...walked, results: reportDashboardPersistence.results };
 
   // RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: resolve RestrictionRule /
   // ScopingRule `UnresolvedProfile:{id}` userCriteria stubs to real
@@ -1225,6 +1250,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
     ...(reconciledTypes !== null ? { reconciledTypes } : {}),
     ...(apexAstStats !== undefined ? { apexAstStats } : {}),
     ...(reportsCapStats !== undefined ? { reportsCapStats } : {}),
+    ...(reportNodeStats !== undefined ? { reportNodeStats } : {}),
     ...(reportPull !== undefined ? { reportPull } : {}),
   };
 
@@ -1317,6 +1343,12 @@ interface RunWithOpenGraphArgs {
     readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
     readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
   };
+  /**
+   * REPORT-DASHBOARD-GRAPH-PERSISTENCE: what the persistence pass actually
+   * wrote per type. Drives {@link decorateReportNodeCapCoverage} and the
+   * manifest's `reportNodeCap` disclosure block.
+   */
+  readonly reportNodeStats?: ReportDashboardPersistStats;
   /** Set when the report/dashboard pull errored or lost batches this run. */
   readonly reportPull?: ReportPullDisclosure;
   readonly store: GraphStore;
@@ -1497,23 +1529,29 @@ export const decorateProfileGrantCoverage = (
 };
 
 /**
- * Types whose graph nodes `foldReportDashboardUsageIntoFields` DELETES before
- * anything counts them: report/dashboard field usage is folded onto the
- * referenced `CustomField` and no per-report node is persisted. So
- * `counts.components['Report']` is STRUCTURALLY 0 however many report files
- * landed — a coverage row built from the node count can never be non-zero.
+ * Types whose graph node count is NOT self-standing evidence of what the
+ * retrieve delivered, so a coverage row built from it can never read as
+ * confirmed-empty.
+ *
+ * HISTORY: this used to mean "the fold DELETES every Report/Dashboard node, so
+ * `counts.components['Report']` is structurally 0". Since
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE the nodes ARE persisted, so the count is
+ * real — but it is still not evidence, for a different reason: it is CAPPED
+ * (`applyReportDashboardPersistence`, per-type node cap), so `retrieved` taken
+ * from the node count would UNDERSTATE a fully-landed pull. The rule is
+ * unchanged: for these types `retrieved` must come from the RETRIEVE
+ * (`reportsCap.landed` — files that actually hit disk), and with no such
+ * evidence the row stays `pending`: unknown, never confirmed-empty.
  *
  * Regression context (2026-07-28): a vault stamped `retrieveConfirmed: true,
  * retrieved: 0` on `Report` for an org holding 4,296 of them — a CONFIRMED
  * ZERO that no successful pull could ever have contradicted, carried
  * identically by a 2026-06-30 manifest from a run that DID land 3,076 report
- * files. For these types the `retrieved` count must come from the RETRIEVE
- * (`reportsCap.landed` — files that actually hit disk), and with no such
- * evidence the row stays `pending`: unknown, never confirmed-empty.
+ * files.
  *
- * Kept in step with `FOLD_TO_FIELD_USAGE` in `refresh-pipeline.ts` (the set the
- * fold actually drops); duplicated rather than imported because the pipeline
- * does not export it.
+ * Kept in step with `REPORT_DASHBOARD_TYPES` in `refresh-pipeline.ts` (the set
+ * the persistence pass owns); duplicated rather than imported because the
+ * pipeline does not export it.
  */
 export const FOLD_ERASED_COVERAGE_TYPES: ReadonlySet<string> = new Set<ComponentType>([
   'Report',
@@ -1651,6 +1689,47 @@ export const decorateReportsCapCoverage = (
     }
   }
   return [...out].sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+};
+
+/**
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE: when the node persistence cap DROPPED
+ * report/dashboard nodes, force that type's coverage row `pending` and strip
+ * `retrieveConfirmed`.
+ *
+ * This is the disclosure that keeps a capped capture from reading as a
+ * complete one. Without it, an org whose pull landed every report would show
+ * `retrieveConfirmed: true` on the Report row while the graph held only the
+ * first N nodes — the exact unfalsifiable-completeness shape the 2026-07-28
+ * report-coverage incident was about, just relocated from the retrieve to the
+ * persistence step. `pending` routes through the SAME machinery
+ * (`summarizeCoverage` -> `partial`), so every field tool that asks
+ * "were reports fully covered?" (`field_360`, `field_lineage`,
+ * `unused_fields_deep`, …) keeps hedging its report absence claims.
+ *
+ * Deliberately does NOT set `errored`: nothing errored. The reason is carried
+ * on the manifest's `reportNodeCap` block and in the refresh summary.
+ *
+ * Runs AFTER `decorateReportsCapCoverage` (which clears `pending` on a fully
+ * landed pull) so the cap always wins over a "fully landed" reading, and
+ * BEFORE `decorateReportPullCoverage` so a real pull failure still wins over
+ * the cap. No-op when nothing was dropped.
+ */
+export const decorateReportNodeCapCoverage = (
+  entries: readonly CoverageEntry[],
+  stats: ReportDashboardPersistStats | undefined,
+): readonly CoverageEntry[] => {
+  if (stats === undefined) return entries;
+  const capped = new Map<string, ReportDashboardTypeStats>();
+  if (stats.reports.persisted < stats.reports.extracted) capped.set('Report', stats.reports);
+  if (stats.dashboards.persisted < stats.dashboards.extracted) {
+    capped.set('Dashboard', stats.dashboards);
+  }
+  if (capped.size === 0) return entries;
+  return entries.map((entry) => {
+    if (!capped.has(entry.type) || entry.neverModeled) return entry;
+    const { retrieveConfirmed: _dropped, ...rest } = entry;
+    return { ...rest, requested: true, pending: true };
+  });
 };
 
 /**
@@ -1991,6 +2070,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
       ...(args.retrieveFailures.length > 0 ? { retrieveFailures: args.retrieveFailures } : {}),
       ...(toolingApiSummary !== undefined ? { toolingApi: toolingApiSummary } : {}),
       ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+      ...(args.reportNodeStats !== undefined ? { reportNodeCap: args.reportNodeStats } : {}),
       ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     };
   }
@@ -2082,9 +2162,12 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // Decoration order matters. `decorateReportsCapCoverage` CLEARS `pending` on
   // a fully-landed report pull, so it must run BEFORE the staged-marker pass —
   // otherwise a mid-tier build's "still queued" pending flag would be erased by
-  // a report pull that only covered its own slice. The report-pull failure pass
-  // runs last of the report-related ones so an errored pull always wins over a
-  // "fully landed" reading.
+  // a report pull that only covered its own slice.
+  // `decorateReportNodeCapCoverage` runs immediately AFTER it, so a node
+  // persistence cap re-asserts `pending` over that "fully landed" reading (the
+  // pull landed everything; the GRAPH still holds a subset). The report-pull
+  // failure pass runs last of the report-related ones so an errored pull always
+  // wins over both.
   const coverageComputedAt = new Date().toISOString();
   // AUDIT-F5: bump per-family epoch/retrievedAt only when a real pull ran
   // (`confirmedTypes !== null`); scoped / --no-pull / pending rows preserve
@@ -2094,16 +2177,19 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     decorateProfileGrantCoverage(
       decoratePendingCoverage(
         decorateReportPullCoverage(
-          decorateReportsCapCoverage(
-            buildCoverageEntries(
-              counts,
-              walked.skippedDirectories,
-              requestedTypes,
-              paths.source,
-              walked.failures,
-              confirmedTypes,
+          decorateReportNodeCapCoverage(
+            decorateReportsCapCoverage(
+              buildCoverageEntries(
+                counts,
+                walked.skippedDirectories,
+                requestedTypes,
+                paths.source,
+                walked.failures,
+                confirmedTypes,
+              ),
+              args.reportsCapStats,
             ),
-            args.reportsCapStats,
+            args.reportNodeStats,
           ),
           args.reportPull,
         ),
@@ -2150,6 +2236,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     ...(opts.stagedMarker !== undefined ? { staged: opts.stagedMarker } : {}),
     ...(args.apexAstStats !== undefined ? { apexAst: args.apexAstStats } : {}),
     ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+    ...(args.reportNodeStats !== undefined ? { reportNodeCap: args.reportNodeStats } : {}),
     ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     ...(profileGrantDisclosure !== null && profileGrantStats !== null
       ? {
@@ -2400,6 +2487,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     ...(pulse !== undefined ? { pulse } : {}),
     ...(toolingApiSummary !== undefined ? { toolingApi: toolingApiSummary } : {}),
     ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+    ...(args.reportNodeStats !== undefined ? { reportNodeCap: args.reportNodeStats } : {}),
     ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     ...(auditTrailSummary !== undefined ? { auditTrail: auditTrailSummary } : {}),
   };
@@ -4307,7 +4395,7 @@ export const runSfRetrieveObjects = async (
  * and requests them explicitly. Best-effort: a SOQL or retrieve failure is
  * non-fatal and leaves the rest of the refresh intact; unfiled / personal items
  * with no matching `Folder` row are skipped. The retrieved field usage is folded
- * onto the fields downstream (`foldReportDashboardUsageIntoFields`) — no per-report
+ * onto the fields downstream (`applyReportDashboardPersistence`) — plus per-report
  * node is persisted. Returns the count requested per type.
  */
 /** SOQL record rows feeding the foldered-report manifest builder. */
@@ -4872,6 +4960,10 @@ export const formatRefreshSummary = (result: RefreshResult): string => {
   if (result.reportsCap !== undefined) {
     lines.push('', ...formatReportsCapSummary(result.reportsCap));
   }
+  const nodeCapLines = formatReportNodeCapSummary(result.reportNodeCap);
+  if (nodeCapLines !== null) {
+    lines.push('', ...nodeCapLines);
+  }
   // STDOUT, not just stderr: `progress` writes to stderr and operators pipe
   // stdout, which is how a failed report pull against a 4,296-report org left
   // no trace anyone read. The summary is the stdout surface.
@@ -4918,6 +5010,38 @@ export const formatReportsCapSummary = (
     'Reports / Dashboards (usage-ranked pull)',
     row('Reports', rc.reports),
     row('Dashboards', rc.dashboards),
+  ];
+};
+
+/**
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE: the extracted-vs-persisted block for the
+ * Report/Dashboard node capture. Returns `null` when nothing was capped (the
+ * default-pull case) so a clean run prints no noise; when the cap DID bite the
+ * block says so in stdout, names the cap, and points at the override — a
+ * capped vault must never look complete.
+ */
+export const formatReportNodeCapSummary = (
+  stats: ReportDashboardPersistStats | undefined,
+): readonly string[] | null => {
+  if (stats === undefined) return null;
+  const capped = (
+    [
+      ['Reports', stats.reports],
+      ['Dashboards', stats.dashboards],
+    ] as const
+  ).filter(([, c]) => c.persisted < c.extracted);
+  if (capped.length === 0) return null;
+  return [
+    'WARNING — Report / Dashboard graph nodes were CAPPED (the vault holds a SUBSET).',
+    ...capped.map(
+      ([label, c]) =>
+        `  ${label}: ${c.persisted}/${c.extracted} persisted as graph nodes (per-type cap ${c.cap}) — ` +
+        `${c.extracted - c.persisted} extracted but NOT persisted.`,
+    ),
+    '  Field-usage answers ("which reports use this field") still cover ALL extracted reports;',
+    '  it is the per-report NODES + their dependency edges that are capped. The coverage rows for',
+    '  these types are marked `pending`, so absence claims about reports stay qualified.',
+    '  Raise or remove the cap with SFI_REPORT_NODE_CAP=<n> (0 disables node persistence).',
   ];
 };
 
@@ -5326,11 +5450,11 @@ export const registerRefreshCommand = (program: Command): void => {
     )
     .option(
       '--no-reports',
-      'Skip the report/dashboard pull entirely. DEFAULT (neither flag): pull the top SFI_REPORTS_CAP (500) reports+dashboards ranked by actual usage (LastRunDate / LastViewedDate, fallback LastModifiedDate) and fold their field references onto fields; when the org holds more than the cap, Report/Dashboard coverage reads `pending` so absence claims stay qualified. Report/Dashboard nodes are folded onto fields and never persisted, so their coverage row can only ever be proven by the pull itself — it reads `pending` (not checked), never a confirmed zero. A pull that errors is non-fatal but NOT silent: it is recorded on the manifest as `reportPull`, marks those rows errored, and exits non-zero.',
+      'Skip the report/dashboard pull entirely. DEFAULT (neither flag): pull the top SFI_REPORTS_CAP (500) reports+dashboards ranked by actual usage (LastRunDate / LastViewedDate, fallback LastModifiedDate) and fold their field references onto fields; when the org holds more than the cap, Report/Dashboard coverage reads `pending` so absence claims stay qualified. Report/Dashboard field usage is folded onto fields AND the reports/dashboards themselves persist as `Report:{Folder}/{Name}` / `Dashboard:{Folder}/{Name}` nodes (redacted: no filter values, no descriptions, no running-user; capped per type by SFI_REPORT_NODE_CAP, default 5000). Their coverage row is never derived from that node count — it can only be proven by the pull itself, so it reads `pending` (not checked), never a confirmed zero; a node cap that bites forces `pending` too. A pull that errors is non-fatal but NOT silent: it is recorded on the manifest as `reportPull`, marks those rows errored, and exits non-zero.',
     )
     .option(
       '--with-reports',
-      'Also pull folder-based Report / Dashboard metadata and fold their field usage onto the referenced fields, so a field used only in a report column / dashboard component stops reading as unused. Off by default — slow on large orgs (enumerates folders + pulls every report/dashboard).',
+      'Pull ALL folder-based Report / Dashboard metadata (uncapped), instead of the DEFAULT top-500-by-usage pull. Their field usage is folded onto the referenced fields, so a field used only in a report column / dashboard component stops reading as unused, and each report/dashboard persists as a redacted graph node. This FLAG is off by default, but reports are NOT: the default is the capped usage-ranked pull (see --no-reports). Slow on large orgs — enumerates folders + pulls every report/dashboard.',
     )
     .option(
       '--staged',

@@ -341,7 +341,9 @@ describe('unusedFieldsDeepHandler', () => {
         nodes: [
           makeNode({ id: acct, type: 'CustomObject', apiName: 'Account' }),
           // Only use is a report column — the refresh `--with-reports` fold stamped
-          // `usedInReport` on it (no per-report node). Must NOT surface as unused.
+          // `usedInReport` on it (usage is a property, never an edge — report
+          // NODES persist, but their field usage does not become an edge).
+          // Must NOT surface as unused.
           makeNode({
             id: reportField,
             apiName: 'ReportOnly__c',

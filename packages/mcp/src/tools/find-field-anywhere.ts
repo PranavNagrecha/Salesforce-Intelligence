@@ -443,10 +443,15 @@ export const findFieldAnywhereHandler = async (
     boundaries.push(MANAGED_PACKAGE_DISCLOSURE);
   }
 
-  // Report / Dashboard usage is folded onto the field as a property (no per-report
-  // node/edge — see foldReportDashboardUsageIntoFields), so it's invisible to the
-  // edge walk above. Surface it: a positive note when the field carries the folded
-  // usage, otherwise the caveat that it's only modeled with `--with-reports`.
+  // Report / Dashboard field usage is folded onto the field as a PROPERTY by
+  // `applyReportDashboardPersistence`, so it is invisible to the edge walk
+  // above. REPORT-DASHBOARD-GRAPH-PERSISTENCE persists the Report/Dashboard
+  // NODES (so `Report:{Folder}/{Name}` is now a real, inspectable component)
+  // but deliberately NOT the analytics -> CustomField edges: at real-org scale
+  // they were 94% of the persisted rows for an answer this property already
+  // gives over EVERY extracted report. The property stays the authority here.
+  // Surface it: a positive note when the field carries the folded usage,
+  // otherwise the caveat that report usage is only modeled when the pull ran.
   const targetNodeResult = await getNodeById(ctx.graph, targetId);
   const rdUsage =
     targetNodeResult.ok && targetNodeResult.value !== null
@@ -460,7 +465,7 @@ export const findFieldAnywhereHandler = async (
       .filter((s): s is string => s !== null)
       .join(' and ');
     boundaries.push(
-      `This field IS used in ${where} (folded from a \`--with-reports\` refresh). Reports/dashboards are not stored as per-report nodes, so there is no per-report breakdown here.`,
+      `This field IS used in ${where} (folded from the report/dashboard pull). Report/dashboard referrers are NOT edges, so they do not appear in the reference list above — read the folded \`usedInReports\` / \`usedInDashboards\` name list on the field (first 50, with an exact truncation total), or open the \`Report:{Folder}/{Name}\` node those names identify.`,
     );
   } else {
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);

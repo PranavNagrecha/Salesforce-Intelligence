@@ -10,8 +10,10 @@ import { loadManifest, summarizeCoverage } from '@sf-intelligence/vault';
 import {
   buildCoverageEntries,
   chunkFolderedReportManifest,
+  decorateReportNodeCapCoverage,
   decorateReportPullCoverage,
   decorateReportsCapCoverage,
+  formatReportNodeCapSummary,
   formatRefreshSummary,
   REPORT_PULL_DISCLOSURE,
   runRefresh,
@@ -29,11 +31,13 @@ import {
  * retrieveConfirmed: true }` — a CONFIRMED ZERO. Two independent defects made
  * that shape unfalsifiable:
  *
- *   1. `foldReportDashboardUsageIntoFields` DROPS every Report/Dashboard node
- *      before anything counts the graph, so `counts.components['Report']` is
- *      structurally 0 no matter how many report files landed. The identical
- *      row appears on the 2026-06-30 manifest of a run that DID land 3,076
- *      report files.
+ *   1. the fold DROPPED every Report/Dashboard node before anything counted
+ *      the graph, so `counts.components['Report']` was structurally 0 no
+ *      matter how many report files landed. The identical row appears on the
+ *      2026-06-30 manifest of a run that DID land 3,076 report files.
+ *      (REPORT-DASHBOARD-GRAPH-PERSISTENCE now persists those nodes, so the
+ *      count is real — but it is CAPPED per type, so it still is not evidence
+ *      of what landed, and the invariant below is unchanged.)
  *   2. `runSfRetrieveSmartReports` returned `err`, the caller logged it to
  *      stderr and continued, and NOTHING in the vault recorded the failure —
  *      the manifest was byte-identical to a successful empty pull.
@@ -115,8 +119,11 @@ describe('the written manifest never carries an unprovable report zero (end to e
       if (!loaded.ok) return;
       const byType = rows(loaded.value.coverage ?? []);
 
-      // The vault holds zero report nodes — as it always will, fold or no fold.
-      // The row must say "not checked", never "confirmed: this org has none".
+      // This vault's source tree holds no report files, so it holds no report
+      // nodes. The row must say "not checked", never "confirmed: this org has
+      // none" — and that stays true now that Report/Dashboard nodes DO persist,
+      // because their coverage `retrieved` is sourced from the RETRIEVE, never
+      // from the (cappable) node count. See FOLD_ERASED_COVERAGE_TYPES.
       for (const type of ['Report', 'Dashboard'] as const) {
         expect(byType.get(type)?.pending).toBe(true);
         expect(byType.get(type)?.retrieveConfirmed).toBeUndefined();
@@ -216,6 +223,87 @@ describe('decorateReportsCapCoverage — `retrieved` is what LANDED, not the pos
     // that returns 0 on a failed query, so a zero there proves nothing.
     expect(byType.get('Dashboard')?.pending).toBe(true);
     expect(byType.get('Dashboard')?.retrieveConfirmed).toBeUndefined();
+  });
+});
+
+/**
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE — the SAME unfalsifiable-completeness
+ * shape, relocated from the retrieve to the persistence step.
+ *
+ * The 2026-07-28 incident was a Report row reading `retrieveConfirmed: true`
+ * for an org holding thousands of them. Persisting report nodes reintroduces
+ * that risk one layer down: a pull that landed EVERY report legitimately
+ * clears `pending` via `decorateReportsCapCoverage`, but the graph may still
+ * hold only the first N nodes because the persistence cap bit. Without this
+ * decorator the vault would claim confirmed, complete report coverage while
+ * holding a subset.
+ */
+describe('decorateReportNodeCapCoverage — a CAPPED node set can never read as complete', () => {
+  const landedClean: readonly CoverageEntry[] = [
+    { type: 'Report', requested: true, retrieved: 4277, errored: false, neverModeled: false, retrieveConfirmed: true },
+    { type: 'Dashboard', requested: true, retrieved: 81, errored: false, neverModeled: false, retrieveConfirmed: true },
+  ];
+
+  it('forces pending + strips retrieveConfirmed on the capped type only', () => {
+    const byType = rows(
+      decorateReportNodeCapCoverage(landedClean, {
+        reports: { extracted: 4277, persisted: 1000, cap: 1000 },
+        dashboards: { extracted: 81, persisted: 81, cap: 1000 },
+      }),
+    );
+    // Reports were capped: the row can no longer claim confirmed coverage.
+    expect(byType.get('Report')?.pending).toBe(true);
+    expect(byType.get('Report')?.retrieveConfirmed).toBeUndefined();
+    // Dashboards were NOT capped — that row is untouched.
+    expect(byType.get('Dashboard')?.pending).toBeUndefined();
+    expect(byType.get('Dashboard')?.retrieveConfirmed).toBe(true);
+  });
+
+  it('is an identity no-op when nothing was capped, and when no stats exist', () => {
+    const uncapped = decorateReportNodeCapCoverage(landedClean, {
+      reports: { extracted: 12, persisted: 12, cap: 1000 },
+      dashboards: { extracted: 3, persisted: 3, cap: 1000 },
+    });
+    expect(uncapped).toBe(landedClean);
+    expect(decorateReportNodeCapCoverage(landedClean, undefined)).toBe(landedClean);
+  });
+
+  it('does NOT claim an error — nothing errored, the capture was just bounded', () => {
+    const byType = rows(
+      decorateReportNodeCapCoverage(landedClean, {
+        reports: { extracted: 4277, persisted: 1000, cap: 1000 },
+        dashboards: { extracted: 81, persisted: 81, cap: 1000 },
+      }),
+    );
+    expect(byType.get('Report')?.errored).toBe(false);
+    expect(byType.get('Report')?.errorReason).toBeUndefined();
+  });
+});
+
+describe('formatReportNodeCapSummary — a capped capture SAYS it is capped', () => {
+  it('names the shortfall, the cap, and the override on stdout', () => {
+    const lines = formatReportNodeCapSummary({
+      reports: { extracted: 4277, persisted: 1000, cap: 1000 },
+      dashboards: { extracted: 81, persisted: 81, cap: 1000 },
+    });
+    expect(lines).not.toBeNull();
+    const text = (lines ?? []).join('\n');
+    expect(text).toContain('CAPPED');
+    expect(text).toContain('1000/4277');
+    expect(text).toContain('3277 extracted but NOT persisted');
+    expect(text).toContain('SFI_REPORT_NODE_CAP');
+    // Dashboards were not capped — they must not appear as if they were.
+    expect(text).not.toContain('Dashboards:');
+  });
+
+  it('prints NOTHING when nothing was capped (no false alarm on a default refresh)', () => {
+    expect(
+      formatReportNodeCapSummary({
+        reports: { extracted: 500, persisted: 500, cap: 1000 },
+        dashboards: { extracted: 81, persisted: 81, cap: 1000 },
+      }),
+    ).toBeNull();
+    expect(formatReportNodeCapSummary(undefined)).toBeNull();
   });
 });
 

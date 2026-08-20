@@ -9,17 +9,20 @@ import {
   closeGraph,
   getNodeById,
   importExtractionResults,
+  listEdges,
   listNodesByType,
   openGraph,
   type GraphStore,
 } from '@sf-intelligence/graph';
 
 import {
+  applyReportDashboardPersistence,
   buildProfileIdIndex,
   componentTypeFromSourcePath,
+  DEFAULT_REPORT_DASHBOARD_NODE_CAP,
   FOLDED_REPORT_DASHBOARD_NAME_CAP,
-  foldReportDashboardUsageIntoFields,
   renderVault,
+  reportDashboardNodeCap,
   resolveRestrictionRuleProfileEdges,
   walkAndExtract,
 } from '../src/refresh-pipeline.js';
@@ -47,8 +50,29 @@ const objectXml = (label: string): string => `<?xml version="1.0" encoding="UTF-
 </CustomObject>
 `;
 
-describe('foldReportDashboardUsageIntoFields', () => {
-  const mkNode = (id: string, type: Node['type']): Node => ({
+/**
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE.
+ *
+ * The pass this describes REPLACED a destructive fold that parsed every Report
+ * / Dashboard (filters, groupings, buckets, cross-filters, charts) and then
+ * deleted the nodes and edges, keeping only booleans plus at most 50 names per
+ * field. These tests pin the four things that must hold now:
+ *
+ *   1. nodes ARE persisted, with their dependency edges;
+ *   2. filter LITERALS are provably ABSENT from the persisted output (the
+ *      privacy guarantee — asserted explicitly, not implied);
+ *   3. every existing boolean / capped-name-list consumer still works
+ *      byte-identically;
+ *   4. a capped capture DISCLOSES that it is capped.
+ *
+ * All api names below are SYNTHETIC.
+ */
+describe('applyReportDashboardPersistence', () => {
+  const mkNode = (
+    id: string,
+    type: Node['type'],
+    properties: Record<string, unknown> = {},
+  ): Node => ({
     id,
     type,
     apiName: id.slice(id.indexOf(':') + 1),
@@ -58,7 +82,7 @@ describe('foldReportDashboardUsageIntoFields', () => {
     lastModifiedDate: null,
     lastModifiedBy: null,
     apiVersion: null,
-    properties: {},
+    properties,
   });
   const mkRef = (fromId: string, toId: string): Edge => ({
     fromId,
@@ -68,8 +92,12 @@ describe('foldReportDashboardUsageIntoFields', () => {
     source: 'test',
     properties: {},
   });
+  const nodesOf = (out: readonly ExtractionResult[]): readonly Node[] =>
+    out.flatMap((r) => r.nodes);
+  const edgesOf = (out: readonly ExtractionResult[]): readonly Edge[] =>
+    out.flatMap((r) => r.edges);
 
-  it('folds report/dashboard usage onto the field and drops the report/dashboard nodes', () => {
+  it('persists Report / Dashboard nodes AND their edges, and still folds usage onto the field', () => {
     const results: readonly ExtractionResult[] = [
       {
         nodes: [
@@ -79,48 +107,177 @@ describe('foldReportDashboardUsageIntoFields', () => {
         edges: [],
       },
       {
-        nodes: [mkNode('Report:Sales/Pipeline', 'Report')],
-        edges: [mkRef('Report:Sales/Pipeline', 'CustomField:Account.Region__c')],
+        nodes: [mkNode('Report:Sales/Pipeline', 'Report', { format: 'Summary' })],
+        edges: [
+          mkRef('Report:Sales/Pipeline', 'CustomField:Account.Region__c'),
+          mkRef('Report:Sales/Pipeline', 'CustomObject:Account'),
+        ],
       },
       {
         nodes: [mkNode('Dashboard:Exec/KPIs', 'Dashboard')],
-        edges: [mkRef('Dashboard:Exec/KPIs', 'CustomField:Account.Region__c')],
+        edges: [
+          mkRef('Dashboard:Exec/KPIs', 'CustomField:Account.Region__c'),
+          mkRef('Dashboard:Exec/KPIs', 'Report:Sales/Pipeline'),
+        ],
       },
     ];
 
-    const out = foldReportDashboardUsageIntoFields(results);
-    const nodes = out.flatMap((r) => r.nodes);
-    const edges = out.flatMap((r) => r.edges);
+    const { results: out, stats } = applyReportDashboardPersistence(results);
+    const nodes = nodesOf(out);
+    const edges = edgesOf(out);
 
-    // Report / Dashboard nodes + their edges are gone — no per-report node bloat.
-    expect(nodes.some((n) => n.type === 'Report' || n.type === 'Dashboard')).toBe(false);
-    expect(edges).toHaveLength(0);
-    // The referenced field carries the usage signal.
+    // The nodes survive — this is the whole point of the change.
+    expect(nodes.find((n) => n.id === 'Report:Sales/Pipeline')?.type).toBe('Report');
+    expect(nodes.find((n) => n.id === 'Dashboard:Exec/KPIs')?.type).toBe('Dashboard');
+    // …and so do their ECOSYSTEM edges, so the reporting graph is navigable.
+    expect(
+      edges.some(
+        (e) => e.fromId === 'Dashboard:Exec/KPIs' && e.toId === 'Report:Sales/Pipeline',
+      ),
+    ).toBe(true);
+    expect(
+      edges.some(
+        (e) => e.fromId === 'Report:Sales/Pipeline' && e.toId === 'CustomObject:Account',
+      ),
+    ).toBe(true);
+    // …but NOT the analytics -> CustomField reference edges: 94% of the rows
+    // at real-org scale, for an answer `usedInReports` already gives over
+    // every extracted report. See step 3 of the pass doc.
+    expect(edges.some((e) => e.toId.startsWith('CustomField:'))).toBe(false);
+    expect(edges).toHaveLength(2);
+    // The pre-existing folded field-usage signal is UNCHANGED.
     const region = nodes.find((n) => n.id === 'CustomField:Account.Region__c');
     expect(region?.properties['usedInReport']).toBe(true);
     expect(region?.properties['usedInDashboard']).toBe(true);
-    // An un-referenced field is untouched.
     const never = nodes.find((n) => n.id === 'CustomField:Account.NeverUsed__c');
     expect(never?.properties['usedInReport']).toBeUndefined();
+    // Nothing capped: a clean capture reports persisted === extracted.
+    expect(stats.reports).toEqual({
+      extracted: 1,
+      persisted: 1,
+      cap: DEFAULT_REPORT_DASHBOARD_NODE_CAP,
+    });
+    expect(stats.dashboards).toEqual({
+      extracted: 1,
+      persisted: 1,
+      cap: DEFAULT_REPORT_DASHBOARD_NODE_CAP,
+    });
   });
 
   it('is an identity no-op when no report/dashboard nodes are present', () => {
     const results: readonly ExtractionResult[] = [
       { nodes: [mkNode('CustomField:A.B__c', 'CustomField')], edges: [] },
     ];
-    expect(foldReportDashboardUsageIntoFields(results)).toBe(results);
+    const { results: out, stats } = applyReportDashboardPersistence(results);
+    expect(out).toBe(results);
+    expect(stats.reports.extracted).toBe(0);
+    expect(stats.dashboards.extracted).toBe(0);
+  });
+
+  // PRIVACY GUARANTEE. A report filter's `<value>` is a literal an admin typed
+  // — a customer name, an email, an amount, a person. The extractor already
+  // reduces it to a `hasValue` boolean; this pass is the second, independent
+  // gate: an ALLOW-LIST, so a regressed extractor that DID capture the literal
+  // still cannot get it into the graph. The fixture below deliberately feeds
+  // the pass properties a correct extractor would never emit.
+  it('PRIVACY — filter literals, descriptions and bucket bins are ABSENT from the persisted node', () => {
+    const LITERAL = 'ACME-PII-LITERAL-DO-NOT-PERSIST';
+    const results: readonly ExtractionResult[] = [
+      {
+        nodes: [
+          mkNode('Report:Sales/Leaky', 'Report', {
+            // Shapes a correct extractor emits (kept, minus the literal).
+            filters: [
+              { field: 'Account.Industry', operator: 'equals', hasValue: true, value: LITERAL },
+            ],
+            crossFilters: [
+              {
+                relatedObject: 'Contact',
+                operation: 'with',
+                hasConditions: true,
+                criteriaItems: [{ column: 'Contact.Email', value: LITERAL }],
+              },
+            ],
+            buckets: [
+              { field: 'BucketField_1', sourceField: 'Account.Region__c', label: LITERAL },
+            ],
+            groupings: [{ field: 'Account.CreatedDate', dateGranularity: 'Day', axis: 'down' }],
+            chart: { type: 'VerticalColumn', hasSummaryAxis: true },
+            booleanFilter: '1 AND 2',
+            format: 'Summary',
+            reportType: 'AccountList',
+            descriptionPresent: true,
+            fieldRefs: ['CustomField:Account.Region__c'],
+            rawReferenceCount: 1,
+            // Shapes a REGRESSED extractor might emit — none may survive.
+            description: LITERAL,
+            name: LITERAL,
+            runningUser: LITERAL,
+            sourceValues: [LITERAL],
+            values: [LITERAL],
+          }),
+          mkNode('Dashboard:Exec/Leaky', 'Dashboard', {
+            componentReports: ['Sales/Leaky'],
+            dashboardType: 'SpecifiedUser',
+            descriptionPresent: true,
+            description: LITERAL,
+            runningUser: LITERAL,
+          }),
+        ],
+        edges: [],
+      },
+    ];
+
+    const { results: out } = applyReportDashboardPersistence(results);
+    const persisted = nodesOf(out).filter(
+      (n) => n.type === 'Report' || n.type === 'Dashboard',
+    );
+    expect(persisted).toHaveLength(2);
+
+    // The literal appears NOWHERE in the serialized persisted output — the
+    // assertion that actually proves the guarantee (a key-by-key check would
+    // miss a literal nested somewhere new).
+    expect(JSON.stringify(persisted)).not.toContain(LITERAL);
+
+    const report = persisted.find((n) => n.type === 'Report');
+    expect(report?.properties['description']).toBeUndefined();
+    expect(report?.properties['name']).toBeUndefined();
+    expect(report?.properties['runningUser']).toBeUndefined();
+    expect(report?.properties['values']).toBeUndefined();
+    expect(report?.properties['sourceValues']).toBeUndefined();
+    // Structure IS kept: field identity + operator + value PRESENCE.
+    expect(report?.properties['filters']).toEqual([
+      { field: 'Account.Industry', operator: 'equals', hasValue: true },
+    ]);
+    expect(report?.properties['crossFilters']).toEqual([
+      { relatedObject: 'Contact', operation: 'with', hasConditions: true },
+    ]);
+    // Bucket identity + source column survive; the admin-typed label does not.
+    expect(report?.properties['buckets']).toEqual([
+      { field: 'BucketField_1', sourceField: 'Account.Region__c' },
+    ]);
+    expect(report?.properties['groupings']).toEqual([
+      { field: 'Account.CreatedDate', dateGranularity: 'Day', axis: 'down' },
+    ]);
+    expect(report?.properties['chart']).toEqual({
+      type: 'VerticalColumn',
+      hasSummaryAxis: true,
+    });
+    // Presence boolean replaces the description TEXT.
+    expect(report?.properties['descriptionPresent']).toBe(true);
+
+    const dashboard = persisted.find((n) => n.type === 'Dashboard');
+    expect(dashboard?.properties['description']).toBeUndefined();
+    expect(dashboard?.properties['runningUser']).toBeUndefined();
+    expect(dashboard?.properties['componentReports']).toEqual(['Sales/Leaky']);
   });
 
   // Finding #36: "which reports break if I change this field" was structurally
-  // unanswerable from the boolean alone. These two cases prove the fold now
-  // preserves a capped, named list — with an honest truncation disclosure once
-  // a field crosses the per-field cap.
+  // unanswerable from the boolean alone. These two cases prove the capped,
+  // named list — the EXISTING consumer contract — is preserved unchanged.
   it('Finding #36 — preserves a capped, sorted name list for a field used by 2+ reports/dashboards', () => {
     const results: readonly ExtractionResult[] = [
-      {
-        nodes: [mkNode('CustomField:Account.Multi__c', 'CustomField')],
-        edges: [],
-      },
+      { nodes: [mkNode('CustomField:Account.Multi__c', 'CustomField')], edges: [] },
       {
         nodes: [
           mkNode('Report:Sales/Pipeline', 'Report'),
@@ -137,10 +294,8 @@ describe('foldReportDashboardUsageIntoFields', () => {
       },
     ];
 
-    const out = foldReportDashboardUsageIntoFields(results);
-    const field = out
-      .flatMap((r) => r.nodes)
-      .find((n) => n.id === 'CustomField:Account.Multi__c');
+    const { results: out } = applyReportDashboardPersistence(results);
+    const field = nodesOf(out).find((n) => n.id === 'CustomField:Account.Multi__c');
 
     expect(field?.properties['usedInReport']).toBe(true);
     // Sorted (not encounter-order) so the answer is deterministic.
@@ -149,9 +304,6 @@ describe('foldReportDashboardUsageIntoFields', () => {
     expect(field?.properties['usedInDashboard']).toBe(true);
     expect(field?.properties['usedInDashboards']).toEqual(['Exec/KPIs']);
     expect(field?.properties['usedInDashboardsTruncated']).toBeUndefined();
-    // Report/Dashboard nodes still dropped — only the capped name list survives.
-    const outNodes = out.flatMap((r) => r.nodes);
-    expect(outNodes.some((n) => n.type === 'Report' || n.type === 'Dashboard')).toBe(false);
   });
 
   it('Finding #36 — discloses truncation when a field exceeds the per-field name cap', () => {
@@ -159,21 +311,14 @@ describe('foldReportDashboardUsageIntoFields', () => {
     const reportNodes = Array.from({ length: reportCount }, (_, i) =>
       mkNode(`Report:Bulk/Report${String(i).padStart(3, '0')}`, 'Report'),
     );
-    const reportEdges = reportNodes.map((n) =>
-      mkRef(n.id, 'CustomField:Account.HeavilyUsed__c'),
-    );
+    const reportEdges = reportNodes.map((n) => mkRef(n.id, 'CustomField:Account.HeavilyUsed__c'));
     const results: readonly ExtractionResult[] = [
-      {
-        nodes: [mkNode('CustomField:Account.HeavilyUsed__c', 'CustomField')],
-        edges: [],
-      },
+      { nodes: [mkNode('CustomField:Account.HeavilyUsed__c', 'CustomField')], edges: [] },
       { nodes: reportNodes, edges: reportEdges },
     ];
 
-    const out = foldReportDashboardUsageIntoFields(results);
-    const field = out
-      .flatMap((r) => r.nodes)
-      .find((n) => n.id === 'CustomField:Account.HeavilyUsed__c');
+    const { results: out } = applyReportDashboardPersistence(results);
+    const field = nodesOf(out).find((n) => n.id === 'CustomField:Account.HeavilyUsed__c');
 
     const names = field?.properties['usedInReports'] as string[] | undefined;
     expect(names).toHaveLength(FOLDED_REPORT_DASHBOARD_NAME_CAP);
@@ -185,15 +330,161 @@ describe('foldReportDashboardUsageIntoFields', () => {
     expect(names?.[49]).toBe('Bulk/Report049');
   });
 
-  it('R6-24 Option B — folded names survive import so impact tools can read them', async () => {
+  // The node cap must be HONEST: a capped capture says it is capped, the drop
+  // is never silent, and the FIELD-USAGE answer does not shrink with it.
+  describe('node persistence cap (SFI_REPORT_NODE_CAP)', () => {
+    const priorCap = process.env['SFI_REPORT_NODE_CAP'];
+    afterEach(() => {
+      if (priorCap === undefined) delete process.env['SFI_REPORT_NODE_CAP'];
+      else process.env['SFI_REPORT_NODE_CAP'] = priorCap;
+    });
+
+    const bulk = (count: number): readonly ExtractionResult[] => {
+      const reportNodes = Array.from({ length: count }, (_, i) =>
+        mkNode(`Report:Bulk/Report${String(i).padStart(3, '0')}`, 'Report'),
+      );
+      return [
+        { nodes: [mkNode('CustomField:Account.Wide__c', 'CustomField')], edges: [] },
+        {
+          nodes: reportNodes,
+          edges: reportNodes.map((n) => mkRef(n.id, 'CustomField:Account.Wide__c')),
+        },
+      ];
+    };
+
+    it('caps node persistence deterministically and DISCLOSES the drop', () => {
+      process.env['SFI_REPORT_NODE_CAP'] = '3';
+      const { results: out, stats } = applyReportDashboardPersistence(bulk(10));
+      const reports = nodesOf(out).filter((n) => n.type === 'Report');
+
+      expect(reports).toHaveLength(3);
+      // Deterministic selection: ascending id, so the vault diff is stable.
+      expect(reports.map((n) => n.id)).toEqual([
+        'Report:Bulk/Report000',
+        'Report:Bulk/Report001',
+        'Report:Bulk/Report002',
+      ]);
+      // The disclosure: extracted !== persisted, with the cap in force.
+      expect(stats.reports).toEqual({ extracted: 10, persisted: 3, cap: 3 });
+      // No dangling edge from a dropped node — and no analytics -> CustomField
+      // edges at all (step 3).
+      expect(edgesOf(out)).toHaveLength(0);
+    });
+
+    it('the cap costs navigability, NOT field-usage recall', () => {
+      process.env['SFI_REPORT_NODE_CAP'] = '3';
+      const { results: out } = applyReportDashboardPersistence(bulk(10));
+      const field = nodesOf(out).find((n) => n.id === 'CustomField:Account.Wide__c');
+      // All TEN reports are still named on the field — the harvest runs over
+      // the full extracted set, before the node cap is applied.
+      expect(field?.properties['usedInReports']).toHaveLength(10);
+      expect(field?.properties['usedInReport']).toBe(true);
+    });
+
+    it('SFI_REPORT_NODE_CAP=0 restores the pre-persistence "usage only" shape', () => {
+      process.env['SFI_REPORT_NODE_CAP'] = '0';
+      const { results: out, stats } = applyReportDashboardPersistence(bulk(4));
+      expect(nodesOf(out).some((n) => n.type === 'Report')).toBe(false);
+      expect(edgesOf(out)).toHaveLength(0);
+      expect(stats.reports).toEqual({ extracted: 4, persisted: 0, cap: 0 });
+      // Byte-identical to the pre-change fold: only the field properties.
+      // Field usage still answers for every report.
+      const field = nodesOf(out).find((n) => n.id === 'CustomField:Account.Wide__c');
+      expect(field?.properties['usedInReports']).toHaveLength(4);
+    });
+
+    it('a non-numeric SFI_REPORT_NODE_CAP falls back to the documented default', () => {
+      process.env['SFI_REPORT_NODE_CAP'] = 'not-a-number';
+      expect(reportDashboardNodeCap()).toBe(DEFAULT_REPORT_DASHBOARD_NODE_CAP);
+    });
+  });
+
+  // `nodes.id` is a primary key, so two results carrying the same id yield ONE
+  // row. Counting extraction OCCURRENCES would make `persisted` over-report by
+  // exactly the duplicate count — wrong precisely in the collision case the
+  // accounting exists to expose.
+  it('counts DISTINCT ids and discloses duplicates rather than absorbing them', () => {
+    const dupe = (): Node => mkNode('Report:Sales/Pipeline', 'Report');
+    const results: readonly ExtractionResult[] = [
+      { nodes: [dupe()], edges: [] },
+      { nodes: [dupe()], edges: [] },
+      { nodes: [mkNode('Report:Sales/Other', 'Report')], edges: [] },
+    ];
+    const { results: out, stats } = applyReportDashboardPersistence(results);
+    // Three extraction occurrences, TWO distinct ids, two rows will land.
+    expect(stats.reports.extracted).toBe(2);
+    expect(stats.reports.persisted).toBe(2);
+    // The absorbed occurrence is named, not silently swallowed.
+    expect(stats.reports.duplicateIds).toBe(1);
+    // A collision-free run carries no duplicate key at all.
+    const clean = applyReportDashboardPersistence([
+      { nodes: [mkNode('Report:Sales/Only', 'Report')], edges: [] },
+    ]);
+    expect(clean.stats.reports.duplicateIds).toBeUndefined();
+    expect(nodesOf(out).filter((n) => n.type === 'Report')).toHaveLength(3);
+  });
+
+  // The node allow-list covers `node.properties`. Edge rows carry their OWN
+  // properties bag, so without an edge allow-list the guarantee "a key that is
+  // not named cannot persist" would be false for half the persisted rows.
+  it('PRIVACY — allow-lists EDGE properties too, not just node properties', () => {
+    const LEAK = 'SYNTHETIC-EDGE-LEAK-STRING';
     const results: readonly ExtractionResult[] = [
       {
-        nodes: [mkNode('CustomField:Account.OptionB__c', 'CustomField')],
-        edges: [],
+        nodes: [mkNode('Report:Sales/Pipeline', 'Report')],
+        edges: [
+          {
+            fromId: 'Report:Sales/Pipeline',
+            toId: 'CustomObject:Account',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'test',
+            properties: {
+              referenceKind: 'reportSourceObject',
+              reportType: 'AccountList',
+              // Shapes a regressed emitter might add — none may survive.
+              filterValue: LEAK,
+              runningUser: LEAK,
+              masterLabel: LEAK,
+            },
+          },
+        ],
       },
+    ];
+    const { results: out } = applyReportDashboardPersistence(results);
+    const edges = edgesOf(out);
+    expect(edges).toHaveLength(1);
+    expect(JSON.stringify(edges)).not.toContain(LEAK);
+    // The metadata discriminators survive.
+    expect(edges[0]?.properties).toEqual({
+      referenceKind: 'reportSourceObject',
+      reportType: 'AccountList',
+    });
+  });
+
+  // An edge NOT sourced from an analytics node is none of this pass's
+  // business and must pass through byte-identically.
+  it('leaves a non-analytics edge untouched', () => {
+    const foreign: Edge = {
+      fromId: 'Flow:Some_Flow',
+      toId: 'CustomField:Account.Region__c',
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      source: 'apex-ast',
+      properties: { anything: 'preserved', nested: { deep: true } },
+    };
+    const { results: out } = applyReportDashboardPersistence([
+      { nodes: [mkNode('Report:Sales/Pipeline', 'Report')], edges: [foreign] },
+    ]);
+    expect(edgesOf(out)).toEqual([foreign]);
+  });
+
+  it('R6-24 Option B — persisted nodes AND folded names survive import', async () => {
+    const results: readonly ExtractionResult[] = [
+      { nodes: [mkNode('CustomField:Account.OptionB__c', 'CustomField')], edges: [] },
       {
         nodes: [
-          mkNode('Report:Sales/Pipeline', 'Report'),
+          mkNode('Report:Sales/Pipeline', 'Report', { format: 'Summary' }),
           mkNode('Report:Exec/Forecast', 'Report'),
         ],
         edges: [
@@ -206,22 +497,23 @@ describe('foldReportDashboardUsageIntoFields', () => {
         edges: [mkRef('Dashboard:Exec/KPIs', 'CustomField:Account.OptionB__c')],
       },
     ];
-    const folded = foldReportDashboardUsageIntoFields(results);
+    const { results: prepared } = applyReportDashboardPersistence(results);
     const dir = await makeTempRoot();
     try {
       const opened = await openGraph(join(dir, 'option-b.db'));
       if (!opened.ok) throw new Error(opened.error.message);
       const store: GraphStore = opened.value;
       try {
-        const imp = await importExtractionResults(store, folded);
+        const imp = await importExtractionResults(store, prepared);
         if (!imp.ok) throw new Error(imp.error.message);
-        // No Report/Dashboard nodes in the graph — identity is field properties only.
+        // Report / Dashboard are now FIRST-CLASS rows in the graph.
         const reports = await listNodesByType(store, 'Report');
         const dashboards = await listNodesByType(store, 'Dashboard');
         expect(reports.ok).toBe(true);
         expect(dashboards.ok).toBe(true);
-        if (reports.ok) expect(reports.value).toHaveLength(0);
-        if (dashboards.ok) expect(dashboards.value).toHaveLength(0);
+        if (reports.ok) expect(reports.value).toHaveLength(2);
+        if (dashboards.ok) expect(dashboards.value).toHaveLength(1);
+        // …and the folded names still answer from the field.
         const fieldResult = await getNodeById(store, 'CustomField:Account.OptionB__c');
         expect(fieldResult.ok).toBe(true);
         if (!fieldResult.ok || fieldResult.value === null) return;
@@ -235,6 +527,162 @@ describe('foldReportDashboardUsageIntoFields', () => {
       }
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE — the end-to-end privacy proof.
+ *
+ * The unit tests above assert the allow-list on the in-memory node. This one
+ * walks a real (synthetic) source tree through the ACTUAL pipeline —
+ * `walkAndExtract` -> `applyReportDashboardPersistence` ->
+ * `importExtractionResults` -> `renderVault` — and asserts the filter literal
+ * appears in NEITHER the graph nor the rendered Markdown a human would read.
+ * The Markdown is the surface that matters: a redaction that survives the
+ * graph but leaks into `components/Report/*.md` is not a redaction.
+ */
+describe('report/dashboard persistence — end to end through the real pipeline', () => {
+  const FILTER_LITERAL = 'SYNTHETIC-FILTER-LITERAL-42';
+  const DESCRIPTION_TEXT = 'SYNTHETIC-REPORT-DESCRIPTION-PROSE';
+  const RUNNING_USER = 'synthetic.analyst@example.invalid';
+
+  it('persists nodes + edges while the filter literal, description and running-user are ABSENT everywhere', async () => {
+    const root = await makeTempRoot();
+    try {
+      const source = join(root, 'source');
+      // NESTED folder on purpose: a real retrieve writes
+      // `reports/{Parent}/{Leaf}/X.report-meta.xml` while the dashboard that
+      // consumes it references `{Leaf}/X`. The node id must be the LEAF-folder
+      // form or the edge below dangles against a report that IS in the vault.
+      await writeAt(
+        source,
+        'reports/Admissions_Reports/Sales_Reports/Pipeline.report-meta.xml',
+        `<?xml version="1.0" encoding="UTF-8"?>
+<Report xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>${DESCRIPTION_TEXT}</description>
+    <name>Pipeline</name>
+    <format>Summary</format>
+    <reportType>AccountList</reportType>
+    <columns><field>Account.Industry</field></columns>
+    <filter>
+        <booleanFilter>1 AND 2</booleanFilter>
+        <criteriaItems>
+            <column>Account.Industry</column>
+            <operator>equals</operator>
+            <value>${FILTER_LITERAL}</value>
+        </criteriaItems>
+    </filter>
+    <buckets>
+        <bucketType>text</bucketType>
+        <developerName>BucketField_1</developerName>
+        <masterLabel>${FILTER_LITERAL}</masterLabel>
+        <sourceColumnName>Account.Industry</sourceColumnName>
+    </buckets>
+</Report>`,
+      );
+      await writeAt(
+        source,
+        'dashboards/Leadership/Exec_Dashboards/KPIs.dashboard-meta.xml',
+        `<?xml version="1.0" encoding="UTF-8"?>
+<Dashboard xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>${DESCRIPTION_TEXT}</description>
+    <runningUser>${RUNNING_USER}</runningUser>
+    <dashboardGridLayout>
+        <dashboardGridComponents>
+            <report>Sales_Reports/Pipeline</report>
+        </dashboardGridComponents>
+    </dashboardGridLayout>
+</Dashboard>`,
+      );
+
+      const walked = await walkAndExtract(source, null);
+      // Sanity: the walker dispatched both files, and BOTH ids are
+      // leaf-folder-qualified despite living two folders deep.
+      expect(walked.results.flatMap((r) => r.nodes.map((n) => n.id)).sort()).toEqual([
+        'Dashboard:Exec_Dashboards/KPIs',
+        'Report:Sales_Reports/Pipeline',
+      ]);
+
+      const { results, stats } = applyReportDashboardPersistence(walked.results);
+      expect(stats.reports.persisted).toBe(1);
+      expect(stats.dashboards.persisted).toBe(1);
+
+      const opened = await openGraph(join(root, 'e2e.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const store: GraphStore = opened.value;
+      try {
+        const imp = await importExtractionResults(store, results);
+        if (!imp.ok) throw new Error(imp.error.message);
+
+        const report = await getNodeById(store, 'Report:Sales_Reports/Pipeline');
+        expect(report.ok).toBe(true);
+        if (!report.ok || report.value === null) return;
+        // Structure survives…
+        expect(report.value.properties['filters']).toEqual([
+          { field: 'Account.Industry', operator: 'equals', hasValue: true },
+        ]);
+        expect(report.value.properties['booleanFilter']).toBe('1 AND 2');
+        expect(report.value.properties['reportType']).toBe('AccountList');
+        expect(report.value.properties['descriptionPresent']).toBe(true);
+        // …the literal, the bucket label and the description text do not.
+        const serializedNode = JSON.stringify(report.value);
+        expect(serializedNode).not.toContain(FILTER_LITERAL);
+        expect(serializedNode).not.toContain(DESCRIPTION_TEXT);
+
+        const dashboard = await getNodeById(store, 'Dashboard:Exec_Dashboards/KPIs');
+        expect(dashboard.ok).toBe(true);
+        if (!dashboard.ok || dashboard.value === null) return;
+        expect(dashboard.value.properties['componentReports']).toEqual([
+          'Sales_Reports/Pipeline',
+        ]);
+        expect(JSON.stringify(dashboard.value)).not.toContain(RUNNING_USER);
+
+        // The dashboard->report edge RESOLVES: its target is byte-equal to a
+        // node that exists in the graph. A full-directory-chain id would make
+        // this dangle while the report sat in the vault under another id —
+        // "not found" masquerading over "looked in the wrong place".
+        const dashEdges = await listEdges(store, 'Dashboard:Exec_Dashboards/KPIs', {
+          direction: 'out',
+        });
+        expect(dashEdges.ok).toBe(true);
+        if (!dashEdges.ok) return;
+        const componentEdge = dashEdges.value.find(
+          (e) => e.properties['referenceKind'] === 'dashboardComponentReport',
+        );
+        expect(componentEdge?.toId).toBe('Report:Sales_Reports/Pipeline');
+        const resolved = await getNodeById(store, componentEdge?.toId ?? '');
+        expect(resolved.ok).toBe(true);
+        if (resolved.ok) expect(resolved.value).not.toBeNull();
+
+        // The vault Markdown — the surface a human reads — is clean too.
+        const vaultRoot = join(root, 'vault');
+        await mkdir(vaultRoot, { recursive: true });
+        const counts = await renderVault(store, vaultRoot);
+        expect(counts.components.Report).toBe(1);
+        expect(counts.components.Dashboard).toBe(1);
+        const readAll = async (dir: string): Promise<string> => {
+          const entries = await readdir(dir, { withFileTypes: true });
+          const parts = await Promise.all(
+            entries.map(async (e) =>
+              e.isDirectory()
+                ? readAll(join(dir, e.name))
+                : readFile(join(dir, e.name), 'utf8'),
+            ),
+          );
+          return parts.join('\n');
+        };
+        const markdown = await readAll(join(vaultRoot, 'components'));
+        expect(markdown).not.toContain(FILTER_LITERAL);
+        expect(markdown).not.toContain(DESCRIPTION_TEXT);
+        expect(markdown).not.toContain(RUNNING_USER);
+        // …but the navigable dependency IS rendered.
+        expect(markdown).toContain('Report:Sales_Reports/Pipeline');
+      } finally {
+        await closeGraph(store);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
