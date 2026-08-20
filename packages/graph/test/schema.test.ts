@@ -69,7 +69,7 @@ describe('initSchema', () => {
       { column_name: 'last_modified_by', data_type: 'VARCHAR' },
       // DuckDB normalizes the SQL keyword `REAL` to its 32-bit `FLOAT`
       // storage type. This is a property of DuckDB's type system, not a
-      // schema mismatch with ARCHITECTURE.md.
+      // schema mismatch with `docs/architecture.md`.
       { column_name: 'api_version', data_type: 'FLOAT' },
       { column_name: 'properties_json', data_type: 'VARCHAR' },
     ]);

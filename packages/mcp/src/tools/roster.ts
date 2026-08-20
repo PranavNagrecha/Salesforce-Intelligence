@@ -2965,6 +2965,10 @@ const CODE_QUALITY_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       componentId: { type: 'string', minLength: 1 },
       classApiName: { type: 'string', minLength: 1 },
       apiName: { type: 'string', minLength: 1 },
+      // ADR-007 alias residual: hosts reach for `componentFilter`. It USED to be
+      // silently dropped by the bare `z.object`, downgrading a one-class audit
+      // to an org-wide sweep the caller read as that class's findings.
+      componentFilter: { type: 'string', minLength: 1 },
       severityFilter: {
         type: 'string',
         enum: ['critical', 'high', 'medium', 'low', 'info', 'all'],
@@ -2978,6 +2982,9 @@ const CODE_QUALITY_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
+    // Mirrors the Zod `.strict()`: an unknown key on a SCOPING tool is rejected
+    // with `invalid-query`, never stripped into a silent org-wide answer.
+    additionalProperties: false,
   });
 
 /**

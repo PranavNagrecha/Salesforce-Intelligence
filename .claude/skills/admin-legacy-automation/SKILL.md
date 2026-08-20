@@ -92,11 +92,12 @@ Fire this skill on legacy-automation phrasing. Concrete triggers:
   *configuration* answer is the AssignmentRule that names the
   queue; the *record-level* answer needs live data and is out of
   scope. Surface both halves.
-- **"What's the criteria for this rule?"** — surface the
-  extracted `criteriaItemCount` and the rule's `formula` or
-  `criteriaItems` property text; the **evaluation** of the
-  criteria against a record needs record-level data and is out of
-  scope.
+- **"What's the criteria for this rule?"** — surface the extracted
+  criteria count from wherever that family puts it (node property on
+  WorkflowRule; per-entry EDGE property on AssignmentRule /
+  AutoResponseRule; absent entirely on EscalationRule) plus the rule's
+  `formula` where present. The **evaluation** of the criteria against a
+  record needs record-level data and is out of scope.
 
 ## When NOT to fire
 
@@ -280,15 +281,33 @@ question is "what does that email actually say?" Call
 `sfi.get_component` on the EmailTemplate id and surface:
 
 - `properties.subject` — the email's subject line, verbatim.
-- `properties.type` — `text`, `html`, `visualforce`, or `custom`.
-- `properties.body` (or `properties.content`) — the body string
-  for `text` and `html` templates. **Note:** the body contains
-  `{!Field_Reference}` merge tokens that v1.3 does NOT tokenize
-  (deferred to v1.4). Surface the body verbatim; do not attempt
-  to resolve the merge tokens to specific `CustomField` nodes.
-- `properties.letterhead` — the named Letterhead, if any.
+- `properties.templateType` — `text`, `html`, `visualforce`, or
+  `custom`. (The XML element is `<type>`; the extracted property is
+  `templateType`. There is no `properties.type`.)
+- **There is no `properties.body` and no `properties.content`.** The
+  extractor does not store the body string at all — it stores
+  `properties.bodyLength`, a character count (always `0` for
+  `visualforce` templates, whose body lives in the referenced VF page).
+  If the admin needs the body text, point them at the source file, or
+  read it via the `sourcePath` on the node.
+- **Merge tokens ARE tokenized.** The v3.0 body-merge scan parses the
+  `<content>` body for `{!Object.Field}` and conditional
+  `{!IF(... Object.Field ...)}` merges. Each distinct field yields a
+  `references` edge with `confidence: 'parsed'`, `properties.role:
+  'body-merge'`, `properties.mergeContext` (the verbatim `{!...}`
+  token) and `properties.conditional`. The node mirrors this as
+  `properties.mergeFields` (canonical `CustomField:` ids) and
+  `properties.referencedObjects`. Do NOT tell the admin merge tokens
+  are un-tokenized — surface the resolved fields.
+- `properties.richTemplateSyntaxDetected` — true when at least one
+  merge appeared inside a function call. When true, disclose the real
+  boundary: the field REFERENCES are captured; the FIRING LOGIC of the
+  conditional is not.
+- `properties.letterheadName` — the named Letterhead, if any. (The XML
+  element is `<letterhead>`; the extracted property is
+  `letterheadName`. There is no `properties.letterhead`.)
 
-If the template's `properties.letterhead` is non-null, the
+If the template's `properties.letterheadName` is non-null, the
 EmailTemplate node has a `references` edge to the named
 Letterhead. Surface the letterhead's name for context; don't walk
 further (Letterhead is a leaf — top/bottom/header colors and
@@ -308,13 +327,23 @@ order:
 2. **When it fires.** Trigger type for WorkflowRule
    (`onCreateOnly`, `onAllChanges`, etc.), entry criteria for
    ApprovalProcess (formula text or `criteriaItems`), action
-   timing for EscalationRule (`SinceCaseCreation` /
-   `SinceLastUpdate` and `minutesToEscalation`), `actionOnInsert`
-   / `actionOnUpdate` for DuplicateRule.
-3. **Criteria summary.** Surface the rule's `criteriaItemCount`
-   and the raw `formula` / `criteriaItems` text from the node's
-   properties. Do **not** evaluate the criteria — that's
-   record-level. The admin reads the predicate themselves.
+   timing for EscalationRule — read `minutesToEscalation` off the
+   rule's outgoing `references` / `sendsEmail` EDGES, which is where
+   the extractor puts it; it is NOT a node property. Do NOT report
+   `escalationStartTime`: the extractor validates it (against the
+   real Salesforce enum, `CaseCreation` / `CaseLastModified` — no
+   other value exists) but does not store it, so the vault cannot
+   tell you which one a rule uses. Say so rather than guessing.
+   `actionOnInsert` / `actionOnUpdate` for DuplicateRule.
+3. **Criteria summary.** Surface the criteria count from the RIGHT
+   place for the family (WorkflowRule: `properties.criteriaItemCount`;
+   AssignmentRule / AutoResponseRule: the per-`ruleEntry`
+   `criteriaItemCount` on the outgoing `references` / `sendsEmail`
+   edge; EscalationRule: **unavailable** — say so) plus
+   `properties.formula` where it exists. There is no
+   `properties.criteriaItems` node property on any of them. Do **not**
+   evaluate the criteria — that's record-level. The admin reads the
+   predicate themselves.
 4. **Actions.** Bucket by action category (Alert / FieldUpdate /
    Apex / OutboundMessage / Task for WorkflowRule;
    initialSubmission / finalApproval / finalRejection /
@@ -601,12 +630,27 @@ follow-ups without paraphrasing.
   `WorkflowRule:` id prefix; the type is the answer.
 - **Inline criteria-field `references`.** WorkflowRule,
   AssignmentRule, EscalationRule, and AutoResponseRule ship
-  `<criteriaItems>` with `<field>` references. v1.3 surfaces the
-  count (`properties.criteriaItemCount`) and the raw field-and-
-  value text but does **not** emit per-field `references` edges
-  from the rule to each criterion field. (Tokenizing rule
-  criteria is v1.4 work, parallel with EmailTemplate body
-  tokenization.)
+  `<criteriaItems>` with `<field>` references. Where the COUNT lands
+  differs per family, and getting this wrong reads as "no criteria":
+  - **WorkflowRule** — `criteriaItemCount` is a NODE property
+    (`properties.criteriaItemCount`), alongside `formula` and
+    `booleanFilter`.
+  - **AssignmentRule** — per-`ruleEntry`, on the EDGE: each outgoing
+    `references` edge carries `entryIndex`, `criteriaItemCount`,
+    `hasFormula`. There is no node-level count.
+  - **AutoResponseRule** — per-`ruleEntry`, on the outgoing
+    `sendsEmail` EDGE (`entryIndex`, `criteriaItemCount`,
+    `hasFormula`). There is no node-level count.
+  - **EscalationRule** — **no `criteriaItemCount` at all**, on the
+    node or on any edge. Its node properties are `active`,
+    `ruleEntryCount`, `actionCount`, `conditions`. Say the count is
+    unavailable for escalation rules; do not report a missing count
+    as zero criteria.
+
+  None of the four emit per-field `references` edges from the rule to
+  each criterion field, and none store the raw criteria field-and-value
+  text as a node property — read the `conditions` mirror /
+  `ConditionalContext` nodes for the expression instead.
 - **Workflow flow-trigger Apex (`callsApex` floor).** When a
   WorkflowRule action is of type `Apex`, the rule node has a
   `callsApex` edge to the named `ApexClass`. The v0.1
@@ -868,9 +912,12 @@ Before sending a response, confirm:
       surfaced the matching rule's `<matchingRuleItems>`
       (field + method).
 - [ ] For `sendsEmail` follow-ups, I called `sfi.get_component`
-      on the EmailTemplate id and surfaced `subject`, `type`,
-      `body` (verbatim, not tokenized), and `letterhead` if
-      present.
+      on the EmailTemplate id and surfaced `subject`,
+      `templateType`, `bodyLength`, the tokenized `mergeFields` /
+      `referencedObjects`, and `letterheadName` if present. I did
+      NOT read `type` / `body` / `letterhead` (those property names
+      do not exist), and I did NOT claim merge tokens are
+      un-tokenized.
 - [ ] I appended the v1.3 boundary disclosure verbatim —
       criteria-evaluation gap, time-dependent actions,
       approval-process-routing gap, fuzzy matching, merge

@@ -139,11 +139,19 @@ const SEVERITY_CONSENSUS_DISCLOSURE =
  * Zod schema for the `sfi.code_quality_audit` tool input.
  *
  *   - `componentId` (`ApexClass:{name}` / `ApexTrigger:{name}`) /
- *     `classApiName` / `apiName`: optional CLASS SCOPE. When supplied the audit
- *     returns ONLY that class's quality issues (+ `appliedScope`); an unresolved
- *     id is `component-not-found` and a non-Apex type prefix is `invalid-query`
- *     — never a silent org-wide fallback (CODE-QUALITY-AUDIT-IGNORES-CLASS-SCOPE).
- *     Omit all three for the org-wide audit.
+ *     `classApiName` / `apiName` / `componentFilter`: optional CLASS SCOPE. When
+ *     supplied the audit returns ONLY that class's quality issues (+
+ *     `appliedScope`); an unresolved id is `component-not-found` and a non-Apex
+ *     type prefix is `invalid-query` — never a silent org-wide fallback
+ *     (CODE-QUALITY-AUDIT-IGNORES-CLASS-SCOPE). Omit all four for the org-wide
+ *     audit. `componentFilter` is the ADR-007 alias residual: hosts (and this
+ *     repo's own `developer-code-quality` skill) reached for that name, and a
+ *     bare `z.object` DROPPED it — turning a one-class audit into a silently
+ *     org-wide sweep the caller then read as that one class's findings. It is
+ *     now honored, not stripped (CODE-QUALITY-AUDIT-COMPONENTFILTER-ALIAS).
+ *   - The schema is `.strict()`: any OTHER unknown key is `invalid-query`, never
+ *     a silent drop. A dropped scope key is indistinguishable from "no scope
+ *     requested", and the org-wide answer that follows is confidently wrong.
  *   - `severityFilter`: optional. `'all'` (default) surfaces every
  *     severity tier; any specific tier narrows to that level.
  *   - `ruleFilter`: optional array of rule ids (e.g.
@@ -152,24 +160,30 @@ const SEVERITY_CONSENSUS_DISCLOSURE =
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 100 in the
  *     handler.
  */
-export const codeQualityAuditInputSchema = z.object({
-  componentId: z.string().min(1).optional(),
-  classApiName: z.string().min(1).optional(),
-  apiName: z.string().min(1).optional(),
-  severityFilter: z
-    .enum(['critical', 'high', 'medium', 'low', 'info', 'all'])
-    .optional(),
-  ruleFilter: z.array(z.string().min(1)).optional(),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(CODE_QUALITY_AUDIT_MAX_LIMIT)
-    .optional(),
-  // CR-22: page cursor for walking the full issue list when truncated.
-  offset: z.number().int().min(0).optional(),
-  cursor: z.string().min(1).optional(),
-});
+export const codeQualityAuditInputSchema = z
+  .object({
+    componentId: z.string().min(1).optional(),
+    classApiName: z.string().min(1).optional(),
+    apiName: z.string().min(1).optional(),
+    componentFilter: z.string().min(1).optional(),
+    severityFilter: z
+      .enum(['critical', 'high', 'medium', 'low', 'info', 'all'])
+      .optional(),
+    ruleFilter: z.array(z.string().min(1)).optional(),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(CODE_QUALITY_AUDIT_MAX_LIMIT)
+      .optional(),
+    // CR-22: page cursor for walking the full issue list when truncated.
+    offset: z.number().int().min(0).optional(),
+    cursor: z.string().min(1).optional(),
+  })
+  // An unknown key on a SCOPING tool is never benign: Zod's default strip turns
+  // a mis-spelled scope selector into an org-wide sweep the caller reads as the
+  // scoped result. Fail closed with `invalid-query` instead.
+  .strict();
 
 const CODE_QUALITY_AUDIT_TOOL = 'sfi.code_quality_audit';
 
@@ -187,7 +201,7 @@ export type CodeQualityAuditInput = z.infer<typeof codeQualityAuditInputSchema>;
 
 /**
  * Resolve the optional CLASS SCOPE from `componentId` / `classApiName` /
- * `apiName` (precedence in that order). `componentId` may be an
+ * `apiName` / `componentFilter` (precedence in that order). `componentId` may be an
  * `ApexClass:`/`ApexTrigger:` id; bare `classApiName`/`apiName` coerce to
  * `ApexClass:{name}`. A value carrying a non-Apex type prefix (e.g. `Flow:`,
  * `CustomObject:`) is `invalid-query` — a class scope is Apex-only.
@@ -196,7 +210,11 @@ export type CodeQualityAuditInput = z.infer<typeof codeQualityAuditInputSchema>;
 const resolveScopeId = (
   input: CodeQualityAuditInput,
 ): Result<ComponentId | null, McpError> => {
-  const raw = input.componentId ?? input.classApiName ?? input.apiName;
+  const raw =
+    input.componentId ??
+    input.classApiName ??
+    input.apiName ??
+    input.componentFilter;
   if (raw === undefined) return ok(null);
   if (raw.startsWith(APEX_CLASS_PREFIX) || raw.startsWith(APEX_TRIGGER_PREFIX)) {
     return ok(raw as ComponentId);

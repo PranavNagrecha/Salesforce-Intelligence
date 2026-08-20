@@ -206,8 +206,11 @@ reports each finding at its own edge confidence. Caller types:
 - **Apex instance caller** — `obj.processOpp(...)` where `obj` is
   typed as `OpportunityService`. Same (the AST resolves the receiver
   type through the symbol table).
-- **Apex test caller** — `@isTest` class or `coversTest` edge to
-  target. `test-class-update`; `parsed` / `heuristic` as above.
+- **Apex test caller** — an incoming `callsApex` edge from a class
+  whose `properties.isTest` is true. `test-class-update`; `parsed`
+  / `heuristic` as above. The tool ALSO walks a `coversTest` edge,
+  but that edge has no producer anywhere in the product, so it
+  contributes nothing on a real vault — see the disclosure below.
 - **Flow caller** (when target is `@InvocableMethod`) — `callsApex`
   edge + matching `<actionName>`. `code-needs-update`, `declared`.
 
@@ -218,10 +221,21 @@ Surface the verbatim Q105 disclosure:
 > backfills files the AST could not parse at `heuristic`. Cite
 > each caller's own confidence. Dynamic dispatch via
 > Type.forName + invoke is invisible to both. Test classes are
-> identified by `@isTest` + naming convention (className +
-> 'Test' suffix) and by `coversTest` edges; a test class that
-> doesn't follow the naming convention and doesn't carry a
-> `@TestVisible`-tagged covering reference may be missed.
+> identified in ONE way that actually works: an incoming
+> `callsApex` edge from a class whose `properties.isTest` is
+> true. The `coversTest` edge this tool ALSO walks is declared
+> in the contract but is emitted by NO extractor, graph-build
+> mint, or enricher in this product, so on a real vault that
+> walk ALWAYS returns nothing — Salesforce does not declare
+> test-to-class coverage anywhere in the metadata source format
+> (coverage is a RUNTIME artifact of a test run, readable only
+> from the Tooling API's ApexCodeCoverage). Read an empty
+> `testClassesNeedingUpdate` as "test-coverage mapping
+> UNAVAILABLE for this class", NEVER as "no tests cover this
+> class": a test class that exercises the target only
+> indirectly — through a helper, a trigger, or dynamic
+> dispatch — has no `callsApex` edge to it and is invisible
+> here.
 
 #### `sfi.what_if_change_field_type`
 

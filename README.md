@@ -499,10 +499,10 @@ and directly invoke the entire roster. See
 ### Install as a Claude Code plugin
 
 The MCP registration above gets you the `sfi.*` tools. Installing
-`sf-intelligence` as a **Claude Code plugin** additionally gets you **25
+`sf-intelligence` as a **Claude Code plugin** additionally gets you **26
 skills** that auto-activate on Salesforce vocabulary (no need to remember tool
-names) and **4 slash commands** (`/sfi-onboard`, `/sfi-init`, `/sfi-refresh`,
-`/sfi-status`) that wrap the `sfi` CLI. Install it from this repo's
+names) and **5 slash commands** (`/sfi-onboard`, `/sfi-init`, `/sfi-refresh`,
+`/sfi-status`, `/sfi-field-audit`) that wrap the `sfi` CLI. Install it from this repo's
 marketplace:
 
 ```sh

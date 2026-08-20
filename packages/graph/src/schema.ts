@@ -11,7 +11,8 @@ import type { GraphError } from './store.js';
  * Each statement uses `IF NOT EXISTS` to make `initSchema` idempotent —
  * running it against an already-initialized database is a no-op.
  *
- * Mirrors the "Graph schema (DuckDB)" section of `ARCHITECTURE.md` verbatim:
+ * Mirrors the DuckDB graph store described in `docs/architecture.md` §4
+ * ("The vault layout"):
  *   - `nodes` is keyed by canonical component id; one row per Salesforce
  *     metadata component.
  *   - `edges` is keyed by `(from_id, to_id, edge_type, source)` so the same

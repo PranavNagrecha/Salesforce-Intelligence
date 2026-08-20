@@ -146,17 +146,28 @@ Severity narrowing:
 { "severityFilter": "high", "limit": 100 }
 ```
 
-Per-class narrowing:
+Per-class narrowing — the canonical key is `componentId` (an
+`ApexClass:` / `ApexTrigger:` id; `classApiName` / `apiName` take a
+bare class name, and `componentFilter` is accepted as an alias for the
+same scope):
 
 ```json
-{ "componentFilter": "ApexClass:OpportunityService" }
+{ "componentId": "ApexClass:OpportunityService" }
 ```
 
+A scoped response echoes `appliedScope: { component, mode: "component" }`.
+**A response with NO `appliedScope` key is the ORG-WIDE audit** — if you
+asked for one class and got no `appliedScope`, do not present the
+findings as that class's. The schema is `.strict()`, so a mis-spelled
+scope key returns `invalid-query` rather than silently widening the
+audit; report the error, don't retry with a guess.
+
 Rule narrowing (useful when the user wants ONE specific pattern
-across the org):
+across the org) — `ruleFilter` is an ARRAY of rule ids, never a bare
+string:
 
 ```json
-{ "ruleFilter": "soql-in-loop", "limit": 100 }
+{ "ruleFilter": ["soql-in-loop"], "limit": 100 }
 ```
 
 Fire this tool when the user asks the broad question ("audit my
@@ -433,9 +444,12 @@ User: *"Audit `OpportunityService` for code quality issues."*
 Claude's flow:
 
 1. **Classify** → broad-sweep narrowed to one class. Use
-   `sfi.code_quality_audit` with `componentFilter`.
+   `sfi.code_quality_audit` with the `componentId` class scope.
 2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.code_quality_audit", "args": { … } }` with
-   `{ "componentFilter": "ApexClass:OpportunityService" }`.
+   `{ "componentId": "ApexClass:OpportunityService" }`, then CHECK the
+   response carries `appliedScope.component ===
+   "ApexClass:OpportunityService"` before reporting the findings as that
+   class's.
 3. **Receive** (illustrative):
 
 ```json

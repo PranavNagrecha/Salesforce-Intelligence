@@ -389,6 +389,44 @@ describe('codeQualityAuditHandler — class scope (guard)', () => {
     );
   });
 
+  // GUARD (CODE-QUALITY-AUDIT-COMPONENTFILTER-ALIAS): `componentFilter` is the
+  // name this repo's own `developer-code-quality` skill documented. The bare
+  // `z.object` STRIPPED it, so a caller who scoped an audit to one class got the
+  // ORG-WIDE leaderboard back and read it as that class's findings — a
+  // confidently-wrong answer, not an error. It must now scope, exactly like
+  // `componentId`.
+  it('componentFilter alias scopes identically to componentId', async () => {
+    const byFilter = await codeQualityAuditHandler(ctx, {
+      componentFilter: 'ApexClass:CriticalCls',
+    });
+    const byId = await codeQualityAuditHandler(ctx, {
+      componentId: 'ApexClass:CriticalCls',
+    });
+    expect(byFilter.ok && byId.ok).toBe(true);
+    if (!byFilter.ok || !byId.ok) return;
+    expect(byFilter.value.data.totalCount).toBe(2);
+    expect(byFilter.value.data.issues).toEqual(byId.value.data.issues);
+    expect(byFilter.value.data.appliedScope).toEqual({
+      component: 'ApexClass:CriticalCls',
+      mode: 'component',
+    });
+    // The whole point: a scoped call must NOT equal the org-wide sweep.
+    const orgWide = await codeQualityAuditHandler(ctx, {});
+    expect(orgWide.ok).toBe(true);
+    if (!orgWide.ok) return;
+    expect(byFilter.value.data.totalCount).not.toBe(orgWide.value.data.totalCount);
+  });
+
+  it('a bare componentFilter class name resolves to ApexClass:{name}', async () => {
+    const r = await codeQualityAuditHandler(ctx, { componentFilter: 'CriticalCls' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:CriticalCls',
+      mode: 'component',
+    });
+  });
+
   it('a scoped clean class returns zero issues (differs from bare org list)', async () => {
     const r = await codeQualityAuditHandler(ctx, { componentId: 'ApexClass:Clean' });
     expect(r.ok).toBe(true);
@@ -425,6 +463,23 @@ describe('codeQualityAuditInputSchema', () => {
       true,
     );
     expect(codeQualityAuditInputSchema.safeParse({ apiName: 'CriticalCls' }).success).toBe(true);
+  });
+
+  it('accepts componentFilter as a class-scope selector', () => {
+    expect(
+      codeQualityAuditInputSchema.safeParse({ componentFilter: 'ApexClass:CriticalCls' })
+        .success,
+    ).toBe(true);
+  });
+
+  // GUARD: the schema is `.strict()`. A mis-spelled scope key must be a loud
+  // `invalid-query`, never a silent strip that downgrades the request to an
+  // org-wide sweep.
+  it('rejects an unknown key rather than stripping it', () => {
+    const parsed = codeQualityAuditInputSchema.safeParse({
+      componentFilterr: 'ApexClass:CriticalCls',
+    });
+    expect(parsed.success).toBe(false);
   });
 
   it('accepts all severityFilter values including "all"', () => {

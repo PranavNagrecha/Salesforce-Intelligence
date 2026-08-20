@@ -75,15 +75,40 @@ verbatim from metadata XML or Apex source — runtime registration
 carry a stored URL that differs from the actual production
 destination. The architect verifies separately.
 
-The v2.8 cdcEnabled boundary: CDC subscription detection is
-**name-pattern only.** v2.8 recognizes `{Object}ChangeEvent` and
-`*__ChangeEvent` shapes but does NOT extract the
-`*.platformEventChannelMember-meta.xml` per-channel filter
-expressions, does NOT detect programmatic
-`EventBus.subscribe(...)` registrations, and does NOT extract CDC
-membership from `*.platformEventChannel-meta.xml` files (an
-enrichment pass populates `isCdcEnabled` on CustomObject nodes but
-the pattern-match runs against the channel registration).
+The CDC boundary, stated accurately (two older claims here were
+overtaken by shipped work — do not repeat them):
+
+- **CDC SUBSCRIBER detection is name-pattern only.** The tool
+  recognizes `{Object}ChangeEvent` / `*__ChangeEvent` shapes on
+  triggers, classes and Flows. That half of the disclosure still
+  holds.
+- **Per-channel filter expressions ARE extracted.** A dedicated
+  `platformEventChannelMember` extractor reads
+  `*.platformEventChannelMember-meta.xml` and emits the member node
+  plus a `references` edge carrying the declared `filterExpression`
+  verbatim. `cdc_subscribers` surfaces them as `channelMembers[]`
+  (`memberId`, `channelId`, `channelType`, `selectedEntity`,
+  `filterExpression`). The real boundary is narrower: the
+  `filterExpression` is the DECLARED XML text, NOT runtime filter
+  EVALUATION — which records actually flow through the channel needs
+  record-level data the vault does not hold. Confidence is `declared`.
+- **Apex `EventBus.subscribe(...)` remains invisible FOR CDC.** The
+  Apex scanner does now resolve static `EventBus.subscribe` channel
+  args into a `listensTo` edge — but it is gated on the `__e` suffix,
+  so Platform Events are covered and CDC `*ChangeEvent` channels are
+  deliberately SKIPPED. For CDC the "programmatic registration is
+  invisible" disclosure still holds verbatim; for Platform Events
+  (`sfi.event_subscribers`) it no longer does.
+
+**There is no `isCdcEnabled` property.** Nothing in `packages/*/src`
+writes it — no extractor, no enricher, no graph-build step. The
+producer-side question ("is this object enabled for CDC?") is answered
+from `cdc_subscribers`' `channelMembers[]`, whose entries carry
+`selectedEntity` (the object bound onto the channel), `channelId`,
+`channelType`, and the declared `filterExpression`. Do not call
+`sfi.get_component` on a CustomObject and read `properties.isCdcEnabled`
+— it will be `undefined` for every object in every vault, and an
+`undefined` read as "not CDC-enabled" is a fabricated negative.
 
 The v2.8 `chainAsync` non-persistence: the transitive chain edge
 is composed AT QUERY TIME by `sfi.async_chain_depth`. The
@@ -92,13 +117,18 @@ this tool surfaces the transitive shape. State this when
 explaining why a chain-walk question can't be answered via
 `get_edges` directly.
 
-The v2.8 cron-parse-failure axis: the v2.8 ScheduledJob synthetic
-node carries `parsedCron` (when `cron-parser` parses cleanly) or
-`null` (when the cron uses Salesforce-specific tokens `L`, `W`,
-`#`, `LAST_FRIDAY`, etc.). When `parsedCron` is `null`, the
-ScheduledJob node's `confidence` is `'declared'` (the schedule IS
-declared by `System.schedule`) and the verbatim per-entry
-fallback disclosure surfaces.
+**The cron expression is NOT available on the vault plane at all.**
+There is no `parsedCron`, no `rawCronExpression`, and no cron parser
+(`cron-parser` is not a dependency of this repo). `scheduled_job_catalog`
+declares two cron-shaped fields — `cronExpressions[]` on an entry and
+`cronExpression` on each `scheduledByCalls[]` row — and BOTH are read
+defensively against a producer that does not exist: the Apex scanner's
+`System.schedule(name, cron, new X())` regex captures only the CLASS
+NAME and discards the cron argument, and the `dispatchesAsync` edge it
+emits carries `{ dispatchMechanism, offset, length }` and nothing else.
+So `cronExpressions` is `[]` and `cronExpression` is `null` on every
+entry in every vault today. Read an empty cron as "cron UNAVAILABLE on
+this plane", never as "this job has no schedule".
 
 ## When to fire
 
@@ -138,8 +168,13 @@ Fire this skill on async / event / scheduled-job / outbound-message
   **"What runs on a schedule?"** — Use
   `sfi.scheduled_job_catalog`.
 - **"What's the cron for `NightlyAccountsRefresh`?"** /
-  **"Decode this scheduled job."** — Same; surface the
-  `rawCronExpression` + `parsedCron` per entry.
+  **"Decode this scheduled job."** — This is an HONEST GAP on the
+  vault plane: the cron string is not extracted (see above).
+  `sfi.scheduled_job_catalog` can tell you the class is Schedulable and
+  which classes call `System.schedule` on it; it cannot tell you the
+  expression. Say so, and offer `sfi.live_scheduled_jobs` (opt-in live
+  plane) — it reads the actual `CronTrigger.CronExpression`,
+  `State`, and `NextFireTime` from the org.
 
 ### Outbound message shape
 
@@ -223,12 +258,15 @@ verbatim disclosure: CDC subscription detection here recognizes
 by NAME PATTERN only. Programmatic `EventBus.subscribe(...)`
 registration is INVISIBLE.
 
-For the v2.8 `properties.isCdcEnabled` flag on CustomObject (the
-parent-side classifier — was this object enabled for CDC in the
-channel registration?), use `sfi.get_component` on the parent
-CustomObject and read `properties.isCdcEnabled`. The
-`cdc_subscribers` tool answers the subscriber-side question; the
-isCdcEnabled flag answers the producer-side question.
+There is **no** `properties.isCdcEnabled` flag on CustomObject — the
+signal has zero producers in the codebase, so reading it returns
+`undefined` for every object. The producer-side question ("is this
+object bound onto a change-event channel?") is answered by the SAME
+tool: `cdc_subscribers` returns `channelMembers[]`, and a member whose
+`selectedEntity` is the object IS the declared CDC binding, with its
+`channelId` / `channelType` / `filterExpression`. An empty
+`channelMembers[]` means no `*.platformEventChannelMember-meta.xml`
+bound the object in the retrieved metadata — not proof CDC is off.
 
 ### 2. `sfi.async_chain_depth` — transitive `dispatchesAsync` walk
 
@@ -295,14 +333,21 @@ Tooling API surface and is invisible to the offline DX-source
 scanner. A class flagged "schedulable" may NOT be currently
 scheduled — the schedule is a runtime registration.
 
-When the `parsedCron` is `null` on a catalog entry, the cron
-expression uses a Salesforce-specific token (`L`, `W`, `#`,
-`LAST_FRIDAY`, etc.) the v2.8 `cron-parser` doesn't support.
-Surface the verbatim per-entry fallback disclosure:
+An entry's `cronExpressions[]` is empty and every
+`scheduledByCalls[].cronExpression` is `null` — always, in every vault.
+The scanner never captures the cron argument. Surface that as an
+availability gap, not a finding:
 
-> The cron expression `{rawCron}` did not parse cleanly; the raw
-> string is shown verbatim. Verify the schedule's meaning
-> manually before relying on this entry for refactor decisions.
+> This catalog names the Schedulable classes and the `System.schedule`
+> call sites that reference them. The cron EXPRESSION itself is not
+> extracted — the scanner captures the scheduled class, not the
+> schedule string. For the actual expression, next fire time, and
+> whether the job is currently registered at all, use
+> `sfi.live_scheduled_jobs` (opt-in live plane, reads `CronTrigger`).
+
+Also surface `likelyUnscheduled` when it is true, with its own meaning:
+a `System.schedule()` call site that lives ONLY inside an `@isTest`
+class does not schedule anything at runtime.
 
 ### 4. `sfi.outbound_message_catalog` — SOAP outbound destination catalog
 
@@ -383,12 +428,19 @@ destination.
 > only. The recognized shapes are `{ObjectName}ChangeEvent` (for
 > standard objects) and `*__ChangeEvent` (for custom objects with
 > the `__c` suffix replaced). The programmatic
-> `EventBus.subscribe(...)` registration path is invisible —
-> runtime registration is not a declaration. CDC channel filter
-> expressions in `*.platformEventChannelMember-meta.xml` are not
-> extracted; subscribers in the catalog appear as "subscribed to
-> all `{Object}ChangeEvent` events" rather than "subscribed to
-> filtered events."
+> `EventBus.subscribe(...)` registration path is invisible for CDC —
+> the scanner's subscribe heuristic is gated on the `__e` Platform
+> Event suffix and skips `*ChangeEvent` channels. Per-member filter
+> expressions in `*.platformEventChannelMember-meta.xml` ARE
+> extracted and surface in `channelMembers[].filterExpression` — but
+> as DECLARED XML text, never as runtime evaluation of which records
+> actually flow.
+>
+> `channelMembers` is also the CDC ENABLEMENT signal: a member that
+> selects a Change Event means CDC is on for that object even when no
+> code subscribes. An empty `subscribers[]` with a non-empty
+> `channelMembers[]` is "enabled, no modeled subscriber", NOT "CDC
+> unused."
 
 ### `sfi.async_chain_depth` — depth cap + heuristic edges (verbatim)
 
@@ -449,22 +501,24 @@ Claude's flow:
 
 1. **Classify** → async chain depth shape.
 2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.async_chain_depth", "args": { … } }` with
-   `{ "rootApexClassId": "ApexClass:AccountIndexer", "maxDepth": 10 }`.
+   `{ "rootApexClassId": "ApexClass:AccountIndexer" }` (the input key
+   is `rootApexClassId`; `componentId` / `rootId` are accepted
+   aliases). Note the INPUT key and the OUTPUT key differ — the
+   response echoes `rootClassId` / `rootFlowId`.
 3. **Receive** (illustrative):
 
 ```json
 {
   "data": {
-    "rootApexClassId": "ApexClass:AccountIndexer",
-    "maxDepthObserved": 4,
+    "rootClassId": "ApexClass:AccountIndexer",
+    "rootFlowId": null,
+    "maxDepth": 4,
     "truncated": false,
-    "cyclesDetected": [
-      { "cycleStartClassId": "ApexClass:AccountIndexer", "cycleEndClassId": "ApexClass:AccountIndexer", "cycleLength": 1 }
-    ],
+    "cyclesDetected": true,
     "branchPoints": [
       { "classId": "ApexClass:AccountIndexer", "branchCount": 2 }
     ],
-    "chain": [
+    "chains": [
       { "fromId": "ApexClass:AccountIndexer", "toId": "ApexClass:AccountIndexer", "depth": 1, "dispatchMechanism": "queueable", "confidence": "declared", "note": "self-enqueue (chunking pattern)" },
       { "fromId": "ApexClass:AccountIndexer", "toId": "ApexClass:AccountIndexNotifier", "depth": 1, "dispatchMechanism": "queueable", "confidence": "declared" },
       { "fromId": "ApexClass:AccountIndexNotifier", "toId": "ApexClass:EmailSender", "depth": 2, "dispatchMechanism": "future", "confidence": "heuristic" },
@@ -480,10 +534,14 @@ Claude's flow:
 
 > Async chain from `ApexClass:AccountIndexer`:
 >
-> - **Max depth observed:** 4 (truncation: false).
+> - **Max depth:** 4 (`maxDepth`; truncation: false).
 > - **Branch points:** 1 (the root, `ApexClass:AccountIndexer`,
 >   has 2 outgoing `dispatchesAsync` edges).
-> - **Cycles:** 1 (a self-enqueue at the root — chunking pattern).
+> - **Cycles:** `cyclesDetected: true` — a self-enqueue at the root
+>   (chunking pattern). Note the field is a BOOLEAN, not a list: the
+>   walker reports THAT a cycle exists, not which nodes formed it.
+>   Find the cycle yourself by looking for a `chains[]` edge whose
+>   `fromId === toId`, or a repeated pair.
 >
 > **Chain edges (5):**
 >
@@ -548,7 +606,8 @@ non-persistence notes.
 | Calling `sfi.cdc_subscribers` against a non-CDC event id. | The tool validates the name pattern (`{Object}ChangeEvent` / `*__ChangeEvent`); a Platform Event (`*__e`) would belong to v1.5's `sfi.event_subscribers`. Re-route to the right tool, don't retry. |
 | Treating an empty `cdc_subscribers` response as "no CDC topology in this org". | The v2.8 `EventBus.subscribe(...)` registration path is invisible. An org with programmatic CDC subscribers will return empty here. Surface the disclosure and suggest the architect check Setup → Change Data Capture. |
 | Treating an `sfi.scheduled_job_catalog` `Schedulable` class with no `scheduledByCalls[]` as "not scheduled". | The Tooling API gap means the actual `CronTrigger` / `AsyncApexJob` registration is invisible. A class with no detected call site may still be scheduled via the UI. Surface the verbatim Tooling API gap disclosure. |
-| Treating a `parsedCron: null` entry as "the schedule is broken". | `parsedCron: null` means the cron uses a Salesforce-specific token (`L`, `W`, `#`, `LAST_FRIDAY`) the v2.8 parser doesn't support — NOT that the schedule is invalid. Surface the verbatim per-entry fallback. |
+| Reporting an empty `cronExpressions[]` as "this job has no schedule". | The cron string is never extracted — the scanner captures the scheduled CLASS and discards the cron argument. Every entry in every vault has `cronExpressions: []` and `cronExpression: null`. That is an availability gap, not a finding. Route the actual expression to `sfi.live_scheduled_jobs`. |
+| Reading `properties.isCdcEnabled`, `parsedCron`, `rawCronExpression`, or `maxDepthObserved`. | None of these exist — zero producers in `packages/*/src`. A read returns `undefined`, and `undefined` narrated as "not enabled" / "no schedule" / "depth 0" is a fabricated negative finding. The real keys are `channelMembers[].selectedEntity` (CDC binding), `cronExpressions[]` / `cronExpression` (both always empty), and `maxDepth`. |
 | Calling `sfi.endpoint_catalog` when the user asked "draw me the integration topology". | The endpoint catalog is the URL-axis composite; the integration map is the topology composite. Defer to `architect-integration-topology` for the topology question. |
 | Surfacing an `outbound_message_catalog` endpoint URL as "this URL is reachable". | v2.8 does NOT probe. The URL is captured verbatim; verify reachability separately. State the v2.8 disclaimer. |
 | Confusing CDC events with Platform Events. | They're separate axes. Platform Events: `__e` suffix, `sfi.event_subscribers` (v1.5). CDC events: `{Object}ChangeEvent` / `*__ChangeEvent` pattern, `sfi.cdc_subscribers` (v2.8). Different name shapes, different tools. |
@@ -594,18 +653,25 @@ Before sending a response, confirm:
       Platform Event.
 - [ ] I surfaced the verbatim per-tool disclosure (URL-not-
       validated, name-pattern detection for CDC, depth-cap of 10,
-      Tooling API gap for cron registration, cron-parse-failure
-      fallback when `parsedCron` is null).
-- [ ] For `async_chain_depth` results, I surfaced
-      `maxDepthObserved`, `truncated`, `cyclesDetected[]`, and
-      `branchPoints[]` with per-edge `dispatchMechanism` +
-      `confidence`.
+      Tooling API gap for cron registration).
+- [ ] I did NOT read `parsedCron`, `rawCronExpression`,
+      `isCdcEnabled`, or `maxDepthObserved` — none of those exist,
+      and an absent signal read as a negative finding is the exact
+      failure this skill is supposed to prevent.
+- [ ] For `async_chain_depth` results, I surfaced `maxDepth`,
+      `truncated`, `cyclesDetected` (a BOOLEAN), and
+      `branchPoints[]`, and walked `chains[]` with per-edge
+      `edgeType` / `async` / `depth`. I did not report a
+      `maxDepthObserved` or a `cyclesDetected[]` list — neither
+      exists.
 - [ ] For self-enqueue cycles in `async_chain_depth`, I called
       out the chunking pattern explicitly rather than treating
       it as a defect.
-- [ ] For `scheduled_job_catalog` entries with
-      `parsedCron: null`, I surfaced the verbatim per-entry
-      fallback disclosure.
+- [ ] For `scheduled_job_catalog` entries I stated that the cron
+      EXPRESSION is unavailable on the vault plane (it is never
+      extracted), rather than reporting an empty
+      `cronExpressions[]` as "this job has no schedule" — and I
+      pointed at `sfi.live_scheduled_jobs` for the real registration.
 - [ ] For `outbound_message_catalog` entries, I cited each
       `invokedByWorkflowRules[]` reference with its canonical id.
 - [ ] For `endpoint_catalog` results, I split the response by

@@ -1,4 +1,4 @@
-# ADR-004: Classify phantoms into a six-bucket taxonomy, computed on demand
+# ADR-004: Classify phantoms into a seven-bucket taxonomy, computed on demand
 
 ## Status
 Accepted
@@ -26,7 +26,7 @@ So phantoms must be *classified*, and the classification must distinguish "go ge
 this" from "stub it forever".
 
 ## Decision
-Classify each phantom into one of six mutually-exclusive buckets
+Classify each phantom into one of seven mutually-exclusive buckets
 (`PhantomClassification` in contracts), from its id shape, its inbound edge
 kinds, and its ComponentType's manifest coverage:
 
@@ -37,7 +37,23 @@ kinds, and its ComponentType's manifest coverage:
 - `managed-extension` — managed-package (namespaced) member → stub forever.
 - `standard-field-phantom` — a standard object or a field on one → stub forever.
 - `grant-only` — only permission grants reference it → stub forever.
+- `unresolved-profile-id` — an `UnresolvedProfile:{id}`: a Profile *Id* a
+  RestrictionRule / DuplicateRule referenced that the vault could not resolve to
+  an api name. Remedy is an Id→apiName index or live Tooling, **never** a wider
+  retrieve manifest.
 - `unknown` — referenced, but neither by automation nor a pure grant.
+
+**Where each bucket is produced.** Six of the seven come from the shared
+`classifyPhantom` in `graph/phantom-classify.ts`. The seventh,
+`unresolved-profile-id`, is an id-shape short-circuit that runs BEFORE
+`classifyPhantom` — it lives in `mcp/tools/phantom-taxonomy.ts`, not in the
+shared classifier. Consequence, recorded here rather than hidden: the
+refresh-time roll-up `computePhantomBucketSummary` calls `classifyPhantom`
+directly and therefore CANNOT emit an `unresolved-profile-id` bucket. The same
+`UnresolvedProfile:` id is reported as `unresolved-profile-id` by
+`get_component` and lands in a different bucket in the refresh summary. Anyone
+adding a bucket must decide which of the two surfaces it belongs to, or move the
+short-circuit down into the shared classifier.
 
 Compute this **on demand** (`graph/phantom-classify.ts`), shared by the MCP layer
 (`reference_stub` on `get_component`) and the CLI (`refresh --components`

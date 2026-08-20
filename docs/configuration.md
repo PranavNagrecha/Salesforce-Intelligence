@@ -692,10 +692,12 @@ LIVE sweep, so two safeties apply per the live-plane rules above:
   whose org isn't consented is an honest `no-consent` *skip* — never a silent
   live call.
 - **The session budget bounds the sweep.** Every per-org staleness query
-  decrements the same `SFI_LIVE_QUERY_BUDGET` (default 50) the hybrid plane uses;
-  N orgs × 6 checks can exhaust it, so a vault the budget can't cover degrades to
-  a `budget-exhausted` skip. Raise `SFI_LIVE_QUERY_BUDGET`, pass a `vaults`
-  subset, or start a new session to reset.
+  decrements the same `SFI_LIVE_QUERY_BUDGET` (default 50) the hybrid plane uses.
+  One org costs one query per checked metadata type — 15 staleness checks today,
+  the full `STALE_CHECK_TYPES` set in `packages/mcp/src/tools/live-plane.ts` — so
+  N orgs × 15 staleness checks can exhaust it, and a vault the budget can't cover
+  degrades to a `budget-exhausted` skip. Raise `SFI_LIVE_QUERY_BUDGET`, pass a
+  `vaults` subset, or start a new session to reset.
 
 ### Concurrent read-only serving (the vault lock)
 

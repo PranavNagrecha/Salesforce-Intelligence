@@ -77,7 +77,7 @@ release artifacts.
 
    `pnpm -r build` (and CI's build step) covers this, but the targeted command is
    the fast path while iterating. Forgetting it makes stale-dist mask your change.
-7. **For a NEW tool, also:** bump `website/site-data.json` `toolCount` (the
+7. **For a NEW tool, also:** bump `website/src/data/site-data.json` `toolCount` (the
    `verify-doc-sync` gate fails on a mismatch), add the tool to the
    order-sensitive roster in `packages/mcp/test/server.test.ts` (two lists), and
    **add it to `sf-intelligence-qa/scripts/tool-smoke.mjs` `MINIMAL` with a
