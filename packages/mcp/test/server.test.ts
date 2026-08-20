@@ -247,6 +247,8 @@ describe('dispatchTool', () => {
     'sfi.app_access',
     'sfi.tab_availability',
     'sfi.lifecycle_process',
+    // ACTION-CHAIN — record actions composed as chains (lead convert, approval).
+    'sfi.action_chain',
     'sfi.layout_assignments',
     'sfi.integration_map',
     'sfi.event_subscribers',
@@ -626,6 +628,7 @@ describe('V01_TOOLS', () => {
       'sfi.app_access',
       'sfi.tab_availability',
       'sfi.lifecycle_process',
+      'sfi.action_chain',
       'sfi.layout_assignments',
       'sfi.integration_map',
       'sfi.event_subscribers',

@@ -1849,6 +1849,29 @@ const LIFECYCLE_PROCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.action_chain`. Mirrors `actionChainInputSchema`.
+ * `action` is the only required key: the record ACTION whose documented chain to
+ * compose. The object keys are the standard L2 alias set (a lead convert is
+ * Lead-scoped by definition and REFUSES a different object; an approval chain
+ * needs one). Drift between Zod and this schema is a code-review concern.
+ */
+const ACTION_CHAIN_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['lead-convert', 'approval-submit'] },
+    objectApiName: { type: 'string', minLength: 1 },
+    object: { type: 'string', minLength: 1 },
+    objectId: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
+    approvalProcess: { type: 'string', minLength: 1 },
+    outcome: { type: 'string', enum: ['approve', 'reject', 'recall', 'all'] },
+    nestedSaveDepth: { type: 'integer', enum: [0, 1] },
+    limit: { type: 'integer', minimum: 1, maximum: 25 },
+  },
+  required: ['action'],
+});
+
+/**
  * Concrete JSON Schema for `sfi.integration_map`. Mirrors
  * `integrationMapInputSchema`. The `filter` enum is duplicated from
  * the Zod schema in `integration-map.ts` and the `limit` upper bound
@@ -4882,6 +4905,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     name: 'sfi.lifecycle_process',
     description: "\"What happens when {Object}.{field} becomes {value}?\" — the existing process for a specific value or stage transition (which automations already run when a record moves into a given state, e.g. an Opportunity going to Closed Won or a Case status flip). A value / stage LIFECYCLE view, not a bare DML-event view. `order_of_execution` / `what_happens_on_save` answer \"what runs on an insert/update\"; this stitches the parts into the JOURNEY of a specific transition (Opportunity → Closed Won, a Case status flip, a record updated into a state). It COMPOSES `order_of_execution` for the transition's event (default `update`; pass `event: 'insert'` for creation) — so the chain always agrees with that tool — and ANNOTATES each step with `coupledToField` (its entry condition references the transition `field`) and `coupledToValue` (the condition expression mentions the `value` literal). `process[]` is the ordered, paginated automation chain (`limit` default 100 / max 200, `offset`/`hasMore`/`truncated`); `coupledAutomation[]` is the COMPLETE subset gated on the transition (the value-add); `summary` tallies total / coupled / field-coupled / value-coupled. `confidence: 'parsed'`. `disclosures` is explicit: conditions are LISTED not EVALUATED (whether a record matches needs record data), value coupling is a literal expression match (can miss formula-encoded values / over-match a substring), and the chain excludes manual actions, the runtime audit trail, and callouts. Parent Summary (roll-up) field recalculation IS included (, inherited from `order_of_execution`'s `post-save-rollup-recalc` phase) but capped to one level and does not expand the recalculated parent's own automation. With no `field`/`value` it returns the full chain plus a hint to pass a transition. Unknown object surfaces via the underlying order_of_execution error.",
     inputSchema: LIFECYCLE_PROCESS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.action_chain',
+    description:
+      "\"What actually happens when I convert this Lead / submit this record for approval?\" — a record ACTION composed as a CHAIN, the way `order_of_execution` composes a record SAVE. `order_of_execution` / `what_happens_on_save` / `lifecycle_process` model the save order only, and `lifecycle_process` says so verbatim: distinct record ACTIONS are outside that insert/update view. This tool closes two of them. `action: 'lead-convert'` composes the documented lead-conversion sequence — convert request and its platform guards, Lead-side validation (with the Lead Settings convert toggle surfaced as an UNRESOLVED gate), Lead duplicate/matching rules, the convert field mapping, the Account / Contact / Opportunity inserts and the Lead update — where each of those four record writes carries its FULL save order, composed by CALLING `what_happens_on_save` so the nested view can never disagree with it. `action: 'approval-submit'` composes the documented approval sequence for each `ApprovalProcess` on the named object — allowed submitters, entry criteria, initial submission actions, record lock, then per step: entry criteria + `ifCriteriaNotMet`, approver assignment (user / queue / group / role / role-and-subordinates / related-user field / hierarchy field), approve and reject actions and `rejectBehavior` — then final approval / final rejection actions, the final lock policy, recall, and the field-update RE-ENTRY into the object's update save order. HONESTY (the point of the tool): every documented step is emitted even when the vault cannot fill it, carrying a TYPED resolution — `resolved`, `platform-step`, `verified-none` (the org provably has none, justified against the manifest's own family-coverage row), `unresolved` (the metadata is MISSING — a hole, never a zero; e.g. the convert field mapping, which lives in the unextracted `LeadConvertSettings` type, and step-level approval FieldUpdate targets, for which the extractor emits no edge), and `not-modeled` (a blind spot in THIS TOOL, named out loud — e.g. Apex `Database.convertLead` invocations, email approval responses, approver delegation). Those three absence kinds are never interchangeable. Conditions are LISTED, NOT EVALUATED. Nested save orders are capped at depth 1 (the saves the action itself performs) and the cap is disclosed. `summary.resolutionCounts` tallies every kind; `evidenceEnvelope` (v2) projects the chain's claims, evidence and absence status — `not-checked` whenever any step is unresolved or not modeled, so an action with a hole can never read as a proven none. Actions NOT modeled as chains (owner change, merge, activation, delete/undelete, login) are REFUSED by name, never answered wrongly.",
+    inputSchema: ACTION_CHAIN_INPUT_SCHEMA,
   },
   {
     name: 'sfi.layout_assignments',

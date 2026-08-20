@@ -74,6 +74,27 @@ const CASES: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
   { q: 'what are the security implications of AccountTableController?', anyOf: ['sfi.interpret'] },
   { q: 'contact has many active record-triggered flows — is their execution order deterministic, and what is the risk?', anyOf: ['sfi.interpret'] },
   { q: 'why could a Contact save fail, and which automations could be involved?', anyOf: ['sfi.interpret'] },
+  // ACTION-CHAIN — a record ACTION asked as a SEQUENCE (lead convert, approval
+  // submission). These are PARAPHRASES, not corpus utterances: none of the
+  // eight phrasings below appears in `funnel-utterances.ts`, so this is real
+  // recall, not self-recall (that lives in funnel-self-recall.test.ts). The
+  // adjacent specialist is an accepted complement in the anyOf where the
+  // question is genuinely ambiguous between the save-time slice and the whole
+  // action — the same convention the F3 interpret rows use.
+  { q: 'break down everything a lead conversion actually does', anyOf: ['sfi.action_chain', 'sfi.lifecycle_process'] },
+  { q: 'spell out the approval routing from submission to the final decision', anyOf: ['sfi.action_chain', 'sfi.list_components'] },
+  { q: 'who signs off at every stage and what happens on a rejection', anyOf: ['sfi.action_chain', 'sfi.list_components'] },
+  { q: 'is the record still editable once the approval finishes', anyOf: ['sfi.action_chain', 'sfi.interpret'] },
+  { q: 'can a submitter pull back a pending approval request', anyOf: ['sfi.action_chain', 'sfi.interpret'] },
+  { q: 'what parts of the convert sequence cannot be answered from this vault', anyOf: ['sfi.action_chain'] },
+  { q: 'end to end what does submitting for approval set off', anyOf: ['sfi.action_chain', 'sfi.list_components'] },
+  // MEASURED BLIND PHRASING (documented, not asserted): "converting a lead
+  // creates three records - what automation runs on each one" does NOT surface
+  // action_chain in the top-8 — the funnel reads it as a record-creation /
+  // save-order question and returns record_creation_paths + what_happens_on_save
+  // + order_of_execution. Those are reasonable neighbours, so it is a recall
+  // gap rather than a wrong answer; recorded here so a later corpus pass can
+  // close it instead of rediscovering it.
 ];
 
 const FLOOR = 0.78; // conservative tripwire; the harness tracks the precise bar

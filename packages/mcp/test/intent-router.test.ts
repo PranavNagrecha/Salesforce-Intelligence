@@ -1362,6 +1362,85 @@ describe('RM-wire (F3) — sfi.interpret stacked onto object-anchored intents', 
   });
 });
 
+describe('ACTION-CHAIN — sfi.action_chain stacked onto the action-shaped intents', () => {
+  // `sfi.action_chain` models a record ACTION as a chain (Lead convert, approval
+  // submission). It ships WITHOUT its own rule and WITHOUT a grandfather
+  // exemption: it is stacked LAST (the 99fdbf29 pattern) onto the two existing
+  // intents whose questions are action-shaped —
+  //   - `lifecycle-process`, whose own patterns already match `converted` /
+  //     `approved` / `on <Entity> conversion`, and whose tool's own disclosure
+  //     says those distinct record ACTIONS are outside its insert/update view;
+  //   - `approval-process`, which answers with a flat COMPONENT CATALOG where
+  //     the question asked for a SEQUENCE.
+  // A new early rule would have STOLEN these phrasings from the grounded
+  // specialists. Stacking cannot: the primary is byte-unchanged in both.
+  const ACTION_SHAPED: ReadonlyArray<{ q: string; intent: string; primary: string }> = [
+    {
+      q: 'what happens when a Lead is converted',
+      intent: 'lifecycle-process',
+      primary: 'sfi.lifecycle_process',
+    },
+    {
+      q: 'what runs automatically when a Lead is converted',
+      intent: 'lifecycle-process',
+      primary: 'sfi.lifecycle_process',
+    },
+    {
+      q: 'what fires on Lead conversion',
+      intent: 'lifecycle-process',
+      primary: 'sfi.lifecycle_process',
+    },
+    {
+      q: 'what happens when an Opportunity becomes Closed Won',
+      intent: 'lifecycle-process',
+      primary: 'sfi.lifecycle_process',
+    },
+    {
+      q: 'what are the approval steps on Opportunity',
+      intent: 'approval-process',
+      primary: 'sfi.list_components',
+    },
+    {
+      q: 'who approves at each approval step',
+      intent: 'approval-process',
+      primary: 'sfi.list_components',
+    },
+  ];
+
+  it.each(ACTION_SHAPED)(
+    'stacks action_chain LAST for "$q" ($intent)',
+    ({ q, intent, primary }) => {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe(intent);
+      expect(r.tools).toContain('sfi.action_chain');
+      // LAST — a complement, never the primary.
+      expect(r.tools[r.tools.length - 1]).toBe('sfi.action_chain');
+      // The specialist it complements is untouched and still ahead of it.
+      expect(r.tools).toContain(primary);
+      expect(r.tools.indexOf(primary)).toBeLessThan(r.tools.indexOf('sfi.action_chain'));
+    },
+  );
+
+  it('is router-reachable (present in allRoutableTools, NOT grandfathered)', () => {
+    // The grandfather list lives in a sibling describe's scope; the
+    // "no stale entries" test there is what fails if anyone re-adds this tool
+    // to it, so reachability is the assertion that belongs here.
+    expect(allRoutableTools()).toContain('sfi.action_chain');
+  });
+
+  it('does not steal the pure save-order intents', () => {
+    // "what fires on an insert" is a SAVE question, not an ACTION question —
+    // stacking must not have leaked into it (the 99fdbf29 rule: pure save-order
+    // and pure lookup intents are left untouched).
+    for (const q of [
+      'what fires when an account gets saved',
+      'what runs on insert for Contact',
+    ]) {
+      expect(classifyQuestion(q).tools).not.toContain('sfi.action_chain');
+    }
+  });
+});
+
 // Baseline-300 route-gap cluster — each was `unrouted` before P14 router-residuals batch.
 describe('baseline-300 route-gap clusters', () => {
   const expectRouted = (q: string, intent: string) => {

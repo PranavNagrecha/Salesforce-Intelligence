@@ -29,6 +29,10 @@ import {
 import type { Context } from '../server.js';
 
 import {
+  actionChainHandler,
+  actionChainInputSchema,
+} from './action-chain.js';
+import {
   aiExposureReportHandler,
   aiExposureReportInputSchema,
 } from './ai-exposure-report.js';
@@ -1188,6 +1192,8 @@ export const dispatchTool = async (
         lifecycleProcessInputSchema,
         lifecycleProcessHandler,
       );
+    case 'sfi.action_chain':
+      return runTool(ctx, args, actionChainInputSchema, actionChainHandler);
     case 'sfi.layout_assignments':
       return runTool(
         ctx,
