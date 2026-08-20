@@ -1089,6 +1089,69 @@ describe('safeToDeleteFieldHandler', () => {
     }
   });
 
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: a current refresh persists Report
+  // NODES but NOT analytics -> CustomField edges, so this shape does not arise
+  // on a current vault. It DOES arise on a vault built by another build, and
+  // the tool must survive it: the same report would otherwise reach this tool
+  // through TWO channels — the edge walk and the folded `usedInReports`
+  // property — and be counted as two blockers. The fold total is the superset,
+  // so edge-derived referrers are subtracted from it.
+  it('does NOT double-count a report that is BOTH a persisted node edge and a folded name', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-std-rptdedup-'));
+    const opened = await openGraph(join(dir, 'rpt.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const acct = 'CustomObject:Account';
+      const field = 'CustomField:Account.DualCounted__c';
+      const persistedReport = 'Report:Sales_Reports/Pipeline';
+      const local: ExtractionResult = {
+        nodes: [
+          makeNode({ id: acct, type: 'CustomObject', apiName: 'Account' }),
+          makeNode({
+            id: persistedReport,
+            type: 'Report',
+            apiName: 'Sales_Reports/Pipeline',
+            properties: { format: 'Summary' },
+          }),
+          makeNode({
+            id: field,
+            apiName: 'DualCounted__c',
+            parentId: acct,
+            properties: {
+              dataType: 'Text',
+              usedInReport: true,
+              // The SAME report as the persisted node above, plus one whose
+              // node did not survive the per-type persistence cap.
+              usedInReports: ['Ops_Reports/Capped', 'Sales_Reports/Pipeline'],
+            },
+          }),
+        ],
+        edges: [
+          makeEdge({ fromId: acct, toId: field, edgeType: 'parentOf' }),
+          makeEdge({ fromId: persistedReport, toId: field, edgeType: 'references' }),
+        ],
+      };
+      const imp = await importExtractionResults(s, [local]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s, liveCapability: mintLiveCapability('opt-in') };
+      const result = await safeToDeleteFieldHandler(localCtx, { fieldId: field });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const analytics = result.value.data.reasoning.find((r) => r.category === 'analytics');
+      // TWO distinct reports break, not three: the persisted-node edge and the
+      // folded name refer to the same `Sales_Reports/Pipeline`.
+      expect(analytics?.count).toBe(2);
+      expect(analytics?.verdict).toBe('blocking');
+      const exampleIds = (analytics?.examples ?? []).map((e) => e.id);
+      expect(new Set(exampleIds).size).toBe(exampleIds.length);
+      expect(exampleIds).toContain(persistedReport);
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('D2: an Activity custom field written via a Task receiver is NOT safe (polymorphic import alias attaches the write)', async () => {
     // The Apex writesTo edge was minted against the dangling
     // `CustomField:Task.Foo__c`; the import-time polymorphic alias re-points it

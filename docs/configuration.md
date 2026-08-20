@@ -428,11 +428,48 @@ the lexical funnel. Feedback welcome — see the GitHub issues page.
 Folder-based Reports/Dashboards are invisible to the wildcard retrieve, so
 every full refresh pulls the top `SFI_REPORTS_CAP` (default `500`) ranked by
 actual usage (Report `LastRunDate`, Dashboard `LastViewedDate`, fallback
-`LastModifiedDate`) via read-only SOQL, folding their field references onto
-fields (no report nodes). When the org holds more than the cap, the
-Report/Dashboard coverage rows read `pending` — the tail was not checked, so
-absence claims stay qualified. `--with-reports` = uncapped full pull;
+`LastModifiedDate`) via read-only SOQL. When the org holds more than the cap,
+the Report/Dashboard coverage rows read `pending` — the tail was not checked,
+so absence claims stay qualified. `--with-reports` = uncapped full pull;
 `--no-reports` = skip.
+
+Each pulled report/dashboard contributes **two** things. Its field references
+are folded onto the referenced `CustomField` nodes as `usedInReport` /
+`usedInDashboard` plus a capped, sorted name list (`usedInReports`, first 50,
+with an exact `usedInReportsTruncated` total) — that fold is the authority for
+"which reports use this field" and covers every pulled report. Separately the
+report/dashboard itself persists as a graph node,
+`Report:{LeafFolder}/{DeveloperName}` / `Dashboard:{LeafFolder}/{DeveloperName}`
+(one folder segment — the leaf — matching the retrieve `<members>` format and
+the `<report>` reference a dashboard carries, however deep the folder tree),
+carrying its parsed structure and DECLARED `references` edges to its source
+object / custom report type and (for a dashboard) to each component report.
+
+Field usage is deliberately a node PROPERTY and never an edge: at real-org
+scale those edges were ~94% of the persisted rows for an answer the folded
+property already gives, so persisting them would multiply vault size and
+refresh time for no new capability.
+
+**What never reaches the graph or the rendered Markdown.** Note the scope:
+`org-kb/source/` still holds the raw retrieved `.report-meta.xml` /
+`.dashboard-meta.xml` — descriptions and `<runningUser>` included — and
+`sfi vault git enable` auto-commits that tree. That is the source mirror
+behaving as it always has; the guarantees below cover the graph and the
+Markdown vault built FROM it. Persisted report/dashboard properties pass an
+explicit allow-list. Report filter `<value>` literals are reduced to a
+`hasValue` boolean — the field reference and operator persist, the value an
+admin typed never does. Bucket bin boundaries and admin-typed bucket labels are
+dropped. `<description>` becomes a `descriptionPresent` boolean, not text (so
+`list_components({ missingDescription: true })` still answers). A dashboard's
+`<runningUser>` is a real org username and is never read at all, so "who does
+this dashboard run as" is not answerable from the vault, by choice.
+
+`SFI_REPORT_NODE_CAP` bounds how many nodes persist per type. It is a blow-up
+guard set above observed real-org scale (3-4k reports), not an operating point.
+When it bites, the manifest carries a `reportNodeCap` block, the refresh
+summary prints an explicit WARNING naming the shortfall, and those coverage
+rows go `pending` — a capped capture never reads as a complete one. The fold
+runs BEFORE the cap, so the cap costs navigability, never field-usage recall.
 
 The refresh summary reports three numbers per type — org total, manifest
 members **requested**, and files that actually **landed** on disk. The
@@ -444,6 +481,7 @@ row `pending` rather than implying it was scanned.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SFI_REPORTS_CAP` | `500` | Usage-ranked pull cap; `0` disables the default pull. |
+| `SFI_REPORT_NODE_CAP` | `5000` | Per-type cap on persisted Report / Dashboard graph NODES. A blow-up guard, not an operating point. `0` persists no nodes (field-usage fold only — the pre-0.3.1 shape). A cap that bites forces those coverage rows `pending`. |
 
 ## Data-shape capture (`refresh --with-data-shape`)
 

@@ -1281,9 +1281,13 @@ export const unusedFieldsDeepHandler = async (
     const ns = namespacePrefixOf(field.apiName);
     if (excludeManaged && ns !== null) return false;
     // A field whose only use is a report column / filter or a dashboard component
-    // is NOT unused. The refresh `--with-reports` pass folds that usage onto the
-    // field as `usedInReport` / `usedInDashboard` (no per-report node); honor it
-    // here so a report-only field never surfaces as a deletion candidate.
+    // is NOT unused. The refresh folds that usage onto the field as
+    // `usedInReport` / `usedInDashboard`; honor it here so a report-only field
+    // never surfaces as a deletion candidate. Report/Dashboard NODES persist
+    // (REPORT-DASHBOARD-GRAPH-PERSISTENCE) but their field usage deliberately
+    // stays a PROPERTY, never an edge — so this property read remains the only
+    // channel, and it covers every extracted report even when the node set is
+    // capped.
     // R6-24-WIRE: keep the capped name lists so format:'proposal' can name the
     // reports/dashboards that would break in the evidence comment.
     const rdDetail = reportDashboardUsageDetail(field);

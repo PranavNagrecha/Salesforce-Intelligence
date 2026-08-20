@@ -234,7 +234,7 @@ export interface Field360Section {
 /**
  * Finding #36: WHICH reports/dashboards reference this field — not just the
  * boolean "used in a report" signal. Sourced from the fold-time capped name
- * list (`foldReportDashboardUsageIntoFields`, first 50 per family, sorted).
+ * list (`applyReportDashboardPersistence`, first 50 per family, sorted).
  * Present only when the field carries folded report/dashboard usage; a vault
  * refreshed before this property existed carries the boolean flags with
  * empty name arrays here (see `boundaries[]` for that fallback phrasing) —

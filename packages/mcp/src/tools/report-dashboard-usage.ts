@@ -1,36 +1,48 @@
 /**
  * Shared helper for report / dashboard field-usage signals.
  *
- * Reports and Dashboards are folder-based and high-volume, so the refresh
- * `--with-reports` pass does NOT persist a node per report — instead it folds
- * each report/dashboard's field usage onto the referenced `CustomField` as the
- * `usedInReport` / `usedInDashboard` boolean properties (see the CLI's
- * `foldReportDashboardUsageIntoFields`). Because that usage is a node *property*
- * rather than an incoming edge, every edge-walking field tool (`field_360`,
- * `find_field_anywhere`, `safe_to_delete_field`, `unused_fields_deep`, …) must
- * read it explicitly. This module centralizes that read + the honesty caveat.
+ * The refresh folds each report/dashboard's field usage onto the referenced
+ * `CustomField` as the `usedInReport` / `usedInDashboard` boolean properties
+ * (see the CLI's `applyReportDashboardPersistence`). Because that usage is a
+ * node *property* rather than an incoming edge, every edge-walking field tool
+ * (`field_360`, `find_field_anywhere`, `safe_to_delete_field`,
+ * `unused_fields_deep`, …) must read it explicitly. This module centralizes
+ * that read + the honesty caveat.
  *
- * R6-24: `extractReport` (packages/extractors/src/enterprise-metadata.ts)
- * now parses a Report's structural depth beyond column identity — filter
- * criteria (field/operator/value-presence, never the literal value),
- * `booleanFilter`, groupings, buckets, crossFilters, chart, and format — onto
- * the transient Report node's `properties`. That richer shape is still
- * dropped here by `foldReportDashboardUsageIntoFields` along with everything
- * else on the node (volume — thousands of reports on a large org), so it
- * does NOT reach `field_360`/`field_lineage`/this module's boolean flags.
- * Filter/grouping LOGIC is no longer entirely unparsed, but per-field
- * composition of "which report filters on this field, and how" remains a
- * `dataNotAvailable` boundary until a future milestone decides to persist
- * (a capped, volume-safe subset of) report nodes instead of folding them away.
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE: the same pass ALSO persists the
+ * Report/Dashboard nodes themselves (redacted through a property allow-list,
+ * capped per type), which it previously deleted. So the richer report shape
+ * R6-24 parses — filter criteria (field/operator/value-PRESENCE, never the
+ * literal), `booleanFilter`, groupings, buckets, crossFilters, chart, format,
+ * plus `fieldRefs` — now reaches the graph, along with
+ * `report -> source object / report type` and `dashboard -> component report`
+ * edges. `Report:{Folder}/{Name}` is an inspectable component.
+ *
+ * What it deliberately does NOT persist is the analytics -> `CustomField`
+ * edge layer: measured at real-org scale (4,277 reports) those were 64,155 of
+ * 68,513 rows — 94% — for an answer THESE PROPERTIES already give. So the
+ * folded properties remain the AUTHORITY for the field-side question, and are
+ * what these tools must cite: the fold covers every EXTRACTED report, the node
+ * set is capped, and an edge layer under a cap would answer "how many things
+ * reference this field" differently for two identical fields depending on
+ * where their report's name sorted.
+ *
+ * Report filter LITERALS never reach the graph or the rendered Markdown (see
+ * `PERSISTED_REPORT_PROPERTY_KEYS` in the CLI), so "what VALUE does this
+ * report filter for" stays a permanent `dataNotAvailable` boundary for every
+ * tool — by design, not by omission. (Scope note: the raw retrieved XML under
+ * `org-kb/source/` is untouched by that redaction and still contains the
+ * literals; no tool reads it, but "never persisted anywhere" would overclaim.)
  *
  * Finding #36: "which reports break if I change this field" was structurally
  * unanswerable from the boolean alone — it says "used in a report" but never
- * WHICH one. `foldReportDashboardUsageIntoFields` now ALSO stamps a capped,
- * sorted list of the referencing report/dashboard api-names (`usedInReports` /
- * `usedInDashboards`, first 50) plus a truncation total (`usedInReportsTruncated`
- * / `usedInDashboardsTruncated`) when the field is referenced by more than the
- * cap. `reportDashboardUsageDetail` reads that richer shape; `reportDashboardUsage`
- * stays as the boolean-only read for existing callers (back-compat).
+ * WHICH one. The fold ALSO stamps a capped, sorted list of the referencing
+ * report/dashboard api-names (`usedInReports` / `usedInDashboards`, first 50)
+ * plus a truncation total (`usedInReportsTruncated` /
+ * `usedInDashboardsTruncated`) when the field is referenced by more than the
+ * cap. `reportDashboardUsageDetail` reads that richer shape;
+ * `reportDashboardUsage` stays as the boolean-only read for existing callers
+ * (back-compat).
  */
 
 import type { Node } from '@sf-intelligence/contracts';
@@ -76,7 +88,7 @@ const readNumberProperty = (node: Node, key: string): number | undefined => {
 /**
  * Read the folded report/dashboard usage NAMES (Finding #36) off a
  * `CustomField` node — the capped list produced by
- * `foldReportDashboardUsageIntoFields`, plus the true total when truncated.
+ * `applyReportDashboardPersistence`, plus the true total when truncated.
  * A vault refreshed before this property existed simply has empty name
  * arrays even when the boolean flags are `true` — callers should fall back
  * to the boolean-only "used in a report" phrasing in that case (see
@@ -164,8 +176,12 @@ export const formatReportDashboardBreakEvidence = (
 
 /**
  * Honesty caveat surfaced by field tools when report/dashboard usage is NOT in
- * the vault. Reports/Dashboards are folder-based + high-volume, so they are off
- * by default; without the opt-in pull a report-only field can read as unused.
+ * the vault. Reports/Dashboards are folder-based + high-volume, so the default
+ * pull is usage-ranked and CAPPED; beyond that cap a report-only field can read
+ * as unused. Scoped to the FIELD-USAGE question — the separate node
+ * persistence cap (which bounds how many per-report NODES the graph holds, not
+ * how many reports the field-usage fold covers) discloses itself through the
+ * Report/Dashboard coverage rows going `pending`.
  */
 export const REPORT_DASHBOARD_USAGE_CAVEAT =
   'report column / filter and dashboard component usage is folded onto CustomField nodes from the default capped reports pull (top 500 by usage; beyond-cap members stay pending). Fields with no folded `usedInReport` / `usedInDashboard` stamp may still be used only in reports or dashboards outside that cap — run `sfi refresh --with-reports` for a full uncapped pull, or `sfi refresh --no-reports` to skip entirely.';

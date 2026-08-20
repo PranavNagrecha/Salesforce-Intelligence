@@ -1310,7 +1310,7 @@ describe('enterprise metadata extractors', () => {
   // enterprise extractor dropped until extraProperties:['description'] was added.
   // The key is captured when present and OMITTED when absent — the honest
   // "extracted, none present" signal (distinct from a not-modeled type).
-  it('captures a top-level <description> on a Report', async () => {
+  it('captures only description PRESENCE on a Report, never the text', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Widget_Usage.report-meta.xml');
@@ -1326,9 +1326,12 @@ describe('enterprise metadata extractors', () => {
       const result = await extractReport(path);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.nodes[0]?.properties['description']).toBe(
-        'Weekly rollup of widget usage by region.',
-      );
+      // REPORT-DASHBOARD-GRAPH-PERSISTENCE (privacy): Report nodes are now
+      // PERSISTED, so the freeform description TEXT is never captured — only
+      // its PRESENCE, which is all `missingDescription` ever needed.
+      expect(result.value.nodes[0]?.properties['description']).toBeUndefined();
+      expect(result.value.nodes[0]?.properties['descriptionPresent']).toBe(true);
+      expect(JSON.stringify(result.value.nodes[0])).not.toContain('Weekly rollup');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -1354,7 +1357,243 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('captures a top-level <description> on a Dashboard', async () => {
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: the node id must be FOLDER-QUALIFIED.
+  // The bare DeveloperName is not unique across report folders, and these
+  // nodes are now persisted under `nodes.id` (a PK) — a bare-name id would let
+  // one report silently overwrite a same-named sibling in another folder, and
+  // no dashboard `<report>Folder/Name</report>` reference would ever resolve.
+  it('mints a FOLDER-QUALIFIED Report id, not the bare basename', async () => {
+    const dir = await makeTemp();
+    try {
+      const folder = join(dir, 'reports', 'Sales_Reports');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'Weekly_Summary.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report xmlns="http://soap.sforce.com/2006/04/metadata"><reportType>AccountList</reportType></Report>',
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.id).toBe('Report:Sales_Reports/Weekly_Summary');
+      expect(result.value.nodes[0]?.apiName).toBe('Sales_Reports/Weekly_Summary');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: Salesforce identity is
+  // `{LeafFolder}/{DeveloperName}` — ONE folder segment, however deep the
+  // retrieve wrote the tree. Measured on a real org: 35% of reports live in
+  // nested folders, and joining the full chain broke 93 dashboard->report
+  // edges that should have resolved (61.0% -> 75.8% resolution when fixed).
+  // The absence of a nested fixture is exactly why that shipped once.
+  it('uses ONLY the LEAF folder for a NESTED report path (not the full chain)', async () => {
+    const dir = await makeTemp();
+    try {
+      const folder = join(dir, 'source', 'reports', 'Admissions_Reports', 'MindMaxReports');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'MM_Case_Log_Day.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report xmlns="http://soap.sforce.com/2006/04/metadata"><reportType>CaseList</reportType></Report>',
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // Leaf only. The full chain (`Admissions_Reports/MindMaxReports/...`)
+      // is an id no dashboard reference and no retrieve member ever names.
+      expect(result.value.nodes[0]?.id).toBe('Report:MindMaxReports/MM_Case_Log_Day');
+      expect(result.value.nodes[0]?.apiName).toBe('MindMaxReports/MM_Case_Log_Day');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a NESTED dashboard resolves its component-report edge to the LEAF-folder id', async () => {
+    const dir = await makeTemp();
+    try {
+      const folder = join(dir, 'source', 'dashboards', 'Leadership', 'Exec_Dashboards');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'KPIs.dashboard-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<Dashboard xmlns="http://soap.sforce.com/2006/04/metadata">
+    <dashboardGridLayout>
+        <dashboardGridComponents>
+            <report>MindMaxReports/MM_Case_Log_Day</report>
+        </dashboardGridComponents>
+    </dashboardGridLayout>
+</Dashboard>`,
+        'utf8',
+      );
+      const result = await extractDashboard(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.id).toBe('Dashboard:Exec_Dashboards/KPIs');
+      // The edge target must be byte-equal to the nested Report's node id
+      // asserted in the test above — that equality IS the resolution.
+      expect(
+        result.value.edges.find(
+          (e) => e.properties['referenceKind'] === 'dashboardComponentReport',
+        )?.toId,
+      ).toBe('Report:MindMaxReports/MM_Case_Log_Day');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves the metadata-type root, not a user folder that is ALSO named "reports"', async () => {
+    const dir = await makeTemp();
+    try {
+      // A legal (if perverse) report folder named `reports`, under a DX
+      // retrieve root. A last-occurrence search would return the bare
+      // `Weekly_Summary` here and collide with a top-level unfiled report of
+      // the same name; anchoring on `unpackaged` keeps the folder qualifier.
+      const folder = join(dir, 'source', 'unpackaged', 'reports', 'reports');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'Weekly_Summary.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report xmlns="http://soap.sforce.com/2006/04/metadata"/>',
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.id).toBe('Report:reports/Weekly_Summary');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the bare api name for an unfoldered report file', async () => {
+    const dir = await makeTemp();
+    try {
+      const folder = join(dir, 'reports');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'Unfiled_Item.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report xmlns="http://soap.sforce.com/2006/04/metadata"/>',
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.id).toBe('Report:Unfiled_Item');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: report -> its source frame. A standard
+  // `{Object}List` report type resolves to the object; a custom report type
+  // resolves to the `ReportType:` node.
+  it('emits a report -> source-object edge for a STANDARD report type', async () => {
+    const dir = await makeTemp();
+    try {
+      const folder = join(dir, 'reports', 'Ops');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'Std.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report xmlns="http://soap.sforce.com/2006/04/metadata"><reportType>AccountList</reportType></Report>',
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const edge = result.value.edges.find(
+        (e) => e.properties['referenceKind'] === 'reportSourceObject',
+      );
+      expect(edge?.toId).toBe('CustomObject:Account');
+      expect(edge?.confidence).toBe('declared');
+      expect(result.value.nodes[0]?.properties['reportType']).toBe('AccountList');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits a report -> ReportType edge for a CUSTOM report type', async () => {
+    const dir = await makeTemp();
+    try {
+      const folder = join(dir, 'reports', 'Ops');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'Cust.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report xmlns="http://soap.sforce.com/2006/04/metadata"><reportType>Widget_Metrics__c</reportType></Report>',
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const edge = result.value.edges.find(
+        (e) => e.properties['referenceKind'] === 'reportSourceType',
+      );
+      expect(edge?.toId).toBe('ReportType:Widget_Metrics__c');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: dashboard -> its component reports.
+  // The `<report>` value is already `Folder/Name`, matching the Report node id.
+  it('emits dashboard -> component-report edges and NEVER reads <runningUser>', async () => {
+    const dir = await makeTemp();
+    try {
+      const folder = join(dir, 'dashboards', 'Exec_Dashboards');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, 'KPIs.dashboard-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<Dashboard xmlns="http://soap.sforce.com/2006/04/metadata">
+    <dashboardType>SpecifiedUser</dashboardType>
+    <runningUser>synthetic.analyst@example.invalid</runningUser>
+    <dashboardGridLayout>
+        <dashboardGridComponents>
+            <report>Sales_Reports/Weekly_Summary</report>
+        </dashboardGridComponents>
+        <dashboardGridComponents>
+            <report>Ops/Std</report>
+        </dashboardGridComponents>
+    </dashboardGridLayout>
+</Dashboard>`,
+        'utf8',
+      );
+      const result = await extractDashboard(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      expect(node.id).toBe('Dashboard:Exec_Dashboards/KPIs');
+      // Sorted + deduplicated so the emitted edge set is byte-stable.
+      expect(node.properties['componentReports']).toEqual([
+        'Ops/Std',
+        'Sales_Reports/Weekly_Summary',
+      ]);
+      expect(node.properties['dashboardType']).toBe('SpecifiedUser');
+      const reportEdges = result.value.edges.filter(
+        (e) => e.properties['referenceKind'] === 'dashboardComponentReport',
+      );
+      expect(reportEdges.map((e) => e.toId).sort()).toEqual([
+        'Report:Ops/Std',
+        'Report:Sales_Reports/Weekly_Summary',
+      ]);
+      // PRIVACY: `<runningUser>` is a real org username. It is never read, so
+      // it can appear NOWHERE in the extracted result.
+      expect(JSON.stringify(result.value)).not.toContain('synthetic.analyst');
+      expect(node.properties['runningUser']).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('captures only description PRESENCE on a Dashboard, never the text', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Ops_Board.dashboard-meta.xml');
@@ -1366,7 +1605,10 @@ describe('enterprise metadata extractors', () => {
       const result = await extractDashboard(path);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.nodes[0]?.properties['description']).toBe('Operations KPIs.');
+      // Presence only, never the text — same rationale as the Report sibling.
+      expect(result.value.nodes[0]?.properties['description']).toBeUndefined();
+      expect(result.value.nodes[0]?.properties['descriptionPresent']).toBe(true);
+      expect(JSON.stringify(result.value.nodes[0])).not.toContain('Operations KPIs');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

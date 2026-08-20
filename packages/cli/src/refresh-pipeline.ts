@@ -179,9 +179,25 @@ export type ExtractCache = Map<string, ExtractCacheEntry>;
  * Cache-format version (P5-incremental-refresh). Bumped when the extractor
  * graph changes shape so an on-disk cache from an older build is ignored. The
  * cache is ALSO keyed by the package version on disk, so a normal upgrade
- * invalidates it; this constant covers same-version extractor changes.
+ * invalidates it; this constant covers SAME-VERSION extractor changes, which
+ * is exactly the case below.
+ *
+ * 1 -> 2 (REPORT-DASHBOARD-GRAPH-PERSISTENCE). The Report/Dashboard extractor
+ * output changed shape three ways: node ids went from the bare
+ * `Report:{DeveloperName}` to `Report:{LeafFolder}/{DeveloperName}`, the
+ * freeform `description` property was replaced by a `descriptionPresent`
+ * boolean, and new properties + `references` edges (source object / report
+ * type / dashboard component report) were added.
+ *
+ * The package-version key does NOT cover this: the version is `0.3.0` on this
+ * branch AND on the published release, so a user already on 0.3.0 would reuse
+ * a cache whose Report entries still hold bare-name ids — silently
+ * reinstating the very id collision the leaf-folder qualification exists to
+ * prevent, and resurrecting cached `description` TEXT the redaction removed.
+ * A cached-stale entry is not a stale answer here; it is a WRONG-shaped node
+ * and a privacy regression. Hence the bump.
  */
-export const EXTRACT_CACHE_VERSION = 1;
+export const EXTRACT_CACHE_VERSION = 2;
 
 /** Counts of node types and edge types seen during a render pass. */
 export interface RenderCounts {
@@ -992,25 +1008,240 @@ export const componentTypeFromSourcePath = (
   return dispatchFile(dirSegments, fileName, isDirectory);
 };
 
-/** Report / Dashboard usage is folded onto fields rather than kept as nodes. */
-const FOLD_TO_FIELD_USAGE: ReadonlySet<ComponentType> = new Set(['Report', 'Dashboard']);
+/**
+ * The two folder-based analytics types this pass owns. They used to be parsed
+ * and then DELETED (usage folded onto fields, nodes and edges dropped); they
+ * are now PERSISTED as first-class nodes, redacted and capped. See
+ * {@link applyReportDashboardPersistence}.
+ */
+const REPORT_DASHBOARD_TYPES: ReadonlySet<ComponentType> = new Set(['Report', 'Dashboard']);
 
 /**
  * Per-field cap on how many report/dashboard NAMES are preserved by
- * {@link foldReportDashboardUsageIntoFields} (Finding #36). This is a
- * per-field name-list cap, distinct from the org-wide `--with-reports`
- * pull cap (top 500 by usage — see `REPORT_DASHBOARD_USAGE_CAVEAT`). It
- * exists so a field referenced by an unusually large number of reports
- * doesn't balloon that one `CustomField` node's properties; beyond-cap
- * membership is disclosed via the `usedInReportsTruncated` /
- * `usedInDashboardsTruncated` total-count property.
- */
-/**
- * Per-field cap on preserved report/dashboard api-names (R6-24 Option B).
- * Documented/exported so tests and CHANGELOG stay aligned with the fold.
+ * {@link applyReportDashboardPersistence} (Finding #36). This is a
+ * per-field name-list cap on the derived `usedInReports`/`usedInDashboards`
+ * property, distinct from BOTH the org-wide `--with-reports` pull cap (top 500
+ * by usage — see `REPORT_DASHBOARD_USAGE_CAVEAT`) AND the per-type node
+ * persistence cap ({@link DEFAULT_REPORT_DASHBOARD_NODE_CAP}). It exists so a
+ * field referenced by an unusually large number of reports doesn't balloon
+ * that one `CustomField` node's properties; beyond-cap membership is disclosed
+ * via the `usedInReportsTruncated` / `usedInDashboardsTruncated` total-count
+ * property.
+ *
+ * UNCHANGED at 50 — its meaning, its consumers (`field_360`,
+ * `safe_to_delete_field`, `find_field_anywhere`, `unused_fields_deep`,
+ * `get_impact`), and the truncation disclosure are exactly as before.
  */
 export const FOLDED_REPORT_DASHBOARD_NAME_CAP = 50;
 const FOLDED_NAME_CAP = FOLDED_REPORT_DASHBOARD_NAME_CAP;
+
+/**
+ * Default per-type cap on how many Report / Dashboard NODES are persisted into
+ * the graph by {@link applyReportDashboardPersistence}. A BLOW-UP GUARD, not
+ * an operating point: it is set above observed real-org scale so a normal org
+ * is never capped, and exists only so a pathological org cannot unbounded-grow
+ * the vault. Override with `SFI_REPORT_NODE_CAP`; `0` disables node
+ * persistence entirely and restores the exact pre-change "usage only" shape.
+ *
+ * SIZING EVIDENCE. Two real-org datapoints: 3,373 reports / 83 dashboards
+ * (2026-06 changelog) and 4,277 reports / 81 dashboards (2026-08). So 3-4k is
+ * TYPICAL, not exceptional. Measured marginal cost at the 4,277 + 81 shape
+ * (synthetic corpus, ~15 field refs per report, real pipeline):
+ *
+ *   nodes + ecosystem edges (what ships)     +3.4 MB DuckDB, +11.4 MB Markdown, ~+23 s import
+ *   …plus report->field edges (rejected)     +23.6 MB DuckDB, +16.2 MB Markdown, ~+110 s import
+ *
+ * The rejected row is why {@link applyReportDashboardPersistence} does NOT
+ * persist report/dashboard -> `CustomField` edges: they were 64,155 of the
+ * 68,513 rows (94%) for an answer the folded `usedInReports` property already
+ * gives, uncapped, through a channel every consumer already reads.
+ *
+ * The import figure is the graph layer's row-at-a-time cold-import path
+ * (~2 ms/row), not anything this pass controls; the only lever here is how
+ * many rows it is handed. A DEFAULT `sfi refresh` pulls the top 500 per type
+ * (`reportsCap()`), so its cost is ~1/8 of the numbers above; the 4,277 shape
+ * is the uncapped `--with-reports` pull, already documented as slow.
+ *
+ * When the cap DOES bite, the drop is DISCLOSED, never silent — see
+ * {@link ReportDashboardPersistStats}.
+ */
+export const DEFAULT_REPORT_DASHBOARD_NODE_CAP = 5000;
+
+/**
+ * Effective per-type node cap: `SFI_REPORT_NODE_CAP` when it parses to a
+ * finite, non-negative integer, else {@link DEFAULT_REPORT_DASHBOARD_NODE_CAP}.
+ * Mirrors `reportsCap()`'s env-override contract in `commands/refresh.ts`.
+ */
+export const reportDashboardNodeCap = (): number => {
+  const raw = Number(process.env['SFI_REPORT_NODE_CAP']);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_REPORT_DASHBOARD_NODE_CAP;
+};
+
+/**
+ * PRIVACY — the persisted-property ALLOW-LIST for a `Report` node.
+ *
+ * This is an allow-list, not a deny-list, and that is the whole guarantee: a
+ * property key that is not named here CANNOT reach the graph, so no future
+ * extractor change can silently start persisting report filter LITERALS,
+ * descriptions, bucket bin boundaries, or anything else freeform. A deny-list
+ * would fail open on exactly that change.
+ *
+ * What a report's XML contains that is NOT here, and why:
+ *   - `<filter><criteriaItems><value>` — the literal an admin typed into a
+ *     filter (a customer name, an email, an amount, a person). Record-level
+ *     data, never metadata. The extractor already reduces it to a
+ *     `hasValue` boolean; {@link sanitizeFilterItems} re-projects each item to
+ *     `{field, operator, hasValue}` so even a regressed extractor cannot leak
+ *     it through this pass.
+ *   - `<description>` — freeform admin text. The extractor captures only
+ *     `descriptionPresent` (a boolean), which IS allowed.
+ *   - `<buckets><values>/<sourceValues>` — bucket bin boundaries are
+ *     themselves value literals; never parsed, and `label` (the admin-typed
+ *     `masterLabel`) is dropped here too.
+ *   - `<name>` — the report's display name is NOT persisted as a property;
+ *     the node's `apiName` (`{Folder}/{DeveloperName}`) is the identity.
+ */
+export const PERSISTED_REPORT_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+  'fieldRefs',
+  'rawReferenceCount',
+  'legacyAddressingRefsSkipped',
+  'descriptionPresent',
+  'reportType',
+  'format',
+  'booleanFilter',
+  'filters',
+  'groupings',
+  'buckets',
+  'crossFilters',
+  'chart',
+  'truncatedCounts',
+]);
+
+/** PRIVACY — the persisted-property allow-list for a `Dashboard` node. Same contract as {@link PERSISTED_REPORT_PROPERTY_KEYS}; notably omits `runningUser` (a real org username), which the extractor never reads in the first place. */
+export const PERSISTED_DASHBOARD_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+  'fieldRefs',
+  'rawReferenceCount',
+  'legacyAddressingRefsSkipped',
+  'descriptionPresent',
+  'dashboardType',
+  'componentReports',
+  'truncatedCounts',
+]);
+
+/**
+ * PRIVACY — the persisted-property allow-list for an EDGE emitted BY a
+ * Report/Dashboard node.
+ *
+ * `sanitizeAnalyticsProperties` covers `node.properties`; without this, the
+ * claim "a key that is not named here cannot persist" would be false for the
+ * edge rows, which carry their own free-form `properties` bag. Nothing leaks
+ * today (every current emitter writes api-names only), but an allow-list that
+ * covers one of two persisted row shapes is a guarantee with a hole in it.
+ *
+ * `referenceKind` is the edge-kind discriminator; `reportType` is a Salesforce
+ * api name (`AccountList`, `Widget_Metrics__c`). Both are metadata. Anything
+ * else an emitter might add — a label, a filter value, a username — is dropped.
+ */
+export const PERSISTED_ANALYTICS_EDGE_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+  'referenceKind',
+  'reportType',
+]);
+
+/** Per-item allow-list for `properties.filters` — field IDENTITY + operator + value PRESENCE, never the literal. */
+const FILTER_ITEM_KEYS = ['field', 'operator', 'hasValue'] as const;
+/** Per-item allow-list for `properties.groupings`. All three are structural. */
+const GROUPING_ITEM_KEYS = ['field', 'dateGranularity', 'axis'] as const;
+/** Per-item allow-list for `properties.buckets` — identity + source column. `label` (admin-typed `masterLabel`) and the bin boundaries are dropped. */
+const BUCKET_ITEM_KEYS = ['field', 'sourceField'] as const;
+/** Per-item allow-list for `properties.crossFilters` — related object + operation + condition PRESENCE, never the conditions' literals. */
+const CROSS_FILTER_ITEM_KEYS = ['relatedObject', 'operation', 'hasConditions'] as const;
+/** Allow-list for the singular `properties.chart` object. */
+const CHART_KEYS = ['type', 'hasSummaryAxis'] as const;
+
+/**
+ * Re-project each element of a property array through a per-item key
+ * allow-list, dropping every other key. `undefined` in, `undefined` out; a
+ * non-array (or non-object element) is dropped rather than passed through, so
+ * an unexpected shape fails CLOSED.
+ */
+const projectItems = (
+  value: unknown,
+  keys: readonly string[],
+): readonly Readonly<Record<string, unknown>>[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const out: Record<string, unknown>[] = [];
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+    const record = item as Readonly<Record<string, unknown>>;
+    const projected: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (record[key] !== undefined) projected[key] = record[key];
+    }
+    out.push(projected);
+  }
+  return out;
+};
+
+/** {@link projectItems} for a singular object property (e.g. `chart`). */
+const projectObject = (
+  value: unknown,
+  keys: readonly string[],
+): Readonly<Record<string, unknown>> | undefined => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Readonly<Record<string, unknown>>;
+  const projected: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (record[key] !== undefined) projected[key] = record[key];
+  }
+  return projected;
+};
+
+/**
+ * PRIVACY — reduce a Report / Dashboard node's properties to exactly the
+ * allow-listed keys, with every nested list re-projected through its own
+ * per-item allow-list.
+ *
+ * Two independent layers have to fail before a filter literal could persist:
+ * the extractor would have to start capturing `<value>` (it captures a
+ * `hasValue` boolean — see `extractReportDetail`'s binding privacy note) AND
+ * that key would have to be added to both {@link PERSISTED_REPORT_PROPERTY_KEYS}
+ * and {@link FILTER_ITEM_KEYS}. Neither is reachable by accident.
+ */
+const sanitizeAnalyticsProperties = (node: Node): Readonly<Record<string, unknown>> => {
+  const allowed =
+    node.type === 'Report' ? PERSISTED_REPORT_PROPERTY_KEYS : PERSISTED_DASHBOARD_PROPERTY_KEYS;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node.properties)) {
+    if (!allowed.has(key)) continue;
+    if (key === 'filters') {
+      const projected = projectItems(value, FILTER_ITEM_KEYS);
+      if (projected !== undefined) out[key] = projected;
+      continue;
+    }
+    if (key === 'groupings') {
+      const projected = projectItems(value, GROUPING_ITEM_KEYS);
+      if (projected !== undefined) out[key] = projected;
+      continue;
+    }
+    if (key === 'buckets') {
+      const projected = projectItems(value, BUCKET_ITEM_KEYS);
+      if (projected !== undefined) out[key] = projected;
+      continue;
+    }
+    if (key === 'crossFilters') {
+      const projected = projectItems(value, CROSS_FILTER_ITEM_KEYS);
+      if (projected !== undefined) out[key] = projected;
+      continue;
+    }
+    if (key === 'chart') {
+      const projected = projectObject(value, CHART_KEYS);
+      if (projected !== undefined) out[key] = projected;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+};
 
 /**
  * Sort a name set deterministically and cap it at {@link FOLDED_NAME_CAP},
@@ -1026,45 +1257,160 @@ const capFoldedNames = (
   return { list: sorted.slice(0, FOLDED_NAME_CAP), truncatedTotal: sorted.length };
 };
 
+/** Per-type persistence accounting for one refresh — see {@link ReportDashboardPersistStats}. */
+export interface ReportDashboardTypeStats {
+  /**
+   * DISTINCT node ids the extractors produced for this type. Deliberately not
+   * a count of extraction OCCURRENCES: `nodes.id` is a primary key, so two
+   * results carrying the same id yield ONE row. Counting occurrences would
+   * make `persisted` over-report by exactly the number of duplicates — i.e.
+   * it would be wrong precisely in the id-collision case this accounting
+   * exists to expose.
+   */
+  readonly extracted: number;
+  /** Nodes actually written to the graph (`min(extracted, cap)`). */
+  readonly persisted: number;
+  /** The per-type cap in force this run. */
+  readonly cap: number;
+  /**
+   * Extraction occurrences beyond the first for an already-seen id — i.e. how
+   * many nodes the primary key silently absorbed. Omitted when zero. Non-zero
+   * means two source files resolved to ONE id and one of them is not in the
+   * vault: a bug worth surfacing, never a rounding error to swallow.
+   */
+  readonly duplicateIds?: number;
+}
+
 /**
- * Fold Report / Dashboard field usage onto the referenced `CustomField` nodes,
- * then drop the Report / Dashboard nodes and their edges.
+ * What {@link applyReportDashboardPersistence} actually persisted, per type.
  *
- * Reports and Dashboards are folder-based and high-volume (thousands on a large
- * org), and the only thing we need from them for analysis is "this field is used
- * by a report/dashboard" — so we deliberately do NOT persist a node per report.
- * This pass harvests each Report/Dashboard's `references` field-edges, stamps
- * `usedInReport` / `usedInDashboard` booleans on the target `CustomField` nodes
- * (so the unused-field tools stop false-flagging a field whose only use is a
- * report column or dashboard component) — AND (Finding #36) a CAPPED, sorted
- * list of the referencing report/dashboard api-names on `usedInReports` /
- * `usedInDashboards` (first `FOLDED_NAME_CAP`, with `usedInReportsTruncated` /
- * `usedInDashboardsTruncated` carrying the true total when it exceeds the cap),
- * so "which reports break if I change this field" can name WHICH reports
- * instead of only asserting "used in a report". It then removes the
- * heavyweight report/dashboard nodes + edges so they never bloat the graph —
- * only the capped name list survives, not a node per report. Pure transform;
- * every other type (FlexiPage, etc.) passes through untouched. A no-op when no
- * report/dashboard was retrieved.
+ * HONESTY: this is the disclosure channel for the node cap. `persisted <
+ * extracted` means the graph holds a SUBSET, and the caller MUST route that
+ * into the manifest's coverage rows (`decorateReportNodeCapCoverage` in
+ * `commands/refresh.ts` forces the row `pending`, which is what makes every
+ * downstream field tool keep hedging its report/dashboard absence claims). A
+ * capped capture must never read as a complete one.
+ *
+ * The FIELD-USAGE fold is computed over the FULL extracted set BEFORE the cap
+ * is applied, so "which reports use this field" keeps its pre-existing
+ * coverage (all retrieved reports, up to the per-field 50-name cap) even when
+ * the node set is capped. The cap costs navigability, not usage recall.
  */
-export const foldReportDashboardUsageIntoFields = (
+export interface ReportDashboardPersistStats {
+  readonly reports: ReportDashboardTypeStats;
+  readonly dashboards: ReportDashboardTypeStats;
+}
+
+/** Return shape of {@link applyReportDashboardPersistence}. */
+export interface ReportDashboardPersistOutcome {
+  readonly results: readonly ExtractionResult[];
+  readonly stats: ReportDashboardPersistStats;
+}
+
+/**
+ * Persist Report / Dashboard as first-class graph nodes AND fold their field
+ * usage onto the referenced `CustomField` nodes.
+ *
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE — this pass replaces the destructive
+ * fold. The old behaviour parsed each report's filters, groupings, buckets,
+ * cross-filters and chart, harvested the field usage, and then DELETED every
+ * Report/Dashboard node and edge; a measured org collapsed 4,277 reports + 81
+ * dashboards into at most 50 retained names per field, which made "which
+ * reports break if I change this field", "what does this dashboard depend on"
+ * and every other reporting-ecosystem question structurally unanswerable.
+ *
+ * What this pass does, in order:
+ *
+ *   1. HARVEST (unchanged, and over the FULL set — never the capped one): each
+ *      Report/Dashboard `references` edge into a `CustomField:` target stamps
+ *      `usedInReport` / `usedInDashboard` on that field plus the capped, sorted
+ *      `usedInReports` / `usedInDashboards` name list and its
+ *      `…Truncated` total. Every existing consumer of those properties
+ *      (`safe_to_delete_field`, `field_360`, `unused_fields_deep`,
+ *      `find_dead_code`, `find_field_anywhere`, `field_lineage`, `get_impact`)
+ *      keeps working byte-identically, and there is ONE source of truth: the
+ *      same edge harvest that now also backs the persisted nodes.
+ *   2. REDACT: each surviving node's properties are reduced to an ALLOW-LIST
+ *      ({@link sanitizeAnalyticsProperties}). Filter literals, descriptions,
+ *      bucket bin boundaries and bucket labels cannot pass.
+ *   3. DROP the analytics -> `CustomField` reference edges. THE COST DECISION,
+ *      measured: at 4,277 reports those edges were 64,155 of 68,513 rows (94%)
+ *      — ~+20 MB of DuckDB and ~+90 s of import — to answer "which reports use
+ *      this field", which step 1's `usedInReports` property ALREADY answers,
+ *      over EVERY extracted report (the node set is capped; the fold is not),
+ *      through a channel every consumer above already reads. Persisting them
+ *      would also make that answer INCONSISTENT: a field used only by
+ *      cap-dropped reports would report `incomingEdgeCount: 0` while an
+ *      identical field whose report sorted earlier reported N. The report's own
+ *      `properties.fieldRefs` still lists its fields, so "what does this report
+ *      depend on" is answerable from the node itself.
+ *   4. CAP: at most {@link reportDashboardNodeCap} nodes per type survive,
+ *      chosen by ascending node id. Ascending id — not "most edges" — because
+ *      it is STABLE: a report gaining a column must not reshuffle which nodes
+ *      are in the vault and churn the whole Markdown diff. The retrieve that
+ *      produced these files is itself already usage-ranked (top-N by
+ *      `LastRunDate`), so the set handed to this pass is the most-used one;
+ *      within it, determinism beats a second ranking.
+ *   5. PRUNE: edges incident to a node the cap dropped are removed, so the cap
+ *      never mints a dangling edge that would read as a missing component.
+ *   6. DISCLOSE: {@link ReportDashboardPersistStats} carries extracted vs
+ *      persisted per type, which the caller routes into coverage.
+ *
+ * Pure transform; every other type passes through untouched. Returns the input
+ * array by reference when no Report/Dashboard node was retrieved, so a no-op
+ * is observably free.
+ */
+export const applyReportDashboardPersistence = (
   results: readonly ExtractionResult[],
-): readonly ExtractionResult[] => {
-  const foldedNodeApiNames = new Map<string, string>();
+): ReportDashboardPersistOutcome => {
+  const cap = reportDashboardNodeCap();
+  const analyticsNodeApiNames = new Map<string, string>();
+  // DISTINCT ids per type (see {@link ReportDashboardTypeStats.extracted}),
+  // plus the count of occurrences the id set absorbed.
+  const idsByType = new Map<ComponentType, Set<string>>([
+    ['Report', new Set()],
+    ['Dashboard', new Set()],
+  ]);
+  const duplicatesByType = new Map<ComponentType, number>([
+    ['Report', 0],
+    ['Dashboard', 0],
+  ]);
   for (const r of results) {
     for (const n of r.nodes) {
-      if (FOLD_TO_FIELD_USAGE.has(n.type)) foldedNodeApiNames.set(n.id, n.apiName);
+      if (!REPORT_DASHBOARD_TYPES.has(n.type)) continue;
+      const seen = idsByType.get(n.type);
+      if (seen !== undefined && seen.has(n.id)) {
+        duplicatesByType.set(n.type, (duplicatesByType.get(n.type) ?? 0) + 1);
+      }
+      analyticsNodeApiNames.set(n.id, n.apiName);
+      seen?.add(n.id);
     }
   }
-  if (foldedNodeApiNames.size === 0) return results;
+  const typeStats = (type: ComponentType): ReportDashboardTypeStats => {
+    const extracted = idsByType.get(type)?.size ?? 0;
+    const duplicateIds = duplicatesByType.get(type) ?? 0;
+    return {
+      extracted,
+      persisted: Math.min(extracted, cap),
+      cap,
+      ...(duplicateIds > 0 ? { duplicateIds } : {}),
+    };
+  };
+  const stats: ReportDashboardPersistStats = {
+    reports: typeStats('Report'),
+    dashboards: typeStats('Dashboard'),
+  };
+  if (analyticsNodeApiNames.size === 0) return { results, stats };
 
+  // Step 1 — HARVEST over the FULL extracted set (pre-cap). The field-usage
+  // answer must not shrink just because the NODE set is capped.
   const reportNamesByField = new Map<string, Set<string>>();
   const dashboardNamesByField = new Map<string, Set<string>>();
   for (const r of results) {
     for (const e of r.edges) {
-      if (e.edgeType !== 'references' || !foldedNodeApiNames.has(e.fromId)) continue;
+      if (e.edgeType !== 'references' || !analyticsNodeApiNames.has(e.fromId)) continue;
       if (!e.toId.startsWith('CustomField:')) continue;
-      const sourceApiName = foldedNodeApiNames.get(e.fromId) ?? e.fromId;
+      const sourceApiName = analyticsNodeApiNames.get(e.fromId) ?? e.fromId;
       const byField = e.fromId.startsWith('Report:')
         ? reportNamesByField
         : e.fromId.startsWith('Dashboard:')
@@ -1077,40 +1423,72 @@ export const foldReportDashboardUsageIntoFields = (
     }
   }
 
-  return results.map((r) => ({
-    ...r,
-    nodes: r.nodes
-      .filter((n) => !FOLD_TO_FIELD_USAGE.has(n.type))
-      .map((n): Node => {
-        if (n.type !== 'CustomField') return n;
-        const reportNames = reportNamesByField.get(n.id);
-        const dashboardNames = dashboardNamesByField.get(n.id);
-        if (reportNames === undefined && dashboardNames === undefined) return n;
-        const reportCap = capFoldedNames(reportNames);
-        const dashboardCap = capFoldedNames(dashboardNames);
-        return {
-          ...n,
-          properties: {
-            ...n.properties,
-            ...(reportNames !== undefined
-              ? { usedInReport: true, usedInReports: reportCap.list }
-              : {}),
-            ...(reportCap.truncatedTotal !== undefined
-              ? { usedInReportsTruncated: reportCap.truncatedTotal }
-              : {}),
-            ...(dashboardNames !== undefined
-              ? { usedInDashboard: true, usedInDashboards: dashboardCap.list }
-              : {}),
-            ...(dashboardCap.truncatedTotal !== undefined
-              ? { usedInDashboardsTruncated: dashboardCap.truncatedTotal }
-              : {}),
-          },
-        };
-      }),
-    edges: r.edges.filter(
-      (e) => !foldedNodeApiNames.has(e.fromId) && !foldedNodeApiNames.has(e.toId),
-    ),
-  }));
+  // Step 4 — CAP. Deterministic by ascending id (see the doc comment).
+  const keptIds = new Set<string>();
+  for (const ids of idsByType.values()) {
+    for (const id of [...ids].sort().slice(0, cap)) keptIds.add(id);
+  }
+  return {
+    results: results.map((r) => ({
+      ...r,
+      nodes: r.nodes
+        .filter((n) => !REPORT_DASHBOARD_TYPES.has(n.type) || keptIds.has(n.id))
+        .map((n): Node => {
+          // Step 2 — REDACT (allow-list) for the surviving analytics nodes.
+          if (REPORT_DASHBOARD_TYPES.has(n.type)) {
+            return { ...n, properties: sanitizeAnalyticsProperties(n) };
+          }
+          if (n.type !== 'CustomField') return n;
+          const reportNames = reportNamesByField.get(n.id);
+          const dashboardNames = dashboardNamesByField.get(n.id);
+          if (reportNames === undefined && dashboardNames === undefined) return n;
+          const reportCap = capFoldedNames(reportNames);
+          const dashboardCap = capFoldedNames(dashboardNames);
+          return {
+            ...n,
+            properties: {
+              ...n.properties,
+              ...(reportNames !== undefined
+                ? { usedInReport: true, usedInReports: reportCap.list }
+                : {}),
+              ...(reportCap.truncatedTotal !== undefined
+                ? { usedInReportsTruncated: reportCap.truncatedTotal }
+                : {}),
+              ...(dashboardNames !== undefined
+                ? { usedInDashboard: true, usedInDashboards: dashboardCap.list }
+                : {}),
+              ...(dashboardCap.truncatedTotal !== undefined
+                ? { usedInDashboardsTruncated: dashboardCap.truncatedTotal }
+                : {}),
+            },
+          };
+        }),
+      // Steps 3 + 5 — DROP analytics -> CustomField reference edges (the 94%
+      // row layer step 1 already covers via `usedInReports`), and PRUNE any
+      // edge incident to a cap-dropped node so the cap never mints a dangling
+      // edge that would read as a missing component. Surviving analytics-
+      // sourced edges are REDACTED through their own allow-list
+      // ({@link PERSISTED_ANALYTICS_EDGE_PROPERTY_KEYS}) so the "unnamed keys
+      // cannot persist" guarantee covers edge rows too, not just node rows.
+      edges: r.edges
+        .filter((e) => {
+          const fromAnalytics = analyticsNodeApiNames.has(e.fromId);
+          if (fromAnalytics && e.toId.startsWith('CustomField:')) return false;
+          if (fromAnalytics && !keptIds.has(e.fromId)) return false;
+          if (analyticsNodeApiNames.has(e.toId) && !keptIds.has(e.toId)) return false;
+          return true;
+        })
+        .map((e): Edge => {
+          if (!analyticsNodeApiNames.has(e.fromId)) return e;
+          const properties: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(e.properties)) {
+            if (PERSISTED_ANALYTICS_EDGE_PROPERTY_KEYS.has(key)) properties[key] = value;
+          }
+          return { ...e, properties };
+        }),
+    })),
+    stats,
+  };
 };
 
 /**
@@ -1213,7 +1591,7 @@ export const resolveRestrictionRuleProfileEdges = (
     return typeof kind === 'string' && RESOLVED_PROFILE_REFERENCE_KIND[kind] !== undefined;
   };
   // Nothing to resolve against, or no stub to rewrite — return the SAME array
-  // ref so a no-op is observably free (mirrors foldReportDashboardUsageIntoFields).
+  // ref so a no-op is observably free (mirrors applyReportDashboardPersistence).
   if (index.size === 0 || !results.some((r) => r.edges.some(isStubEdge))) return results;
 
   const resolveApiName = (profileId: string): string | undefined => {

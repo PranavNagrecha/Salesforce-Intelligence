@@ -273,25 +273,43 @@ the answer is the walk tree with per-step `sourceKind` /
 >   referencing the field are not extracted. Reports filtered by
 >   this field will continue to function but are invisible to
 >   the synthesis.
-> - **Reports.** Tabular / matrix / summary reports filtered by
->   or grouped on this field are not extracted by default. (Opt-in:
->   an `sfi refresh --with-reports` folds report *field usage* onto
->   the field — no per-report node — so this category drops from
->   `dataNotAvailable` and `field_360` shows the in-use signal.)
->   R6-24: filter/grouping LOGIC — operator, boolean AND/OR
->   combination, and whether a literal value is set (never the
->   literal itself — a filter value is record data, which this
->   product never vaults) — IS captured on the Report node at
->   extraction time. It still does not reach field_360/field_lineage:
->   the refresh pipeline folds every Report/Dashboard node into the
->   field's `usedInReport`/`usedInDashboard` boolean and drops the
->   per-report node (volume — thousands on a large org), so WHICH
->   report filters/groups on this field, and how, stays unmodeled
->   in synthesis even though the underlying logic is no longer
->   entirely unparsed.
-> - **Dashboards.** Dashboard components referencing this field
->   are not extracted by default (same `--with-reports` opt-in as
->   Reports above).
+> - **Reports.** The default refresh pulls a usage-ranked, capped
+>   slice of reports; `sfi refresh --with-reports` pulls all.
+>   Report *field usage* is folded onto the field
+>   (`usedInReport`, plus the capped `usedInReports` name list), so
+>   this category drops from `dataNotAvailable` and `field_360`
+>   shows the in-use signal.
+>   Report NODES are also persisted, id
+>   `Report:{LeafFolder}/{DeveloperName}`. Their `references` edges
+>   go to the report's **source object / custom report type** only.
+>   There is deliberately **NO report -> field edge**: at real-org
+>   scale that layer was ~94% of the persisted rows for an answer
+>   the folded `usedInReports` property already gives, so field
+>   usage is a node PROPERTY and never an edge. Do not promise a
+>   graph walk from a field to its reports — read the folded
+>   property (first 50 names, with an exact truncation total), or
+>   open the `Report:` node those names identify. The report's own
+>   `properties.fieldRefs` lists the fields it uses.
+>   Filter/grouping LOGIC — operator, boolean AND/OR combination,
+>   and whether a literal value is set — is on the node. The
+>   **literal value itself is NEVER persisted**: a filter value is
+>   record data, which this product does not vault. "What value
+>   does this report filter for" is a permanent boundary, by
+>   design. Report/dashboard `<description>` text is likewise not
+>   persisted — only a `descriptionPresent` boolean.
+>   The per-report node set is CAPPED per type
+>   (`SFI_REPORT_NODE_CAP`, default 5000 — a blow-up guard set
+>   above observed real-org scale, not an operating point); when
+>   the cap bites, the Report/Dashboard coverage rows go `pending`,
+>   so absence claims about reports stay hedged. The FOLDED field
+>   usage is not capped by it — it covers every extracted report.
+> - **Dashboards.** Dashboard nodes are persisted the same way,
+>   with `references` edges to their component reports
+>   (`Dashboard:{LeafFolder}/{Name}` ->
+>   `Report:{LeafFolder}/{Name}`).
+>   A dashboard's `<runningUser>` is a real org username and is
+>   deliberately never read, so "who does this dashboard run as" is
+>   not answerable from the vault.
 > - **Named-credential default-argument plumbing.** A
 >   NamedCredential or ExternalService that passes this field
 >   as a default argument is captured only when the integration's

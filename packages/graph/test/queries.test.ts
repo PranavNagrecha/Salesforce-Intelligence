@@ -1192,6 +1192,23 @@ describe('descriptionPresence filter', () => {
           apiName: 'NoDescKey',
           properties: { rawReferenceCount: 0 },
         }),
+        // REPORT-DASHBOARD-GRAPH-PERSISTENCE: a persisted Report carries NO
+        // description TEXT (it is freeform admin prose on a high-volume node
+        // family) — only a `descriptionPresent` BOOLEAN. Without honoring that
+        // key, `missingDescription: true` would return every report in the org
+        // and `hasDescription: true` none of them.
+        makeNode({
+          id: 'Report:RedactedHasDesc',
+          type: 'Report',
+          apiName: 'RedactedHasDesc',
+          properties: { descriptionPresent: true },
+        }),
+        makeNode({
+          id: 'Report:RedactedNoDesc',
+          type: 'Report',
+          apiName: 'RedactedNoDesc',
+          properties: { descriptionPresent: false },
+        }),
       ],
       edges: [],
     };
@@ -1210,7 +1227,7 @@ describe('descriptionPresence filter', () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.map((n) => n.id)).toEqual(['Report:HasDesc']);
+    expect(r.value.map((n) => n.id)).toEqual(['Report:HasDesc', 'Report:RedactedHasDesc']);
   });
 
   it("'absent' folds null, empty-string, and missing-key into one bucket", async () => {
@@ -1223,6 +1240,7 @@ describe('descriptionPresence filter', () => {
       'Report:EmptyDesc',
       'Report:NoDescKey',
       'Report:NullDesc',
+      'Report:RedactedNoDesc',
     ]);
   });
 
@@ -1236,8 +1254,8 @@ describe('descriptionPresence filter', () => {
     const total = await countNodesByType(localStore, 'Report');
     expect(present.ok && absent.ok && total.ok).toBe(true);
     if (!present.ok || !absent.ok || !total.ok) return;
-    expect(present.value).toBe(1);
-    expect(absent.value).toBe(3);
+    expect(present.value).toBe(2);
+    expect(absent.value).toBe(4);
     expect(present.value + absent.value).toBe(total.value);
   });
 });

@@ -1212,16 +1212,35 @@ const coreSafeToDeleteFieldHandler = async (
     }
   }
 
-  // Report / Dashboard usage is folded onto the field as a property (no per-report
-  // node/edge — see foldReportDashboardUsageIntoFields), so the edge walk above
-  // can't see it. Inject it as an `analytics` (blocking) reason so a field used
-  // only in a report column / dashboard component never reads as `safe`.
-  // Finding #36 / R6-24-WIRE: when the fold stamped capped name lists, surface
-  // those as examples (and later as proposal evidence) so the answer names WHICH
+  // Report / Dashboard usage is folded onto the field as a property by
+  // `applyReportDashboardPersistence`. Inject it as an `analytics` (blocking)
+  // reason so a field used only in a report column / dashboard component never
+  // reads as `safe`.
+  // Finding #36 / R6-24-WIRE: the fold stamps capped name lists, surfaced as
+  // examples (and later as proposal evidence) so the answer names WHICH
   // reports/dashboards would break — not just a boolean.
+  //
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE — DE-DUPLICATION (defensive).
+  // The refresh persists Report/Dashboard NODES but deliberately not the
+  // analytics -> `CustomField` edges, so on a current vault the edge walk
+  // above contributes NO Report/Dashboard referrers and this subtraction is a
+  // no-op — the counts are byte-identical to the pre-change behaviour. It is
+  // kept because the two sources are not interchangeable and the vault is not
+  // guaranteed to be current: a vault built by a different build (or a future
+  // one that does persist those edges) would otherwise count the same report
+  // twice, once from its edge and once from the folded name. The FOLD total is
+  // always the superset (it covers every EXTRACTED report; its name list is
+  // per-field-capped at 50 but its `…Truncated` total is exact), so
+  // edge-derived referrers are subtracted from it and only the genuinely
+  // additional remainder is added. Examples are unioned by id — both sides
+  // mint the same `Report:{Folder}/{Name}` identity.
   const rdUsage = reportDashboardUsageDetail(nodeResult.value);
   if (rdUsage.usedInReport || rdUsage.usedInDashboard) {
     const existing = buckets.get('analytics');
+    const existingExamples = existing?.examples ?? [];
+    const existingIds = new Set(existingExamples.map((e) => e.id as string));
+    const alreadyCounted = (type: string): number =>
+      existingExamples.filter((e) => e.type === type).length;
     const foldExamples: SafeToDeleteFieldExample[] = [
       ...rdUsage.reportNames.map(
         (name): SafeToDeleteFieldExample => ({
@@ -1237,17 +1256,19 @@ const coreSafeToDeleteFieldHandler = async (
           apiName: name,
         }),
       ),
-    ];
+    ].filter((e) => !existingIds.has(e.id as string));
     const reportCount =
       rdUsage.reportsTruncatedTotal ??
       (rdUsage.usedInReport ? Math.max(rdUsage.reportNames.length, 1) : 0);
     const dashboardCount =
       rdUsage.dashboardsTruncatedTotal ??
       (rdUsage.usedInDashboard ? Math.max(rdUsage.dashboardNames.length, 1) : 0);
-    const added = reportCount + dashboardCount;
+    const added =
+      Math.max(0, reportCount - alreadyCounted('Report')) +
+      Math.max(0, dashboardCount - alreadyCounted('Dashboard'));
     buckets.set('analytics', {
       verdict: 'blocking',
-      examples: [...(existing?.examples ?? []), ...foldExamples],
+      examples: [...existingExamples, ...foldExamples],
       count: (existing?.count ?? 0) + added,
     });
   }

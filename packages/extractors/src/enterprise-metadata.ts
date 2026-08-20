@@ -190,7 +190,110 @@ interface EnterpriseExtractorConfig {
    * `EntitlementProcess`. See {@link extractMilestoneDetails}.
    */
   readonly captureMilestones?: boolean;
+  /**
+   * REPORT-DASHBOARD-GRAPH-PERSISTENCE: derive the node's `apiName` as
+   * `{LeafFolderDeveloperName}/{DeveloperName}` rather than the bare basename.
+   *
+   * Salesforce identifies a foldered Report/Dashboard by exactly ONE folder
+   * segment — the LEAF folder — regardless of how deep the folder tree is.
+   * That is what `buildFolderedReportManifest` (`commands/refresh.ts`) puts in
+   * the retrieve `<members>` (it builds `${folderDev}/${dev}` from
+   * `SELECT DeveloperName, FolderName`, i.e. the leaf), and it is what a
+   * Dashboard's `<report>Folder/Name</report>` component reference carries.
+   *
+   * BINDING — do NOT "fix" this to join the full directory chain. A retrieve
+   * writes a NESTED folder tree to disk (`reports/Parent/Leaf/X.report-meta.xml`)
+   * while the dashboard that consumes it references `Leaf/X`. Joining the
+   * chain mints `Report:Parent/Leaf/X`, which no dashboard reference resolves
+   * against — measured on a real org, the full-chain scheme resolved 385 of
+   * 631 dashboard→report edges (61.0%) versus 478 (75.8%) for leaf-only,
+   * losing 93 edges that SHOULD resolve, with 35% of reports living in nested
+   * folders. That is an honesty failure, not just a miss: a dangling edge
+   * asserts "this report is not in the vault" about a report that IS in the
+   * vault under a different id.
+   *
+   * Why folder-qualify at all: `nodes.id` is a primary key, and a bare
+   * basename is not guaranteed unique across folders — two folders may each
+   * hold a `Weekly_Summary`, and the second import row would SILENTLY
+   * overwrite the first. (Frequency measured on a real org: 0 colliding
+   * basenames across 3,076 reports in 134 folders, and leaf-folder
+   * qualification was likewise collision-free at 3,076 distinct ids. The
+   * mechanism is real and cheap to close; the frequency is not "near-certain",
+   * which an earlier revision of this comment wrongly claimed.)
+   *
+   * Set for `Report` / `Dashboard`. An unfoldered file directly under the root
+   * keeps its bare name, matching Salesforce's unfiled/personal convention.
+   */
+  readonly folderedUnder?: 'reports' | 'dashboards';
+  /**
+   * REPORT-DASHBOARD-GRAPH-PERSISTENCE (privacy): capture only the PRESENCE of
+   * a top-level `<description>`, as `properties.descriptionPresent: boolean` —
+   * never the description TEXT.
+   *
+   * A report/dashboard description is freeform text an admin typed into a
+   * high-volume, folder-based artifact; on a real org it is the surface most
+   * likely to name a person, a customer, or a cohort ("Jane's pipeline",
+   * "students flagged for X"). Now that these nodes are PERSISTED (they used
+   * to be parsed and then dropped, so their descriptions never reached the
+   * vault), capturing the text would newly write thousands of freeform user
+   * strings into the graph and the Markdown vault. The presence boolean keeps
+   * the only capability the text capture was justified by — "which reports
+   * have no description" — at zero text. `listNodesByType`'s
+   * description-presence predicate honors `descriptionPresent` explicitly, so
+   * `list_components({ missingDescription: true })` stays truthful.
+   */
+  readonly descriptionPresenceOnly?: boolean;
+  /**
+   * REPORT-DASHBOARD-GRAPH-PERSISTENCE: parse a Dashboard's component
+   * `<report>Folder/Name</report>` references into DECLARED `references` edges
+   * to `Report:{Folder}/{Name}` (`referenceKind: 'dashboardComponentReport'`)
+   * plus a mirrored, deduplicated `properties.componentReports` list, and read
+   * the structural `<dashboardType>` scalar.
+   *
+   * Deliberately does NOT read `<runningUser>`: that element is a real
+   * USERNAME (an org login, usually an email address) — record-level identity
+   * data, not metadata, and exactly the class of value this product never
+   * vaults. "Which dashboard runs as whom" is therefore NOT answerable from
+   * the vault, by choice.
+   */
+  readonly dashboardDetail?: boolean;
 }
+
+/**
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE: derive
+ * `{LeafFolderDeveloperName}/{DeveloperName}` for a file living under a
+ * `reports/` or `dashboards/` source root — see
+ * {@link EnterpriseExtractorConfig.folderedUnder} for why the bare basename is
+ * unsafe as a node id AND why only the LEAF folder may be used.
+ *
+ * Root resolution: anchor on the LAST `source`/`unpackaged` segment (the DX
+ * retrieve root) and take the FIRST `reports`/`dashboards` after it. A plain
+ * last-occurrence search would mis-resolve a report folder that is itself
+ * named `reports` (`reports/reports/X` -> `X`, colliding with a top-level
+ * unfiled `X`); anchoring picks the metadata-type directory, not the user's
+ * folder. Falls back to a last-occurrence search when no anchor exists (a
+ * synthetic test path), then to the bare api name when the root segment is
+ * absent entirely (an unfoldered / personal file).
+ *
+ * Nesting: everything between the root and the leaf folder is DISCARDED —
+ * `reports/Parent/Leaf/X.report-meta.xml` resolves to `Leaf/X`, which is the
+ * id a dashboard's `<report>Leaf/X</report>` reference resolves against.
+ */
+const deriveFolderedApiName = (
+  filePath: string,
+  suffix: string,
+  folderRoot: 'reports' | 'dashboards',
+): string => {
+  const bare = deriveComponentApiName(filePath, suffix);
+  const segments = filePath.replace(/\\/g, '/').split('/').filter((s) => s.length > 0);
+  const anchor = Math.max(segments.lastIndexOf('unpackaged'), segments.lastIndexOf('source'));
+  const anchored = anchor === -1 ? -1 : segments.indexOf(folderRoot, anchor + 1);
+  const rootIndex = anchored !== -1 ? anchored : segments.lastIndexOf(folderRoot);
+  if (rootIndex === -1) return bare;
+  const folders = segments.slice(rootIndex + 1, segments.length - 1);
+  const leaf = folders[folders.length - 1];
+  return leaf === undefined ? bare : `${leaf}/${bare}`;
+};
 
 const readText = async (path: string): Promise<Result<string, ExtractorError>> => {
   try {
@@ -778,6 +881,53 @@ const extractReportDetail = (
 
   const format = extractXmlValues(xml, 'format')[0] ?? null;
 
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: `<reportType>` is the report's source
+  // frame — either a STANDARD type (`{Object}List`, e.g. `AccountList`) or a
+  // CUSTOM report type's DeveloperName. Captured verbatim as a property AND
+  // emitted as a DECLARED `references` edge so the reporting ecosystem is
+  // navigable in both directions ("what feeds this report", "which reports sit
+  // on this report type / object"). Standard types resolve to the object
+  // `inferReportObjectApiName` already derives; a custom type resolves to the
+  // `ReportType:{DeveloperName}` node the ReportType extractor mints. Both
+  // targets may legitimately dangle (a standard object or an unretrieved
+  // report type), which the phantom taxonomy already classifies.
+  const reportType = extractXmlValues(xml, 'reportType')[0] ?? null;
+  const reportTypeEdges: Edge[] = [];
+  if (reportType !== null && reportType.length > 0) {
+    const standardObject =
+      reportType.endsWith('List') && !reportType.includes('__')
+        ? reportType.slice(0, -4)
+        : null;
+    reportTypeEdges.push({
+      fromId: nodeId,
+      toId: standardObject !== null ? `CustomObject:${standardObject}` : `ReportType:${reportType}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {
+        referenceKind: standardObject !== null ? 'reportSourceObject' : 'reportSourceType',
+        reportType,
+      },
+    });
+  }
+  // The report's scope object, when it differs from the report-type edge above
+  // (a CUSTOM report type whose api name is itself an object api name). Keeps
+  // object-scoped blast-radius walks reaching the report.
+  if (
+    scopeObject !== null &&
+    scopeObject.length > 0 &&
+    !reportTypeEdges.some((e) => e.toId === `CustomObject:${scopeObject}`)
+  ) {
+    reportTypeEdges.push({
+      fromId: nodeId,
+      toId: `CustomObject:${scopeObject}`,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'reportScopeObject' },
+    });
+  }
+
   // Bucket source-field edges: DECLARED confidence (the bucket XML states
   // its source column explicitly, not inferred) — gated through the same
   // phantom-field guard as <columns> so a pseudo-column source never mints
@@ -806,10 +956,55 @@ const extractReportDetail = (
     ...(crossFilters.length > 0 ? { crossFilters } : {}),
     ...(chart !== null ? { chart } : {}),
     ...(format !== null ? { format } : {}),
+    ...(reportType !== null ? { reportType } : {}),
     ...(Object.keys(truncatedCounts).length > 0 ? { truncatedCounts } : {}),
   };
 
-  return { properties, edges };
+  return { properties, edges: [...edges, ...reportTypeEdges] };
+};
+
+/**
+ * REPORT-DASHBOARD-GRAPH-PERSISTENCE: parse a Dashboard's component report
+ * references + `<dashboardType>` — see
+ * {@link EnterpriseExtractorConfig.dashboardDetail}, including why
+ * `<runningUser>` is deliberately never read.
+ *
+ * A dashboard component names its source report as `<report>Folder/Name</report>`
+ * — the SAME `Folder/Name` identity {@link deriveFolderedApiName} mints for the
+ * Report node, so the edge resolves. Values are deduplicated + sorted so the
+ * emitted edge set is byte-stable across refreshes. Capped at
+ * {@link REPORT_DETAIL_LIST_CAP} with the drop count recorded in
+ * `truncatedCounts.componentReports` (never silently lost).
+ */
+const extractDashboardDetail = (
+  xml: string,
+  nodeId: string,
+): ReportDetailResult => {
+  const all = [...new Set(extractXmlValues(xml, 'report'))]
+    .filter((v) => v.length > 0)
+    .sort();
+  const componentReports = all.slice(0, REPORT_DETAIL_LIST_CAP);
+  const dashboardType = extractXmlValues(xml, 'dashboardType')[0] ?? null;
+  const truncatedCounts: Record<string, number> = {};
+  if (all.length > REPORT_DETAIL_LIST_CAP) {
+    truncatedCounts['componentReports'] = all.length - REPORT_DETAIL_LIST_CAP;
+  }
+  const edges: Edge[] = componentReports.map((member) => ({
+    fromId: nodeId,
+    toId: `Report:${member}`,
+    edgeType: 'references',
+    confidence: 'declared',
+    source: EXTRACTOR_SOURCE,
+    properties: { referenceKind: 'dashboardComponentReport' },
+  }));
+  return {
+    properties: {
+      ...(componentReports.length > 0 ? { componentReports } : {}),
+      ...(dashboardType !== null ? { dashboardType } : {}),
+      ...(Object.keys(truncatedCounts).length > 0 ? { truncatedCounts } : {}),
+    },
+    edges,
+  };
 };
 
 /** Result of parsing a ReportType's structural shape — see {@link extractReportTypeDetail}. */
@@ -1046,6 +1241,10 @@ const extractEnterpriseMetadata = async (
     }
     apiName = `${nested.objectApiName}.${nested.apiName}`;
     parentObjectApiName = nested.objectApiName;
+  } else if (config.folderedUnder !== undefined) {
+    // REPORT-DASHBOARD-GRAPH-PERSISTENCE: `{Folder}/{Name}`, not the bare
+    // basename — see {@link EnterpriseExtractorConfig.folderedUnder}.
+    apiName = deriveFolderedApiName(path, config.suffix, config.folderedUnder);
   } else {
     apiName = deriveComponentApiName(path, config.suffix);
   }
@@ -1096,6 +1295,19 @@ const extractEnterpriseMetadata = async (
   // ReportType-only (config.reportTypeDetail).
   const reportTypeDetail = config.reportTypeDetail === true
     ? extractReportTypeDetail(text.value, nodeId)
+    : null;
+
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE: Dashboard component-report edges +
+  // `<dashboardType>` — see {@link extractDashboardDetail}. Dashboard-only.
+  const dashboardDetail = config.dashboardDetail === true
+    ? extractDashboardDetail(text.value, nodeId)
+    : null;
+
+  // REPORT-DASHBOARD-GRAPH-PERSISTENCE (privacy): presence boolean, never the
+  // description TEXT — see
+  // {@link EnterpriseExtractorConfig.descriptionPresenceOnly}.
+  const descriptionPresent = config.descriptionPresenceOnly === true
+    ? (extractXmlValues(text.value, 'description')[0] ?? '').length > 0
     : null;
 
   // R6-22: TransactionSecurityPolicy `<action>` block summary — see
@@ -1234,6 +1446,8 @@ const extractEnterpriseMetadata = async (
       ...extraPropertiesBlock,
       ...(reportDetail !== null ? reportDetail.properties : {}),
       ...(reportTypeDetail !== null ? reportTypeDetail.properties : {}),
+      ...(dashboardDetail !== null ? dashboardDetail.properties : {}),
+      ...(descriptionPresent !== null ? { descriptionPresent } : {}),
       ...(transactionSecurityAction !== null ? { action: transactionSecurityAction } : {}),
       ...(milestoneDetails !== null && milestoneDetails.length > 0
         ? { milestones: milestoneDetails }
@@ -1296,6 +1510,7 @@ const extractEnterpriseMetadata = async (
       ...visibleToEdges,
       ...(reportDetail !== null ? reportDetail.edges : []),
       ...(reportTypeDetail !== null ? reportTypeDetail.edges : []),
+      ...(dashboardDetail !== null ? dashboardDetail.edges : []),
     ],
   });
 };
@@ -1304,11 +1519,17 @@ export const extractReport = (path: string): Promise<Result<ExtractionResult, Ex
   extractEnterpriseMetadata(path, {
     type: 'Report',
     suffix: '.report-meta.xml',
-    // Reports carry a top-level <description> in source. Capture it so
-    // "which reports have no description" is answerable and get_component
-    // can surface the report's stated purpose. Omitted when absent — the
-    // "extracted, none present" signal (vs a not-modeled type).
-    extraProperties: ['description'],
+    // REPORT-DASHBOARD-GRAPH-PERSISTENCE: `Report:{Folder}/{Name}` — the bare
+    // basename is not unique across folders and these nodes are now PERSISTED
+    // (a colliding id would silently overwrite a sibling report at import).
+    folderedUnder: 'reports',
+    // Reports carry a top-level <description> in source. It is freeform user
+    // text, so only its PRESENCE is captured — never the text. That keeps
+    // "which reports have no description" answerable (the sole capability the
+    // former text capture was justified by) without writing thousands of
+    // admin-authored strings into a now-persisted, high-volume node family.
+    // See {@link EnterpriseExtractorConfig.descriptionPresenceOnly}.
+    descriptionPresenceOnly: true,
     // R6-24: filters/booleanFilter/groupings/buckets/crossFilters/chart/
     // format — see {@link extractReportDetail}.
     reportDetail: true,
@@ -1318,9 +1539,15 @@ export const extractDashboard = (path: string): Promise<Result<ExtractionResult,
   extractEnterpriseMetadata(path, {
     type: 'Dashboard',
     suffix: '.dashboard-meta.xml',
-    // Dashboards carry a top-level <description>. Same capture rationale as
-    // Report — omitted when absent.
-    extraProperties: ['description'],
+    // REPORT-DASHBOARD-GRAPH-PERSISTENCE: `Dashboard:{Folder}/{Name}` — see
+    // the Report sibling above.
+    folderedUnder: 'dashboards',
+    // Presence only, never the text — same rationale as Report.
+    descriptionPresenceOnly: true,
+    // Component `<report>` references + `<dashboardType>`; `<runningUser>` is
+    // deliberately NOT read (it is a real username). See
+    // {@link extractDashboardDetail}.
+    dashboardDetail: true,
   });
 
 export const extractListView = (path: string): Promise<Result<ExtractionResult, ExtractorError>> =>

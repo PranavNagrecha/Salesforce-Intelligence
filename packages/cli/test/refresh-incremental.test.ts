@@ -12,6 +12,7 @@ import {
 import { vaultPaths } from '@sf-intelligence/vault';
 
 import { runRefresh } from '../src/commands/refresh.js';
+import { EXTRACT_CACHE_VERSION } from '../src/refresh-pipeline.js';
 
 /**
  * End-to-end coverage for `runRefresh({ incremental: true })`
@@ -98,7 +99,11 @@ describe('runRefresh --incremental (P5-incremental-refresh)', () => {
         packageVersion: string;
         entries: unknown[];
       };
-      expect(cache.cacheVersion).toBe(1);
+      // Assert against the CONSTANT, not a literal: EXTRACT_CACHE_VERSION is
+      // bumped whenever the extractor graph changes shape (1 -> 2 for
+      // REPORT-DASHBOARD-GRAPH-PERSISTENCE), and a hardcoded literal here just
+      // turns every legitimate bump into a test to chase.
+      expect(cache.cacheVersion).toBe(EXTRACT_CACHE_VERSION);
       expect(cache.packageVersion).toMatch(/^\d+\.\d+\.\d+$/);
       expect(cache.entries.length).toBeGreaterThanOrEqual(1);
 
@@ -161,10 +166,14 @@ describe('runRefresh --incremental (P5-incremental-refresh)', () => {
 
       // Plant a poisoned cache from a "future" build: if it were honored, the
       // run would reuse its (bogus) entries. The version guard must reject it.
+      // `cacheVersion` is the CURRENT one on purpose, so this case isolates the
+      // packageVersion axis — pinning a stale literal here would let the cache
+      // be rejected for the wrong reason and the packageVersion guard could rot
+      // undetected.
       await writeFile(
         join(paths.meta, 'extract-cache.json'),
         JSON.stringify({
-          cacheVersion: 1,
+          cacheVersion: EXTRACT_CACHE_VERSION,
           packageVersion: '99.0.0',
           entries: [
             { key: 'main/default/classes/FooBar.cls', mtimeMs: 1, size: 1, result: { nodes: [], edges: [] } },
