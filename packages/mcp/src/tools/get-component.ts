@@ -73,6 +73,12 @@ import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { tryReadComponentDoc } from './component-doc-fallback.js';
+import {
+  buildReservedConceptReasoning,
+  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_UNAVAILABLE_NOTE,
+  type ConceptReasoningEnvelope,
+} from './concept-reasoning.js';
 import { mergeInputAliases } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { buildReferenceStub } from './phantom-taxonomy.js';
@@ -140,6 +146,9 @@ const getComponentInputBaseSchema = z.object({
     .min(0)
     .max(DEFAULT_COMPONENT_BODY_MAX_BYTES)
     .optional(),
+  // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). IGNORED on the
+  // metadata-probe path — see `conceptReasoning` on the output.
+  includeConceptReasoning: z.boolean().optional(),
 });
 
 export const getComponentInputSchema = z.preprocess(
@@ -257,6 +266,34 @@ export interface GetComponentOutput {
    * fields stay elsewhere; hosts that understand the brand should prefer this.
    */
   readonly labelOrgText?: UntrustedOrgText;
+  /**
+   * REASONING-REACHABILITY — deterministic concept-rule claims about THIS
+   * component, on the shared `EvidenceEnvelopeV2` contract plus a
+   * `completeness` report that keeps "checked and found nothing" distinct from
+   * "never checked". Present ONLY when the caller passed
+   * DEFAULT ON. Absent only when the caller passed
+   * `includeConceptReasoning: false`, when the reasoning read failed, or on the
+   * metadata-probe path (see below).
+   *
+   * This is the UNIVERSAL anchor: `get_component` accepts any component type,
+   * so it is the only surface through which concept rules bound on the long
+   * tail of anchors (Role, SharingRule, Network, DuplicateRule,
+   * RestrictionRule …) can be reached at all.
+   *
+   * THE METADATA-PROBE CARVE-OUT IS A CORRECTNESS BOUNDARY, NOT A DEFAULT.
+   * A `maxBodyBytes` at or below `METADATA_PROBE_MAX_BODY_BYTES` selects the
+   * bounded grounding PROBE: a deliberately minimal projection whose contract is
+   * "the smallest thing that still answers what this component is". A probe that
+   * silently returned a multi-kilobyte reasoning block would no longer be a
+   * probe — the caller's explicit size bound would be violated by the tool. So
+   * the flag is IGNORED there, in BOTH directions, and the probe path returns
+   * before reasoning is ever considered. Ask for reasoning with a normal call.
+   *
+   * Read `completeness.noRuleCoversComponentType` FIRST: when true, no concept
+   * rule applies to this component type and an empty `claims` list means
+   * NOTHING WAS CHECKED — never "clean".
+   */
+  readonly conceptReasoning?: ConceptReasoningEnvelope;
   /** AUDIT-F8 — description / inlineHelpText from node properties, branded. */
   readonly descriptionOrgText?: UntrustedOrgText;
 }
@@ -323,6 +360,23 @@ export const getComponentHandler = async (
           returnedBodyBytes: boundedBody.returnedBytes,
           omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
           maxBodyBytes,
+          // R3 — the DOC-FALLBACK path (a component whose markdown is on disk
+          // but which has NO graph node) can never run concept reasoning: the
+          // engine needs a node to anchor on. Say so rather than returning a
+          // block-less payload that reads as "nothing found".
+          disclosure:
+            (isMetadataProbe && boundedFrontmatter !== null
+              ? `${buildMetadataDisclosure({
+                  maxBodyBytes,
+                  omittedPropertyKeys: [],
+                  totalPropertyKeys: 0,
+                  omittedReferenceCount: 0,
+                  totalReferenceCount: 0,
+                })} `
+              : '') +
+            'This component was read from its vault document; it has no graph node, so concept-rule ' +
+            'reasoning could not be anchored and NO concept layer was checked. That is "not ' +
+            'checked", not "nothing found".',
           ...(isMetadataProbe && boundedFrontmatter !== null
             ? {
                 metadataOnly: true as const,
@@ -330,13 +384,6 @@ export const getComponentHandler = async (
                 frontmatterTruncated: boundedFrontmatter.truncated,
                 frontmatterBytes: boundedFrontmatter.originalBytes,
                 returnedFrontmatterBytes: boundedFrontmatter.returnedBytes,
-                disclosure: buildMetadataDisclosure({
-                  maxBodyBytes,
-                  omittedPropertyKeys: [],
-                  totalPropertyKeys: 0,
-                  omittedReferenceCount: 0,
-                  totalReferenceCount: 0,
-                }),
               }
             : {}),
         },
@@ -507,13 +554,21 @@ export const getComponentHandler = async (
         frontmatterTruncated: boundedFrontmatter.truncated,
         frontmatterBytes: boundedFrontmatter.originalBytes,
         returnedFrontmatterBytes: boundedFrontmatter.returnedBytes,
-        disclosure: buildMetadataDisclosure({
-          maxBodyBytes,
-          omittedPropertyKeys: propProjection.omittedKeys,
-          totalPropertyKeys: propertyKeys.length,
-          omittedReferenceCount: refProjection.omittedCount,
-          totalReferenceCount: allReferenceIds.length,
-        }),
+        disclosure:
+          buildMetadataDisclosure({
+            maxBodyBytes,
+            omittedPropertyKeys: propProjection.omittedKeys,
+            totalPropertyKeys: propertyKeys.length,
+            omittedReferenceCount: refProjection.omittedCount,
+            totalReferenceCount: allReferenceIds.length,
+          }) +
+          // A carve-out has to be STATED. A metadata probe never attaches the
+          // concept-reasoning block — its contract is a minimal payload, and
+          // honouring the flag here would violate the caller's own size bound —
+          // but dropping it silently would read as "nothing was found".
+          ' Concept-rule reasoning is NOT run on a metadata probe (the `includeConceptReasoning` ' +
+          'flag is ignored here, in both directions) because a probe must stay minimal — so no ' +
+          'concept layer was checked. Re-query without `maxBodyBytes` to get it.',
         ...(annotations !== undefined ? { annotations } : {}),
         ...orgTextFields(node),
       },
@@ -523,6 +578,22 @@ export const getComponentHandler = async (
       },
     });
   }
+
+  // REASONING-REACHABILITY — opt-in concept-rule reasoning over ANY component
+  // type. Never reached on the metadata-probe path above (that returns first),
+  // so the grounding probe keeps its minimal payload.
+  const conceptReasoning: ConceptReasoningEnvelope | null =
+    input.includeConceptReasoning === false
+      ? null
+      : ((await buildReservedConceptReasoning(ctx, node.id, { rootNode: node }))?.envelope ??
+        null);
+  // R3 — an absent block is never silent on any path.
+  const conceptNote =
+    conceptReasoning !== null
+      ? null
+      : input.includeConceptReasoning === false
+        ? CONCEPT_REASONING_SKIPPED_NOTE
+        : CONCEPT_REASONING_UNAVAILABLE_NOTE(node.id);
 
   return ok({
     data: {
@@ -543,6 +614,8 @@ export const getComponentHandler = async (
       omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
       maxBodyBytes,
       ...(annotations !== undefined ? { annotations } : {}),
+      ...(conceptReasoning !== null ? { conceptReasoning } : {}),
+      ...(conceptNote !== null ? { disclosure: conceptNote } : {}),
       ...orgTextFields(node),
     },
     vaultState: {

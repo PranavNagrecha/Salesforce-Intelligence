@@ -87,6 +87,12 @@ import type { Context } from '../server.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { isUnresolvedFieldReceiver } from './apex-receiver.js';
 import { coercePrefix } from './coerce-id.js';
+import {
+  buildReservedConceptReasoning,
+  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_UNAVAILABLE_NOTE,
+  type ConceptReasoningEnvelope,
+} from './concept-reasoning.js';
 import { mergeInputAliases } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
@@ -121,6 +127,8 @@ const UNRESOLVED_FIELDS_SUFFIX =
 const explainApexMethodInputBaseSchema = z.object({
   classApiName: z.string().min(1),
   methodName: z.string().min(1).optional(),
+  // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). See `conceptReasoning`.
+  includeConceptReasoning: z.boolean().optional(),
 });
 
 export const explainApexMethodInputSchema = z.preprocess(
@@ -268,6 +276,25 @@ export interface ExplainApexMethodOutput {
   readonly qualityIssues: readonly ExplainApexQualityIssue[];
   readonly disclosure: string;  /** P13-ANNOT-tools: curated annotations for the CLASS (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
+  /**
+   * REASONING-REACHABILITY — deterministic concept-rule claims about THIS class
+   * or trigger, on the shared `EvidenceEnvelopeV2` contract plus a
+   * `completeness` report that keeps "checked and found nothing" distinct from
+   * "never checked". DEFAULT ON — absent only when the caller passed
+   * `includeConceptReasoning: false`, or the reasoning read failed (in which
+   * case the block is omitted rather than the answer failed).
+   *
+   * ApexClass is the single largest anchor in the concept model — 26 of the 133
+   * node-shaped rules bind on it (sharing posture, async boundaries, external
+   * API surface, injection / governor quality defects, test quality) — so an
+   * "explain this class" answer without them would be leaving the product's own
+   * analysis on the floor.
+   *
+   * Read `completeness.noRuleCoversComponentType` FIRST: when true, no concept
+   * rule applies to this component type and an empty `claims` list means
+   * NOTHING WAS CHECKED — never "clean".
+   */
+  readonly conceptReasoning?: ConceptReasoningEnvelope;
 }
 
 /**
@@ -657,8 +684,33 @@ export const explainApexMethodHandler = async (
 
   const annotations = await annotationsBlockFor(ctx, classId);
 
+  // REASONING-REACHABILITY — the class node is already resolved, so this costs
+  // one bound-type edge query + one endpoint node query (both capped). A failed
+  // read omits the block rather than failing an otherwise complete answer.
+  const reservedReasoning =
+    input.includeConceptReasoning === false
+      ? null
+      : await buildReservedConceptReasoning(ctx, classId, { rootNode: node });
+  const conceptReasoning: ConceptReasoningEnvelope | null =
+    reservedReasoning?.envelope ?? null;
+  // R3 — every path must SAY what happened to the reasoning layer. Absence of
+  // the block is not evidence of absence, so neither an opt-out nor a failed
+  // read may be silent. This tool has no `boundaries[]`, so it rides the
+  // `disclosure` string (appended, never replacing the pinned honesty axis).
+  const conceptNote =
+    conceptReasoning !== null
+      ? ` Concept reasoning: ${conceptReasoning.completeness.summary}`
+      : input.includeConceptReasoning === false
+        ? ` ${CONCEPT_REASONING_SKIPPED_NOTE}`
+        : ` ${CONCEPT_REASONING_UNAVAILABLE_NOTE(classId)}`;
+
   return ok({
-    data: { ...data, ...(annotations !== undefined ? { annotations } : {}) },
+    data: {
+      ...data,
+      disclosure: data.disclosure + conceptNote,
+      ...(annotations !== undefined ? { annotations } : {}),
+      ...(conceptReasoning !== null ? { conceptReasoning } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

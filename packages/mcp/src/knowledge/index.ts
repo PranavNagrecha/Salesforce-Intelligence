@@ -72,3 +72,25 @@ export {
   phaseOrdinal,
   type SaveOrderPhase,
 } from './save-order-phase.js';
+
+/**
+ * REASONING-REACHABILITY — the ONE code path that runs the concept rules for a
+ * single component (slice assembly + evaluate + chain/compound/reconcile +
+ * honest coverage report). `sfi.interpret` is a thin projection of it, and any
+ * component-anchored tool can compose it to carry concept claims in its own
+ * answer. See `reason-component.ts` for the honesty-bucket contract.
+ */
+export {
+  adaptCoverage,
+  classifyRuleCoverage,
+  JOIN_FANOUT_CAP,
+  reasonAboutComponent,
+  SLICE_EDGE_CAP,
+  type ConceptCoverageReport,
+  type ReasonAboutComponentOptions,
+  type ReasonAboutComponentResult,
+  type ReasonComponentError,
+  type ReasonContext,
+  type UnevaluableReason,
+  type UnevaluableRule,
+} from './reason-component.js';
