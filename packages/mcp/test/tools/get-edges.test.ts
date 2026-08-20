@@ -405,3 +405,53 @@ describe('getEdgesInputSchema', () => {
     if (out.success) expect(out.data.direction).toBe('out');
   });
 });
+
+describe('sfi.get_edges — an unproduced edge type is disclosed, not silently empty', () => {
+  // UNPRODUCED-EDGE-TYPE-READS-AS-PROVEN-NONE.
+  //
+  // `coversTest` is declared in the contract but emitted by ZERO extractors, so
+  // `get_edges { edgeType: 'coversTest' }` is empty BY CONSTRUCTION. Without a
+  // disclosure that empty list reads as "nothing covers this class" — the exact
+  // proven-none-vs-not-checked conflation this product exists to prevent.
+  //
+  // `what_if_change_method_signature` was fixed for this; `get_edges` and
+  // `get_impact` were not, even though both advertise the type as a selectable
+  // filter. An earlier contract comment asserted the what-if tool was "the only
+  // such consumer today", which was false when written.
+  it('FAIL-BEFORE/PASS-AFTER: discloses that coversTest has no producer', async () => {
+    const result = await getEdgesHandler(ctx, {
+      nodeId: 'CustomObject:A',
+      edgeType: 'coversTest',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data as { edges: readonly unknown[]; unproducedEdgeType?: string };
+
+    // The empty result is real…
+    expect(data.edges).toEqual([]);
+    // …and it now says WHY, in a way that cannot be read as a proven none.
+    expect(data.unproducedEdgeType).toBeDefined();
+    expect(data.unproducedEdgeType).toMatch(/coversTest/);
+    expect(data.unproducedEdgeType).toMatch(/EMPTY BY CONSTRUCTION/);
+    expect(data.unproducedEdgeType).toMatch(/never as .*there is none/);
+    // It must also distinguish itself from a coverage gap, which a refresh CAN close.
+    expect(data.unproducedEdgeType).toMatch(/cannot populate it/);
+  });
+
+  it('stays byte-identical for a produced edge type (no new field)', async () => {
+    const result = await getEdgesHandler(ctx, {
+      nodeId: 'CustomObject:A',
+      edgeType: 'parentOf',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data).not.toHaveProperty('unproducedEdgeType');
+  });
+
+  it('stays byte-identical when no edgeType filter is supplied', async () => {
+    const result = await getEdgesHandler(ctx, { nodeId: 'CustomObject:A' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data).not.toHaveProperty('unproducedEdgeType');
+  });
+});

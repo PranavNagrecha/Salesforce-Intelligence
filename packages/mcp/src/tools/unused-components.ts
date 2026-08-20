@@ -94,6 +94,7 @@ import {
   type CoverageCaveat,
 } from './coverage-trust.js';
 import { firstNonEmpty, toObjectApiName } from './input-aliases.js';
+import { COMPONENT_TYPES } from './list-components.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit } from './scan-cap.js';
 
@@ -147,62 +148,23 @@ const DEFAULT_UNUSED_TYPES: readonly ComponentType[] = [
 ];
 
 /**
- * The full superset of ComponentTypes Zod validates against. Mirrors
- * the `ComponentType` union in `@sf-intelligence/contracts`; declared
- * inline so Zod validates against a real enum rather than
- * `z.string()` (clients with a typo learn `invalid-query` instead of
- * receiving an empty list and concluding the org has nothing of that
- * type).
+ * The full superset of ComponentTypes Zod validates against. Imported from
+ * the single source of truth in `list-components.ts`, which is proven
+ * complete at COMPILE TIME (`satisfies readonly ComponentType[]` plus the
+ * `ComponentTypesComplete` guard), rather than hand-copied.
+ *
+ * It WAS hand-copied, and had drifted to 47 of 101 while its own comment
+ * claimed to be the full superset -- so this tool rejected 54 types the
+ * extractors retrieve and model (`FlexiPage`, `CustomPermission`, every CPQ
+ * and OmniStudio tier) with `invalid-query`. That is exactly the
+ * LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES failure `list-components.ts'
+ * documents having already shipped once. Deriving it means a type added to
+ * the contracts union fails the build until it is listed, instead of
+ * silently becoming unqueryable here.
+ *
+ * NOTE: this is the VALIDATION superset only. The semantic default set is
+ * `DEFAULT_UNUSED_TYPES` above and is deliberately narrower.
  */
-const COMPONENT_TYPES = [
-  'CustomObject',
-  'CustomField',
-  'ValidationRule',
-  'Flow',
-  'ApexClass',
-  'ApexTrigger',
-  'Layout',
-  'Profile',
-  'PermissionSet',
-  'PermissionSetAssignment',
-  'NamedCredential',
-  'ConnectedApp',
-  'Group',
-  'Queue',
-  'Role',
-  'SharingRule',
-  'RecordType',
-  'BusinessProcess',
-  'CustomTab',
-  'WebLink',
-  'CustomApplication',
-  'QuickAction',
-  'PathAssistant',
-  'GlobalValueSet',
-  'CustomLabel',
-  'StaticResource',
-  'WorkflowRule',
-  'ApprovalProcess',
-  'AssignmentRule',
-  'AutoResponseRule',
-  'EscalationRule',
-  'DuplicateRule',
-  'MatchingRule',
-  'EmailTemplate',
-  'Letterhead',
-  'LightningComponentBundle',
-  'AuraDefinitionBundle',
-  'VisualforcePage',
-  'VisualforceComponent',
-  'AuthProvider',
-  'RemoteSiteSetting',
-  'CspTrustedSite',
-  'ExternalDataSource',
-  'ExternalService',
-  'NetworkAccess',
-  'CustomMetadataRecord',
-  'CustomSettingRecord',
-] as const satisfies readonly ComponentType[];
 
 /**
  * Zod schema for the `sfi.unused_components` tool input.

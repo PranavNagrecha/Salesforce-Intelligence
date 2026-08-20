@@ -16,6 +16,7 @@
 
 import {
   EDGE_TYPES,
+  UNPRODUCED_EDGE_TYPES,
   type ConfidenceLevel,
   type Edge,
   type McpError,
@@ -126,6 +127,17 @@ export interface GetEdgesOutput {
    * when edges exist or the vault is fully covered (byte-identical to before).
    */
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * Present ONLY when the caller filtered on an edge type that NO extractor
+   * produces (`UNPRODUCED_EDGE_TYPES`). Such a query is guaranteed to return
+   * `[]`, and without this the empty result reads as a proven "nothing has
+   * this relationship" when the truth is "this relationship is never recorded".
+   *
+   * Distinct from `coverageCaveat`, which reports a family this VAULT did not
+   * retrieve — a gap a refresh can close. This one cannot be closed by any
+   * refresh on any org, because the producer does not exist in the product.
+   */
+  readonly unproducedEdgeType?: string;
 }
 
 /**
@@ -218,6 +230,20 @@ export const getEdgesHandler = async (
       ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
       : undefined;
 
+  // Same "empty ≠ none" hazard, different and more absolute cause: the caller
+  // asked for an edge type the product NEVER emits, so `[]` is structurally
+  // guaranteed and no refresh can change it. Emitted only when that filter was
+  // actually used, so every other response stays byte-identical.
+  const unproducedEdgeType =
+    input.edgeType !== undefined &&
+    (UNPRODUCED_EDGE_TYPES as readonly string[]).includes(input.edgeType)
+      ? `\`${input.edgeType}\` is a DECLARED edge type that NO extractor in this ` +
+        `product emits, so this result is EMPTY BY CONSTRUCTION — it is not ` +
+        `evidence that no such relationship exists. Read it as "this ` +
+        `relationship is never recorded", never as "there is none". Unlike a ` +
+        `coverage gap, re-running \`sfi refresh\` on any org cannot populate it.`
+      : undefined;
+
   return ok({
     data: {
       edges: paged.items,
@@ -227,6 +253,7 @@ export const getEdgesHandler = async (
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(note !== undefined ? { note } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(unproducedEdgeType !== undefined ? { unproducedEdgeType } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

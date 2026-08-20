@@ -27,7 +27,22 @@ import {
 
 // LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES: the advertised list_components
 // `type` enum is spread from this single source of truth, not hand-duplicated.
+import { SECTION_NAMES as FIELD_360_SECTION_NAMES } from './field-360.js';
 import { COMPONENT_TYPES } from './list-components.js';
+// STALE-CHECK-DESCRIPTION-UNDERSTATES-COVERAGE: the two staleness tools'
+// descriptions hand-listed 6 of the 15 checked types and rotted when the set
+// widened. Interpolate the constant the handler actually loops over so the
+// advertised surface cannot drift from the code again.
+//
+// Imported from the import-free LEAF, never from `./live-plane.js` — that file
+// is the live plane's consent/session seam, and a value edge from the roster
+// into it would hand every non-live tool that reads the roster transitive
+// reach into the ambient live plane (`plane-import-guard.test.ts` rejects
+// exactly that, and did when this first landed).
+import {
+  STALE_CHECK_TYPE_COUNT,
+  STALE_CHECK_TYPE_LIST,
+} from './stale-check-types.js';
 
 /**
  * MCP protocol `Tool.annotations` for vault-plane tools (MCP-01).
@@ -1909,12 +1924,18 @@ const SAFE_TO_DELETE_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.unused_components`. Mirrors
- * `unusedComponentsInputSchema`. The `limit` upper bound (`500`) and
- * the `types` enum are duplicated from the Zod schema in
- * `unused-components.ts`; drift between Zod and this schema is a
- * code-review concern. The enum mirrors the contracts `ComponentType`
- * union — the same superset `LIST_COMPONENTS_INPUT_SCHEMA` uses — so
- * the tool stays usable across every node type the v1.x vault holds.
+ * `unusedComponentsInputSchema`. The `types` enum is SPREAD from the single
+ * source of truth `COMPONENT_TYPES` rather than hand-copied.
+ *
+ * It previously WAS hand-copied, and the copy said it "mirrors the contracts
+ * `ComponentType` union — the same superset `LIST_COMPONENTS_INPUT_SCHEMA`
+ * uses". That claim was false: the hand-copy carried 49 of 101 types, omitting
+ * `CustomPermission`, `ConditionalContext` and every CPQ and OmniStudio type.
+ * A host validating args against the ADVERTISED schema therefore rejected
+ * types the Zod validator accepts — the identical failure mode
+ * `LIST_COMPONENTS_INPUT_SCHEMA` documents as
+ * LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES. Deriving it removes the drift
+ * rather than leaving it to code review, which had already missed it once.
  */
 const UNUSED_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -1924,60 +1945,7 @@ const UNUSED_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         type: 'array',
         items: {
           type: 'string',
-          enum: [
-            'CustomObject',
-            'CustomField',
-            'ValidationRule',
-            'Flow',
-            'ApexClass',
-            'ApexTrigger',
-            'Layout',
-            'Profile',
-            'PermissionSet',
-            'PermissionSetAssignment',
-            'NamedCredential',
-            'ConnectedApp',
-            'Group',
-            'Queue',
-            'Role',
-            'SharingRule',
-            'RecordType',
-            'BusinessProcess',
-            'CustomTab',
-            'CustomApplication',
-            'QuickAction',
-            'PathAssistant',
-            'GlobalValueSet',
-            'CustomLabel',
-            'StaticResource',
-            'WorkflowRule',
-            'ApprovalProcess',
-            'AssignmentRule',
-            'AutoResponseRule',
-            'EscalationRule',
-            'DuplicateRule',
-            'MatchingRule',
-            'EmailTemplate',
-            'Letterhead',
-            'LightningComponentBundle',
-            'AuraDefinitionBundle',
-            'VisualforcePage',
-            'VisualforceComponent',
-            'AuthProvider',
-            'RemoteSiteSetting',
-            'CspTrustedSite',
-            'ExternalDataSource',
-            'ExternalService',
-            'NetworkAccess',
-            'CustomMetadataRecord',
-            'CustomSettingRecord',
-            // v4.x — decomposed object-child metadata (button/link placement).
-            'WebLink',
-            // v2.0a — conditional-context tier.
-            'ConditionalContext',
-            // v2.8 — async + integration deep tier.
-            'OutboundMessage',
-          ],
+          enum: [...COMPONENT_TYPES],
         },
       },
       // Singular type alias — folded into a one-element `types` scope; an
@@ -2159,10 +2127,18 @@ const RECORDTYPE_AVAILABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * `field360InputSchema`. The `fieldId` accepts either canonical
  * `CustomField:Object.Field` or short `Object.Field` form (the
  * handler normalises); non-matching shapes surface as
- * `invalid-query`. `includeSections` enum mirrors the ten content
- * sections defined in PLAN-v3.0 §4; `maxRowsPerSection` upper bound
- * (`200`) is the Q165 hard cap. Drift between Zod and this schema is
- * a code-review concern.
+ * `invalid-query`. `maxRowsPerSection` upper bound (`200`) is the Q165 hard
+ * cap.
+ *
+ * FIELD-360-ADVERTISED-SECTIONS-UNDERSTATE-SCHEMA: `includeSections` used to
+ * hand-list "the ten content sections defined in PLAN-v3.0 §4" and had fallen
+ * two behind the Zod schema — `rollups` and `listViews` were missing, so a host
+ * that validates arguments against this advertised schema REJECTED the two
+ * sections the handler had gained (and which exist precisely to stop roll-up
+ * and list-view referrers being silently dropped). The enum is now
+ * INTERPOLATED from `SECTION_NAMES`, the same tuple the Zod enum is built
+ * from, so "drift between Zod and this schema" is no longer a code-review
+ * concern — it is structurally impossible.
  */
 const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -2173,18 +2149,7 @@ const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         type: 'array',
         items: {
           type: 'string',
-          enum: [
-            'validates',
-            'formulas',
-            'writers',
-            'readers',
-            'ui',
-            'integrations',
-            'automations',
-            'emails',
-            'dependencies',
-            'summary',
-          ],
+          enum: [...FIELD_360_SECTION_NAMES],
         },
       },
       groupBy: {
@@ -2270,9 +2235,12 @@ const DOMAIN_CLUSTERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * `changedSinceInputSchema`. The `since` ISO-8601 validation is
  * expressed as a non-empty string at the advertised level; the Zod
  * refine (`Date.parse(...)`) rejects non-date strings at the handler
- * boundary with `error.kind: 'invalid-query'`. The `types` enum
- * mirrors the contracts `ComponentType` union, the `limit` upper
- * bound (`500`) is the v1.7 honesty cap, and the schema is the v1.7
+ * boundary with `error.kind: 'invalid-query'`. The `types` enum is SPREAD
+ * from the single source of truth `COMPONENT_TYPES`; it was previously a
+ * hand-copy carrying 47 of 101 types while this comment claimed it "mirrors
+ * the contracts `ComponentType` union", so a host validating against the
+ * advertised schema rejected 54 types the Zod validator accepts. The `limit`
+ * upper bound (`500`) is the v1.7 honesty cap, and the schema is the v1.7
  * R2 freshness headline answer to the buyer-priority gap "when was
  * X modified?".
  */
@@ -2285,56 +2253,7 @@ const CHANGED_SINCE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         type: 'array',
         items: {
           type: 'string',
-          enum: [
-            'CustomObject',
-            'CustomField',
-            'ValidationRule',
-            'Flow',
-            'ApexClass',
-            'ApexTrigger',
-            'Layout',
-            'Profile',
-            'PermissionSet',
-            'PermissionSetAssignment',
-            'NamedCredential',
-            'ConnectedApp',
-            'Group',
-            'Queue',
-            'Role',
-            'SharingRule',
-            'RecordType',
-            'BusinessProcess',
-            'CustomTab',
-            'CustomApplication',
-            'QuickAction',
-            'PathAssistant',
-            'GlobalValueSet',
-            'CustomLabel',
-            'StaticResource',
-            'WorkflowRule',
-            'ApprovalProcess',
-            'AssignmentRule',
-            'AutoResponseRule',
-            'EscalationRule',
-            'DuplicateRule',
-            'MatchingRule',
-            'EmailTemplate',
-            'Letterhead',
-            'LightningComponentBundle',
-            'AuraDefinitionBundle',
-            'VisualforcePage',
-            'VisualforceComponent',
-            'AuthProvider',
-            'RemoteSiteSetting',
-            'CspTrustedSite',
-            'ExternalDataSource',
-            'ExternalService',
-            'NetworkAccess',
-            'CustomMetadataRecord',
-            'CustomSettingRecord',
-            // v2.8 — async + integration deep tier.
-            'OutboundMessage',
-          ],
+          enum: [...COMPONENT_TYPES],
         },
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
@@ -4472,7 +4391,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.fleet_drift_ranking',
     description:
-      "Fleet ops: of every REGISTERED vault, which is most behind its live org — i.e. which to /sfi-refresh first. Runs the same Tooling-API staleness check as sfi.live_stale_check (components modified since the vault's refreshedAt across ApexClass / ApexTrigger / ValidationRule / Layout / Flow / CustomField) across the whole registry and ranks vaults by drift descending, with a `mostDrifted` + `recommendation`. Consent is PER ORG: a vault whose sourceOrg has no live consent is an honest `no-consent` skip (not an error, no silent call) — grant per org or pass `liveEnabled: true`. Every query routes through the per-session live-query budget, so a sweep the budget can't cover degrades to `budget-exhausted` skips instead of overrunning org API limits (raise SFI_LIVE_QUERY_BUDGET or pass a `vaults` subset). Each ranked row is its own live_org read at its own time; the aggregate is a fleet roll-up (one org's freshness never implies another's). Only the 6 checked types drift-count; read-only. Optional `vaults` (alias subset), `liveEnabled`.",
+      `Fleet ops: of every REGISTERED vault, which is most behind its live org — i.e. which to /sfi-refresh first. Runs the same Tooling-API staleness check as sfi.live_stale_check (components modified since the vault's refreshedAt across the same ${String(STALE_CHECK_TYPE_COUNT)} types: ${STALE_CHECK_TYPE_LIST}) across the whole registry and ranks vaults by drift descending, with a \`mostDrifted\` + \`recommendation\`. Consent is PER ORG: a vault whose sourceOrg has no live consent is an honest \`no-consent\` skip (not an error, no silent call) — grant per org or pass \`liveEnabled: true\`. Every query routes through the per-session live-query budget, so a sweep the budget can't cover degrades to \`budget-exhausted\` skips instead of overrunning org API limits (raise SFI_LIVE_QUERY_BUDGET or pass a \`vaults\` subset). Each ranked row is its own live_org read at its own time; the aggregate is a fleet roll-up (one org's freshness never implies another's). Only the ${String(STALE_CHECK_TYPE_COUNT)} checked types drift-count; read-only. Optional \`vaults\` (alias subset), \`liveEnabled\`.`,
     inputSchema: FLEET_DRIFT_RANKING_INPUT_SCHEMA,
   },
   {
@@ -4585,7 +4504,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   },
   {
     name: 'sfi.live_stale_check',
-    description: "Opt-in live org: \"is the org AHEAD of the vault?\". For each Tooling-queryable type (ApexClass, ApexTrigger, ValidationRule, Layout, Flow, CustomField), counts components with `LastModifiedDate` AFTER the vault's `refreshedAt` via the Tooling API. Returns `orgAheadOfVault`, `totalChangedSinceRefresh`, per-type `byType`, `checkedTypes`, `erroredTypes`, and an `interpretation`. A non-zero total means the vault is STALE relative to the org — run /sfi-refresh. Read-only; does not mutate the org or vault. Requires the live plane (SFI_LIVE_PLANE_ENABLED, liveEnabled:true, or sfi.live_consent). orgAheadOfVault:false means \"none of the CHECKED types drifted\", not \"nothing changed\".",
+    description: `Opt-in live org: "is the org AHEAD of the vault?". For each of the ${String(STALE_CHECK_TYPE_COUNT)} Tooling-queryable types it checks (${STALE_CHECK_TYPE_LIST}), counts components with \`LastModifiedDate\` AFTER the vault's \`refreshedAt\` via the Tooling API. The set spans code, declarative logic, schema, UI surfaces AND — the half most drift questions are really about — the permission / security families (Profile, PermissionSet, PermissionSetGroup, SharingRules), so "did someone change permissions since my refresh?" IS covered. Returns \`orgAheadOfVault\`, \`totalChangedSinceRefresh\`, per-type \`byType\`, \`checkedTypes\`, \`erroredTypes\`, and an \`interpretation\`. A non-zero total means the vault is STALE relative to the org — run /sfi-refresh. A type the org's Tooling API rejects lands in \`erroredTypes\` and is skipped, never fatal. Read-only; does not mutate the org or vault. Requires the live plane (SFI_LIVE_PLANE_ENABLED, liveEnabled:true, or sfi.live_consent). orgAheadOfVault:false means "none of the CHECKED types drifted", not "nothing changed".`,
     inputSchema: LIVE_STALE_CHECK_INPUT_SCHEMA,
   },
   {
@@ -5260,7 +5179,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   },
   {
     name: 'sfi.what_if_change_method_signature',
-    description: "Given an ApexClass (`classApiName` / `componentId` / `apiName` — a bare name or an `ApexClass:` id, interchangeable, resolved + echoed as `appliedScope`), a method name, and an optional new signature string, enumerates every direct caller of the named method plus every test class exercising the target class. Walks incoming `callsApex` edges filtering by `properties.methodName === methodName` (Flow callers are accepted without methodName matching — Flow XML declares the action name at class level), then walks incoming `coversTest` edges. Each caller surfaces in `callingClasses[]` as a `WhatIfImpactItem` with `category` (`code-needs-update` for non-test code callers; `test-class-update` for test classes), source ComponentId, edge-level `confidence` (`heuristic` for the apex-scanner / Visualforce callers; `parsed` for Flow callers parsed out of the Flow `<actionCalls>` XML; `declared` for LWC/Aura `@salesforce/apex/{Class}.{method}` imports), and a one-sentence explanation. Test classes also surface in a parallel `testClassesNeedingUpdate[]` scalar array. The `newSignature` parameter is accepted for renderer context and echoed verbatim in the response — the tool does NOT parse it. Aggregate `verdict` is `safe` (no callers) / `risky` (callers present — every caller is flagged for human review because signature COMPATIBILITY is not statically proven: the caller SET is exact, but whether each call-site's arguments still type-check against the new signature is not analysed). Honesty axis (verbatim, surfaced ALWAYS): caller confidence varies by source — Apex callers are `parsed` where the default-on Apex AST resolved the call-site (`callerMethods` then names the calling method), `heuristic` where only the regex apex-scanner matched; Visualforce callers are heuristic; Flow callers are parsed from the <actionCalls> XML; LWC/Aura callers are declared via the @salesforce/apex import; dynamic dispatch via Type.forName + invoke is invisible. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).",
+    description: "Given an ApexClass (`classApiName` / `componentId` / `apiName` — a bare name or an `ApexClass:` id, interchangeable, resolved + echoed as `appliedScope`), a method name, and an optional new signature string, enumerates every direct caller of the named method plus every test class exercising the target class. Walks incoming `callsApex` edges filtering by `properties.methodName === methodName` (Flow callers are accepted without methodName matching — Flow XML declares the action name at class level), then walks incoming `coversTest` edges. Each caller surfaces in `callingClasses[]` as a `WhatIfImpactItem` with `category` (`code-needs-update` for non-test code callers; `test-class-update` for test classes), source ComponentId, edge-level `confidence` (`heuristic` for the apex-scanner / Visualforce callers; `parsed` for Flow callers parsed out of the Flow `<actionCalls>` XML; `declared` for LWC/Aura `@salesforce/apex/{Class}.{method}` imports), and a one-sentence explanation. Test classes also surface in a parallel `testClassesNeedingUpdate[]` scalar array. The `newSignature` parameter is accepted for renderer context and echoed verbatim in the response — the tool does NOT parse it. Aggregate `verdict` is `safe` (no callers) / `risky` (callers present — every caller is flagged for human review because signature COMPATIBILITY is not statically proven: the caller SET is exact, but whether each call-site's arguments still type-check against the new signature is not analysed). Honesty axis (verbatim, surfaced ALWAYS): caller confidence varies by source — Apex callers are `parsed` where the default-on Apex AST resolved the call-site (`callerMethods` then names the calling method), `heuristic` where only the regex apex-scanner matched; Visualforce callers are heuristic; Flow callers are parsed from the <actionCalls> XML; LWC/Aura callers are declared via the @salesforce/apex import; dynamic dispatch via Type.forName + invoke is invisible. Test classes are identified in ONE way that actually works: an incoming `callsApex` edge from a class whose `properties.isTest` is true. The `coversTest` edge this tool ALSO walks is declared in the contract but is emitted by NO extractor, graph-build mint, or enricher in this product, so on a real vault that walk ALWAYS returns nothing - Salesforce does not declare test-to-class coverage anywhere in the metadata source format (coverage is a RUNTIME artifact of a test run). Read an empty `testClassesNeedingUpdate` as \"test-coverage mapping UNAVAILABLE for this class\", never as \"no tests cover this class\": a test class that exercises the target only indirectly - through a helper, a trigger, or dynamic dispatch - has no `callsApex` edge to it and is invisible here. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).",
     inputSchema: WHAT_IF_CHANGE_METHOD_SIGNATURE_INPUT_SCHEMA,
   },
   {
@@ -5462,7 +5381,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   // cross-tier field-forensics questions.
   {
     name: 'sfi.field_360',
-    description: "A complete 360 profile of a single FIELD — everything that touches that field across validation, formulas, automation, code, UI, integrations, and emails, in one place. (Field forensics — this is about a field, NOT a user Profile or permissions.) The go-to answer for \"give me the full profile of this field\", \"the full picture of {Object}.{Field}\", \"everything that uses {Object}.{Field}\", \"what touches this field across automation and code\", or a BA's field impact assessment before a change. unified field-forensics synthesis tool. Given a CustomField canonical id (or short `<Object>.<Field>` form), composes every prior tier's reads of the field into one structured response with ten optional content sections (`validates`, `formulas`, `writers`, `readers`, `ui`, `integrations`, `automations`, `emails`, `dependencies`, `summary`) plus the constitutional honesty axis. A validation rule that reaches the field BOTH ways (a direct `references` edge and its own condition's `readsFrom`, both tokenized from one `errorConditionFormula`) is listed ONCE under `validates` — `validates` and `automations` never both hold one rule — with the fold named in `boundaries[]`; the folded rows still count on the automation RISK axis, so `riskLevel` is unaffected by the collapse. Optional `includeSections` narrows the response; `maxRowsPerSection` (default 50, max 200) bounds per-section row counts; `groupBy` (default `'source'`) reshuffles the rendering hint. The `summary` carries per-section unfiltered counts AND a `riskLevel` (`'low' | 'medium' | 'high'`) computed per PLAN- §4.1 with the specific `riskFactors[]` enumerated; PII risk factors are computed live via the heuristic pii recognizer (EncryptedText / SSN / financial names), not read from a stamped property. The `boundaries[]` array carries the verbatim disclosure naming which surfaces are composed vs folded elsewhere (list views, reports, dashboards); `dataNotAvailable: ['list-view-filters', 'reports', 'dashboards']` surfaces verbatim regardless of section filter. D3: a Flow decision / record-trigger filter that references this field carries NO `readsFrom` edge (it is a `firesWhen` edge to a ConditionalContext), so such Flow reads are RECONSTRUCTED from the graph's ConditionalContext `fieldRefs` and surfaced in `readers` as heuristic-confidence rows (`source: flow-condition-reads-scan:*`, deduped against real `readsFrom` readers) — otherwise `readers` would read 0 for a field several Flows filter on; `boundaries[]` also names the referrer classes still NOT composed into any section (roll-up source coupling, layout related-list placement). Top-level `confidence` reports `'mixed'` when sections span tiers (the typical case for any real-org field). Honesty axis (verbatim, ALWAYS): synthesis without omission disclosure is a contract violation; the report is the COMPLETE answer ONLY for extracted axes. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`. When the vault holds captured data-shape facts (`refresh --with-data-shape`), the response embeds a `dataShape` block — the field's sampled fill rate as a stamped `data_snapshot` (sampled + TTL-checked; context, never a live read).",
+    description: "A complete 360 profile of a single FIELD — everything that touches that field across validation, formulas, automation, code, UI, integrations, and emails, in one place. (Field forensics — this is about a field, NOT a user Profile or permissions.) The go-to answer for \"give me the full profile of this field\", \"the full picture of {Object}.{Field}\", \"everything that uses {Object}.{Field}\", \"what touches this field across automation and code\", or a BA's field impact assessment before a change. unified field-forensics synthesis tool. Given a CustomField canonical id (or short `<Object>.<Field>` form), composes every prior tier's reads of the field into one structured response with " + String(FIELD_360_SECTION_NAMES.length) + " optional content sections (" + FIELD_360_SECTION_NAMES.map((section) => "`" + section + "`").join(", ") + ") plus the constitutional honesty axis. `rollups` carries roll-up-summary couplings, `listViews` carries saved-list-view column / filter referrers, and `ui` carries page-layout AND Lightning-page (FlexiPage) placements — three sections the advertised schema used to omit. A validation rule that reaches the field BOTH ways (a direct `references` edge and its own condition's `readsFrom`, both tokenized from one `errorConditionFormula`) is listed ONCE under `validates` — `validates` and `automations` never both hold one rule — with the fold named in `boundaries[]`; the folded rows still count on the automation RISK axis, so `riskLevel` is unaffected by the collapse. Optional `includeSections` narrows the response; `maxRowsPerSection` (default 50, max 200) bounds per-section row counts; `groupBy` (default `'source'`) reshuffles the rendering hint. The `summary` carries per-section unfiltered counts AND a `riskLevel` (`'low' | 'medium' | 'high'`) computed per PLAN- §4.1 with the specific `riskFactors[]` enumerated; PII risk factors are computed live via the heuristic pii recognizer (EncryptedText / SSN / financial names), not read from a stamped property. The `boundaries[]` array carries the verbatim disclosure naming which surfaces are composed vs folded elsewhere (list views, reports, dashboards); `dataNotAvailable: ['list-view-filters', 'reports', 'dashboards']` surfaces verbatim regardless of section filter. D3: a Flow decision / record-trigger filter that references this field carries NO `readsFrom` edge (it is a `firesWhen` edge to a ConditionalContext), so such Flow reads are RECONSTRUCTED from the graph's ConditionalContext `fieldRefs` and surfaced in `readers` as heuristic-confidence rows (`source: flow-condition-reads-scan:*`, deduped against real `readsFrom` readers) — otherwise `readers` would read 0 for a field several Flows filter on; `boundaries[]` also names the referrer classes still NOT composed into any section (roll-up source coupling, layout related-list placement). Top-level `confidence` reports `'mixed'` when sections span tiers (the typical case for any real-org field). Honesty axis (verbatim, ALWAYS): synthesis without omission disclosure is a contract violation; the report is the COMPLETE answer ONLY for extracted axes. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`. When the vault holds captured data-shape facts (`refresh --with-data-shape`), the response embeds a `dataShape` block — the field's sampled fill rate as a stamped `data_snapshot` (sampled + TTL-checked; context, never a live read).",
     inputSchema: FIELD_360_INPUT_SCHEMA,
   },
   {

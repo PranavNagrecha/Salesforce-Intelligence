@@ -1148,18 +1148,64 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
 
     // The score gate would have LET THIS THROUGH — pinned so nobody "simplifies"
     // the breadth gate away believing the threshold was doing the work.
+    //
+    // Pinned to 2dp, NOT 3dp, deliberately. `semantic-funnel.ts` builds its BM25
+    // corpus from `tool.description` at RUNTIME, so IDF and average document
+    // length shift whenever ANY tool description is edited anywhere in the repo.
+    // A 3dp pin therefore fails as collateral of unrelated description work
+    // (observed: 0.275 -> 0.276 from a description fix in another tool) while
+    // saying nothing about routing. What this assertion is FOR is the magnitude
+    // — that the score clears the floor and so cannot be what refuses the route.
+    // The `>= FUNNEL_PRIMARY_MIN_SCORE` line above is the load-bearing half.
     const cands = semanticCandidates(
       'any thoughts on the general vibe of the setup here',
       10,
     );
     expect(cands[0]?.tool).toBe('sfi.live_setup_audit_trail');
-    expect(cands[0]?.score).toBeGreaterThanOrEqual(FUNNEL_PRIMARY_MIN_SCORE);
-    expect(cands[0]?.score).toBeCloseTo(0.275, 3);
-    // …and the breadth gate is what actually refuses it.
-    expect(funnelEvidenceBreadth(cands)).toBeLessThan(
-      FUNNEL_MIN_EVIDENCE_BREADTH,
+
+    // (a) The SCORE gate would have let this through — and not by a hair.
+    //
+    // This asserts the MARGIN, not the measurement. `semantic-funnel.ts`
+    // quantizes scores to 3dp and rebuilds its BM25 corpus from
+    // `tool.description` at RUNTIME, so the RENDERED value flips between
+    // 0.275 and 0.276 whenever any description anywhere in the repo is
+    // edited. Measured across six concurrent branches the TRUE score varies
+    // only 3.4e-4 (0.27531–0.27565, 0.12% relative) while straddling the
+    // 0.2755 rounding boundary — so an exact pin asserts a rounding artifact
+    // of a quantity that never meaningfully moved. Two separate agents
+    // "re-measured" that artifact and re-pinned it; both were wrong, and the
+    // second broke the first. Ratios are immune: a uniform IDF shift moves
+    // numerator and denominator together.
+    const top = cands[0]?.score ?? 0;
+    expect(top).toBeGreaterThan(FUNNEL_PRIMARY_MIN_SCORE);
+    // Observed 1.058–1.062 across six branches (2026-08-20). Bounded on BOTH
+    // sides: too low and the score gate stops being the thing that fails to
+    // refuse this; too high and it is no longer noise-tier.
+    expect(top / FUNNEL_PRIMARY_MIN_SCORE).toBeGreaterThan(1.03);
+    expect(top / FUNNEL_PRIMARY_MIN_SCORE).toBeLessThan(1.15);
+
+    // (b) …and BREADTH is what actually refuses it — with real headroom.
+    //
+    // The old 3dp pin here was ~6x more fragile than the score pin and is
+    // exactly what a previous fix left behind: `funnelEvidenceBreadth` sums
+    // SIX already-quantized scores, so `toBeCloseTo(x, 3)` on it is exact
+    // equality, and the rendered total flips when any ONE rank-3..8 tail
+    // candidate crosses a 3dp boundary.
+    const noiseBreadth = funnelEvidenceBreadth(cands);
+    expect(noiseBreadth).toBeLessThan(FUNNEL_MIN_EVIDENCE_BREADTH);
+    // Observed 0.866–0.869 of the gate. Worth stating plainly, because the
+    // "4x separation" noted below is the POSITIVE case only: the NEGATIVE
+    // control is refused by just ~13% of headroom, and the 3dp pin obscured
+    // that rather than surfacing it.
+    expect(noiseBreadth / FUNNEL_MIN_EVIDENCE_BREADTH).toBeLessThan(0.92);
+
+    // (c) The separation the gate actually relies on, asserted as a ratio so
+    // it survives any uniform corpus shift (observed 4.48–4.64x).
+    const genuine = semanticCandidates(
+      'contact has many active record-triggered flows - is their execution order deterministic, and what is the risk?',
+      10,
     );
-    expect(funnelEvidenceBreadth(cands)).toBeCloseTo(0.277, 3);
+    expect(funnelEvidenceBreadth(genuine) / noiseBreadth).toBeGreaterThan(3);
   });
 
   it('POSITIVE (intent gate): a real advisory-tier question still routes', async () => {
@@ -1187,7 +1233,20 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
     // diagnosis (or accidentally fixes it) surfaces here.
     const bare = semanticCandidates('setup', 5);
     expect(bare[0]?.tool).toBe('sfi.live_setup_audit_trail');
-    expect(bare[0]?.score).toBeCloseTo(0.436, 3);
+
+    // The claim this line exists to prove is COMPARATIVE — "a shorter,
+    // emptier noise question scores HIGHER" — so assert that, not a literal.
+    // The old `toBeCloseTo(0.436, 3)` was a latent landmine: measured raw
+    // 0.4360313, which sits 4.2e-5 from rounding to 0.437, so an unrelated
+    // description edit anywhere would have flipped it and sent the next
+    // engineer hunting a routing regression that did not exist.
+    const full =
+      semanticCandidates('any thoughts on the general vibe of the setup here', 5)[0]
+        ?.score ?? 0;
+    expect(bare[0]?.score ?? 0).toBeGreaterThan(full);
+    // …and the noise CEILING sits above the advisory-tier signal floor,
+    // which is the whole reason no score threshold can separate the two.
+    expect(bare[0]?.score ?? 0).toBeGreaterThan(FUNNEL_PRIMARY_MIN_SCORE);
 
     // Same list, same score, from a question that merely CONTAINS the token.
     const noise = semanticCandidates('the setup here — any opinions', 5);

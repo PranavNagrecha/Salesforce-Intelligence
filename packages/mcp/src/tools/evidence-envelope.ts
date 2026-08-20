@@ -20,6 +20,28 @@ import type {
 
 import type { CoverageCaveat } from './coverage-trust.js';
 
+/**
+ * The ONE place the v2 envelope's version number lives.
+ *
+ * ENVELOPEVERSION-DUPLICATED-LITERAL: the number was a bare `2` in three
+ * independent places inside this module — both builders below plus the
+ * fail-closed assertion that validates them — so a version bump had to be
+ * applied three times in lockstep, and applying it to the builders but not the
+ * assertion (or vice versa) would make the module reject its own output at the
+ * handler boundary. Hoisted to a single typed constant so that class of
+ * half-applied bump is impossible; the emitted value is UNCHANGED (`2`), so no
+ * tool's output moves by a byte.
+ *
+ * NOTE on scope: `envelopeVersion` is NOT a field individual tools stamp. The
+ * v2 evidence envelope is opt-in per tool (see the module doc above) and is
+ * built ONLY here — currently for `sfi.interpret` and
+ * `sfi.safe_to_delete_field`. The ~39 tool modules that carry a `trust` block
+ * carry `TrustSummary`, a different and much older contract; they are not
+ * unmigrated envelope emitters and must not be retrofitted with a version
+ * field they do not have an envelope for.
+ */
+export const EVIDENCE_ENVELOPE_VERSION = 2 satisfies EvidenceEnvelopeV2['envelopeVersion'];
+
 /** Runtime errors when a migrated tool emits a malformed envelope. */
 export class EvidenceEnvelopeError extends Error {
   constructor(message: string) {
@@ -60,9 +82,9 @@ export function assertEvidenceEnvelopeV2(
   if (!isObject(value)) {
     throw new EvidenceEnvelopeError('evidenceEnvelope must be an object');
   }
-  if (value.envelopeVersion !== 2) {
+  if (value.envelopeVersion !== EVIDENCE_ENVELOPE_VERSION) {
     throw new EvidenceEnvelopeError(
-      `evidenceEnvelope.envelopeVersion must be 2 (got ${String(value.envelopeVersion)})`,
+      `evidenceEnvelope.envelopeVersion must be ${String(EVIDENCE_ENVELOPE_VERSION)} (got ${String(value.envelopeVersion)})`,
     );
   }
   if (!Array.isArray(value.claims)) {
@@ -207,7 +229,7 @@ export const buildInterpretEvidenceEnvelope = (args: {
   readonly disclosure: string;
 }): EvidenceEnvelopeV2 => {
   const envelope: EvidenceEnvelopeV2 = {
-    envelopeVersion: 2,
+    envelopeVersion: EVIDENCE_ENVELOPE_VERSION,
     claims: claimsFromInterpretations(args.interpretations),
     evidence: evidenceFromGroundedIds(args.interpretations),
     coverage: coverageFromCaveat(args.trust, args.coverageCaveat),
@@ -281,7 +303,7 @@ export const buildSafeToDeleteEvidenceEnvelope = (
 
   const status = absenceStatusForDelete(source.verdict, source.coverageCaveat);
   const envelope: EvidenceEnvelopeV2 = {
-    envelopeVersion: 2,
+    envelopeVersion: EVIDENCE_ENVELOPE_VERSION,
     claims,
     evidence,
     coverage: coverageFromCaveat(source.trust, source.coverageCaveat),

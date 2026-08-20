@@ -49,6 +49,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { COMPONENT_TYPES } from './list-components.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
@@ -61,13 +62,27 @@ const CHANGED_SINCE_DEFAULT_LIMIT = 100;
 
 const CHANGED_SINCE_TOOL = 'sfi.changed_since';
 
-/**
- * Full superset of ComponentTypes for Zod validation. Mirrors the
- * contracts `ComponentType` union; declared inline so the validator
- * rejects typos with `invalid-query` rather than silently returning an
- * empty list for a never-existed type.
+ /**
+ * The types scanned when the caller omits `types`.
+ *
+ * This array USED to be named `COMPONENT_TYPES` and served two jobs at once:
+ * the Zod enum AND this default. Its comment claimed to be the "full
+ * superset" of the contracts union but had drifted to 46 of 101, so it
+ * silently did both jobs wrong -- rejecting 55 retrievable types at the
+ * validator, and quietly narrowing the default scan while `roster.ts`
+ * advertised "default scans every ComponentType".
+ *
+ * Validation now derives from the compile-time-proven `COMPONENT_TYPES` in
+ * `list-components.ts`. This constant keeps the PREVIOUS default scan set
+ * verbatim so the fix to the validator does not silently change what an
+ * unqualified `changed_since` call returns.
+ *
+ * KNOWN GAP (deliberately not changed here): this default is still narrower
+ * than the advertised "every ComponentType", so a change to e.g. a
+ * `FlexiPage` is invisible to a default call. Widening it is a BEHAVIOUR
+ * change and is tracked separately.
  */
-const COMPONENT_TYPES = [
+const CHANGED_SINCE_DEFAULT_TYPES = [
   'CustomObject',
   'CustomField',
   'ValidationRule',
@@ -311,7 +326,7 @@ export const changedSinceHandler = async (
   input: ChangedSinceInput,
 ): Promise<Result<McpResponse<ChangedSinceOutput>, McpError>> => {
   const limit = input.limit ?? CHANGED_SINCE_DEFAULT_LIMIT;
-  const types = input.types ?? COMPONENT_TYPES;
+  const types = input.types ?? CHANGED_SINCE_DEFAULT_TYPES;
 
   // CHANGED-SINCE-REJECTS-LAST-REFRESH-TOKEN: resolve a natural "last refresh"
   // token to the vault's refresh timestamp. The resolution is transparent —

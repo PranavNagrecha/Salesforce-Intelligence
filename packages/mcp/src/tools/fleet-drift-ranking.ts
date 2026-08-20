@@ -13,7 +13,8 @@
  *     (`probeLiveAccess`). A vault whose org has no consent is an honest
  *     `no-consent` SKIP, never an error and never a silent live call.
  *   - **Shared session budget.** Every staleness query routes through
- *     `runLiveQuery`, so N orgs × 6 queries decrement the same P6 budget that
+ *     `runLiveQuery`, so N orgs × {@link STALE_CHECK_TYPES}.length queries
+ *     (currently 15 per org, not the 6 this line used to claim) decrement the same P6 budget that
  *     bounds the hybrid plane. When the budget can't cover a vault's checks, the
  *     vault is a `budget-exhausted` skip — the sweep degrades, never overruns
  *     the org's API limits.
@@ -42,7 +43,7 @@ import { probeLiveAccess, STALE_CHECK_TYPES } from './live-plane.js';
 import { liveBudgetStatus, runLiveQuery, type LiveBudgetStatus } from './live-session.js';
 
 export const FLEET_DRIFT_DISCLOSURE =
-  'Ranks registered vaults by how far each is BEHIND its live org — a per-org Tooling-API count of components modified since that vault\'s last refresh, across ApexClass / ApexTrigger / ValidationRule / Layout / Flow / CustomField (other families NOT checked). Each ranked row is its own live_org read at its own time; the aggregate is a fleet roll-up, so one org\'s freshness never implies another\'s. Consent is per org (a vault without it is an honest no-consent skip); every query routes through the per-session live-query budget (a vault the budget can\'t cover is a budget-exhausted skip — raise SFI_LIVE_QUERY_BUDGET or sweep a subset). Read-only; mutates neither org nor vault.';
+  `Ranks registered vaults by how far each is BEHIND its live org — a per-org Tooling-API count of components modified since that vault's last refresh, across the ${String(STALE_CHECK_TYPES.length)} types \`sfi.live_stale_check\` checks (${STALE_CHECK_TYPES.join(' / ')}; other families NOT checked). Each ranked row is its own live_org read at its own time; the aggregate is a fleet roll-up, so one org's freshness never implies another's. Consent is per org (a vault without it is an honest no-consent skip); every query routes through the per-session live-query budget (a vault the budget can't cover is a budget-exhausted skip — raise SFI_LIVE_QUERY_BUDGET or sweep a subset). Read-only; mutates neither org nor vault.`;
 
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const STALE_TYPE_COUNT = STALE_CHECK_TYPES.length;

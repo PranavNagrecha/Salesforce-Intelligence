@@ -2,12 +2,17 @@
 /**
  * AUDIT-F4 — EvidenceEnvelope v2 builders + runtime assert.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import type { TrustSummary } from '@sf-intelligence/contracts';
 
 import {
   assertEvidenceEnvelopeV2,
   buildInterpretEvidenceEnvelope,
   buildSafeToDeleteEvidenceEnvelope,
+  EVIDENCE_ENVELOPE_VERSION,
   EvidenceEnvelopeError,
 } from '../../src/tools/evidence-envelope.js';
 
@@ -130,5 +135,70 @@ describe('EvidenceEnvelope v2 (AUDIT-F4)', () => {
       },
     ]);
     expect(envelope.absence?.status).toBe('unknown');
+  });
+});
+
+/**
+ * ENVELOPEVERSION-DUPLICATED-LITERAL.
+ *
+ * `envelopeVersion` is NOT a per-tool field: the v2 envelope is opt-in and is
+ * constructed ONLY in `evidence-envelope.ts`, for `sfi.interpret` and
+ * `sfi.safe_to_delete_field`. That centralisation is correct and is left alone.
+ * What was NOT centralised is the version NUMBER itself: it was a bare `2` in
+ * three independent places inside the module — both builders plus the
+ * fail-closed assertion that validates their output — so a bump had to be
+ * applied three times in lockstep, and a half-applied bump would make the
+ * module reject envelopes it had just built.
+ *
+ * These assertions pin the single-constant arrangement. The emitted value is
+ * unchanged, so no tool's output moves; what changes is that it can only be
+ * changed in one place.
+ */
+describe('ENVELOPEVERSION-DUPLICATED-LITERAL — one constant, no stray literals', () => {
+  const moduleSource = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      'src',
+      'tools',
+      'evidence-envelope.ts',
+    ),
+    'utf8',
+  );
+
+  it('both builders emit the shared constant, not a bare literal', () => {
+    // FAIL-BEFORE: two `envelopeVersion: 2,` object literals lived here.
+    expect(moduleSource).not.toMatch(/envelopeVersion:\s*\d/);
+    const uses = moduleSource.match(/envelopeVersion: EVIDENCE_ENVELOPE_VERSION,/g) ?? [];
+    expect(uses.length).toBe(2);
+  });
+
+  it('the fail-closed assert validates against the SAME constant', () => {
+    // FAIL-BEFORE: the guard compared against its own hardcoded `!== 2`, so it
+    // could silently disagree with the builders after a partial bump.
+    expect(moduleSource).toContain(
+      'if (value.envelopeVersion !== EVIDENCE_ENVELOPE_VERSION)',
+    );
+  });
+
+  it('the constant is still 2 — this is a refactor, not a version bump', () => {
+    expect(EVIDENCE_ENVELOPE_VERSION).toBe(2);
+  });
+
+  it('every envelope the module builds carries the constant', () => {
+    const interpret = buildInterpretEvidenceEnvelope({
+      interpretations: [],
+      trust: trust('complete'),
+      disclosure: 'test disclosure',
+    });
+    const del = buildSafeToDeleteEvidenceEnvelope({
+      fieldId: 'CustomField:Account.Test__c',
+      verdict: 'safe',
+      reasoning: [],
+      trust: trust('complete'),
+    });
+    expect(interpret.envelopeVersion).toBe(EVIDENCE_ENVELOPE_VERSION);
+    expect(del.envelopeVersion).toBe(EVIDENCE_ENVELOPE_VERSION);
   });
 });

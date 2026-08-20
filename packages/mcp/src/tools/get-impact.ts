@@ -43,6 +43,7 @@
 
 import {
   EDGE_TYPES,
+  UNPRODUCED_EDGE_TYPES,
   type ComponentId,
   type Edge,
   type EdgeType,
@@ -184,6 +185,13 @@ export interface GetImpactOutput {
    * (byte-identical to before).
    */
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * Present ONLY when `edgeTypes` named a type no extractor produces
+   * (`UNPRODUCED_EDGE_TYPES`). Distinct from `coverageCaveat`: that reports a
+   * family THIS VAULT did not retrieve, which a refresh can close. This one
+   * cannot be closed by any refresh on any org.
+   */
+  readonly unproducedEdgeTypes?: string;
   readonly disclosure: string;
   /**
    * R6-19: a ```` ```mermaid graph TD ``` ```` fence visualizing the impact
@@ -771,6 +779,26 @@ export const getImpactHandler = async (
       ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
       : undefined;
 
+  // Same "empty is not none" hazard as `sfi.get_edges`, and more absolute than a
+  // coverage gap: an edge type in `UNPRODUCED_EDGE_TYPES` has NO producer in the
+  // product, so filtering on it contributes nothing BY CONSTRUCTION and no
+  // refresh on any org can change that. Emitted only when such a type was
+  // actually requested, so every other response stays byte-identical.
+  const requestedUnproduced = (input.edgeTypes ?? []).filter((t) =>
+    (UNPRODUCED_EDGE_TYPES as readonly string[]).includes(t),
+  );
+  const unproducedEdgeTypes =
+    requestedUnproduced.length > 0
+      ? `${requestedUnproduced.map((t) => `\`${t}\``).join(', ')} ${
+          requestedUnproduced.length === 1 ? 'is a DECLARED edge type that' : 'are DECLARED edge types that'
+        } NO extractor in this product emits, so ${
+          requestedUnproduced.length === 1 ? 'it contributes' : 'they contribute'
+        } NOTHING to this impact walk BY CONSTRUCTION. Absence here is not ` +
+        `evidence that no such relationship exists — it is never recorded. ` +
+        `Unlike a coverage gap, re-running \`sfi refresh\` on any org cannot ` +
+        `populate ${requestedUnproduced.length === 1 ? 'it' : 'them'}.`
+      : undefined;
+
   const truncationReason = finalTruncated
     ? {
         reason: budgeted.trimmed
@@ -811,6 +839,7 @@ export const getImpactHandler = async (
       payloadSlimmed: slimmedCount > 0,
       soundness,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(unproducedEdgeTypes !== undefined ? { unproducedEdgeTypes } : {}),
       disclosure,
       ...(diagram !== undefined ? { diagram } : {}),
       ...(diagramOmittedReason !== undefined ? { diagramOmittedReason } : {}),

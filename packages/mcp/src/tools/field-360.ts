@@ -28,7 +28,7 @@
  *   | rollups       | incoming `references` from a PARENT roll-up (rollup-summary)   | declared       |
  *   | writers       | incoming `writesTo` from Apex/Flow/Workflow/PB         | mixed            |
  *   | readers       | incoming `readsFrom` from Apex/Flow/LWC/Aura/VF/SOQL — CODE reads only; a ConditionalContext `readsFrom` is NOT one (see `automations`) | mixed (heuristic)|
- *   | ui            | incoming `usedInLayout` + frontend `readsFrom` to UI   | declared/heuristic |
+ *   | ui            | incoming `usedInLayout` + frontend `readsFrom` to UI + `references` from a UI placement surface (Layout, **FlexiPage** — the Lightning page, both its heuristic field sweep and its parsed related-list aliases — QuickAction, CustomTab) | declared/parsed/heuristic |
  *   | integrations  | incoming `references`/`exposes` from integration tier  | declared/heuristic |
  *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule + ConditionalContext `readsFrom` (the fields a Flow/workflow/validation condition TESTS, source condition-extractor) | declared/parsed/heuristic |
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
@@ -145,8 +145,19 @@ export const FIELD_360_DATA_NOT_AVAILABLE: readonly string[] = [
   'dashboards',
 ];
 
-/** The content sections `includeSections` can request. */
-const SECTION_NAMES = [
+/**
+ * The content sections `includeSections` can request.
+ *
+ * FIELD-360-ADVERTISED-SECTIONS-UNDERSTATE-SCHEMA: exported because the
+ * ADVERTISED JSON Schema in `roster.ts` used to hand-list this enum and had
+ * silently fallen two behind it — `rollups` and `listViews` were accepted by
+ * the Zod schema and implemented by the handler, but a host validating args
+ * against the advertised schema would REJECT them. Those are precisely the two
+ * sections that were added to stop roll-up and list-view referrers being
+ * dropped, so the drift made the fixes unreachable through a strict host.
+ * The roster now interpolates this tuple instead of re-listing it.
+ */
+export const SECTION_NAMES = [
   'validates',
   'formulas',
   'rollups',
@@ -388,9 +399,37 @@ const INTEGRATION_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
   'OutboundMessage',
 ]);
 
-/** Node types whose UI edges land in the `ui` section. */
+/**
+ * Node types whose UI edges land in the `ui` section.
+ *
+ * FLEXIPAGE-MISSING-FROM-UI-SURFACE: `FlexiPage` (the Lightning record/app/home
+ * page) belongs here and was absent, so EVERY Lightning-page reference to a
+ * field fell through `classifyIncomingEdge` and was dropped silently — the
+ * `ui` section reported Classic layouts only, on the surface that is the
+ * PRIMARY UI of a modern org. Two producers mint those incoming edges and both
+ * were lost:
+ *
+ *   - `extractFlexiPage` (`enterprise-metadata-extractor`, heuristic) — the
+ *     whole-XML dotted-field sweep, `referenceKind: 'fieldRef'`;
+ *   - the import-time relationship resolver (`relationship-resolver`, parsed) —
+ *     dynamic related-list column aliases, which resolve onto the RELATED
+ *     object's fields.
+ *
+ * `safe_to_delete_field` already classifies BOTH as its `ui` category
+ * ("A Lightning page (FlexiPage) references this field"), so the omission also
+ * made the two tools describe one dependency incompatibly — the same class of
+ * disagreement the `rollups` and `listViews` branches below were added to fix.
+ *
+ * FlexiPage is deliberately NOT added to {@link CODE_NODE_TYPES}: a Lightning
+ * page is a placement surface, not code, so the both-code-and-UI `readsFrom`
+ * fold does not apply to it (no extractor mints a FlexiPage `readsFrom` today,
+ * and if one ever did it would be a UI placement read, reached through the
+ * `references` branch). `ui` is not on any `computeRisk` axis, so surfacing
+ * these rows moves no field's `riskLevel`.
+ */
 const UI_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
   'Layout',
+  'FlexiPage',
   'LightningComponentBundle',
   'AuraDefinitionBundle',
   'VisualforcePage',
@@ -803,8 +842,12 @@ const classifyIncomingEdge = (
     return;
   }
 
-  // UI-only types (Layout, QuickAction, CustomTab) outside the
-  // usedInLayout edge fall into `ui` via `references`.
+  // UI-only types (Layout, FlexiPage, QuickAction, CustomTab) outside the
+  // usedInLayout edge fall into `ui` via `references`. FlexiPage arrives here
+  // by BOTH of its producers — the heuristic `enterprise-metadata-extractor`
+  // field sweep and the parsed `relationship-resolver` related-list aliases —
+  // and the row carries `source` + `confidence` so a caller can still tell a
+  // scraped page reference from a resolved related-list column.
   if (UI_NODE_TYPES.has(source.type) && edge.edgeType === 'references') {
     buckets.ui.push(row);
     return;

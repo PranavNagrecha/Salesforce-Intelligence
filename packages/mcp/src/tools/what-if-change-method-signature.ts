@@ -60,8 +60,15 @@
  * **Test class identification.** Per the WhatIfSemantics.md "Test
  * class identification" rules, a test class needs update when it:
  *
- *   - Has an outgoing `coversTest` edge to the target class (the v0.3
- *     extracted convention from @TestVisible / @TestSetup), OR
+ *   - Has an outgoing `coversTest` edge to the target class — NOTE: this
+ *     branch is DEAD on every real vault. `coversTest` is a declared
+ *     `EdgeType` with ZERO producers (see `UNPRODUCED_EDGE_TYPES` in
+ *     `@sf-intelligence/contracts`); the "v0.3 extracted convention from
+ *     @TestVisible / @TestSetup" this comment used to claim was never built,
+ *     and could not be: neither annotation names a test-to-class mapping, and
+ *     Salesforce publishes coverage only as a RUNTIME artifact. The walk is
+ *     kept (it costs one query and would light up the moment a producer
+ *     lands) and the gap is DISCLOSED rather than hidden, OR
  *   - Has an outgoing `callsApex` edge to the target class with the
  *     matching `methodName` AND its node properties indicate it is a
  *     test class (`properties.isTest === true` per the v1.5
@@ -90,9 +97,12 @@
  * `Boundary disclosure (surfaced ALWAYS for this tool)` text from
  * WhatIfSemantics.md is the prefix; the v2.3 anchor on dynamic Apex
  * blind-spots applies (reflective `Type.forName + invoke` paths are
- * invisible). Test classes that don't follow the
- * `{TargetClassName}Test` naming convention and don't carry a
- * `coversTest` edge may be missed.
+ * invisible). Test-class identification reduces, in practice, to "an
+ * `@isTest` class with a DIRECT `callsApex` call-site to the target": the
+ * `{TargetClassName}Test` naming convention is not implemented at all, and
+ * `coversTest` has no producer. An empty `testClassesNeedingUpdate` therefore
+ * means the coverage mapping is UNAVAILABLE, not that the class is untested,
+ * and the always-on `disclosure` says so verbatim.
  *
  * Implementation notes:
  *   - `classApiName` is required to start with `ApexClass:`. Other
@@ -214,7 +224,7 @@ export interface WhatIfChangeMethodSignatureOutput {
  * tool)" text so the test suite can lock the phrasing.
  */
 const DISCLOSURE =
-  "caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
+  "caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified in ONE way that actually works: an incoming `callsApex` edge from a class whose `properties.isTest` is true. The `coversTest` edge this tool ALSO walks is declared in the contract but is emitted by NO extractor, graph-build mint, or enricher in this product (see `UNPRODUCED_EDGE_TYPES`), so on a real vault that walk ALWAYS returns nothing - Salesforce does not declare test-to-class coverage anywhere in the metadata source format (coverage is a RUNTIME artifact of a test run). Read an empty `testClassesNeedingUpdate` as \"test-coverage mapping UNAVAILABLE for this class\", never as \"no tests cover this class\": a test class that exercises the target only indirectly - through a helper, a trigger, or dynamic dispatch - has no `callsApex` edge to it and is invisible here. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
 
 /**
  * Zod schema for the `sfi.what_if_change_method_signature` tool input.
@@ -521,12 +531,26 @@ const collectCallers = async (
 };
 
 /**
- * Walk the incoming `coversTest` edges to the target class. The v0.3
- * extractor populates these from `@TestVisible` / `@TestSetup`
- * annotations and the `className + 'Test'` naming convention. Each
- * source class is a test class that exercises the target — surfaces
- * in both the `callingClasses` array (with `category:
- * 'test-class-update'`) and the `testClassesNeedingUpdate` scalar.
+ * Walk the incoming `coversTest` edges to the target class.
+ *
+ * COVERSTEST-DECLARED-BUT-NEVER-PRODUCED: this walk returns EMPTY on every
+ * real vault. The doc here used to state that "the v0.3 extractor populates
+ * these from `@TestVisible` / `@TestSetup` annotations and the
+ * `className + 'Test'` naming convention" — no such extractor exists, and a
+ * scan of every producing package finds ZERO `edgeType: 'coversTest'`
+ * emission sites (`UNPRODUCED_EDGE_TYPES` in `@sf-intelligence/contracts`
+ * pins that, and `packages/mcp/test/tools/edge-type-producers.test.ts` fails
+ * if it ever stops being true). It is not an oversight that can be patched
+ * locally either: neither annotation declares a test-to-class mapping, and the
+ * one statically-knowable signal ("an @isTest class calls this class") is
+ * already modeled as `callsApex` + `properties.isTest` and is walked by
+ * {@link collectCallers}.
+ *
+ * The function is KEPT rather than deleted so the tool lights up automatically
+ * if a producer ever lands (the Tooling API's `ApexCodeCoverage` being the only
+ * sound source), and the tool's always-on `disclosure` names the gap so an
+ * empty `testClassesNeedingUpdate` reads as "coverage mapping unavailable"
+ * instead of "nothing tests this".
  */
 const collectCoveringTests = async (
   ctx: Context,

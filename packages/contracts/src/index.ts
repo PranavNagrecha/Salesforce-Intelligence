@@ -810,6 +810,48 @@ type EdgeTypesComplete =
 const edgeTypesComplete: EdgeTypesComplete = true;
 
 /**
+ * COVERSTEST-DECLARED-BUT-NEVER-PRODUCED: the {@link EdgeType} members that are
+ * part of the contract but that NO extractor, graph-build mint, or enricher in
+ * this product emits — so a vault can never contain one, and a tool that walks
+ * one gets an empty result on EVERY real org while its synthetic-fixture tests
+ * pass.
+ *
+ * `coversTest` is the whole list, and it has been since v1.4 declared it. Its
+ * own union comment claims it is "declared via @TestVisible/@TestSetup,
+ * heuristic from callsApex inference" — no such producer was ever written. It
+ * is a genuine gap rather than dead weight, because it is NOT recoverable from
+ * metadata: Salesforce does not declare which test class covers which class
+ * anywhere in the source format (coverage is a RUNTIME artifact of a test run,
+ * readable only from the Tooling API's ApexCodeCoverage). `@TestVisible` marks
+ * a member on the TARGET class and names no test; `@TestSetup` marks a method
+ * inside the test class and names no target. The one thing that IS statically
+ * knowable — "an @isTest class calls this class" — is ALREADY modeled as
+ * `callsApex` plus `properties.isTest`, so minting `coversTest` from it would
+ * duplicate an existing edge and report one referrer twice.
+ *
+ * The type is therefore KEPT (deleting it would silently drop a modeled
+ * concept and break the tools and vaults that reference the name), and every
+ * consumer that walks it MUST disclose the gap instead of letting an empty walk
+ * read as "no tests cover this".
+ *
+ * `sfi.what_if_change_method_signature` discloses it. TWO OTHERS DO NOT:
+ * `sfi.get_edges` and `sfi.get_impact` both advertise `coversTest` as a
+ * user-selectable `edgeType`, so `get_edges { edgeType: 'coversTest' }` returns
+ * `[]` and that empty result reads as "nothing covers this class". An earlier
+ * revision of this comment asserted `what_if_change_method_signature` was "the
+ * only such consumer today"; that was false when written — the two selectable
+ * surfaces above were already shipping. Do not re-narrow this claim without
+ * grepping the roster for the type first.
+ *
+ * Enforced by `packages/mcp/test/tools/edge-type-producers.test.ts`, which
+ * scans the producing packages for `edgeType: '…'` emission sites and fails if
+ * this list stops matching the set with zero producers — in EITHER direction.
+ * (That test lives in `packages/mcp`, not `packages/contracts`, which has no
+ * `test/` directory at all.)
+ */
+export const UNPRODUCED_EDGE_TYPES = ['coversTest'] as const satisfies readonly EdgeType[];
+
+/**
  * A directed edge between two nodes.
  *
  * Every edge carries a `confidence` so consumers can distinguish ground

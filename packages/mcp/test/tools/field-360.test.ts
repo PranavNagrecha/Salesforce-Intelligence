@@ -110,6 +110,17 @@ const FILTER_ONLY_FIELD = 'CustomField:Account.Filter_Only__c';
 const COMBO_FIELD = 'CustomField:Account.Combo__c';
 const FILTER_LIST_VIEW = 'ListView:Account.FilteredOnly';
 const COMBO_LIST_VIEW = 'ListView:Account.ComboView';
+// FLEXIPAGE-MISSING-FROM-UI-SURFACE: a field whose ONLY referrers are Lightning
+// pages, plus the two FlexiPage nodes that reference it — one via the heuristic
+// whole-XML field sweep (`enterprise-metadata-extractor`), one via the parsed
+// import-time related-list alias resolution (`relationship-resolver`). Both
+// producers mint a real FlexiPage -> CustomField `references` edge on a real
+// vault; neither reached ANY field_360 section before the fix, because
+// `FlexiPage` was absent from UI_NODE_TYPES and the edge fell through
+// `classifyIncomingEdge` entirely.
+const FLEXI_ONLY_FIELD = 'CustomField:Account.Flexi_Only__c';
+const FLEXI_PAGE = 'FlexiPage:Account_Record_Page';
+const FLEXI_PAGE_RELATED_LIST = 'FlexiPage:Account_Console';
 const seed: ExtractionResult = {
   nodes: [
     makeNode({
@@ -269,6 +280,29 @@ const seed: ExtractionResult = {
       apiName: 'ComboView',
       parentId: 'CustomObject:Account',
     }),
+    // FLEXIPAGE-MISSING-FROM-UI-SURFACE fixture.
+    makeNode({
+      id: FLEXI_ONLY_FIELD,
+      type: 'CustomField',
+      apiName: 'Flexi_Only__c',
+      label: 'Flexi Only',
+      parentId: 'CustomObject:Account',
+      properties: { dataType: 'Text' },
+    }),
+    makeNode({
+      id: FLEXI_PAGE,
+      type: 'FlexiPage',
+      apiName: 'Account_Record_Page',
+      label: 'Account Record Page',
+      properties: { sobjectType: 'Account', pageType: 'RecordPage', activationsModeled: false },
+    }),
+    makeNode({
+      id: FLEXI_PAGE_RELATED_LIST,
+      type: 'FlexiPage',
+      apiName: 'Account_Console',
+      label: 'Account Console',
+      properties: { sobjectType: 'Account', pageType: 'RecordPage', activationsModeled: false },
+    }),
   ],
   edges: [
     makeEdge({
@@ -376,6 +410,28 @@ const seed: ExtractionResult = {
       source: 'enterprise-metadata-extractor',
       properties: { referenceKind: 'columnAndFilter' },
     }),
+    // FLEXIPAGE-MISSING-FROM-UI-SURFACE: producer 1 — extractFlexiPage's
+    // whole-XML dotted-field sweep (heuristic, referenceKind fieldRef).
+    makeEdge({
+      fromId: FLEXI_PAGE,
+      toId: FLEXI_ONLY_FIELD,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: 'enterprise-metadata-extractor',
+      properties: { referenceKind: 'fieldRef' },
+    }),
+    // Producer 2 — the import-time relationship resolver, which grounds a
+    // dynamic related list's BARE column aliases onto the related object's
+    // fields (parsed). Deliberately NOT routed to `formulas`: that branch is
+    // scoped to a CustomField referrer for exactly this reason.
+    makeEdge({
+      fromId: FLEXI_PAGE_RELATED_LIST,
+      toId: FLEXI_ONLY_FIELD,
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'relationship-resolver',
+      properties: { referenceKind: 'relatedListFieldAlias' },
+    }),
   ],
 };
 
@@ -455,6 +511,57 @@ describe('field360Handler', () => {
     expect(row?.properties['referenceKind']).toBe('fieldRef');
     // The per-section count reflects the listViews row too.
     expect(out.summary.perSectionCounts['listViews']).toBe(1);
+  });
+
+  it('FLEXIPAGE-MISSING-FROM-UI-SURFACE — Lightning page field refs compose into the ui section', async () => {
+    // FAIL-BEFORE: `FlexiPage` was missing from UI_NODE_TYPES, so a Lightning
+    // page's `references` edge onto a field matched NO branch of
+    // classifyIncomingEdge and was dropped silently — `ui` reported Classic
+    // layouts only, and a field used ONLY on Lightning pages read as having no
+    // UI referrer at all. On the reference vault that silently discarded 708
+    // FlexiPage -> CustomField edges across 588 distinct fields.
+    const result = await field360Handler(ctx, { fieldId: FLEXI_ONLY_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.ui?.rows.length).toBe(2);
+    const byId = new Map(out.ui?.rows.map((r) => [r.componentId, r]) ?? []);
+
+    // Producer 1: the heuristic whole-XML field sweep.
+    const sweep = byId.get(FLEXI_PAGE);
+    expect(sweep?.componentType).toBe('FlexiPage');
+    expect(sweep?.edgeType).toBe('references');
+    expect(sweep?.confidence).toBe('heuristic');
+    expect(sweep?.source).toBe('enterprise-metadata-extractor');
+
+    // Producer 2: the parsed related-list alias resolution. It must land in
+    // `ui`, NOT in `formulas` — `relationship-resolver` also mints resolved
+    // formula traversals, but that branch is scoped to a CustomField referrer.
+    const alias = byId.get(FLEXI_PAGE_RELATED_LIST);
+    expect(alias?.componentType).toBe('FlexiPage');
+    expect(alias?.confidence).toBe('parsed');
+    expect(alias?.source).toBe('relationship-resolver');
+    expect(out.formulas?.rows.length ?? 0).toBe(0);
+
+    expect(out.summary.perSectionCounts['ui']).toBe(2);
+    // Every incoming edge is now accounted for by a section — the silent drop
+    // is what made totalIncomingEdges exceed the visible rows.
+    expect(out.summary.totalIncomingEdges).toBe(2);
+  });
+
+  it('FLEXIPAGE-MISSING-FROM-UI-SURFACE — FlexiPage is a UI surface, never a code reader', async () => {
+    // Guards the interaction the fix has to get right: FlexiPage is added to
+    // UI_NODE_TYPES but deliberately NOT to CODE_NODE_TYPES, so it can never
+    // take the both-code-and-UI `readsFrom` fold that LWC / Aura / Visualforce
+    // use. A Lightning page is a placement surface, not code.
+    const result = await field360Handler(ctx, { fieldId: FLEXI_ONLY_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.readers?.rows.length ?? 0).toBe(0);
+    expect(out.listViews?.rows.length ?? 0).toBe(0);
+    expect(out.automations?.rows.length ?? 0).toBe(0);
+    expect(out.integrations?.rows.length ?? 0).toBe(0);
   });
 
   it('CR-CAP-13 — a filter-ONLY field surfaces in listViews tagged filterRef', async () => {

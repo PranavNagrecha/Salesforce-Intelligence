@@ -58,6 +58,11 @@ import {
   type PicklistLiteralMismatch,
   type PicklistValidationGap,
 } from './picklist-literal-check.js';
+import {
+  STALE_CHECK_TYPE_COUNT,
+  STALE_CHECK_TYPE_LIST,
+  STALE_CHECK_TYPES,
+} from './stale-check-types.js';
 
 // Re-export the leaf primitives so every existing import path that pulls them
 // FROM './live-plane.js' (live-session.ts, the public barrel, the test suites)
@@ -790,32 +795,24 @@ export type LiveStaleCheckInput = z.infer<typeof liveStaleCheckInputSchema>;
  * the whole check.
  */
 /**
- * The Tooling-API-queryable types the staleness check compares against the
- * vault's `refreshedAt`. Exported so the fleet drift sweep
- * (`fleet_drift_ranking`) runs the SAME set of checks per org as
- * `live_stale_check` does for one org, without drift.
+ * The staleness check's type set + its prose renderings now live in the
+ * import-free leaf {@link ./stale-check-types.js}, and are RE-EXPORTED here so
+ * every existing consumer (`src/index.ts`, `fleet-drift-ranking.ts`, the
+ * tests) keeps its import path.
+ *
+ * They were moved because `roster.ts` must interpolate them into the MCP tool
+ * descriptions (see STALE-CHECK-DESCRIPTION-UNDERSTATES-COVERAGE) and this
+ * file is the live plane's consent/session SEAM: a value import from the
+ * roster into here gives every non-live tool that reads the roster transitive
+ * reach into the ambient live plane, which `plane-import-guard.test.ts`
+ * correctly rejects. A leaf both sides can read costs nothing and keeps the
+ * seam un-widened.
  */
-export const STALE_CHECK_TYPES = [
-  'ApexClass',
-  'ApexTrigger',
-  'ValidationRule',
-  'Layout',
-  'Flow',
-  'CustomField',
-  // P13-WATCH-sweep widening — closes the permission-drift hole (a Profile or
-  // PermissionSet edited in the org silently invalidated access answers) and
-  // covers the UI/record-type surfaces. A type the org's Tooling API rejects
-  // lands in erroredTypes honestly, never fatal.
-  'CustomObject',
-  'Profile',
-  'PermissionSet',
-  'PermissionSetGroup',
-  'SharingRules',
-  'FlexiPage',
-  'RecordType',
-  'CustomApplication',
-  'CustomTab',
-] as const;
+export {
+  STALE_CHECK_TYPE_COUNT,
+  STALE_CHECK_TYPE_LIST,
+  STALE_CHECK_TYPES,
+} from './stale-check-types.js';
 
 /** Strict ISO-8601 UTC timestamp guard for the SOQL datetime literal. */
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
@@ -864,7 +861,7 @@ export interface LiveStaleCheckOutput {
 
 const LIVE_STALE_BOUNDARIES: readonly string[] = Object.freeze([
   'Compares the vault\'s refreshedAt against a LIVE Tooling-API query for components modified since; requires the live plane (SFI_LIVE_PLANE_ENABLED or liveEnabled:true). Read-only; does not mutate the org or the vault.',
-  'Counts modifications for the Tooling-queryable types (ApexClass, ApexTrigger, ValidationRule, Layout, Flow, CustomField, CustomObject, Profile, PermissionSet, PermissionSetGroup, SharingRules, FlexiPage, RecordType, CustomApplication, CustomTab — types the org rejects land in erroredTypes). Other metadata families are NOT checked, so orgAheadOfVault:false means "none of the checked types drifted", not "nothing in the org changed". Run /sfi-refresh when staleness matters.',
+  `Counts modifications for the ${String(STALE_CHECK_TYPE_COUNT)} Tooling-queryable types (${STALE_CHECK_TYPE_LIST} — types the org rejects land in erroredTypes). Other metadata families are NOT checked, so orgAheadOfVault:false means "none of the checked types drifted", not "nothing in the org changed". Run /sfi-refresh when staleness matters.`,
 ]);
 
 /** The staleness counts plus the per-type detail the `live_stale_check` tool surfaces. */
@@ -944,6 +941,16 @@ export const checkVaultStaleness = async (
  * detection (P5-stale-detection). For each checked type, counts components with
  * `LastModifiedDate` after the vault's `refreshedAt`. A non-zero total means the
  * vault is stale relative to the org for that type.
+ *
+ * The checked set is {@link STALE_CHECK_TYPES} — ALL of it, currently 15 types,
+ * NOT the six the roster description used to name. It spans four families:
+ * code (ApexClass, ApexTrigger), declarative logic (ValidationRule, Flow),
+ * schema (CustomObject, CustomField, RecordType), and — the half the
+ * description omitted — permission / security (Profile, PermissionSet,
+ * PermissionSetGroup, SharingRules) plus UI surfaces (Layout, FlexiPage,
+ * CustomApplication, CustomTab). Every prose surface interpolates
+ * {@link STALE_CHECK_TYPE_LIST} rather than re-listing them, so the
+ * description, this JSDoc, and the code cannot disagree again.
  */
 export const liveStaleCheckHandler = async (
   ctx: Context,
