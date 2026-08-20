@@ -52,7 +52,7 @@ error. Stop and report cleanly to the user when:
 - `sfi status` exits non-zero for any reason. That is not an
   expected state; surface the stderr line verbatim and do not
   retry. The CLI may be miswired or the workspace may have a
-  broken install — point the user at `INSTALL.md`.
+  broken install — point the user at `docs/guides/installation.md`.
 - The user asks you to "fix" the reported state from inside this
   command. Don't. `/sfi-status` reports; recovery is the user's
   call, via `/sfi-init` or `/sfi-refresh`.

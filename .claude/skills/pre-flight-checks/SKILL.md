@@ -191,7 +191,7 @@ Stop and surface the limit, or route to another skill, when:
 
 - **`sfi.health_check` itself fails to dispatch** (not just returns
   `degraded` — the call errors). The MCP server may not be running.
-  Surface verbatim and point the user to `INSTALL.md`.
+  Surface verbatim and point the user to `docs/guides/installation.md`.
 - **`sf org list --json` returns no orgs at all.** Recommend
   `sf org login web --alias <alias>` and stop.
 - **The manifest's `sourceOrg` doesn't match any alias the CLI knows.**

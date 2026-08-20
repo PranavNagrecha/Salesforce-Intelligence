@@ -2,7 +2,8 @@
  * P7-reference-stub-nodes — the phantom taxonomy classifier, computed ON DEMAND.
  *
  * A referenced-but-unretrieved id (an edge target with no node) is classified
- * into one of six buckets — the same taxonomy measured in
+ * into one of the seven `PhantomClassification` buckets — the same taxonomy
+ * measured in
  * `docs/reports/phantom-taxonomy-audit.md` (GATE 0) — from its inbound edge
  * kinds, its id shape, and the manifest coverage of its ComponentType. The
  * result is a {@link ReferenceStub}: a structured, classified stub returned in

@@ -92,9 +92,10 @@ contracts          shared types — no deps
 ├── plugin.json        # manifest: paths to skills + commands, and the MCP server command
 └── marketplace.json   # Claude Code marketplace entry
 .claude/
-├── skills/            # 25 skill folders, each <name>/SKILL.md (auto-activate by trigger)
+├── skills/            # 26 skill folders, each <name>/SKILL.md (auto-activate by trigger)
 │   └── using-sf-intelligence/  ← the entry skill: teaches the resolve-first tool cascade
-└── commands/          # 4 slash commands: sfi-onboard, sfi-init, sfi-refresh, sfi-status
+└── commands/          # 5 slash commands: sfi-onboard, sfi-init, sfi-refresh,
+                    #   sfi-status, sfi-field-audit
 ```
 
 The slash commands wrap the `sfi` CLI; the skills are the agent's instructions

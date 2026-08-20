@@ -18,6 +18,14 @@ export default defineConfig({
     // core dump → exit 134) rather than failing softly. Give the graph-backed
     // tests headroom so a slow runner is a slow pass, not a crash.
     testTimeout: 20000,
+    // Same root cause as packages/graph (GRAPH-QUERIES-BEFOREALL-FLAKE):
+    // `testTimeout` was raised for the DuckDB-backed suites but `hookTimeout`
+    // silently kept vitest's 10s default, so the `beforeAll` that OPENS the
+    // graph had a third of the budget of the tests that query it. Under the
+    // parallel pool that surfaced as an intermittent setup failure in a
+    // different package each run — a false red, never a real one. Equal
+    // budgets; a hook that truly hangs still fails.
+    hookTimeout: 20000,
     passWithNoTests: true,
   },
 });

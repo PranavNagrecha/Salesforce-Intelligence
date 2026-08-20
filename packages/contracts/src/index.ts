@@ -647,7 +647,10 @@ export interface Node {
  * surfaces pair (`belongsToApp`, `usesValueSet`). v1.3 added the legacy-
  * automation + communications singleton (`sendsEmail`). v1.4 adds the
  * developer test-mapping singleton (`coversTest`) — a directed edge from
- * a test class to a non-test class it covers. The LWC/Aura/VF frontend
+ * a test class to a non-test class it covers, DECLARED IN THE CONTRACT
+ * ONLY: nothing in this product produces it (see the member comment on
+ * `coversTest` below for why it is not recoverable from metadata, and
+ * what a consumer must disclose instead). The LWC/Aura/VF frontend
  * extractors deliberately reuse the existing `readsFrom`, `writesTo`,
  * `callsApex`, and `references` edges rather than fragmenting per tier;
  * see PLAN-v1.4.md §3 for the rationale. v1.5 adds the integration
@@ -731,7 +734,7 @@ export type EdgeType =
   // v1.3 — legacy automation + communications tier.
   | 'sendsEmail' //        WorkflowRule / ApprovalProcess / AutoResponseRule / AssignmentRule / EscalationRule -> EmailTemplate (declared, alert / notification template reference)
   // v1.4 — developer frontend + test mapping tier.
-  | 'coversTest' //        ApexClass (@isTest) -> ApexClass (covered); declared via @TestVisible/@TestSetup, heuristic from callsApex inference
+  | 'coversTest' //        ApexClass (@isTest) -> ApexClass (covered). DECLARED BUT NEVER PRODUCED: no extractor, graph-build mint, or enricher in this product emits this edge, so no vault has ever contained one and every walk of it returns empty on a real org while synthetic-fixture tests pass. It is NOT recoverable from metadata: Salesforce does not declare test-to-class coverage anywhere in the source format (coverage is a RUNTIME artifact of a test run, readable only from the Tooling API's ApexCodeCoverage). `@TestVisible` marks a member on the TARGET class and names no test; `@TestSetup` marks a method inside the test class and names no target; the one statically-knowable signal — "an @isTest class calls this class" — is ALREADY modeled as `callsApex` plus `properties.isTest`, so minting `coversTest` from it would double-report one referrer. The type is KEPT so tools and vaults referencing the name do not silently break, but every consumer that walks it MUST report an empty result as "test-coverage mapping UNAVAILABLE", never as "no tests cover this".
   // v1.5 — integration topology + event/async/API surface tier.
   | 'exposes' //           ApexClass with @RestResource / @AuraEnabled / @InvocableMethod -> synthetic `ExternalApi:{kind}/{path}` target (declared; the annotation IS the declaration, the synthetic id is a graph-store convention not a ComponentType — see PLAN-v1.5.md §3).
   | 'dispatchesAsync' //   ApexClass (caller) -> ApexClass (Queueable / Schedulable / Batchable / @future job); declared when the dispatch shape names the target class in-line (`System.enqueueJob(new MyQueueable())`), heuristic when it passes a constructed local variable the scanner can still resolve. The @future variant is minted at GRAPH-BUILD time (CR-CAP-09, `mintFutureDispatchEdges`) by joining a `callsApex` edge to a target class with `hasFutureMethod === true`; it is `heuristic` and CLASS-GRANULAR (`properties.dispatchMechanism: 'future'`, `granularity: 'class'`) — it fires when the target class has SOME @future method, not necessarily the invoked one (method-level precision gated on CR-CAP-06). Does NOT replace `callsApex` — a caller emits both edges in parallel.

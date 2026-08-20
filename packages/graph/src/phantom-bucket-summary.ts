@@ -1,7 +1,16 @@
 /**
  * Refresh-time phantom bucket roll-up — aggregates distinct dangling edge
- * targets into the six-bucket taxonomy without materializing stub nodes
- * (ADR-004). Mirrors the on-demand loop in `classifyForDemandRetrieve`.
+ * targets into the taxonomy without materializing stub nodes (ADR-004).
+ * Mirrors the on-demand loop in `classifyForDemandRetrieve`.
+ *
+ * SCOPE: `PhantomClassification` has SEVEN members, but this roll-up calls
+ * `classifyPhantom` directly and so can only ever emit the SIX it returns. The
+ * seventh, `unresolved-profile-id`, is an id-shape short-circuit that lives
+ * upstream in `mcp/tools/phantom-taxonomy.ts` and runs BEFORE `classifyPhantom`
+ * — so an `UnresolvedProfile:{id}` phantom is bucketed here by its generic
+ * coverage/edge shape, while `get_component` reports it as
+ * `unresolved-profile-id`. The two surfaces disagree by construction; do not
+ * read this summary as the full taxonomy.
  */
 
 import type { ComponentId, PhantomClassification } from '@sf-intelligence/contracts';

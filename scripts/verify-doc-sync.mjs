@@ -334,6 +334,149 @@ if (manifest) {
   }
 }
 
+// ── REPO-STRUCTURE.md plugin inventory must match what is on disk ───────────
+// The repo map advertised "25 skill folders" and "4 slash commands" while
+// .claude/ held 26 and 5 (sfi-field-audit shipped unlisted in BOTH counts).
+// Counted from disk, never hand-maintained.
+{
+  // Local binding: this block runs above the `skillsRoot` declaration.
+  const skillsDir = join(root, '.claude/skills');
+  const toolCount = V01_TOOLS.length;
+  let componentTypeCount = 0;
+  let edgeTypeCount = 0;
+  try {
+    ({ COMPONENT_TYPES: componentTypeCount } = await import(
+      pathToFileURL(join(root, 'packages/mcp/dist/src/tools/list-components.js')).href
+    ));
+    componentTypeCount = componentTypeCount?.length ?? 0;
+    ({ EDGE_TYPES: edgeTypeCount } = await import(
+      pathToFileURL(join(root, 'packages/contracts/dist/index.js')).href
+    ));
+    edgeTypeCount = edgeTypeCount?.length ?? 0;
+  } catch (error) {
+    warn(`Could not read COMPONENT_TYPES / EDGE_TYPES to pin inventory. ${error.message}`);
+  }
+  const skillDirCount = existsSync(skillsDir)
+    ? readdirSync(skillsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).length
+    : 0;
+  const commandsRoot = join(root, '.claude/commands');
+  const commandNames = existsSync(commandsRoot)
+    ? readdirSync(commandsRoot)
+        .filter((f) => f.endsWith('.md'))
+        .map((f) => f.replace(/\.md$/, ''))
+        .sort()
+    : [];
+  // Every surface that states the plugin's own size, not just the repo map.
+  // The entry-point skill (loaded first in EVERY session) was the worst
+  // offender: 72/20/121/25 against 101/23/209/26.
+  const inventoryPinFiles = [
+    'REPO-STRUCTURE.md',
+    'README.md',
+    '.claude/skills/using-sf-intelligence/SKILL.md',
+    '.claude/skills/refreshing-the-org-vault/SKILL.md',
+  ];
+  // label → [regex, expected]. A file that states none of these is fine;
+  // a file that states one WRONG is not.
+  const inventoryPins = [
+    ['skill folders/skills', /\*{0,2}(\d+)\*{0,2}\s+skill(?:s| folders)\b/gi, skillDirCount],
+    ['slash commands', /\*{0,2}(\d+)\*{0,2}\s+slash\s+commands/gi, commandNames.length],
+    ['component types', /\*{0,2}(\d+)\*{0,2}\s+component\s+types/gi, componentTypeCount],
+    ['edge types', /\*{0,2}(\d+)\*{0,2}\s+(?:typed\s+)?edge\s+types/gi, edgeTypeCount],
+    ['sfi.* tools', /\*{0,2}(\d+)\s*\n?`sfi\.\*` tools/gi, toolCount],
+  ];
+  for (const rel of inventoryPinFiles) {
+    const path = join(root, rel);
+    if (!existsSync(path)) {
+      warn(`${rel} missing — cannot pin the plugin inventory.`);
+      continue;
+    }
+    const text = read(path);
+    for (const [label, pattern, expected] of inventoryPins) {
+      if (typeof expected !== 'number' || expected <= 0) continue;
+      const re = new RegExp(pattern.source, pattern.flags);
+      let match;
+      while ((match = re.exec(text)) !== null) {
+        if (Number(match[1]) !== expected) {
+          fail(
+            `${rel} states ${match[1]} ${label} ("${match[0].replace(/\n/g, ' ').trim()}") ` +
+              `but the live count is ${expected}`,
+          );
+        }
+      }
+    }
+  }
+  // A count that matches while a NAME is missing is how sfi-field-audit stayed
+  // invisible in two files at once: the list is the claim, not just the number.
+  for (const rel of ['REPO-STRUCTURE.md', 'README.md']) {
+    const path = join(root, rel);
+    if (!existsSync(path)) continue;
+    const text = read(path);
+    if (!/slash\s+commands/i.test(text)) continue;
+    for (const name of commandNames) {
+      if (!text.includes(name)) {
+        fail(`${rel} states a slash-command list that omits \`${name}\``);
+      }
+    }
+  }
+}
+
+// ── staleness-check count must match STALE_CHECK_TYPES ──────────────────────
+// docs/configuration.md advertised the fleet drift sweep as "N orgs × 6 checks"
+// while STALE_CHECK_TYPES had grown to 15 (the P13-WATCH-sweep widening added
+// the permission + security drift families). A reader budgeting
+// SFI_LIVE_QUERY_BUDGET off that sentence under-provisions by 2.5x and gets
+// budget-exhausted skips the doc says should not happen. Derived from the
+// constant, never hand-copied.
+if (manifest) {
+  let staleCheckCount = null;
+  try {
+    ({ STALE_CHECK_TYPES: staleCheckCount } = await import(
+      pathToFileURL(join(root, 'packages/mcp/dist/src/tools/live-plane.js')).href
+    ));
+    staleCheckCount = staleCheckCount?.length ?? null;
+  } catch (error) {
+    warn(`Could not read STALE_CHECK_TYPES to pin staleness-check counts. ${error.message}`);
+  }
+  if (typeof staleCheckCount === 'number' && staleCheckCount > 0) {
+    // Both phrasings docs/configuration.md has used: "N orgs × 15 staleness
+    // checks" and the older bare "× 6 checks".
+    const staleCountRes = [
+      /(\d+)\s+staleness\s+checks/gi,
+      /×\s*(\d+)\s+checks\b/g,
+      /x\s+(\d+)\s+checks\b/g,
+    ];
+    const staleCountPinFiles = ['docs/configuration.md'];
+    for (const rel of staleCountPinFiles) {
+      const path = join(root, rel);
+      if (!existsSync(path)) {
+        warn(`${rel} missing — cannot pin staleness-check count.`);
+        continue;
+      }
+      const text = read(path);
+      let matched = 0;
+      for (const pattern of staleCountRes) {
+        const re = new RegExp(pattern.source, pattern.flags);
+        let match;
+        while ((match = re.exec(text)) !== null) {
+          matched += 1;
+          if (Number(match[1]) !== staleCheckCount) {
+            fail(
+              `${rel} states ${match[1]} staleness checks ("${match[0].trim()}") ` +
+                `but STALE_CHECK_TYPES.length=${staleCheckCount}`,
+            );
+          }
+        }
+      }
+      if (matched === 0) {
+        warn(
+          `${rel} has no staleness-check count phrase ` +
+            '(`N staleness checks`); a pin that matches nothing is how stale counts survive.',
+        );
+      }
+    }
+  }
+}
+
 // ── architecture.md graph tables ────────────────────────────────────────────
 const architectureMd = join(root, 'docs/architecture.md');
 if (existsSync(architectureMd) && manifest) {
@@ -460,6 +603,60 @@ const stalePhrases = [
     reason:
       'OutboundMessage action edges must target OutboundMessage: promoted node ids.',
   },
+  // ── invented Salesforce enum values ───────────────────────────────────────
+  // A skill that tells the model to EMIT a value Salesforce does not define is
+  // the worst kind of lie this product can tell: it is indistinguishable from
+  // an extracted fact. `SinceCaseCreation` / `SinceModified` were once guessed
+  // into the escalation-rule extractor's allowed-enum and rejected every real
+  // rule as malformed-input, dropping the WHOLE `Case.escalationRules` file
+  // from the vault (CHANGELOG "EscalationRule no longer rejects valid
+  // escalationStartTime values"). The extractor was corrected; the skill that
+  // teaches the same guess was not, and shipped for another two minor versions.
+  {
+    phrase: 'SinceCaseCreation',
+    reason:
+      'Invented enum. EscalationRule <escalationStartTime> is CaseCreation | CaseLastModified ' +
+      '(ALLOWED_START_TIMES in packages/extractors/src/escalation-rule.ts). This guess once ' +
+      'dropped the whole Case.escalationRules file from the vault.',
+  },
+  {
+    phrase: 'SinceLastUpdate',
+    reason:
+      'Invented enum. EscalationRule <escalationStartTime> is CaseCreation | CaseLastModified ' +
+      '(ALLOWED_START_TIMES in packages/extractors/src/escalation-rule.ts).',
+  },
+  {
+    phrase: 'SinceModified',
+    reason:
+      'Invented enum. EscalationRule <escalationStartTime> is CaseCreation | CaseLastModified ' +
+      '(ALLOWED_START_TIMES in packages/extractors/src/escalation-rule.ts).',
+  },
+  // ── coversTest is declared but has NO producer ────────────────────────────
+  // grep -rn coversTest packages/*/src finds only the contract declaration and
+  // the two READ sites in what_if_change_method_signature: zero extractors,
+  // zero graph-build mints, zero enrichers emit it. Any wording that implies a
+  // covering test is normally found and only occasionally "missed" inverts the
+  // truth — coverage mapping is entirely unavailable, not mostly known.
+  {
+    phrase: '@TestVisible`-tagged covering reference',
+    reason:
+      'coversTest has NO producer (zero emission sites in packages/*/src), and @TestVisible ' +
+      'marks a member on the TARGET class — it names no test. An empty result means ' +
+      '"test-coverage mapping UNAVAILABLE", never "no tests cover this".',
+  },
+  {
+    phrase: '@TestVisible-tagged covering reference',
+    reason:
+      'coversTest has NO producer (zero emission sites in packages/*/src), and @TestVisible ' +
+      'marks a member on the TARGET class — it names no test. An empty result means ' +
+      '"test-coverage mapping UNAVAILABLE", never "no tests cover this".',
+  },
+  {
+    phrase: 'declared via @TestVisible/@TestSetup',
+    reason:
+      'coversTest has NO producer. @TestVisible marks a member on the TARGET and names no ' +
+      'test; @TestSetup sits inside the test class and names no target.',
+  },
 ];
 
 const honestyConstantPaths = [
@@ -530,6 +727,280 @@ if (existsSync(configurationMd)) {
   }
 } else {
   fail('docs/configuration.md missing (required for registry + vault-git discovery pins).');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONTRACT-DERIVED SKILL GUARDS (documentation-truth sweep, round 2)
+//
+// The prior tripwires above are PHRASE blacklists — they catch a known-bad
+// string. These guards instead DERIVE the legal value set from the source of
+// truth and check every value a skill renders against it, so a stage/verdict
+// /enum that is renamed, added, or removed fails here without anyone
+// remembering to add a phrase.
+//
+// Why this class matters: the skills below were documenting tool contracts
+// that DO NOT EXIST — invented stage names, invented verdicts, and a nested
+// input envelope for a flat schema, which means every worked example in them
+// was a call that returns `invalid-query`. A model following those examples
+// answers confidently and wrongly. That is the failure mode this product
+// exists to prevent, so it is guarded, not just fixed.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Every `'literal'` inside a TS union that follows `readonly <field>:`. */
+const readonlyUnionMembers = (source, field) => {
+  const re = new RegExp(`readonly ${field}:([\\s\\S]*?);`);
+  const m = source.match(re);
+  if (!m) return null;
+  return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+};
+
+/** Every value a skill renders as a JSON literal `"<key>": "<value>"`. */
+const jsonLiteralValues = (text, key) =>
+  [...text.matchAll(new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`, 'g'))].map((x) => x[1]);
+
+const cascadeContracts = [
+  {
+    tool: 'sfi.layout_for_user',
+    sourcePath: join(root, 'packages/mcp/src/tools/layout-for-user.ts'),
+    skillPath: join(root, '.claude/skills/admin-page-layout-routing/SKILL.md'),
+  },
+  {
+    tool: 'sfi.why_cant_user_see_record',
+    sourcePath: join(root, 'packages/mcp/src/tools/why-cant-user-see-record.ts'),
+    skillPath: join(root, '.claude/skills/admin-sharing-troubleshooting/SKILL.md'),
+  },
+];
+
+for (const { tool, sourcePath, skillPath } of cascadeContracts) {
+  if (!existsSync(sourcePath) || !existsSync(skillPath)) {
+    warn(`${tool}: cascade guard skipped (source or skill missing).`);
+    continue;
+  }
+  const source = read(sourcePath);
+  const skill = read(skillPath);
+  for (const field of ['stage', 'verdict']) {
+    const legal = readonlyUnionMembers(source, field);
+    if (legal === null || legal.length === 0) {
+      fail(`${sourcePath}: could not derive the \`${field}\` union for ${tool}.`);
+      continue;
+    }
+    const rendered = jsonLiteralValues(skill, field);
+    if (rendered.length === 0) {
+      warn(
+        `${skillPath} renders no \`"${field}": "…"\` example for ${tool}; the guard has nothing to check.`,
+      );
+      continue;
+    }
+    for (const value of new Set(rendered)) {
+      if (!legal.includes(value)) {
+        fail(
+          `${skillPath} documents ${tool} ${field} "${value}", which is not in the real union ` +
+            `(${legal.join(' | ')}) declared in ${sourcePath}. A stage/verdict the tool never emits ` +
+            `produces a trace the caller cannot reconcile with the response.`,
+        );
+      }
+    }
+  }
+}
+
+// ── Sharing enums: OWD values + sharing-rule ruleType ───────────────────────
+// `"Public"` is a Salesforce UI LABEL ("Public Read Only"), never a metadata
+// SharingModel value; `owner-based` / `criteria-based` are English, never
+// `ruleType` values. Both were rendered as field values in the sharing skill.
+const customObjectSrc = join(root, 'packages/extractors/src/custom-object.ts');
+const sharingRulesSrc = join(root, 'packages/extractors/src/sharing-rules.ts');
+const sharingSkill = join(root, '.claude/skills/admin-sharing-troubleshooting/SKILL.md');
+
+if (existsSync(customObjectSrc) && existsSync(sharingSkill)) {
+  const block = read(customObjectSrc).match(
+    /const ALLOWED_SHARING_MODEL = \[([\s\S]*?)\]/,
+  );
+  if (!block) {
+    fail(`${customObjectSrc}: could not derive ALLOWED_SHARING_MODEL.`);
+  } else {
+    const allowed = [...block[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+    const skill = read(sharingSkill);
+    // Same-line `OWD is \`X\`` / `sharingModel is \`X\`` only — a multi-line
+    // window would graze the next backticked token (a stage name) and produce
+    // a false red, which is the exact failure mode this gate exists to stop.
+    const owdRendered = [
+      ...jsonLiteralValues(skill, 'decision'),
+      ...[...skill.matchAll(/(?:OWD|sharingModel)`?\s*(?:is|=)\s*`([A-Za-z]+)`/g)].map(
+        (x) => x[1],
+      ),
+    ];
+    for (const value of new Set(owdRendered)) {
+      if (!allowed.includes(value)) {
+        fail(
+          `${sharingSkill} presents "${value}" as an OWD / sharingModel value, but ALLOWED_SHARING_MODEL ` +
+            `in ${customObjectSrc} is (${allowed.join(' | ')}). The extractor REJECTS anything else.`,
+        );
+      }
+    }
+  }
+}
+
+if (existsSync(sharingRulesSrc)) {
+  const m = read(sharingRulesSrc).match(/type RuleType =([^;]*);/);
+  if (!m) {
+    fail(`${sharingRulesSrc}: could not derive the sharing RuleType union.`);
+  } else {
+    const legal = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+    for (const path of skillFiles) {
+      const text = read(path);
+      const rendered = [
+        ...jsonLiteralValues(text, 'ruleType'),
+        ...[...text.matchAll(/ruleType:\s*'([^']+)'/g)].map((x) => x[1]),
+      ];
+      for (const value of new Set(rendered)) {
+        if (!legal.includes(value)) {
+          fail(
+            `${path} documents sharing ruleType "${value}"; the extractor emits (${legal.join(' | ')}).`,
+          );
+        }
+      }
+    }
+  }
+}
+
+// ── Zero-producer signals ──────────────────────────────────────────────────
+// The `coversTest` lesson generalized. Each name below was READ by a skill as
+// if it were a field on a response. None has a producer anywhere in
+// `packages/*/src`: no extractor writes it, no enricher mints it, no handler
+// returns it. A model reading an absent signal narrates `undefined` as a
+// NEGATIVE FINDING ("CDC is not enabled", "this job has no schedule").
+//
+// The guard is bidirectional ON PURPOSE. It re-runs the producer search every
+// gate, so it fails BOTH when a skill starts reading a signal that does not
+// exist AND when someone finally implements one — at which point the "this
+// does not exist" prose in the skills becomes the lie and must be updated.
+const ZERO_PRODUCER_SIGNALS = [
+  'parsedCron',
+  'rawCronExpression',
+  'isCdcEnabled',
+  'maxDepthObserved',
+  'publishesTo',
+];
+
+const collectSourceFiles = (dir, out) => {
+  if (!existsSync(dir)) return out;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) collectSourceFiles(full, out);
+    else if (entry.name.endsWith('.ts')) out.push(full);
+  }
+  return out;
+};
+
+const packagesRoot = join(root, 'packages');
+const productSources = existsSync(packagesRoot)
+  ? readdirSync(packagesRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .flatMap((e) => collectSourceFiles(join(packagesRoot, e.name, 'src'), []))
+  : [];
+
+if (productSources.length === 0) {
+  warn('No packages/*/src sources found; skipping the zero-producer signal guard.');
+} else {
+  const productText = productSources.map(read).join('\n');
+  for (const signal of ZERO_PRODUCER_SIGNALS) {
+    // A producer writes the key: `signal:` (object literal / interface) or
+    // `'signal'` / `"signal"` (computed property, EdgeType member).
+    const producerRe = new RegExp(`(^|[^\\w.'"\`])${signal}\\s*:|['"\`]${signal}['"\`]`, 'm');
+    const hasProducer = producerRe.test(productText);
+    if (hasProducer) {
+      fail(
+        `\`${signal}\` now appears as a key in packages/*/src, but the skills state it does not exist. ` +
+          `Either it shipped (update the skills to READ it) or something re-introduced a phantom. ` +
+          `Do not leave the two disagreeing.`,
+      );
+      continue;
+    }
+    // No producer. A skill must not put the signal in a FENCED EXAMPLE — that
+    // is the text a model copies into a real call or renders as a real field.
+    // Naming it in prose is allowed and expected: the skills now say
+    // explicitly that these signals do not exist, and that sentence has to be
+    // able to contain the name.
+    const inFence = new RegExp(`\\b${signal}\\b`);
+    for (const path of skillFiles) {
+      const fences = [...read(path).matchAll(/```[\s\S]*?```/g)].map((x) => x[0]);
+      if (fences.some((block) => inFence.test(block))) {
+        fail(
+          `${path} renders \`${signal}\` inside a fenced example, but it has ZERO producers in ` +
+            `packages/*/src. An absent signal read as a negative finding is the coversTest ` +
+            `failure class — a caller copies the example and narrates \`undefined\` as a result.`,
+        );
+      }
+    }
+  }
+}
+
+// ── code_quality_audit scope contract ──────────────────────────────────────
+// `componentFilter` was documented by developer-code-quality but DROPPED by the
+// bare `z.object`, so a one-class audit silently returned the ORG-WIDE sweep and
+// the caller read it as that class's findings. It is now an honored alias, and
+// the schema is `.strict()` so any OTHER mis-spelled scope key is a loud
+// `invalid-query` rather than a silent widening.
+if (manifest) {
+  try {
+    const { codeQualityAuditInputSchema } = await import(
+      pathToFileURL(join(root, 'packages/mcp/dist/src/tools/code-quality-audit.js')).href
+    );
+    // Assert the value SURVIVES parsing, not merely that parsing succeeded — a
+    // non-strict schema "succeeds" by silently STRIPPING the key, which is the
+    // exact bug this guards.
+    const aliasParse = codeQualityAuditInputSchema.safeParse({
+      componentFilter: 'ApexClass:X',
+    });
+    if (!aliasParse.success || aliasParse.data.componentFilter !== 'ApexClass:X') {
+      fail(
+        'code_quality_audit does not carry `componentFilter` through parsing. It is a documented ' +
+          'scope alias; stripping it silently downgrades a scoped audit to an org-wide sweep that ' +
+          'the caller reads as that one class\'s findings.',
+      );
+    }
+    if (codeQualityAuditInputSchema.safeParse({ compnentFilter: 'ApexClass:X' }).success) {
+      fail(
+        'code_quality_audit accepted an unknown key. The schema must stay `.strict()` — a stripped ' +
+          'scope key returns the org-wide audit, which the caller reads as the scoped result.',
+      );
+    }
+  } catch (error) {
+    warn(`Could not load code_quality_audit schema for the scope guard: ${error.message}`);
+  }
+}
+
+// ── Phantom taxonomy bucket count ──────────────────────────────────────────
+// ADR-004 said "six-bucket" while `PhantomClassification` had seven, and the
+// error had propagated into two JSDoc headers.
+const contractsSrc = join(root, 'packages/contracts/src/index.ts');
+const adr004 = join(root, 'docs/decisions/ADR-004-phantom-taxonomy-on-demand.md');
+if (existsSync(contractsSrc) && existsSync(adr004)) {
+  const m = read(contractsSrc).match(/export type PhantomClassification =([\s\S]*?)\n\n/);
+  if (!m) {
+    fail(`${contractsSrc}: could not derive the PhantomClassification union.`);
+  } else {
+    const members = [...m[1].matchAll(/\|\s*'([^']+)'/g)].map((x) => x[1]);
+    const NUMBER_WORD = [
+      'zero', 'one', 'two', 'three', 'four', 'five',
+      'six', 'seven', 'eight', 'nine', 'ten',
+    ];
+    const word = NUMBER_WORD[members.length];
+    const adrText = read(adr004);
+    if (word === undefined) {
+      warn(`PhantomClassification has ${members.length} members — no word form to pin.`);
+    } else if (!adrText.includes(`${word}-bucket`)) {
+      fail(
+        `ADR-004 does not say "${word}-bucket" but PhantomClassification has ${members.length} members ` +
+          `(${members.join(', ')}).`,
+      );
+    }
+    for (const member of members) {
+      if (!adrText.includes(member)) {
+        fail(`ADR-004 does not document the \`${member}\` phantom bucket.`);
+      }
+    }
+  }
 }
 
 const result = {

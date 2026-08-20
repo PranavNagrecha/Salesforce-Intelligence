@@ -110,18 +110,39 @@ next.
 The tool needs two inputs, and the user almost never types either of
 them in canonical form:
 
-- **`recordId`** — the target object shape, in canonical form
-  (`CustomObject:Account`, `CustomObject:Payment__c`, etc.).
-  Translate "Accounts" → `CustomObject:Account`, "the
-  Payment object" → `CustomObject:Payment__c`. If
-  the user supplies a record-row ID like `001xx0000012345`,
-  **translate to the object shape and disclose the shift explicitly**
-  ("I'm running the visibility cascade against `CustomObject:Account`
-  — v1.1 doesn't model record-row visibility. Continue?").
-- **`userId`** — the requesting user, in the form
-  `User:<apexName>` (e.g., `User:m.chen@example.com`).
-  v1.1 doesn't extract User records, so the prefix is a tool-level
-  convention; the handler doesn't validate against a graph node.
+The input schema is FLAT at the top level. There is no `userId` and no
+`recordId` — those keys do not exist. A call carrying only those two is
+`invalid-query` twice over: they are stripped, and the tool then fails
+its required-axis checks (`provide componentId or objectApiName`, and
+`userContext must supply at least one of: profileId, profileApiName,
+permissionSetIds, roleId, groupIds`).
+
+- **`componentId`** (or the `objectApiName` alias) — the target
+  object. `componentId` is the canonical id (`CustomObject:Account`,
+  `CustomObject:Payment__c`); `objectApiName` is the bare api name
+  (`Account`, `Payment__c`). Pass EITHER — supplying both that
+  disagree is `invalid-query`. Translate "Accounts" →
+  `CustomObject:Account`, "the Payment object" →
+  `CustomObject:Payment__c`. If the user supplies a record-row ID like
+  `001xx0000012345`, **translate to the object shape and disclose the
+  shift explicitly** ("I'm running the visibility cascade against
+  `CustomObject:Account` — v1.1 doesn't model record-row
+  visibility. Continue?"). At least one of the two is REQUIRED.
+- **`userContext`** — a NESTED object describing the user's
+  bundle. There is no user *identity* parameter: v1.1 doesn't extract
+  `User` records, so the cascade runs against the bundle, never against
+  a named user. It must carry at least one of `profileId`
+  (`Profile:{Name}`) / `profileApiName` (bare name, coerced to
+  `Profile:{name}`) / `permissionSetIds[]` / `roleId` / `groupIds[]`;
+  an empty `userContext` is `invalid-query`.
+- **`accessLevel`** — optional, one of `read` (default) / `edit` /
+  `delete` / `create`. Read-only access must never be reported as
+  edit-capable, so pass the level the admin actually asked about.
+
+The response echoes `appliedScope: { object, profile }` — the
+object id and profile id the cascade ACTUALLY resolved. Check it before
+reporting; it is how you know an alias you passed was honored rather
+than reinterpreted.
 
 The cascade depends on the user's **bundle** — their profile,
 permission sets, role, and group memberships. If the user's question
@@ -150,28 +171,60 @@ Default invocation:
 
 ```json
 {
-  "userId": "User:m.chen@example.com",
-  "recordId": "CustomObject:Account"
+  "componentId": "CustomObject:Account",
+  "accessLevel": "read",
+  "userContext": { "profileApiName": "Sales_Rep", "roleId": "Role:Sales_Rep" }
 }
 ```
 
-The response shape (per the v1.1 contract):
+The response shape (per the v1.1 contract). Each `reasoning[]` entry has
+exactly four keys — `stage`, `verdict`, `reason`, and an optional
+`traversed[]` (plus an optional `mutedBy[]` when a muting permission set
+in a PermissionSetGroup flipped an object-CRUD precondition off). There
+is no `rule`, no `decision`, no `name`, no `ruleType`, and no `note`:
 
 ```json
 {
   "data": {
     "verdict": "visible" | "restricted" | "unknown",
+    "appliedScope": { "object": "CustomObject:Account", "profile": "Profile:Sales_Rep" },
     "reasoning": [
-      { "rule": "OWD",          "decision": "Public" | "Private" | "ControlledByParent", "verdict": "visible" | "restricted" | "unknown", "note": "..." },
-      { "rule": "RoleHierarchy","traversed": ["Role:..."],          "verdict": "visible" | "restricted" | "unknown", "note": "..." },
-      { "rule": "SharingRule",  "name": "SharingRule:...",          "ruleType": "owner-based" | "criteria-based", "verdict": "visible" | "restricted" | "unknown", "note": "..." },
-      { "rule": "ManualSharing", "verdict": "unknown", "note": "..." },
-      { "rule": "SharingSet",    "verdict": "unknown", "note": "..." },
-      { "rule": "AccountTeam",   "verdict": "unknown", "note": "..." }
+      { "stage": "OWD",                  "verdict": "restricted", "reason": "..." },
+      { "stage": "PermissionGrant",      "verdict": "visible",    "reason": "..." },
+      { "stage": "RoleHierarchy",        "verdict": "restricted", "reason": "...", "traversed": ["Role:..."] },
+      { "stage": "OwnerSharingRule",     "verdict": "restricted", "reason": "..." },
+      { "stage": "CriteriaSharingRule",  "verdict": "unknown",    "reason": "..." },
+      { "stage": "ManualSharing",        "verdict": "unknown",    "reason": "..." }
     ]
   }
 }
 ```
+
+`stage` is one of exactly these fourteen: `OWD`, `PermissionGrant`,
+`SystemPermission`, `RecordType`, `RoleHierarchy`, `OwnerSharingRule`,
+`CriteriaSharingRule`, `RestrictionRule`, `ScopingRule`,
+`PermissionSetGroup`, `TerritoryAndGuestRules`, `ManualSharing`,
+`SharingSets`, `AccountTeams`. `verdict` is one of exactly three:
+`visible`, `restricted`, `unknown`. Do not invent a stage or a verdict
+outside these sets, and do not report a stage the response did not
+contain.
+
+**OWD values.** The OWD stage reads `properties.sharingModel` off the
+CustomObject. The extractor accepts exactly these values: `Private`,
+`Read`, `ReadSelect`, `ReadWrite`, `ReadWriteTransfer`,
+`ControlledByParent`, `ControlledByCampaign`, `FullAccess`. **There is
+no `Public` OWD value** — Salesforce's UI labels are "Public Read
+Only" / "Public Read/Write", but the metadata values are `Read` and
+`ReadWrite`. Quote the metadata value, and gloss the UI label in prose
+if it helps the admin find the setting.
+
+**Sharing-rule types.** The extractor's `ruleType` values are `owner`,
+`criteria`, `guest`, `territory`, and `territoryGroup` — not
+`owner-based` / `criteria-based`. Those hyphenated forms are fine as
+ENGLISH ("the owner-based sharing rules"); they are not field values.
+Note also that the cascade surfaces owner rules and criteria rules as
+two distinct STAGES (`OwnerSharingRule` / `CriteriaSharingRule`), so
+you rarely need to quote `ruleType` at all.
 
 The cascade runs top-to-bottom. The first step that resolves to
 `visible` terminates execution and the top-level `verdict` becomes
@@ -256,8 +309,9 @@ permission set overrides, Claude fires the tool:
 
 ```json
 {
-  "userId": "User:janet@example.com",
-  "recordId": "CustomObject:Account"
+  "componentId": "CustomObject:Account",
+  "accessLevel": "read",
+  "userContext": { "profileApiName": "Sales_Rep", "roleId": "Role:Sales_Rep" }
 }
 ```
 
@@ -267,14 +321,15 @@ The tool returns (illustrative):
 {
   "data": {
     "verdict": "unknown",
+    "appliedScope": { "object": "CustomObject:Account", "profile": "Profile:Sales_Rep" },
     "reasoning": [
-      { "rule": "OWD",          "decision": "Private",                                       "verdict": "restricted", "note": "Account OWD is Private; cascade continues." },
-      { "rule": "RoleHierarchy","traversed": ["Role:Sales_Rep","Role:Sales_Manager","Role:Sales_VP","Role:Executive_Officer"], "verdict": "restricted", "note": "No role in the chain holds a sharedWith grant on Account." },
-      { "rule": "SharingRule",  "name": "SharingRule:Account.Share_Tech_Accounts_With_Sales", "ruleType": "criteria-based", "verdict": "unknown",    "note": "Criterion 'Industry = Technology' requires record-level data; v1.1 cannot evaluate." },
-      { "rule": "SharingRule",  "name": "SharingRule:Account.Share_VP_Accounts_With_Execs",   "ruleType": "owner-based",   "verdict": "restricted", "note": "sharedFrom = Role:Sales_VP; Janet is below Sales_VP. sharedTo = Role:Executive_Officer; Janet is not in that role." },
-      { "rule": "ManualSharing","verdict": "unknown", "note": "v1.1 does not model manual sharing; check the record's Share button in Salesforce Setup." },
-      { "rule": "SharingSet",   "verdict": "unknown", "note": "v1.1 does not model sharing sets." },
-      { "rule": "AccountTeam",  "verdict": "unknown", "note": "v1.1 does not model Account teams." }
+      { "stage": "OWD",                 "verdict": "restricted", "reason": "Account sharingModel is Private; cascade continues." },
+      { "stage": "RoleHierarchy",       "verdict": "restricted", "reason": "No role in the chain holds a sharedWith grant on Account.", "traversed": ["Role:Sales_Rep","Role:Sales_Manager","Role:Sales_VP","Role:Executive_Officer"] },
+      { "stage": "OwnerSharingRule",    "verdict": "restricted", "reason": "SharingRule:Account.Share_VP_Accounts_With_Execs shares FROM Role:Sales_VP TO Role:Executive_Officer; the role bundle is in neither." },
+      { "stage": "CriteriaSharingRule", "verdict": "unknown",    "reason": "SharingRule:Account.Share_Tech_Accounts_With_Sales matches on 'Industry = Technology'; evaluating that criterion needs record-level data v1.1 does not hold." },
+      { "stage": "ManualSharing",       "verdict": "unknown",    "reason": "v1.1 does not model manual sharing; check the record's Share button in Salesforce Setup." },
+      { "stage": "SharingSets",         "verdict": "unknown",    "reason": "v1.1 does not model sharing sets." },
+      { "stage": "AccountTeams",        "verdict": "unknown",    "reason": "v1.1 does not model Account teams." }
     ]
   }
 }
@@ -282,29 +337,31 @@ The tool returns (illustrative):
 
 Claude's presentation back to the admin:
 
-> Visibility cascade for `User:janet@example.com` on
-> `CustomObject:Account`:
+> Visibility cascade for the `Sales_Rep` bundle
+> (`Profile:Sales_Rep` + `Role:Sales_Rep`) on `CustomObject:Account`
+> — v1.1 doesn't extract `User` records, so this is the bundle's
+> access, not Janet's specifically:
 >
-> - **OWD** — `restricted`. Account OWD is `Private`; cascade
->   continues.
-> - **Role hierarchy** — `restricted`. Walked `Role:Sales_Rep →
+> - **OWD** — `restricted`. Account `sharingModel` is `Private`;
+>   cascade continues.
+> - **RoleHierarchy** — `restricted`. Walked `Role:Sales_Rep →
 >   Role:Sales_Manager → Role:Sales_VP → Role:Executive_Officer`;
 >   no role in the chain holds a `sharedWith` grant on Account.
-> - **Sharing rule** `SharingRule:Account.Share_Tech_Accounts_With_Sales`
->   (criteria-based) — `unknown`. The criterion `Industry =
->   Technology` requires record-level data; v1.1 can't evaluate
->   it. Manual check: pull a sample Account record and verify
->   `Industry`.
-> - **Sharing rule** `SharingRule:Account.Share_VP_Accounts_With_Execs`
->   (owner-based) — `restricted`. `sharedFrom = Role:Sales_VP`
->   (Janet sits below); `sharedTo = Role:Executive_Officer`
->   (Janet is not in that role).
-> - **Manual sharing** — `unknown`. v1.1 doesn't model manual
+> - **OwnerSharingRule** — `restricted`.
+>   `SharingRule:Account.Share_VP_Accounts_With_Execs` shares from
+>   `Role:Sales_VP` to `Role:Executive_Officer`; the role bundle is
+>   in neither.
+> - **CriteriaSharingRule** — `unknown`.
+>   `SharingRule:Account.Share_Tech_Accounts_With_Sales` matches on
+>   `Industry = Technology`; evaluating that criterion needs
+>   record-level data v1.1 doesn't hold. Manual check: pull a sample
+>   Account record and verify `Industry`.
+> - **ManualSharing** — `unknown`. v1.1 doesn't model manual
 >   sharing. Manual check: open the record in Salesforce and
 >   inspect the **Share** button.
-> - **Sharing sets** — `unknown`. v1.1 doesn't model sharing sets.
+> - **SharingSets** — `unknown`. v1.1 doesn't model sharing sets.
 >   Manual check: Setup → Sharing Sets.
-> - **Account teams** — `unknown`. v1.1 doesn't model Account
+> - **AccountTeams** — `unknown`. v1.1 doesn't model Account
 >   teams. Manual check: open the Account record and inspect the
 >   **Account Team** related list.
 >
@@ -424,8 +481,9 @@ Claude's flow:
    is overridden by OWD on `Private` standard objects.
 2. **Confirm** Janet's bundle (assume the admin says: "Role
    `Sales_Rep`, no extra perm sets, not in any public group").
-3. **Fire** `sfi.run_analysis` with `{ "name": "sfi.why_cant_user_see_record", "args": { … } }` with `{ userId:
-   'User:janet@example.com', recordId: 'CustomObject:Account' }`.
+3. **Fire** `sfi.run_analysis` with `{ "name": "sfi.why_cant_user_see_record", "args": { … } }` with
+   `{ componentId: 'CustomObject:Account', accessLevel: 'read',
+   userContext: { profileApiName: 'Sales_Rep', roleId: 'Role:Sales_Rep' } }`.
 4. **Present** the cascade timeline (see *Reporting format* above):
    OWD `restricted`, role hierarchy `restricted`, the two existing
    sharing rules on Account return `unknown` (criteria) and
@@ -441,12 +499,12 @@ Claude's flow:
 
 If the admin follows up with *"Janet's role is actually Sales_VP,
 not Sales_Rep — sorry"*, re-fire the tool with the corrected user
-context. The cascade's role-hierarchy step will now traverse `Role:
-Sales_VP → Role:Executive_Officer`, and the owner-based rule
+context. The cascade's `RoleHierarchy` step will now traverse `Role:
+Sales_VP → Role:Executive_Officer`, and the owner rule
 `SharingRule:Account.Share_VP_Accounts_With_Execs` (which has
 `sharedFrom = Role:Sales_VP`, `sharedTo = Role:Executive_Officer`)
 will resolve `visible` for any Account owned by a Sales_VP — though
-the criteria-based rule is still `unknown` for the record-level
+the criteria rule is still `unknown` for the record-level
 question.
 
 ## Verification
@@ -454,16 +512,32 @@ question.
 Before sending a response, confirm:
 
 - [ ] I translated the user's reference into a canonical
-      `recordId` (`CustomObject:{ApiName}`) and a `userId`
-      (`User:<apexName>`), asking for the user's role / profile /
-      perm sets / groups when the question omitted them.
+      `componentId` (`CustomObject:{ApiName}`) or `objectApiName`
+      (bare api name) plus a `userContext` carrying at least one of
+      `profileId` / `profileApiName` / `permissionSetIds[]` /
+      `roleId` / `groupIds[]`, asking for the user's role / profile
+      / perm sets / groups when the question omitted them. I did NOT
+      pass `userId` or `recordId` — those keys do not exist on this
+      tool.
+- [ ] I checked `appliedScope` on the response and reported the
+      object + profile the cascade ACTUALLY resolved, not the ones I
+      assumed.
 - [ ] If the user supplied a record-row ID (`001xx...`), I
       translated to the object shape **and disclosed the shift**
       before firing.
 - [ ] I called `sfi.run_analysis` for `sfi.why_cant_user_see_record` exactly once per
       bundle. (If the admin corrected context, I refired.)
+- [ ] I named each step by its real `stage` value (one of the
+      fourteen) and its real `verdict` (`visible` / `restricted` /
+      `unknown`), quoting `reason` — never an invented `rule` /
+      `decision` / `note` key.
+- [ ] I quoted OWD as a real `sharingModel` metadata value
+      (`Private` / `Read` / `ReadSelect` / `ReadWrite` /
+      `ReadWriteTransfer` / `ControlledByParent` /
+      `ControlledByCampaign` / `FullAccess`) — never `Public`, which
+      is a UI label, not a metadata value.
 - [ ] I presented every step in `reasoning[]` — including
-      `unknown` steps — as a bulleted timeline with rule, verdict,
+      `unknown` steps — as a bulleted timeline with stage, verdict,
       and reason.
 - [ ] Every `unknown` step carried a manual-check recommendation
       naming the specific Salesforce UI surface to inspect.

@@ -460,9 +460,7 @@ Standard disclosure paragraph:
 > `dispatchesAsync` / the seven new property booleans. It does
 > **not** model: outbound HTTP correlation from LWC source
 > (`fetch('https://...')`), outbound-message destination
-> correlation from WorkflowRule, the `publishesTo` edge
-> (only `listensTo` is produced — `EventBus.publish` is
-> invisible), virtual sObjects projected from Salesforce
+> correlation from WorkflowRule, virtual sObjects projected from Salesforce
 > Connect (`Customer__x`), Change Data Capture subscriptions
 > (`AccountChangeEvent` shapes), reflective async dispatch
 > (`Type.forName(...).newInstance()`), Connected App → Profile /
@@ -583,9 +581,8 @@ Claude's flow:
 > v1.5 integration topology captures the declared / configured
 > surface from metadata XML and Apex-header annotations. It does
 > **not** model outbound `fetch('https://...')` from LWC source,
-> outbound-message destinations from WorkflowRule, the
-> `publishesTo` edge (only `listensTo` is produced), virtual
-> sObjects projected from Salesforce Connect, CDC subscribers,
+> outbound-message destinations from WorkflowRule, virtual
+> sObjects projected from Salesforce Connect,
 > reflective async dispatch, Connected App → Profile /
 > Permission Set linkage, annotation-argument bodies (e.g.,
 > `@AuraEnabled(label='...')`), and Sites / Experience Cloud
@@ -612,13 +609,25 @@ hits one of the boundaries below:
   If the architect needs Sites / Experience Cloud coverage,
   refuse honestly; deferred to v1.6+ if architect demand
   surfaces.
-- **`publishesTo` edge.** v1.5 produces `listensTo` (the
-  subscriber side) but NOT the corresponding `publishesTo`
-  (the publisher side). An Apex class that calls
-  `EventBus.publish(new Account_Change__e())` is detectable but
-  v1.5 deliberately scopes to the subscriber side — the
-  architect's "who reads this event" question is the
-  higher-value half. Publication is a bounded v1.6+ extension.
+- **Event publishers are PARTLY modeled — under a different edge
+  name.** There is no `publishesTo` EdgeType and there never was; the
+  graph model is `writesTo` = emits/publishes, `listensTo` =
+  receives/subscribes, and the two are mutually exclusive.
+  `sfi.event_subscribers` in single-event mode (with an `eventId`)
+  returns a `publishers[]` group built from those inbound `writesTo`
+  edges. So "what publishes `Account_Change__e`?" is NOT a refusal —
+  run it. But split the answer by source:
+  - **Flow publishers: modeled.** A Flow `<recordCreates>` on the
+    event mints an object-level `writesTo` edge, and those appear.
+  - **Apex `EventBus.publish(...)`: NOT modeled.** Despite what the
+    tool's own publisher disclosure says, no scanner in
+    `packages/parsers/src` or `packages/extractors/src` detects
+    `EventBus.publish` — the Apex scanner detects `EventBus.subscribe`
+    (heuristic `listensTo`) and nothing on the publish side. An Apex
+    class that publishes the event will NOT appear in `publishers[]`.
+  So an empty `publishers[]` is not proof nothing publishes the event
+  — it is compatible with "every publisher here is Apex". Say that
+  rather than reporting the event as unpublished.
 - **LWC `fetch()` URL correlation to `RemoteSiteSetting` /
   `CspTrustedSite`.** An LWC bundle that does
   `fetch('https://my-api.example.com/x')` is invisible to
@@ -737,11 +746,10 @@ Claude's flow:
 4. **Present** the eight categorized sections + cross-type
    references section, citing canonical IDs and edge
    confidences.
-5. **Boundary disclosure** — verbatim, all eleven bullets
-   (LWC fetch, outbound message, `publishesTo`, virtual
-   sObjects, CDC, reflective dispatch, EventBus.subscribe,
-   AuraEnabled label, approval notifications, helper-wrapper
-   `dispatchesAsync`, Platform Event channel).
+5. **Boundary disclosure** — verbatim (LWC fetch, outbound message,
+   virtual sObjects, reflective dispatch, AuraEnabled label,
+   approval notifications, helper-wrapper `dispatchesAsync`,
+   Platform Event channel).
 
 ### Event-subscriber lookup — who subscribes to a Platform Event
 
@@ -794,15 +802,23 @@ Claude's flow:
 > All three subscribers are `declared`-confidence — v1.5 reads
 > the subscription declaration directly from the source.
 >
-> v1.5 captures the declared subscriber surface. It does **not**
-> see programmatic `EventBus.subscribe(...)` registrations
-> (runtime, not declared), CDC subscribers (CDC uses Streaming
-> API channels with `AccountChangeEvent`-shaped names, not
-> `__e` Platform Events), or the `publishesTo` companion edge
-> (only `listensTo` is produced; if you need to know which
-> classes publish `Account_Change__e`, that's a v1.6+ item —
-> grep the Apex source for `EventBus.publish(new
-> Account_Change__e())` manually for now).
+> v1.5 captures the declared subscriber surface. Apex
+> `EventBus.subscribe(...)` is now recognized heuristically
+> (static/resolvable channel args only); dynamically-built
+> subscriptions and managed-package listeners remain invisible. CDC
+> subscribers are a separate axis — CDC uses `AccountChangeEvent`-shaped
+> channel names, not `__e` Platform Events, and
+> `sfi.cdc_subscribers` covers them.
+>
+> For what PUBLISHES `Account_Change__e`, call
+> `sfi.event_subscribers` with the `eventId` — its `publishers[]`
+> group is built from inbound `writesTo` edges. There is no
+> `publishesTo` edge; `writesTo` is the publish-side edge. Coverage is
+> partial and asymmetric: **Flow** publishers (a `<recordCreates>` on
+> the event) ARE modeled; **Apex `EventBus.publish(...)` is NOT** —
+> no scanner detects it, so an Apex publisher never appears. An empty
+> `publishers[]` therefore means "no modeled Flow publisher", never
+> "nothing publishes this event".
 
 ### Async classifier — list all queueable classes
 
@@ -970,12 +986,18 @@ Before sending a response, confirm:
 - [ ] I did NOT resolve a synthetic `ExternalApi:` id to a fake
       real-node form.
 - [ ] I appended the v1.5 boundary disclosure — LWC fetch
-      correlation, outbound message destinations, `publishesTo`,
-      virtual sObjects, CDC, reflective dispatch,
-      `EventBus.subscribe`, AuraEnabled label argument, Connected
-      App → Profile linkage, helper-wrapper `dispatchesAsync`,
-      Platform Event channel routing, Sites / Experience Cloud,
-      approval-step notifications.
+      correlation, outbound message destinations,
+      virtual sObjects, reflective dispatch, AuraEnabled label
+      argument, Connected App → Profile linkage, helper-wrapper
+      `dispatchesAsync`, Platform Event channel routing, Sites /
+      Experience Cloud, approval-step notifications.
+- [ ] I did NOT claim a `publishesTo` edge exists — the publish-side
+      edge is `writesTo`, surfaced in
+      `event_subscribers.publishers[]`. I ran that tool rather than
+      refusing the publisher question, and I split the answer:
+      Flow publishers are modeled, Apex `EventBus.publish(...)` is
+      not detected by any scanner, so an empty `publishers[]` is
+      never "nothing publishes this event".
 - [ ] If the question was about a Network / Experience Cloud
       Site, LWC fetch URL, CDC subscriber, or event publisher,
       I refused honestly and named the boundary verbatim.

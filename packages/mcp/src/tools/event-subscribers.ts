@@ -188,9 +188,16 @@ export interface EventSubscriber {
  * carrying the declared `operation` (create/publish) and `mechanism`
  * (flow-create-record / EventBus.publish) where the extractor surfaced them.
  *
- * HONESTY: detection is the modeled `writesTo` edge only. The Apex
- * `EventBus.publish(...)` call is detected by the extractor's heuristic scan;
- * dynamically-built publishes and managed-package publishers are NOT modeled.
+ * HONESTY: detection is the modeled `writesTo` edge only, and coverage is
+ * ASYMMETRIC. A Flow `<recordCreates>` on the event mints a `writesTo` edge and
+ * DOES appear here. Apex `EventBus.publish(...)` does NOT: no scanner in
+ * `packages/parsers/src` or `packages/extractors/src` detects it (the Apex
+ * scanner covers `EventBus.subscribe` → `listensTo` and nothing on the publish
+ * side), so an Apex publisher never reaches this list. This renderer would
+ * surface such an edge if a future scanner minted one — the test fixture seeds
+ * one directly, which is why the suite is green on a path the extractor cannot
+ * produce. Dynamically-built publishes and managed-package publishers are also
+ * NOT modeled.
  */
 export interface EventPublisher {
   readonly id: ComponentId;
@@ -258,9 +265,10 @@ export interface EventSubscribersOutput {
   /**
    * GROUP C: the code that PUBLISHES this event (Flow/Apex emitting a `writesTo`
    * edge into the event). Present only in single-event mode (eventId supplied).
-   * Empty when nothing modeled publishes the event — empty≠absent (the
-   * `EventBus.publish` heuristic and dynamic/managed-package publishers may be
-   * unmodeled). Surfacing this stops a published-but-unsubscribed event from
+   * Empty when nothing modeled publishes the event — empty≠absent. Apex
+   * `EventBus.publish(...)` has NO detector, so an event published only from
+   * Apex reads as empty here; dynamic and managed-package publishers are also
+   * unmodeled. Surfacing this stops a published-but-unsubscribed event from
    * looking orphaned.
    */
   readonly publishers?: readonly EventPublisher[];
@@ -285,7 +293,7 @@ const EVENT_SUB_EMPTY_DISCLOSURE =
   'No subscribers found for this event — NOT proof nothing subscribes. Apex `EventBus.subscribe(...)` is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions and managed-package listeners remain invisible. Verify in Setup before assuming the event is unused.';
 // GROUP C: publish-side CODE (the publishers list).
 const EVENT_SUB_PUBLISHER_DISCLOSURE =
-  'Publishers are detected from modeled `writesTo` edges (Flow record-create on the event, Apex `EventBus.publish(...)`). Detection is partial: dynamically-built publishes and managed-package publishers are NOT modeled — an empty publishers list is not proof nothing publishes the event.';
+  'Publishers are detected from modeled `writesTo` edges. Coverage is ASYMMETRIC: a Flow `<recordCreates>` on the event IS modeled and appears here; Apex `EventBus.publish(...)` is NOT — no scanner in this codebase detects it, so an Apex publisher never appears (the renderer would surface such an edge if a future scanner minted one). Dynamically-built publishes and managed-package publishers are also NOT modeled. An empty publishers list means "no modeled Flow publisher", never "nothing publishes this event".';
 /**
  * CR-10: Publisher-vs-subscriber disambiguation disclosure. A Flow that
  * writes TO a platform event (recordCreates → `writesTo` edge) is a PUBLISHER,

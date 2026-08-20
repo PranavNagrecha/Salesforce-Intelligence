@@ -27,12 +27,12 @@ dependencies, then escalate to source grep only if the vault is thin.
 The vault is the cache; the retrieved source under `org-kb/source/` is
 cold storage. Both are served by the same MCP server.
 
-The graph covers **72 component types** and **20 edge types** — objects
+The graph covers **101 component types** and **23 edge types** — objects
 and fields, validation rules, Flows, Apex classes and triggers, layouts,
 profiles and permission sets, the sharing tier (roles, groups, queues,
 sharing rules), record types and UI surfaces, legacy automation, LWC /
 Aura / Visualforce, the integration tier (named credentials, external
-services, outbound messages), CPQ, and OmniStudio. There are **121
+services, outbound messages), CPQ, and OmniStudio. There are **209
 `sfi.*` tools**, fronted by `sfi.route_question` (call it first). Default
 conversation is **offline** (vault-only). The
 hard boundaries: **no writes to Salesforce**, **runtime / dynamic analysis
@@ -271,7 +271,7 @@ scope. Pass results through with their confidence and evidence (see the
 
 ## The other skills
 
-There are **25 skills** total; they auto-activate from their triggers —
+There are **26 skills** total; they auto-activate from their triggers —
 you don't call them, you just cooperate. The families:
 
 - **Refresh / lifecycle** — `refreshing-the-org-vault`,
