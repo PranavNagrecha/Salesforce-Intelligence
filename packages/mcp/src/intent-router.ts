@@ -2647,13 +2647,21 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // ACTION-CHAIN: `sfi.action_chain` is STACKED LAST here (the 99fdbf29
+    // pattern), never as a new rule and never as the primary. This intent's own
+    // patterns already match `converted` / `approved` / `on <Entity>
+    // conversion`, and `lifecycle_process`'s own disclosure says those distinct
+    // record ACTIONS are OUTSIDE its insert/update view — so the specialist
+    // answers the save-time slice and the chain tool completes it. A separate
+    // early rule would have STOLEN these phrasings from the grounded specialist;
+    // stacking cannot, because the primary is unchanged.
     intent: 'lifecycle-process',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.lifecycle_process'],
+    tools: ['sfi.resolve', 'sfi.lifecycle_process', 'sfi.action_chain'],
     liveRequired: false,
     needsResolve: true,
     reason:
-      'What happens when {Object}.{field} becomes {value} — the automation coupled to a value/stage transition, from the vault (lifecycle_process).',
+      'What happens when {Object}.{field} becomes {value} — the automation coupled to a value/stage transition, from the vault (lifecycle_process). For the distinct record ACTIONS lifecycle_process excludes (Lead convert, approval submission), action_chain composes the documented action sequence.',
     patterns: [
       /\bwhat\s+happens\s+when\b.*\b(becomes?|turns?|changes?\s+to|is\s+set\s+to|reaches?)\b/,
       // Up to three optional adverb words between the verb and "when" — "what
@@ -6279,12 +6287,18 @@ const RULES: readonly Rule[] = [
   },
   {
     // Approval processes — list + steps. Fell through to schema/unrouted (B21.6).
+    // ACTION-CHAIN: stacked LAST. This intent answers with a flat COMPONENT
+    // CATALOG (list_components / get_component); `action_chain` answers the
+    // same question as a SEQUENCE — submit, entry criteria, per-step approvers
+    // and actions, final approval / rejection, lock, recall. The catalog stays
+    // primary (it is the grounded inventory); the chain rides along.
     intent: 'approval-process',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.list_components', 'sfi.get_component'],
+    tools: ['sfi.resolve', 'sfi.list_components', 'sfi.get_component', 'sfi.action_chain'],
     liveRequired: false,
     needsResolve: false,
-    reason: 'Approval processes and their steps are modeled in the vault (ApprovalProcess).',
+    reason:
+      'Approval processes and their steps are modeled in the vault (ApprovalProcess) — list_components/get_component for the inventory, action_chain for the documented submit → approve/reject → lock/recall SEQUENCE instantiated against those components.',
     patterns: [
       /\bapproval\s+process(es)?\b/,
       /\bapproval\s+steps?\b/,

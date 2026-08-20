@@ -3,13 +3,14 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 209,
+    "total": 210,
     "advertised": 19,
     "hidden": 4,
     "defaultProfile": "core",
     "activeProfile": "core",
     "profiles": {
       "full": [
+        "sfi.action_chain",
         "sfi.ai_exposure_report",
         "sfi.annotations",
         "sfi.apex_build_advisor",
@@ -450,6 +451,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 2,
-  "catalogHash": "sha256:2c419cd5b2d6c0c4556b6139c8af817b283415bd3f7beb91bfbdbc7a3cccf497",
-  "identityHash": "sha256:289066b047c74f3344abcbf292f1fc9d409245b0d4b1e006a3d1ce055d71bcd7"
+  "catalogHash": "sha256:b0d513783d80d33473e7d5351afd5edcbb7bcf6664837cebf37e43008f85c064",
+  "identityHash": "sha256:a0c20ddddd86149a15622f279ab452f3185ce9e241359d7a82c93e947bd3ed5f"
 }

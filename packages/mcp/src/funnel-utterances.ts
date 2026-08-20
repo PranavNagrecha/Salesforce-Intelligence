@@ -992,6 +992,25 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'when the Status field flips to Resolved, what processes kick in for that value transition?',
     'what happens behind the scenes when a record moves to a new stage?',
   ],
+  // ACTION-CHAIN: a record ACTION composed as a chain (lead convert, approval
+  // submission). Deliberately phrased around the ACTION verb and the "what is
+  // the whole sequence" framing, NOT around "what fires on save" (that stays
+  // order_of_execution / what_happens_on_save) and NOT around "what happens
+  // when a field becomes a value" (that stays lifecycle_process).
+  'sfi.action_chain': [
+    'what is the full sequence when a Lead gets converted?',
+    'walk me through everything lead conversion does, step by step',
+    'when I convert a Lead, what fires on the Account, Contact and Opportunity it creates?',
+    'does converting a Lead run our validation rules and triggers?',
+    'what are all the steps of the approval process on Opportunity?',
+    'who approves at each step and what happens when someone rejects?',
+    'what fires when a record is submitted for approval?',
+    'show me the approval chain end to end including final approval and recall',
+    'what happens after final rejection — does the record stay locked?',
+    'do the approval field updates re-trigger our automation?',
+    'model the lead convert action as a chain of steps',
+    'which parts of the convert or approval sequence can this vault not resolve?',
+  ],
   'sfi.layout_assignments': [
     'which layouts are assigned to which profiles on Case?',
     'show me all layout assignments for Contact',
