@@ -2549,6 +2549,44 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // PLATFORM-ACCESS-ORACLE: the META question — "is our OWN offline
+    // permission answer right?" — not "who can access X". Sits AFTER the two
+    // record-level live rules (so "verify record-level access …" keeps
+    // first-matching live-record-access) and BEFORE effective-permissions
+    // (whose bare "effective access" pattern would otherwise swallow a parity
+    // ask and answer it from the vault — the very answer under audit).
+    //
+    // Every pattern carries an anchor NO other intent owns: parity / oracle /
+    // the literal UserEntityAccess, or a verify/cross-check verb explicitly
+    // paired with our-side vocabulary (offline / vault / computed / our). It
+    // deliberately does NOT match generic "who can access" or "what
+    // permissions does X have" — those belong to the specialists whose output
+    // this tool audits.
+    intent: 'platform-access-oracle',
+    plane: 'live',
+    tools: ['sfi.live_access_oracle'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      "Whether the OFFLINE permission engine is actually right is a parity question, not an access question: live_access_oracle asks Salesforce for its own UserEntityAccess verdict on the same user and objects and reports where the two disagree. It never replaces effective_permissions — it audits it.",
+    patterns: [
+      /\blive_access_oracle\b/,
+      /\buserentityaccess\b/,
+      /\b(?:access|permission)\s+parity\b/,
+      /\bparity\s+(?:check|oracle)\b/,
+      /\baccess\s+oracle\b/,
+      // "verify / prove / cross-check OUR (offline|vault|computed) permission
+      // answer" — the verb alone is far too generic, so an our-side noun is
+      // required in the same clause.
+      /\b(?:verify|prove|cross[-\s]check|double[-\s]check)\b[^.?!]{0,60}\b(?:offline|vault|computed|our)\b[^.?!]{0,60}\b(?:permission|access)\w*\b/,
+      /\b(?:offline|vault|computed|our)\b[^.?!]{0,40}\b(?:permission|access)\w*\b[^.?!]{0,60}\b(?:verify|prove|cross[-\s]check|double[-\s]check)\b/,
+      // "am I overstating / are we understating this user's access"
+      /\b(?:overstat|understat)\w*\b[^.?!]{0,40}\baccess\b/,
+      // "where does our access model disagree with the live org"
+      /\baccess\s+model\b[^.?!]{0,40}\b(?:disagree|differ|contradict)\w*\b/,
+    ],
+  },
+  {
     intent: 'effective-permissions',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.effective_permissions'],

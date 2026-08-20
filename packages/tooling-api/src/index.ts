@@ -58,3 +58,5 @@ export type {
   DependencyEnrichmentResult,
   EdgeConfirmation,
 } from './enrich-dependencies.js';
+
+export * from './user-entity-access.js';

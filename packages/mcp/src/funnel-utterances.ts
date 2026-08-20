@@ -479,6 +479,23 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'how are Contacts distributed across sales reps?',
     'how many Cases does each queue own right now?',
   ],
+  // PLATFORM-ACCESS-ORACLE. Deliberately NOT phrased as "who can access X" —
+  // that vocabulary belongs to effective_permissions / who_can_access_object /
+  // live_record_access. This tool's question is meta: "is our own answer
+  // right?", so its lexicon is parity / oracle / cross-check / disagree /
+  // overstate — the words no other tool owns.
+  'sfi.live_access_oracle': [
+    'verify our offline permission calculation is actually correct for this user',
+    'cross-check computed object access against what Salesforce itself says',
+    'run a parity check between our access model and the platform verdict',
+    'access parity oracle for a user on Account and Contact',
+    'does UserEntityAccess agree with what we computed offline?',
+    'where does our access model disagree with the live org?',
+    'prove the permission engine right or wrong for this user',
+    'double-check the access answer against the platform before I trust it',
+    'am I overstating this user\'s access — cross-check it with Salesforce',
+    'is the vault wrong about what this user can do — ask the org itself',
+  ],
   // Runtime resolver for the offline why_cant_user_see_record `unknown` — the
   // ACCESS direction (does user X have access to record Y right now). Vault
   // sfi.why_cant_user_see_record still owns the metadata cascade / "why".

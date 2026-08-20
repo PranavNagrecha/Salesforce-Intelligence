@@ -426,6 +426,10 @@ import {
   listViewSharingInputSchema,
 } from './list-view-sharing.js';
 import {
+  liveAccessOracleHandler,
+  liveAccessOracleInputSchema,
+} from './live-access-oracle.js';
+import {
   liveAutomationFiredHandler,
   liveAutomationFiredInputSchema,
 } from './live-automation-fired.js';
@@ -980,6 +984,8 @@ export const dispatchTool = async (
       return runTool(ctx, args, liveOwnerBreakdownInputSchema, liveOwnerBreakdownHandler);
     case 'sfi.live_record_access':
       return runTool(ctx, args, liveRecordAccessInputSchema, liveRecordAccessHandler);
+    case 'sfi.live_access_oracle':
+      return runTool(ctx, args, liveAccessOracleInputSchema, liveAccessOracleHandler);
     case 'sfi.live_record_shares':
       return runTool(ctx, args, liveRecordSharesInputSchema, liveRecordSharesHandler);
     case 'sfi.live_scheduled_jobs':

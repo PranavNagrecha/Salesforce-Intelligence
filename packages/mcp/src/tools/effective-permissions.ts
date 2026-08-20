@@ -63,8 +63,10 @@ import type {
   Edge,
   McpError,
   McpResponse,
+  ObjectPermissionFlag,
   PageInfo,
 } from '@sf-intelligence/contracts';
+import { OBJECT_PERMISSION_FLAGS } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
@@ -93,16 +95,18 @@ const EFFECTIVE_PERMS_BYTE_BUDGET = 38_000;
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
 
-/** The six object-permission flags composed max-wins, canonical order. */
-export const OBJECT_FLAGS = [
-  'allowCreate',
-  'allowRead',
-  'allowEdit',
-  'allowDelete',
-  'viewAllRecords',
-  'modifyAllRecords',
-] as const;
-export type ObjectFlag = (typeof OBJECT_FLAGS)[number];
+/**
+ * The six object-permission flags composed max-wins, canonical order.
+ *
+ * Hoisted to `@sf-intelligence/contracts` as {@link OBJECT_PERMISSION_FLAGS}:
+ * they are Salesforce `<objectPermissions>` vocabulary, not MCP vocabulary,
+ * and the muting subtractor in `permission-set-group.ts` kept a byte-identical
+ * private copy. Re-exported under the historical names so every existing
+ * import path keeps resolving and the union + the subtraction are provably
+ * iterating the same list.
+ */
+export const OBJECT_FLAGS = OBJECT_PERMISSION_FLAGS;
+export type ObjectFlag = ObjectPermissionFlag;
 
 const effectivePermissionsInputBaseSchema = z
   .object({

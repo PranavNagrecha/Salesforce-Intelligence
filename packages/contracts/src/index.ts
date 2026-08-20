@@ -520,6 +520,42 @@ export type ComponentType =
 export type ComponentId = string;
 
 // ============================================================================
+// Salesforce object-permission vocabulary
+// ============================================================================
+
+/**
+ * The six object-permission flags Salesforce serializes under
+ * `<objectPermissions>` in Profile / PermissionSet metadata, in canonical
+ * order.
+ *
+ * This is SALESFORCE PLATFORM vocabulary, not MCP vocabulary, which is why it
+ * lives here rather than inside a tool module. Before it was hoisted it had
+ * drifted into two byte-identical private copies — `OBJECT_FLAGS` in
+ * `effective-permissions.ts` (the max-wins union engine) and
+ * `MUTING_OBJECT_FLAGS` in `permission-set-group.ts` (the muting subtractor) —
+ * and any third consumer had to pick one tool module to depend on. Both now
+ * re-export this list, so the union and the subtraction are provably iterating
+ * the SAME flags: a future flag added by Salesforce is added once here and
+ * cannot land in one half of the calculation and not the other.
+ *
+ * Note what is NOT in this list: there is no `undelete` flag. Undelete rights
+ * follow from record ownership / `modifyAllRecords` / `ModifyAllData` at
+ * runtime, so any consumer comparing declared metadata against a runtime
+ * undelete signal has no offline counterpart to compare against.
+ */
+export const OBJECT_PERMISSION_FLAGS = [
+  'allowCreate',
+  'allowRead',
+  'allowEdit',
+  'allowDelete',
+  'viewAllRecords',
+  'modifyAllRecords',
+] as const;
+
+/** One member of {@link OBJECT_PERMISSION_FLAGS}. */
+export type ObjectPermissionFlag = (typeof OBJECT_PERMISSION_FLAGS)[number];
+
+// ============================================================================
 // Confidence
 // ============================================================================
 

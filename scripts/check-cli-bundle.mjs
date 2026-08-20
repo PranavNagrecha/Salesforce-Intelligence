@@ -31,8 +31,18 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * re-inline would add the ~5.4 MB ANTLR grammar (bundle > 10 MB). Ceiling set
  * with headroom above current legitimate size and far below any re-inline; the
  * antlr-ref guard, not this number, is what actually catches a re-inline.
+ *
+ * PLATFORM-ACCESS-ORACLE raise (5_750_000 -> 5_900_000): the ceiling had run
+ * down to ~9.6 KB of headroom (bundle 5_740_339), so the NEXT tool anyone added
+ * was going to trip it regardless of what that tool was — one live-plane tool
+ * plus its parity engine and Tooling fetcher is ~48 KB of bundled source
+ * (esbuild is not minified here, so JSDoc ships too). That is legitimate
+ * feature surface, not a grammar re-inline: the precise guard, `MAX_ANTLR_REFS`,
+ * stayed at 5 of an allowed 80 across this change. Raised to ~110 KB of
+ * headroom so the ceiling keeps catching a re-inline (> 10 MB) without failing
+ * every ordinary feature addition.
  */
-const MAX_BYTES = 5_750_000;
+const MAX_BYTES = 5_900_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */

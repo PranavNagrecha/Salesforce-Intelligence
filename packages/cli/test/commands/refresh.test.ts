@@ -13,6 +13,7 @@ import type {
 import { loadManifest, summarizeCoverage } from '@sf-intelligence/vault';
 
 import {
+  buildAndSaveProfileNameMap,
   buildFolderedReportManifest,
   buildPackageXml,
   buildRefreshPulse,
@@ -990,6 +991,132 @@ describe('CR-01 / C1 — shell-injection hardening of the `sf` exec path', () =>
       });
       expect(result.status).toBe('failed');
       expect(result.fatalError).toContain('Invalid Salesforce org alias');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe('PLATFORM-ACCESS-ORACLE — Profile label <-> API-name map at refresh', () => {
+  // PRIVACY: every profile below is INVENTED. The real artifact holds the org's
+  // own profile names and lives ONLY inside the vault (gitignored) — it must
+  // never reach a tracked file, fixture, or test.
+  const PROFILE_ID = '00e0x0000000001AAA';
+
+  /** Stub `sf`: answers the two map reads, records the argv it was handed. */
+  const mapExec = (
+    calls: string[][],
+    over: { listed?: unknown; queried?: unknown; throwOn?: string } = {},
+  ) =>
+    (async (_bin: string, args: readonly string[]) => {
+      calls.push([...args]);
+      if (over.throwOn !== undefined && args.join(' ').includes(over.throwOn)) {
+        throw new Error('sf CLI failed: boom');
+      }
+      if (args.includes('metadata') && args.includes('-m')) {
+        return {
+          stdout: JSON.stringify(
+            over.listed ?? { result: [{ id: PROFILE_ID, fullName: 'Std_User_Profile' }] },
+          ),
+          stderr: '',
+        };
+      }
+      return {
+        stdout: JSON.stringify(
+          over.queried ?? {
+            result: { records: [{ Id: PROFILE_ID, Name: 'Standard Widget User' }] },
+          },
+        ),
+        stderr: '',
+      };
+    }) as unknown as Parameters<typeof buildAndSaveProfileNameMap>[2];
+
+  it('issues exactly the two documented org reads, as bare argv (never a shell)', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      const calls: string[][] = [];
+      const r = await buildAndSaveProfileNameMap('test-org', join(cwd, 'org-kb'), mapExec(calls));
+      expect(r.ok).toBe(true);
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toEqual([
+        'org', 'list', 'metadata', '-m', 'Profile', '--target-org', 'test-org', '--json',
+      ]);
+      expect(calls[1]).toEqual([
+        'data', 'query', '--query', 'SELECT Id, Name FROM Profile',
+        '--target-org', 'test-org', '--json',
+      ]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('writes the artifact INSIDE the vault (org profile names never leave it)', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      const vaultRoot = join(cwd, 'org-kb');
+      await buildAndSaveProfileNameMap('test-org', vaultRoot, mapExec([]));
+      const written = join(vaultRoot, 'meta', 'profile-name-map.json');
+      expect(await pathExists(written)).toBe(true);
+      const raw = await readFile(written, 'utf8');
+      expect(raw).toContain('Std_User_Profile');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('is BEST-EFFORT: an org failure returns an error and writes nothing, never throws', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      const vaultRoot = join(cwd, 'org-kb');
+      const r = await buildAndSaveProfileNameMap(
+        'test-org',
+        vaultRoot,
+        mapExec([], { throwOn: 'list metadata' }),
+      );
+      expect(r.ok).toBe(false);
+      // No half-written artifact: absent stays absent, and an absent map makes
+      // every consumer refuse rather than guess.
+      expect(await pathExists(join(vaultRoot, 'meta', 'profile-name-map.json'))).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('tolerates an unexpected CLI envelope instead of throwing', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      const r = await buildAndSaveProfileNameMap(
+        'test-org',
+        join(cwd, 'org-kb'),
+        mapExec([], { listed: { result: { unexpected: true } }, queried: { result: {} } }),
+      );
+      // Structurally empty is a legitimate outcome; it must not be a crash.
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.entries).toBe(0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('a --no-pull refresh makes NO org call for the map (metadata-only stays offline)', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      await writeConfig(cwd, 'test-org');
+      await seedSmallFixture(cwd);
+      const seen: string[] = [];
+      const result = await runRefresh({
+        cwd,
+        noPull: true,
+        onProgress: (m: string) => seen.push(m),
+      });
+      expect(result.status).toBe('success');
+      // The guard, asserted behaviourally rather than by reading the source.
+      expect(seen.some((m) => /Profile label/i.test(m))).toBe(false);
+      expect(
+        await pathExists(join(cwd, 'org-kb', 'meta', 'profile-name-map.json')),
+      ).toBe(false);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

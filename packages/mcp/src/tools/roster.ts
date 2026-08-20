@@ -951,6 +951,47 @@ const LIVE_RECORD_ACCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Objec
   },
 });
 
+/**
+ * Concrete JSON Schema for `sfi.live_access_oracle`. Mirrors
+ * `liveAccessOracleInputSchema` in `live-access-oracle.ts`. The `objects`
+ * maxItems is NOT cosmetic: `UserEntityAccess` cannot be paged, so the tool is
+ * a bounded spot-check by construction.
+ */
+const LIVE_ACCESS_ORACLE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  required: ['user', 'objects'],
+  properties: {
+    user: {
+      type: 'string',
+      minLength: 1,
+      description:
+        'The subject user, by exact Username (preferred — unique) or exact User.Name. An ambiguous Name is an honest error, never a guess.',
+    },
+    objects: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 25,
+      items: { type: 'string', minLength: 1 },
+      description:
+        'Object API names to adjudicate. BOUNDED by design: UserEntityAccess does not support queryMore(), so there is no "check every object" mode. Objects not named here are "not checked", never "no access".',
+    },
+    profileId: {
+      type: 'string',
+      minLength: 1,
+      description:
+        "Offline Profile container ('Profile:Admin' or bare 'Admin'). Required when the user's live profile LABEL is not also the vault Profile node name — SOQL exposes the label, the vault keys by metadata API name.",
+    },
+    permissionSetIds: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+      description:
+        'Offline PermissionSet / PermissionSetGroup containers. Supplying profileId or this switches the offline side to caller-supplied wholesale — derived and supplied containers are never mixed.',
+    },
+    ...LIVE_ENABLED_PROPERTY,
+  },
+  additionalProperties: false,
+});
+
 /** Concrete JSON Schema for `sfi.live_record_shares`. Mirrors `liveRecordSharesInputSchema`. */
 const LIVE_RECORD_SHARES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
@@ -4647,6 +4688,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "Opt-in live org: a specific user's EFFECTIVE access to ONE record right now — Read / Edit / Delete / Transfer / Full (All) — from the org's live sharing calculation (UserRecordAccess). This is the RUNTIME resolver for the offline sfi.why_cant_user_see_record: when that vault cascade returns `unknown` (manual shares, account/opportunity teams, Apex managed sharing, and criteria sharing over record field VALUES are record-level state the vault never holds), this tool answers definitively against the live org. Give `recordId` (15/18-char) plus `userId` OR `username` (username resolves via a capped exact-Username lookup; ambiguity or no-match is an honest error). An empty result (`noAccessRow: true`) means the org returned no access row for this user+record — record missing, wrong id, or invisible to the querying user — and is reported as 'could not determine', NEVER a confirmed deny. Read-only; point-in-time as of queriedAt; provenance live_org; never falls back to vault data.",
     inputSchema: LIVE_RECORD_ACCESS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.live_access_oracle',
+    description:
+      "Opt-in live org: PARITY ORACLE for the offline permission engine. Answers 'is sfi.effective_permissions actually RIGHT about this user?' by asking Salesforce for its OWN final verdict (Tooling API `UserEntityAccess`) on the same user and the same bounded set of objects, then diffing the two per object per verb. Four verdicts: AGREE (platform confirmed), OFFLINE UNDERSTATES (platform grants it, offline says no — the known bug class: computeEffectiveGrants never expands permission DEPENDENCIES, and blanket ViewAllData/ModifyAllData is invisible to per-object grant edges), OFFLINE OVERSTATES (offline says yes, platform says no — the DANGEROUS class, listed explicitly, never folded into a count), and UNKNOWN with a named reason. VERB MAPPING is deliberately incomplete: read/create/edit/delete map 1:1 to IsReadable/IsCreatable/IsEditable/IsDeletable; `undelete` and `IsFlsUpdatable` have NO offline equivalent and `viewAllRecords`/`modifyAllRecords` have NO platform column — all four stay UNKNOWN rather than being mapped onto a near-miss flag to make the diff look clean. BOUNDED BY CONSTRUCTION: UserEntityAccess does not support queryMore(), so name up to 25 objects; an object not named — or named but returned with NO row — is 'not checked'/'not answered', NEVER 'no access'. The offline side is computed over the user's REAL grant bundle (profile + permission sets + groups, derived live); when that bundle cannot be resolved the tool REFUSES rather than emitting false understatements. Requires the `users` scope. This is object-level only — FLS and record-level sharing are out of scope. Read-only; provenance hybrid (offline vault × live platform verdict); the offline path is unaffected and still answers with no org connection.",
+    inputSchema: LIVE_ACCESS_ORACLE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.live_record_shares',

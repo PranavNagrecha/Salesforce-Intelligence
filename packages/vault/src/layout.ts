@@ -28,6 +28,8 @@ export interface VaultLayout {
   readonly version: string;
   readonly snapshots: string;
   readonly baseline: string;
+  /** PLATFORM-ACCESS-ORACLE — Profile Id <-> API-name map (org data; gitignored). */
+  readonly profileNameMap: string;
 }
 
 /**
@@ -56,6 +58,7 @@ export const vaultPaths = (vaultRoot: string): VaultLayout => {
     version: join(meta, 'version.txt'),
     snapshots: join(vaultRoot, 'snapshots'),
     baseline: join(meta, 'baseline.json'),
+    profileNameMap: join(meta, 'profile-name-map.json'),
   };
 };
 
