@@ -48,6 +48,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { declaredOnlyDependencyDisclosure } from './declared-only-disclosure.js';
 import {
   mergeInputAliases,
   resolveFieldAlias,
@@ -538,8 +539,18 @@ export const userAbilityHandler = async (
       truncated: hasMore || offset > 0,
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'declared',
+      // FRONT of the note: it qualifies actionPermissions as a whole. This
+      // tool reads `properties.userPermissions` directly and filters to a
+      // known action list, so an action permission the org's dependency
+      // graph IMPLIES rather than declares is invisible here.
       boundaryNote:
-        'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
+        declaredOnlyDependencyDisclosure({
+          noun: 'actionPermissions list',
+          specifics:
+            'Concretely for this surface: a container declaring `ExportReport` also confers `RunReports` (a dependency edge measured on a real org) and both are action permissions, yet only the declared one appears above.',
+        })
+        + ' '
+        + 'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
         + (fieldAccess !== null
           ? ` fieldAccess = this container's declared FLS on \`${fieldAccess.field}\` (read/edit; edit implies read; both false = no FLS granted). FLS is NOT record access — record visibility still needs OWD + sharing; for the full grantor breakdown on a field use \`field_access_audit\`.`
           : '')

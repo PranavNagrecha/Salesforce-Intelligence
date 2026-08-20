@@ -71,6 +71,16 @@ export {
 } from './annotations.js';
 export type { Annotation, AnnotationEvent, AnnotationKey } from './annotations.js';
 export {
+  loadPermissionDependencies,
+  permissionDependenciesPath,
+  savePermissionDependencies,
+} from './permission-dependencies.js';
+export type {
+  PermissionDependencyFile,
+  PermissionDependencyIoError,
+  PermissionDependencyRecord,
+} from './permission-dependencies.js';
+export {
   appendDemandHit,
   appendDrainResult,
   demandQueuePath,

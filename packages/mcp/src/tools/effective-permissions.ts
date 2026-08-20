@@ -50,6 +50,29 @@
  *     is absent (managed-package / not-retrieved). They are NOT system
  *     `<userPermissions>`, so they are never double-counted under
  *     `systemPermissions`.
+ *   - PLATFORM DEPENDENCY EXPANSION: the declared union alone systematically
+ *     UNDERSTATES access, because Salesforce refuses to save a container
+ *     granting a permission whose required permissions are not also enabled —
+ *     a permission set granting `ManageUsers` silently confers 15. The
+ *     system-permission set is therefore expanded through the org's captured
+ *     `PermissionDependency` graph (`meta/permission-dependencies.json`,
+ *     written by `sfi refresh --with-tooling-api`). An added permission is
+ *     NEVER presented as directly granted: its `grantedBy` is EMPTY and it
+ *     carries `impliedBy` with the root permission and the required-by chain.
+ *     A vault with NO capture is DISCLOSED as declared-only + possibly
+ *     understated (never silently unexpanded); a TRUNCATED capture is
+ *     disclosed and the closure marked partial. Rows are partitioned by the
+ *     platform's DECLARED `PermissionType` (a closed two-value domain:
+ *     `User Permission` / `Object Permission`), with the `Name<verb>` name
+ *     shape kept only as a consistency check that is disclosed when the two
+ *     disagree. Object-level requirements (`Account<create>`) land in
+ *     `impliedObjectPermissions`, not folded into `objectPermissions` — and
+ *     because object-typed rows are the MAJORITY of this graph, the
+ *     disclosure carries that PROPORTION and warns that object-level access
+ *     may STILL be understated. The disclosure also reports, COMPUTED from
+ *     this org's own captured graph and in BOTH directions, how many
+ *     permissions `ModifyAllData` / `ViewAllData` require and are required
+ *     by — never an asserted constant, because the graph is org-variable.
  *   - Record-type visibilities are unioned max-wins (visible=true wins) from
  *     each container's extracted `properties.recordTypeVisibilities`, with the
  *     same per-container attribution as custom permissions. A container
@@ -67,8 +90,15 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { loadPermissionDependencies } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
+import {
+  buildPermissionDependencyGraph,
+  expandPermissionClosure,
+  parseObjectPermissionToken,
+  type PermissionDependencyGraph,
+} from '../knowledge/permission-closure.js';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
@@ -167,12 +197,104 @@ export interface EffectiveObjectPerm {
   readonly mutedBy?: readonly string[];
 }
 
-/** One system permission, attributed to the granting containers. */
+/**
+ * Attribution for a permission the PLATFORM's dependency graph adds — the
+ * closure's citation. Present only on a row nothing directly grants.
+ */
+export interface ImpliedSystemPermSource {
+  /**
+   * The DIRECTLY-granted permission whose `PermissionDependency` chain
+   * requires this one.
+   */
+  readonly rootPermission: string;
+  /**
+   * The chain `rootPermission → … → this permission`, inclusive of both
+   * ends — the shortest such path, so the addition is citable rather than
+   * asserted.
+   */
+  readonly path: readonly string[];
+  /**
+   * The container(s) that grant `rootPermission`. They do NOT declare this
+   * permission; they confer it because the platform will not let the root
+   * be enabled without it.
+   */
+  readonly rootGrantedBy: readonly string[];
+}
+
+/**
+ * One system permission the union confers.
+ *
+ * Two ORIGINS share this row shape and are never conflated:
+ *   - DIRECTLY granted — `grantedBy` names the container(s) whose
+ *     `<userPermissions>` declare it, and `impliedBy` is ABSENT.
+ *   - IMPLIED by the platform's `PermissionDependency` graph — `grantedBy`
+ *     is EMPTY (nothing declares it) and `impliedBy` carries the chain
+ *     from the directly-granted permission that requires it. A closure-
+ *     added permission is never presented as directly granted.
+ */
 export interface EffectiveSystemPerm {
   readonly permission: string;
   readonly grantedBy: readonly string[];
   /** R6-06: muting set(s) that denied this perm within a group (non-empty only). */
   readonly mutedBy?: readonly string[];
+  /**
+   * Present ONLY on a permission added by dependency expansion — its
+   * citation. A row with `impliedBy` has an EMPTY `grantedBy` by
+   * construction; the two are mutually exclusive.
+   */
+  readonly impliedBy?: ImpliedSystemPermSource;
+}
+
+/**
+ * An OBJECT-level permission the dependency closure requires (the
+ * platform encodes these as `Account<create>` / `Contract<viewAllRecords>`
+ * inside `PermissionDependency`).
+ *
+ * Kept in its own list rather than folded into `objectPermissions`: these
+ * are NOT declared object grants and this tool does not (yet) map the
+ * platform's flag spelling onto the vault's `allowCreate` /
+ * `viewAllRecords` vocabulary or re-page the object list around them.
+ * Listing them here says what was actually found; merging them would
+ * assert an object-permission row nothing in the vault declares.
+ */
+export interface EffectiveImpliedObjectPerm {
+  /** Object half of the token, e.g. `Account`. */
+  readonly object: string;
+  /** Flag half, in the PLATFORM's spelling, e.g. `create` / `viewAllRecords`. */
+  readonly flag: string;
+  /** The raw token as the platform wrote it, e.g. `Account<create>`. */
+  readonly permission: string;
+  /** The directly-granted permission chain that requires it. */
+  readonly impliedBy: ImpliedSystemPermSource;
+}
+
+/**
+ * The state of the platform dependency expansion for THIS response — the
+ * honesty block for the closure axis. Always present, because "we did not
+ * expand" is exactly the state a caller must not mistake for "there was
+ * nothing to expand".
+ */
+export interface DependencyExpansionState {
+  /**
+   * FALSE when this vault carries no `PermissionDependency` capture (any
+   * vault refreshed before the ingest shipped, or refreshed without
+   * `--with-tooling-api`). The system permissions shown are then DECLARED
+   * ONLY and effective access may be UNDERSTATED.
+   */
+  readonly available: boolean;
+  /** System permissions added by the closure (0 when unavailable). */
+  readonly impliedSystemPermissions: number;
+  /** Object-level permissions the closure requires (see `impliedObjectPermissions`). */
+  readonly impliedObjectPermissions: number;
+  /**
+   * TRUE when the capture was TRUNCATED — the closure is a LOWER BOUND and
+   * more permissions may be implied than are shown.
+   */
+  readonly partial: boolean;
+  /** Distinct edges in the captured graph. 0 when unavailable. */
+  readonly edgeCount: number;
+  /** ISO capture time of the artifact, so its age is judgeable. Absent when unavailable. */
+  readonly capturedAt?: string;
 }
 
 /**
@@ -219,11 +341,33 @@ export interface EffectivePermissionsOutput {
    * (pre-extraction vault) contributes nothing and is disclosed.
    */
   readonly recordTypeVisibilities: readonly EffectiveRecordTypeVisibility[];
+  /**
+   * OBJECT-level permissions the platform's dependency closure requires
+   * (e.g. `Account<create>` required by a granted system permission).
+   * Empty when no capture is available or nothing object-level is implied.
+   * Deliberately NOT merged into `objectPermissions` — see
+   * {@link EffectiveImpliedObjectPerm}.
+   */
+  readonly impliedObjectPermissions: readonly EffectiveImpliedObjectPerm[];
+  /**
+   * The honesty block for the dependency-closure axis. ALWAYS present:
+   * `available: false` is the load-bearing signal that grants are DECLARED
+   * ONLY and effective access may be UNDERSTATED.
+   */
+  readonly dependencyExpansion: DependencyExpansionState;
   readonly summary: {
     readonly objects: number;
     readonly fieldsWithFls: number;
     readonly apexClasses: number;
+    /**
+     * Size of the `systemPermissions` list — DIRECTLY granted plus
+     * dependency-IMPLIED. `impliedSystemPermissions` is the implied half,
+     * so `systemPermissions - impliedSystemPermissions` is the declared
+     * half.
+     */
     readonly systemPermissions: number;
+    /** The dependency-implied half of `systemPermissions`. 0 when unavailable. */
+    readonly impliedSystemPermissions: number;
     readonly customPermissions: number;
     readonly recordTypeVisibilities: number;
   };
@@ -265,6 +409,23 @@ const PREFIX = {
   apex: 'ApexClass:',
   customPermission: 'CustomPermission:',
 } as const;
+
+/**
+ * The two permissions whose dependency posture is worth stating explicitly
+ * whenever the closure runs — they are the broadest grants in Salesforce,
+ * so "the closure added nothing" is most likely to be misread as "nothing
+ * to worry about" precisely here.
+ *
+ * The FACTS about them are COMPUTED from the org's own captured graph, never
+ * asserted: the graph is org-VARIABLE (edition + enabled features), which is
+ * the entire reason it is captured per-org instead of modelled in-product. A
+ * hardcoded "these have zero edges" would be an unchecked per-org claim in
+ * the reassuring direction about the most dangerous names in the platform.
+ */
+const BROAD_PERMISSIONS_TO_REPORT: readonly string[] = Object.freeze([
+  'ModifyAllData',
+  'ViewAllData',
+]);
 
 const BASE_DISCLOSURES: readonly string[] = Object.freeze([
   'Permission-set GROUP membership IS expanded: a PermissionSetGroup passed in `permissionSetIds` is unioned into its member permission sets (declared metadata), then each group’s muting permission set(s) are removed from THAT group’s grant per modeled permission class (object CRUD, FLS, system/user perms, custom perms, Apex-class access) before the containers union max-wins — muting is group-scoped, never org-wide. Record-type visibility is not mutable and is never removed. See any per-group muting disclosure for sets/classes that could not be applied.',
@@ -778,6 +939,88 @@ export const effectivePermissionsHandler = async (
       ...(a.mutedBy.size > 0 ? { mutedBy: [...a.mutedBy].sort() } : {}),
     });
   }
+  const declaredSystemCount = systemPermissions.length;
+
+  // ---- Platform dependency expansion (PermissionDependency) ---------------
+  // The declared union above UNDERSTATES access, systematically. Salesforce
+  // will not save a container granting `ManageUsers` unless the 14
+  // permissions it requires are enabled too, so the real effective set is
+  // the CLOSURE of the declared set over the org's `PermissionDependency`
+  // graph — 15 permissions, not 1. That graph is org-VARIABLE (edition +
+  // enabled features), so it is captured into the vault at refresh time
+  // (`--with-tooling-api`) rather than modelled in-product.
+  const depsLoaded = await loadPermissionDependencies(ctx.vaultRoot);
+  let dependencyGraph: PermissionDependencyGraph | null = null;
+  let dependencyArtifactError: string | null = null;
+  let dependencyCapturedAt: string | null = null;
+  let dependencyTruncationReason: string | null = null;
+  if (!depsLoaded.ok) {
+    // A corrupt / unreadable artifact is NOT "no dependencies": it degrades
+    // to the same disclosed-unavailable path, naming the read failure.
+    dependencyArtifactError = depsLoaded.error.message;
+  } else if (depsLoaded.value !== null) {
+    dependencyCapturedAt = depsLoaded.value.capturedAt;
+    dependencyTruncationReason = depsLoaded.value.truncationReason ?? null;
+    dependencyGraph = buildPermissionDependencyGraph(depsLoaded.value.edges, {
+      truncated: depsLoaded.value.truncated,
+    });
+  }
+
+  const impliedObjectPermissions: EffectiveImpliedObjectPerm[] = [];
+  let impliedSystemCount = 0;
+  let dependencyCycles = 0;
+  if (dependencyGraph !== null) {
+    // Roots are the SURVIVING system permissions only: a grant a group's
+    // muting set removed is not held, so it implies nothing. Object-level
+    // grants are NOT seeded as roots — that would need the vault's flag
+    // vocabulary mapped onto the platform's, which this pass does not do
+    // (disclosed below).
+    const rootGrantedBy = new Map<string, readonly string[]>();
+    for (const row of systemPermissions) rootGrantedBy.set(row.permission, row.grantedBy);
+    const closure = expandPermissionClosure(rootGrantedBy.keys(), dependencyGraph);
+    dependencyCycles = closure.cyclesDetected.length;
+    for (const imp of closure.implied) {
+      const source: ImpliedSystemPermSource = {
+        rootPermission: imp.rootPermission,
+        path: imp.path,
+        rootGrantedBy: rootGrantedBy.get(imp.rootPermission) ?? [],
+      };
+      // Partition on the platform's DECLARED type (`kindOf`), not on the
+      // name shape: the type column is authoritative and has a closed
+      // two-value domain. An object-level permission listed under
+      // systemPermissions would misstate what kind of thing was found.
+      // `parseObjectPermissionToken` is used only to SPLIT an already
+      // object-classified name into its object/verb halves.
+      if (dependencyGraph.kindOf.get(imp.permission) === 'object') {
+        const token = parseObjectPermissionToken(imp.permission);
+        impliedObjectPermissions.push({
+          object: token?.object ?? imp.permission,
+          flag: token?.flag ?? '',
+          permission: imp.permission,
+          impliedBy: source,
+        });
+        continue;
+      }
+      impliedSystemCount += 1;
+      // `grantedBy: []` is the honest attribution — no container declares
+      // it. `impliedBy` carries the chain that confers it.
+      systemPermissions.push({ permission: imp.permission, grantedBy: [], impliedBy: source });
+    }
+    systemPermissions.sort((x, y) =>
+      x.permission < y.permission ? -1 : x.permission > y.permission ? 1 : 0,
+    );
+    impliedObjectPermissions.sort((x, y) =>
+      x.permission < y.permission ? -1 : x.permission > y.permission ? 1 : 0,
+    );
+  }
+  const dependencyExpansion: DependencyExpansionState = {
+    available: dependencyGraph !== null,
+    impliedSystemPermissions: impliedSystemCount,
+    impliedObjectPermissions: impliedObjectPermissions.length,
+    partial: dependencyGraph?.truncated === true,
+    edgeCount: dependencyGraph?.edgeCount ?? 0,
+    ...(dependencyCapturedAt !== null ? { capturedAt: dependencyCapturedAt } : {}),
+  };
 
   // CR-CAP-10: resolve each SURVIVING custom permission against its definition
   // node so a managed-package grant whose definition is absent is disclosed
@@ -922,6 +1165,80 @@ export const effectivePermissionsHandler = async (
   const emitCursor = paged.pageInfo.nextCursor !== null;
 
   const disclosures = [...BASE_DISCLOSURES];
+
+  // --- Dependency-closure disclosures -------------------------------------
+  // The UNDERSTATEMENT risk (no capture at all, or a truncated one) is
+  // unshifted so it reads BEFORE the standing boundary notes; the
+  // applied/limitation notes ride at the back.
+  if (dependencyGraph === null) {
+    const why =
+      dependencyArtifactError !== null
+        ? ` The capture file exists but could not be read (${dependencyArtifactError}).`
+        : '';
+    disclosures.unshift(
+      `Dependency expansion UNAVAILABLE: this vault carries no PermissionDependency capture (\`meta/permission-dependencies.json\`), so \`systemPermissions\` above are DECLARED grants ONLY.${why} Salesforce requires dependent permissions to be enabled together — a container granting \`ManageUsers\` really confers 15 permissions, not 1 — so effective access here may be UNDERSTATED. Re-run \`sfi refresh --with-tooling-api\` to capture the platform's dependency graph.`,
+    );
+  } else {
+    // BOTH directions, computed. "Requires N" answers "what are its
+    // prerequisites"; "required by M" answers "what would CONFER it" — the
+    // safety-relevant one, and the one a forward-only reading silently drops.
+    const broadPermissionFacts = BROAD_PERMISSIONS_TO_REPORT.map((perm) => {
+      const requires = dependencyGraph.requires.get(perm)?.length ?? 0;
+      const requiredBy = dependencyGraph.requiredBy.get(perm)?.length ?? 0;
+      return `\`${perm}\` requires ${requires} permission(s) and is required by ${requiredBy}`;
+    }).join('; ');
+    disclosures.push(
+      `Dependency expansion applied: ${impliedSystemCount} system permission(s)${impliedObjectPermissions.length > 0 ? ` and ${impliedObjectPermissions.length} object-level permission(s)` : ''} are IMPLIED by the platform's PermissionDependency graph (${dependencyExpansion.edgeCount} edges captured ${dependencyCapturedAt ?? 'at an unknown time'}) on top of ${declaredSystemCount} declared grant(s). An implied row carries \`impliedBy\` (the directly-granted root permission and the required-by chain) and an EMPTY \`grantedBy\` — nothing DECLARES it; the platform confers it because the root cannot be enabled without it. A permission that expands to nothing is making a claim about its PREREQUISITES, not about how much access it confers. Measured in THIS org's captured graph: ${broadPermissionFacts}.`,
+    );
+    if (dependencyExpansion.partial) {
+      disclosures.unshift(
+        `Dependency capture is TRUNCATED — the closure above is a LOWER BOUND and MORE permissions may be implied than are shown${dependencyTruncationReason !== null ? ` (${dependencyTruncationReason})` : ''}. Treat the implied set as partial, never as complete.`,
+      );
+    }
+    // The object-level share is NOT a footnote: on a real org roughly 9 in
+    // 10 dependency edges require an OBJECT-level permission, so "N listed
+    // separately" would badly understate what is being held back. State the
+    // proportion, and state the consequence in plain words.
+    const kinds = dependencyGraph.requiredKindCounts;
+    const totalRequirements = kinds.user + kinds.object + kinds.unknown;
+    if (kinds.object > 0) {
+      const pct =
+        totalRequirements > 0 ? Math.round((kinds.object / totalRequirements) * 100) : 0;
+      disclosures.push(
+        `OBJECT-LEVEL REQUIREMENTS ARE REPORTED BUT NOT MERGED: ${kinds.object} of ${totalRequirements} captured dependency edges (${pct}%) require an OBJECT-level permission (the platform encodes these as \`Object<verb>\`, e.g. a user permission requiring \`Account<create>\`). ${impliedObjectPermissions.length} of them apply to this container bundle and are listed under \`impliedObjectPermissions\`; they are NOT merged into \`objectPermissions\`, because doing so would need a verified mapping from the platform's verb spelling onto this vault's allowCreate / viewAllRecords vocabulary, which this tool does not have. Object-level effective access may therefore STILL be UNDERSTATED here even though the closure ran. Separately, object grants are NOT used as expansion roots, so dependency chains that START at an object permission are not followed at all.`,
+      );
+    }
+    if (dependencyGraph.typeDisagreements.length > 0) {
+      disclosures.push(
+        `${dependencyGraph.typeDisagreements.length} captured permission name(s) carry a DECLARED type that contradicts their name shape (${dependencyGraph.typeDisagreements.slice(0, 5).join(', ')}${dependencyGraph.typeDisagreements.length > 5 ? ', …' : ''}). The declared type was used, but the platform disagreeing with itself means the user/object split for those rows is not fully trustworthy.`,
+      );
+    }
+    if (dependencyGraph.unknownTypeLabels.length > 0) {
+      const labels = dependencyGraph.unknownTypeLabels
+        .map((l) => (l.length === 0 ? '(absent)' : `\`${l}\``))
+        .join(', ');
+      disclosures.push(
+        `Some captured rows carry a permission-type label this build does not recognise (${labels}); the expected values are \`User Permission\` and \`Object Permission\`. Those rows were classified by name shape instead — a fallback, not an authoritative reading. Re-run \`sfi refresh --with-tooling-api\` on a current build if this persists.`,
+      );
+    }
+    // A SELF-LOOP is a 1-cycle. Reporting 2-cycles as "worth reporting" while
+    // silently discarding 1-cycles would apply the stated standard
+    // inconsistently, so both are surfaced by the same disclosure.
+    const selfLoops = dependencyGraph.selfLoopsDropped;
+    if (dependencyCycles > 0 || selfLoops > 0) {
+      const parts: string[] = [];
+      if (dependencyCycles > 0) parts.push(`${dependencyCycles} cycle(s)`);
+      if (selfLoops > 0) {
+        parts.push(
+          `${selfLoops} self-referential edge(s) (a permission requiring ITSELF — a 1-cycle, dropped at graph-build time because it can add nothing to a closure)`,
+        );
+      }
+      disclosures.push(
+        `The captured dependency graph contains ${parts.join(' and ')}. The closure is cycle-safe (each permission is expanded at most once), so the effective set is still complete for everything reachable — but a cycle in the platform's own dependency data is worth reporting.`,
+      );
+    }
+  }
+
   if (scopedObject !== null) {
     disclosures.push(
       `Scoped to object \`${scopedObject.object}\`: objectPermissions, the fieldsWithFls count, and recordTypeVisibilities are narrowed to it (an empty list is this profile/permission set holding nothing on that object). systemPermissions, customPermissions, and apexClasses are container-wide (not object-specific) and are NOT narrowed.`,
@@ -986,11 +1303,14 @@ export const effectivePermissionsHandler = async (
       systemPermissions: systemPage,
       customPermissions,
       recordTypeVisibilities: finalRecordTypeVisibilities,
+      impliedObjectPermissions,
+      dependencyExpansion,
       summary: {
         objects: totalObjects,
         fieldsWithFls,
         apexClasses: g.apexClasses.size,
         systemPermissions: systemPermissions.length,
+        impliedSystemPermissions: impliedSystemCount,
         customPermissions: customPermissions.length,
         recordTypeVisibilities: finalRecordTypeVisibilities.length,
       },

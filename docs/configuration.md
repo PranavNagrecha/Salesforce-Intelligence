@@ -536,6 +536,46 @@ is marked with its outcome (`retrieved` / `already-present` / `refused`). A
 new hit after a drain re-queues the id; draining twice is a no-op. The watch
 daemon drains automatically with `--drain-demand-queue`.
 
+## Permission dependencies (`meta/permission-dependencies.json`)
+
+The platform's own `PermissionDependency` graph — "user permission X requires
+permission Y" — captured from the Tooling API by `sfi refresh
+--with-tooling-api`. It exists because a declared-grants-only union
+**understates** effective access: Salesforce refuses to save a container
+granting a permission whose required permissions are not also enabled, so a
+permission set granting `ManageUsers` really confers 15 permissions, not 1.
+The edge set is org-VARIABLE (edition + enabled features), which is why it is
+vault state rather than a curated model file.
+
+`sfi.effective_permissions` expands its system-permission union through this
+graph. An IMPLIED permission carries `impliedBy` (`rootPermission`, the
+required-by `path`, and the containers granting the root) with an **empty**
+`grantedBy` — it is never presented as directly granted. Object-level
+requirements (the platform encodes them `Account<create>`) are listed under
+`impliedObjectPermissions`, not folded into `objectPermissions`.
+
+Object-level requirements dominate this graph (roughly 9 in 10 sampled rows),
+so the disclosure states the **proportion**, not merely that some exist, and
+says plainly that object-level effective access may still be understated.
+
+Honesty: the artifact is **absent** on any vault refreshed before the ingest
+shipped or without `--with-tooling-api`, and the tool then discloses that
+grants are DECLARED only and access may be UNDERSTATED — absent is never read
+as "this org has no permission dependencies". Dependency is not risk —
+`ModifyAllData` and `ViewAllData` have zero dependency edges.
+
+This is a virtual Tooling object with measured quirks the ingest handles
+explicitly: `LIMIT` is **silently ignored**, the queryMore cursor **re-serves**
+each batch (~5 raw records per distinct edge, up to a 10,000-record response
+cap), and `totalSize` disagrees with the records array. `WHERE Id >` and
+`ORDER BY Id ASC` *are* honoured, so the keyset walk covers the whole object
+and steps past the record cap; the artifact therefore keeps `edgeCount`
+(distinct — the headline) and `rawRowsReceived` (wire diagnostic) as separate
+fields, and termination never depends on a batch's size. The un-paged
+single-query fallback, used only when an org rejects the keyset SOQL, cannot be
+trusted to be complete and is marked `truncated`, which marks the closure
+partial (a LOWER BOUND).
+
 ---
 
 ## Governance and observability

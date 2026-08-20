@@ -28,6 +28,14 @@ export interface VaultLayout {
   readonly version: string;
   readonly snapshots: string;
   readonly baseline: string;
+  /**
+   * The platform's `PermissionDependency` graph captured at refresh time
+   * (`meta/permission-dependencies.json`). ABSENT on every vault refreshed
+   * before the ingest shipped, and on any refresh that ran without the
+   * Tooling-API pass — consumers must treat absent as "not captured",
+   * never as "this org has no permission dependencies".
+   */
+  readonly permissionDependencies: string;
 }
 
 /**
@@ -56,6 +64,7 @@ export const vaultPaths = (vaultRoot: string): VaultLayout => {
     version: join(meta, 'version.txt'),
     snapshots: join(vaultRoot, 'snapshots'),
     baseline: join(meta, 'baseline.json'),
+    permissionDependencies: join(meta, 'permission-dependencies.json'),
   };
 };
 

@@ -158,6 +158,27 @@ afterAll(async () => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+describe('whatIfAssignPermsetHandler — declared-only dependency disclosure', () => {
+  // The top honesty finding: this tool and `sfi.effective_permissions` answer
+  // the same question about the same containers and DISAGREE, because only the
+  // latter applies the PermissionDependency closure. The divergence errs toward
+  // UNDER-stating access — the direction in which a reviewer approves a grant
+  // they would have blocked — so the response must say so on every call.
+  it('leads its disclosures with the declared-only warning on every call', async () => {
+    const r = await whatIfAssignPermsetHandler(ctx, {
+      permissionSetId: 'PermissionSet:SalesConsole',
+      baseline: { profileId: 'Profile:Base', permissionSetIds: [] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const first = r.value.data.disclosures[0];
+    expect(first).toContain('DEPENDENCY EXPANSION IS NOT APPLIED HERE');
+    expect(first).toContain('LOWER BOUND');
+    expect(first).toContain('disagree on the same containers BY DESIGN');
+    expect(first).toContain('sfi.effective_permissions');
+  });
+});
+
 describe('whatIfAssignPermsetHandler — GAINED delta', () => {
   it('surfaces object CRUD / FLS / system / custom / record-type GAINED, but not the redundant Account read', async () => {
     const r = await whatIfAssignPermsetHandler(ctx, {

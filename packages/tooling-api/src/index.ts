@@ -58,3 +58,15 @@ export type {
   DependencyEnrichmentResult,
   EdgeConfirmation,
 } from './enrich-dependencies.js';
+
+export {
+  fetchPermissionDependencies,
+  PERMISSION_DEPENDENCY_RAW_RECORD_CAP,
+} from './permission-dependencies.js';
+export type {
+  PermissionDependencyEdge,
+  PermissionDependencyFetchOptions,
+  PermissionDependencyFetchResult,
+  PermissionDependencyRow,
+  PermissionDependencyStrategy,
+} from './permission-dependencies.js';

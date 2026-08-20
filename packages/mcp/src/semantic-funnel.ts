@@ -27,6 +27,7 @@ import { FUNNEL_UTTERANCES, INTERPRET_CONCEPT_CARDS } from './funnel-utterances.
 import type { Plane } from './intent-router.js';
 import { fuseScoresRrf, staticEmbedRanking, staticIndexAvailable } from './static-embed.js';
 import { CATEGORIES } from './tools/capabilities.js';
+import { stripRosterDeclaredOnlyDisclosure } from './tools/declared-only-disclosure.js';
 import { V01_TOOLS } from './tools/index.js';
 
 /** Funnel-local confidence in the shortlist itself (I2a-calibrated band). */
@@ -654,7 +655,21 @@ export const buildToolDocs = (): Map<string, string> => {
     // phrase-synonym rewrite — see tokenize) and any corpus edit shifts every
     // term's IDF, so the funnel-recall / semantic-funnel tests referee changes.
     const utterances = (FUNNEL_UTTERANCES[tool.name] ?? []).join(' ');
-    docs.set(tool.name, `${nameWords} ${nameWords} ${tool.description} ${keywords} ${utterances}`);
+    // The declared-only dependency WARNING is stripped before indexing. It is
+    // ~90 words of near-identical boilerplate on four tools, dense in the
+    // vocabulary the permissions family needs to discriminate on — indexing it
+    // crowds those tools together, lets them outrank the tool that actually
+    // answers a permission question, and (by repeating common terms like
+    // `org`) depresses their IDF corpus-wide, measurably weakening UNRELATED
+    // tools. Nobody searches for a tool by its caveat. Same reasoning as
+    // CORPUS_EXCLUDED above, at sentence rather than whole-tool granularity.
+    // NOTE: this removes the REGRESSION, not all movement. Measured against
+    // clean HEAD, the surviving (legitimate) prose edit still shifted 14
+    // terms' df, changed 138/204 documents' tf-idf vectors, and moved 137
+    // top-8 orderings — see `stripRosterDeclaredOnlyDisclosure`. The pinned
+    // suites do not observe that; they are a sample, not a stability metric.
+    const indexedDescription = stripRosterDeclaredOnlyDisclosure(tool.description);
+    docs.set(tool.name, `${nameWords} ${nameWords} ${indexedDescription} ${keywords} ${utterances}`);
   }
   for (const cat of CATEGORIES) {
     const catText = ` ${cat.title} ${cat.description} ${cat.exampleQuestions.join(' ')}`;

@@ -26,13 +26,17 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * Soft size backstop for a full grammar re-inline. The PRECISE grammar-inline
  * guard is `MAX_ANTLR_REFS` below (a re-inline mints ~1,700 ApexParser/antlr
  * refs); this byte ceiling is only defense-in-depth. The externalized bundle
- * grows with legitimate feature surface (the Graph-B concept model + the tool
- * roster) — it was ~4.1 MB at INFRA-11, ~5.6 MB now — while a real grammar
- * re-inline would add the ~5.4 MB ANTLR grammar (bundle > 10 MB). Ceiling set
- * with headroom above current legitimate size and far below any re-inline; the
- * antlr-ref guard, not this number, is what actually catches a re-inline.
+ * grows with legitimate feature surface (the Graph-B concept model, the tool
+ * roster, and the PermissionDependency ingest) — it was ~4.1 MB at INFRA-11,
+ * ~5.76 MB now — while a real grammar re-inline would add the ~5.4 MB ANTLR
+ * grammar (bundle > 10 MB). Ceiling set with headroom above current legitimate
+ * size and far below any re-inline; the antlr-ref guard, not this number, is
+ * what actually catches a re-inline. Raised 5.75 -> 5.90 MB when the
+ * PermissionDependency ingest landed: it added ~22 KB of legitimate surface
+ * against ~9.6 KB of remaining headroom, and a re-inline would still overshoot
+ * the new number by ~4 MB.
  */
-const MAX_BYTES = 5_750_000;
+const MAX_BYTES = 5_900_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */
