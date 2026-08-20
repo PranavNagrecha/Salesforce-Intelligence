@@ -42,6 +42,26 @@ export { COMPOUND_RULES } from './compound-rules.js';
 export { SUPERSEDES_RULES } from './supersedes-rules.js';
 
 /**
+ * The pure, cycle-safe transitive closure over the platform's
+ * `PermissionDependency` graph — "granting X really confers X plus
+ * everything X requires". No I/O; the graph is handed in.
+ */
+export {
+  buildPermissionDependencyGraph,
+  classifyPermissionKind,
+  expandPermissionClosure,
+  isObjectPermissionToken,
+  OBJECT_PERMISSION_TYPE,
+  parseObjectPermissionToken,
+  USER_PERMISSION_TYPE,
+  type ImpliedPermission,
+  type PermissionClosureResult,
+  type PermissionDependencyEdgeInput,
+  type PermissionDependencyGraph,
+  type PermissionKind,
+} from './permission-closure.js';
+
+/**
  * RM-loop PASS 2 — pure save-order phase derivation used by the join engine to
  * upgrade a coupled-field-write coupling to a strict cross-phase computed gate
  * when (and only when) it is provable.

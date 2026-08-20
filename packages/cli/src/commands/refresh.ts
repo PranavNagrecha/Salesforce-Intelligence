@@ -59,6 +59,7 @@ import {
   createToolingApiClient,
   enrichDependencies,
   enrichLastModified,
+  fetchPermissionDependencies,
   getAuthFromSfCli,
   type EnrichmentResult,
   type ToolingApiClient,
@@ -74,6 +75,7 @@ import {
   readAnnotations,
   readDemandQueue,
   saveManifest,
+  savePermissionDependencies,
   stampFamilyEpochs,
   vaultPaths,
   type ExtendedVaultManifest,
@@ -390,6 +392,23 @@ export interface ToolingApiRefreshSummary {
    * Absent when that pass did not run or found no API-only edges.
    */
   readonly dependencyNewEdgeCount?: number;
+  /**
+   * Outcome of the sibling `PermissionDependency` capture — `'ok'`, the
+   * Tooling API error kind, `'write-failed'`, or `'threw'`. Absent when the
+   * pass did not run (no vault root handed in). The pass is FAIL-SOFT: a
+   * failure is reported here and leaves the artifact absent; it never flips
+   * the refresh status, because the offline vault is still coherent
+   * without it.
+   */
+  readonly permissionDependencyOutcome?: string;
+  /** Distinct permission-dependency edges persisted. Absent unless the pass ran. */
+  readonly permissionDependencyEdgeCount?: number;
+  /**
+   * TRUE when the capture hit the server row ceiling / page budget and is a
+   * LOWER BOUND. Persisted onto the artifact too, so every downstream
+   * closure can disclose it. Absent unless the pass ran.
+   */
+  readonly permissionDependencyTruncated?: boolean;
 }
 
 /** Options accepted by `runRefresh`. */
@@ -1919,7 +1938,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // phase 1 because it mutates the graph; phase 2 carries its summary forward.
   let toolingApiSummary = args.toolingApiSummary;
   if (opts.withToolingApi === true && args.buildOnly === true) {
-    toolingApiSummary = await runToolingApiEnrichment(store, targetOrg, opts);
+    toolingApiSummary = await runToolingApiEnrichment(store, targetOrg, opts, paths.root);
   }
 
   if (args.buildOnly === true) {
@@ -1985,7 +2004,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     opts.withToolingApi === true &&
     args.publishOnly !== true
   ) {
-    toolingApiSummary = await runToolingApiEnrichment(store, targetOrg, opts);
+    toolingApiSummary = await runToolingApiEnrichment(store, targetOrg, opts, paths.root);
   }
 
   const hashResult = await computeSourceTreeHash(paths.source);
@@ -2647,48 +2666,27 @@ const ENRICH_CANDIDATE_PAGE_SIZE = 500;
 
 /**
  * Drive the v1.7 R2 (+ R4 dependency) enrichment pass against the open
- * graph. Returns a structured `ToolingApiRefreshSummary` regardless of
- * outcome so the CLI can render the live-data axis as a separate block.
- * Authentication failures, malformed responses, and per-type query
- * errors all surface here without flipping the overall refresh status
- * (the offline vault is the source of truth; the enrichment is additive).
+ * graph, given an ALREADY-RESOLVED client. Returns a structured
+ * `ToolingApiRefreshSummary` regardless of outcome so the CLI can render
+ * the live-data axis as a separate block. Malformed responses and per-type
+ * query errors all surface here without flipping the overall refresh
+ * status (the offline vault is the source of truth; the enrichment is
+ * additive).
  *
  * After the R2 freshness pass (`enrichLastModified`), a sibling R4 pass
  * (`enrichDependencies`) reuses the same candidates + client to stamp
  * `properties.confirmedByApi` on matching edges and append new
  * `dependsOnFromApi` edges from MetadataComponentDependency.
+ *
+ * The client is passed IN rather than resolved here so the sibling
+ * PermissionDependency capture can share one authentication —
+ * see {@link runToolingApiEnrichment}.
  */
-export const runToolingApiEnrichment = async (
+const runGraphEnrichmentPasses = async (
   store: GraphStore,
-  targetOrg: string,
+  client: ToolingApiClient,
   opts: RunRefreshOptions,
 ): Promise<ToolingApiRefreshSummary> => {
-  let client: ToolingApiClient;
-  if (opts.toolingApiClient !== undefined) {
-    client = opts.toolingApiClient;
-  } else {
-    const authResult = await getAuthFromSfCli(targetOrg);
-    if (!authResult.ok) {
-      return {
-        enrichedCount: 0,
-        errorCount: 0,
-        outcome: authResult.error.kind,
-        fatalMessage: authResult.error.message,
-      };
-    }
-    try {
-      client = createToolingApiClient({ auth: authResult.value });
-    } catch (cause) {
-      const msg = cause instanceof Error ? cause.message : String(cause);
-      return {
-        enrichedCount: 0,
-        errorCount: 0,
-        outcome: 'client-init-failed',
-        fatalMessage: msg,
-      };
-    }
-  }
-
   // Materialise the enrichment candidates by re-reading from the graph.
   // The enrichment runs after import/render, so the graph is the canonical
   // store. `listNodesByType` caps each page at LIST_MAX_LIMIT (500), so a
@@ -2914,6 +2912,137 @@ export const runToolingApiEnrichment = async (
       : {}),
     ...(dependencyNewEdgeCount > 0 ? { dependencyNewEdgeCount } : {}),
   };
+};
+
+/**
+ * Capture the org's `PermissionDependency` graph — the PLATFORM's own
+ * "user permission X requires permission Y" table — into the vault at
+ * `meta/permission-dependencies.json`.
+ *
+ * This is org-VARIABLE data (the edge set depends on edition and enabled
+ * features), so it is vault state, not a curated model file. It exists
+ * because `sfi.effective_permissions` unioned DECLARED grants only and
+ * therefore systematically UNDERSTATED access: a container granting
+ * `ManageUsers` really confers 15 permissions, not 1.
+ *
+ * FAIL-SOFT by contract. Every failure path — auth, query, write, or an
+ * unexpected throw — returns an outcome string and leaves the artifact
+ * ABSENT. It never flips the refresh status and never aborts the
+ * enrichment pass, because the offline vault is coherent without it and
+ * the MCP side discloses the absence rather than assuming "no
+ * dependencies".
+ *
+ * NOTE ON STALENESS: a failed capture leaves any PREVIOUS artifact in
+ * place rather than deleting it. That is deliberate — a stale dependency
+ * graph is far better than none — and the artifact's own `capturedAt` is
+ * what lets a reader judge its age.
+ */
+const capturePermissionDependencies = async (
+  client: ToolingApiClient,
+  vaultRoot: string,
+  opts: RunRefreshOptions,
+): Promise<Partial<ToolingApiRefreshSummary>> => {
+  // Injected clients are test stubs — skip the 200ms citizen throttle so
+  // fixtures stay within the suite budget. Production keeps the default.
+  const rateLimitPauseMs = opts.toolingApiClient !== undefined ? 0 : undefined;
+  try {
+    const fetched = await fetchPermissionDependencies({
+      client,
+      ...(rateLimitPauseMs !== undefined ? { rateLimitPauseMs } : {}),
+    });
+    if (!fetched.ok) {
+      return { permissionDependencyOutcome: fetched.error.kind };
+    }
+    const saved = await savePermissionDependencies(vaultRoot, {
+      version: 1,
+      capturedAt: new Date().toISOString(),
+      source: 'tooling-api:PermissionDependency',
+      // DISTINCT edges is the headline; the raw wire count is kept beside
+      // it as a diagnostic and never substituted for it (the cursor
+      // re-serves, so raw runs ~5x the edge count).
+      edgeCount: fetched.value.edges.length,
+      rawRowsReceived: fetched.value.rawRowsReceived,
+      truncated: fetched.value.truncated,
+      ...(fetched.value.truncationReason !== undefined
+        ? { truncationReason: fetched.value.truncationReason }
+        : {}),
+      edges: fetched.value.edges.map((e) => ({
+        permission: e.permission,
+        permissionType: e.permissionType,
+        requiredPermission: e.requiredPermission,
+        requiredPermissionType: e.requiredPermissionType,
+      })),
+    });
+    if (!saved.ok) {
+      return { permissionDependencyOutcome: 'write-failed' };
+    }
+    return {
+      permissionDependencyOutcome: 'ok',
+      permissionDependencyEdgeCount: fetched.value.edges.length,
+      permissionDependencyTruncated: fetched.value.truncated,
+    };
+  } catch {
+    return { permissionDependencyOutcome: 'threw' };
+  }
+};
+
+/**
+ * The opt-in Tooling API pass: resolve ONE authenticated client, then run
+ * every live-data capture that rides on it.
+ *
+ * Two independent passes share the client:
+ *   1. {@link capturePermissionDependencies} — the platform's permission
+ *      dependency graph, persisted to the vault. Runs FIRST and
+ *      independently so a graph-enrichment failure (no enrichable nodes,
+ *      a merge error) cannot silently skip it.
+ *   2. {@link runGraphEnrichmentPasses} — the R2 freshness enrichment and
+ *      the R4 MetadataComponentDependency confirmation, both against the
+ *      open graph.
+ *
+ * `vaultRoot` is optional: omitted, the permission-dependency capture is
+ * skipped entirely and the summary carries no `permissionDependency*`
+ * fields at all (so a caller with nowhere to write does not get a
+ * misleading "ok").
+ */
+export const runToolingApiEnrichment = async (
+  store: GraphStore,
+  targetOrg: string,
+  opts: RunRefreshOptions,
+  vaultRoot?: string,
+): Promise<ToolingApiRefreshSummary> => {
+  let client: ToolingApiClient;
+  if (opts.toolingApiClient !== undefined) {
+    client = opts.toolingApiClient;
+  } else {
+    const authResult = await getAuthFromSfCli(targetOrg);
+    if (!authResult.ok) {
+      return {
+        enrichedCount: 0,
+        errorCount: 0,
+        outcome: authResult.error.kind,
+        fatalMessage: authResult.error.message,
+      };
+    }
+    try {
+      client = createToolingApiClient({ auth: authResult.value });
+    } catch (cause) {
+      const msg = cause instanceof Error ? cause.message : String(cause);
+      return {
+        enrichedCount: 0,
+        errorCount: 0,
+        outcome: 'client-init-failed',
+        fatalMessage: msg,
+      };
+    }
+  }
+
+  const permissionDependency: Partial<ToolingApiRefreshSummary> =
+    vaultRoot === undefined
+      ? {}
+      : await capturePermissionDependencies(client, vaultRoot, opts);
+
+  const summary = await runGraphEnrichmentPasses(store, client, opts);
+  return { ...summary, ...permissionDependency };
 };
 
 /**
@@ -4742,7 +4871,28 @@ const formatToolingApiSummary = (summary: ToolingApiRefreshSummary): string => {
     depBits.push(`${summary.dependencyNewEdgeCount} API-only edges`);
   }
   const depSuffix = depBits.length > 0 ? `; ${depBits.join(', ')}` : '';
-  return `Tooling API: enriched ${summary.enrichedCount} components, ${summary.errorCount} errors${depSuffix}`;
+  const lines = [
+    `Tooling API: enriched ${summary.enrichedCount} components, ${summary.errorCount} errors${depSuffix}`,
+  ];
+  // The permission-dependency capture is FAIL-SOFT, so a failure is invisible
+  // unless the summary says so. A silent absence is exactly the state that
+  // makes effective-access answers understate — name it here.
+  if (summary.permissionDependencyOutcome !== undefined) {
+    if (summary.permissionDependencyOutcome === 'ok') {
+      const truncNote =
+        summary.permissionDependencyTruncated === true
+          ? ' — TRUNCATED capture (server row ceiling): the dependency closure is a LOWER BOUND'
+          : '';
+      lines.push(
+        `Permission dependencies: ${summary.permissionDependencyEdgeCount ?? 0} edges captured to meta/permission-dependencies.json${truncNote}`,
+      );
+    } else {
+      lines.push(
+        `Permission dependencies: NOT captured (${summary.permissionDependencyOutcome}) — effective-permission answers will disclose that grants are DECLARED only and may be UNDERSTATED.`,
+      );
+    }
+  }
+  return lines.join('\n');
 };
 
 /**
@@ -5044,7 +5194,7 @@ export const registerRefreshCommand = (program: Command): void => {
     )
     .option(
       '--with-tooling-api',
-      'After the offline refresh completes, run the v1.7 Tooling API enrichment pass to hydrate `lastModifiedDate` / `lastModifiedBy` / `apiVersion` on enrichable nodes, and now also confirms declared dependencies (stamps `confirmedByApi` on matching edges and appends `dependsOnFromApi` edges from MetadataComponentDependency). Requires `sf` CLI installed and the target org alias authenticated.',
+      'After the offline refresh completes, run the v1.7 Tooling API enrichment pass to hydrate `lastModifiedDate` / `lastModifiedBy` / `apiVersion` on enrichable nodes, confirm declared dependencies (stamps `confirmedByApi` on matching edges and appends `dependsOnFromApi` edges from MetadataComponentDependency), and capture the platform PermissionDependency graph ("permission X requires permission Y") to `meta/permission-dependencies.json` so effective-permission answers expand declared grants through their required permissions instead of understating access. Requires `sf` CLI installed and the target org alias authenticated.',
     )
     .option(
       '--with-audit-trail',
