@@ -188,6 +188,19 @@ export interface PermissionDependencyEdgeInput {
 export interface PermissionDependencyGraph {
   /** permission -> the permissions it DIRECTLY requires, sorted, deduped. */
   readonly requires: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The REVERSE index: permission -> the permissions that directly require
+   * IT, sorted, deduped.
+   *
+   * Kept because the two directions answer different questions and the
+   * safety-relevant one is usually the reverse. "What does `ViewAllData`
+   * require?" is a statement about its prerequisites; "what would CONFER
+   * `ViewAllData`?" is a statement about how a user might end up holding
+   * it. A surface that reports only the forward direction, and phrases it
+   * as "has no dependencies", leaves the second question unanswered while
+   * sounding like it answered both.
+   */
+  readonly requiredBy: ReadonlyMap<string, readonly string[]>;
   /** Distinct edges the graph holds (after dedupe / self-loop drops). */
   readonly edgeCount: number;
   /**
@@ -348,8 +361,24 @@ export const buildPermissionDependencyGraph = (
   for (const [from, bucket] of sets) {
     requires.set(from, [...bucket].sort());
   }
+  const reverseSets = new Map<string, Set<string>>();
+  for (const [from, bucket] of sets) {
+    for (const to of bucket) {
+      let rev = reverseSets.get(to);
+      if (rev === undefined) {
+        rev = new Set<string>();
+        reverseSets.set(to, rev);
+      }
+      rev.add(from);
+    }
+  }
+  const requiredBy = new Map<string, readonly string[]>();
+  for (const [to, bucket] of reverseSets) {
+    requiredBy.set(to, [...bucket].sort());
+  }
   return {
     requires,
+    requiredBy,
     edgeCount,
     truncated: options?.truncated === true,
     selfLoopsDropped,

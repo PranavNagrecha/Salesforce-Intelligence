@@ -69,8 +69,10 @@
  *     `impliedObjectPermissions`, not folded into `objectPermissions` — and
  *     because object-typed rows are the MAJORITY of this graph, the
  *     disclosure carries that PROPORTION and warns that object-level access
- *     may STILL be understated. Dependency is NOT risk — `ModifyAllData` and
- *     `ViewAllData` have ZERO dependency edges.
+ *     may STILL be understated. The disclosure also reports, COMPUTED from
+ *     this org's own captured graph and in BOTH directions, how many
+ *     permissions `ModifyAllData` / `ViewAllData` require and are required
+ *     by — never an asserted constant, because the graph is org-variable.
  *   - Record-type visibilities are unioned max-wins (visible=true wins) from
  *     each container's extracted `properties.recordTypeVisibilities`, with the
  *     same per-container attribution as custom permissions. A container
@@ -407,6 +409,23 @@ const PREFIX = {
   apex: 'ApexClass:',
   customPermission: 'CustomPermission:',
 } as const;
+
+/**
+ * The two permissions whose dependency posture is worth stating explicitly
+ * whenever the closure runs — they are the broadest grants in Salesforce,
+ * so "the closure added nothing" is most likely to be misread as "nothing
+ * to worry about" precisely here.
+ *
+ * The FACTS about them are COMPUTED from the org's own captured graph, never
+ * asserted: the graph is org-VARIABLE (edition + enabled features), which is
+ * the entire reason it is captured per-org instead of modelled in-product. A
+ * hardcoded "these have zero edges" would be an unchecked per-org claim in
+ * the reassuring direction about the most dangerous names in the platform.
+ */
+const BROAD_PERMISSIONS_TO_REPORT: readonly string[] = Object.freeze([
+  'ModifyAllData',
+  'ViewAllData',
+]);
 
 const BASE_DISCLOSURES: readonly string[] = Object.freeze([
   'Permission-set GROUP membership IS expanded: a PermissionSetGroup passed in `permissionSetIds` is unioned into its member permission sets (declared metadata), then each group’s muting permission set(s) are removed from THAT group’s grant per modeled permission class (object CRUD, FLS, system/user perms, custom perms, Apex-class access) before the containers union max-wins — muting is group-scoped, never org-wide. Record-type visibility is not mutable and is never removed. See any per-group muting disclosure for sets/classes that could not be applied.',
@@ -1160,8 +1179,16 @@ export const effectivePermissionsHandler = async (
       `Dependency expansion UNAVAILABLE: this vault carries no PermissionDependency capture (\`meta/permission-dependencies.json\`), so \`systemPermissions\` above are DECLARED grants ONLY.${why} Salesforce requires dependent permissions to be enabled together — a container granting \`ManageUsers\` really confers 15 permissions, not 1 — so effective access here may be UNDERSTATED. Re-run \`sfi refresh --with-tooling-api\` to capture the platform's dependency graph.`,
     );
   } else {
+    // BOTH directions, computed. "Requires N" answers "what are its
+    // prerequisites"; "required by M" answers "what would CONFER it" — the
+    // safety-relevant one, and the one a forward-only reading silently drops.
+    const broadPermissionFacts = BROAD_PERMISSIONS_TO_REPORT.map((perm) => {
+      const requires = dependencyGraph.requires.get(perm)?.length ?? 0;
+      const requiredBy = dependencyGraph.requiredBy.get(perm)?.length ?? 0;
+      return `\`${perm}\` requires ${requires} permission(s) and is required by ${requiredBy}`;
+    }).join('; ');
     disclosures.push(
-      `Dependency expansion applied: ${impliedSystemCount} system permission(s)${impliedObjectPermissions.length > 0 ? ` and ${impliedObjectPermissions.length} object-level permission(s)` : ''} are IMPLIED by the platform's PermissionDependency graph (${dependencyExpansion.edgeCount} edges captured ${dependencyCapturedAt ?? 'at an unknown time'}) on top of ${declaredSystemCount} declared grant(s). An implied row carries \`impliedBy\` (the directly-granted root permission and the required-by chain) and an EMPTY \`grantedBy\` — nothing DECLARES it; the platform confers it because the root cannot be enabled without it. Dependency is NOT risk: \`ModifyAllData\` and \`ViewAllData\` have ZERO dependency edges and expand to nothing.`,
+      `Dependency expansion applied: ${impliedSystemCount} system permission(s)${impliedObjectPermissions.length > 0 ? ` and ${impliedObjectPermissions.length} object-level permission(s)` : ''} are IMPLIED by the platform's PermissionDependency graph (${dependencyExpansion.edgeCount} edges captured ${dependencyCapturedAt ?? 'at an unknown time'}) on top of ${declaredSystemCount} declared grant(s). An implied row carries \`impliedBy\` (the directly-granted root permission and the required-by chain) and an EMPTY \`grantedBy\` — nothing DECLARES it; the platform confers it because the root cannot be enabled without it. A permission that expands to nothing is making a claim about its PREREQUISITES, not about how much access it confers. Measured in THIS org's captured graph: ${broadPermissionFacts}.`,
     );
     if (dependencyExpansion.partial) {
       disclosures.unshift(
@@ -1194,9 +1221,20 @@ export const effectivePermissionsHandler = async (
         `Some captured rows carry a permission-type label this build does not recognise (${labels}); the expected values are \`User Permission\` and \`Object Permission\`. Those rows were classified by name shape instead — a fallback, not an authoritative reading. Re-run \`sfi refresh --with-tooling-api\` on a current build if this persists.`,
       );
     }
-    if (dependencyCycles > 0) {
+    // A SELF-LOOP is a 1-cycle. Reporting 2-cycles as "worth reporting" while
+    // silently discarding 1-cycles would apply the stated standard
+    // inconsistently, so both are surfaced by the same disclosure.
+    const selfLoops = dependencyGraph.selfLoopsDropped;
+    if (dependencyCycles > 0 || selfLoops > 0) {
+      const parts: string[] = [];
+      if (dependencyCycles > 0) parts.push(`${dependencyCycles} cycle(s)`);
+      if (selfLoops > 0) {
+        parts.push(
+          `${selfLoops} self-referential edge(s) (a permission requiring ITSELF — a 1-cycle, dropped at graph-build time because it can add nothing to a closure)`,
+        );
+      }
       disclosures.push(
-        `The captured dependency graph contains ${dependencyCycles} cycle(s). The closure is cycle-safe (each permission is expanded at most once), so the effective set is still complete for everything reachable — but a cycle in the platform's own dependency data is worth reporting.`,
+        `The captured dependency graph contains ${parts.join(' and ')}. The closure is cycle-safe (each permission is expanded at most once), so the effective set is still complete for everything reachable — but a cycle in the platform's own dependency data is worth reporting.`,
       );
     }
   }

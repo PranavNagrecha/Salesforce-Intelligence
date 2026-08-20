@@ -63,6 +63,7 @@ import {
   type CoverageCaveat,
   type Verdict,
 } from './coverage-trust.js';
+import { declaredOnlyDependencyDisclosure } from './declared-only-disclosure.js';
 import {
   computeEffectiveGrants,
   heldCustomPerm,
@@ -504,6 +505,16 @@ const runPermsetDelta = async (
 
   // ---- Situational honesty caveats ----------------------------------------
   const disclosures: string[] = [];
+  // FRONT of the list: this qualifies the whole delta, not a detail of it.
+  // Both compose paths run the DECLARED-grant union engine, which carries no
+  // dependency closure, so the system-permission delta is a lower bound.
+  disclosures.push(
+    declaredOnlyDependencyDisclosure({
+      noun: 'system-permission delta',
+      specifics:
+        'A permission the target set declares may pull in further permissions the platform requires alongside it; those are absent from the gained/lost counts here.',
+    }),
+  );
   if (action === 'assign' && targetInBaseline) {
     disclosures.push(
       `The target permission set ${targetId} is already in the baseline — assigning it is a no-op, so the net gain is empty.`,

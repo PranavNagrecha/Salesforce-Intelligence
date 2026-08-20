@@ -200,6 +200,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { declaredOnlyDependencyDisclosure } from './declared-only-disclosure.js';
 import { expandGroupMembership } from './group-membership.js';
 import {
   expandPermissionSetGroup,
@@ -528,6 +529,21 @@ export interface WhyCantUserSeeRecordOutput {
  * offline and never issues a live query itself; it names the live tool the host
  * can call if read-only live access is enabled.
  */
+/**
+ * Standing qualifier on EVERY verdict: the system-permission BYPASS stage
+ * reads DECLARED `ViewAllData` / `ModifyAllData` off each container and never
+ * consults the org's captured dependency graph.
+ *
+ * This tool's failure direction is the dangerous one — it concludes a user
+ * CANNOT see a record — so a bypass permission the org IMPLIES rather than
+ * declares would produce a confident deny that is wrong.
+ */
+const DECLARED_ONLY_BYPASS_NOTE = declaredOnlyDependencyDisclosure({
+  noun: 'system-permission bypass stage',
+  specifics:
+    "That stage reads only the DECLARED `ViewAllData` / `ModifyAllData` on each container. Neither carried dependency edges on one probed org, but the graph is org-VARIABLE and this tool never consults it — so a bypass permission an org IMPLIES rather than declares would be missed here, and a `restricted` verdict could understate access.",
+});
+
 const LIVE_ACCESS_RESOLVER_NOTE =
   'Verdict is `unknown`: the offline vault cannot decide record-level access ' +
   '(manual shares, account/opportunity teams, Apex managed sharing, and criteria ' +
@@ -2516,9 +2532,10 @@ export const whyCantUserSeeRecordHandler = async (
         ...(createResult.value.mutedBy.length > 0
           ? { mutedBy: createResult.value.mutedBy }
           : {}),
-        ...(createResult.value.verdict === 'unknown'
-          ? { boundaryNote: LIVE_ACCESS_RESOLVER_NOTE }
-          : {}),
+        boundaryNote:
+          createResult.value.verdict === 'unknown'
+            ? `${DECLARED_ONLY_BYPASS_NOTE} ${LIVE_ACCESS_RESOLVER_NOTE}`
+            : DECLARED_ONLY_BYPASS_NOTE,
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -2542,7 +2559,7 @@ export const whyCantUserSeeRecordHandler = async (
         verdict: owdStep.verdict,
         reasoning: [owdStep],
         appliedScope,
-        boundaryNote: LIVE_ACCESS_RESOLVER_NOTE,
+        boundaryNote: `${DECLARED_ONLY_BYPASS_NOTE} ${LIVE_ACCESS_RESOLVER_NOTE}`,
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -2777,6 +2794,25 @@ export const whyCantUserSeeRecordHandler = async (
     mutingCouldNotApply && finalVerdict !== 'restricted'
       ? ` NOTE: a permission set group referenced muting permission set(s) that could not be applied (${[...netAccess!.presentWithoutData, ...netAccess!.missingMutingIds].sort().join(', ')} — pre-R6-06 or absent), so object access may be OVERSTATED; re-run \`/sfi-refresh\` and see the PermissionSetGroup step.`
       : '';
+  // The pre-existing situational note, unchanged in content — extracted from
+  // the response literal so the standing declared-only qualifier can lead it.
+  const situationalBoundaryNote =
+    objectCrudHardDenyReason !== null
+      ? mutedByForDeny.length > 0
+        ? `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
+          `The object-CRUD grant existed but was muted within its permission set group ` +
+          `(muting is group-scoped) — use sfi.effective_permissions for the full net grant. ` +
+          `Restriction rules and sharing stages cannot revive a muted object-CRUD precondition.`
+        : `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
+          `Restriction rules (when present) may further narrow visible records but cannot ` +
+          `grant access when object Read is missing — evaluate RestrictionRule stages for ` +
+          `non-granting filters such as Hide_External even though they do not overturn the deny.`
+      : finalVerdict === 'unknown'
+        ? LIVE_ACCESS_RESOLVER_NOTE + overstatementNote
+        : overstatementNote !== ''
+          ? overstatementNote.trimStart()
+          : '';
+
   return ok({
     data: {
       verdict: finalVerdict,
@@ -2784,24 +2820,14 @@ export const whyCantUserSeeRecordHandler = async (
       appliedScope,
       ...mutedByField,
       ...(objectCrudHardDenyReason !== null
-        ? {
-            hardDenyReason: objectCrudHardDenyReason,
-            boundaryNote:
-              mutedByForDeny.length > 0
-                ? `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
-                  `The object-CRUD grant existed but was muted within its permission set group ` +
-                  `(muting is group-scoped) — use sfi.effective_permissions for the full net grant. ` +
-                  `Restriction rules and sharing stages cannot revive a muted object-CRUD precondition.`
-                : `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
-                  `Restriction rules (when present) may further narrow visible records but cannot ` +
-                  `grant access when object Read is missing — evaluate RestrictionRule stages for ` +
-                  `non-granting filters such as Hide_External even though they do not overturn the deny.`,
-          }
-        : finalVerdict === 'unknown'
-          ? { boundaryNote: LIVE_ACCESS_RESOLVER_NOTE + overstatementNote }
-          : overstatementNote !== ''
-            ? { boundaryNote: overstatementNote.trimStart() }
-            : {}),
+        ? { hardDenyReason: objectCrudHardDenyReason }
+        : {}),
+      // The declared-only qualifier leads EVERY verdict — it is the reason
+      // this tool and `sfi.effective_permissions` can disagree on the same
+      // containers, and this tool's error direction is a wrong DENY.
+      boundaryNote: [DECLARED_ONLY_BYPASS_NOTE, situationalBoundaryNote]
+        .filter((part) => part.length > 0)
+        .join(' '),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

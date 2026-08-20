@@ -263,7 +263,7 @@ describe('effective_permissions — dependency capture present', () => {
     expect(editTask?.impliedBy?.rootGrantedBy).toEqual(['PermissionSet:SyntheticMailer']);
   });
 
-  it('keeps ModifyAllData unexpanded — dependency is NOT risk', async () => {
+  it('keeps ModifyAllData unexpanded, and says so from COMPUTED counts not a claim', async () => {
     const r = await effectivePermissionsHandler(ctx, { ...CONTAINERS });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -273,7 +273,7 @@ describe('effective_permissions — dependency capture present', () => {
     const applied = r.value.data.disclosures.find((x) =>
       x.includes('Dependency expansion applied'),
     );
-    expect(applied).toContain('ZERO dependency edges');
+    expect(applied).toContain("Measured in THIS org's captured graph");
   });
 
   // The motivating real case: ImportPersonal is a USER permission whose
@@ -328,6 +328,67 @@ describe('effective_permissions — dependency capture present', () => {
     expect(disclosure).toContain('3 of 9 captured dependency edges (33%)');
     expect(disclosure).toContain('STILL be UNDERSTATED');
     expect(disclosure).toContain('NOT used as expansion roots');
+  });
+});
+
+describe('effective_permissions — computed broad-permission facts (no hardcoded claims)', () => {
+  it('reports ModifyAllData / ViewAllData counts COMPUTED from this org\'s graph, in BOTH directions', async () => {
+    const r = await effectivePermissionsHandler(ctx, { ...CONTAINERS });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const applied = r.value.data.disclosures.find((x) =>
+      x.includes('Dependency expansion applied'),
+    );
+    expect(applied).toBeDefined();
+    // The fixture graph has no edges touching either permission, so both
+    // directions read zero — but they are READ, not asserted.
+    expect(applied).toContain(
+      '`ModifyAllData` requires 0 permission(s) and is required by 0',
+    );
+    expect(applied).toContain('`ViewAllData` requires 0 permission(s) and is required by 0');
+    // The old hardcoded editorial claim must be gone.
+    expect(applied).not.toContain('Dependency is NOT risk');
+    expect(applied).not.toContain('have ZERO dependency edges');
+  });
+
+  it('reflects a graph in which something DOES confer ViewAllData', async () => {
+    const saved = await savePermissionDependencies(tempDir, {
+      ...CAPTURE,
+      edges: [...CAPTURE.edges, record('ManageUsers', 'ViewAllData')],
+      edgeCount: CAPTURE.edges.length + 1,
+    });
+    if (!saved.ok) throw new Error(saved.error.message);
+    const r = await effectivePermissionsHandler(ctx, { ...CONTAINERS });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const applied = r.value.data.disclosures.find((x) =>
+      x.includes('Dependency expansion applied'),
+    );
+    // The safety-relevant direction now reads 1, computed live.
+    expect(applied).toContain('`ViewAllData` requires 0 permission(s) and is required by 1');
+    // Restore the canonical capture for any later block.
+    const restored = await savePermissionDependencies(tempDir, CAPTURE);
+    if (!restored.ok) throw new Error(restored.error.message);
+  });
+
+  it('surfaces a SELF-LOOP (a 1-cycle) rather than discarding it silently', async () => {
+    const saved = await savePermissionDependencies(tempDir, {
+      ...CAPTURE,
+      edges: [...CAPTURE.edges, record('SelfReferential', 'SelfReferential')],
+      edgeCount: CAPTURE.edges.length + 1,
+    });
+    if (!saved.ok) throw new Error(saved.error.message);
+    const r = await effectivePermissionsHandler(ctx, { ...CONTAINERS });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cycleNote = r.value.data.disclosures.find((x) =>
+      x.includes('self-referential edge(s)'),
+    );
+    expect(cycleNote).toBeDefined();
+    expect(cycleNote).toContain('1 self-referential edge(s)');
+    expect(cycleNote).toContain('1-cycle');
+    const restored = await savePermissionDependencies(tempDir, CAPTURE);
+    if (!restored.ok) throw new Error(restored.error.message);
   });
 });
 

@@ -224,6 +224,36 @@ describe('expandPermissionClosure — cycle safety', () => {
   });
 });
 
+describe('reverse index (the safety-relevant direction)', () => {
+  // "What does X require?" and "what would CONFER X?" are different questions.
+  // A surface reporting only the forward direction, phrased as "has no
+  // dependencies", leaves the second unanswered while sounding complete.
+  it('indexes both directions independently', () => {
+    const graph = buildPermissionDependencyGraph([
+      e('EmailMass', 'EmailSingle'),
+      e('ExportReport', 'RunReports'),
+      e('ScheduleReports', 'RunReports'),
+    ]);
+    expect(graph.requires.get('EmailMass')).toEqual(['EmailSingle']);
+    expect(graph.requiredBy.get('EmailSingle')).toEqual(['EmailMass']);
+    // Two different permissions both require RunReports.
+    expect(graph.requiredBy.get('RunReports')).toEqual(['ExportReport', 'ScheduleReports']);
+    // A leaf requires nothing; a root is required by nothing.
+    expect(graph.requires.get('RunReports')).toBeUndefined();
+    expect(graph.requiredBy.get('EmailMass')).toBeUndefined();
+  });
+
+  it('distinguishes "requires nothing" from "nothing confers it"', () => {
+    // ModifyAllData with zero edges in EITHER direction, versus a permission
+    // that requires nothing but IS conferred by something else.
+    const graph = buildPermissionDependencyGraph([e('SomeAdminPerm', 'ViewAllData')]);
+    expect(graph.requires.get('ModifyAllData')).toBeUndefined();
+    expect(graph.requiredBy.get('ModifyAllData')).toBeUndefined();
+    expect(graph.requires.get('ViewAllData')).toBeUndefined();
+    expect(graph.requiredBy.get('ViewAllData')).toEqual(['SomeAdminPerm']);
+  });
+});
+
 describe('permission KIND classification (declared type is authoritative)', () => {
   it('recognises the platform angle-bracket encoding as a consistency check', () => {
     expect(isObjectPermissionToken('Account<create>')).toBe(true);
