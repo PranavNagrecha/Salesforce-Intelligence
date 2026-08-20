@@ -27,7 +27,7 @@ import { FUNNEL_UTTERANCES, INTERPRET_CONCEPT_CARDS } from './funnel-utterances.
 import type { Plane } from './intent-router.js';
 import { fuseScoresRrf, staticEmbedRanking, staticIndexAvailable } from './static-embed.js';
 import { CATEGORIES } from './tools/capabilities.js';
-import { stripRosterDeclaredOnlyDisclosure } from './tools/declared-only-disclosure.js';
+import { stripCorpusBoilerplate } from './tools/corpus-boilerplate.js';
 import { V01_TOOLS } from './tools/index.js';
 
 /** Funnel-local confidence in the shortlist itself (I2a-calibrated band). */
@@ -655,20 +655,25 @@ export const buildToolDocs = (): Map<string, string> => {
     // phrase-synonym rewrite — see tokenize) and any corpus edit shifts every
     // term's IDF, so the funnel-recall / semantic-funnel tests referee changes.
     const utterances = (FUNNEL_UTTERANCES[tool.name] ?? []).join(' ');
-    // The declared-only dependency WARNING is stripped before indexing. It is
-    // ~90 words of near-identical boilerplate on four tools, dense in the
-    // vocabulary the permissions family needs to discriminate on — indexing it
-    // crowds those tools together, lets them outrank the tool that actually
-    // answers a permission question, and (by repeating common terms like
-    // `org`) depresses their IDF corpus-wide, measurably weakening UNRELATED
-    // tools. Nobody searches for a tool by its caveat. Same reasoning as
-    // CORPUS_EXCLUDED above, at sentence rather than whole-tool granularity.
-    // NOTE: this removes the REGRESSION, not all movement. Measured against
-    // clean HEAD, the surviving (legitimate) prose edit still shifted 14
-    // terms' df, changed 138/204 documents' tf-idf vectors, and moved 137
-    // top-8 orderings — see `stripRosterDeclaredOnlyDisclosure`. The pinned
-    // suites do not observe that; they are a sample, not a stability metric.
-    const indexedDescription = stripRosterDeclaredOnlyDisclosure(tool.description);
+    // Repeated boilerplate is stripped before indexing. `description` is both
+    // the host-facing CONTRACT (wants exhaustive caveats, repeated verbatim
+    // wherever they apply) and the RETRIEVAL DOCUMENT (wants vocabulary that
+    // DISCRIMINATES). Text identical across N tools is maximally useful to a
+    // reader and actively harmful to retrieval: it depresses the df of every
+    // term it contains for EVERY tool, including ones that never mention the
+    // subject. Nobody searches for a tool by its caveat.
+    //
+    // Two measured regressions, both caught by tests, both listed in
+    // `corpus-boilerplate.ts`: a permission WARNING that broke `sfi.org_card`
+    // (a tool it never touched), and a `conceptReasoning` block that displaced
+    // `sfi.interpret` from a top-5 assertion by 0.0010 — where NEITHER parent
+    // branch failed alone and only the merge did.
+    //
+    // NOTE: this removes the REGRESSIONS, not all movement. Measured against
+    // clean HEAD the surviving legitimate prose still shifted 14 terms' df and
+    // moved 137 top-8 orderings. The pinned suites do not observe that; they
+    // are a sample, not a stability metric.
+    const indexedDescription = stripCorpusBoilerplate(tool.description);
     docs.set(tool.name, `${nameWords} ${nameWords} ${indexedDescription} ${keywords} ${utterances}`);
   }
   for (const cat of CATEGORIES) {

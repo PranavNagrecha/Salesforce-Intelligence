@@ -3,13 +3,14 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 209,
+    "total": 211,
     "advertised": 19,
     "hidden": 4,
     "defaultProfile": "core",
     "activeProfile": "core",
     "profiles": {
       "full": [
+        "sfi.action_chain",
         "sfi.ai_exposure_report",
         "sfi.annotations",
         "sfi.apex_build_advisor",
@@ -113,6 +114,7 @@
         "sfi.list_analyses",
         "sfi.list_components",
         "sfi.list_view_sharing",
+        "sfi.live_access_oracle",
         "sfi.live_aggregate",
         "sfi.live_automation_fired",
         "sfi.live_budget",
@@ -244,6 +246,7 @@
       "sfi.field_change_advisor",
       "sfi.field_cleanup_candidates",
       "sfi.fleet_drift_ranking",
+      "sfi.live_access_oracle",
       "sfi.live_aggregate",
       "sfi.live_automation_fired",
       "sfi.live_budget",
@@ -450,6 +453,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 2,
-  "catalogHash": "sha256:36629cd5b7ab063861925ea2792dfc10893f2451ca69b3a75dd56202e93996b0",
-  "identityHash": "sha256:059da1c7337582df230da9641bdd9d9f73bc357396c4ed4a5a7a9a5b6f1c97a3"
+  "catalogHash": "sha256:6c2f1399545a4ea2119a02afc9fd1c22f9aee1d74bca790c3afacd986494f08f",
+  "identityHash": "sha256:f8223d41436ba6b9b1f44d0a181513b233aa3aff5dd99225342472b234618198"
 }
