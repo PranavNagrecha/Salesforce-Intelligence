@@ -31,8 +31,18 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * re-inline would add the ~5.4 MB ANTLR grammar (bundle > 10 MB). Ceiling set
  * with headroom above current legitimate size and far below any re-inline; the
  * antlr-ref guard, not this number, is what actually catches a re-inline.
+ *
+ * RAISED 5_750_000 -> 5_900_000. Two legitimate feature landings share this
+ * headroom: the PermissionDependency ingest (already at 5.90 MB on a committed
+ * branch) and REASONING-REACHABILITY, which composed the concept-rule engine
+ * into `field_360` / `explain_apex_method` / `what_happens_on_save` /
+ * `get_component` (shared helper `knowledge/reason-component.ts` + adapter
+ * `tools/concept-reasoning.ts`). The value is matched to that branch on purpose
+ * so the two do not collide on merge. The ANTLR-ref guard (`MAX_ANTLR_REFS`) is
+ * untouched and still reports 5 refs against its cap of 80 — that, not this
+ * byte ceiling, is what actually catches a re-inline.
  */
-const MAX_BYTES = 5_750_000;
+const MAX_BYTES = 5_900_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */

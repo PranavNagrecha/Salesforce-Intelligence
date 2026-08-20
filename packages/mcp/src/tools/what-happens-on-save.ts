@@ -138,6 +138,12 @@ import {
   isUnresolvedApexCallTarget,
   isUnresolvedFieldReceiver,
 } from './apex-receiver.js';
+import {
+  buildReservedConceptReasoning,
+  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_UNAVAILABLE_NOTE,
+  type ConceptReasoningEnvelope,
+} from './concept-reasoning.js';
 import { resolveObjectAlias } from './input-aliases.js';
 import {
   type InactiveConfiguredFirer,
@@ -158,6 +164,7 @@ import {
   type BoundableStep,
   computePhasesOmitted,
   enforceSoeByteBudget,
+  SOE_MAX_PAYLOAD_BYTES,
   type SoePhase,
   type SoePhaseCounts,
   type SoePhaseOmission,
@@ -244,6 +251,9 @@ export const whatHappensOnSaveInputSchema = z
      * `appliedPhaseFilter`.
      */
     phase: z.enum(AUTOMATION_PHASES).optional(),
+    // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). Its bytes are RESERVED
+    // out of the SOE budget, never bolted on. See `conceptReasoning`.
+    includeConceptReasoning: z.boolean().optional(),
   })
   .refine(
     (i) =>
@@ -452,6 +462,28 @@ export interface WhatHappensOnSaveOutput {
   readonly entitlementProcessNotes?: readonly EntitlementProcessNote[];
   /** Present (`true`) only when `entitlementProcessNotes` hit the cap. */
   readonly entitlementProcessNotesTruncated?: boolean;
+  /**
+   * REASONING-REACHABILITY — deterministic concept-rule claims about the target
+   * OBJECT, on the shared `EvidenceEnvelopeV2` contract plus a `completeness`
+   * report that keeps "checked and found nothing" distinct from "never
+   * checked". DEFAULT ON — absent only when the caller passed
+   * `includeConceptReasoning: false`, or the reasoning read failed.
+   *
+   * HOW IT SHARES THE BUDGET. This tool's 40 KB SOE budget
+   * (`SOE_MAX_PAYLOAD_BYTES`) sits just under a 45 KB global cap, so a block
+   * bolted on afterwards would push dense objects past the guard. Instead the
+   * block is built FIRST, fitted to `CONCEPT_RESERVATION_MAX_BYTES`, and its
+   * measured size RESERVED out of the SOE budget before the steps are fitted —
+   * reasoning claims its slice by right and the primary answer fills the rest.
+   * When that reservation actually costs a trim, the existing SOE truncation
+   * disclosure names reasoning's share and how to re-query without it.
+
+   *
+   * Read `completeness.noRuleCoversComponentType` FIRST: when true, no concept
+   * rule applies to this component type and an empty `claims` list means
+   * NOTHING WAS CHECKED — never "clean".
+   */
+  readonly conceptReasoning?: ConceptReasoningEnvelope;
 }
 
 /**
@@ -1352,6 +1384,7 @@ export const whatHappensOnSaveHandler = async (
     truncated?: boolean;
     entitlementProcessNotes?: readonly EntitlementProcessNote[];
     entitlementProcessNotesTruncated?: boolean;
+    conceptReasoning?: ConceptReasoningEnvelope;
   } = {
     objectApiName: input.objectApiName,
     appliedScope,
@@ -1397,14 +1430,68 @@ export const whatHappensOnSaveHandler = async (
   // tool. A single-event step list, once its actions/conditionals are slimmed,
   // is small enough that the step COUNT alone never exceeds the budget, so the
   // last-resort step-drop pass is neither needed nor allowed here.
+  // REASONING-REACHABILITY — opt-in concept-rule reasoning over the target
+  // OBJECT. Built BEFORE the byte-budget pass so its measured size can be
+  // RESERVED out of the SOE budget: the SOE budget (40 KB) sits just under the
+  // global response cap (45 KB), so an unreserved block would push a densely
+  // automated object past the guard. With the reservation, requesting reasoning
+  // may trim more per-step action tails — a trade the caller opted into and
+  // which is disclosed below. The default path never runs this and is
+  // byte-identical to before the flag existed.
+  // REASONING-REACHABILITY. Build the block now, but do NOT attach it until
+  // AFTER the byte-budget pass below.
+  //
+  // WHY THE ORDER MATTERS: `enforceSoeByteBudget` measures `sizeOf(payload)`
+  // WHOLE. An earlier revision attached the block first AND subtracted its size
+  // from the budget — the block was inside what the budget measured, so it was
+  // charged twice and the effective allowance became `40_000 - 2N`. Measured
+  // result: 33 of 50 real objects had their entire action inventory stripped to
+  // zero on ~30 KB payloads, 10 KB UNDER budget, and the tool then disclosed a
+  // truncation its own arithmetic had invented. `order-of-execution.ts` gets
+  // this right by attaching its envelope after enforcement; this now matches.
+  //
+  // The block is fitted to CONCEPT_RESERVATION_MAX_BYTES (~2 KB) before it is
+  // ever attached, so the SOE budget keeps a fixed, small headroom instead of a
+  // moving subtraction.
+  let conceptReasoning: ConceptReasoningEnvelope | undefined;
+  let conceptReasoningBytes = 0;
+  if (input.includeConceptReasoning !== false) {
+    const reserved = await buildReservedConceptReasoning(ctx, objectId);
+    if (reserved !== null) {
+      conceptReasoning = reserved.envelope;
+      conceptReasoningBytes = reserved.reservedBytes;
+    } else {
+      // R3 — a MISSING block must never be silent. `null` covers both a
+      // component that did not resolve and a graph read that failed, so the
+      // note attributes neither.
+      data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_UNAVAILABLE_NOTE(objectId)}`;
+    }
+  } else {
+    data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_SKIPPED_NOTE}`;
+  }
+
   const budget = enforceSoeByteBudget(
     data,
     [visibleSoe] as unknown as BoundableStep[][],
-    { allowStepDrop: false },
+    {
+      allowStepDrop: false,
+      // Reserve headroom for the block that will be ATTACHED AFTER this pass.
+      // Subtracted exactly once, because `data` does not contain it yet.
+      ...(conceptReasoningBytes > 0
+        ? { budgetBytes: SOE_MAX_PAYLOAD_BYTES - conceptReasoningBytes }
+        : {}),
+    },
   );
   if (budget.truncated) {
     data.truncated = true;
     data.disclosure = `${data.disclosure} ${soeTruncationNote(budget)}`;
+    // Name reasoning's share of the squeeze so the trade is never invisible.
+    if (conceptReasoningBytes > 0) {
+      data.disclosure =
+        `${data.disclosure} Concept reasoning reserved ${conceptReasoningBytes} bytes of this ` +
+        'response before the steps were fitted, so part of that trimming is its share; re-query ' +
+        'with `includeConceptReasoning: false` for the untrimmed order-of-execution.';
+    }
   }
 
   // Honesty invariant (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES): on
@@ -1423,6 +1510,11 @@ export const whatHappensOnSaveHandler = async (
           .map((p) => `${p.phase} (${p.present}/${p.declared} shown)`)
           .join(', ')} truncated out of the returned sequence — re-query with the \`phase\` filter to see the full roster.`;
     }
+  }
+
+  // Attach LAST — after every budget/trim pass has measured `data` without it.
+  if (conceptReasoning !== undefined) {
+    data.conceptReasoning = conceptReasoning;
   }
 
   return ok({

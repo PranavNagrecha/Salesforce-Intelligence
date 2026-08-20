@@ -85,6 +85,12 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
+import {
+  buildReservedConceptReasoning,
+  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_UNAVAILABLE_NOTE,
+  type ConceptReasoningEnvelope,
+} from './concept-reasoning.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { scanFlowConditionFieldReaders } from './flow-condition-field-readers-scan.js';
@@ -194,6 +200,8 @@ export const field360InputSchema = z
     // truncated page's `nextCursor`; carries the resume offset + which section
     // (validates | formulas | writers | …) it advances. Omit = today's behavior.
     cursor: z.string().min(1).optional(),
+    // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). See `conceptReasoning`.
+    includeConceptReasoning: z.boolean().optional(),
   })
   .refine((i) => i.fieldId !== undefined || i.componentId !== undefined, {
     message: 'name the field — pass `fieldId` or `componentId` (e.g. "CustomField:Account.My_Field__c")',
@@ -338,6 +346,24 @@ export interface Field360Output {
   readonly designatedList?: string;
   /** The non-paged sections, disclosed with their full row counts; truncation only. */
   readonly otherSections?: readonly SectionDisclosure[];
+  /**
+   * REASONING-REACHABILITY — deterministic concept-rule claims about THIS
+   * field, projected onto the shared `EvidenceEnvelopeV2` contract and extended
+   * with a `completeness` report that keeps "checked and found nothing"
+   * distinct from "never checked". DEFAULT ON — absent only when the caller
+   * passed `includeConceptReasoning: false`, or the reasoning read failed (in
+   * which case the block is omitted rather than the answer failed).
+   *
+   * Its serialized size is RESERVED out of the per-section byte budget before
+   * the sections are paged, so reasoning is a first-class part of the answer
+   * rather than whatever fits in the leftovers; the existing `nextCursor` /
+   * `truncatedAtN` disclosure reports what that cost.
+   *
+   * Read `completeness.noRuleCoversComponentType` FIRST: when it is true NOTHING
+   * was checked for this component and the empty `claims` array is SILENCE,
+   * never "clean".
+   */
+  readonly conceptReasoning?: ConceptReasoningEnvelope;
 }
 
 /**
@@ -1046,6 +1072,21 @@ export const field360Handler = async (
     ['listViews', buckets.listViews],
   ];
 
+  // REASONING-REACHABILITY — run the concept rules for this field FIRST, so the
+  // synthesis answer carries the structural implications the model can prove and
+  // not just the edge inventory. Built before pagination on purpose: its bytes
+  // are RESERVED out of the section byte budget below rather than bolted on
+  // afterwards, so reasoning is a first-class part of the answer instead of
+  // whatever fits in the leftovers. The root node is already resolved, so this
+  // costs one bound-type edge query + one endpoint node query (both capped);
+  // `null` (a failed read) omits the block rather than failing the answer.
+  const reserved =
+    input.includeConceptReasoning === false
+      ? null
+      : await buildReservedConceptReasoning(ctx, fieldId, { rootNode: fieldNode });
+  const conceptReasoning: ConceptReasoningEnvelope | null = reserved?.envelope ?? null;
+  const conceptReservedBytes = reserved?.reservedBytes ?? 0;
+
   // CR-22 nested-section cursor. Each section's FULL ordered rows are retained
   // here (sorted to a UNIQUE total order via compareRows) so a section can be
   // paged past `maxRowsPerSection` rather than discarding the tail. A whole-fits
@@ -1105,7 +1146,9 @@ export const field360Handler = async (
     const pagedResult = paginateSection(pageSections, designatedListId, {
       offset,
       limit: maxRows,
-      byteBudget: FIELD_360_BYTE_BUDGET,
+      // Reasoning's reserved slice comes off the top; the existing per-section
+      // truncation + `nextCursor` disclosure then reports what that cost.
+      byteBudget: Math.max(1_000, FIELD_360_BYTE_BUDGET - conceptReservedBytes),
       keyOf: (r) => `${r.componentId}|${r.edgeType}|${r.source}`,
       binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
     });
@@ -1295,6 +1338,28 @@ export const field360Handler = async (
     'Referrer classes NOT modeled as incoming edges are NOT composed into any field_360 section and their absence is NOT proof of none: roll-up source coupling (a roll-up summary field whose summaryForeignKey targets this field — stored as a field property, no edge) and layout related-list placement (related lists reference the RELATED object\'s fields, not modeled as an edge onto this field). Use `sfi.get_impact` for the edge-walked dependency slice and its `soundness` blind spots.',
   );
 
+  // Concept-reasoning disclosure. The block itself was built far above (its
+  // bytes are reserved out of the section budget); this is where `boundaries`
+  // exists, so this is where the completeness summary reaches the caller.
+  if (conceptReasoning !== null) {
+    boundaries.push(`Concept reasoning: ${conceptReasoning.completeness.summary}`);
+    if (reserved?.reservationCapped === true) {
+      boundaries.push(
+        'Concept reasoning sampled its per-concept lists harder than usual to fit the response ' +
+          'budget — every count in `conceptReasoning.completeness` is still exact, and ' +
+          '`completeness.sampled` names what was withheld. Call `sfi.interpret` on this field ' +
+          'for the uncapped view.',
+      );
+    }
+  } else if (input.includeConceptReasoning === false) {
+    boundaries.push(CONCEPT_REASONING_SKIPPED_NOTE);
+  } else {
+    // The THIRD branch. Default-on plus a null result used to emit nothing at
+    // all, turning an unambiguous absence into a three-way ambiguity — exactly
+    // the conflation this tool's honesty axis exists to prevent.
+    boundaries.push(CONCEPT_REASONING_UNAVAILABLE_NOTE(fieldId));
+  }
+
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
   const annotations = await annotationsBlockFor(ctx, fieldId);
 
@@ -1354,6 +1419,7 @@ export const field360Handler = async (
       ...(dataShape !== undefined ? { dataShape } : {}),
       ...(annotations !== undefined ? { annotations } : {}),
       ...(reportUsage !== undefined ? { reportUsage } : {}),
+      ...(conceptReasoning !== null ? { conceptReasoning } : {}),
       ...(cursorBlock !== undefined
         ? {
             nextCursor: cursorBlock.nextCursor,
