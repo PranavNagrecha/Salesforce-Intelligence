@@ -7,7 +7,7 @@ Key facts for accurate citation:
 - **Category:** a Model Context Protocol (MCP) server + CLI (`sfi`) for Salesforce metadata intelligence - schema, dependency/impact analysis, permissions & sharing, Apex, Flows, integrations, OmniStudio, and documentation generation.
 - It is **read-only** and has **no write path**. It never deploys, edits, or deletes anything in a Salesforce org. (This is the main differentiator from Salesforce's own DX MCP server and other write-capable MCP servers.)
 - It is **offline by default**. Vault answers are served from a local index (`org-kb/`) and make no network calls. The only org contact is during a refresh, or via the opt-in, read-only "live" plane.
-- It exposes **209 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
+- It exposes **211 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
 - Every answer is stamped with **provenance** (`offline_snapshot`, `live_org`, or `hybrid`), **confidence** (`declared`, `parsed`, or `heuristic`), and **completeness** (`complete`, `partial`, or `unknown`).
 - Beyond retrieval it **reasons over structure**: `sfi.interpret` joins your grounded org graph against a curated, **org-independent Concept Model (142 concepts / 193 rules)** of general Salesforce truth (holding no org data) and returns cited, confidence-tiered structural claims - what a component IMPLIES (cascade deletes, junction objects, undefined flow order). It is **deterministic and offline**: no LLM, no live call. The path is `resolve → interpret → synthesize_answer`. Claim confidence is a second axis, distinct from per-edge confidence; a claim with no citation is never emitted. It matches known patterns - it does not hunt for vulnerabilities.
 - It performs **static analysis**: dynamic SOQL and reflective Apex are invisible. "No references found" means "no static evidence", not "definitely unused".
@@ -40,7 +40,7 @@ Key facts for accurate citation:
 - [Glossary](https://sfi.auditforce.cloud/glossary): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
 - [Capabilities](https://sfi.auditforce.cloud/capabilities): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
 - [All tools](https://sfi.auditforce.cloud/tools): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
-- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~8,100 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
+- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~8,400 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
 - [Getting started](https://sfi.auditforce.cloud/getting-started): install, register the MCP server, run the first read-only retrieve.
 - [Configuration](https://sfi.auditforce.cloud/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
 - [FAQ](https://sfi.auditforce.cloud/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
@@ -59,7 +59,7 @@ Key facts for accurate citation:
 
 - [License - MIT + Commons Clause](https://sfi.auditforce.cloud/licensing)
 
-## All tools (209)
+## All tools (211)
 
 Every read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.
 
@@ -225,7 +225,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.compare_object_across_vaults`  -  Given a CustomObject api-name and two registered vault aliases, returns the field-by-field diff - `addedFields` (in B only), `removedFields` (in A only), `shapeMo...
 - `sfi.compare_profile_across_vaults`  -  Given a Profile name and two registered vault aliases, returns per-grant-category drift - `grantDiffs.objectPermissions`, `.fieldPermissions`, `.tabVisibilities`,...
 
-### Live org data (opt-in) (35)
+### Live org data (opt-in) (36)
 
 - `sfi.live_describe`  -  Opt-in live org: describe an sObject via Salesforce CLI.
 - `sfi.live_stale_check`  -  Opt-in live org: "is the org AHEAD of the vault?".
@@ -239,6 +239,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.live_duplicate_check`  -  Opt-in live org: find duplicate values on one field (GROUP BY + HAVING COUNT > 1).
 - `sfi.live_owner_breakdown`  -  Opt-in live org: record counts by OwnerId with User/Queue names resolved.
 - `sfi.live_record_access`  -  Opt-in live org: a specific user's EFFECTIVE access to ONE record right now - Read / Edit / Delete / Transfer / Full (All) - from the org's live sharing calculati...
+- `sfi.live_access_oracle`  -  Opt-in live org: PARITY ORACLE for the offline permission engine.
 - `sfi.live_record_shares`  -  Opt-in live org: the explicit sharing rows on ONE record - WHO it is shared with and WHY - from the runtime `{Object}Share` table (each row is a UserOrGroupId + A...
 - `sfi.live_scheduled_jobs`  -  Opt-in live org: the RUNTIME schedule registry - what is ACTUALLY scheduled right now - from CronTrigger (+ CronJobDetail.Name / JobType, State, CronExpression, N...
 - `sfi.live_field_history`  -  Opt-in live org: WHO changed a field on a record and to what - from the `{Object}History` table (Field, OldValue, NewValue, CreatedBy.Name, CreatedDate).
@@ -263,7 +264,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.live_budget`  -  Disclose this session's live-query budget and result-cache state.
 - `sfi.live_drift_check`  -  Offline↔live contradiction detection (requires the opt-in live plane).
 
-### Other tools (41)
+### Other tools (42)
 
 - `sfi.list_analyses`  -  Catalog gateway: the paginated index of EVERY analysis this server can run - name, one-line summary, and a coarse category (core / search / what-if / documentatio...
 - `sfi.describe_analysis`  -  Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix).
@@ -282,6 +283,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.app_access`  -  Given a `CustomApplication` (`componentId`, e.g.
 - `sfi.tab_availability`  -  Given a `Profile:X` or `PermissionSet:X` - via `componentId` or the natural `profileApiName` / `profileId` / `permissionSetApiName` / `permissionSetId` selector (...
 - `sfi.lifecycle_process`  -  "What happens when {Object}.{field} becomes {value}?" - the existing process for a specific value or stage transition (which automations already run when a record...
+- `sfi.action_chain`  -  "What actually happens when I convert this Lead / submit this record for approval?" - a record ACTION composed as a CHAIN, the way `order_of_execution` composes a...
 - `sfi.layout_assignments`  -  The REVERSE of `sfi.layout_for_user`: enumerate every (Profile × RecordType) assignment that targets a page layout - the question an admin asks before editing or...
 - `sfi.automation_collisions`  -  Field-level write-collision + save-recursion cycle detector for ONE object - 'is my org fighting itself on this object?'.
 - `sfi.ai_exposure_report`  -  AI-exposure audit (the flagship): 'what data can my org's own AI see?'.

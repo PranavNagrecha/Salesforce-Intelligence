@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-08-07T19:27:34.625Z",
+  "generatedAt": "2026-08-20T23:56:15.360Z",
   "version": "0.3.0",
-  "toolCount": 209,
+  "toolCount": 211,
   "skillCount": 26,
   "agentCount": 2,
   "commandCount": 5,
@@ -13,18 +13,18 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 276,
-        "cases": 5508
+        "files": 288,
+        "cases": 5730
       },
       {
         "name": "extractors",
         "files": 83,
-        "cases": 1110
+        "cases": 1118
       },
       {
         "name": "cli",
-        "files": 45,
-        "cases": 467
+        "files": 46,
+        "cases": 490
       },
       {
         "name": "graph",
@@ -48,13 +48,13 @@
       },
       {
         "name": "vault",
-        "files": 9,
-        "cases": 100
+        "files": 11,
+        "cases": 132
       },
       {
         "name": "tooling-api",
-        "files": 4,
-        "cases": 54
+        "files": 6,
+        "cases": 86
       },
       {
         "name": "core",
@@ -62,12 +62,12 @@
         "cases": 50
       }
     ],
-    "totalCases": 8115,
-    "totalFiles": 466,
+    "totalCases": 8432,
+    "totalFiles": 483,
     "packageCount": 10,
-    "approx": 8100
+    "approx": 8400
   },
-  "integrationSuiteCount": 7,
+  "integrationSuiteCount": 3,
   "gates": [
     "Type-check",
     "Lint",
@@ -90,20 +90,20 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 276,
-      "cases": 5508,
-      "description": "The 209 read-only tools + router + grounding layer"
+      "files": 288,
+      "cases": 5730,
+      "description": "The 211 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 83,
-      "cases": 1110,
+      "cases": 1118,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
-      "files": 45,
-      "cases": 467,
+      "files": 46,
+      "cases": 490,
       "description": "The sfi command-line tool"
     },
     {
@@ -132,14 +132,14 @@
     },
     {
       "name": "vault",
-      "files": 9,
-      "cases": 100,
+      "files": 11,
+      "cases": 132,
       "description": "Vault layout, manifest, freshness"
     },
     {
       "name": "tooling-api",
-      "files": 4,
-      "cases": 54,
+      "files": 6,
+      "cases": 86,
       "description": "Optional Tooling-API enrichment"
     },
     {

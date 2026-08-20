@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-07T19:27:34.625Z",
-  "toolCount": 209,
+  "generatedAt": "2026-08-20T23:56:15.360Z",
+  "toolCount": 211,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -625,6 +625,10 @@
           "description": "Opt-in live org: a specific user's EFFECTIVE access to ONE record right now - Read / Edit / Delete / Transfer / Full (All) - from the org's live sharing calculati..."
         },
         {
+          "name": "sfi.live_access_oracle",
+          "description": "Opt-in live org: PARITY ORACLE for the offline permission engine."
+        },
+        {
           "name": "sfi.live_record_shares",
           "description": "Opt-in live org: the explicit sharing rows on ONE record - WHO it is shared with and WHY - from the runtime `{Object}Share` table (each row is a UserOrGroupId + A..."
         },
@@ -788,6 +792,10 @@
         {
           "name": "sfi.lifecycle_process",
           "description": "\"What happens when {Object}.{field} becomes {value}?\" - the existing process for a specific value or stage transition (which automations already run when a record..."
+        },
+        {
+          "name": "sfi.action_chain",
+          "description": "\"What actually happens when I convert this Lead / submit this record for approval?\" - a record ACTION composed as a CHAIN, the way `order_of_execution` composes a..."
         },
         {
           "name": "sfi.layout_assignments",
