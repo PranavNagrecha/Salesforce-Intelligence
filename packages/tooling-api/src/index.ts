@@ -70,3 +70,4 @@ export type {
   PermissionDependencyRow,
   PermissionDependencyStrategy,
 } from './permission-dependencies.js';
+export * from './user-entity-access.js';

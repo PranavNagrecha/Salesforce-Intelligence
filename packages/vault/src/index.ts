@@ -115,3 +115,6 @@ export type {
   VaultRef,
   VaultRegistry,
 } from './registry.js';
+// PLATFORM-ACCESS-ORACLE — Profile Id <-> metadata API-name map. Built at
+// refresh, persisted in the vault (org data — never a tracked file).
+export * from './profile-name-map.js';

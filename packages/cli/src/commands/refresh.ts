@@ -74,8 +74,10 @@ import {
   queuedDrainIds,
   readAnnotations,
   readDemandQueue,
+  buildProfileNameMap,
   saveManifest,
   savePermissionDependencies,
+  saveProfileNameMap,
   stampFamilyEpochs,
   vaultPaths,
   type ExtendedVaultManifest,
@@ -1107,6 +1109,32 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
           walked = await walkAndExtract(paths.source, requestedTypes, prevCache);
         }
       }
+    }
+  }
+
+  // PLATFORM-ACCESS-ORACLE: build the Profile Id <-> API-name map. Two org
+  // reads, best-effort, never fatal. A live user carries a ProfileId and a
+  // MUTABLE label; every offline Profile node is keyed by metadata API name,
+  // which SOQL never returns. Consumers resolve on the ID (labels can be
+  // renamed and re-used, which would silently misattribute a user to the wrong
+  // profile); the label is joined too so a rename is detectable and so the
+  // unjoinable count is knowable. Skipped on `--no-pull` (no org contact in
+  // that mode); the previous map, if any, stays.
+  if (!opts.noPull) {
+    progress('Building Profile Id <-> API-name map...');
+    const profileMap = await buildAndSaveProfileNameMap(targetOrg, paths.root);
+    if (!profileMap.ok) {
+      progress(
+        `Profile name map FAILED (non-fatal): ${profileMap.error}. ` +
+          'Live-to-offline profile resolution will refuse rather than guess.',
+      );
+    } else {
+      progress(
+        `Profile name map: ${profileMap.entries} profile(s) joined` +
+          (profileMap.gaps > 0 ? `, ${profileMap.gaps} disclosed gap(s)` : '') +
+          (profileMap.ambiguous > 0 ? `, ${profileMap.ambiguous} ambiguous label(s)` : '') +
+          '.',
+      );
     }
   }
 
@@ -3530,6 +3558,90 @@ const getOrgSupportedTypes = async (targetOrg: string): Promise<ReadonlySet<stri
     return names.size > 0 ? names : null;
   } catch {
     return null;
+  }
+};
+
+/**
+ * PLATFORM-ACCESS-ORACLE — build and persist the Profile label ↔ API-name map.
+ *
+ * SOQL exposes `User.Profile.Name`, the profile LABEL ("System Administrator");
+ * every offline surface keys Profile nodes by the metadata API name ("Admin").
+ * No SOQL field returns the API name. Measured on a real org, 17% of profiles
+ * differ — and a THIRD of those were org-custom (a profile renamed after
+ * creation keeps its original API name), so a static standard-profile alias
+ * table would not close the gap.
+ *
+ * Two org reads, joined on the 15-char Id:
+ *   - `sf org list metadata -m Profile` -> `{ id, fullName }`; fullName IS the
+ *     API name. NOTE: this is a NEW call — refresh previously ran only
+ *     `org list metadata-types` (the type describe, which returns xmlNames, not
+ *     per-component fullNames), and Profile metadata XML carries no Id, so the
+ *     vault alone cannot supply the join key.
+ *   - `SELECT Id, Name FROM Profile` -> `{ Id, Name }`; Name IS the label.
+ *
+ * BEST-EFFORT: any failure returns an error string and leaves the artifact
+ * absent. It must never fail a refresh — but an absent artifact is also never
+ * silently treated as an empty map (see `loadProfileNameMap`), so a consumer
+ * refuses rather than guessing.
+ */
+export const buildAndSaveProfileNameMap = async (
+  targetOrg: string,
+  vaultRoot: string,
+  exec?: RawExecFile,
+): Promise<
+  | { readonly ok: true; readonly entries: number; readonly gaps: number; readonly ambiguous: number }
+  | { readonly ok: false; readonly error: string }
+> => {
+  try {
+    const listed = await runSf(
+      ['org', 'list', 'metadata', '-m', 'Profile', '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
+      exec,
+    );
+    // `sf org list metadata --json` returns `result` as an ARRAY; tolerate an
+    // object-wrapped shape too rather than assuming one CLI version's envelope.
+    const listedParsed = JSON.parse(listed.stdout) as { result?: unknown };
+    const rawMetadata = Array.isArray(listedParsed.result)
+      ? listedParsed.result
+      : Array.isArray((listedParsed.result as { records?: unknown })?.records)
+        ? ((listedParsed.result as { records: unknown[] }).records)
+        : [];
+
+    const queried = await runSf(
+      [
+        'data',
+        'query',
+        '--query',
+        'SELECT Id, Name FROM Profile',
+        '--target-org',
+        targetOrg,
+        '--json',
+      ],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
+      exec,
+    );
+    const queriedParsed = JSON.parse(queried.stdout) as {
+      result?: { records?: unknown };
+    };
+    const rawSoql = Array.isArray(queriedParsed.result?.records)
+      ? queriedParsed.result.records
+      : [];
+
+    const map = buildProfileNameMap(
+      rawMetadata as ReadonlyArray<{ id?: string | null; fullName?: string | null }>,
+      rawSoql as ReadonlyArray<{ Id?: string | null; Name?: string | null }>,
+      new Date().toISOString(),
+    );
+    const saved = await saveProfileNameMap(vaultRoot, map);
+    if (!saved.ok) return { ok: false, error: saved.error.message };
+    return {
+      ok: true,
+      entries: map.entries.length,
+      gaps: map.onlyInMetadata.length + map.onlyInSoql.length,
+      ambiguous: map.ambiguousLabels.length,
+    };
+  } catch (cause) {
+    return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
   }
 };
 

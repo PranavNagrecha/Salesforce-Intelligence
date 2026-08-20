@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 209,
+    "total": 210,
     "advertised": 19,
     "hidden": 4,
     "defaultProfile": "core",
@@ -113,6 +113,7 @@
         "sfi.list_analyses",
         "sfi.list_components",
         "sfi.list_view_sharing",
+        "sfi.live_access_oracle",
         "sfi.live_aggregate",
         "sfi.live_automation_fired",
         "sfi.live_budget",
@@ -244,6 +245,7 @@
       "sfi.field_change_advisor",
       "sfi.field_cleanup_candidates",
       "sfi.fleet_drift_ranking",
+      "sfi.live_access_oracle",
       "sfi.live_aggregate",
       "sfi.live_automation_fired",
       "sfi.live_budget",
@@ -450,6 +452,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 2,
-  "catalogHash": "sha256:e931d47ddcf7eaf84134a3f70b905432ed9fe6567fa9273f795fbecf1ddd4e31",
-  "identityHash": "sha256:7670b020c4690a26b15b3361be71ed5ddabd410067170f74583c21c600b0fb26"
+  "catalogHash": "sha256:135b07907d90ac0ce15e78bec40c4091d5f64fb3b7b28ace306358cc87baf8a5",
+  "identityHash": "sha256:39f4dbd2ffc58ce448c6913cd430a14c2c57e697db45606e70fd74c94dabdaa7"
 }

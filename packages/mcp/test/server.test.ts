@@ -198,6 +198,9 @@ describe('dispatchTool', () => {
     'sfi.live_duplicate_check',
     'sfi.live_owner_breakdown',
     'sfi.live_record_access',
+    // PLATFORM-ACCESS-ORACLE — offline permission engine vs the
+    // platform's own UserEntityAccess verdict.
+    'sfi.live_access_oracle',
     'sfi.live_record_shares',
     'sfi.live_scheduled_jobs',
     'sfi.live_field_history',
@@ -577,6 +580,7 @@ describe('V01_TOOLS', () => {
       'sfi.live_duplicate_check',
       'sfi.live_owner_breakdown',
       'sfi.live_record_access',
+      'sfi.live_access_oracle',
       'sfi.live_record_shares',
       'sfi.live_scheduled_jobs',
       'sfi.live_field_history',

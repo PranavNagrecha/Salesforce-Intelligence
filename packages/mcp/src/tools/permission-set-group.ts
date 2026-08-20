@@ -44,7 +44,9 @@
 import type {
   ComponentId,
   Node,
+  ObjectPermissionFlag,
 } from '@sf-intelligence/contracts';
+import { OBJECT_PERMISSION_FLAGS } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
 import {
   getNodeById,
@@ -82,16 +84,18 @@ export interface ExpandedPsg {
   readonly hasMuting: boolean;
 }
 
-/** The six object-permission flags a muting set can deny, canonical order. */
-export const MUTING_OBJECT_FLAGS = [
-  'allowCreate',
-  'allowRead',
-  'allowEdit',
-  'allowDelete',
-  'viewAllRecords',
-  'modifyAllRecords',
-] as const;
-export type MutingObjectFlag = (typeof MUTING_OBJECT_FLAGS)[number];
+/**
+ * The six object-permission flags a muting set can deny, canonical order.
+ *
+ * This WAS a byte-identical private copy of `effective-permissions.ts`'s
+ * `OBJECT_FLAGS`. Both now alias {@link OBJECT_PERMISSION_FLAGS} in
+ * `@sf-intelligence/contracts`, so the muting SUBTRACTION and the max-wins
+ * UNION cannot iterate different flag lists — a divergence that would have
+ * silently left a would-be-denied flag granted. Name kept for the existing
+ * call sites.
+ */
+export const MUTING_OBJECT_FLAGS = OBJECT_PERMISSION_FLAGS;
+export type MutingObjectFlag = ObjectPermissionFlag;
 
 /**
  * The permission classes ONE muting permission set denies, parsed from the

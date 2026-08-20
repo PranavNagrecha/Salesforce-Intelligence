@@ -442,6 +442,12 @@ export const LIVE_TOOL_REQUIRED_SCOPES: Readonly<
   'sfi.live_zombie_accounts': Object.freeze(['users'] as const),
   'sfi.live_group_members': Object.freeze(['users'] as const),
   'sfi.live_record_access': Object.freeze(['users'] as const),
+  // PLATFORM-ACCESS-ORACLE: `UserEntityAccess` is keyed on a named
+  // individual's UserId and returns that person's effective access — the
+  // same identity class as live_record_access / live_user_permsets, so it
+  // takes `users`, NOT `aggregate`. It reads no record rows, so `sample` is
+  // not required on top. No new scope is introduced.
+  'sfi.live_access_oracle': Object.freeze(['users'] as const),
   'sfi.live_record_shares': Object.freeze(['users'] as const),
   'sfi.live_owner_breakdown': Object.freeze(['users'] as const),
   'sfi.live_setup_audit_trail': Object.freeze(['audit'] as const),

@@ -36,6 +36,8 @@ export interface VaultLayout {
    * never as "this org has no permission dependencies".
    */
   readonly permissionDependencies: string;
+  /** PLATFORM-ACCESS-ORACLE — Profile Id <-> API-name map (org data; gitignored). */
+  readonly profileNameMap: string;
 }
 
 /**
@@ -65,6 +67,7 @@ export const vaultPaths = (vaultRoot: string): VaultLayout => {
     snapshots: join(vaultRoot, 'snapshots'),
     baseline: join(meta, 'baseline.json'),
     permissionDependencies: join(meta, 'permission-dependencies.json'),
+    profileNameMap: join(meta, 'profile-name-map.json'),
   };
 };
 

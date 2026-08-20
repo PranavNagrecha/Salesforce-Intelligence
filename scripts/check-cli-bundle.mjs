@@ -26,17 +26,23 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * Soft size backstop for a full grammar re-inline. The PRECISE grammar-inline
  * guard is `MAX_ANTLR_REFS` below (a re-inline mints ~1,700 ApexParser/antlr
  * refs); this byte ceiling is only defense-in-depth. The externalized bundle
- * grows with legitimate feature surface (the Graph-B concept model, the tool
- * roster, and the PermissionDependency ingest) — it was ~4.1 MB at INFRA-11,
- * ~5.76 MB now — while a real grammar re-inline would add the ~5.4 MB ANTLR
- * grammar (bundle > 10 MB). Ceiling set with headroom above current legitimate
- * size and far below any re-inline; the antlr-ref guard, not this number, is
- * what actually catches a re-inline. Raised 5.75 -> 5.90 MB when the
- * PermissionDependency ingest landed: it added ~22 KB of legitimate surface
- * against ~9.6 KB of remaining headroom, and a re-inline would still overshoot
- * the new number by ~4 MB.
+ * grows with legitimate feature surface — it was ~4.1 MB at INFRA-11 and is
+ * ~5.96 MB after the 2026-08-20 integration (PermissionDependency ingest,
+ * platform-access oracle, action-chain model, reasoning reachability, report
+ * graph persistence) — while a real grammar re-inline would add the ~5.4 MB
+ * ANTLR grammar (bundle > 10 MB). The antlr-ref guard, not this number, is what
+ * actually catches a re-inline.
+ *
+ * SET ONCE AT INTEGRATION (5_750_000 -> 6_300_000). Five branches independently
+ * ratcheted this constant to three different values (5.75 / 5.80 / 5.90 MB)
+ * because each one, in isolation, was the next feature to exhaust the ~9.6 KB of
+ * headroom left at 5_740_339. Summed, their deltas land the merged bundle at
+ * ~5_964_000 — so whichever branch merged LAST would have gone red on a ceiling
+ * every earlier branch had already "fixed". Raising it per-branch is the
+ * anti-pattern; this is one value with real headroom, chosen so the next feature
+ * does not restart the ratchet, and still ~4.7 MB below any grammar re-inline.
  */
-const MAX_BYTES = 5_900_000;
+const MAX_BYTES = 6_300_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */
