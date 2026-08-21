@@ -115,7 +115,28 @@ export interface GraphReferrer {
 /** Incoming referrers grouped by the referrer's component type. */
 export interface ReferrerGroup {
   readonly referrerType: string;
+  /**
+   * EDGE count, not component count. One referrer reaches a target through as
+   * many edges as it has relationships to it — a Flow that reads, writes AND
+   * triggers on an object contributes 3. Measured on a real vault:
+   * `{ referrerType: 'Flow', count: 77 }` for a hub object where only 53
+   * distinct Flows reference it, a 45% over-count if read as "77 flows use
+   * this". Read `distinctReferrers` for the component-count answer.
+   */
   readonly count: number;
+  /**
+   * DISTINCT referring components of this type. Always `<= count`; the two
+   * differ exactly when a referrer has more than one relationship to the
+   * target. This is the number to quote to a human.
+   */
+  readonly distinctReferrers: number;
+  /**
+   * Up to `GRAPH_REFERRER_SAMPLE` edge rows, id-sorted — each row carries its
+   * own `viaEdge` / `confidence`, so a multi-edge referrer legitimately appears
+   * more than once here. The cap is on ROWS, so a group with many multi-edge
+   * referrers shows fewer than `GRAPH_REFERRER_SAMPLE` distinct components (a
+   * real hub's Flow sample held 20 distinct flows in 25 rows).
+   */
   readonly sample: readonly GraphReferrer[];
 }
 
@@ -152,7 +173,15 @@ export interface FindComponentUsagesOutput {
    */
   readonly grantedBy?: GrantedBySection;
   readonly summary: {
+    /**
+     * Total incoming USAGE **edges** — NOT the number of components that use
+     * the target. `grantedBy.count` next to it IS a distinct count, so the two
+     * were not comparable despite both being called a count. Measured on a real
+     * hub object: 162 edges from 138 distinct referrers.
+     */
     readonly graphReferrerCount: number;
+    /** DISTINCT referring components across all types — the human-facing number. */
+    readonly distinctReferrerCount: number;
     readonly grepMatchCount: number;
     readonly referrerTypes: readonly string[];
     readonly hasStaticEvidence: boolean;
@@ -226,12 +255,18 @@ export const findComponentUsagesHandler = async (
     .map(([referrerType, refs]) => ({
       referrerType,
       count: refs.length,
+      // A referrer with several relationships to the target (a Flow that reads,
+      // writes AND triggers on an object) contributes several EDGES but is ONE
+      // component. `count` alone read as "77 flows use this" over-stated a real
+      // hub by 45%.
+      distinctReferrers: new Set(refs.map((r) => r.referrerId)).size,
       sample: refs
         .sort((a, b) => (a.referrerId < b.referrerId ? -1 : a.referrerId > b.referrerId ? 1 : 0))
         .slice(0, GRAPH_REFERRER_SAMPLE),
     }))
     .sort((a, b) => b.count - a.count || (a.referrerType < b.referrerType ? -1 : 1));
   const graphReferrerCount = usageEdges.length;
+  const distinctReferrerCount = new Set(usageEdges.map((e) => e.fromId)).size;
   const graphTruncated = graphReferrers.some((g) => g.count > g.sample.length);
 
   // --- GREP supplement: literal api-name match in Apex AND frontend bundle
@@ -304,6 +339,7 @@ export const findComponentUsagesHandler = async (
 
   const boundaries: string[] = [
     'Graph referrers are the modeled incoming dependency edges (access grants `grantedBy` and structural `parentOf` are EXCLUDED — access is not usage); each carries edge `confidence` (declared / parsed / heuristic).',
+    `\`graphReferrerCount\` and each group's \`count\` are EDGE counts, not component counts: one referrer contributes one edge per relationship it has to the target (a Flow that reads, writes AND triggers on an object counts 3). ${graphReferrerCount} edge(s) here come from ${distinctReferrerCount} distinct component(s) — quote \`distinctReferrerCount\` / \`distinctReferrers\` to a human, and note the 25-row \`sample\` cap is on ROWS, so a group with multi-edge referrers shows fewer than 25 distinct components.`,
     'The grep supplement is a literal text match on the api name across Apex AND frontend bundle source — LWC, Aura, Visualforce ($Label / $Resource / @salesforce module references) — (`text-match` tier): it can OVER-match (a substring / a different component sharing the name) and UNDER-match (dynamically built references). Treat it as leads, not proof.',
   ];
   // I3b (empty ≠ none): only when there is NO static evidence anywhere do we
@@ -352,6 +388,7 @@ export const findComponentUsagesHandler = async (
       },
       summary: {
         graphReferrerCount,
+        distinctReferrerCount,
         grepMatchCount: grepMatches.length,
         referrerTypes: graphReferrers.map((g) => g.referrerType),
         hasStaticEvidence,

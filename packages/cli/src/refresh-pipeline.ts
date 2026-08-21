@@ -90,6 +90,7 @@ import {
   extractServiceChannel,
   extractSessionSettings,
   extractSharingRules,
+  extractSharingSet,
   extractSkill,
   extractStandardValueSet,
   extractStaticResource,
@@ -235,7 +236,11 @@ type Extractor = (path: string) => Promise<Result<ExtractionResult, ExtractorErr
  * the Builder bundle's top-level meta; `Network` emits DECLARED
  * `references` to its site + bundle, `CustomSite` emits a HEURISTIC
  * `references` to its convention-named guest profile, and the bundle's
- * JSON page tree is out of scope by design).
+ * JSON page tree is out of scope by design) plus the Experience Cloud /
+ * portal record-access singleton (`SharingSet` — `sharingSets/`, the
+ * user-field-to-record-field matching that grants portal users records
+ * without a sharing rule; emits `sharedWith` to each mapped object and
+ * `grantedBy` from each granted profile, no new EdgeType).
  *
  * Directories that don't exist under `source/` are skipped cleanly by
  * `walkDir`'s readdir try/catch — orgs without the v1.1 / v1.2 / v1.3 /
@@ -323,6 +328,7 @@ export const SUPPORTED_TYPES = [
   'ServiceChannel',
   'SessionSettings',
   'SharingRule',
+  'SharingSet',
   'Skill',
   'StandardValueSet',
   'StaticResource',
@@ -435,6 +441,7 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   ServiceChannel: extractServiceChannel,
   SessionSettings: extractSessionSettings,
   SharingRule: extractSharingRules,
+  SharingSet: extractSharingSet,
   Skill: extractSkill,
   StandardValueSet: extractStandardValueSet,
   StaticResource: extractStaticResource,
@@ -607,6 +614,16 @@ const dispatchFile = (
   if (segments.includes('groups') && fileName.endsWith('.group-meta.xml')) return 'Group';
   if (segments.includes('queues') && fileName.endsWith('.queue-meta.xml')) return 'Queue';
   if (segments.includes('sharingRules') && fileName.endsWith('.sharingRules-meta.xml')) return 'SharingRule';
+  // Experience Cloud / portal record-access tier. `SharingSet` is a FLAT
+  // top-level dispatch under its own `sharingSets/` directory — it does NOT
+  // share the `sharingRules/` folder above, and `.sharingSet-meta.xml` never
+  // satisfies `.sharingRules-meta.xml`'s `endsWith` check, so the two are
+  // mutually exclusive and the order between them is immaterial. Folder +
+  // suffix follow the Metadata API's directoryName/suffix convention for the
+  // type; no SharingSet metadata was present in any vault reachable when this
+  // shipped, so this pairing is documentation-derived, NOT confirmed against a
+  // real retrieve — worth re-verifying on the first org that has one.
+  if (segments.includes('sharingSets') && fileName.endsWith('.sharingSet-meta.xml')) return 'SharingSet';
   if (segments.includes('tabs') && fileName.endsWith('.tab-meta.xml')) return 'CustomTab';
   if (segments.includes('applications') && fileName.endsWith('.app-meta.xml')) return 'CustomApplication';
   if (segments.includes('quickActions') && fileName.endsWith('.quickAction-meta.xml')) return 'QuickAction';

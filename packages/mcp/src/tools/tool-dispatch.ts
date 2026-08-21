@@ -538,6 +538,10 @@ import {
   nonselectiveSoqlInputSchema,
 } from './nonselective-soql.js';
 import {
+  object360Handler,
+  object360InputSchema,
+} from './object-360.js';
+import {
   objectAccessAuditHandler,
   objectAccessAuditInputSchema,
 } from './object-access-audit.js';
@@ -1354,6 +1358,8 @@ export const dispatchTool = async (
         fieldAccessAuditInputSchema,
         fieldAccessAuditHandler,
       );
+    case 'sfi.object_360':
+      return runTool(ctx, args, object360InputSchema, object360Handler);
     case 'sfi.object_access_audit':
       return runTool(
         ctx,

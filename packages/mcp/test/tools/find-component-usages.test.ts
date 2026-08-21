@@ -288,3 +288,61 @@ describe('grantedBy section (grants listed separately from usages)', () => {
     expect(r.value.data.summary.hasStaticEvidence).toBe(false);
   });
 });
+
+// FCU-EDGE-COUNT-READS-AS-REFERRER-COUNT. `graphReferrerCount` and each group's
+// `count` are EDGE counts, but everything around them is named "referrer" and
+// the sibling `grantedBy.count` in the SAME payload is a DISTINCT count — so
+// the two numbers were not comparable despite reading the same. Measured on a
+// real hub object: `{ referrerType: 'Flow', count: 77 }` where only 53 distinct
+// Flows reference it (a 45% over-count), and the 25-row sample held just 20
+// distinct flows because the cap is on rows.
+describe('findComponentUsagesHandler — edge count vs distinct referrer count', () => {
+  it('reports distinct referring COMPONENTS alongside the edge count', async () => {
+    const multiDir = mkdtempSync(join(tmpdir(), 'sfi-fcu-multi-'));
+    try {
+      const o = await openGraph(join(multiDir, 'g.db'));
+      expect(o.ok).toBe(true);
+      if (!o.ok) return;
+      const multiStore = o.value;
+      const target = 'CustomObject:Widget__c';
+      const i = await importExtractionResults(multiStore, [
+        {
+          nodes: [
+            node({ id: target, type: 'CustomObject', apiName: 'Widget__c' }),
+            node({ id: 'Flow:Busy', type: 'Flow', apiName: 'Busy' }),
+            node({ id: 'Flow:Quiet', type: 'Flow', apiName: 'Quiet' }),
+          ],
+          edges: [
+            // ONE flow, THREE relationships → 3 edges, 1 component.
+            edge({ fromId: 'Flow:Busy', toId: target, edgeType: 'readsFrom' }),
+            edge({ fromId: 'Flow:Busy', toId: target, edgeType: 'writesTo' }),
+            edge({ fromId: 'Flow:Busy', toId: target, edgeType: 'triggersOn' }),
+            edge({ fromId: 'Flow:Quiet', toId: target, edgeType: 'readsFrom' }),
+          ],
+        },
+      ]);
+      expect(i.ok).toBe(true);
+      const multiCtx: Context = { vaultRoot: multiDir, manifest: MANIFEST, graph: multiStore };
+      const r = await findComponentUsagesHandler(multiCtx, {
+        componentId: target,
+        includeGrep: false,
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      // 4 edges…
+      expect(d.summary.graphReferrerCount).toBe(4);
+      const flows = d.graphReferrers.find((g) => g.referrerType === 'Flow');
+      expect(flows?.count).toBe(4);
+      // …from 2 distinct Flows. Quoting 4 to a human is the defect.
+      expect(d.summary.distinctReferrerCount).toBe(2);
+      expect(flows?.distinctReferrers).toBe(2);
+      // And the response says so in prose, next to the numbers.
+      expect(d.boundaries.join(' ')).toContain('EDGE counts, not component counts');
+      expect(d.boundaries.join(' ')).toContain('4 edge(s) here come from 2 distinct');
+      await closeGraph(multiStore);
+    } finally {
+      rmSync(multiDir, { recursive: true, force: true });
+    }
+  });
+});

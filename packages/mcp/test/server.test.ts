@@ -276,6 +276,8 @@ describe('dispatchTool', () => {
     'sfi.pii_inventory',
     'sfi.field_access_audit',
     'sfi.object_access_audit',
+    // object_360 — the object-tier synthesis surface (two-tier usage roll-up).
+    'sfi.object_360',
     'sfi.recordtype_availability',
     'sfi.org_overview',
     'sfi.domain_clusters',
@@ -538,7 +540,7 @@ describe('tool profiles (P13-GW-profiles)', () => {
 });
 
 describe('V01_TOOLS', () => {
-  it('advertises the 10 v0.1, 2 v0.2 architect, 1 v0.3 developer, 1 v1.1 admin, 1 v1.2 admin, 2 v1.5 architect, 1 v1.4 developer, 2 v1.6 business-user, 2 v2.0b composition, 2 v2.0c snapshot/compare, 2 v2.0d compliance/privacy, 2 v2.0g org-tour, 2 v1.7 freshness, 3 v2.0e lifecycle-narrator, 3 v2.0f explainer, 5 v2.4 hygiene, 5 v2.1 R3 code-quality composer, 3 v2.3 R2a what-if field-level, 2 value-change (what_if_change_field_value, value_change_audit), 3 v2.3 R2b what-if component-level, 2 v2.3 R2c what-if profile-level, 6 v2.5 documentation-generation, 5 v2.7 R2 deep code, 1 tests-for-change selection, 1 review-change deploy gate, 5 v2.8 R2 async/integration deep, 3 v2.9 R4 vocabulary, 5 v2.2 R2 find-anywhere, 1 package-impact boundary surface, 4 v3.1 cross-org, 5 v3.2 OmniStudio composer (datatransform-field-map, decision-table-browse, integration-procedure-chain, omniscript-flow, omniuicard-widget-breakdown), 1 capabilities self-description, 1 synthesize-answer answer-layer tool, 1 guidance knowledge-plane tool, 2 fleet/pulse tools (org-pulse, fleet-find), 1 universal usage dispatcher (find-component-usages), 1 installed-package catalog (installed-package-catalog), 1 automation-collision detector (automation-collisions), 1 live setup-audit-trail tool (live_setup_audit_trail, R6-27), 1 AI-exposure audit (ai-exposure-report), 1 guest-exposure report (guest-exposure-report), and 1 history-tracking-gaps compliance audit (R7-W7), and 1 interpret reasoning-engine surface (RM-wire), and 1 limit-headroom report (limit_headroom_report, org-ops), and 1 doc-coverage report (doc_coverage_report, org-answers/documentation)', () => {
+  it('advertises the 10 v0.1, 2 v0.2 architect, 1 v0.3 developer, 1 v1.1 admin, 1 v1.2 admin, 2 v1.5 architect, 1 v1.4 developer, 2 v1.6 business-user, 2 v2.0b composition, 2 v2.0c snapshot/compare, 2 v2.0d compliance/privacy, 2 v2.0g org-tour, 2 v1.7 freshness, 3 v2.0e lifecycle-narrator, 3 v2.0f explainer, 5 v2.4 hygiene, 5 v2.1 R3 code-quality composer, 3 v2.3 R2a what-if field-level, 2 value-change (what_if_change_field_value, value_change_audit), 3 v2.3 R2b what-if component-level, 2 v2.3 R2c what-if profile-level, 6 v2.5 documentation-generation, 5 v2.7 R2 deep code, 1 tests-for-change selection, 1 review-change deploy gate, 5 v2.8 R2 async/integration deep, 3 v2.9 R4 vocabulary, 5 v2.2 R2 find-anywhere, 1 package-impact boundary surface, 4 v3.1 cross-org, 5 v3.2 OmniStudio composer (datatransform-field-map, decision-table-browse, integration-procedure-chain, omniscript-flow, omniuicard-widget-breakdown), 1 capabilities self-description, 1 synthesize-answer answer-layer tool, 1 guidance knowledge-plane tool, 2 fleet/pulse tools (org-pulse, fleet-find), 1 universal usage dispatcher (find-component-usages), 1 installed-package catalog (installed-package-catalog), 1 automation-collision detector (automation-collisions), 1 live setup-audit-trail tool (live_setup_audit_trail, R6-27), 1 AI-exposure audit (ai-exposure-report), 1 guest-exposure report (guest-exposure-report), and 1 history-tracking-gaps compliance audit (R7-W7), and 1 interpret reasoning-engine surface (RM-wire), and 1 limit-headroom report (limit_headroom_report, org-ops), and 1 doc-coverage report (doc_coverage_report, org-answers/documentation), and 1 object-tier synthesis surface (object_360)', () => {
     const names = V01_TOOLS.map((tool) => tool.name);
     expect(names).toEqual([
       'sfi.search_components',
@@ -658,6 +660,7 @@ describe('V01_TOOLS', () => {
       'sfi.pii_inventory',
       'sfi.field_access_audit',
       'sfi.object_access_audit',
+      'sfi.object_360',
       'sfi.recordtype_availability',
       'sfi.org_overview',
       'sfi.domain_clusters',

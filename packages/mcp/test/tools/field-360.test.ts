@@ -18,6 +18,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { USAGE_SOURCE_FAMILIES } from '../../src/tools/coverage-trust.js';
 import {
   FIELD_360_DATA_NOT_AVAILABLE,
   FIELD_360_Q165_DISCLOSURE,
@@ -701,6 +702,9 @@ describe('field360Handler', () => {
     const out = result.value.data;
     // Structured companion field — the "WHICH reports" answer, not just the boolean.
     expect(out.reportUsage).toEqual({
+      usedInReport: true,
+      usedInDashboard: true,
+      namesAvailable: true,
       reportNames: ['Exec/Forecast', 'Sales/Pipeline'],
       dashboardNames: ['Exec/KPIs'],
     });
@@ -2027,5 +2031,264 @@ describe('field360Handler: Flow decision/filter reads (readers no longer 0)', ()
       delete process.env['SFI_CONDITION_SCAN_MAX'];
       rmSync(capDir, { recursive: true, force: true });
     }
+  });
+});
+
+// =============================================================================
+// UNCLASSIFIED-REFERRERS-READ-AS-ABSENCE + FORMULA-DEPENDENCY-ON-A-PLATFORM-
+// FIELD-READ-AS-NO-DEPENDENCY.
+//
+// Both are the same defect wearing two hats: an edge whose OTHER endpoint the
+// composition could not place was dropped with no trace, so a field with real
+// dependencies answered `count: 0` / `riskLevel: low` / `narrow-footprint`.
+// Measured on the reference vault before the fix: 126 incoming edges (79
+// `WebLink`, 47 `ReportType`) over ~70 fields lost to the first, and 36 of 364
+// formula-dependency rows over 29 fields lost to the second — 14 of those fields
+// reporting `dependencies.count: 0` for a formula body of `CASESAFEID(Id)`.
+// `sfi.safe_to_delete_field` calls the ReportType edge `analytics`/BLOCKING, so
+// the two shipped field tools contradicted each other about one field.
+// =============================================================================
+describe('field360Handler — referrers and dependencies the composition cannot place', () => {
+  let dropStore: GraphStore;
+  let dropCtx: Context;
+  let dropDir: string;
+  const OBJ = 'CustomObject:Course__c';
+  const RT_FIELD = 'CustomField:Course__c.Department_Name__c';
+  const REPORT_TYPE = 'ReportType:Widget_Sessions';
+  const FORMULA_FIELD = 'CustomField:Course__c.X18_Digit_ID__c';
+  // The formula's target: a platform id field the refresh never models as its
+  // own node. The edge exists; the node does not.
+  const UNMODELED_TARGET = 'CustomField:Course__c.Id';
+  const BOOL_ONLY_REPORT_FIELD = 'CustomField:Course__c.Bool_Report__c';
+
+  beforeAll(async () => {
+    dropDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-f360-drop-'));
+    const opened = await openGraph(join(dropDir, 'drop.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    dropStore = opened.value;
+    const dropSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Course__c' }),
+        makeNode({
+          id: RT_FIELD,
+          type: 'CustomField',
+          apiName: 'Department_Name__c',
+          parentId: OBJ,
+          properties: { dataType: 'Text' },
+        }),
+        makeNode({
+          id: REPORT_TYPE,
+          type: 'ReportType',
+          apiName: 'Widget_Sessions',
+        }),
+        makeNode({
+          id: FORMULA_FIELD,
+          type: 'CustomField',
+          apiName: 'X18_Digit_ID__c',
+          parentId: OBJ,
+          properties: { dataType: 'Text', formula: 'CASESAFEID(Id)' },
+        }),
+        makeNode({
+          id: BOOL_ONLY_REPORT_FIELD,
+          type: 'CustomField',
+          apiName: 'Bool_Report__c',
+          parentId: OBJ,
+          // The boolean with NO name list — a vault refreshed before the
+          // Finding-#36 name property existed. 303 fields are in exactly this
+          // state on the reference vault and NONE carry names.
+          properties: { dataType: 'Text', usedInReport: true },
+        }),
+      ],
+      edges: [
+        // A ReportType reference: a real incoming dependency the composition
+        // table has no branch for.
+        makeEdge({
+          fromId: REPORT_TYPE,
+          toId: RT_FIELD,
+          edgeType: 'references',
+          confidence: 'heuristic',
+          source: 'enterprise-metadata-extractor',
+        }),
+        // A formula reference whose TARGET has no node row.
+        makeEdge({
+          fromId: FORMULA_FIELD,
+          toId: UNMODELED_TARGET,
+          edgeType: 'references',
+          confidence: 'parsed',
+          source: 'formula-tokenizer',
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(dropStore, [dropSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    dropCtx = { vaultRoot: dropDir, manifest: FIXTURE_MANIFEST, graph: dropStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(dropStore);
+    rmSync(dropDir, { recursive: true, force: true });
+  });
+
+  it('counts and NAMES a referrer no section holds instead of dropping it', async () => {
+    const result = await field360Handler(dropCtx, { fieldId: RT_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    // The edge is real and counted in the total…
+    expect(out.summary.totalIncomingEdges).toBe(1);
+    // …and no section holds it (the composition table genuinely has no branch).
+    const sectionTotal = Object.values(out.summary.perSectionCounts).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    expect(sectionTotal).toBe(0);
+    // FAIL-BEFORE: the gap between the two numbers was unexplained and this key
+    // did not exist.
+    expect(out.summary.unclassifiedReferrerCount).toBe(1);
+    // FAIL-BEFORE: `low` / `narrow-footprint` — the same field safe_to_delete_field
+    // calls BLOCKING. A referrer whose kind is unknown is not a measured low risk.
+    expect(out.summary.riskLevel).not.toBe('low');
+    expect(out.summary.riskFactors).toContain('1-unclassified-referrers');
+    // The disclosure names the referrer and points at the tool that does classify it.
+    const note = out.boundaries.find((b) => b.includes('matched NO field_360 section'));
+    expect(note).toBeDefined();
+    expect(note).toContain(REPORT_TYPE);
+    expect(note).toContain('ReportType references');
+    expect(note).toContain('safe_to_delete_field');
+    expect(note).toContain('FLOOR');
+  });
+
+  it('lists a formula dependency whose target the vault never modeled', async () => {
+    const result = await field360Handler(dropCtx, { fieldId: FORMULA_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.isFormula).toBe(true);
+    // FAIL-BEFORE: rows [], count 0 — "this formula depends on nothing", for
+    // `CASESAFEID(Id)`.
+    expect(out.dependencies?.count).toBe(1);
+    const row = out.dependencies?.rows[0];
+    expect(row?.componentId).toBe(UNMODELED_TARGET);
+    expect(row?.componentType).toBe('CustomField');
+    expect(row?.componentApiName).toBe('Course__c.Id');
+    // The row says what it is: cited from the edge, with no definition behind it.
+    expect(row?.properties['targetNotModeled']).toBe(true);
+    const note = out.boundaries.find((b) => b.includes('NOT modeled as their own vault node'));
+    expect(note).toBeDefined();
+    expect(note).toContain(UNMODELED_TARGET);
+  });
+
+  it('keeps a boolean-only report fold distinguishable from "zero reports"', async () => {
+    const result = await field360Handler(dropCtx, { fieldId: BOOL_ONLY_REPORT_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    // FAIL-BEFORE: the block was `{ reportNames: [], dashboardNames: [] }` —
+    // byte-identical whether the report flag, the dashboard flag or both are set,
+    // so a consumer reading the arrays got "zero reports".
+    expect(out.reportUsage?.usedInReport).toBe(true);
+    expect(out.reportUsage?.usedInDashboard).toBe(false);
+    expect(out.reportUsage?.namesAvailable).toBe(false);
+    expect(out.reportUsage?.reportNames).toEqual([]);
+    // The prose was already right; it now also says the empty list is not a zero.
+    const note = out.boundaries.find((b) => b.includes('IS referenced by'));
+    expect(note).toContain('names not captured');
+    expect(note).toContain('NOT "zero reports"');
+  });
+});
+
+// =============================================================================
+// EMPTY-SECTION-ON-A-COVERAGE-DEGRADED-VAULT-READ-AS-NONE.
+//
+// Every empty section is an ABSENCE claim. `safe_to_delete_field` has always
+// said "Treat absence of dependencies in those families as 'not checked', not
+// 'none'" on a partial vault; `field_360` said nothing at all, so the same
+// field on the same vault carried opposite epistemics depending on which tool
+// you asked.
+// =============================================================================
+describe('field360Handler — empty sections on a coverage-degraded vault', () => {
+  let covStore: GraphStore;
+  let covDir: string;
+  const FIELD = 'CustomField:Account.Quiet__c';
+
+  const PARTIAL_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      { type: 'CustomField', requested: true, retrieved: 1, errored: false, neverModeled: false },
+      // The families that WOULD produce writers / automations rows: never retrieved.
+      { type: 'Flow', requested: false, retrieved: 0, errored: false, neverModeled: false },
+      { type: 'WorkflowRule', requested: false, retrieved: 0, errored: false, neverModeled: false },
+    ],
+  };
+  const COMPLETE_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      // DERIVED from the shared contract, never re-listed: if the family set
+      // grows, this fixture grows with it instead of silently under-covering.
+      ...(USAGE_SOURCE_FAMILIES['CustomField'] ?? []).map((type) => ({
+        type,
+        requested: true,
+        retrieved: 1,
+        errored: false,
+        neverModeled: false,
+      })),
+    ],
+  };
+
+  beforeAll(async () => {
+    covDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-f360-cov-'));
+    const opened = await openGraph(join(covDir, 'cov.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    covStore = opened.value;
+    const imp = await importExtractionResults(covStore, [
+      {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+          makeNode({
+            id: FIELD,
+            type: 'CustomField',
+            apiName: 'Quiet__c',
+            parentId: 'CustomObject:Account',
+            properties: { dataType: 'Text' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+  });
+
+  afterAll(async () => {
+    await closeGraph(covStore);
+    rmSync(covDir, { recursive: true, force: true });
+  });
+
+  it('names the unretrieved families behind an all-empty answer', async () => {
+    const result = await field360Handler(
+      { vaultRoot: covDir, manifest: PARTIAL_MANIFEST, graph: covStore },
+      { fieldId: FIELD },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.totalIncomingEdges).toBe(0);
+    // FAIL-BEFORE: no boundary mentioned coverage at all.
+    const note = result.value.data.boundaries.find((b) =>
+      b.includes('NOT "none exists"'),
+    );
+    expect(note).toBeDefined();
+    expect(note).toContain('Flow');
+    expect(note).toContain('WorkflowRule');
+  });
+
+  it('stays silent when the referrer families WERE retrieved (no false caveat)', async () => {
+    const result = await field360Handler(
+      { vaultRoot: covDir, manifest: COMPLETE_MANIFEST, graph: covStore },
+      { fieldId: FIELD },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.data.boundaries.some((b) => b.includes('NOT "none exists"')),
+    ).toBe(false);
   });
 });

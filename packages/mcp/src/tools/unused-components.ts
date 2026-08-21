@@ -42,6 +42,17 @@
  *     trigger Inactive; validation/workflow rule active=false). This is what
  *     stops the tool reporting every active Flow in the org as "unused".
  *
+ * **Unchecked zeros** (UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN): a scanned type
+ * with no instances in the vault yields `byType[type] = 0`, byte-identical to
+ * "scanned every one, all in use". On a vault whose refresh never retrieved
+ * Reports, `sfi.unused_components { types: ['Report'] }` answered
+ * `{ byType: { Report: 0 }, components: [], truncated: false }` — a confident
+ * "no unused reports" for a family that was never looked at. Every such zero is
+ * now itemised in `uncheckedTypes` with the reason read off the manifest's
+ * coverage row (`not-retrieved` / `never-modeled` / `confirmed-empty` /
+ * `coverage-unknown`). This is the SCANNED axis; `coverageCaveat` below is the
+ * REFERRER axis, and its wording does not vary with what you scanned.
+ *
  * **Honesty axis** (per the v2.0b spec): the tool never claims
  * components are "definitively unused". Each entry carries a per-type
  * `invisibleReferencesNote` that names the categories of reference
@@ -84,6 +95,7 @@ import {
   listEdgesForNodes,
   listNodesByType,
 } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -121,6 +133,30 @@ const UNUSED_DEFAULT_LIMIT = 100;
  */
 const PAGE_CAP = 500;
 const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
+
+/**
+ * UNUSED-PAGE-CURSOR-SKIPS-TRIMMED-ROWS byte budgeting.
+ *
+ * The global response guard (`tool-dispatch`) measures the WHOLE envelope
+ * against ~39 KB (a 40 KB budget less its ~1 KB reserve) and tail-truncates
+ * `data.components` when it does not fit — AFTER this handler has already
+ * minted `nextOffset` / `nextCursor` for the untrimmed page, so the resume
+ * token points past the rows the guard deleted. `paginateLegacy`'s default
+ * budget (38 KB) bounds only the array, leaving no room for the rest.
+ *
+ * `DATA_ENVELOPE_TARGET_BYTES` is the ceiling for the whole `data` object,
+ * chosen with headroom under that ~39 KB reduction cap for the fields the
+ * dispatcher adds around it (`contentPolicy`, `vaultState`,
+ * `estimatedPayloadBytes` — measured at ~0.6 KB).
+ * `PAGE_METADATA_RESERVE_BYTES` covers the pagination fields this handler adds
+ * only when the page IS truncated (`limit`, `offset`, `nextOffset`,
+ * `nextCursor`, `pageInfo`), which are therefore not in the pre-measured fixed
+ * payload. `MIN_PAGE_BYTE_BUDGET` keeps a pathologically large coverage caveat
+ * from starving the page to nothing.
+ */
+const DATA_ENVELOPE_TARGET_BYTES = 36_000;
+const PAGE_METADATA_RESERVE_BYTES = 900;
+const MIN_PAGE_BYTE_BUDGET = 8_000;
 
 /**
  * The default set of ComponentTypes the tool scans when `types` is
@@ -325,6 +361,41 @@ export interface UnusedComponentsOutput {
    * only by reports would read unused. The caveat names the families.
    */
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN: present ONLY when a scanned type has
+   * ZERO instances in this vault, i.e. its `byType` entry is 0 because nothing
+   * was SCANNED, not because everything scanned was in use. Without it,
+   * `byType: { "Report": 0 }` on a vault whose refresh never retrieved a single
+   * Report is byte-identical to `byType: { "EmailTemplate": 0 }` on a vault
+   * that checked every template and found them all used — the reader concludes
+   * "no unused reports" either way.
+   *
+   * The existing `coverageCaveat` does NOT cover this: it is the REFERRER axis
+   * ("a field used only by reports would read unused"), its wording is
+   * identical whichever type you scanned, and it fires just as loudly on a
+   * fully-scanned type. This is the SCANNED axis. Absent when every scanned
+   * type had at least one instance (response byte-identical to before).
+   */
+  readonly uncheckedTypes?: readonly {
+    readonly type: string;
+    /**
+     *   - `not-retrieved`  — requested but the refresh landed 0 rows, or the
+     *                        pull was capped / staged / errored. A refresh can
+     *                        close this.
+     *   - `never-modeled`  — no extractor models this type at all. No refresh
+     *                        on any org can close it.
+     *   - `confirmed-empty`— the retrieve is confirmed clean and the org
+     *                        genuinely holds none. The zero IS checked.
+     *   - `coverage-unknown` — a legacy vault with no coverage rows; which of
+     *                        the above applies cannot be determined.
+     */
+    readonly reason:
+      | 'not-retrieved'
+      | 'never-modeled'
+      | 'confirmed-empty'
+      | 'coverage-unknown';
+    readonly note: string;
+  }[];
   /** Provenance / completeness for the absence claim. */
   readonly trust: TrustSummary;
 }
@@ -554,7 +625,20 @@ const scanType = async (
   ctx: Context,
   type: ComponentType,
   objectScopeId: string | null,
-): Promise<Result<readonly UnusedComponent[], string>> => {
+): Promise<
+  Result<
+    {
+      readonly components: readonly UnusedComponent[];
+      /**
+       * How many instances of this type exist IN THE VAULT (before any object
+       * scope). Zero means NOTHING WAS SCANNED, so a `byType` count of 0 is an
+       * unchecked zero, not a clean bill of health — see `uncheckedTypes`.
+       */
+      readonly vaultInstances: number;
+    },
+    string
+  >
+> => {
   // Page this type to EXHAUSTION, not just the first 500. The `unused` verdict
   // is destructive and `byType` is a tally; a single `listNodesByType` page
   // caps at 500 (id ASC), so an org with > 500 of a type used to drop the tail
@@ -627,7 +711,57 @@ const scanType = async (
       invisibleReferencesNote: note,
     });
   }
-  return ok([...out].sort(compareById));
+  return ok({
+    components: [...out].sort(compareById),
+    vaultInstances: allNodes.length,
+  });
+};
+
+/**
+ * UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN: classify WHY a scanned type produced no
+ * instances to scan, from the manifest's per-type coverage row. A zero that
+ * means "the refresh never retrieved this family" and a zero that means "the
+ * org genuinely has none" are the same number and must not read the same.
+ */
+const classifyUncheckedType = (
+  ctx: Context,
+  type: ComponentType,
+): {
+  readonly type: string;
+  readonly reason:
+    | 'not-retrieved'
+    | 'never-modeled'
+    | 'confirmed-empty'
+    | 'coverage-unknown';
+  readonly note: string;
+} => {
+  const coverage = summarizeCoverage(ctx.manifest, [type]);
+  if (!coverage.coverageKnown) {
+    return {
+      type,
+      reason: 'coverage-unknown',
+      note: `\`${type}\`: 0 unused because ZERO instances were scanned — this vault holds no \`${type}\` at all, and its manifest carries no coverage rows, so whether the refresh skipped the family or the org genuinely has none cannot be determined. Re-run \`sfi refresh --no-pull\` to compute coverage before reading this 0 as "nothing unused".`,
+    };
+  }
+  if (coverage.notModeledTypes.includes(type)) {
+    return {
+      type,
+      reason: 'never-modeled',
+      note: `\`${type}\`: 0 unused because ZERO instances were scanned — NO extractor in this product models \`${type}\`, on any org. This 0 is "never checked" BY CONSTRUCTION and no refresh can change it; it is not evidence that no unused \`${type}\` exists.`,
+    };
+  }
+  if (coverage.coveredTypes.includes(type)) {
+    return {
+      type,
+      reason: 'confirmed-empty',
+      note: `\`${type}\`: 0 unused because this org holds no \`${type}\` at all — the retrieve is confirmed clean and returned zero members, so the 0 IS a checked zero (nothing to be unused).`,
+    };
+  }
+  return {
+    type,
+    reason: 'not-retrieved',
+    note: `\`${type}\`: 0 unused because ZERO instances were scanned — this vault's last refresh did NOT retrieve any \`${type}\` (not requested, capped, staged, or errored). This 0 means "NOT CHECKED", never "no unused \`${type}\`". Run \`/sfi-refresh\` and re-ask, or check \`sfi.coverage_report\`.`,
+  };
 };
 
 /**
@@ -656,6 +790,18 @@ export const unusedComponentsHandler = async (
 
   const allUnused: UnusedComponent[] = [];
   const byType: Record<string, number> = {};
+  // UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN: a scanned type with no instances to
+  // scan produces `byType[type] = 0` — identical to "checked everything, all in
+  // use". Record which zeros were never checked.
+  const uncheckedTypes: {
+    readonly type: string;
+    readonly reason:
+      | 'not-retrieved'
+      | 'never-modeled'
+      | 'confirmed-empty'
+      | 'coverage-unknown';
+    readonly note: string;
+  }[] = [];
 
   for (const type of types) {
     const result = await scanType(ctx, type, objectId);
@@ -665,8 +811,11 @@ export const unusedComponentsHandler = async (
         message: `graph query failed: ${result.error}`,
       });
     }
-    byType[type] = result.value.length;
-    allUnused.push(...result.value);
+    byType[type] = result.value.components.length;
+    allUnused.push(...result.value.components);
+    if (result.value.vaultInstances === 0) {
+      uncheckedTypes.push(classifyUncheckedType(ctx, type));
+    }
   }
 
   const sorted = [...allUnused].sort(compareGlobally);
@@ -686,21 +835,6 @@ export const unusedComponentsHandler = async (
     offset = decoded.value.o;
   }
 
-  const paged = paginateLegacy(sorted, {
-    offset,
-    limit,
-    keyOf: (c) => c.id,
-    binding: {
-      tool: UNUSED_COMPONENTS_TOOL,
-      vaultHash: ctx.manifest.sourceTreeHash,
-      argsFingerprint: fingerprint,
-    },
-  });
-  const components = paged.items;
-  const truncated = paged.hasMore;
-  const emitCursor = paged.nextCursor !== null;
-  const isPaged = truncated || offset > 0;
-
   // "Unused" is an absence claim: it is only as strong as the coverage of the
   // families that could hold the reference AND the extractor's ability to see
   // those references. Routed through the SHARED L1 completeness contract
@@ -715,6 +849,7 @@ export const unusedComponentsHandler = async (
   //     built LWC/Aura resourceUrl) carries a structured `extractor-blind`
   //     blindSpot EVEN on a fully-covered vault, so its "unused" reads "not
   //     checked", not proven "none". `blindPlaneTypes` is the scanned type set.
+  // Computed BEFORE pagination because its size feeds the page byte budget.
   const coverageCaveat = assertUsageCompleteness(ctx, {
     usageFamilies: UNUSED_REQUIRED_COVERAGE,
     blindPlaneTypes: types,
@@ -723,6 +858,59 @@ export const unusedComponentsHandler = async (
   }).caveat;
 
   const scoped = typesExplicit || objectId !== null;
+
+  // UNUSED-PAGE-CURSOR-SKIPS-TRIMMED-ROWS: `paginateLegacy`'s default byte
+  // budget bounds the COMPONENTS ARRAY alone (38 KB), while the global response
+  // guard in `tool-dispatch` measures the WHOLE envelope against ~39 KB. On a
+  // large page the surrounding fields (byType, the multi-KB blind-plane
+  // coverageCaveat, uncheckedTypes, trust, contentPolicy) pushed the envelope
+  // over, so the guard tail-truncated `components` AFTER this handler had
+  // already minted `nextOffset`/`nextCursor` for the untrimmed page — and the
+  // guard's own note tells the caller "the handler's pagination is
+  // authoritative". Measured: `{ limit: 500 }` returned 59 rows with a cursor
+  // pointing at offset 118, so following it SKIPPED 59 unused components
+  // outright, and page 2 skipped 63 more. A "what can I delete" list that
+  // silently omits rows between its own pages is the worst shape this tool has.
+  //
+  // Fix: budget the page against what is actually LEFT for it, so the handler's
+  // page fits the envelope and its cursor stays truthful.
+  const trust = offlineTrust(
+    ctx,
+    coverageCaveat === undefined
+      ? { status: 'complete' }
+      : { status: 'partial', missingCoverage: coverageCaveat.missingCoverage },
+  );
+  const fixedPayloadBytes = Buffer.byteLength(
+    JSON.stringify({
+      appliedScope: { types: [...types], object, mode: scoped ? 'scoped' : 'default' },
+      byType,
+      truncated: true,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(uncheckedTypes.length > 0 ? { uncheckedTypes } : {}),
+      trust,
+    }),
+    'utf8',
+  );
+  const pageByteBudget = Math.max(
+    MIN_PAGE_BYTE_BUDGET,
+    DATA_ENVELOPE_TARGET_BYTES - fixedPayloadBytes - PAGE_METADATA_RESERVE_BYTES,
+  );
+
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    byteBudget: pageByteBudget,
+    keyOf: (c) => c.id,
+    binding: {
+      tool: UNUSED_COMPONENTS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const components = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
 
   return ok({
     data: {
@@ -740,12 +928,8 @@ export const unusedComponentsHandler = async (
         ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
-      trust: offlineTrust(
-        ctx,
-        coverageCaveat === undefined
-          ? { status: 'complete' }
-          : { status: 'partial', missingCoverage: coverageCaveat.missingCoverage },
-      ),
+      ...(uncheckedTypes.length > 0 ? { uncheckedTypes } : {}),
+      trust,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

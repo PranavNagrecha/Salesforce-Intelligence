@@ -42,6 +42,12 @@ const CASES: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
   { q: 'which apex classes ship without test coverage', anyOf: ['sfi.test_coverage_gaps', 'sfi.meaningful_test_audit', 'sfi.list_components', 'sfi.apex_test_coverage'] },
   { q: 'where does Pranav have access to', anyOf: ['sfi.field_access_audit', 'sfi.who_can_access_object', 'sfi.object_access_audit', 'sfi.effective_permissions', 'sfi.why_cant_user_see_record'] },
   { q: 'what changed since last month', anyOf: ['sfi.changed_since', 'sfi.org_history', 'sfi.what_changed_since_refresh', 'sfi.component_history'] },
+  // object_360 — the object-tier synthesis surface. The owner's verbatim ask
+  // plus two phrasings that do NOT reuse its utterance wording, so the row
+  // guards generalization rather than echoing the corpus back at itself.
+  { q: 'tell me everything about the Contact object - where is it used, what automations touch it, can I delete it', anyOf: ['sfi.object_360'] },
+  { q: 'can we retire the Invoice__c object or is something still using it', anyOf: ['sfi.object_360', 'sfi.unused_components', 'sfi.find_component_usages'] },
+  { q: 'which profiles lose access if the Contact object goes away', anyOf: ['sfi.object_360', 'sfi.object_access_audit', 'sfi.who_can_access_object'] },
   // F3 — the advertised OBJECT reasoning questions. interpret is an accepted
   // complement in each anyOf (it is stacked onto these object-anchored intents),
   // but the primary specialist is what the floor actually guards.

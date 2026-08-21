@@ -183,6 +183,69 @@ edgeSemantics:
       default:
         category: permission
         verdict: review
+    # ── OBJECT-TIER edge types (added for object_360) ──────────────────────
+    # The five entries above cover only the edge types that land on a
+    # CustomField. Measured on a real 9,264-node vault, `lookupTo` (272 edges),
+    # `triggersOn` (225) and `sharedWith` (19 to an object) land EXCLUSIVELY on
+    # a CustomObject, and `parentOf` is the containment edge. So the deletion
+    # vocabulary had NO entry for any dependency an OBJECT actually has: every
+    # one of them fell through to the top-level `{unknown, risky}` default and a
+    # master-detail child, an active trigger and a record-owning queue all
+    # classified identically to an unrecognised edge.
+    #
+    # Adding them is byte-safe for `safe_to_delete_field`: it walks a
+    # CustomField's incoming edges, and it `continue`s past `parentOf` before
+    # `classifyEdge` is ever called, so none of these four rows is reachable
+    # from the field tool on this edge model. They exist for the object tier.
+    lookupTo:
+      bySourceType:
+        # A relationship FIELD on some object points at this object. If it is
+        # master-detail, the platform cascade-deletes the children and refuses
+        # the parent delete outright; if it is a lookup, the field itself must
+        # go first. Either way the object cannot leave while the field exists.
+        CustomField:
+          category: relationship
+          verdict: blocking
+      default:
+        category: relationship
+        verdict: blocking
+    triggersOn:
+      bySourceType:
+        # An ApexTrigger or a record-triggered Flow is BOUND to this object.
+        # Neither carries a parentId, so this edge is the only evidence the
+        # automation exists — and Salesforce will not delete an object that
+        # still has one attached.
+        ApexTrigger:
+          category: apex
+          verdict: blocking
+        Flow:
+          category: flow
+          verdict: blocking
+      default:
+        category: automation
+        verdict: blocking
+    parentOf:
+      bySourceType: {}
+      # CONTAINMENT, not an external dependency: the child goes with the parent
+      # automatically. `review`, never `blocking` — the honest reading is "this
+      # much goes with it", not "this stops you".
+      default:
+        category: containment
+        verdict: review
+    sharedWith:
+      bySourceType:
+        # A Queue configured to OWN records of this object. The object must be
+        # removed from the queue's supported-objects list first.
+        Queue:
+          category: sharing
+          verdict: blocking
+        # A sharing rule whose scope is this object.
+        SharingRule:
+          category: sharing
+          verdict: blocking
+      default:
+        category: sharing
+        verdict: review
 
   # 4. Fallback when the edge type itself is not in byEdgeType.
   default:

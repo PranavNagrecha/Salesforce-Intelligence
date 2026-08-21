@@ -2199,3 +2199,207 @@ describe('safeToDeleteFieldHandler — validation-rule referrer collapse', () =>
     expect(condition?.examples[0]?.firerId).toBe(FLOW_BOTH);
   });
 });
+
+// =============================================================================
+// SUPPLEMENTAL-FLOW-EVIDENCE + UNDELETABLE-FIELD-COUNT-WAS-FABRICATED +
+// ANALYTICS-COUNT-IS-A-FLOOR-NOT-A-TOTAL.
+//
+// All three came out of cross-checking this tool against `sfi.field_360` on the
+// same fields of the same real vault, where the two shipped tools contradicted
+// each other:
+//
+//   - `CustomField:APXT_CongaSign__Transaction__c.Parent_a7s__c` — `field_360`
+//     printed TWO record-triggered Flows reading it (`$Record.Parent_a7s__c
+//     IsNull` in their decisions); this tool printed `reasoning: []`, zero
+//     referrers. Only the vault's stale-builder + partial-coverage caveats held
+//     the verdict at `review`; on a current, fully-covered vault the same field
+//     reaches a bare `safe`.
+//   - `CustomField:Contact.Id` — `field_360` printed 85 usage referrers; this
+//     tool printed `count: 1`, a number nothing had counted, and stamped the
+//     response `completeness: complete` on a vault whose own coverage rows say
+//     partial.
+//   - 303 fields carry `usedInReport: true` with NO name list, where the
+//     analytics count of 1 is a floor the response reported as a total.
+// =============================================================================
+describe('safeToDeleteFieldHandler — cross-tool parity with field_360', () => {
+  let xStore: GraphStore;
+  let xCtx: Context;
+  let xDir: string;
+  const OBJ = 'CustomObject:Txn__c';
+  // Read ONLY by a Flow decision — the condition extractor stores that as a
+  // firesWhen edge to a synthetic ConditionalContext carrying the field on
+  // `fieldRefs`, so NO edge lands on the field and the incoming walk sees none.
+  const COND_ONLY_FIELD = 'CustomField:Txn__c.Parent_Ref__c';
+  const COND_FLOW = 'Flow:Txn_Status_Update';
+  const COND_CTX = 'ConditionalContext:Flow:Txn_Status_Update.condition-0';
+  // A standard field on a standard object, with real usage referrers behind it.
+  const STANDARD_FIELD = 'CustomField:Contact.Id';
+  const STD_READER = 'ApexClass:ContactService';
+  const STD_WRITER = 'ApexTrigger:ContactTrigger';
+  const STD_PROFILE = 'Profile:Admin';
+  // Folded report usage as a bare BOOLEAN — no name list, no truncation total.
+  const BOOL_REPORT_FIELD = 'CustomField:Txn__c.Bool_Report__c';
+
+  beforeAll(async () => {
+    xDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-std-parity-'));
+    const opened = await openGraph(join(xDir, 'parity.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    xStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Txn__c' }),
+        makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
+        makeNode({
+          id: COND_ONLY_FIELD,
+          apiName: 'Parent_Ref__c',
+          parentId: OBJ,
+          properties: { dataType: 'Text' },
+        }),
+        makeNode({ id: COND_FLOW, type: 'Flow', apiName: 'Txn_Status_Update' }),
+        makeNode({
+          id: COND_CTX,
+          type: 'ConditionalContext',
+          apiName: 'Flow:Txn_Status_Update.condition-0',
+          parentId: COND_FLOW,
+          properties: { kind: 'flow-decision', fieldRefs: [COND_ONLY_FIELD] },
+        }),
+        makeNode({
+          id: STANDARD_FIELD,
+          apiName: 'Id',
+          parentId: 'CustomObject:Contact',
+          properties: { dataType: 'Text' },
+        }),
+        makeNode({ id: STD_READER, type: 'ApexClass', apiName: 'ContactService' }),
+        makeNode({ id: STD_WRITER, type: 'ApexTrigger', apiName: 'ContactTrigger' }),
+        makeNode({ id: STD_PROFILE, type: 'Profile', apiName: 'Admin' }),
+        makeNode({
+          id: BOOL_REPORT_FIELD,
+          apiName: 'Bool_Report__c',
+          parentId: OBJ,
+          properties: { dataType: 'Text', usedInReport: true },
+        }),
+      ],
+      edges: [
+        // The ONLY evidence the Flow touches COND_ONLY_FIELD: an edge that does
+        // not point at the field at all.
+        makeEdge({
+          fromId: COND_FLOW,
+          toId: COND_CTX,
+          edgeType: 'firesWhen',
+          source: 'condition-extractor',
+          properties: { kind: 'flow-decision', conditionIndex: 0 },
+        }),
+        makeEdge({ fromId: STD_READER, toId: STANDARD_FIELD, edgeType: 'readsFrom' }),
+        makeEdge({ fromId: STD_WRITER, toId: STANDARD_FIELD, edgeType: 'writesTo' }),
+        // An FLS grant and the containment edge: excluded from the usage count.
+        makeEdge({ fromId: STD_PROFILE, toId: STANDARD_FIELD, edgeType: 'grantedBy' }),
+        makeEdge({
+          fromId: 'CustomObject:Contact',
+          toId: STANDARD_FIELD,
+          edgeType: 'parentOf',
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(xStore, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    xCtx = {
+      vaultRoot: xDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: xStore,
+      liveCapability: mintLiveCapability('opt-in'),
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(xStore);
+    rmSync(xDir, { recursive: true, force: true });
+  });
+
+  it('sees a Flow decision that TESTS the field, which mints no edge onto it', async () => {
+    const result = await safeToDeleteFieldHandler(xCtx, { fieldId: COND_ONLY_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning, trust } = result.value.data;
+    // FAIL-BEFORE: `safe` with `reasoning: []` — a field two Flows read, cleared
+    // for deletion.
+    expect(verdict).toBe('blocking');
+    const flow = reasoning.find((r) => r.category === 'flow');
+    expect(flow?.count).toBe(1);
+    expect(flow?.examples[0]?.id).toBe(COND_FLOW);
+    // The provenance is on the citation: this row came from a reconstruction,
+    // not from an incoming edge.
+    expect(flow?.examples[0]?.via).toBe('flow-condition-reads-scan');
+    // A reconstruction-backed verdict must not report `declared`.
+    expect(trust.confidence).toBe('heuristic');
+    expect(
+      trust.limitations.some(
+        (l) => l.includes('RECONSTRUCTED') && l.includes('flow-condition-reads-scan'),
+      ),
+    ).toBe(true);
+  });
+
+  it('renders the reconstruction provenance in the delete checklist citation', async () => {
+    const result = await safeToDeleteFieldHandler(xCtx, {
+      fieldId: COND_ONLY_FIELD,
+      format: 'checklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const checklist = result.value.data.checklist ?? '';
+    expect(checklist).toContain('Verdict: BLOCKING');
+    expect(checklist).toContain('found by flow-condition-reads-scan, heuristic');
+  });
+
+  it('reports the REAL referrer count on an undeletable standard field', async () => {
+    const result = await safeToDeleteFieldHandler(xCtx, { fieldId: STANDARD_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning, trust } = result.value.data;
+    // The verdict is intrinsic and unchanged.
+    expect(verdict).toBe('blocking');
+    // FAIL-BEFORE: a hard-coded 1. The graph holds 2 usage edges (1 read,
+    // 1 write); the FLS grant and the parentOf containment edge are excluded.
+    expect(reasoning[0]?.count).toBe(2);
+    expect(reasoning[0]?.note).toContain('1 field-level security grant(s)');
+    // The response no longer claims complete knowledge just because the verdict
+    // does not depend on it — the limitation states the independence instead.
+    expect(
+      trust.limitations.some((l) =>
+        l.includes('BLOCKING verdict does not depend on dependency-edge coverage'),
+      ),
+    ).toBe(true);
+  });
+
+  it('says the analytics count is a FLOOR when the fold stamped only a boolean', async () => {
+    const result = await safeToDeleteFieldHandler(xCtx, { fieldId: BOOL_REPORT_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { reasoning, trust } = result.value.data;
+    const analytics = reasoning.find((r) => r.category === 'analytics');
+    expect(analytics?.count).toBe(1);
+    expect(analytics?.examples).toEqual([]);
+    // FAIL-BEFORE: nothing said that the 1 is "at least one" and the empty
+    // example list is "names not captured" rather than "zero reports".
+    expect(
+      trust.limitations.some(
+        (l) => l.includes('LOWER BOUND') && l.includes('NEVER "zero reports"'),
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts the same `<Object>.<Field>` short form sfi.field_360 accepts', async () => {
+    // FAIL-BEFORE: invalid-query here, a full report from field_360 — one user,
+    // one id, two answers.
+    const short = await safeToDeleteFieldHandler(xCtx, { fieldId: 'Txn__c.Parent_Ref__c' });
+    const canonical = await safeToDeleteFieldHandler(xCtx, { fieldId: COND_ONLY_FIELD });
+    expect(short.ok).toBe(true);
+    expect(canonical.ok).toBe(true);
+    if (!short.ok || !canonical.ok) return;
+    expect(short.value.data).toEqual(canonical.value.data);
+    // A NON-CustomField canonical id is still refused — that is the check that matters.
+    const wrongType = await safeToDeleteFieldHandler(xCtx, { fieldId: 'Flow:Txn_Status_Update' });
+    expect(wrongType.ok).toBe(false);
+    if (wrongType.ok) return;
+    expect(wrongType.error.kind).toBe('invalid-query');
+  });
+});

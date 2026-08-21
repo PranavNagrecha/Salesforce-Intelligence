@@ -145,8 +145,80 @@ describe('objectAccessAuditHandler', () => {
       delete: 1,
       viewAll: 1,
       modifyAll: 1,
+      // OBJECT-ACCESS-SUMMARY-MIXES-GRANTER-KINDS: the flat tallies above are
+      // row counts over Profiles + PermissionSets + PSG duplicate rows. The
+      // per-kind, distinct-actor split is what answers "how many PROFILES".
+      byGranterType: {
+        Profile: {
+          granters: 1,
+          create: 1,
+          read: 1,
+          edit: 1,
+          delete: 1,
+          viewAll: 1,
+          modifyAll: 1,
+        },
+        PermissionSet: {
+          granters: 1,
+          create: 0,
+          read: 1,
+          edit: 0,
+          delete: 0,
+          viewAll: 0,
+          modifyAll: 0,
+        },
+        PermissionSetGroup: {
+          granters: 0,
+          create: 0,
+          read: 0,
+          edit: 0,
+          delete: 0,
+          viewAll: 0,
+          modifyAll: 0,
+        },
+      },
     });
     expect(r.value.data.notModeled).toBe(false);
+  });
+
+  // OBJECT-ACCESS-SUMMARY-MIXES-GRANTER-KINDS. The owner's question is "which
+  // profiles will be affected — X profiles who can create it, X who can edit".
+  // `summary.create` cannot answer it: it counts Profile rows + PermissionSet
+  // rows + PermissionSetGroup rows, and a PSG row is a COPY of its member
+  // permission set's flags, so the same access is counted twice. Measured on a
+  // real hub object: `summary.create` = 35 against a true profile answer of 20.
+  it('answers "how many PROFILES can create/edit" without mixing in permission sets', async () => {
+    const r = await objectAccessAuditHandler(ctx, { componentId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const s = r.value.data.summary;
+    // The flat tally spans both populations…
+    expect(s.read).toBe(2);
+    // …while the profile-only answer is 1. These must not be conflated.
+    expect(s.byGranterType.Profile.read).toBe(1);
+    expect(s.byGranterType.Profile.create).toBe(1);
+    expect(s.byGranterType.Profile.edit).toBe(1);
+    expect(s.byGranterType.PermissionSet.read).toBe(1);
+    expect(s.byGranterType.PermissionSet.create).toBe(0);
+    // And the note must say the flat tallies are not a profile count, fire even
+    // though no granter here has two access paths, and refuse a user reading.
+    const note = r.value.data.note ?? '';
+    expect(note).toContain('ROW counts');
+    expect(note).toContain('byGranterType.Profile');
+    expect(note).toContain('never a USER count');
+  });
+
+  // OBJECT-ACCESS-PERMSET-MODE-ZEROS: the PermissionSet branch is a disclosure
+  // mode; its all-zero summary must not read as "this permission set grants
+  // nothing".
+  it('explains the all-zero summary in PermissionSet disclosure mode', async () => {
+    const r = await objectAccessAuditHandler(ctx, { componentId: READER_PS });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.granters).toBe(0);
+    const note = r.value.data.note ?? '';
+    expect(note).toContain('BY CONSTRUCTION');
+    expect(note).toContain('do NOT mean this permission set grants nothing');
   });
 
   it('rejects a non-CustomObject id with invalid-query', async () => {

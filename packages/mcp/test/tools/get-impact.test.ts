@@ -433,6 +433,114 @@ describe('getImpactHandler', () => {
     expect(edgeKeys).toEqual(sortedEdgeKeys);
   });
 
+  // GET-IMPACT-TRUNCATION-DROPS-FAMILIES. `enforceGraphPayloadBudget` drops the
+  // id-sorted TAIL, so truncation is NOT a proportional sample — it deletes
+  // whole alphabetically-late referrer families. Measured on a real vault: a hub
+  // object's walk collected 6 referrer families (Flow 77 edges, CustomField 49,
+  // ApexClass 21, FlexiPage 9, ApexTrigger 5, LightningComponentBundle 1) and
+  // the returned slice held ONLY `ApexClass` — 18 of 234 edges — while
+  // `truncated: true` said nothing about WHICH dependents vanished and
+  // `traversedEdgeTypes` still listed the vanished families as contributors.
+  // A field's 3 ValidationRule dependents disappearing from "what breaks if I
+  // change this field?" is the exact answer an architect must not lose.
+  it('names the referrer families truncation DROPPED, not just that it truncated', async () => {
+    const dropDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-dropfam-'));
+    try {
+      const opened = await openGraph(join(dropDir, 'dropfam.db'));
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const dropStore = opened.value;
+      const fieldId = 'CustomField:Account.Busy__c';
+      const nodes: Node[] = [
+        makeNode({ id: 'CustomObject:Account' }),
+        makeNode({
+          id: fieldId,
+          type: 'CustomField',
+          apiName: 'Busy__c',
+          parentId: 'CustomObject:Account',
+        }),
+      ];
+      const edges: Edge[] = [];
+      // Alphabetically FIRST family — fat enough to exhaust the byte budget.
+      for (let i = 0; i < 120; i++) {
+        const id = `ApexClass:Aaa${String(i).padStart(3, '0')}`;
+        nodes.push(
+          makeNode({
+            id,
+            type: 'ApexClass',
+            apiName: `Aaa${String(i).padStart(3, '0')}`,
+            properties: { body: 'x'.repeat(400) },
+          }),
+        );
+        edges.push(
+          makeEdge({ fromId: id, toId: fieldId, edgeType: 'readsFrom' }),
+        );
+      }
+      // Alphabetically LAST families — the ones the tail-trim silently deletes.
+      for (let i = 0; i < 3; i++) {
+        const vrId = `ValidationRule:Account.Zzz${i}`;
+        nodes.push(
+          makeNode({
+            id: vrId,
+            type: 'ValidationRule',
+            apiName: `Zzz${i}`,
+            parentId: 'CustomObject:Account',
+          }),
+        );
+        edges.push(
+          makeEdge({ fromId: vrId, toId: fieldId, edgeType: 'references' }),
+        );
+      }
+      const linkId = 'WebLink:Account.ZzzButton';
+      nodes.push(
+        makeNode({ id: linkId, type: 'WebLink', apiName: 'ZzzButton' }),
+      );
+      edges.push(
+        makeEdge({ fromId: linkId, toId: fieldId, edgeType: 'usedInLayout' }),
+      );
+
+      const imported = await importExtractionResults(dropStore, [{ nodes, edges }]);
+      expect(imported.ok).toBe(true);
+      const dropCtx: Context = {
+        vaultRoot: dropDir,
+        manifest: FIXTURE_MANIFEST,
+        graph: dropStore,
+      };
+      const result = await getImpactHandler(dropCtx, {
+        componentId: fieldId,
+        hops: 1,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const data = result.value.data;
+      expect(data.truncated).toBe(true);
+      const returnedReferrerTypes = new Set(
+        data.impact.edges.map((e) => e.fromId.slice(0, e.fromId.indexOf(':'))),
+      );
+      // Precondition for the assertion below: the trim really did delete them.
+      expect(returnedReferrerTypes.has('ValidationRule')).toBe(false);
+      expect(returnedReferrerTypes.has('WebLink')).toBe(false);
+
+      const tr = data.truncationReason;
+      expect(tr).toBeDefined();
+      // The walk's real totals, so `returnedEdges` is readable as a fraction.
+      expect(tr?.walkedEdges).toBe(124);
+      expect(tr?.walkedEdges).toBeGreaterThan(tr?.returnedEdges ?? 0);
+      // The dropped families are NAMED, on both axes.
+      expect(tr?.omittedReferrerTypes).toContain('ValidationRule');
+      expect(tr?.omittedReferrerTypes).toContain('WebLink');
+      expect(tr?.omittedEdgeTypes).toContain('references');
+      expect(tr?.omittedEdgeTypes).toContain('usedInLayout');
+      expect(tr?.remedy).toMatch(/WHOLE DEPENDENT FAMILIES ARE MISSING/);
+      // …and the prose disclosure a host is told to cite says it too.
+      expect(data.disclosure).toContain('ENTIRE DEPENDENT FAMILIES WERE DROPPED');
+      expect(data.disclosure).toContain('ValidationRule');
+      await closeGraph(dropStore);
+    } finally {
+      rmSync(dropDir, { recursive: true, force: true });
+    }
+  });
+
   it('warns when grantedBy edges inflate payload despite count caps', async () => {
     const heavyDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-heavy-'));
     try {
@@ -549,18 +657,184 @@ describe('getImpactHandler', () => {
     }
   });
 
-  it('returns an empty impact set for an unknown componentId', async () => {
+  // GET-IMPACT-UNKNOWN-ID-READS-AS-SAFE. This test previously asserted
+  // `ok` with an empty slice, on the (false) premise that the graph cannot
+  // separate "missing component" from "component with no incoming edges". It
+  // can — `getNodeById` plus an unfiltered inbound-edge probe — and the empty
+  // `ok` shipped the disclosure "Complete impact slice within 2 hop(s): 0
+  // node(s) / 0 edge(s)", i.e. a typo'd id read as a PROVEN "nothing breaks if
+  // you change this". The sibling `sfi.find_component_usages` already refuses
+  // the identical input with `component-not-found`; the two now agree.
+  it('REFUSES an unknown componentId instead of answering "nothing depends on it"', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.DoesNotExist__c',
     });
-    // The graph has no incoming edges to an absent node, and the root
-    // does not resolve to a Node row, so both lists are empty.
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+    expect(result.error.message).toContain('CustomField:Account.DoesNotExist__c');
+    // The refusal must NOT read as an absence claim.
+    expect(result.error.message).not.toMatch(/Complete impact slice/i);
+  });
+
+  // A bare, non-canonical name is the same hazard with a friendlier face: a
+  // host that forgets the `Type:` prefix got a confident empty slice.
+  it('REFUSES a bare (non-canonical) name rather than returning an empty slice', async () => {
+    const result = await getImpactHandler(ctx, { componentId: 'account' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+  });
+
+  // The refusal must not swallow a PHANTOM: an id with NO node row but with
+  // inbound edges (a standard / managed-package component reached only through
+  // permission or lookup edges) genuinely exists and must still answer.
+  it('still answers for a PHANTOM root — no node row but inbound edges', async () => {
+    const phantomDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-phantom-'));
+    try {
+      const opened = await openGraph(join(phantomDir, 'phantom.db'));
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const phantomStore = opened.value;
+      const imported = await importExtractionResults(phantomStore, [
+        {
+          nodes: [makeNode({ id: 'ApexClass:Caller', type: 'ApexClass', apiName: 'Caller' })],
+          // `CustomObject:Macro` has NO node row — only this inbound edge.
+          edges: [
+            makeEdge({
+              fromId: 'ApexClass:Caller',
+              toId: 'CustomObject:Macro',
+              edgeType: 'readsFrom',
+            }),
+          ],
+        },
+      ]);
+      expect(imported.ok).toBe(true);
+      const phantomCtx: Context = {
+        vaultRoot: phantomDir,
+        manifest: FIXTURE_MANIFEST,
+        graph: phantomStore,
+      };
+      const result = await getImpactHandler(phantomCtx, {
+        componentId: 'CustomObject:Macro',
+      });
+      // It must NOT be refused — the inbound edge proves the component exists.
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const data = result.value.data;
+      expect(data.disclosure).toContain('PHANTOM');
+
+      // GET-IMPACT-PHANTOM-ENDPOINT-EDGE-LOSS. The referrer node IS returned,
+      // but the edge connecting it to the phantom root is deleted by the shared
+      // dangling-edge filter in `enforceGraphPayloadBudget` (the root has no
+      // node row, so every inbound edge has a missing endpoint). Measured on a
+      // real vault: a phantom standard object returned `14 node(s) / 0 edge(s)`
+      // with `truncated: false` and "Complete impact slice" — 14 granting
+      // containers with nothing connecting them to anything. The edge loss is
+      // in shared code this tool does not own; what this tool MUST do is stop
+      // reporting the loss as a clean, complete answer.
+      expect(data.impact.nodes.length).toBe(1);
+      expect(data.impact.edges.length).toBe(0);
+      expect(data.truncated).toBe(true);
+      expect(data.truncationReason?.reason).toBe('dropped-endpoint');
+      expect(data.droppedEndpointEdges?.count).toBe(1);
+      expect(data.droppedEndpointEdges?.phantomEndpointCount).toBe(1);
+      expect(data.droppedEndpointEdges?.nodeCapExcludedCount).toBe(0);
+      expect(data.droppedEndpointEdges?.endpointIds).toContain(
+        'CustomObject:Macro',
+      );
+      expect(data.disclosure).toContain('sfi.find_component_usages');
+      expect(data.disclosure).not.toMatch(/^Complete impact slice/);
+      await closeGraph(phantomStore);
+    } finally {
+      rmSync(phantomDir, { recursive: true, force: true });
+    }
+  });
+
+  // GET-IMPACT-EMPTY-READS-COMPLETE: a real component with no dependents must
+  // not open its disclosure with "Complete impact slice" while the SAME payload
+  // carries a `coverageCaveat` saying coverage is partial.
+  it('does not call an EMPTY dependent set a "Complete impact slice"', async () => {
+    const result = await getImpactHandler(ctx, {
+      componentId: 'ApexTrigger:UnrelatedTrigger',
+    });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.data.impact.nodes.length).toBe(0);
     expect(result.value.data.impact.edges.length).toBe(0);
-    expect(result.value.data.traversedEdgeTypes.length).toBe(0);
-    expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
+    expect(result.value.data.disclosure).not.toMatch(/^Complete impact slice/);
+    expect(result.value.data.disclosure).toContain('NO dependent edges found');
+    expect(result.value.data.disclosure).toContain('NOT a proven');
+  });
+
+  // GET-IMPACT-PARENTOF-ONLY-SUPPRESSES-CAVEAT: a slice whose only inbound edge
+  // is the structural parent has ZERO usage dependents. The disclosure already
+  // said so, but the empty≠none `coverageCaveat` was keyed on
+  // `edges.length === 0` and so never fired on that shape.
+  it('emits coverageCaveat when the ONLY inbound edge is the structural parent', async () => {
+    const parentDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-parentonly-'));
+    try {
+      const opened = await openGraph(join(parentDir, 'parentonly.db'));
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const parentStore = opened.value;
+      const imported = await importExtractionResults(parentStore, [
+        {
+          nodes: [
+            makeNode({ id: 'CustomObject:Account' }),
+            makeNode({
+              id: 'ValidationRule:Account.Lonely',
+              type: 'ValidationRule',
+              apiName: 'Lonely',
+              parentId: 'CustomObject:Account',
+            }),
+          ],
+          edges: [
+            makeEdge({
+              fromId: 'CustomObject:Account',
+              toId: 'ValidationRule:Account.Lonely',
+              edgeType: 'parentOf',
+              confidence: 'declared',
+              source: 'extractor:custom-object',
+            }),
+          ],
+        },
+      ]);
+      expect(imported.ok).toBe(true);
+      // A vault that did NOT retrieve Reports — so the empty≠none caveat has
+      // something true to say. (The default fixture manifest is fully covered,
+      // where `undefined` is the correct, honest answer.)
+      const parentCtx: Context = {
+        vaultRoot: parentDir,
+        manifest: {
+          ...FIXTURE_MANIFEST,
+          coverageComputedAt: '2026-05-27T14:34:00Z',
+          coverage: [
+            {
+              type: 'Report',
+              requested: true,
+              retrieved: 0,
+              errored: false,
+              neverModeled: false,
+            },
+          ],
+        } as Context['manifest'],
+        graph: parentStore,
+      };
+      const result = await getImpactHandler(parentCtx, {
+        componentId: 'ValidationRule:Account.Lonely',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.impact.edges.length).toBe(1);
+      expect(result.value.data.impact.edges[0]?.edgeType).toBe('parentOf');
+      // The disclosure already claimed "no usage dependents were found" —
+      // the caveat that qualifies that claim must be reachable too.
+      expect(result.value.data.disclosure).toContain('no usage');
+      expect(result.value.data.coverageCaveat).toBeDefined();
+      await closeGraph(parentStore);
+    } finally {
+      rmSync(parentDir, { recursive: true, force: true });
+    }
   });
 
   // CR-17: the BFS expansion batches incoming-edge fetches into ONE
@@ -876,8 +1150,24 @@ describe('getImpactHandler', () => {
       if (!result.ok) return;
 
       // The slice is tiny, so the byte budget took the EARLY RETURN, not the
-      // trim path — this is precisely the branch the fix had to cover.
-      expect(result.value.data.truncated).toBe(false);
+      // trim path — this is precisely the branch the CR-RV7 fix had to cover.
+      // GET-IMPACT-PHANTOM-ENDPOINT-EDGE-LOSS: this assertion USED to be
+      // `truncated: false`. Dropping the dangling edge is right (a consumer
+      // must never deref a node missing from the slice), but `GhostVR` is a
+      // REAL validation rule that references this field — it was found by the
+      // walk and then deleted from "what breaks if I change this field?".
+      // Reporting that deletion as a clean, complete answer is the lie; the
+      // drop itself is not. The dangling-free invariant below is unchanged.
+      expect(result.value.data.truncated).toBe(true);
+      expect(result.value.data.truncationReason?.reason).toBe('dropped-endpoint');
+      expect(result.value.data.droppedEndpointEdges?.count).toBe(1);
+      expect(
+        result.value.data.droppedEndpointEdges?.phantomEndpointCount,
+      ).toBe(1);
+      expect(
+        result.value.data.droppedEndpointEdges?.endpointIds,
+      ).toContain('ValidationRule:Account.GhostVR');
+      expect(result.value.data.disclosure).toContain('PHANTOM');
 
       const ids = new Set(result.value.data.impact.nodes.map((n) => n.id));
       // FAIL-BEFORE: the early-return path kept the GhostVR-endpoint edge even

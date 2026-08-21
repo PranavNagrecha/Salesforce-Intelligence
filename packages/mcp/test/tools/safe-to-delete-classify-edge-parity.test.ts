@@ -125,6 +125,34 @@ const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
       return { category: 'layout', verdict: 'review' };
     case 'grantedBy':
       return { category: 'permission', verdict: 'review' };
+    // THIRD intentional extension (object_360): the table above covered only
+    // the edge types that land on a CustomField, so EVERY dependency an
+    // OBJECT has — a master-detail child (`lookupTo`), an attached trigger or
+    // record-triggered flow (`triggersOn`), a record-owning queue or a sharing
+    // rule (`sharedWith`) — fell through to `{unknown, risky}` and read as an
+    // unrecognised edge. Measured on a real vault, none of these four edge
+    // types lands on a CustomField (lookupTo 272/272 to CustomObject,
+    // triggersOn 225/225, sharedWith 19 to CustomObject + 31 to Group/Role),
+    // and `safe_to_delete_field` `continue`s past `parentOf` before calling
+    // `classifyEdge` at all — so adding them leaves the FIELD tool's output
+    // byte-identical while giving the object tier a real vocabulary.
+    case 'lookupTo':
+      return { category: 'relationship', verdict: 'blocking' };
+    case 'triggersOn':
+      if (fromType === 'ApexTrigger') {
+        return { category: 'apex', verdict: 'blocking' };
+      }
+      if (fromType === 'Flow') {
+        return { category: 'flow', verdict: 'blocking' };
+      }
+      return { category: 'automation', verdict: 'blocking' };
+    case 'parentOf':
+      return { category: 'containment', verdict: 'review' };
+    case 'sharedWith':
+      if (fromType === 'Queue' || fromType === 'SharingRule') {
+        return { category: 'sharing', verdict: 'blocking' };
+      }
+      return { category: 'sharing', verdict: 'review' };
     default:
       return { category: 'unknown', verdict: 'risky' };
   }
@@ -211,8 +239,18 @@ const CASES: readonly Case[] = [
   { name: 'usedInLayout', edgeType: 'usedInLayout', source: 'x', fromType: 'Layout', expected: { category: 'layout', verdict: 'review' } },
   { name: 'grantedBy PermissionSet', edgeType: 'grantedBy', source: 'x', fromType: 'PermissionSet', expected: { category: 'permission', verdict: 'review' } },
   { name: 'grantedBy Profile', edgeType: 'grantedBy', source: 'x', fromType: 'Profile', expected: { category: 'permission', verdict: 'review' } },
-  // 6. edgeType not in the table -> top-level default
-  { name: 'unknown edgeType (triggersOn)', edgeType: 'triggersOn', source: 'x', fromType: 'Flow', expected: { category: 'unknown', verdict: 'risky' } },
+  // 6. OBJECT-TIER edge types (object_360 extension). DELIBERATE REVERSAL:
+  //    `triggersOn` used to reach the top-level `{unknown, risky}` default.
+  { name: 'lookupTo CustomField (relationship field points at the object)', edgeType: 'lookupTo', source: 'custom-field-extractor', fromType: 'CustomField', expected: { category: 'relationship', verdict: 'blocking' } },
+  { name: 'triggersOn ApexTrigger (trigger bound to the object)', edgeType: 'triggersOn', source: 'apex-scanner', fromType: 'ApexTrigger', expected: { category: 'apex', verdict: 'blocking' } },
+  { name: 'triggersOn Flow (record-triggered flow bound to the object)', edgeType: 'triggersOn', source: 'flow-extractor', fromType: 'Flow', expected: { category: 'flow', verdict: 'blocking' } },
+  { name: 'triggersOn default (other automation family)', edgeType: 'triggersOn', source: 'x', fromType: 'WorkflowRule', expected: { category: 'automation', verdict: 'blocking' } },
+  { name: 'parentOf (containment — blast radius, not a blocker)', edgeType: 'parentOf', source: 'x', fromType: 'CustomObject', expected: { category: 'containment', verdict: 'review' } },
+  { name: 'sharedWith Queue (queue owns records of the object)', edgeType: 'sharedWith', source: 'queue-extractor', fromType: 'Queue', expected: { category: 'sharing', verdict: 'blocking' } },
+  { name: 'sharedWith SharingRule', edgeType: 'sharedWith', source: 'x', fromType: 'SharingRule', expected: { category: 'sharing', verdict: 'blocking' } },
+  { name: 'sharedWith default (Role target of a sharing grant)', edgeType: 'sharedWith', source: 'x', fromType: 'Role', expected: { category: 'sharing', verdict: 'review' } },
+  // 7. edgeType still not in the table -> top-level default
+  { name: 'unknown edgeType (callsApex)', edgeType: 'callsApex', source: 'x', fromType: 'ApexClass', expected: { category: 'unknown', verdict: 'risky' } },
 ];
 
 describe('RM-1b(2) classifyEdge — table-driven is byte-identical to the original switch', () => {

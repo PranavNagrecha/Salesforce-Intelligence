@@ -356,6 +356,11 @@ const CONTINUATION_TOOL_TYPES: ReadonlyMap<string, ReadonlySet<string>> = new Ma
   ['sfi.explain_apex_method', new Set(['ApexClass', 'ApexTrigger'])],
   ['sfi.who_can_access_object', new Set(['CustomObject'])],
   ['sfi.object_access_audit', new Set(['CustomObject'])],
+  // The object BRIEF is the shape most likely to be asked as a follow-up —
+  // "what is this object, where is it used, can we delete it" names nothing,
+  // because the previous turn named it. Without this row the continuation was
+  // abandoned and the brief was unreachable from the conversational form.
+  ['sfi.object_360', new Set(['CustomObject'])],
   ['sfi.field_access_audit', new Set(['CustomField'])],
   ['sfi.explain_flow', new Set(['Flow'])],
   ['sfi.who_can_run', new Set(['Flow'])],

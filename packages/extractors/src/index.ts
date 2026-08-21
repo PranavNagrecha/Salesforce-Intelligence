@@ -138,6 +138,8 @@ export { extractRole } from './role.js';
 export { extractSamlSsoConfig } from './saml-sso-config.js';
 export { extractSessionSettings } from './session-settings.js';
 export { extractSharingRules } from './sharing-rules.js';
+export { extractSharingSet } from './sharing-set.js';
+export type { SharingSetAccessMapping } from './sharing-set.js';
 export { extractSkill } from './skill.js';
 export {
   buildDescribeFieldExtraction,

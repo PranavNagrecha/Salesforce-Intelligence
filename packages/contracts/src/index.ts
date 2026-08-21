@@ -504,6 +504,24 @@ export type ComponentType =
   | 'WaveDashboard' //             A CRM Analytics dashboard (`wave/{Name}.wdash-meta.xml`, root `<WaveDashboard>`, MetadataWithContent, API v37.0+). Carries `application`, `masterLabel` (also `label`), `description`, `templateAssetSourceName`, `dateVersion` — each null when absent. `contentModeled: false` (the companion `.wdash` JSON blob is not parsed). Id `WaveDashboard:{Name}` — flat, no parent scope, zero edges.
   | 'WaveDataflow' //              A CRM Analytics dataflow/recipe definition (`wave/{Name}.wdf-meta.xml`, root `<WaveDataflow>`, MetadataWithContent, API v37.0+). Carries `application`, `masterLabel`, `description`, `dataflowType` (`User` | `Prepared`). `contentModeled: false` (the companion `.wdf` JSON blob is not parsed). Id `WaveDataflow:{Name}` — flat, no parent scope, zero edges.
   | 'WaveXmd' //                   Extended metadata for a CRM Analytics dataset (`wave/{Name}.xmd-meta.xml`, root `<WaveXmd>`, plain Metadata, API v39.0+). Carries `application`, `dataset` (also used as `label` when present), `datasetConnector`, `datasetFullyQualifiedName`, `origin`, `xmdType` (`<type>`), `waveVisualization`, plus `dimensionCount`/`measureCount`/`dateCount`. Dimension/measure customizations whose `<origin>` or `<field>` is Object.Field-shaped each emit a DECLARED `references` edge to `CustomField:{Object}.{Field}` (`referenceKind: 'waveXmdFieldCustomization'`), mirrored onto `properties.referencedFields` (sorted; omitted when empty). Id `WaveXmd:{Name}` — flat, no parent scope.
+  // Experience Cloud / portal record-access tier. A `SharingSet` is how a
+  // portal user reaches a record WITHOUT a sharing rule: each
+  // `<accessMappings>` block pairs a field on the USER (`<userField>`, e.g.
+  // `Contact.Account`) with a field on the TARGET record (`<objectField>`),
+  // and the user reaches records where the two values match. It was
+  // previously unmodeled ENTIRELY — no ComponentType, no retrieve, no
+  // extraction — which is why `sfi.why_cant_user_see_record`'s `SharingSets`
+  // cascade stage is permanently `unknown` with a not-modeled disclosure.
+  // Modeling it makes the DECLARED half of that stage answerable (which sets
+  // exist, which objects they map, at what access level, for which profiles);
+  // the APPLICABILITY half stays record-level and therefore stays `unknown`
+  // (deciding it needs the record's `<objectField>` value and the user's
+  // `<userField>` value — live data the vault does not hold). Refresh-gated:
+  // a vault built before this type shipped carries no SharingSet nodes until
+  // a re-refresh pulls them. No new EdgeType: the object side reuses
+  // `sharedWith` (the same edge SharingRule / Queue already emit toward an
+  // access target) and the profile side reuses `grantedBy`.
+  | 'SharingSet' //               An Experience Cloud / portal record-access sharing set (`sharingSets/{Name}.sharingSet-meta.xml`, root `<SharingSet>`). Carries `description`, `accessMappings` (`{ object, accessLevel, userField, objectField }[]`, one entry per `<accessMappings>` block — every member `null` when its element is absent, NEVER defaulted), and `profiles` (the deduplicated + sorted granted profile names). Both arrays are always present, empty when nothing was declared. Id `SharingSet:{Name}` — flat, no parent scope (one set maps SEVERAL objects, so it cannot be parented to one). Emits one DECLARED `sharedWith` edge per DISTINCT mapped object to `CustomObject:{object}` (`relationship: 'sharingSetAccess'`, plus `mappingCount` and — only when exactly one mapping owns that object — that mapping's `accessLevel`/`userField`/`objectField`; several mappings on one object carry the count alone rather than misattributing the first block's fields), and one DECLARED `grantedBy` edge per granted profile FROM `Profile:{name}` TO the set (`sharingSetAccess: true`) — `fromId` is the granting container per this codebase's universal `grantedBy` direction, since holding one of those profiles is what qualifies a portal user for the set's access; the `Profile:` node may be absent from the vault (dangling-by-design, like the sharing-rules `Group:` targets).
 
 /**
  * A canonical component identifier.
