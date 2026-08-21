@@ -1178,10 +1178,22 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
     // numerator and denominator together.
     const top = cands[0]?.score ?? 0;
     expect(top).toBeGreaterThan(FUNNEL_PRIMARY_MIN_SCORE);
-    // Observed 1.058–1.062 across six branches (2026-08-20). Bounded on BOTH
-    // sides: too low and the score gate stops being the thing that fails to
-    // refuse this; too high and it is no longer noise-tier.
-    expect(top / FUNNEL_PRIMARY_MIN_SCORE).toBeGreaterThan(1.03);
+    // Observed 1.058–1.062 across six branches (2026-08-20), then 1.0269 once
+    // this lane added `sfi.security_settings` and its utterances.
+    //
+    // CORRECTION to the note above: a ratio is NOT immune to every corpus edit.
+    // It is immune to a UNIFORM idf shift, which is what motivated it. Adding a
+    // whole DOCUMENT is not uniform — it raises df only for the terms that
+    // document contains, so the ratio moves for questions sharing vocabulary
+    // with the new tool. Expect this bound to drift down as the roster grows.
+    //
+    // The lower bound is the softer half of the pair: the guarantee it was
+    // written for — that the score gate is not what refuses this question — is
+    // already asserted one line above (`top > FUNNEL_PRIMARY_MIN_SCORE`). What
+    // this bound adds is "not pinned to the floor by accident", so it is
+    // widened rather than re-pinned to the new measurement, which would only
+    // invite the next lane to re-pin it again.
+    expect(top / FUNNEL_PRIMARY_MIN_SCORE).toBeGreaterThan(1.02);
     expect(top / FUNNEL_PRIMARY_MIN_SCORE).toBeLessThan(1.15);
 
     // (b) …and BREADTH is what actually refuses it — with real headroom.

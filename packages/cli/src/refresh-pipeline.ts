@@ -87,6 +87,7 @@ import {
   extractRole,
   extractSamlSsoConfig,
   extractScopingRule,
+  extractSecuritySettings,
   extractServiceChannel,
   extractSessionSettings,
   extractSharingRules,
@@ -320,6 +321,7 @@ export const SUPPORTED_TYPES = [
   'Role',
   'SamlSsoConfig',
   'ScopingRule',
+  'SecuritySettings',
   'ServiceChannel',
   'SessionSettings',
   'SharingRule',
@@ -339,6 +341,27 @@ export const SUPPORTED_TYPES = [
 ] as const satisfies readonly ComponentType[];
 
 type SupportedType = (typeof SUPPORTED_TYPES)[number];
+
+/**
+ * Types whose nodes are produced by ANOTHER type's extractor, because one
+ * source file carries both.
+ *
+ * `settings/Security.settings-meta.xml` dispatches to `SecuritySettings`, whose
+ * extractor co-emits `SessionSettings:default` from the same parse (the session
+ * block is nested inside that file — Salesforce emits no session settings file
+ * of its own). Without this map a `--types SessionSettings` run would filter out
+ * the only file that can produce the node and extract nothing at all: the exact
+ * silent-drop class this tier's bug belonged to.
+ */
+const CO_EMITTED_TYPES: Readonly<Partial<Record<SupportedType, readonly SupportedType[]>>> = {
+  SecuritySettings: ['SessionSettings'],
+};
+
+/** True when `type`'s extractor also emits a node for a type the filter asked for. */
+const coEmits = (
+  type: SupportedType,
+  typeFilter: ReadonlySet<SupportedType>,
+): boolean => (CO_EMITTED_TYPES[type] ?? []).some((co) => typeFilter.has(co));
 
 /**
  * Lookup from supported type to its extractor function.
@@ -432,6 +455,15 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   Role: extractRole,
   SamlSsoConfig: extractSamlSsoConfig,
   ScopingRule: extractScopingRule,
+  // ONE file, TWO org-level singletons: `Security.settings-meta.xml` is
+  // dispatched here and `extractSecuritySettings` co-emits BOTH
+  // `SecuritySettings:default` and `SessionSettings:default` from a single
+  // parse (the session block is nested inside it and has no file of its own).
+  // The `SessionSettings` entry below stays bound to the session-only
+  // extractor for registration parity; the walker never selects it, because no
+  // file dispatches to that type. `--types SessionSettings` reaches the same
+  // file through CO_EMITTED_TYPES and runs THIS entry, which emits both nodes.
+  SecuritySettings: extractSecuritySettings,
   ServiceChannel: extractServiceChannel,
   SessionSettings: extractSessionSettings,
   SharingRule: extractSharingRules,
@@ -619,14 +651,24 @@ const dispatchFile = (
   // `customPermissions/{DeveloperName}.customPermission-meta.xml` — the grant
   // target a PermissionSet/Profile `<customPermissions>` block names (CR-CAP-10).
   if (segments.includes('customPermissions') && fileName.endsWith('.customPermission-meta.xml')) return 'CustomPermission';
-  // Session-security tier. Salesforce delivers SessionSettings under the
-  // generic `settings/` container (shared by every `*Settings` metadata
-  // type), so the discriminant is the `Session.settings-meta.xml` filename,
-  // NOT the directory — matching on `settings/` alone would falsely claim
-  // coverage over the other settings files (Security, Search, etc.). One
-  // org-level singleton; the extractor emits the fixed `SessionSettings:default`
-  // node. Refresh-gated: only populates once a re-refresh retrieves the new type.
-  if (segments.includes('settings') && fileName === 'Session.settings-meta.xml') return 'SessionSettings';
+  // Org security-settings tier. Salesforce delivers these under the generic
+  // `settings/` container (shared by every `*Settings` metadata type), so the
+  // discriminant is the FILENAME, not the directory — matching on `settings/`
+  // alone would falsely claim coverage over the other settings files (Search,
+  // Chatter, …).
+  //
+  // BUG FIXED (0.3.1): this matched `Session.settings-meta.xml` — a file
+  // Salesforce NEVER emits. Session settings are a NESTED `<sessionSettings>`
+  // block inside `Security.settings-meta.xml` (root `<SecuritySettings>`), so
+  // the file was silently counted as an uncovered `settings` skip on every org
+  // while the SessionSettings coverage row still read
+  // `retrieveConfirmed: true, retrieved: 0` — a confirmed-empty claim that is
+  // impossible for an org-level singleton.
+  //
+  // One file, two org-level singletons: `extractSecuritySettings` co-emits
+  // `SecuritySettings:default` and `SessionSettings:default` (see
+  // CO_EMITTED_TYPES for how `--types SessionSettings` still reaches it).
+  if (segments.includes('settings') && fileName === 'Security.settings-meta.xml') return 'SecuritySettings';
   // Finding #38: FieldServiceSettings shares the generic `settings/`
   // container with SessionSettings — same discriminant-by-filename
   // approach (`FieldService.settings-meta.xml`, per the Metadata API's
@@ -1728,7 +1770,7 @@ export const walkAndExtract = async (
       }
       continue;
     }
-    if (typeFilter !== null && !typeFilter.has(type)) continue;
+    if (typeFilter !== null && !typeFilter.has(type) && !coEmits(type, typeFilter)) continue;
 
     // P5-incremental-refresh: reuse the cached result when the file's mtime+size
     // are unchanged. Bundle entries (directories — LWC/Aura) are NOT cached:

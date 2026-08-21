@@ -648,6 +648,10 @@ import {
   searchFlowMetadataInputSchema,
 } from './search-flow-metadata.js';
 import {
+  securitySettingsHandler,
+  securitySettingsInputSchema,
+} from './security-settings.js';
+import {
   churnHandler,
   churnInputSchema,
   trendHandler,
@@ -1177,6 +1181,8 @@ export const dispatchTool = async (
       return runTool(ctx, args, userAbilityInputSchema, userAbilityHandler);
     case 'sfi.profile_security':
       return runTool(ctx, args, profileSecurityInputSchema, profileSecurityHandler);
+    case 'sfi.security_settings':
+      return runTool(ctx, args, securitySettingsInputSchema, securitySettingsHandler);
     case 'sfi.lightning_pages':
       return runTool(ctx, args, lightningPagesInputSchema, lightningPagesHandler);
     case 'sfi.list_view_sharing':

@@ -277,20 +277,36 @@ export type ComponentType =
   // EDGE_TYPES tuple + EdgeTypesComplete guard are UNTOUCHED.
   | 'PlatformEventChannel' //       The publish/stream container (`.platformEventChannel-meta.xml`). Carries `channelType` (`event` | `data`) and `label`. Id `PlatformEventChannel:{Name}__chn`. Node-only; the member file owns the channel→member `parentOf` and member→event `references` edges.
   | 'PlatformEventChannelMember' // One entity bound onto a PlatformEventChannel (`.platformEventChannelMember-meta.xml`). Carries `eventChannel`, `selectedEntity`, and the optional declared `filterExpression`. Id `PlatformEventChannelMember:{Name}__chn`; `parentId` = its `PlatformEventChannel`. Emits `parentOf` (channel→member) + `references` (member→`CustomObject:{selectedEntity}`, carrying `filterExpression`). NO new EdgeType.
-  // Session / MFA security tier. A SessionSettings node models the org-wide
-  // session-security policy (`.sessionSettings-meta.xml`) — required-MFA,
-  // strong-auth-for-UI-logins, and session-timeout. Exactly ONE per org
-  // (org-level metadata), so the id is the fixed `SessionSettings:default`; no
-  // parent scope and no edges of its own. It pairs with the already-extracted
-  // (but previously unsurfaced) Profile `loginIpRanges` to answer login &
-  // session security questions via `sfi.profile_security`. REFRESH-GATED:
-  // `SessionSettings` is added to the retrieve manifest + extractor tier, so a
-  // vault built before this type shipped will not carry the node until a
-  // re-refresh pulls it. Per-weekday `loginHours` windows are a separate,
-  // already-shipped Profile-only concern (read straight off the Profile's own
-  // `<loginHours>` element into `properties.loginHours`) — NOT gated by this
-  // tier.
-  | 'SessionSettings' //            Org-wide session-security policy (`.sessionSettings-meta.xml`). Carries `mfaRequired`, `requiresStrongAuth`, and `sessionTimeoutMinutes`. Id `SessionSettings:default` (single org-level node; no parent scope, no edges of its own). Refresh-gated: needs a re-refresh with the new retrieve set to populate.
+  // Org security-settings tier. ONE source file — `settings/Security.settings-meta.xml`,
+  // root `<SecuritySettings>` — produces TWO org-level singleton nodes:
+  // `SessionSettings:default` (its nested `<sessionSettings>` block) and
+  // `SecuritySettings:default` (everything else). Exactly one of each per org,
+  // so both ids are fixed; no parent scope and no edges of their own.
+  //
+  // HISTORY (0.3.1): before this, BOTH the file discriminant
+  // (`Session.settings-meta.xml` — a filename Salesforce never emits) and the
+  // extractor's expected root (`<SessionSettings>` — the real root is
+  // `<SecuritySettings>`) were wrong, so the node never populated on ANY org
+  // while the coverage row still read `retrieveConfirmed: true, retrieved: 0`
+  // — a confirmed-empty claim that is IMPOSSIBLE for an org-level singleton.
+  // The two MFA concept rules that bind `mfaRequired` / `requiresStrongAuth`
+  // were NOT the bug and are deliberately left alone: neither element name
+  // appears in a real `SecuritySettings` payload, so those properties stay
+  // `null` ("not declared") rather than being fabricated into `false`.
+  //
+  // These pair with the already-extracted Profile `loginIpRanges` to answer
+  // login & session security questions via `sfi.security_settings` (org-wide)
+  // and `sfi.profile_security` (per profile). Per-weekday `loginHours` windows
+  // are a separate, already-shipped Profile-only concern (read straight off the
+  // Profile's own `<loginHours>` element into `properties.loginHours`).
+  | 'SessionSettings' //            Org-wide session-security policy, read from the NESTED `<sessionSettings>` block of `settings/Security.settings-meta.xml` (root `<SecuritySettings>`). Salesforce emits NO `Session.settings-meta.xml` — the pre-0.3.1 filename discriminant and the pre-0.3.1 `<SessionSettings>` root expectation were both wrong, so this node never populated. Carries every leaf key of that block VERBATIM in `sessionSettings` (strings, never coerced — Salesforce settings enums are discrete strings), plus `declaredKeys`/`declaredKeyCount`; `sessionTimeout` (the RAW enum, e.g. `FourHours`); `sessionTimeoutMinutes` + `sessionTimeoutMinutesDerivedFrom` (OUR enum→minutes mapping, not a value Salesforce emits — `null` for an enum this build does not know); and `mfaRequired` / `requiresStrongAuth`, which stay `null` on any org whose file does not declare `MFARequired` / `enableRequiredStrongAuthForUILogins` (an honest "not declared", NOT "disabled"). Id `SessionSettings:default` (single org-level node; no parent scope, no edges of its own). Co-emitted by the `SecuritySettings` extractor — one source file, two singleton nodes.
+  // The rest of `Security.settings-meta.xml`: password policy, trusted-IP
+  // network access, SSO settings, and the org-level security toggles. Kept as
+  // its OWN ComponentType rather than overloaded onto the session node — they
+  // are separate Setup surfaces with separate audit questions, and a password
+  // policy is not a session policy. Both nodes come from the one file, so
+  // neither is refresh-gated relative to the other.
+  | 'SecuritySettings' //           Org-wide security settings OTHER than the session block (`settings/Security.settings-meta.xml`, root `<SecuritySettings>`). Carries `passwordPolicies` (verbatim string map — `complexity`, `expiration`, `lockoutInterval`, `maxLoginAttempts`, `minimumPasswordLength`, `historyRestriction`, `minimumPasswordLifetime`, `obscureSecretAnswer`, `questionRestriction`; `null` when the block is absent), `networkAccessIpRanges` (`{start, end, description}` trusted-IP windows) + `networkAccessIpRangeCount`, `singleSignOnSettings` (verbatim string map or `null`), `orgToggles` (every TOP-LEVEL scalar leaf verbatim — `enableRequireHttpsConnection`, `enableAdminLoginAsAnyUser`, `canUsersGrantLoginAccess`, `redirectBlockModeEnabled`, …), `topLevelBlocks` (every top-level element name present, sorted), and `sessionSettingsPresent`. Id `SecuritySettings:default` (single org-level node; no parent scope, no edges of its own). NOTE: the four `enableClickjack*` toggles are NESTED inside `<sessionSettings>` in the real Metadata API payload, so they live on the `SessionSettings` node, not here.
   // R6-08 — standard-picklist tier. Standard picklists (Industry, LeadSource,
   // OpportunityStage, …) were previously entirely unmodeled: zero
   // ComponentType, zero extraction. A StandardValueSet is Salesforce's org-wide

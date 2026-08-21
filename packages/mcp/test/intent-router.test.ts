@@ -3356,3 +3356,46 @@ describe('ENGINE-ARC §2c — zombie-accounts arm (NEW)', () => {
       .toBe('permset-user-roster');
   });
 });
+
+describe('org security rules must not hijack PROFILE-scoped questions', () => {
+  // The two org-security rules sit AHEAD of `profile-security`, and their
+  // vocabulary was assumed org-EXCLUSIVE ("no profile reading competes").
+  // It is not: `profile-security`'s co-anchored pattern only matches
+  // `password polic\w*`, so a profile-named question about the minimum
+  // password length, the expiration, or a trusted-IP list was claimed by the
+  // ORG rule and answered with the org-wide value — no appliedScope, no
+  // refusal, and no negative case anywhere in this 590-case suite to catch it.
+  //
+  // A new router rule needs a NEGATIVE test, not only a positive one. These
+  // are that test.
+  const profileScoped = [
+    'what is the trusted IP range list for the Sales Manager profile?',
+    'show me the trusted IP ranges on the Integration User profile',
+    'which profiles have trusted IP ranges configured?',
+    'trusted ip ranges for each profile',
+    'what is the minimum password length for the Support profile?',
+    'what password expiration is set on the Admin profile?',
+    'what is the lockout interval on the Read Only profile?',
+    'maximum login attempts for the Standard User profile',
+  ];
+  for (const question of profileScoped) {
+    it(`does not route to an org-security tool: "${question}"`, () => {
+      const route = classifyQuestion(question);
+      expect(route.intent.startsWith('org-')).toBe(false);
+      expect(route.tools).not.toContain('sfi.security_settings');
+    });
+  }
+
+  // The guard must not cost the org readings it exists to serve.
+  const orgScoped: readonly (readonly [string, string])[] = [
+    ['what are the org trusted IP ranges?', 'org-trusted-ip-security'],
+    ['what is our org password policy?', 'org-security-settings'],
+    ['is clickjack protection enabled?', 'org-security-settings'],
+    ['what is the org-wide session timeout?', 'org-security-settings'],
+  ];
+  for (const [question, intent] of orgScoped) {
+    it(`still routes org-scoped: "${question}"`, () => {
+      expect(classifyQuestion(question).intent).toBe(intent);
+    });
+  }
+});

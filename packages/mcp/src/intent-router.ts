@@ -3069,6 +3069,26 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // ORG-WIDE trusted IP ranges (`<networkAccess><ipRanges>`), placed BEFORE
+    // `profile-security` because that rule's broad `\bip ranges?\b` pattern
+    // otherwise claims the org-level reading too. The vocabulary here is
+    // org-EXCLUSIVE: "Trusted IP Ranges" is the org network-access list, while a
+    // profile's control is labelled "Login IP Ranges" — so this steals nothing
+    // from the profile phrasings ("IP relaxation", "login IP", "profiles ...").
+    intent: 'org-trusted-ip-security',
+    plane: 'vault',
+    tools: ['sfi.security_settings'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Org-wide trusted IP ranges are declared in settings/Security.settings-meta.xml <networkAccess>, not on any profile — security_settings reads them (per-profile login IP ranges remain profile_security).',
+    patterns: [
+      /^(?!.*\bprofiles?\b).*\btrusted\s+ip\s+(?:ranges?|addresses?|list)\b/,
+      /\bip\s+(?:ranges?|addresses?)\b[^.?!]{0,30}\bfor\s+the\s+(?:whole\s+|entire\s+)?org(?:ani[sz]ation)?\b/,
+      /\borgs?[-\s]?wide\s+ip\s+(?:ranges?|addresses?|restrictions?)\b/,
+    ],
+  },
+  {
     // Profile login/session security — IP ranges ("IP relaxation"), login
     // hours, session settings (sfi.profile_security). Eval family C: the
     // "integration users" qualifier in "do any profiles have IP relaxation
@@ -3097,6 +3117,38 @@ const RULES: readonly Rule[] = [
       // knowledge question on guidance.
       /\bprofiles?\b[^.?!]{0,60}\b(?:mfa|multi[-\s]?factor|password\s+polic\w*|session\s+(?:security|timeout|settings?))\b/,
       /\b(?:mfa|multi[-\s]?factor|password\s+polic\w*|session\s+(?:security|timeout|settings?))\b[^.?!]{0,60}\bprofiles?\b/,
+    ],
+  },
+  {
+    // ORG-WIDE security settings (sfi.security_settings). Deliberately placed
+    // AFTER `profile-security`: any question that names a PROFILE is claimed
+    // there first (first match in array order wins), so this rule only sees the
+    // org-level reading. Before 0.3.1 there was no tool to route to — the file
+    // was on disk and unparsed — and "what is my org password policy and
+    // session timeout?" fell through to `unrouted`.
+    intent: 'org-security-settings',
+    plane: 'vault',
+    tools: ['sfi.security_settings'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Org-wide password policy, session timeout, trusted IP ranges, clickjack/CSRF and the org security toggles are declared metadata in settings/Security.settings-meta.xml — security_settings reads both org-level singletons and enumerates what it cannot see.',
+    patterns: [
+      // Org-anchored, either word order.
+      /\b(?:org|orgs?[-\s]?wide|company|organi[sz]ations?)\b[^.?!]{0,40}\b(?:security\s+settings?|password\s+polic\w*|session\s+(?:timeout|settings?))\b/,
+      /\b(?:security\s+settings?|password\s+polic\w*|session\s+(?:timeout|settings?))\b[^.?!]{0,40}\b(?:org|orgs?[-\s]?wide|company|organi[sz]ations?)\b/,
+      // Vocabulary that only exists at org level — no profile reading competes.
+      /^(?!.*\bprofiles?\b).*\btrusted\s+ip\s+(?:ranges?|addresses?|list)\b/,
+      /\bclickjack\w*/,
+      /\bredirect\s+block\w*/,
+      /\b(?:require|requires|requiring)\s+https\b/,
+      /\blog\s*in\s+as\s+any\s+user\b/,
+      /^(?!.*\bprofiles?\b).*\bmin(?:imum)?\s+password\s+length\b/,
+      /^(?!.*\bprofiles?\b).*\bpassword\s+(?:expir\w+|complexity|history)\b/,
+      /^(?!.*\bprofiles?\b).*\bmax(?:imum)?\s+(?:failed\s+)?login\s+attempts?\b/,
+      /^(?!.*\bprofiles?\b).*\blockout\s+interval\b/,
+      /\bsessions?\s+times?\s+out\b/,
+      /\bsecurity_settings\b/,
     ],
   },
   {

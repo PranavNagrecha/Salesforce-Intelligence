@@ -81,6 +81,11 @@ watch" callouts.
 
 The access + exposure sweep:
 
+0. `sfi.security_settings` — the ORG-WIDE baseline the rest of the sweep sits on:
+   password policy, session timeout (raw enum + our derived minutes), trusted IP
+   ranges, clickjack/CSRF, HTTPS, admin-login-as. Read its `notCovered[]` BEFORE
+   writing any "we are covered" line — it enumerates what the vault cannot see
+   (login history and per-user MFA enforcement are record data, not metadata).
 1. `sfi.permission_risk_report` — over-permissioned profiles/permsets, god-mode.
 2. `sfi.crud_fls_audit` — object + field-level security gaps.
 3. `sfi.unassigned_permission_sets` + `sfi.empty_queues_and_groups` — dead access cruft.
