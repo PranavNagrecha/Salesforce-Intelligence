@@ -703,6 +703,10 @@ import {
   testsForChangeInputSchema,
 } from './tests-for-change.js';
 import {
+  traceDebugLogHandler,
+  traceDebugLogInputSchema,
+} from './trace-debug-log.js';
+import {
   unassignedPermissionSetsHandler,
   unassignedPermissionSetsInputSchema,
 } from './unassigned-permission-sets.js';
@@ -1554,6 +1558,8 @@ export const dispatchTool = async (
         explainDebugLogInputSchema,
         explainDebugLogHandler,
       );
+    case 'sfi.trace_debug_log':
+      return runTool(ctx, args, traceDebugLogInputSchema, traceDebugLogHandler);
     case 'sfi.history_tracking_gaps':
       return runTool(
         ctx,

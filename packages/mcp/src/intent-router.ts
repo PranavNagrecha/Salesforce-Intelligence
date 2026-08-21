@@ -2219,7 +2219,11 @@ const RULES: readonly Rule[] = [
     reason:
       'Whether an automation actually RAN (and when) is runtime execution state — live_automation_fired reads it; the vault only holds the automation definitions.',
     patterns: [
-      /\b(flow|trigger|automation|process|it)\b[^.?!]{0,60}\bfired\b[^.?!]{0,50}\b(yesterday|today|last\s+\w+|this\s+\w+|recently)\b/,
+      // TIME WORDS, not `this\s+\w+`. The open form was meant for "this
+      // morning" and also matched "in THIS DEBUG log", so a pasted-log
+      // question — answerable offline by trace_debug_log — was claimed by this
+      // LIVE rule and then failed closed for want of consent.
+      /\b(flow|trigger|automation|process|it)\b[^.?!]{0,60}\bfired\b[^.?!]{0,50}\b(yesterday|today|recently|last\s+(?:night|week|month|year|hour|time|run|\d+\s*\w+)|this\s+(?:morning|afternoon|evening|week|month|year|hour|time|run))\b/,
       /\bfired\b[^.?!]{0,30}\b(yesterday|today|last\s+night|recently)\b/,
       /\bdid\b[^.?!]{0,60}\b(flow|trigger|automation)\b[^.?!]{0,50}\b(fire|run|execute|actually\s+fire)\b/,
       /\b(flow|trigger|automation)\b[^.?!]{0,40}\b(actually\s+(ran|fired|executed))\b/,
@@ -4375,6 +4379,47 @@ const RULES: readonly Rule[] = [
   },
 
   // === Apex / code (vault) ==================================================
+  {
+    // LANE F: READ a pasted debug log as an event stream — timeline, time
+    // attribution, automation firing order, consumption by phase
+    // (trace_debug_log). Placed BEFORE explain-debug-log because a bare paste
+    // (structure markers alone) still belongs there: this rule fires ONLY when
+    // a log anchor is COMBINED with a projection ask (timeline / where the time
+    // went / what order / how much of each limit), so an unqualified
+    // "explain this debug log" is unchanged. The limit-block tokens
+    // (CUMULATIVE_LIMIT_USAGE / LIMIT_USAGE_FOR_NS) are exclusive to this tool:
+    // they ARE the per-limit consumption table.
+    intent: 'trace-debug-log',
+    plane: 'vault',
+    tools: ['sfi.trace_debug_log'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Reading a pasted Apex debug log as an ORDERED EVENT STREAM — execution timeline, time attribution with database and callout wait subtracted, which automation fired in what order, per-phase consumption, and the CUMULATIVE_LIMIT_USAGE actual/allowed table (trace_debug_log). Fully offline. Needs the raw logText — supply the pasted log verbatim. For "which component is this log about", use explain_debug_log instead.',
+    patterns: [
+      // A log anchor followed by a projection ask.
+      /\b(?:debug|apex)\s+logs?\b[^.?!]{0,90}\b(?:timeline|cpu time|time went|time go|how long|took the longest|firing order|in what order|what order|fired first|profile|profiling|consum\w+|limit usage|step by step|breakdown|break(?:\s|-)?down)\b/i,
+      // The projection ask followed by a log anchor.
+      /\b(?:timeline|cpu time|time went|time go|how long|what order|firing order|profile|profiling|consumption|breakdown)\b[^.?!]{0,90}\b(?:debug|apex)\s+logs?\b/i,
+      // Explicit trace/parse/profile verbs on a DEBUG log. `debug|apex` is now
+      // REQUIRED: with it optional this read as "<verb> … logs" and claimed
+      // eleven questions about other log families — "analyze the setup audit
+      // trail logs" (which belongs to runtime-audit-trail), "summarize the
+      // login logs", "break down the logs by user", "analyze my org logs".
+      // None of those is an Apex debug log and none is answerable here.
+      /\b(?:trace|parse|profile|analy[sz]e|summari[sz]e|break\s+down)\b[^.?!]{0,30}\b(?:this|the|my)?\s*(?:apex\s+debug|debug|apex)\s+logs?\b/i,
+      // The limit-consumption block is this tool's table, by name. These two
+      // tokens only ever appear in a pasted log, so they need no projection ask.
+      /\bcumulative_limit_usage\b|\blimit_usage_for_ns\b/i,
+      // Flow-element / code-unit markers. A BARE paste of these belongs to
+      // explain-debug-log (identify the component), so they claim the question
+      // only when a projection ask is present too — otherwise this rule, which
+      // sits above explain-debug-log, silently took that tool's own funnel
+      // utterance ("interpret this CODE_UNIT_STARTED / LIMIT_USAGE debug log").
+      /(?=[^.?!]*\b(?:timeline|time went|time go|cpu|how long|what order|firing order|fired first|slowest|profile|profiling|consum\w+|step by step|breakdown)\b)[^.?!]*\b(?:flow_element_(?:begin|end)|code_unit_(?:started|finished))\b/i,
+      /\btrace_debug_log\b/,
+    ],
+  },
   {
     // Finding #40: decode a PASTED Apex DEBUG LOG / runtime governor-limit
     // exception back to the class/trigger/flow that ran (explain_debug_log).

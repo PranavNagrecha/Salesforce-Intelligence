@@ -275,9 +275,9 @@ field.
 
 ## Tool profile (advertised roster)
 
-Under the default profile, 19 advertised tool schemas (214 registered; 5
+Under the default profile, 19 advertised tool schemas (215 registered; 5
 back-compat aliases stay hidden) form the core spine — including
-`sfi.live_consent`. The full non-hidden roster is 209 schemas and costs tens
+`sfi.live_consent`. The full non-hidden roster is 210 schemas and costs tens
 of thousands of context tokens in MCP clients that do not defer tool
 definitions. **Default is `core`** (AUDIT-F6): only that 19-schema spine is
 advertised and directly invokable. Everything else stays reachable via

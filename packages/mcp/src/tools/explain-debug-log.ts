@@ -40,6 +40,10 @@
  *      maps to the fired limit (`soql-in-loop` for a SOQL limit, `dml-in-loop`
  *      for a DML limit) ranked first. This is a HEURISTIC correlation — the
  *      static scan is where the limit MOST LIKELY came from, not a runtime proof.
+ *      The cross-reference is SCOPED per resolved class (`componentId`), not a
+ *      bare org-wide call: the org-wide audit is PAGED at 100 classes, so
+ *      reading page 1 and then asserting "the Apex named in the log has no
+ *      static loop finding" was a confidently wrong affirmative for class #101+.
  *   3. FLOW FAULT — a fault shape embedded in the log ("Flow API Name: Y") is
  *      resolved to a real `Flow:` node (`declared`), mirroring `explain_error`.
  *   4. STATUS CODE — a recognized REST/API status code is explained at the
@@ -49,6 +53,11 @@
  * concrete `nextSteps` (e.g. `sfi.governor_limit_risks`, `sfi.call_graph`) — a
  * source is NEVER fabricated. Several confident sources → `ambiguous` with
  * ranked candidates, mirroring `sfi.resolve`'s disposition contract.
+ *
+ * SIBLING: `sfi.trace_debug_log` reads the SAME pasted text as an ORDERED EVENT
+ * STREAM (timeline, time attribution, automation firing order, per-phase
+ * consumption, the CUMULATIVE_LIMIT_USAGE table). This tool answers "WHICH
+ * COMPONENT"; that one answers "WHAT HAPPENED, in what order, at what cost".
  *
  * Honesty axis: resolving a NAME to a node is `declared`; correlating a runtime
  * limit to a static loop-risk finding is `heuristic` (the limit can come from a
@@ -409,6 +418,17 @@ export const collectApexIdentifiers = (
   )) {
     add('ApexClass', m[1]);
   }
+  // METHOD_ENTRY / METHOD_EXIT event units (`METHOD_ENTRY|[1]|<id>|Foo.bar(…)`).
+  // Without these, a class that appears ONLY as a called method — the common
+  // case for a helper the stack trace never reaches — was invisible, so a log
+  // naming a class absent from the vault returned `unresolvedApex: []`, i.e. a
+  // false "everything in this log resolved". The leftmost segment is taken
+  // because `Outer.Inner.method()` is one ApexClass component, not two.
+  for (const m of logText.matchAll(
+    /\bMETHOD_(?:ENTRY|EXIT)\b[^\r\n]*?\|([A-Za-z][A-Za-z0-9_]*)(?:\.[A-Za-z][A-Za-z0-9_]*)+\s*\(/gi,
+  )) {
+    add('ApexClass', m[1]);
+  }
   return out;
 };
 
@@ -556,6 +576,11 @@ export const explainDebugLogHandler = async (
       note =
         'No Apex class from the log resolved to a vault node, so the fired limit could not be pinned to a specific static finding — run sfi.governor_limit_risks for the org-wide loop-risk scan, or paste the full stack trace so the running class is named.';
     } else {
+      // MERGE NOTE: both branches independently fixed the page-1 clean
+      // verdict. This side is kept because it has NO silent cap and it
+      // records a scan that could not run as UNKNOWN; the other capped at 25
+      // resolved classes and skipped errors, which reintroduces the same
+      // 'affirmative produced by not looking' at a lower threshold.
       // EXPLAIN-DEBUG-LOG-CLEAN-VERDICT-FROM-PAGE-ONE: this used to call
       // `governorLimitRisksHandler(ctx, {})` — the ORG-WIDE mode, whose `classes`
       // array is a PAGE (default limit 100) and whose `truncated` / `nextOffset`
@@ -731,6 +756,11 @@ export const explainDebugLogHandler = async (
     nextSteps.push(
       'Confirm the candidate id, then use sfi.explain_apex_method / sfi.explain_flow / sfi.get_component to see the logic behind it.',
     );
+    if (isDebugLog(logText)) {
+      nextSteps.push(
+        'sfi.trace_debug_log reads this SAME log as an event stream: execution timeline, where the time went (database and callout wait subtracted), which automation fired in what order, per-phase consumption, and the CUMULATIVE_LIMIT_USAGE actual/allowed table.',
+      );
+    }
     if (detectedLimit !== null) {
       nextSteps.push(
         'sfi.governor_limit_risks shows the full static loop-risk finding (rule + location) for the correlated class; sfi.call_graph traces who calls it.',

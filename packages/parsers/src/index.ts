@@ -6,9 +6,41 @@
  * adds a heuristic Apex source scanner (regex / brace-balanced; a
  * PMD AST layer follows in v0.4). v1.4 adds the LWC/Aura/VF
  * heuristic frontend scanner family — sibling of the Apex scanner,
- * not a replacement.
+ * not a replacement. v0.3 also adds the Apex DEBUG LOG parser — an
+ * event-stream reader (not a name scraper) that turns pasted log text
+ * into ordered, depth-tracked, entry/exit-paired frames plus the
+ * per-category "was this even logged" coverage the domain hinges on.
  */
 
+export {
+  apexClassOfSignature,
+  classifyCodeUnit,
+  debugLogCoverage,
+  DEBUG_LOG_CATEGORIES,
+  descendantNanosByKind,
+  frameSelfNanos,
+  indexFrames,
+  NON_CPU_FRAME_KINDS,
+  parseApexDebugLog,
+  parseTriggerUnit,
+} from './apex-debug-log.js';
+export type {
+  CodeUnitKind,
+  DebugLogCategory,
+  DebugLogCategoryCoverage,
+  DebugLogError,
+  DebugLogEvent,
+  DebugLogFrame,
+  DebugLogFrameKind,
+  DebugLogHeader,
+  DebugLogLevel,
+  DebugLogLimitRow,
+  DebugLogParseCaveat,
+  DebugLogTruncation,
+  DebugLogUserDebug,
+  ParseApexDebugLogOptions,
+  ParsedApexDebugLog,
+} from './apex-debug-log.js';
 export { scanApexSource } from './apex-scanner.js';
 export type {
   ApexScannerError,

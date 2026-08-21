@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 214,
+    "total": 215,
     "advertised": 19,
     "hidden": 5,
     "defaultProfile": "core",
@@ -196,6 +196,7 @@
         "sfi.test_coverage_for_method",
         "sfi.test_coverage_gaps",
         "sfi.tests_for_change",
+        "sfi.trace_debug_log",
         "sfi.trend",
         "sfi.unassigned_permission_sets",
         "sfi.unused_components",
@@ -457,6 +458,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:183bc333aa134c0897b9072b3475a527fe61f09bdfbbb55f314163cd9a23d9a0",
-  "identityHash": "sha256:a08d6a62a70cb79c86feca958097d2a7a82655fb01b67e7621460091a21f17c2"
+  "catalogHash": "sha256:2051aecdbf51c79cea16bec5e81e6dc1d61913e07f294ba862f3d4feea7dce69",
+  "identityHash": "sha256:0ddadaeff81e5b73388c0dbedb7fb55baff54ad5fc139befcbc46ff2cc6c2ad2"
 }

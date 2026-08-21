@@ -1538,6 +1538,30 @@ const EXPLAIN_DEBUG_LOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object
 });
 
 /**
+ * Concrete JSON Schema for `sfi.trace_debug_log`. Mirrors
+ * `traceDebugLogInputSchema` — a required `logText` (the pasted Apex debug
+ * log) plus the three display knobs (`limit`, `maxDepth`, `includeTimeline`).
+ * The same natural aliases as `sfi.explain_debug_log` (`debugLog` / `log` /
+ * `text` / `content`) are accepted for `logText` and merged before validation
+ * (canonical wins), so a host that pasted the log under a guessed key is not
+ * hard-failed.
+ */
+const TRACE_DEBUG_LOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    logText: { type: 'string', minLength: 1 },
+    debugLog: { type: 'string', minLength: 1 },
+    log: { type: 'string', minLength: 1 },
+    text: { type: 'string', minLength: 1 },
+    content: { type: 'string', minLength: 1 },
+    limit: { type: 'number', minimum: 1, maximum: 400 },
+    maxDepth: { type: 'number', minimum: 0, maximum: 50 },
+    includeTimeline: { type: 'boolean' },
+  },
+  required: ['logText'],
+});
+
+/**
  * Concrete JSON Schema for `sfi.who_can_access_object`. Mirrors
  * `whoCanAccessObjectInputSchema` — a required `componentId`
  * (`CustomObject:X`) plus optional `limit`/`offset` for the paged
@@ -5727,6 +5751,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "Decode a PASTED Apex DEBUG LOG, flow fault text, or governor-limit exception back to the org component that ran — the developer/support runtime-triage wedge, ZERO org access. Where `sfi.explain_error` decodes a SAVE-time error banner (validation/duplicate rule) back to the rule that blocked the write, THIS tool decodes a DEVELOPER debug log and a RUNTIME governor-limit exception back to the Apex class/trigger/flow that executed. Input: `logText` (the pasted log / stack trace / `System.LimitException` line; the aliases `debugLog` / `log` / `text` / `content` are also accepted) + optional `object` SObject hint. Strategies, each candidate carrying its own `confidence` + a `why`: (1) APEX IDENTITY — every class/trigger named in the log (stack frames `Class.X.method: line N` / `Trigger.Y: line N`, debug-log `CODE_UNIT_STARTED`/`METHOD_ENTRY` event lines, `__sfdc_trigger/Y` markers) resolves to a real `ApexClass:`/`ApexTrigger:` node (`declared`); the offending LINE is not resolvable offline (disclosed); unresolved names (managed/not-retrieved) are reported, never fabricated. (2) GOVERNOR LIMIT — a runtime `System.LimitException` (`Too many SOQL queries: 101`, `Too many DML statements`, `Apex CPU time limit exceeded`, `Apex heap size too large`, or an exceeding `LIMIT_USAGE` block) is classified to a limit TYPE and cross-referenced against `sfi.governor_limit_risks`: each resolved Apex class in the log gets its OWN per-component scoped query (never a page of the org-wide list, so a class cannot be missed by sorting past a page boundary), and its static loop-risk findings are surfaced with the ones whose rule maps to the fired limit (`soql-in-loop` for a SOQL limit, `dml-in-loop` for a DML limit) ranked first — a HEURISTIC correlation, the static scan is where the limit MOST LIKELY came from, not a runtime proof. `governorRiskCrossRef.scannedComponents` names exactly which components that scan covered, and any component whose scan could not run is listed in `uncheckedComponents` as UNKNOWN rather than folded into a clean verdict. (3) FLOW FAULT — a `Flow API Name:` embedded in the log resolves to a real `Flow:` node (`declared`). (4) STATUS-CODE taxonomy — a recognized REST/API status code is explained at the CATEGORY level (reused from explain_error, never a specific match). `disposition` mirrors `sfi.resolve`: `matched` (one confident source), `ambiguous` (several ranked), or `none` — FAIL CLOSED, a source is never fabricated; on `none`, `triedStrategies` + `nextSteps` (e.g. `sfi.governor_limit_risks`, `sfi.call_graph`) guide the next move. Matching is offline string-matching against declared metadata + the static governor-risk scan, not a runtime trace — every candidate confidence + a verbatim `disclosure` say so; the candidate list is byte-budgeted (`truncated`).",
     inputSchema: EXPLAIN_DEBUG_LOG_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.trace_debug_log',
+    description:
+      "READ a pasted Apex DEBUG LOG as the EVENT STREAM it is, and answer the four questions a log is actually opened for: the execution TIMELINE, WHERE THE TIME WENT, WHICH AUTOMATION FIRED IN WHAT ORDER, and CONSUMPTION BY PHASE + the platform's own limit table. 100% OFFLINE — the pasted text is the only input; the vault is read solely to turn names into canonical component ids, so a log from an org this vault has never seen still parses. Where `sfi.explain_debug_log` answers 'WHICH COMPONENT is this log about' by resolving names to nodes, THIS answers 'WHAT HAPPENED, in what order, and what did it cost'. Input: `logText` (aliases `debugLog` / `log` / `text` / `content`) plus display knobs `limit` (timeline spans, default 60 / max 400), `maxDepth` (default 4) and `includeTimeline`. Returns: `capture` (the header's per-category log LEVELS, and `notLogged[]` for every category at NONE/undeclared); `transaction` (entry point, elapsed ms, event and frame counts); `timeline[]` (ordered, depth-tracked spans with start/duration/self ms, `incomplete` when a span never closed); `timeAttribution[]` per code unit / flow interview / workflow evaluation with `wallMs`, `soqlMs`, `dmlMs`, `calloutMs` and `cpuEstimateMs` (wall MINUS db+callout wait, so CPU is distinguished from DB wait); `hotSpots[]` ranked by EXCLUSIVE wall time (where the CPU went, method by method); `automationOrder[]` — every Apex trigger context, validation rule, workflow evaluation and flow interview in the order the log recorded them, each with the flow's element sequence in `steps[]`; `phases[]` (before-save-apex-triggers / validation-rules / after-save-apex-triggers / workflow-rules / flows) with per-phase wall, CPU estimate, SOQL and DML — nested spans are attributed to their outermost phase, never double counted; `database` (SOQL/DML/callout counts, ms, rows, and the slowest distinct queries with a `repeated` count that exposes a query running in a loop); `limits[]` — the actual/allowed/`pctUsed` table straight from CUMULATIVE_LIMIT_USAGE, per namespace; `errors[]` with the FATAL_ERROR stack; `truncation`; and `componentResolution[]`, whose `identity` separates the THREE kinds of \"no id\": `not-in-vault` (a real component type was looked up and this vault lacks it — a refresh could close it), `not-a-component` (a flow ELEMENT or a WF_RULE_EVAL header is never its own component in ANY org — nothing to resolve, ever), and `unresolvable` (identified only by a Salesforce record id). Apex triggers/classes resolve `declared`; a Flow matched by MasterLabel and a ValidationRule matched by developer name resolve `heuristic`; a shared label/name resolves `ambiguous`. THREE STRUCTURAL HONESTY RULES, not footnotes: (1) A log records ONLY the categories its DebugLevel enabled — an empty section for a category listed in `capture.notLogged` means NOT LOGGED, never 'did not happen'; `coverageCaveat` and `boundaries` say so verbatim. (2) The log's `(nanos)` column is WALL time, so `cpuEstimateMs` is HEURISTIC; the DECLARED CPU number is the `CPU time` row of `limits[]`. (3) Salesforce RECORD IDS never resolve offline — a `Flow:301...` code unit reports `identity: 'unresolvable'` on any org after any refresh (NOT a coverage gap a refresh can close), and flow identity instead comes from FLOW_START_INTERVIEW_BEGIN, which carries a MasterLabel, matched by exact label and typed `heuristic`, never `declared`. A truncated log (skipped-bytes marker or the 20 MB ceiling) makes every count a FLOOR, and a span that never closed reports a null duration rather than a guessed one. HOW logs are created — TraceFlag, DebugLevel, monitored users, retention — is NOT modeled by this product (neither TraceFlag nor DebugLevel is an extracted ComponentType); `logCreation` states that boundary and the platform rules explicitly rather than omitting half the question.",
+    inputSchema: TRACE_DEBUG_LOG_INPUT_SCHEMA,
   },
   {
     name: 'sfi.history_tracking_gaps',
