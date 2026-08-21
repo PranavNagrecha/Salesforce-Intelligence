@@ -435,12 +435,17 @@ describe('parseFlowGraph — decisions / assignments / loops / formulas / variab
     });
   });
 
-  it('projects action calls and subflows by identity only', () => {
+  it('projects action calls with their parameters, and subflows by identity', () => {
     const action = graph.actions.find((a) => a.name === 'My_Action')!;
+    // Identity ALONE is no longer the contract: two calls of the same action
+    // must be distinguishable, so the parameter arrays are part of the shape
+    // (empty here — this fixture's action declares none).
     expect(action).toEqual({
       name: 'My_Action',
       actionType: 'apex',
       actionName: 'My_Apex',
+      inputParameters: [],
+      outputParameters: [],
       connectsTo: 'My_Subflow',
       faultConnectsTo: 'My_Fault_Screen',
     });
@@ -462,8 +467,15 @@ describe('parseFlowGraph — unmodeled elements (honest gap list, spec §4.3)', 
     expect(graph.unmodeled).toContain('My_Wait');
     expect(graph.unmodeled).toContain('My_Collection_Processor');
     // They are NOT smuggled into any modeled array.
-    expect(graph.elements.some((e) => e.name === 'My_Wait')).toBe(false);
-    expect(graph.elements.some((e) => e.name === 'My_Collection_Processor')).toBe(false);
+    // The BODY is the gap, not the element: each unmodeled element keeps an
+    // identity row typed `unmodeled` + its source container, so `elements[]`
+    // indexes every connector endpoint instead of dangling at these nodes.
+    const wait = graph.elements.find((e) => e.name === 'My_Wait');
+    expect(wait?.type).toBe('unmodeled');
+    expect(wait?.container).toBe('waits');
+    const proc = graph.elements.find((e) => e.name === 'My_Collection_Processor');
+    expect(proc?.type).toBe('unmodeled');
+    expect(proc?.container).toBe('collectionProcessors');
   });
 });
 
@@ -534,7 +546,11 @@ describe('parseFlowGraph — unmodeled-element connectors (spec §4.2 completene
     ).toBeDefined();
     expect(graph.unmodeled).toContain('My_Filter');
     // Body stays unmodeled — no typed detail array, not smuggled into elements[].
-    expect(graph.elements.some((e) => e.name === 'My_Filter')).toBe(false);
+    // Identity row present, body still the honest gap (see unmodeled[]).
+    expect(graph.elements.find((e) => e.name === 'My_Filter')?.type).toBe('unmodeled');
+    expect(graph.elements.find((e) => e.name === 'My_Filter')?.container).toBe(
+      'collectionProcessors',
+    );
   });
 
   it('emits an apexPluginCall <connector>+<faultConnector> as default+fault, name still unmodeled', () => {
@@ -545,7 +561,11 @@ describe('parseFlowGraph — unmodeled-element connectors (spec §4.2 completene
       findConnector(graph.connectors, 'My_Plugin', 'My_Fault_Screen', 'fault'),
     ).toBeDefined();
     expect(graph.unmodeled).toContain('My_Plugin');
-    expect(graph.elements.some((e) => e.name === 'My_Plugin')).toBe(false);
+    // Identity row present, body still the honest gap (see unmodeled[]).
+    expect(graph.elements.find((e) => e.name === 'My_Plugin')?.type).toBe('unmodeled');
+    expect(graph.elements.find((e) => e.name === 'My_Plugin')?.container).toBe(
+      'apexPluginCalls',
+    );
   });
 
   it('emits a <waits> top-level <connector> as a default edge and keeps it unmodeled', () => {
@@ -561,7 +581,11 @@ describe('parseFlowGraph — unmodeled-element connectors (spec §4.2 completene
       findConnector(graph.connectors, 'My_Wait', 'My_End_Screen', 'default'),
     ).toBeDefined();
     expect(graph.unmodeled).toContain('My_Wait');
-    expect(graph.elements.some((e) => e.name === 'My_Wait')).toBe(false);
+    // Identity row present, body still the honest gap (see unmodeled[]).
+    expect(graph.elements.find((e) => e.name === 'My_Wait')?.type).toBe('unmodeled');
+    expect(graph.elements.find((e) => e.name === 'My_Wait')?.container).toBe(
+      'waits',
+    );
   });
 });
 
@@ -738,5 +762,58 @@ describe('parseFlowGraph — pure entry point over a pre-parsed root', () => {
     const graph = parseFlowGraph(root);
     expect(graph.assignments).toHaveLength(1);
     expect(findConnector(graph.connectors, 'My_Assignment', 'My_End', 'default')).toBeDefined();
+  });
+});
+
+describe('parseFlowGraph — unprojected[] is a MEASUREMENT, not a boilerplate caveat', () => {
+  it('classifies referencable resources, unrecognised elements, and flow metadata', () => {
+    const graph = parse(`<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>My Flow</label>
+  <processType>Flow</processType>
+  <status>Active</status>
+  <interviewLabel>My Flow {!$Flow.CurrentDateTime}</interviewLabel>
+  <constants><name>My_Const_A</name></constants>
+  <constants><name>My_Const_B</name></constants>
+  <choices><name>My_Choice</name></choices>
+  <someFutureElementType><name>My_Future_Element</name></someFutureElementType>
+  <decisions>
+    <name>My_Decision</name>
+    <rules>
+      <name>My_Rule</name>
+      <connector><targetReference>My_Decision</targetReference></connector>
+    </rules>
+  </decisions>
+</Flow>`);
+    const byContainer = new Map(graph.unprojected.map((u) => [u.container, u]));
+    // Multiplicity is real, not a 0/1 flag.
+    expect(byContainer.get('constants')).toEqual({
+      container: 'constants',
+      count: 2,
+      kind: 'resource',
+    });
+    expect(byContainer.get('choices')?.kind).toBe('resource');
+    expect(byContainer.get('interviewLabel')?.kind).toBe('metadata');
+    // A container nobody has taught this parser about is the LOUDEST bucket —
+    // it means a real canvas element type is invisible — and it is found by
+    // "present minus accounted-for", never by an allowlist of known drops.
+    expect(byContainer.get('someFutureElementType')?.kind).toBe('element');
+    // A container the projection DOES carry never appears here.
+    expect(byContainer.has('decisions')).toBe(false);
+    expect(byContainer.has('label')).toBe(false);
+    // Element rows sort first so the reader hits the comprehension gap before
+    // the trivia.
+    expect(graph.unprojected[0]?.kind).toBe('element');
+  });
+
+  it('reports an empty unprojected[] for a flow that declares nothing extra', () => {
+    const graph = parse(`<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>My Flow</label>
+  <processType>Flow</processType>
+  <status>Active</status>
+  <decisions><name>My_Decision</name></decisions>
+</Flow>`);
+    expect(graph.unprojected).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-20T23:56:15.360Z",
+  "generatedAt": "2026-08-21T18:26:52.240Z",
   "toolCount": 211,
   "sections": [
     {
@@ -827,7 +827,7 @@
         },
         {
           "name": "sfi.flow_graph",
-          "description": "The FAITHFUL, LOSSLESS structural graph of a Flow - every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decis..."
+          "description": "The FAITHFUL structural graph of a Flow, and - with `walkthrough: true` - the ORDERED, element-by-element walk of what runs when it runs."
         },
         {
           "name": "sfi.nonselective_soql",

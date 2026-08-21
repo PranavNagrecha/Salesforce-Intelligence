@@ -1500,6 +1500,26 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'give me the raw structural graph of <FlowName> so I can see the wiring',
     'what are the fault-path connectors in <FlowName>',
     'diagram the flow of control through <FlowName>',
+    // W2B: the owner's literal ask — an ORDERED element-by-element walk, plus
+    // the two datum families the projection now carries (screen fields, action
+    // input parameters). Before these rows the walkthrough phrasing ranked
+    // flow_graph 4th behind action_chain / order_of_execution, and the screen
+    // and email phrasings did not reach the top 8 at all.
+    'explain what each element of <FlowName> does, step by step, in the order it runs',
+    'what happens when <FlowName> runs — walk me through every element in order',
+    'walk me through <FlowName> element by element and tell me what each one does',
+    'what does each step of <FlowName> actually do',
+    'give me an ordered walkthrough of <FlowName> from the start element to the end',
+    'what are the different elements of <FlowName> and what is each one doing',
+    'in what order do the elements of <FlowName> run',
+    'what fields does the <FlowName> screen show the user',
+    'what does the screen in <FlowName> ask for — the input fields and display text',
+    'which lightning component does <FlowName> render on its screen',
+    'who does <FlowName> email, with what subject and from which sender',
+    'what parameters does <FlowName> pass to its email action',
+    'what inputs does the quick action in <FlowName> get',
+    'did the flow author leave notes on the elements of <FlowName>',
+    'what did the builder of <FlowName> say each element is for',
   ],
   'sfi.flow_bulkification_audit': [
     'which of my flows are not bulkified?',

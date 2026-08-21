@@ -1,7 +1,8 @@
 /**
  * Handler for the `sfi.flow_trace` MCP tool (spec §5).
  *
- * Where `sfi.flow_graph` returns the FAITHFUL, LOSSLESS *structure* of a Flow,
+ * Where `sfi.flow_graph` returns the declared *structure* of a Flow (faithful to
+ * what it projects, and MEASURING what it does not — see its `unprojected[]`),
  * `flow_trace` answers the question a human debugs by hand: given a starting
  * record's field values, WHICH PATH executes and WHAT does it write. It is an
  * HONEST PROJECTION over the Flow's DECLARED logic — NOT a Salesforce runtime.
