@@ -531,6 +531,23 @@ The list people most often assume wrongly:
   before any matching.
 - **`confidence: 'high'` is not a score.** It describes how the route was
   derived (§6).
+- **The refusal gates can refuse a question the product has a tool for.** They run on
+  the raw string BEFORE any matching, so they cannot know a tool exists. Reproduced:
+  `read this debug log and tell me which class ran` — the funnel ranks
+  `sfi.explain_debug_log` at **0.433**, far above the 0.26 floor, while
+  `detectRefusalShape` classifies the same string `runtime-analytics` and the route
+  returns `tools: []`, with the tool it just refused listed under "Nearest reads".
+- **12 of the product's own 2,006 funnel utterances are gated by its own refusal
+  detectors** (10 `write-imperative`, 1 `out-of-scope`, 1 `runtime-analytics`). These are
+  the phrasings the corpus teaches the funnel to expect, so a user who asks exactly the
+  way the product advertises is refused. Among them:
+  `sfi.explain_debug_log` — "read this debug log and tell me which class ran";
+  `sfi.what_if_merge_profiles` — "merge <A> into <B> — what are the collisions?" (a
+  SIMULATION question, which is the read-only alternative the write gate exists to
+  offer); `sfi.automation_collisions` — "is anything overwriting the field my flow just
+  set?"; `sfi.export_manifest` — "create a package.xml with all custom components".
+  Reproduce with `detectRefusalShape` over `FUNNEL_UTTERANCES`. **A new tool's utterances
+  should be run through the refusal gates as part of adding them.**
 - **It cannot rescue a tool that answers wrongly.** Perfect routing to a tool
   that reports "clean" because it never scanned anything still produces a wrong
   answer. Routing quality and answer quality are independent axes, and only one
