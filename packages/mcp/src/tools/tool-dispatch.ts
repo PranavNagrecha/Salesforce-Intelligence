@@ -2508,9 +2508,15 @@ export const jsonResult = (
   return oversizeResult(baseBytes);
 };
 
-/** Input-schema keys that narrow a query — surfaced in oversize guidance. */
+/**
+ * Input-schema keys that narrow a query — surfaced in oversize guidance.
+ *
+ * `include` / `element` are here because a section-selecting tool
+ * (`sfi.flow_graph`) previously fell through to the generic "filter,
+ * pagination, fewer hops" advice, which names no knob it actually has.
+ */
 const NARROWING_KNOB_RE =
-  /^(limit|offset|cursor|hops|maxDepth|maxBodyBytes|maxRowsPerSection|grepLimit|format|verbosity|scope|type|types|category|classification|direction)$|filter/i;
+  /^(limit|offset|cursor|hops|maxDepth|maxBodyBytes|maxRowsPerSection|grepLimit|format|verbosity|scope|type|types|category|classification|direction|include|element)$|filter/i;
 
 /** Extract narrowing knob names from a tool's Zod input schema (object schemas only). */
 const narrowingKnobs = (schema: z.ZodTypeAny): readonly string[] => {

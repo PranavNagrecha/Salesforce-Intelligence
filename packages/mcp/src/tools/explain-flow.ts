@@ -60,9 +60,11 @@
  * six narrative axes (identity, trigger info, action/subflow calls,
  * record lookups/writes, decisions) — it does NOT enumerate every
  * element or the element-to-element connector graph. `sfi.flow_graph`
- * is the lossless structural projection (every element by its real
- * name, the full connector graph from→to→kind, loop next-value/no-
- * more-values edges, formula expressions, variable declarations). The
+ * is the faithful structural projection (every element by its real
+ * name and the author's own <description>, the full connector graph
+ * from→to→kind, screen fields, action parameters, loop next-value/
+ * no-more-values edges, formula expressions, variable declarations) —
+ * and with `walkthrough: true`, the ORDERED element-by-element walk. The
  * `seeAlso` field on the output makes this explicit so a caller asking
  * "what's the full structure" / "what are the branches" / "show me the
  * connectors" is routed to `flow_graph` instead of over-trusting this
@@ -135,7 +137,7 @@ const DISCLOSURE = 'Structured narrative; Claude composes prose';
  * not a silent drift between what the tool claims and what it returns.
  */
 const SEE_ALSO_FLOW_GRAPH =
-  'This is a SUMMARY narrative (trigger info, action/subflow calls, record lookups/writes, decisions) — it does NOT enumerate every element or the element-to-element connector graph. For the full structure (every element by real name, the complete from→to→kind connector graph, decision rule branches, loops, formulas, and variables), call sfi.flow_graph(flowRef) instead.';
+  'This is a SUMMARY narrative (trigger info, action/subflow calls, record lookups/writes, decisions) — it does NOT enumerate every element or the element-to-element connector graph. For the full structure (every element by real name, the complete from→to→kind connector graph, decision rule branches, loops, formulas, and variables), call sfi.flow_graph(flowRef) instead. For "what does each element DO, step by step, in the order it runs", call sfi.flow_graph(flowRef, walkthrough: true) — it returns the ordered element-by-element walk with each element\'s own author description, screen fields, and action parameters, none of which this summary carries.';
 
 /**
  * Zod schema for the `sfi.explain_flow` tool input.
@@ -444,7 +446,8 @@ export interface ExplainFlowOutput {
    * Cross-reference to `sfi.flow_graph` (spec §9 Q2). Always present, verbatim
    * — see {@link SEE_ALSO_FLOW_GRAPH}. States plainly that this narrative is a
    * SUMMARY over six axes, not the complete element/connector graph, and names
-   * the tool that returns the lossless structural projection.
+   * the tool that returns the faithful structural projection (and its ordered
+   * `walkthrough: true` mode).
    */
   readonly seeAlso: string;
   /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */

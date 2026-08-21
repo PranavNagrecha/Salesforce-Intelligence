@@ -7,26 +7,34 @@
  * (`hasImmediateConnector`, `scheduledPathTypes`). It has never modeled the
  * element-to-element `<connector><targetReference>` graph — the thing that
  * says "what runs next". THIS module fills that gap: it walks the parsed
- * `<Flow>` root and produces a faithful, LOSSLESS structural projection —
- * every canvas element with its REAL `<name>`, the full connector graph
- * (`from → to → kind`), decision rules, assignment items, record-op filters,
- * loops, formulas, variables, subflows, actions, and the `<start>` element
- * including scheduled paths.
+ * `<Flow>` root and produces a faithful structural projection — every canvas
+ * element with its REAL `<name>`, its `<label>`, and the flow author's own
+ * `<description>`, the full connector graph (`from → to → kind`), decision
+ * rules, assignment items, record-op filters, screen fields, action input /
+ * output parameters, loops, formulas, variables, subflows, and the `<start>`
+ * element including scheduled paths.
  *
  * Design contract (spec §4.3 — the honesty spine):
  *   - **Real names always.** Element `name` is the metadata `<name>`, never a
  *     synthetic `condition-N`.
- *   - **Lossless.** If a datum is in the XML it is in the output — expressions,
- *     `conditionLogic`, filter triplets, and offsets are carried verbatim.
+ *   - **Faithful, NOT lossless.** What IS projected is carried verbatim —
+ *     expressions, `conditionLogic`, filter triplets, offsets, screen
+ *     `fieldText`, action parameter values. What is NOT projected is COUNTED,
+ *     never implied absent: an element type whose body this parser does not
+ *     model keeps its identity row and lands in `unmodeled[]`, and every
+ *     top-level `<Flow>` container that contributes no datum to the payload
+ *     lands in `unprojected[]` with its occurrence count. An empty
+ *     `unmodeled[]` therefore no longer reads as "nothing was dropped" — the
+ *     two lists together are the measured gap for THIS flow.
  *   - **No inference.** No reachability, dead-branch detection, or ordering is
  *     computed here; that is the host LLM's / `flow_trace`'s job.
- *   - **Honest gaps.** A canvas-element type this parser does not model lands
- *     in `unmodeled[]` (by `<name>`), never silently dropped.
  *   - **Object-level trust.** `RecordOp.objectResolution` mirrors the shipped
  *     record-DML resolution ({@link resolveInputReferenceObject}).
  *
  * `connectors[]` is the AUTHORITATIVE full graph; the per-element `connectsTo`
- * fields are conveniences derived in the same pass.
+ * fields are conveniences derived in the same pass. `elements[]` is the
+ * COMPLETE index of connector endpoints — including unmodeled element types,
+ * which were previously connector targets with no element row at all.
  */
 
 import type { ExtractorError, Result } from '@sf-intelligence/contracts';
@@ -38,6 +46,7 @@ import {
   asRecord,
   FLOW_XML_PARSER_OPTIONS,
   resolveInputReferenceObject,
+  toArray,
   toNonEmptyString,
   toNullableString,
   unwrapSingle,
@@ -87,7 +96,23 @@ export interface ConnectorTarget {
   readonly isGoTo?: boolean;
 }
 
-/** One canvas element, identified by its real `<name>` + `<label>` + type. */
+/**
+ * One canvas element, identified by its real `<name>` + `<label>` + type.
+ *
+ * `description` is the flow AUTHOR's own `<description>` — the answer to "what
+ * does this element do", written by the person who built the flow. It is
+ * present only when the element declares a non-empty one, so an element with
+ * no author note is byte-identical to before this field existed. `elements[]`
+ * is always kept under every narrowing knob, which makes it the one place a
+ * description survives an `include`-narrowed response.
+ *
+ * `type: 'unmodeled'` is an element whose CONTAINER this parser recognises but
+ * whose BODY it does not model (see {@link KNOWN_UNMODELED_ELEMENT_KEYS}).
+ * Its identity (`name`/`label`/`description`) and its `container` are real; its
+ * body semantics are the honest gap recorded in `unmodeled[]`. Before this
+ * existed such an element was a connector TARGET with no element row, so
+ * `elements[]` was not a complete index of connector endpoints.
+ */
 export interface FlowElement {
   readonly name: string;
   readonly label: string | null;
@@ -104,7 +129,12 @@ export interface FlowElement {
     | 'subflow'
     | 'wait'
     | 'start'
-    | 'end';
+    | 'end'
+    | 'unmodeled';
+  /** The flow author's `<description>` — omitted when the element declares none. */
+  readonly description?: string;
+  /** For `type:'unmodeled'` — the `<Flow>` child container it came from (e.g. `collectionProcessors`). */
+  readonly container?: string;
   readonly locationX?: number;
   readonly locationY?: number;
 }
@@ -173,14 +203,24 @@ export interface Loop {
   readonly noMoreValuesConnectsTo: string | null;
 }
 
-/** A `<formulas>` resource: name + declared dataType + verbatim expression. */
+/**
+ * A `<formulas>` resource: name + declared dataType + verbatim expression, plus
+ * the author's `<description>` when one is declared (omitted otherwise — a
+ * formula with no author note is byte-identical to before this field existed).
+ * Formulas have no canvas element row, so the description lives here.
+ */
 export interface Formula {
   readonly name: string;
   readonly dataType: string | null;
   readonly expression: string;
+  readonly description?: string;
 }
 
-/** A `<variables>` resource declaration. */
+/**
+ * A `<variables>` resource declaration, plus the author's `<description>` when
+ * one is declared (omitted otherwise). Variables have no canvas element row, so
+ * the description lives here.
+ */
 export interface Variable {
   readonly name: string;
   readonly dataType: string | null;
@@ -188,6 +228,7 @@ export interface Variable {
   readonly isCollection: boolean;
   readonly isInput: boolean;
   readonly isOutput: boolean;
+  readonly description?: string;
 }
 
 /** A `<start><scheduledPaths>` entry. */
@@ -213,13 +254,127 @@ export interface Subflow {
   readonly faultConnectsTo: string | null;
 }
 
-/** An `<actionCalls>` element — identity only (no attempt to read inside Apex). */
+/**
+ * One `<inputParameters>` / screen-field parameter: its `<name>` and the
+ * `<value>` wrapper unwrapped to a scalar plus a `literal | reference`
+ * discriminator (an `<elementReference>` is a variable / formula / `$Record`
+ * path, never a literal). `valueKind: 'unset'` is a parameter declared with no
+ * value at all — distinct from a literal empty string.
+ */
+export interface ActionParameter {
+  readonly name: string;
+  readonly value: string | null;
+  readonly valueKind: 'literal' | 'reference' | 'unset';
+}
+
+/** One `<outputParameters>`: which action output lands in which flow resource. */
+export interface ActionOutput {
+  readonly name: string;
+  readonly assignToReference: string;
+}
+
+/**
+ * An `<actionCalls>` element. `actionType` + `actionName` are the action's
+ * IDENTITY; `inputParameters` is what makes two calls of the SAME action
+ * distinguishable — without it every `emailSimple` call projects identically
+ * and a reader cannot tell who gets emailed, with what subject, from which
+ * sender. Values are carried verbatim from the metadata, references included
+ * (`recipientId` → `Application.Applicant__r.Id` is the answer to "who").
+ * No attempt is made to read inside the invoked Apex / packaged action: what an
+ * action DOES with its inputs is outside this projection.
+ */
 export interface ActionCall {
   readonly name: string;
   readonly actionType: string | null;
   readonly actionName: string | null;
+  readonly inputParameters: readonly ActionParameter[];
+  readonly outputParameters: readonly ActionOutput[];
   readonly connectsTo: string | null;
   readonly faultConnectsTo: string | null;
+}
+
+/**
+ * One `<screens><fields>` entry — recursive, because a `Region` /
+ * `RegionContainer` field nests its own `<fields>`.
+ *
+ * REFUTED PREMISE, recorded here so nobody re-derives it: Flow screen fields
+ * carry NO `<label>` element (the Metadata API's `FlowScreenField` has none;
+ * probed across every screen field in the reference vault — 313 fields, 0
+ * labels). The human-visible text is `fieldText`: the body copy for a
+ * `DisplayText` field, the prompt for an input field. There is no label to
+ * parse, so none is fabricated.
+ *
+ * `extensionName` names the LWC / Aura component behind a `ComponentInstance`
+ * field, and `inputParameters` carries what that component is configured with —
+ * together they are the "what does this screen actually show" answer.
+ */
+export interface ScreenField {
+  /**
+   * The field's `<name>`, or `null` for the field types Salesforce emits
+   * WITHOUT one — an `ObjectProvided` field inside a record form is identified
+   * by its `objectFieldReference` (`Object.Field`) instead. Requiring a name
+   * silently dropped 18 of the 313 screen fields in the reference vault, which
+   * is the exact defect this projection exists to stop; a nameless field is
+   * kept and its null name is stated.
+   */
+  readonly name: string | null;
+  readonly fieldType: string | null;
+  readonly dataType: string | null;
+  /** Display copy / input prompt, verbatim (may contain HTML). */
+  readonly fieldText: string | null;
+  readonly helpText: string | null;
+  readonly isRequired: boolean | null;
+  /** For `ComponentInstance` fields — the LWC/Aura extension rendered here. */
+  readonly extensionName: string | null;
+  /** For `ObjectProvided` fields — the `Object.Field` this input is bound to. */
+  readonly objectFieldReference: string | null;
+  /** `<choiceReferences>` — names of the `<choices>` / `<dynamicChoiceSets>` resources offered. */
+  readonly choiceReferences: readonly string[];
+  readonly inputParameters: readonly ActionParameter[];
+  /** `<visibilityRule><conditionLogic>` — null when the field is always shown. */
+  readonly visibilityLogic: string | null;
+  /** `<visibilityRule><conditions>` triplets — empty when the field is always shown. */
+  readonly visibilityConditions: readonly Condition[];
+  /** Nested fields of a `Region` / `RegionContainer`; empty for a leaf field. */
+  readonly fields: readonly ScreenField[];
+}
+
+/**
+ * A `<screens>` element with its FIELDS. A screen's inputs are exactly what the
+ * decisions and assignments downstream of it reference, so projecting a screen
+ * as name + label alone left those references dangling in the payload.
+ */
+export interface Screen {
+  readonly name: string;
+  readonly label: string | null;
+  readonly allowBack: boolean | null;
+  readonly allowFinish: boolean | null;
+  readonly allowPause: boolean | null;
+  readonly nextOrFinishButtonLabel: string | null;
+  readonly fields: readonly ScreenField[];
+  readonly connectsTo: string | null;
+}
+
+/**
+ * One top-level `<Flow>` container this projection carries NO datum for, with
+ * the number of occurrences the flow actually declares. Computed per flow from
+ * the parsed XML — a MEASUREMENT of this response's gap, not a boilerplate
+ * caveat, so a flow that declares none of them emits an empty list truthfully.
+ *
+ *   - `resource` — a referencable resource (`constants`, `textTemplates`,
+ *     `choices`, `dynamicChoiceSets`). Elements reference these BY NAME, so an
+ *     unprojected resource is a dangling reference in the payload.
+ *   - `element` — a canvas-element container this parser does not recognise at
+ *     all (distinct from {@link KNOWN_UNMODELED_ELEMENT_KEYS}, whose elements
+ *     DO get an identity row and land in `unmodeled[]`).
+ *   - `metadata` — flow-level metadata outside the structural projection
+ *     (`processMetadataValues`, `environments`, `interviewLabel`,
+ *     `triggerOrder`, …).
+ */
+export interface UnprojectedContainer {
+  readonly container: string;
+  readonly count: number;
+  readonly kind: 'resource' | 'element' | 'metadata';
 }
 
 /** The `<start>` element projection, including entry criteria + scheduled paths. */
@@ -249,6 +404,8 @@ export interface FlowStart {
  * graph node). `connectors[]` is the authoritative element graph.
  */
 export interface FlowGraphProjection {
+  /** The flow-level `<description>` — the author's own "what is this flow for". */
+  readonly description: string | null;
   readonly start: FlowStart;
   readonly elements: readonly FlowElement[];
   readonly connectors: readonly Connector[];
@@ -256,12 +413,23 @@ export interface FlowGraphProjection {
   readonly assignments: readonly Assignment[];
   readonly recordOps: readonly RecordOp[];
   readonly loops: readonly Loop[];
+  readonly screens: readonly Screen[];
   readonly formulas: readonly Formula[];
   readonly variables: readonly Variable[];
   readonly subflows: readonly Subflow[];
   readonly actions: readonly ActionCall[];
-  /** Canvas-element types the parser does not model, by `<name>` (honest gap list). */
+  /**
+   * Canvas elements whose BODY semantics the parser does not model, by
+   * `<name>`. Their identity + connectors ARE projected (each has a
+   * `type:'unmodeled'` row in `elements[]`); only the body is the gap.
+   */
   readonly unmodeled: readonly string[];
+  /**
+   * Top-level `<Flow>` containers this projection carries no datum for, with
+   * per-flow occurrence counts. Together with `unmodeled[]` this is the measured
+   * answer to "what did you drop" — see {@link UnprojectedContainer}.
+   */
+  readonly unprojected: readonly UnprojectedContainer[];
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +621,210 @@ const KNOWN_UNMODELED_ELEMENT_KEYS = [
   'transforms',
 ] as const;
 
+/**
+ * Top-level `<Flow>` containers this projection DOES carry a datum for — the
+ * typed detail arrays plus the identity-only element containers above plus the
+ * scalars the tool layer's `meta` block and the projection root carry
+ * (`description`, `label`, `status`, `processType`, `apiVersion`, `runInMode`,
+ * and the legacy `startElementReference` the start reader consumes).
+ *
+ * Anything present in a flow's XML and NOT in this set becomes an
+ * {@link UnprojectedContainer} row with its real occurrence count. Keeping the
+ * accounted-for set explicit (rather than deriving it from "keys we happened to
+ * read") is what makes `unprojected[]` a measurement instead of a guess: adding
+ * a parser for a container without adding it here fails loudly in the tests.
+ */
+const ACCOUNTED_CONTAINER_KEYS: ReadonlySet<string> = new Set<string>([
+  'start',
+  'decisions',
+  'assignments',
+  'recordCreates',
+  'recordUpdates',
+  'recordLookups',
+  'recordDeletes',
+  'loops',
+  'screens',
+  'actionCalls',
+  'subflows',
+  'formulas',
+  'variables',
+  ...KNOWN_UNMODELED_ELEMENT_KEYS,
+  'description',
+  'label',
+  'status',
+  'processType',
+  'apiVersion',
+  'runInMode',
+  'startElementReference',
+]);
+
+/**
+ * Containers that are REFERENCABLE RESOURCES: an element names one of these by
+ * name (a screen field's `choiceReferences`, an assignment's `elementReference`),
+ * so leaving one unprojected leaves a dangling reference in the payload. Ranked
+ * `resource` in {@link UnprojectedContainer} so a reader can tell a real
+ * comprehension gap from flow-level trivia.
+ */
+const RESOURCE_CONTAINER_KEYS: ReadonlySet<string> = new Set<string>([
+  'constants',
+  'textTemplates',
+  'choices',
+  'dynamicChoiceSets',
+  'stages',
+]);
+
+/**
+ * Containers that are flow-level METADATA rather than canvas structure. Anything
+ * present in a flow's XML that is neither accounted-for, nor a known resource,
+ * nor listed here is reported as an unrecognised `element` container — the
+ * loudest bucket, because it means a real canvas element type is invisible.
+ */
+const METADATA_CONTAINER_KEYS: ReadonlySet<string> = new Set<string>([
+  'processMetadataValues',
+  'environments',
+  'interviewLabel',
+  'triggerOrder',
+  'sourceTemplate',
+  'isAdditionalPermissionRequiredToRun',
+  'isTemplate',
+  'fullName',
+  'migratedFromWorkflowRuleName',
+  'timeZoneSidKey',
+]);
+
+/**
+ * Count the occurrences of a top-level `<Flow>` child. fast-xml-parser emits an
+ * object for a single occurrence and an array for many, so `Array.isArray` is
+ * the only reliable multiplicity signal.
+ */
+const occurrenceCount = (value: unknown): number =>
+  Array.isArray(value) ? value.length : 1;
+
+/**
+ * Measure what this flow's XML declares that the projection does not carry.
+ * Pure over the parsed root — no allowlist of "things we know we drop", just
+ * `present keys − accounted keys`, so a container nobody thought about still
+ * shows up.
+ */
+const buildUnprojected = (
+  rootObj: Record<string, unknown>,
+): UnprojectedContainer[] => {
+  const out: UnprojectedContainer[] = [];
+  for (const key of Object.keys(rootObj)) {
+    if (ACCOUNTED_CONTAINER_KEYS.has(key)) continue;
+    const value = rootObj[key];
+    if (value === undefined || value === null || value === '') continue;
+    const kind: UnprojectedContainer['kind'] = RESOURCE_CONTAINER_KEYS.has(key)
+      ? 'resource'
+      : METADATA_CONTAINER_KEYS.has(key)
+        ? 'metadata'
+        : 'element';
+    out.push({ container: key, count: occurrenceCount(value), kind });
+  }
+  // Stable, reader-useful order: the buckets that cost comprehension first.
+  const rank: Record<UnprojectedContainer['kind'], number> = {
+    element: 0,
+    resource: 1,
+    metadata: 2,
+  };
+  return out.sort(
+    (a, b) => rank[a.kind] - rank[b.kind] || a.container.localeCompare(b.container),
+  );
+};
+
+/**
+ * Parse one `<inputParameters>` (or screen-field parameter) into an
+ * {@link ActionParameter}. A parameter declared with no `<value>` at all is
+ * `valueKind:'unset'` — distinct from a literal empty string. Returns `null`
+ * when the parameter carries no `<name>`.
+ */
+const parseActionParameter = (
+  raw: Record<string, unknown>,
+): ActionParameter | null => {
+  const name = toNonEmptyString(raw['name']);
+  if (name === null) return null;
+  const parsed = parseValue(raw['value']);
+  if (parsed === null) return { name, value: null, valueKind: 'unset' };
+  return { name, value: parsed.value, valueKind: parsed.kind };
+};
+
+/** Parse every `<inputParameters>` child into {@link ActionParameter}s. */
+const parseActionParameters = (raw: unknown): ActionParameter[] => {
+  const out: ActionParameter[] = [];
+  for (const rec of toRecordArray(raw)) {
+    const param = parseActionParameter(rec);
+    if (param !== null) out.push(param);
+  }
+  return out;
+};
+
+/** Parse every `<outputParameters>` child into {@link ActionOutput}s. */
+const parseActionOutputs = (raw: unknown): ActionOutput[] => {
+  const out: ActionOutput[] = [];
+  for (const rec of toRecordArray(raw)) {
+    const name = toNonEmptyString(rec['name']);
+    const assignToReference = toNonEmptyString(rec['assignToReference']);
+    if (name === null || assignToReference === null) continue;
+    out.push({ name, assignToReference });
+  }
+  return out;
+};
+
+/** Recursion guard for {@link parseScreenField} (deepest real nesting seen: 3). */
+const MAX_SCREEN_FIELD_DEPTH = 8;
+
+/**
+ * Parse one `<screens><fields>` entry, recursing into a `Region` /
+ * `RegionContainer`'s nested `<fields>`. `depth` guards against a pathological
+ * (or hand-edited) nesting chain; real screens nest at most a container → region
+ * → field, and the reference vault's deepest is 3.
+ */
+const parseScreenField = (
+  raw: Record<string, unknown>,
+  depth: number,
+): ScreenField | null => {
+  const name = toNonEmptyString(raw['name']);
+  const fieldType = toNonEmptyString(raw['fieldType']);
+  const objectFieldReference = toNonEmptyString(raw['objectFieldReference']);
+  // Keep any field that declares SOMETHING identifying. Only a genuinely empty
+  // `<fields/>` node is skipped — a nameless `ObjectProvided` field is real and
+  // is identified by `objectFieldReference`.
+  if (name === null && fieldType === null && objectFieldReference === null) {
+    return null;
+  }
+  const visibility = asRecord(unwrapSingle(raw['visibilityRule']));
+  const choiceReferences: string[] = [];
+  for (const ref of toArray(raw['choiceReferences'])) {
+    const s = toNonEmptyString(ref);
+    if (s !== null) choiceReferences.push(s);
+  }
+  const nested: ScreenField[] = [];
+  if (depth < MAX_SCREEN_FIELD_DEPTH) {
+    for (const child of toRecordArray(raw['fields'])) {
+      const parsed = parseScreenField(child, depth + 1);
+      if (parsed !== null) nested.push(parsed);
+    }
+  }
+  return {
+    name,
+    fieldType,
+    dataType: toNonEmptyString(raw['dataType']),
+    fieldText: toNullableString(raw['fieldText']),
+    helpText: toNullableString(raw['helpText']),
+    isRequired: toNullableBoolean(raw['isRequired']),
+    extensionName: toNonEmptyString(raw['extensionName']),
+    objectFieldReference,
+    choiceReferences,
+    inputParameters: parseActionParameters(raw['inputParameters']),
+    visibilityLogic:
+      visibility === null ? null : toNullableString(visibility['conditionLogic']),
+    visibilityConditions:
+      visibility === null ? [] : parseConditions(visibility['conditions']),
+    fields: nested,
+  };
+};
+
+
 // ---------------------------------------------------------------------------
 // The projection builder
 // ---------------------------------------------------------------------------
@@ -479,6 +851,7 @@ export const parseFlowGraph = (
   const variables: Variable[] = [];
   const subflows: Subflow[] = [];
   const actions: ActionCall[] = [];
+  const screens: Screen[] = [];
   const unmodeled: string[] = [];
 
   const pushConnector = (
@@ -500,20 +873,29 @@ export const parseFlowGraph = (
     return parsed.target;
   };
 
+  /**
+   * Push one element index row. `description` and `container` are spread in
+   * ONLY when present, so an element with no author `<description>` serializes
+   * byte-identically to before those fields existed.
+   */
   const pushElement = (
     name: string,
     obj: Record<string, unknown>,
     type: FlowElement['type'],
+    container?: string,
   ): void => {
     const el: FlowElement = {
       name,
       label: toNullableString(obj['label']),
       type,
     };
+    const description = toNonEmptyString(obj['description']);
     const x = toNumber(obj['locationX']);
     const y = toNumber(obj['locationY']);
     elements.push({
       ...el,
+      ...(description !== null ? { description } : {}),
+      ...(container !== undefined ? { container } : {}),
       ...(x !== null ? { locationX: x } : {}),
       ...(y !== null ? { locationY: y } : {}),
     });
@@ -734,12 +1116,29 @@ export const parseFlowGraph = (
     if (noMoreConn !== null) pushConnector(name, noMoreConn, 'noMoreValues');
   }
 
-  // --- <screens> (element + single connector; no dedicated detail array) -----
+  // --- <screens> (element + connector + the FIELDS the screen shows) --------
+  // A screen's fields are what downstream decisions and assignments reference,
+  // so projecting a screen as name + label alone left those references dangling.
   for (const screen of toRecordArray(rootObj['screens'])) {
     const name = toNonEmptyString(screen['name']);
     if (name === null) continue;
     pushElement(name, screen, 'screen');
     const conn = readConnector(screen['connector']);
+    const fields: ScreenField[] = [];
+    for (const raw of toRecordArray(screen['fields'])) {
+      const field = parseScreenField(raw, 0);
+      if (field !== null) fields.push(field);
+    }
+    screens.push({
+      name,
+      label: toNullableString(screen['label']),
+      allowBack: toNullableBoolean(screen['allowBack']),
+      allowFinish: toNullableBoolean(screen['allowFinish']),
+      allowPause: toNullableBoolean(screen['allowPause']),
+      nextOrFinishButtonLabel: toNullableString(screen['nextOrFinishButtonLabel']),
+      fields,
+      connectsTo: conn?.target ?? null,
+    });
     if (conn !== null) pushConnector(name, conn, 'default');
   }
 
@@ -754,6 +1153,8 @@ export const parseFlowGraph = (
       name,
       actionType: toNonEmptyString(call['actionType']),
       actionName: toNonEmptyString(call['actionName']),
+      inputParameters: parseActionParameters(call['inputParameters']),
+      outputParameters: parseActionOutputs(call['outputParameters']),
       connectsTo: conn?.target ?? null,
       faultConnectsTo: faultConn?.target ?? null,
     });
@@ -784,10 +1185,12 @@ export const parseFlowGraph = (
   for (const f of toRecordArray(rootObj['formulas'])) {
     const name = toNonEmptyString(f['name']);
     if (name === null) continue;
+    const description = toNonEmptyString(f['description']);
     formulas.push({
       name,
       dataType: toNonEmptyString(f['dataType']),
       expression: toNullableString(f['expression']) ?? '',
+      ...(description !== null ? { description } : {}),
     });
   }
 
@@ -795,6 +1198,7 @@ export const parseFlowGraph = (
   for (const v of toRecordArray(rootObj['variables'])) {
     const name = toNonEmptyString(v['name']);
     if (name === null) continue;
+    const description = toNonEmptyString(v['description']);
     variables.push({
       name,
       dataType: toNonEmptyString(v['dataType']),
@@ -802,6 +1206,7 @@ export const parseFlowGraph = (
       isCollection: toBoolean(v['isCollection']),
       isInput: toBoolean(v['isInput']),
       isOutput: toBoolean(v['isOutput']),
+      ...(description !== null ? { description } : {}),
     });
   }
 
@@ -821,6 +1226,12 @@ export const parseFlowGraph = (
       const name = toNonEmptyString(el['name']);
       if (name === null) continue;
       unmodeled.push(name);
+      // Identity row: before this, an unmodeled element was a connector TARGET
+      // with no row in `elements[]` — so the element index was not a complete
+      // index of connector endpoints and a walk over it dangled. Its `<name>`,
+      // `<label>` and the author's `<description>` are real facts; only the
+      // BODY stays the gap `unmodeled[]` records.
+      pushElement(name, el, 'unmodeled', key);
       const conn = readConnector(el['connector']);
       if (conn !== null) pushConnector(name, conn, 'default');
       // Waits (and orchestration stages) carry their default-resume path on
@@ -839,6 +1250,7 @@ export const parseFlowGraph = (
   }
 
   return {
+    description: toNonEmptyString(rootObj['description']),
     start,
     elements,
     connectors,
@@ -846,11 +1258,13 @@ export const parseFlowGraph = (
     assignments,
     recordOps,
     loops,
+    screens,
     formulas,
     variables,
     subflows,
     actions,
     unmodeled,
+    unprojected: buildUnprojected(rootObj),
   };
 };
 

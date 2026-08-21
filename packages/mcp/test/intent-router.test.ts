@@ -2327,6 +2327,77 @@ describe('flow-family REACH routing', () => {
     expect(r.tools).toContain(primaryTool);
   };
 
+  // W2B gold rows — the ORDERED element-by-element ask belongs to
+  // flow-structure / sfi.flow_graph (whose `walkthrough: true` mode answers it);
+  // explain_flow narrates six axes and enumerates no elements at all. The
+  // guards below are the load-bearing half: explain_flow's own narration
+  // phrasings must NOT be stolen by the widened rule.
+  describe('flow-structure — ordered element-by-element walkthrough', () => {
+    it('routes the owner\'s verbatim ask (each element, step by step, in order)', () => {
+      routesTo(
+        'explain what each element of the Foo_Bar_Flow flow does, step by step, in the order it runs',
+        'flow-structure',
+        'sfi.flow_graph',
+      );
+    });
+    it('routes "what are the different elements of this flow and what is each one doing"', () => {
+      routesTo(
+        'what are the different elements of this flow and what is each one doing',
+        'flow-structure',
+        'sfi.flow_graph',
+      );
+    });
+    it('routes "walk me through this flow element by element"', () => {
+      routesTo(
+        'walk me through this flow element by element',
+        'flow-structure',
+        'sfi.flow_graph',
+      );
+    });
+    it('routes "in what order do the elements of <Flow> run"', () => {
+      routesTo(
+        'in what order do the elements of Foo_Bar_Flow run',
+        'flow-structure',
+        'sfi.flow_graph',
+      );
+    });
+    it('carries flowRef + walkthrough into suggestedArgs, and fabricates neither', () => {
+      const named = classifyQuestion(
+        'explain what each element of the Foo_Bar_Flow flow does, step by step, in the order it runs',
+      );
+      expect(named.suggestedArgs).toEqual({
+        flowRef: 'Foo_Bar_Flow',
+        walkthrough: true,
+      });
+      // No api-name in the question → no invented flowRef; the walk hint stands
+      // on its own and sfi.resolve still leads the route.
+      const unnamed = classifyQuestion('walk me through this flow element by element');
+      expect(unnamed.suggestedArgs).toEqual({ walkthrough: true });
+      expect(unnamed.tools[0]).toBe('sfi.resolve');
+      // A plain structure ask keeps the default (cheaper) shape.
+      const structural = classifyQuestion('show me the structure of Foo_Bar_Flow');
+      expect(structural.suggestedArgs).toEqual({ flowRef: 'Foo_Bar_Flow' });
+    });
+    // GUARD: narration without the word "element" stays on explain_flow.
+    it.each([
+      'Walk me through what Foo_Bar_Flow actually does step by step',
+      'Explain the purpose of RT_Create_New_Case',
+      'Summarize the Widget_Sync_Flow for me',
+      'what does the Foo_Bar_Flow flow do',
+    ])('does NOT steal explain_flow narration: "%s"', (q) => {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('explain-flow');
+      expect(r.tools).toContain('sfi.explain_flow');
+    });
+    // GUARD: an "in order" ask about SAVE-TIME automation is not a flow walk.
+    it('does NOT steal the cross-automation save-order ask', () => {
+      const r = classifyQuestion(
+        'When a Case is created, walk me through everything that fires in order — assignment rules, flows, the works.',
+      );
+      expect(r.intent).toBe('trigger-order');
+    });
+  });
+
   describe('explain-flow — named-flow narration', () => {
     it('routes "walk me through what <Flow> actually does step by step"', () => {
       routesTo('Walk me through what Foo_Bar_Flow actually does step by step', 'explain-flow', 'sfi.explain_flow');

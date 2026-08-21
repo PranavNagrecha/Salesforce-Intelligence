@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-21T17:54:57.825Z",
+  "generatedAt": "2026-08-21T18:32:18.877Z",
   "version": "0.3.0",
   "toolCount": 214,
   "skillCount": 26,
@@ -14,12 +14,12 @@
       {
         "name": "mcp",
         "files": 294,
-        "cases": 5899
+        "cases": 5930
       },
       {
         "name": "extractors",
         "files": 86,
-        "cases": 1152
+        "cases": 1154
       },
       {
         "name": "cli",
@@ -62,7 +62,7 @@
         "cases": 50
       }
     ],
-    "totalCases": 8645,
+    "totalCases": 8678,
     "totalFiles": 492,
     "packageCount": 10,
     "approx": 8600
@@ -91,13 +91,13 @@
     {
       "name": "mcp",
       "files": 294,
-      "cases": 5899,
+      "cases": 5930,
       "description": "The 214 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 86,
-      "cases": 1152,
+      "cases": 1154,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {

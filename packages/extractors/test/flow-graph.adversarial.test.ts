@@ -96,11 +96,26 @@ describe('adversarial — all 8 KNOWN_UNMODELED_ELEMENT_KEYS surface by name', (
         'My_Transform',
       ].sort(),
     );
-    // None of them leak into elements[] or any modeled array.
+    // Each gets an IDENTITY row (typed `unmodeled`, tagged with its source
+    // container) so `elements[]` indexes every connector endpoint — but none
+    // leaks into a MODELED detail array, which is where the body would be.
     for (const name of graph.unmodeled) {
-      expect(graph.elements.some((e) => e.name === name)).toBe(false);
+      const row = graph.elements.find((e) => e.name === name);
+      expect(row?.type).toBe('unmodeled');
+      expect(typeof row?.container).toBe('string');
     }
-    expect(graph.elements).toHaveLength(0);
+    expect(graph.elements).toHaveLength(8);
+    for (const arr of [
+      graph.decisions,
+      graph.assignments,
+      graph.recordOps,
+      graph.loops,
+      graph.screens,
+      graph.subflows,
+      graph.actions,
+    ]) {
+      expect(arr).toHaveLength(0);
+    }
   });
 });
 

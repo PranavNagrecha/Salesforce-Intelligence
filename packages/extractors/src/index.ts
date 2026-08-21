@@ -87,6 +87,8 @@ export type {
 export { parseFlowGraph, parseFlowGraphSource } from './flow-graph.js';
 export type {
   ActionCall,
+  ActionOutput,
+  ActionParameter,
   Assignment,
   Condition,
   Connector,
@@ -99,7 +101,10 @@ export type {
   Loop,
   RecordOp,
   ScheduledPath,
+  Screen,
+  ScreenField,
   Subflow,
+  UnprojectedContainer,
   Variable,
 } from './flow-graph.js';
 export {

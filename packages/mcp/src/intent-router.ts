@@ -468,6 +468,50 @@ const deriveObjectApiFromQuestion = (q: string, question?: string): string | und
   return custom?.[1];
 };
 
+/**
+ * Derive `sfi.flow_graph` arguments for the `flow-structure` intent.
+ *
+ * Two independent jobs, each of which degrades to "say nothing" rather than
+ * guess:
+ *   - `flowRef`: the ORIGINAL-CASE api-name token in the question (a
+ *     >=2-underscore identifier, the same {@link NAMED_COMPONENT_ID} shape the
+ *     narration rules anchor on). The router's generic entity extraction does
+ *     not bind a Flow here, so without this a host that honors `suggestedArgs`
+ *     had to guess the argument the tool REQUIRES. Omitted entirely when the
+ *     question names no such token — `sfi.resolve` still leads the route.
+ *   - `walkthrough`: true only for the ORDERED element-by-element phrasing, so
+ *     a plain "show me the structure of X" keeps the default (cheaper) shape.
+ *
+ * Suggested, never authoritative: `suggestedArgs` is a hint the host may use.
+ */
+const deriveFlowGraphArgs = (
+  q: string,
+  question?: string,
+): Record<string, unknown> => {
+  const args: Record<string, unknown> = {};
+  const source = question ?? q;
+  // W2B-REVIEW F6: take the first candidate that is not the NAME OF A TOOL.
+  // "use flow_graph to walk me through Foo_Bar_Flow element by element"
+  // matched `flow_graph` first and suggested it as the flow to open.
+  const TOOL_NAME_TOKEN = /^(?:sfi[._])?(?:flow_graph|flow_trace|explain_flow|flow_fault_audit|flow_bulkification_audit)$/i;
+  const named = [...source.matchAll(
+    /\b((?!\w*__)[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9]+[A-Za-z0-9_]*[A-Za-z0-9])\b/g,
+  )]
+    .map((m) => m[1])
+    .find((t) => t !== undefined && !TOOL_NAME_TOKEN.test(t));
+  if (named !== undefined) args.flowRef = named;
+  if (
+    /\belement[-\s]by[-\s]element\b/.test(q) ||
+    /\bstep\s+by\s+step\b/.test(q) ||
+    /\b(?:in\s+)?(?:the\s+|what\s+)?order\b[^.?!]{0,60}\b(?:elements?|steps?)\b/.test(q) ||
+    /\b(?:elements?|steps?)\b[^.?!]{0,60}\b(?:in\s+)?(?:the\s+|what\s+)?order\b/.test(q) ||
+    /\b(?:each|every|all\s+the|different)\s+(?:elements?|steps?)\b/.test(q)
+  ) {
+    args.walkthrough = true;
+  }
+  return args;
+};
+
 /** Optional hop depth from `get_impact … hops=2` phrasing. */
 const deriveImpactHops = (q: string): number | undefined => {
   const match = q.match(/\bhops\s*[=:]\s*(\d+)/);
@@ -772,8 +816,9 @@ const RULES: readonly Rule[] = [
     tools: ['sfi.resolve', 'sfi.flow_graph'],
     liveRequired: false,
     needsResolve: true,
+    suggestArgs: deriveFlowGraphArgs,
     reason:
-      'The faithful, lossless structural graph of a Flow — every element by its real name, the full element-to-element connector graph (what runs next), decision rule branches, loops, formulas, and variables. flow_graph exposes the RAW graph; explain_flow gives the plain-business summary.',
+      'The faithful structural graph of a Flow — every element by its real name and the author\'s own description, the full element-to-element connector graph (what runs next), decision rule branches, screen fields, action parameters, loops, formulas, and variables; `walkthrough: true` adds the ordered element-by-element walk. Faithful, not lossless — unmodeled element bodies and unprojected containers are named per flow. flow_graph exposes the RAW graph; explain_flow gives the plain-business summary.',
     patterns: [
       // "structure / element graph / connector graph OF a flow" (either order).
       /\b(?:structure|element\s+graph|connector\s+graph)\b[^.?!]{0,50}\bflows?\b/,
@@ -800,6 +845,32 @@ const RULES: readonly Rule[] = [
       new RegExp(
         `\\b${NAMED_COMPONENT_ID}\\b[^.?!]{0,60}\\b(?:structure|connector\\s+graph|element\\s+graph|decision\\s+branches|rule\\s+branches)\\b`,
       ),
+      // W2B — the ORDERED element-by-element ask ("what happens when a flow
+      // runs, what are the different elements, what each element is doing").
+      // `flow_graph(walkthrough: true)` answers this; `explain_flow` cannot (it
+      // narrates six axes and enumerates no elements). Every pattern REQUIRES
+      // the word "element(s)", which is precisely the token explain_flow's
+      // narration asks ("walk me through what <Flow> actually does step by
+      // step", "summarize <Flow>", "explain the purpose of <Flow>") never
+      // carry — so this widens flow-structure without stealing narration.
+      // ANCHOR (W2B-REVIEW F1/F2): "element" is NOT a flow-exclusive noun. An
+      // OmniScript, an Integration Procedure, an approval process and a page
+      // layout all have elements, and this rule sits AHEAD of `omnistudio`,
+      // `omniscript-flow` and `approval-process`, so an unanchored pattern
+      // steals from all three — measured: "what does each element of my
+      // OmniScript do", "walk me through every element of the approval process
+      // in order", "what does each element on the Account page layout do" all
+      // landed here, one of them with suggestedArgs {flowRef:'Create_Case'}
+      // pointed at flow_graph. Every pattern below therefore requires the
+      // question to NAME a flow — the literal token, or a NAMED_COMPONENT_ID
+      // (the multi-underscore api-name shape flows actually carry). A question
+      // that names no flow falls through to the funnel, which is the routing
+      // authority on this project anyway.
+      new RegExp(`^(?=.*(?:\\bflows?\\b|${NAMED_COMPONENT_ID}))(?=.*\\belements?\\b[^.?!]{0,60}\\b(?:step\\s+by\\s+step|one\\s+by\\s+one|(?:in\\s+)?(?:the\\s+|what\\s+)?order\\b)).*`),
+      new RegExp(`^(?=.*(?:\\bflows?\\b|${NAMED_COMPONENT_ID}))(?=.*\\b(?:step\\s+by\\s+step|(?:in\\s+)?(?:the\\s+|what\\s+)?order)\\b[^.?!]{0,60}\\belements?\\b).*`),
+      new RegExp(`^(?=.*(?:\\bflows?\\b|${NAMED_COMPONENT_ID}))(?=.*\\belement[-\\s]by[-\\s]element\\b).*`),
+      new RegExp(`^(?=.*(?:\\bflows?\\b|${NAMED_COMPONENT_ID}))(?=.*\\b(?:each|every|all\\s+the|different)\\s+(?:elements?|steps?)\\b[^.?!]{0,80}\\b(?:flows?|do|does|doing)\\b).*`),
+      /\bflows?\b[^.?!]{0,80}\b(?:each|every|all\s+the|different)\s+elements?\b/,
     ],
   },
   {
@@ -3830,7 +3901,11 @@ const RULES: readonly Rule[] = [
       /\bbefore[-\s]?(?:vs[-\s]?)?after[-\s]?save\b[^.?!]{0,40}\b(breakdown|every\s+automation|automation)\b/,
       // "what order do validation rules and record-triggered flows evaluate" —
       // an explicit ordering question over multiple automation families.
-      /\bwhat\s+order\b[^.?!]{0,90}\b(evaluate|run|fire|execute)\b/,
+      // W2B guard: "what order do the ELEMENTS OF <Flow> run" is an INTRA-flow
+      // element walk (flow-structure / sfi.flow_graph walkthrough), not the
+      // cross-automation save order. Excluded here rather than reordering the
+      // intent table, so every other save-order phrasing is untouched.
+      /\bwhat\s+order\b(?![^.?!]{0,90}\belements?\s+of\b)[^.?!]{0,90}\b(evaluate|run|fire|execute)\b/,
       // "run order between <FlowA> and <flow>" — the pairwise ordering ask.
       /\brun\s+order\s+between\b/,
       // "which apex classes are triggered when a X is inserted/created" — the
