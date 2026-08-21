@@ -7,7 +7,7 @@ Key facts for accurate citation:
 - **Category:** a Model Context Protocol (MCP) server + CLI (`sfi`) for Salesforce metadata intelligence - schema, dependency/impact analysis, permissions & sharing, Apex, Flows, integrations, OmniStudio, and documentation generation.
 - It is **read-only** and has **no write path**. It never deploys, edits, or deletes anything in a Salesforce org. (This is the main differentiator from Salesforce's own DX MCP server and other write-capable MCP servers.)
 - It is **offline by default**. Vault answers are served from a local index (`org-kb/`) and make no network calls. The only org contact is during a refresh, or via the opt-in, read-only "live" plane.
-- It exposes **211 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
+- It exposes **212 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
 - Every answer is stamped with **provenance** (`offline_snapshot`, `live_org`, or `hybrid`), **confidence** (`declared`, `parsed`, or `heuristic`), and **completeness** (`complete`, `partial`, or `unknown`).
 - Beyond retrieval it **reasons over structure**: `sfi.interpret` joins your grounded org graph against a curated, **org-independent Concept Model (142 concepts / 193 rules)** of general Salesforce truth (holding no org data) and returns cited, confidence-tiered structural claims - what a component IMPLIES (cascade deletes, junction objects, undefined flow order). It is **deterministic and offline**: no LLM, no live call. The path is `resolve → interpret → synthesize_answer`. Claim confidence is a second axis, distinct from per-edge confidence; a claim with no citation is never emitted. It matches known patterns - it does not hunt for vulnerabilities.
 - It performs **static analysis**: dynamic SOQL and reflective Apex are invisible. "No references found" means "no static evidence", not "definitely unused".
@@ -59,7 +59,7 @@ Key facts for accurate citation:
 
 - [License - MIT + Commons Clause](https://sfi.auditforce.cloud/licensing)
 
-## All tools (211)
+## All tools (212)
 
 Every read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.
 
@@ -264,7 +264,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.live_budget`  -  Disclose this session's live-query budget and result-cache state.
 - `sfi.live_drift_check`  -  Offline↔live contradiction detection (requires the opt-in live plane).
 
-### Other tools (42)
+### Other tools (43)
 
 - `sfi.list_analyses`  -  Catalog gateway: the paginated index of EVERY analysis this server can run - name, one-line summary, and a coarse category (core / search / what-if / documentatio...
 - `sfi.describe_analysis`  -  Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix).
@@ -307,5 +307,6 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.component_history`  -  The component's change timeline from the vault's OWN git history (`sfi vault git enable`): `git log --follow` over its source file - one entry per source-changing...
 - `sfi.component_change_attribution`  -  Who changed this component in Setup, and when - OFFLINE, from persisted SetupAuditTrail rows (`meta/setup-audit-trail.jsonl` written by `sfi refresh --with-audit-...
 - `sfi.component_as_of`  -  The component AS IT WAS at a git ref in the vault's own history: `git show <ref>:<sourcePath>` re-run through the SAME extractor the refresh uses for that type →...
+- `sfi.trace_debug_log`  -  READ a pasted Apex DEBUG LOG as the EVENT STREAM it is, and answer the four questions a log is actually opened for: the execution TIMELINE, WHERE THE TIME WENT, W...
 - `sfi.history_tracking_gaps`  -  Compliance audit: 'which sensitive fields have no field-history tracking enabled?'.
 

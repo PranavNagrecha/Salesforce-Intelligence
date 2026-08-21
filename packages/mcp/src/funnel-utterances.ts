@@ -2788,6 +2788,40 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'this debug log has a Flow API Name in the fault — which flow errored?',
     'interpret this CODE_UNIT_STARTED / LIMIT_USAGE debug log',
   ],
+  // LANE F: reading a debug log as an EVENT STREAM — timeline, time
+  // attribution, firing order, consumption by phase. Phrased the way a
+  // developer actually asks, and deliberately anchored on the WHAT-HAPPENED
+  // vocabulary (timeline / how long / where did the time go / what fired in
+  // what order / how much of each limit) rather than the WHICH-COMPONENT
+  // vocabulary that belongs to explain_debug_log.
+  'sfi.trace_debug_log': [
+    'read this debug log and tell me where the CPU time went',
+    'where did the time go in this debug log',
+    'which automation fired in what order in this log',
+    'what fired first in this transaction, the trigger or the flow',
+    'build me a timeline from this Apex debug log',
+    'break this debug log into an execution timeline',
+    'how long did each method take in this log',
+    'what took the longest in this transaction',
+    'how much of each governor limit did this transaction actually use',
+    'show me the CUMULATIVE_LIMIT_USAGE table from this log',
+    'how many SOQL queries ran in this transaction and where',
+    'is the slow part in this log CPU or database wait',
+    'how much time was database wait versus Apex CPU here',
+    'which flow elements ran and how long did each take',
+    'what order did my triggers, validation rules, workflow rules and flows run in',
+    'trace this debug log step by step',
+    'profile this Apex debug log',
+    'summarize what happened in this debug log',
+    'which query in this log is running inside a loop',
+    'how much CPU time did each trigger context burn',
+    'what consumed the transaction time before save versus after save',
+    'parse this debug log into events I can read',
+    'analyze this Apex log for performance',
+    'how are debug logs created and what is in each one',
+    'what do the log levels at the top of a debug log mean',
+    'why is there no validation rule in my debug log',
+  ],
 };
 
 /**

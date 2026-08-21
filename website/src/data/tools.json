@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-20T23:56:15.360Z",
-  "toolCount": 211,
+  "generatedAt": "2026-08-21T14:13:43.722Z",
+  "toolCount": 212,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -888,6 +888,10 @@
         {
           "name": "sfi.component_as_of",
           "description": "The component AS IT WAS at a git ref in the vault's own history: `git show <ref>:<sourcePath>` re-run through the SAME extractor the refresh uses for that type →..."
+        },
+        {
+          "name": "sfi.trace_debug_log",
+          "description": "READ a pasted Apex DEBUG LOG as the EVENT STREAM it is, and answer the four questions a log is actually opened for: the execution TIMELINE, WHERE THE TIME WENT, W..."
         },
         {
           "name": "sfi.history_tracking_gaps",

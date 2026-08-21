@@ -468,7 +468,50 @@ const PROVENANCE_DISCLOSURE =
 // automation fired (live_automation_fired), org limits (live_org_limits).
 // R7-W6: who-changed-a-Setup-setting (FLS/sharing/OWD/session/password-policy/
 // MFA) and bare "setup audit trail" are ALSO now absent (live_setup_audit_trail).
-const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string])[] = [
+/**
+ * A PASTED debug log is not runtime telemetry the product cannot see. Since
+ * `sfi.trace_debug_log` reads a log's event stream entirely offline, a question
+ * about a log the USER supplies ("read THIS debug log…", "here's the log…", a
+ * paste carrying `CODE_UNIT_STARTED|`) is answerable and must NOT be refused.
+ * RETRIEVING a log from the org ("pull the debug log from yesterday's batch
+ * run") remains a genuine gap — no tool fetches logs — so the retrieval trigger
+ * below keeps firing for it. This excluder separates the two.
+ */
+const PASTED_DEBUG_LOG_FRAME = new RegExp(
+  [
+    // (a) PASTE EVIDENCE — the log itself is in the message. A pipe-delimited
+    //     event marker, or the `<version> CATEGORY,LEVEL;` header line. This is
+    //     the only unambiguous signal, and it also catches a minimal log whose
+    //     whole body is a header plus USER_INFO.
+    // `\b` not `\|` as the closing delimiter: a payload-less event such as
+    // `EXECUTION_STARTED` ends the LINE, so requiring a trailing pipe missed
+    // the shortest and most obvious paste of all.
+    String.raw`\|(?:CODE_UNIT_STARTED|CODE_UNIT_FINISHED|EXECUTION_STARTED|EXECUTION_FINISHED|METHOD_ENTRY|USER_INFO|USER_DEBUG|SOQL_EXECUTE_BEGIN|DML_BEGIN|CUMULATIVE_LIMIT_USAGE|LIMIT_USAGE_FOR_NS|FLOW_ELEMENT_BEGIN|FLOW_START_INTERVIEW_BEGIN|VALIDATION_RULE|FATAL_ERROR)\b`,
+    // The log-line grammar itself: `HH:MM:SS.mmm (nanos)|`. Nothing else a
+    // user types looks like this, so it is paste evidence on its own.
+    String.raw`\d{1,2}:\d{2}:\d{2}\.\d+\s+\(\d+\)\|`,
+    String.raw`\b\d{2}\.\d\s+APEX_CODE,[A-Z]+;`,
+    // (b) An explicit PASTE MARKER next to the log noun, in either order.
+    //     Deliberately NOT the bare demonstratives `this` / `these` /
+    //     `following`: those are how RETRIEVAL is phrased, not pasting —
+    //     "read this sandbox's debug logs", "pull this week's debug logs",
+    //     "show me this org's event monitoring logs", "retrieve the following
+    //     users' debug logs" all matched the old excluder and stopped
+    //     refusing, even though nothing in this product fetches a log.
+    String.raw`\b(?:pasted|attached|here'?s)\b[^.?!]{0,40}\blogs?\b`,
+    String.raw`\blogs?\b[^.?!]{0,40}\b(?:below|above|attached|pasted|at\s+the\s+(?:bottom|top|end))\b`,
+    // (c) The asker says outright that they supplied it.
+    String.raw`\b(?:i|we)\s+(?:just\s+)?(?:pasted|attached|shared|captured)\b`,
+  ].join('|'),
+  'i',
+);
+
+/**
+ * Runtime/ops telemetry the product genuinely cannot read. Each row is
+ * `[trigger, topic]`, optionally with a third EXCLUDER regex: when the excluder
+ * matches, the row does not fire (the question is answerable after all).
+ */
+const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string, RegExp?])[] = [
   [/\blogin\s+history\b|\baudit\s+trail\s+of\s+logins?\b/i, 'login history'],
   // Per-user LOGIN EVENTS (hon-031/hon-036/hon-060): who logged in when,
   // exact login timestamps, who is logged in right now, or a full per-user
@@ -532,6 +575,9 @@ const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string])[] = [
   [
     /\b(?:show|see|view|pull|get|give|retrieve|read|check|download|fetch)\b[^.?!]{0,45}\b(?:debug|event[\s-]monitoring)\s+logs?\b/i,
     'debug / event-monitoring logs',
+    // …unless the user is handing us the log. sfi.trace_debug_log reads a
+    // PASTED log's event stream offline; only fetching one from the org is a gap.
+    PASTED_DEBUG_LOG_FRAME,
   ],
   [
     /\b(?:query|execution|soql)\s+plans?\b|\bindexes?\s+(?:are\s+)?being\s+used\b/i,
@@ -791,7 +837,9 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
 
   // 3 — runtime/ops telemetry honest gap.
   const runtimeTopic =
-    RUNTIME_TRIGGERS.find(([pattern]) => pattern.test(q))?.[1] ??
+    RUNTIME_TRIGGERS.find(
+      ([pattern, , excluder]) => pattern.test(q) && !(excluder?.test(q) ?? false),
+    )?.[1] ??
     (RUNTIME_WINDOW.test(q) && RUNTIME_INCIDENT.test(q) ? 'runtime incident forensics' : undefined);
   if (runtimeTopic !== undefined) {
     return { kind: 'runtime-analytics', disclosure: runtimeDisclosure(runtimeTopic) };

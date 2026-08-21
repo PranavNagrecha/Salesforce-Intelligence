@@ -288,6 +288,8 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'What happens when an Opportunity becomes Closed Won?',
       'A user pasted this save error — which component produced it?',
       'Explain this Apex debug log / governor-limit exception and point me at the class.',
+      'Read this debug log: where did the CPU time go and which automation fired in what order?',
+      'Break this debug log down into a timeline with a per-limit consumption table.',
     ],
     tools: [
       'sfi.explain_field',
@@ -302,6 +304,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.field_360',
       'sfi.explain_error',
       'sfi.explain_debug_log',
+      'sfi.trace_debug_log',
     ],
   },
   {

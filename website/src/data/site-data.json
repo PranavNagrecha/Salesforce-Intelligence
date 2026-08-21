@@ -1,9 +1,9 @@
 {
-  "generatedAt": "2026-08-20T23:56:15.360Z",
+  "generatedAt": "2026-08-21T14:13:43.722Z",
   "version": "0.3.0",
-  "toolCount": 211,
+  "toolCount": 212,
   "skillCount": 26,
-  "agentCount": 2,
+  "agentCount": 4,
   "commandCount": 5,
   "componentTypeCount": 101,
   "edgeTypeCount": 23,
@@ -13,8 +13,8 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 288,
-        "cases": 5730
+        "files": 289,
+        "cases": 5752
       },
       {
         "name": "extractors",
@@ -33,8 +33,8 @@
       },
       {
         "name": "parsers",
-        "files": 7,
-        "cases": 176
+        "files": 8,
+        "cases": 202
       },
       {
         "name": "patterns",
@@ -62,8 +62,8 @@
         "cases": 50
       }
     ],
-    "totalCases": 8432,
-    "totalFiles": 483,
+    "totalCases": 8480,
+    "totalFiles": 485,
     "packageCount": 10,
     "approx": 8400
   },
@@ -90,9 +90,9 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 288,
-      "cases": 5730,
-      "description": "The 211 read-only tools + router + grounding layer"
+      "files": 289,
+      "cases": 5752,
+      "description": "The 212 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
@@ -114,8 +114,8 @@
     },
     {
       "name": "parsers",
-      "files": 7,
-      "cases": 176,
+      "files": 8,
+      "cases": 202,
       "description": "Formula / SOQL / source tokenizers"
     },
     {
