@@ -18,9 +18,17 @@ returns, for one plain-language question:
 
 | Field | Authority | What it is |
 | --- | --- | --- |
-| `toolCandidates` | **Primary** | Meaning-ranked shortlist of `sfi.*` tools (offline TF-IDF over the tool catalog — no network, no embeddings service). Each row carries the tool, its plane, whether it needs the live org, a confidence band, and `cosine` — the raw pre-fusion semantic score (`0` for rows inserted purely from a regex route hint), so you can tell real semantic support from rule assertion. |
+| `toolCandidates` | **Primary** | Meaning-ranked shortlist of `sfi.*` tools (offline TF-IDF over the tool catalog — no network, no embeddings service). Each row carries the tool, **`answers`** (the tool's one-line summary) and its **`category`**, its plane, whether it needs the live org, a confidence band, and `cosine` — the raw pre-fusion semantic score (`0` for rows inserted purely from a regex route hint), so you can tell real semantic support from rule assertion. |
 | `route` | **Advisory hint** | The deterministic route: an intent, ordered `route.tools` (with step ids and `dependsOn` edges for compound questions), plane, confidence, `suggestedArgs`, disclosures. A suggestion to inform your pick — never a command. |
 | `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground via `sfi.synthesize_answer`. |
+
+`answers` exists because the default tool profile is `core`, which advertises 19
+of 207 tools. For every other candidate the shortlist would otherwise name a tool
+whose description is nowhere in your context, recoverable only by an
+`sfi.describe_analysis` round trip per candidate. The one-liner is the same text
+`sfi.list_analyses` renders, so you can pick without a second call — and, just as
+usefully, recognise a shortlist that contains no right answer. It does not affect
+ranking; candidate order and scores are identical with or without it.
 
 **The host LLM decides.** In the default hybrid mode you read the candidates
 and the hint, pick, run, and ground. Two things are *not* advisory:
