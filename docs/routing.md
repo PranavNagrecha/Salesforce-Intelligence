@@ -458,15 +458,49 @@ those are deliberately retired and say so in their own descriptions
 (`release_readiness_report`, `find_apex_usages`, `churn`), and routing to a
 retired tool would be the defect, not the fix.
 
+### What the deterministic layer memorised
+
+The same activation measurement across three corpora makes the fitting visible:
+
+| corpus | regex fires | correct when it fires |
+| --- | --- | --- |
+| tuned goldset (328) | 165/328 (50.3%) | **165/165 — 100.0%** |
+| fresh (1,000 rows) | 296/1000 (29.6%) | 256/296 (86.5%) |
+| fresh, **deduplicated** (563) | **77/563 (13.7%)** | 65/77 (84.4%) |
+
+A layer that is **never wrong** on the set it was fitted to and fires on **one
+question in seven** of genuinely fresh phrasing is a lookup table, not a
+generaliser. This is not a criticism of the design — a curated intent table is a
+perfectly good way to nail known phrasings — but it is the reason the goldset
+number cannot be quoted as accuracy.
+
 ### Honest limits of these numbers
 
-- The 1,000-question corpus is **template-generated** from fixed object / field /
-  profile vocabulary. It proves generalization beyond the goldset; it does not
-  prove anything about real user phrasing.
+Every caveat below was verified against the corpora themselves, not inferred.
+
+- **The "1,000 fresh questions" are 563 distinct strings.** 437 rows are exact
+  duplicates — a padding loop recycles templates until the array reaches 1,000,
+  and one string appears 9 times. Deduplicating drops recall@8 from 89.4% to
+  **84.7%**. The duplicated rows are also disproportionately regex-matched, which
+  is why activation falls from 29.6% to 13.7% on the deduplicated set.
+- **Grading accepts a tool FAMILY, not a tool.** Each row carries a hand-written
+  list of acceptable tools (mean 2.22, max 4). A "hit" means any family member
+  reached the top-K.
+- **Only 67 distinct tools are ever accepted anywhere in the corpus**, out of 206
+  funnel-indexable ones. **Roughly 139 tools have zero generalization coverage** —
+  the harness cannot regress what it never grades.
+- **Both recall harnesses stop at `semanticCandidates`** — the RAW funnel. The
+  list a host actually receives is built by `buildFunnelCandidates`, which fuses
+  the regex route, de-crowds what-if families, applies the mode rerank and breaks
+  plane ties before slicing. Those stages are **ungated for recall**: a change
+  that broke the fusion outright would not move either recall number.
+- **The corpus is template-generated** from a closed vocabulary (18 objects, 16
+  fields, 7 profiles, 7 classes, 5 flows, 3 events). It proves generalization
+  beyond the goldset and nothing about real user phrasing.
 - Recall@8 around 90% and recall@1 around 60% describe the same system. Quoting
   either without K is misleading.
-- A grade is against a labelled `expectedTool`. Where a shortlist contains a
-  *better* tool than the label, the harness scores it wrong.
+- Where a shortlist contains a *better* tool than the label, the harness scores it
+  wrong.
 
 ---
 
@@ -530,6 +564,22 @@ this. If a disclosure must appear on several tools, route it through
 **Adding utterances is not free.** A wrapper tool given utterances that duplicate
 its own dependency's mostly steals routing from the dependency. Check what
 already covers the phrasing before adding.
+
+**Routing quality is NOT defended by CI.** A negative search over `.github/`
+finds zero references to `router-goldset`, `router-recall`,
+`funnel-generalization`, `sf-intelligence-qa` or `commit-gate`. GitHub CI runs
+only `pnpm eval:routing-gate`. The three harnesses above live in the LOCAL
+commit gate, which a human must remember to run. Treat a green CI badge as
+saying nothing about routing.
+
+**The per-question guards are partial, and one command erases them.**
+`config/router-recall-baseline.json` records `total: 115` and a `passing` list of
+103, written 2026-06-16; the fixture now holds **328** rows. So 225 rows have no
+per-question protection — only the aggregate floor. And
+`router-goldset.mjs --update-baseline` writes the new baseline and `return`s
+**before** the regression check, so a ratchet run always exits 0 and silently
+drops any currently-failing row out of the guarded set. Ratchet deliberately,
+never as housekeeping.
 
 **Two fixes already measured and refused** — do not re-attempt without new
 evidence: enabling the embeddings (§4), and correcting the plural stemmer (§3).
