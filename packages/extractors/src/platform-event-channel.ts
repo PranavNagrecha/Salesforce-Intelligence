@@ -110,7 +110,9 @@ const parseRoot = (
  * fullName suffix is preserved so a member's `<eventChannel>` resolves to
  * exactly this id). A PlatformEventChannel is the publish/stream container; it
  * carries `<channelType>` (`event` for custom Platform Event channels, `data`
- * for Change Data Capture channels) and `<label>`.
+ * for Change Data Capture channels), `<eventType>` (`custom` when the channel
+ * carries the org's own events, `standard` for platform-defined streams) and
+ * `<label>`.
  *
  * Node-only: the channel→member `parentOf` and member→event `references` edges
  * are emitted by the MEMBER extractor (a member knows its parent channel via
@@ -146,6 +148,10 @@ export const extractPlatformEventChannel = async (
     apiVersion: null,
     properties: {
       channelType: optionalString(rootObj, 'channelType'),
+      // `<eventType>` distinguishes a channel carrying the org's OWN events
+      // (`custom`) from one carrying platform-defined streams (`standard`).
+      // Read verbatim; `null` when the org omitted it.
+      eventType: optionalString(rootObj, 'eventType'),
       label,
     },
   };

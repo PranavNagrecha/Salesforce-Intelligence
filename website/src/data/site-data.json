@@ -1,30 +1,30 @@
 {
-  "generatedAt": "2026-08-21T13:57:35.726Z",
+  "generatedAt": "2026-08-21T17:54:57.825Z",
   "version": "0.3.0",
-  "toolCount": 212,
+  "toolCount": 214,
   "skillCount": 26,
   "agentCount": 4,
   "commandCount": 5,
   "componentTypeCount": 102,
   "edgeTypeCount": 23,
-  "conceptCount": 142,
-  "conceptRuleCount": 193,
+  "conceptCount": 143,
+  "conceptRuleCount": 195,
   "tests": {
     "packages": [
       {
         "name": "mcp",
-        "files": 289,
-        "cases": 5741
+        "files": 294,
+        "cases": 5899
       },
       {
         "name": "extractors",
-        "files": 84,
-        "cases": 1131
+        "files": 86,
+        "cases": 1152
       },
       {
         "name": "cli",
         "files": 46,
-        "cases": 490
+        "cases": 493
       },
       {
         "name": "graph",
@@ -49,7 +49,7 @@
       {
         "name": "vault",
         "files": 11,
-        "cases": 132
+        "cases": 139
       },
       {
         "name": "tooling-api",
@@ -62,10 +62,10 @@
         "cases": 50
       }
     ],
-    "totalCases": 8456,
-    "totalFiles": 485,
+    "totalCases": 8645,
+    "totalFiles": 492,
     "packageCount": 10,
-    "approx": 8400
+    "approx": 8600
   },
   "integrationSuiteCount": 3,
   "gates": [
@@ -90,20 +90,20 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 289,
-      "cases": 5741,
-      "description": "The 212 read-only tools + router + grounding layer"
+      "files": 294,
+      "cases": 5899,
+      "description": "The 214 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 84,
-      "cases": 1131,
+      "files": 86,
+      "cases": 1152,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
       "files": 46,
-      "cases": 490,
+      "cases": 493,
       "description": "The sfi command-line tool"
     },
     {
@@ -133,7 +133,7 @@
     {
       "name": "vault",
       "files": 11,
-      "cases": 132,
+      "cases": 139,
       "description": "Vault layout, manifest, freshness"
     },
     {

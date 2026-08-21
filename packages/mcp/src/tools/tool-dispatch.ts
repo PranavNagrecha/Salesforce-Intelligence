@@ -205,6 +205,10 @@ import {
   eventSubscribersInputSchema,
 } from './event-subscribers.js';
 import {
+  eventTopologyHandler,
+  eventTopologyInputSchema,
+} from './event-topology.js';
+import {
   explainApexMethodHandler,
   explainApexMethodInputSchema,
 } from './explain-apex-method.js';
@@ -1790,6 +1794,15 @@ export const dispatchTool = async (
         args,
         reviewChangeInputSchema,
         reviewChangeHandler,
+      );
+    // LANE-E — the event-plane front door. `sfi.cdc_subscribers` below stays
+    // dispatchable as a hidden back-compat alias; new callers land here.
+    case 'sfi.event_topology':
+      return runTool(
+        ctx,
+        args,
+        eventTopologyInputSchema,
+        eventTopologyHandler,
       );
     case 'sfi.cdc_subscribers':
       return runTool(

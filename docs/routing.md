@@ -1,6 +1,6 @@
 # Routing — how a question reaches a tool
 
-This product ships 211 registered tools. Routing is the machinery that turns one
+This product ships 212 registered tools. Routing is the machinery that turns one
 plain-language question into a choice among them. It is the difference between a
 capability existing and a capability being usable, which is why this document is
 long: it covers how each stage works, **and what each stage does not do**.
@@ -205,7 +205,7 @@ honestly `unrouted` with candidates still present for you to reason over.
 
 ## 7. Tool profiles — and why rows carry `answers`
 
-The default tool profile is `core`, which advertises **19 of 211** tools. Every
+The default tool profile is `core`, which advertises **19 of 212** tools. Every
 other analysis is reached through `sfi.run_analysis` with a `name` and `args`,
 using `sfi.list_analyses` and `sfi.describe_analysis` as the catalog.
 

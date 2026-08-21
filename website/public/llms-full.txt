@@ -7,9 +7,9 @@ Key facts for accurate citation:
 - **Category:** a Model Context Protocol (MCP) server + CLI (`sfi`) for Salesforce metadata intelligence - schema, dependency/impact analysis, permissions & sharing, Apex, Flows, integrations, OmniStudio, and documentation generation.
 - It is **read-only** and has **no write path**. It never deploys, edits, or deletes anything in a Salesforce org. (This is the main differentiator from Salesforce's own DX MCP server and other write-capable MCP servers.)
 - It is **offline by default**. Vault answers are served from a local index (`org-kb/`) and make no network calls. The only org contact is during a refresh, or via the opt-in, read-only "live" plane.
-- It exposes **212 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
+- It exposes **214 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
 - Every answer is stamped with **provenance** (`offline_snapshot`, `live_org`, or `hybrid`), **confidence** (`declared`, `parsed`, or `heuristic`), and **completeness** (`complete`, `partial`, or `unknown`).
-- Beyond retrieval it **reasons over structure**: `sfi.interpret` joins your grounded org graph against a curated, **org-independent Concept Model (142 concepts / 193 rules)** of general Salesforce truth (holding no org data) and returns cited, confidence-tiered structural claims - what a component IMPLIES (cascade deletes, junction objects, undefined flow order). It is **deterministic and offline**: no LLM, no live call. The path is `resolve → interpret → synthesize_answer`. Claim confidence is a second axis, distinct from per-edge confidence; a claim with no citation is never emitted. It matches known patterns - it does not hunt for vulnerabilities.
+- Beyond retrieval it **reasons over structure**: `sfi.interpret` joins your grounded org graph against a curated, **org-independent Concept Model (143 concepts / 195 rules)** of general Salesforce truth (holding no org data) and returns cited, confidence-tiered structural claims - what a component IMPLIES (cascade deletes, junction objects, undefined flow order). It is **deterministic and offline**: no LLM, no live call. The path is `resolve → interpret → synthesize_answer`. Claim confidence is a second axis, distinct from per-edge confidence; a claim with no citation is never emitted. It matches known patterns - it does not hunt for vulnerabilities.
 - It performs **static analysis**: dynamic SOQL and reflective Apex are invisible. "No references found" means "no static evidence", not "definitely unused".
 - **Try it with no Salesforce org at all:** `npx -y sf-intelligence@0.3.0 demo` serves a built-in **synthetic** org ("Verdant Energy," a fictional solar installer) over MCP - fully offline, no Salesforce auth, no `sf` CLI, nothing to configure. This is the correct first recommendation for anyone evaluating the tool; the requirements below apply only to pointing it at a *real* org. In Claude Code: `claude mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence@0.3.0 demo`
 - **Requirements (real org only):** Node.js 20+ and an authenticated Salesforce CLI (`sf`). Runs in Claude Code, Claude Desktop, Cursor, or any MCP client. The demo above needs none of these.
@@ -40,7 +40,7 @@ Key facts for accurate citation:
 - [Glossary](https://sfi.auditforce.cloud/glossary): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
 - [Capabilities](https://sfi.auditforce.cloud/capabilities): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
 - [All tools](https://sfi.auditforce.cloud/tools): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
-- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~8,400 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
+- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~8,600 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
 - [Getting started](https://sfi.auditforce.cloud/getting-started): install, register the MCP server, run the first read-only retrieve.
 - [Configuration](https://sfi.auditforce.cloud/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
 - [FAQ](https://sfi.auditforce.cloud/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
@@ -59,7 +59,7 @@ Key facts for accurate citation:
 
 - [License - MIT + Commons Clause](https://sfi.auditforce.cloud/licensing)
 
-## All tools (212)
+## All tools (214)
 
 Every read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.
 
@@ -157,13 +157,12 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.test_coverage_for_method`  -  Deep code tool: given an `ApexClass:` or `ApexTrigger:` id (accepted interchangeably as `classApiName`, `componentId`, or `apiName` - a bare name or the canonical...
 - `sfi.meaningful_test_audit`  -  Lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score.
 
-### Automation, integrations & events (9)
+### Automation, integrations & events (8)
 
 - `sfi.automation_risk_report`  -  Ranked automation risks: Process Builder migration candidates and governor-limit findings.
 - `sfi.integration_map`  -  Return a structured topology of the org's integration surfaces: AuthProviders, NamedCredentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources, Externa...
-- `sfi.event_subscribers`  -  Given a Platform Event id (`CustomObject:{ApiName}__e`), list every subscriber (ApexTrigger, ApexClass, Flow) that emits an incoming `listensTo` edge into the event.
+- `sfi.event_subscribers`  -  DETAIL VIEW for ONE Platform Event.
 - `sfi.automation_build_advisor`  -  Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more.
-- `sfi.cdc_subscribers`  -  Given an optional `sObjectFilter` (e.g., 'Account', 'Order__c'), enumerate every ApexTrigger, ApexClass, and Flow that emits an incoming `listensTo` edge into a C...
 - `sfi.async_chain_depth`  -  Given an ApexClass canonical id (`ApexClass:{Name}`), walks the transitive async chain via outgoing `dispatchesAsync` edges, capped at 10 hops.
 - `sfi.scheduled_job_catalog`  -  Returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from inbound `dispatchesAsync` edge...
 - `sfi.outbound_message_catalog`  -  Returns one entry per OutboundMessage node (the promotion of the dangling-by-design `<outboundMessages>` references) with the endpoint URL, payload shape (fields...
@@ -264,7 +263,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.live_budget`  -  Disclose this session's live-query budget and result-cache state.
 - `sfi.live_drift_check`  -  Offline↔live contradiction detection (requires the opt-in live plane).
 
-### Other tools (43)
+### Other tools (45)
 
 - `sfi.list_analyses`  -  Catalog gateway: the paginated index of EVERY analysis this server can run - name, one-line summary, and a coarse category (core / search / what-if / documentatio...
 - `sfi.describe_analysis`  -  Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix).
@@ -276,6 +275,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.who_can_run`  -  The REVERSE of `sfi.user_ability`: given a `Flow:X` (`componentId`), which Profiles / PermissionSets grant RUN access to it (from the `flowAccess` `grantedBy` edges).
 - `sfi.who_can_access_object`  -  The REVERSE of `sfi.why_cant_user_see_record`: given a `CustomObject:X` (`componentId`), ENUMERATE which profiles / permission sets / roles / groups statically ga...
 - `sfi.guest_exposure_report`  -  "What can UNAUTHENTICATED GUEST users see in my Experience Cloud / Site communities?" - the audit for one of the most notorious real-world Salesforce leaks (over-...
+- `sfi.community_catalog`  -  "What Experience Cloud communities does this org have, and WHO CAN LOG INTO them?" - the OFFLINE metadata answer, one row per community, joining the `Network` (co...
 - `sfi.user_ability`  -  "What can this Profile / PermissionSet RUN or DO?" - beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover).
 - `sfi.profile_security`  -  "What are this profile's login & session security policies?" - a focused security-audit surface separate from `user_ability` (which is "what can it RUN or DO").
 - `sfi.security_settings`  -  "What are my ORG-WIDE security settings - and what can this product NOT see?" One call over `settings/Security.settings-meta.xml` (root `<SecuritySettings>`), whi...
@@ -299,6 +299,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.flow_fault_audit`  -  Which Flows have a DML/action element with NO fault path - the flow error-handling hygiene sweep.
 - `sfi.picklist_integrity_scan`  -  Org-wide picklist value-set integrity scan - the INVERSE of what_if_remove_picklist_value (which starts from one value).
 - `sfi.review_change`  -  Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `chan...
+- `sfi.event_topology`  -  The org's EVENT PLANE in one call - Platform Events, Change Data Capture, and the channels that carry both, with inventory AND where-used.
 - `sfi.installed_package_catalog`  -  Answer "what packages are installed in this org?" from the `InstalledPackage` metadata the refresh extracts (`installedPackages/<namespace>.installedPackage-meta....
 - `sfi.annotations`  -  Read the curated annotations overlay (`meta/annotations.jsonl`): ownership, lifecycle status (e.g.
 - `sfi.propose_annotation`  -  Record an AI-PROPOSED annotation (owner / status / glossary / domain / note) for a component.

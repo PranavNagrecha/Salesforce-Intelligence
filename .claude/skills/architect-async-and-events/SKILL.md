@@ -7,8 +7,10 @@ description: |
   subscribers do we have", "what's the async chain depth from this
   Queueable", "show me every scheduled job", "what outbound messages
   does this org send", "give me every endpoint URL in one place".
-  Drives the v2.8 cascade: `cdc_subscribers` (Change Data Capture
-  subscribers via name-pattern detection), `async_chain_depth`
+  Drives the cascade: `event_topology` (the event plane — Platform
+  Events, Change Data Capture enablement, event channels, and the
+  retrieval coverage behind each; it supersedes the retired
+  `cdc_subscribers` alias), `async_chain_depth`
   (transitive `dispatchesAsync` walk; chainAsync NOT persisted),
   `scheduled_job_catalog` (cron-driven jobs from `System.schedule`
   detection), `outbound_message_catalog` (the new v2.8 OutboundMessage
@@ -232,7 +234,34 @@ Defer to another skill when:
 
 Five tools, five distinct surfaces. Pick the right entry point.
 
-### 1. `sfi.cdc_subscribers` — Change Data Capture subscribers
+### 1. `sfi.event_topology` — the event plane (Platform Events + CDC)
+
+**Start here for anything event-shaped.** One call returns the org's
+Platform Events with their declared `eventType` / `publishBehavior`
+and their publishers, subscribers and channel bindings; the entities
+whose Change Data Capture stream a `PlatformEventChannelMember`
+SELECTS (that selection IS the enablement declaration); the channels
+carrying both; the events the org NAMES but the vault never retrieved;
+and a `coverage` block naming the counts all of the above were computed
+under.
+
+```json
+{}                                   // the whole event plane
+{ "filter": "cdc" }                  // only the CDC half
+{ "objectApiName": "Contact" }       // is CDC enabled for Contact?
+```
+
+Two boundaries to surface verbatim, because they are the ones a reader
+gets wrong: an empty `cdcEntities` list quotes the manifest coverage
+row, so it reads as a CHECKED zero or as NOT CHECKED — never as a bare
+"no CDC"; and a permission grant naming a `*ChangeEvent` entity is NOT
+CDC enablement (those entities exist on every org), so it appears only
+under `referencedNotRetrieved`.
+
+`sfi.cdc_subscribers` below is a RETIRED back-compat alias: still
+dispatchable by name, no longer advertised. Prefer `event_topology`.
+
+### 1b. `sfi.cdc_subscribers` (retired alias) — CDC subscribers only
 
 Walks `listensTo` edges WHOSE TARGET MATCHES the CDC name
 pattern: `{ObjectName}ChangeEvent` for standard objects,

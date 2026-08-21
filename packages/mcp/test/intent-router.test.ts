@@ -2486,18 +2486,56 @@ describe('flow-family REACH routing', () => {
   });
 
   describe('CDC / event subscribers', () => {
+    // LANE-E: `sfi.cdc_subscribers` retired to a hidden back-compat alias; the
+    // survivor `sfi.event_topology` answers the CDC half AND the platform-event
+    // half, so these subscriber-frame routes now lead with it.
     it('routes "what\'s subscribing to Change Data Capture"', () => {
       routesTo(
         "What's subscribing to Change Data Capture in this org? Will turning on CDC for Contact fan out?",
         'cdc-subscribers',
-        'sfi.cdc_subscribers',
+        'sfi.event_topology',
       );
     });
     it('routes "CDC or platform-event subscribers feeding <system>"', () => {
       routesTo(
         'Do we have any CDC or platform-event subscribers feeding the warehouse, or is that all API polling?',
         'cdc-subscribers',
-        'sfi.cdc_subscribers',
+        'sfi.event_topology',
+      );
+    });
+  });
+
+  describe('CDC enablement — the frame that previously routed nowhere', () => {
+    // The owner's verbatim phrasing. Before LANE-E this fell through to
+    // `unrouted` and the funnel's top pick returned an `oversize` error, so
+    // the user got no answer at all.
+    it('routes "which objects have change data capture enabled in this org?"', () => {
+      routesTo(
+        'which objects have change data capture enabled in this org?',
+        'cdc-enablement',
+        'sfi.event_topology',
+      );
+    });
+    it('routes "is CDC turned on for any object"', () => {
+      routesTo(
+        'Is CDC turned on for any object in this org?',
+        'cdc-enablement',
+        'sfi.event_topology',
+      );
+    });
+    it('does NOT steal the history-tracking enablement question (no CDC noun)', () => {
+      expect(
+        classifyQuestion('Which objects have field history tracking enabled?').intent,
+      ).not.toBe('cdc-enablement');
+    });
+  });
+
+  describe('event channels — the owner\'s second goal', () => {
+    it('routes "what event channels does this org have?"', () => {
+      routesTo(
+        'What event channels does this org have?',
+        'event-catalog',
+        'sfi.event_topology',
       );
     });
   });
@@ -3429,6 +3467,35 @@ describe('community-access must not steal live login-ACTIVITY questions', () => 
   for (const [question, intent] of declared) {
     it(`still claims the DECLARED-access question: "${question}"`, () => {
       expect(classifyQuestion(question).intent).toBe(intent);
+    });
+  }
+});
+
+describe('cdc-enablement must not steal the field-history neighbours', () => {
+  // "change data capture" and "field history tracking" are the standing lexical
+  // collision in this corpus — the TF-IDF funnel cannot separate them, because
+  // `change`, `data` and `history` are individually common. The deterministic
+  // rule can, but only if it does not over-reach. These pin both directions.
+  const cdc: readonly string[] = [
+    'which objects have change data capture enabled in this org?',
+    'is CDC turned on for Account?',
+    'which entities have CDC selected?',
+  ];
+  for (const question of cdc) {
+    it(`claims the enablement question: "${question}"`, () => {
+      expect(classifyQuestion(question).intent).toBe('cdc-enablement');
+    });
+  }
+
+  const notCdc: readonly string[] = [
+    'what field history tracking is enabled?',
+    'which objects have field history tracking enabled?',
+  ];
+  for (const question of notCdc) {
+    it(`leaves the field-history neighbour alone: "${question}"`, () => {
+      const route = classifyQuestion(question);
+      expect(route.intent).not.toBe('cdc-enablement');
+      expect(route.tools).not.toContain('sfi.event_topology');
     });
   }
 });

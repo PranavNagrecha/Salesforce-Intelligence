@@ -414,6 +414,66 @@ describe('extractCustomObject', () => {
       }
     });
 
+    // LANE-E — Platform-Event facts. These are what let a consumer ask the
+    // GRAPH whether a node IS a Platform Event, and tell "the org did not
+    // declare an eventType" apart from "this vault's extractor never read
+    // one". They are emitted on the PlatformEvent variant ONLY, so no other
+    // object's properties map changes shape.
+    it('__e stamps isPlatformEvent + the declared eventType / publishBehavior', async () => {
+      const xml = buildVariantXml(
+        '    <deploymentStatus>Deployed</deploymentStatus>\n' +
+          '    <pluralLabel>My Events</pluralLabel>\n' +
+          '    <eventType>HighVolume</eventType>\n' +
+          '    <publishBehavior>PublishAfterCommit</publishBehavior>',
+      );
+      const { dir, path } = await writeTempXml('My_Event__e.object-meta.xml', xml);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node?.properties['isPlatformEvent']).toBe(true);
+        expect(node?.properties['eventType']).toBe('HighVolume');
+        expect(node?.properties['publishBehavior']).toBe('PublishAfterCommit');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('__e with the elements OMITTED reads null — declared-absent, never invented', async () => {
+      const xml = buildVariantXml(
+        '    <deploymentStatus>Deployed</deploymentStatus>\n' +
+          '    <pluralLabel>My Events</pluralLabel>',
+      );
+      const { dir, path } = await writeTempXml('Bare_Event__e.object-meta.xml', xml);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node?.properties['isPlatformEvent']).toBe(true);
+        expect(node?.properties['eventType']).toBeNull();
+        expect(node?.properties['publishBehavior']).toBeNull();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a NON-PlatformEvent object carries none of the three keys (shape unchanged)', async () => {
+      const { dir, path } = await writeTempXml('Widget__c.object-meta.xml', VALID_XML);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const keys = Object.keys(result.value.nodes[0]?.properties ?? {});
+        expect(keys).not.toContain('isPlatformEvent');
+        expect(keys).not.toContain('eventType');
+        expect(keys).not.toContain('publishBehavior');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('__b (Big Object) variant accepts missing <nameField>', async () => {
       const xml = buildVariantXml(
         '    <deploymentStatus>Deployed</deploymentStatus>\n' +

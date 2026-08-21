@@ -1194,9 +1194,35 @@ describe('eventSubscribersHandler — retrieval state is separate from subscript
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect('referencedNotRetrievedEventCount' in result.value.data).toBe(false);
-      expect(result.value.data.boundaries).toHaveLength(1);
+      // Assert the ABSENCE of the partial-inventory line, not the LENGTH of the
+      // boundaries array. A count pin here is a tripwire for every unrelated
+      // catalog-mode disclosure: LANE-E's CATALOG SCOPE line is emitted on this
+      // same path and is correct, and it broke this pin the moment the two lanes
+      // merged even though neither lane failed alone.
+      const text = result.value.data.boundaries.join(' ');
+      expect(text).not.toContain('PARTIAL INVENTORY');
+      expect(text).toContain('CATALOG SCOPE');
     }
     await closeGraph(cleanStore);
     rmSync(cleanDir, { recursive: true, force: true });
+  });
+});
+
+describe('event_subscribers — catalog mode declares its own scope (LANE-E)', () => {
+  it('catalog mode says it covers neither CDC nor referenced-but-not-retrieved events', async () => {
+    const result = await eventSubscribersHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const text = result.value.data.boundaries.join(' ');
+    expect(text).toContain('CATALOG SCOPE');
+    expect(text).toContain('Change Data Capture');
+    expect(text).toContain('sfi.event_topology');
+  });
+
+  it('single-event mode does NOT carry the catalog-scope line (byte-identical path)', async () => {
+    const result = await eventSubscribersHandler(ctx, { eventId: ORDER_EVENT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.boundaries.join(' ')).not.toContain('CATALOG SCOPE');
   });
 });

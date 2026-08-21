@@ -3731,6 +3731,29 @@ const CDC_SUBSCRIBERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.event_topology`. Mirrors
+ * `eventTopologyInputSchema`. `filter` selects one half of the event plane
+ * (`coverage` / `boundaries` are returned whatever the filter, so a narrowed
+ * call is never a less honest one); `objectApiName` / `object` narrow the CDC
+ * half to a single entity and accept a bare apiName, the Change Event name,
+ * or a `CustomObject:` id. Drift between Zod and this schema is a code-review
+ * concern.
+ */
+const EVENT_TOPOLOGY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      filter: {
+        type: 'string',
+        enum: ['all', 'platform-events', 'cdc', 'channels'],
+      },
+      objectApiName: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.async_chain_depth`. Mirrors
  * `asyncChainDepthInputSchema`. The `rootApexClassId` prefix
  * constraint (must start with `ApexClass:`) is not expressible in
@@ -4981,7 +5004,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   },
   {
     name: 'sfi.event_subscribers',
-    description: "Given a Platform Event id (`CustomObject:{ApiName}__e`), list every subscriber (ApexTrigger, ApexClass, Flow) that emits an incoming `listensTo` edge into the event. OMIT `eventId` for CATALOG mode: every Platform Event in the org with its subscriber count (`events[]`) — answers \"what platform events does this org publish?\" (then `subscribers` is `[]` and `eventApiName` is `null`). Single-event mode returns each subscriber's identity, the emitting extractor, and edge-level subscription metadata, and now also returns `publishers` (the Flow/Apex code that EMITS the event, from modeled `writesTo` edges); catalog mode adds a per-event `publisherCount`, surfacing published-but-unsubscribed events. Honest empty list when no subscribers exist; `invalid-query` when a supplied id is not a Platform Event canonical form. P3b: programmatic `EventBus.subscribe(...)` registrations in Apex (ApexClass / ApexTrigger) are now recognized heuristically when the FIRST argument is a STATIC, resolvable channel string literal that names a real Platform Event (`__e`) — these surface as subscribers via an extractor-emitted `listensTo` edge (the same edge family as the R3 trigger/flow paths, so no module-header contradiction). Dynamic / computed channel args (a variable, method call, or concatenation) mint NO edge and remain invisible, as do managed-package listeners. `boundaries[]` carries the heuristic-detection disclosure; an empty subscriber list adds an empty≠absent line (CDC/dynamic/managed subscriptions not modeled), never a silent empty. RETRIEVAL STATE IS SEPARATE FROM SUBSCRIPTION: the `__e` id check is pure syntax, so an event this org's metadata NAMES but never retrieved (managed-package, or outside the retrieve scope) is reported as `eventRetrieved: false` with a leading not-retrieved boundary — never as a plain \"no subscribers\". Catalog mode enumerates RETRIEVED events only and therefore also reports `referencedNotRetrievedEventCount` / `referencedNotRetrievedEvents`, so a partial inventory cannot pass for the org's whole event list.",
+    description: "DETAIL VIEW for ONE Platform Event. Given `eventId` (`CustomObject:{ApiName}__e`) or the bare `eventApiName` (`Application_Event__e`), return every subscriber (ApexTrigger / ApexClass / Flow with an incoming `listensTo` edge) with its identity, the emitting extractor and the edge-level subscription metadata, plus `publishers` (the Flow/Apex emitting a modeled `writesTo` edge) and `channels` (the publish-side PlatformEventChannel bindings with their DECLARED per-member filter text). For the org-wide INVENTORY — what platform events exist, where each is used, which entities have Change Data Capture enabled, and which events the org names but the vault never retrieved — call `sfi.event_topology` instead; it is the front door for the whole event plane and reports retrieval coverage as data. (Omitting the event scope here still returns a bare catalog of retrieved `__e` objects with subscriber / publisher counts, kept for back-compat callers; it says NOTHING about CDC or about referenced-but-not-retrieved events, so `event_topology` is the honest answer to an inventory question.) Honest empty list when no subscribers exist; `invalid-query` when a supplied id is not a Platform Event canonical form. P3b: programmatic `EventBus.subscribe(...)` registrations in Apex are recognized heuristically ONLY when the FIRST argument is a STATIC, resolvable channel string literal naming a real `__e` event — dynamic / computed channel args and managed-package listeners mint NO edge and stay invisible. `boundaries[]` always carries the heuristic-detection disclosure, the publisher-vs-subscriber role distinction, and — on an empty subscriber list — an explicit empty\u2260absent line, never a silent empty. RETRIEVAL STATE IS SEPARATE FROM SUBSCRIPTION: the `__e` id check is pure syntax, so an event this org's metadata NAMES but never retrieved (managed-package, or outside the retrieve scope) is reported as `eventRetrieved: false` behind a leading not-retrieved boundary — never as a plain \"no subscribers\". The back-compat catalog path enumerates RETRIEVED events only and therefore also reports `referencedNotRetrievedEventCount` / `referencedNotRetrievedEvents`, so a partial inventory cannot pass for the org's whole event list.",
     inputSchema: EVENT_SUBSCRIBERS_INPUT_SCHEMA,
   },
   {
@@ -5405,8 +5428,21 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   },
   {
     name: 'sfi.cdc_subscribers',
-    description: "Given an optional `sObjectFilter` (e.g., 'Account', 'Order__c'), enumerate every ApexTrigger, ApexClass, and Flow that emits an incoming `listensTo` edge into a Change Data Capture (CDC) event. recognizes CDC events by NAME PATTERN on the target apiName — standard objects use `{ObjectName}ChangeEvent` (no separator); custom objects use `{ObjectNameWithout__c}__ChangeEvent`. The sibling of `sfi.event_subscribers` (which handles `__e` Platform Events) — both walk the same R3 `listensTo` edge family but filter by different target name patterns. When `sObjectFilter` is supplied the tool computes the synthetic ChangeEvent id from the filter; when omitted every CDC-recognizable event in the graph is scanned. TWO subscription edge families are read, not one: `listensTo` (Flow / Apex class) and the Apex CDC TRIGGER's declared `triggersOn` — `trigger X on AccountChangeEvent` emits `triggersOn` and never `listensTo`, so such rows are tagged `subscriptionEdge: 'triggersOn'`. The scan set comes from Change Event edge TARGETS rather than retrieved nodes, because a `{X}ChangeEvent` is synthesised by the platform and is never a retrievable component on any org; `summary.scannedChangeEvents` reports how many streams were actually walked, so `totalSubscribers: 0` can be told apart from `nothing was scanned`. Honesty axis (verbatim): detection is by name pattern only — `EventBus.subscribe(...)` programmatic registration is invisible; the declared per-member `filterExpression` in `*.platformEventChannelMember-meta.xml` IS extracted, but it is the declared XML text, not runtime evaluation of which records flow.",
+    // HIDDEN back-compat alias (LANE-E): the CDC half folded into
+    // `sfi.event_topology`, which answers Platform Events AND Change Data
+    // Capture from one front door and reports retrieval coverage as data.
+    // Dispatchable by name / run_analysis, un-advertised on tools/list, so the
+    // retrieval corpus stays net-flat while the front door is added.
+    hidden: true,
+    description:
+      'Change Data Capture subscribers for an optional `sObjectFilter`: the ApexTrigger / ApexClass / Flow emitting an incoming `listensTo` edge into a `{Object}ChangeEvent` / `{Object}__ChangeEvent` target, plus the `PlatformEventChannelMember` rows that select a Change Event. (Superseded by `sfi.event_topology`, which returns the same CDC enablement and code-subscriber facts alongside the Platform Event half and a `coverage` block naming what was and was not retrieved.)',
     inputSchema: CDC_SUBSCRIBERS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.event_topology',
+    description:
+      "The org's EVENT PLANE in one call — Platform Events, Change Data Capture, and the channels that carry both, with inventory AND where-used. `platformEvents[]` lists every retrieved `__e` object with its DECLARED `eventType` (HighVolume / StandardVolume) and `publishBehavior` (PublishAfterCommit / PublishImmediately), the code that subscribes (`listensTo`) and publishes (`writesTo`) it, and its channel bindings. `cdcEntities[]` lists every entity whose Change Data Capture stream a retrieved `PlatformEventChannelMember` SELECTS — that member IS the org's CDC-enablement declaration — each with its channel, declared filter text, and any CDC Apex trigger reached by the trigger's own declared `triggersOn` edge into the Change Event. `channels[]` rosters each PlatformEventChannel with its members. `filter` narrows to one section (`platform-events` / `cdc` / `channels`); `objectApiName` narrows the CDC half to one entity (accepts `Contact`, `ContactChangeEvent`, or `CustomObject:Contact`). ABSENCE IS TYPED, never flattened to zero: `referencedNotRetrieved[]` names every event id the org's own metadata REFERENCES but this vault never retrieved (their subscribers are UNKNOWN, not zero), each flagged `closableByRefresh: false` when it carries a managed-package namespace a metadata retrieve cannot return; `coverage` reports the counts those answers were computed under (events modeled, events referenced-but-not-retrieved, channels and members modeled, CDC members modeled, whether the platform-event facts were extracted at all, and the manifest's own `verified-none` / `unresolved` verdict on the PlatformEventChannelMember family) so a zero is readable as CHECKED or UNCHECKED without trusting prose. An empty `cdcEntities` list therefore carries an explicit boundary quoting the manifest coverage row rather than implying 'no CDC'. Honesty axis (verbatim in `boundaries[]`): where-used is read from MODELED edges only — Apex `EventBus.publish(...)` has no detector and `EventBus.subscribe(...)` is recognized only for a static resolvable channel argument, so an empty participant list means 'no modeled participant', never 'nothing uses this event'; `eventType` / `publishBehavior` are `null` (with a disclosure) on a vault built before the extractor read them, never reported as 'not declared'; a permission grant naming a `*ChangeEvent` entity is NOT CDC enablement and is excluded from `cdcEntities`; channel `filterExpression` is DECLARED XML text, not runtime filter evaluation. Metadata plane only — event volume, delivery and subscriber lag are record-level facts the vault does not hold.",
+    inputSchema: EVENT_TOPOLOGY_INPUT_SCHEMA,
   },
   {
     name: 'sfi.async_chain_depth',

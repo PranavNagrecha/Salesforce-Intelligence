@@ -41,21 +41,21 @@ generators and what-if simulations sit on top of that graph.
 ### Two graphs: the org vault and the Concept Model
 
 There is a second, much smaller graph that never touches your org. The
-**Concept Model** is a curated, org-independent set of **142** reasoning
-concepts and **193** rules encoding general Salesforce truth — save-order
+**Concept Model** is a curated, org-independent set of **143** reasoning
+concepts and **195** rules encoding general Salesforce truth — save-order
 phases, relationship semantics, sharing posture, code-shape signals. It holds
 **no org data**: no canonical ids, no counts, nothing org-specific. The org
 enters reasoning *only* through the grounded slice passed to the engine at query
 time.
 
 `sfi.interpret` joins the two at query time — the grounded org slice (Graph A)
-against the org-independent Concept Model (Graph B — 142 concepts / 193 rules;
+against the org-independent Concept Model (Graph B — 143 concepts / 195 rules;
 pinned by `eval/product-manifest.json`):
 
 ```
    Graph A · org vault slice          Graph B · Concept Model
    (grounded, org-specific)           (org-independent, in the package)
-     CustomObject:Account               142 concepts / 193 rules
+     CustomObject:Account               143 concepts / 195 rules
      Flow:Account_Set_Defaults          save-order · relationships ·
      Flow:Account_Enrich_Billing        sharing · code-shape
      CustomField:Invoice__c.Total__c    NO org data (no ids, no counts)
@@ -283,7 +283,7 @@ API name up front:
 | `sfi.interpret`                      | canonical component ID, optional `concepts` / `ruleIds` filters | cited structural-implication claims (`interpretations[]` with `groundedIn` + claim confidence) + `trust` block | Join the Concept Model against the component's vault slice — deterministic, offline reasoning (no LLM, no live read). |
 
 `sfi.interpret` is the reasoning tool: it fires the curated Concept Model
-(142 concepts / 193 rules — see §1) against a minimal graph slice assembled around
+(143 concepts / 195 rules — see §1) against a minimal graph slice assembled around
 the target component. Each returned claim cites the exact ids it matched, and an
 empty list means "no rule fired," not "nothing depends on it." Its per-claim
 confidence is a *distinct* axis from per-edge confidence and can never exceed the

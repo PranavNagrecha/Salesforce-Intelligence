@@ -176,6 +176,20 @@ const coerceBoolean = (value: unknown): boolean => {
 };
 
 /**
+ * Read an optional single-occurrence string element, preserving the DECLARED
+ * value verbatim and returning `null` when the org omitted the element. `null`
+ * therefore means "not declared on this component", never "not read" — the
+ * distinction the Platform-Event facts depend on.
+ */
+const optionalStringElement = (
+  rootObj: Record<string, unknown>,
+  element: string,
+): string | null => {
+  const raw = unwrapSingle(rootObj[element]);
+  return raw === undefined || raw === null ? null : String(raw);
+};
+
+/**
  * OBJECT-SEARCHLAYOUT-LISTVIEWBUTTONS-UNGRAPHED — an object's
  * `<searchLayouts><listViewButtons>` names the custom List Button (a
  * `WebLink`) placed on the object's list views. The button is DECLARED here,
@@ -350,6 +364,14 @@ const validateRoot = (
  * conditionally per variant. `<visibility>` is read as an optional
  * string regardless of variant. The canonical ID prefix is always
  * `CustomObject:` regardless of variant.
+ *
+ * The `PlatformEvent` variant ALSO carries three extra properties —
+ * `isPlatformEvent: true`, `eventType` (`HighVolume` / `StandardVolume`) and
+ * `publishBehavior` (`PublishAfterCommit` / `PublishImmediately`) — read
+ * verbatim from the object file, with `null` for an element the org omitted.
+ * They are emitted on that variant ONLY, so every other object's properties
+ * map is unchanged, and they let a consumer ask the graph whether a node IS a
+ * Platform Event rather than re-deriving it from the `__e` suffix.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -533,6 +555,30 @@ export const extractCustomObject = async (
   const externalSharingModel =
     externalSharingModelRaw === undefined ? null : String(externalSharingModelRaw);
 
+  // PLATFORM-EVENT FACTS. `<eventType>` (`HighVolume` / `StandardVolume`) and
+  // `<publishBehavior>` (`PublishAfterCommit` / `PublishImmediately`) are
+  // serialized ONLY on the PlatformEvent variant, and they are the two facts
+  // that change how an event behaves at runtime: a High Volume event is
+  // delivered asynchronously off the transaction, and PublishImmediately fires
+  // even when the transaction rolls back.
+  //
+  // The `isPlatformEvent` marker is stamped alongside them so a consumer can
+  // ask the GRAPH whether a node is a Platform Event instead of re-deriving it
+  // from the `__e` suffix. The suffix rule stays correct — this is what lets a
+  // consumer tell "the org did not declare an eventType" from "the vault was
+  // built before this extractor read one", which the suffix alone cannot.
+  //
+  // Emitted ONLY on the PlatformEvent path: every other variant's properties
+  // map is byte-identical to before, so no other object's node changes shape.
+  const platformEventFacts: Record<string, unknown> =
+    variant === 'PlatformEvent'
+      ? {
+          isPlatformEvent: true,
+          eventType: optionalStringElement(rootObj, 'eventType'),
+          publishBehavior: optionalStringElement(rootObj, 'publishBehavior'),
+        }
+      : {};
+
   const node: Node = {
     id: `${ROOT_ELEMENT}:${apiName}`,
     type: 'CustomObject',
@@ -557,6 +603,7 @@ export const extractCustomObject = async (
       enableHistory: coerceBoolean(unwrapSingle(rootObj['enableHistory'])),
       enableReports: coerceBoolean(unwrapSingle(rootObj['enableReports'])),
       enableSearch: coerceBoolean(unwrapSingle(rootObj['enableSearch'])),
+      ...platformEventFacts,
     },
   };
 

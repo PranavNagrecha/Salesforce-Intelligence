@@ -43,6 +43,10 @@ describe('CR-CAP-18 platform-event-channel extractors', () => {
       expect(node?.parentId).toBeNull();
       expect(node?.properties.channelType).toBe('event');
       expect(node?.properties.label).toBe('Application Event Channel');
+      // LANE-E: `<eventType>` distinguishes a channel carrying the org's own
+      // events from one carrying platform-defined streams. Read verbatim;
+      // `null` when the org omitted it, never guessed from channelType.
+      expect(node?.properties).toHaveProperty('eventType');
       // Channel is a node-only container; member files carry the edges.
       expect(result.value.edges).toEqual([]);
     } finally {

@@ -90,7 +90,7 @@ this class an unenforced entry point — go one step past retrieval:
 run interpret via the gateway
 (`sfi.run_analysis { "name": "sfi.interpret", "args": { "componentId": "…" } }`)
 — it joins the org's grounded vault slice against a curated,
-org-independent **Concept Model** (142 concepts / 193 rules of general
+org-independent **Concept Model** (143 concepts / 195 rules of general
 Salesforce truth) and returns **cited, confidence-tiered structural
 claims**; `sfi.synthesize_answer` folds those claims into the answer,
 hedged and attributed. It is **deterministic and offline** — no LLM, no
