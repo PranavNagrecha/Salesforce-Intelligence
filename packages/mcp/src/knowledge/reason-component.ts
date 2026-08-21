@@ -653,7 +653,26 @@ export const classifyRuleCoverage = (args: {
           'tracking existed, so every family reads as unconfirmed. Re-run `sfi refresh --no-pull` ' +
           'to recompute coverage from the existing snapshot (no org access needed) and these ' +
           'layers become checkable.';
-
+  // NO shared-container remedy is appended here, and adding one back needs a
+  // reachable case first. A `retrievedNotParsedTypes` member (today only
+  // SessionSettings / FieldServiceSettings) cannot reach the
+  // `vault-coverage-missing` bucket above on any coherent vault: every rule
+  // that declares one in `dependsOnCoverage` also binds `componentTypes` to
+  // that same type, and that is a `node` bind — a PROVABLE category — so a root
+  // of any other type exits at step 2 as `proven-inapplicable` and never
+  // reaches step 3. The one root that WOULD reach step 3 is the
+  // shared-container type itself, which needs its own node in the graph; that
+  // node exists only once its member file was parsed, which is exactly what
+  // keeps the type OUT of `retrievedNotParsedTypes` (that set requires
+  // `retrieved === 0`). The two conditions are mutually exclusive, so the
+  // remedy sentence that used to live here was unreachable text — and it was
+  // false as well, claiming the type's files were on disk unread when the
+  // shared container had simply come back without them. The reachable, true
+  // disclosure of that state is the one `sfi.coverage_report` and
+  // `sfi.health_check` emit, and the family still reaches THIS answer through
+  // `missingCoverage` (the caveat on `trust.completeness`).
+  // `reason-component.test.ts` carries the invariant test that fails the moment
+  // a rule makes the case reachable.
   const summary = noRuleCoversComponentType
     ? `NOTHING was checked for this ${args.rootType}: of ${args.selectedRules.length} concept ` +
       `rules, ${rulesNotApplicable} are provably inapplicable to this component type and ` +

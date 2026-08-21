@@ -355,3 +355,91 @@ describe('coverageReportHandler — assignmentData (ENGINE-ARC §6)', () => {
     expect(result.value.data.covered.map((e) => e.type)).not.toContain('User');
   });
 });
+
+// =============================================================================
+// NOT PARSED, MEMBER NEVER ARRIVED (spec row 7) at the coverage_report surface.
+// On the probe vault `SessionSettings` and `FieldServiceSettings` sat in
+// `covered` with `retrieved: 0` while 139 files under the `settings/` container
+// they are dispatched from were walked past into `skippedDirectories` — the
+// report was simultaneously listing `settings` in `topUncoveredFamilies` as
+// retrieved-but-not-modeled and calling the two types complete.
+//
+// The disclosure must state the TRUE cause. Verified on the probe vault:
+// neither `Session.settings-meta.xml` nor `FieldService.settings-meta.xml` is
+// on disk (139 OTHER settings files are), both filenames ARE dispatched to
+// shipped extractors, and both types already alias onto `Settings` in the
+// retrieve manifest. So the container was requested, returned, and simply did
+// not carry this member — it is NOT "the files are here and nothing read them",
+// and NOT "the product cannot parse that container yet".
+// =============================================================================
+describe('coverageReportHandler — shared container returned without the member', () => {
+  const unparsedCtx: Context = {
+    ...ctx,
+    manifest: {
+      ...manifest,
+      skippedDirectories: { settings: 139 },
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'SessionSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'FieldServiceSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        // Confirmed-empty, but its own container IS dispatched — stays covered.
+        { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      ],
+    },
+  };
+
+  it('moves the unparsed types out of covered into their own bucket and discloses why', async () => {
+    const result = await coverageReportHandler(unparsedCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+
+    const covered = data.covered.map((e) => e.type);
+    expect(covered).not.toContain('SessionSettings');
+    expect(covered).not.toContain('FieldServiceSettings');
+    // Narrowly scoped: a confirmed-empty type outside the class is untouched.
+    expect(covered).toContain('SharingRule');
+
+    expect((data.retrievedNotParsed ?? []).map((e) => e.type)).toEqual([
+      'FieldServiceSettings',
+      'SessionSettings',
+    ]);
+    // Not silently re-labelled as a retrieve gap — `partial` prescribes a
+    // re-retrieve, which cannot close this.
+    const partial = data.partial.map((e) => e.type);
+    expect(partial).not.toContain('SessionSettings');
+    expect(partial).not.toContain('FieldServiceSettings');
+
+    // INVARIANT: the summary and the partitions agree — the lockstep this file
+    // already guards for the confirmed-empty tri-state now covers the new state.
+    expect(data.summary.retrievedNotParsedTypes).toEqual([
+      'FieldServiceSettings',
+      'SessionSettings',
+    ]);
+    expect(data.summary.coveredTypes).not.toContain('SessionSettings');
+    expect(data.summary.missingCoverage).toContain('SessionSettings');
+    expect(data.summary.status).toBe('partial');
+    expect(data.trust.completeness.status).toBe('partial');
+
+    expect(data.disclosure).toContain('THE CONTAINER RETURNED WITHOUT THIS MEMBER');
+    expect(data.disclosure).toContain('NOT CHECKED');
+    // The three clauses that were false, all gone — a reader sent to a
+    // re-retrieve (or to a parser the product already ships) is sent nowhere.
+    expect(data.disclosure).not.toContain('files on disk');
+    expect(data.disclosure).not.toContain("types' files on disk");
+    expect(data.disclosure).not.toContain('the product does not parse that container yet');
+    // …and the remedy that IS true for SessionSettings: the member cannot
+    // arrive, because Salesforce nests it inside Security.settings.
+    expect(data.disclosure).toContain('Security.settings-meta.xml');
+    expect(data.disclosure).toContain('PRODUCT change');
+    expect(data.trust.limitations[0]).toBe(data.disclosure);
+  });
+
+  it('is inert on a vault whose containers were all dispatched (key absent, disclosure unchanged)', async () => {
+    const result = await coverageReportHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.retrievedNotParsed).toBeUndefined();
+    expect(result.value.data.disclosure).not.toContain('THE CONTAINER RETURNED WITHOUT THIS MEMBER');
+  });
+});

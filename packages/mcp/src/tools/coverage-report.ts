@@ -22,6 +22,8 @@ import {
   buildMixedFreshness,
   rankUncoveredFamilies,
   readTombstones,
+  retrievedNotParsedTypes,
+  SHARED_CONTAINER_TYPES,
   summarizeCoverage,
   type TombstoneRecord,
   type UncoveredFamily,
@@ -35,6 +37,62 @@ import { ASSIGNMENT_DATA_LIVE_TOOLS } from './vault-assignment-disclosure.js';
 
 /** CR-CAP-20 — cap on the ranked uncovered-families list. */
 const TOP_UNCOVERED_FAMILIES_CAP = 10;
+
+/**
+ * The disclosure sentence for types whose SHARED retrieve container came back
+ * WITHOUT their own member file (see `SHARED_CONTAINER_TYPES`).
+ *
+ * It must state the TRUE cause, because the cause decides the remedy. The
+ * earlier wording said the files were "on disk and nothing read them" and that
+ * "the product does not parse that container yet" — all three clauses were
+ * false on the probe vault: the refresh dispatches both filenames to shipped
+ * extractors, the retrieve manifest already aliases the types onto the shared
+ * container, and neither member file is anywhere in the retrieved container.
+ * It sent the reader to a re-retrieve AND to a product gap that does not exist.
+ *
+ * What the manifest actually proves for a listed type: the container was
+ * requested (`requested` + `retrieveConfirmed`), the org returned it (a
+ * positive `skippedDirectories[container]` counts its OTHER members), and this
+ * type still parsed zero. Since the dispatcher for its filename ships and
+ * works, what follows is that its member file never arrived — and nothing
+ * more. WHY it never arrived is UNDECIDABLE from the vault: the org may not
+ * have the feature enabled (it then emits no such file, and "the org has none"
+ * is the true reading), or the file exists in the org and did not come back.
+ * A previous wording denied the first cause outright — "`retrieved: 0` is a
+ * BUILD outcome, not 'the org has none'" — for BOTH types, with a proof for
+ * neither; on the probe vault it is probably backwards for FieldServiceSettings,
+ * which models no ServiceAppointment / ServiceTerritory / WorkOrder /
+ * OperatingHours object at all. So the disclosure names the GAP and refuses to
+ * name its cause, except where a type-specific proof exists (SessionSettings).
+ *
+ * Empty string for an empty list, so a vault without the condition serialises
+ * exactly as before.
+ */
+export const retrievedNotParsedDisclosure = (types: readonly string[]): string => {
+  if (types.length === 0) return '';
+  const containers = [
+    ...new Set(
+      Object.entries(SHARED_CONTAINER_TYPES)
+        .filter(([, members]) => members.some((t) => types.includes(t)))
+        .map(([dir]) => dir),
+    ),
+  ].sort();
+  const containerPhrase = containers.map((c) => `\`${c}\``).join(' / ');
+  // SessionSettings is the case where the member can NEVER arrive: Salesforce
+  // has no `Session.settings` file at all. Named only when it is in the list.
+  const sessionClause = types.includes('SessionSettings')
+    ? ' For SessionSettings that member never will arrive — Salesforce does not emit `Session.settings-meta.xml` at all; session settings are a nested `<sessionSettings>` element inside `Security.settings-meta.xml`, which IS in this vault. Closing that one is a PRODUCT change (read the nested element), not an operator action.'
+    : '';
+  return (
+    ` NOT PARSED — THE CONTAINER RETURNED WITHOUT THIS MEMBER: ${types.join(', ')}.` +
+    ` Each is dispatched by one exact filename out of the shared ${containerPhrase} retrieve container, and the refresh DOES parse that filename.` +
+    ' The container WAS requested (these types alias onto it in the retrieve manifest) and the org DID return it — its other members are the family ranked in `topUncoveredFamilies` — but this type\'s own member file was not among them, so nothing was ever parsed for it.' +
+    ' WHY it was not among them cannot be decided from this vault: the org may not have the feature enabled (it then emits no such file, and "the org has none" is the true reading), or the file exists in the org and did not come back. Offline those two are indistinguishable, so no cause is asserted here for any type without a type-specific proof.' +
+    ' What is certain either way is that nothing was read for this type: `retrieved: 0` here is not evidence of an empty org, so treat their absence from any answer as NOT CHECKED.' +
+    ' Re-running the same retrieve does not change it — the container already came back and the member was not in it; only the org (Setup / a feature check) separates the two causes.' +
+    sessionClause
+  );
+};
 
 export const COVERAGE_DISCLOSURE =
   "Coverage describes what the last `sf project retrieve` requested and returned — not what exists in the org. A type listed under `notModeled` is not analyzed by this product at all; its absence from any result means 'not checked', never 'none'. Re-run `/sfi-refresh` after widening your retrieve manifest to close a gap. `topUncoveredFamilies` ranks (by skipped-file volume) directories that WERE retrieved but not modeled by an extractor — a listed family is retrieved-but-not-modeled, never 'absent'.";
@@ -57,6 +115,22 @@ export interface CoverageReportOutput {
    * but came back empty/errored"). Empty outside a staged build.
    */
   readonly pending: readonly CoverageEntry[];
+  /**
+   * Types dispatched by exact filename out of a SHARED retrieve container whose
+   * OWN member file did not come back in it — the third honesty state between
+   * `covered` and `partial`. Their coverage row reads
+   * `{requested: true, retrieveConfirmed: true, retrieved: 0}`, which the
+   * tri-state used to read as "the org genuinely has none"; it is not. The
+   * container WAS requested and DID return (its other members are counted in
+   * `topUncoveredFamilies`), the refresh DOES dispatch this type's filename, and
+   * still nothing was parsed for it — because that member never arrived. WHY it
+   * never arrived (the feature is off in the org, so no such file exists; or the
+   * file exists and did not come back) is not decidable from the vault, and this
+   * bucket asserts neither. "Retrieved" in this name refers to the CONTAINER,
+   * never to this type's own file. Present ONLY when non-empty. Never read a
+   * listed type's absence from any answer as "none" — nothing has looked.
+   */
+  readonly retrievedNotParsed?: readonly CoverageEntry[];
   /** Present while a staged refresh is mid-build (tier progress). */
   readonly stagedBuild?: {
     readonly tier: number;
@@ -161,28 +235,51 @@ export const buildAssignmentDataCoverage = async (
 // Without this gate coverage_report would self-contradict summarizeCoverage
 // (its own `partial[]` listing a type the summary calls complete) — the exact
 // bug the lockstep comment in manifest.ts guards.
+// RETRIEVED-NOT-PARSED: the same carve-out `summarizeCoverage` applies. A type
+// dispatched by exact filename out of a SHARED retrieve container whose own
+// member file did not come back in that container parsed nothing, so its
+// confirmed-clean `retrieved: 0` is not evidence of an empty org — it must
+// leave `covered`, and it does not belong in `partial` either (a re-retrieve
+// does not change it: the container already came back without the member).
 const partitionCoverage = (
   entries: readonly CoverageEntry[],
-): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending'> => ({
-  covered: entries.filter(
-    (entry) =>
-      entry.requested &&
-      (entry.retrieved > 0 || entry.retrieveConfirmed === true) &&
-      !entry.errored &&
-      !entry.neverModeled &&
-      entry.pending !== true,
-  ),
-  partial: entries.filter(
-    (entry) =>
-      entry.requested &&
-      ((entry.retrieved === 0 && entry.retrieveConfirmed !== true) ||
-        entry.errored) &&
-      !entry.neverModeled &&
-      entry.pending !== true,
-  ),
-  notModeled: entries.filter((entry) => entry.neverModeled),
-  pending: entries.filter((entry) => entry.pending === true && !entry.neverModeled),
-});
+  unparsed: ReadonlySet<string>,
+): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending'> & {
+  // Always an array HERE (the handler decides whether to emit the key), unlike
+  // the optional output field.
+  readonly retrievedNotParsed: readonly CoverageEntry[];
+} => {
+  const isRetrievedNotParsed = (entry: CoverageEntry): boolean =>
+    unparsed.has(entry.type) &&
+    entry.requested &&
+    entry.retrieved === 0 &&
+    entry.retrieveConfirmed === true &&
+    !entry.errored &&
+    !entry.neverModeled &&
+    entry.pending !== true;
+  return {
+    covered: entries.filter(
+      (entry) =>
+        entry.requested &&
+        (entry.retrieved > 0 || entry.retrieveConfirmed === true) &&
+        !entry.errored &&
+        !entry.neverModeled &&
+        entry.pending !== true &&
+        !isRetrievedNotParsed(entry),
+    ),
+    partial: entries.filter(
+      (entry) =>
+        entry.requested &&
+        ((entry.retrieved === 0 && entry.retrieveConfirmed !== true) ||
+          entry.errored) &&
+        !entry.neverModeled &&
+        entry.pending !== true,
+    ),
+    notModeled: entries.filter((entry) => entry.neverModeled),
+    pending: entries.filter((entry) => entry.pending === true && !entry.neverModeled),
+    retrievedNotParsed: entries.filter(isRetrievedNotParsed),
+  };
+};
 
 export const coverageReportHandler = async (
   ctx: Context,
@@ -195,7 +292,10 @@ export const coverageReportHandler = async (
     ctx.manifest,
     input.type === undefined ? undefined : [input.type],
   );
-  const partitions = partitionCoverage(entries);
+  const { retrievedNotParsed, ...partitions } = partitionCoverage(
+    entries,
+    retrievedNotParsedTypes(ctx.manifest),
+  );
   const missingCoverage = summary.missingCoverage;
   const staged = ctx.manifest.staged;
   // CR-CAP-20: rank retrieved-but-not-modeled families and cap the list.
@@ -209,6 +309,13 @@ export const coverageReportHandler = async (
     input.type === undefined ? undefined : ([input.type] as readonly string[]);
   const freshness = buildMixedFreshness(ctx.manifest, involvedTypes);
   const tombstones = await readTombstones(ctx.vaultRoot, 50);
+  // A shared-container member that never arrived is invisible in the standard
+  // disclosure — it is neither a `notModeled` family nor a retrieve gap — so it
+  // gets its own sentence, appended ONLY when the vault has the condition.
+  const retrievedNotParsedNote = retrievedNotParsedDisclosure(
+    retrievedNotParsed.map((entry) => entry.type),
+  );
+  const disclosure = COVERAGE_DISCLOSURE + retrievedNotParsedNote;
   const mixedNote =
     freshness.overall === 'mixed'
       ? `Mixed family freshness: oldest evidence at ${freshness.oldestEvidenceAt ?? 'unknown'} — a scoped refresh left some families older than the vault-wide refreshedAt.`
@@ -219,6 +326,9 @@ export const coverageReportHandler = async (
       coverageKnown: summary.coverageKnown,
       coverageComputedAt: ctx.manifest.coverageComputedAt ?? null,
       ...partitions,
+      // Present ONLY when the vault actually has the condition, so a vault
+      // whose containers were all dispatched serialises exactly as before.
+      ...(retrievedNotParsed.length > 0 ? { retrievedNotParsed } : {}),
       ...(staged !== undefined
         ? { stagedBuild: { tier: staged.tier, totalTiers: staged.totalTiers } }
         : {}),
@@ -235,11 +345,11 @@ export const coverageReportHandler = async (
           ...(missingCoverage.length > 0 ? { missingCoverage } : {}),
         },
         limitations: [
-          COVERAGE_DISCLOSURE,
+          disclosure,
           ...(mixedNote !== null ? [mixedNote] : []),
         ],
       },
-      disclosure: COVERAGE_DISCLOSURE,
+      disclosure,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

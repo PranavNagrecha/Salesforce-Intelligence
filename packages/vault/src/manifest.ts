@@ -153,6 +153,85 @@ const SKIPPED_DIR_COVERAGE: Readonly<Partial<Record<string, ComponentType>>> = {
   webLinks: 'WebLink',
 };
 
+/**
+ * Metadata types whose source files land in a SHARED retrieve container that
+ * the refresh dispatches BY FILENAME, next to many files belonging to other
+ * types. `settings/` is the only such container the product has: `SessionSettings`
+ * is dispatched from `Session.settings-meta.xml`, `FieldServiceSettings` from
+ * `FieldService.settings-meta.xml`, and EVERY other file under `settings/` is
+ * walked past into `skippedDirectories`.
+ *
+ * Why this matters to coverage: for a type in this table, a
+ * `{requested: true, retrieveConfirmed: true, retrieved: 0}` row is NOT a
+ * confirmed-empty org. The container WAS requested and DID return —
+ * `skippedDirectories[container]` counts the members that landed — and the
+ * refresh DOES dispatch this type's filename (refresh-pipeline.ts), yet zero
+ * was parsed for it. What follows is that this type's OWN member file was not
+ * in what came back — and nothing more. WHY it was not is UNDECIDABLE from the
+ * vault, because two causes produce identical evidence: the org does not have
+ * the feature enabled (it emits no such file, so "the org has none" is the true
+ * reading), or the file exists in the org and did not come back.
+ * `FieldServiceSettings` on the probe vault is the live case for the first
+ * reading — that vault models no ServiceAppointment / ServiceTerritory /
+ * WorkOrder / OperatingHours object at all, i.e. Field Service simply is not
+ * on. So the ONLY safe classification is "NOT CHECKED": reading the zero as
+ * "the org has none" is the conflation this product exists to refuse, and
+ * asserting the opposite ("a BUILD outcome, not an org fact") is an unprovable
+ * denial of the likelier cause. Both were shipped once. That is why
+ * {@link summarizeCoverage} routes these types into `retrievedNotParsedTypes`
+ * instead of `coveredTypes`, and why the disclosure names the gap without
+ * naming its cause.
+ *
+ * DO NOT restate this as "the files are on disk and nothing read them", as
+ * "the product does not parse that container yet", or as "`retrieved: 0` is a
+ * BUILD outcome, not 'the org has none'" — all three were shipped once and all
+ * three are wrong: the dispatchers exist, neither `Session.settings-meta.xml`
+ * nor `FieldService.settings-meta.xml` is anywhere in the retrieved container on
+ * the probe vault (139 other settings files are), and the third asserts a cause
+ * no offline evidence can establish. A cause may be named ONLY where a
+ * type-specific proof exists. For `SessionSettings` one does — the
+ * member cannot arrive at all: Salesforce has no `Session.settings` file —
+ * session settings are a nested `<sessionSettings>` element inside
+ * `Security.settings-meta.xml`. Closing that one means reading the nesting (a
+ * PRODUCT change); re-retrieving cannot.
+ *
+ * The evidence is read straight off the manifest — a positive
+ * `skippedDirectories[container]`, or the `neverModeled` coverage row the CLI
+ * writes for the same raw dir — so the classification costs no filesystem I/O.
+ * Types NOT in this table are unaffected: a container the dispatcher does
+ * recognise leaves nothing behind, so its `retrieved: 0` really is
+ * "confirmed empty" (verified on the probe org: `AutoResponseRule`,
+ * `EscalationRule` and `WorkflowRule` all report zero with their files present
+ * on disk, and those files declare zero rules — the count is honest).
+ */
+export const SHARED_CONTAINER_TYPES: Readonly<Record<string, readonly string[]>> = {
+  settings: ['SessionSettings', 'FieldServiceSettings'],
+};
+
+/**
+ * The types whose retrieve container reached disk with NOTHING parsed out of
+ * it — see {@link SHARED_CONTAINER_TYPES}. Pure: manifest-in, set-out, no IO.
+ * Empty for any vault whose shared containers were fully dispatched.
+ */
+export const retrievedNotParsedTypes = (
+  manifest: VaultManifest | ExtendedVaultManifest | undefined,
+): ReadonlySet<string> => {
+  const skipped = readSkippedDirectories(manifest);
+  // A pre-`skippedDirectories` manifest can still carry the CLI's raw-dir
+  // `neverModeled` coverage row, so both sources are consulted.
+  const skippedRowCounts = new Map<string, number>();
+  for (const entry of readCoverageEntries(manifest)) {
+    if (entry.neverModeled) skippedRowCounts.set(entry.type, entry.retrieved);
+  }
+  const out = new Set<string>();
+  for (const [container, types] of Object.entries(SHARED_CONTAINER_TYPES)) {
+    const count = skipped[container] ?? skippedRowCounts.get(container) ?? 0;
+    if (count <= 0) continue;
+    for (const type of types) out.add(type);
+  }
+  return out;
+};
+
 /** Normalized coverage summary consumed by MCP tools and CLI diagnostics. */
 export interface CoverageSummary {
   readonly coverageKnown: boolean;
@@ -161,6 +240,20 @@ export interface CoverageSummary {
   readonly partialTypes: readonly string[];
   readonly notModeledTypes: readonly string[];
   readonly missingCoverage: readonly string[];
+  /**
+   * Types whose SHARED retrieve container came back WITHOUT their own member
+   * file, so nothing was parsed for them — the third honesty state, distinct
+   * from `covered` (rows landed, or a confirmed-empty org), from `partial`
+   * (requested, errored/pending/unconfirmed) and from `notModeled` (no
+   * extractor at all). Folded into `missingCoverage` so every absence caveat
+   * downstream fires, but kept OUT of `partialTypes` because the remedy
+   * differs: a re-retrieve will not help — the container already returned, and
+   * the member was not in it.
+   *
+   * Present ONLY when non-empty, so a vault without the condition serialises
+   * byte-identically to before this state existed.
+   */
+  readonly retrievedNotParsedTypes?: readonly string[];
 }
 
 /**
@@ -389,6 +482,28 @@ export const summarizeCoverage = (
   // A `pending` row (P13-STAGED-tiers / reports-cap) is excluded from BOTH
   // covered branches by the `pending !== true` guard, so a capped/dropped pull
   // can never read as confirmed-empty even if it carries retrieveConfirmed.
+  //  (b') retrieved === 0 AND retrieveConfirmed === true AND the type is
+  //       dispatched by filename out of a SHARED container that returned other
+  //       members (SHARED_CONTAINER_TYPES) -> NOT PARSED, MEMBER NEVER ARRIVED.
+  //       Branch (b) reads a confirmed-clean zero as "the org genuinely has
+  //       none", which is only sound when the type's own file was among what
+  //       came back. Here it was not: the container returned (its other members
+  //       are counted in `skippedDirectories`), the dispatcher for this type's
+  //       filename ships, and still nothing parsed — so the zero is a BUILD
+  //       outcome. Carved out BEFORE (b) so such a type can never read as
+  //       covered.
+  const unparsedContainerTypes = retrievedNotParsedTypes(manifest);
+  const confirmedEmpty = (entry: CoverageEntry): boolean =>
+    entry.requested &&
+    entry.retrieved === 0 &&
+    entry.retrieveConfirmed === true &&
+    !entry.errored &&
+    !entry.neverModeled &&
+    entry.pending !== true;
+  const retrievedNotParsed = filtered
+    .filter((entry) => confirmedEmpty(entry) && unparsedContainerTypes.has(entry.type))
+    .map((entry) => entry.type);
+  const retrievedNotParsedSet = new Set(retrievedNotParsed);
   const coveredTypes = filtered
     .filter(
       (entry) =>
@@ -396,7 +511,8 @@ export const summarizeCoverage = (
         (entry.retrieved > 0 || entry.retrieveConfirmed === true) &&
         !entry.errored &&
         !entry.neverModeled &&
-        entry.pending !== true,
+        entry.pending !== true &&
+        !retrievedNotParsedSet.has(entry.type),
     )
     .map((entry) => entry.type);
   // Requested, non-errored, non-pending, modeled types that retrieved ZERO
@@ -454,8 +570,19 @@ export const summarizeCoverage = (
       }
     }
   }
+  // `retrievedNotParsed` joins `missingCoverage` — that is the set every
+  // absence caveat and every `dependsOnCoverage` hedge downstream reads, and a
+  // plane whose files were never opened is exactly what those guards exist for.
+  // It stays OUT of `partialTypes` so the buckets keep distinct remedies:
+  // `partial` asks for a re-retrieve, this one cannot be closed by retrieving
+  // again.
   const missingCoverage = [
-    ...new Set([...partialTypes, ...notModeledTypes, ...notRequestedTypes]),
+    ...new Set([
+      ...partialTypes,
+      ...notModeledTypes,
+      ...notRequestedTypes,
+      ...retrievedNotParsed,
+    ]),
   ].sort();
   const coverageKnown = readCoverageEntries(manifest).length > 0;
   const status = missingCoverage.length > 0
@@ -471,6 +598,9 @@ export const summarizeCoverage = (
     partialTypes,
     notModeledTypes,
     missingCoverage,
+    ...(retrievedNotParsed.length > 0
+      ? { retrievedNotParsedTypes: [...retrievedNotParsed].sort() }
+      : {}),
   };
 };
 

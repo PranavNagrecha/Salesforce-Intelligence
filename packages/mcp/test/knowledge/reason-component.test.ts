@@ -36,7 +36,7 @@ import {
   importExtractionResults,
   openGraph,
 } from '@sf-intelligence/graph';
-import { componentPath } from '@sf-intelligence/vault';
+import { componentPath, SHARED_CONTAINER_TYPES } from '@sf-intelligence/vault';
 
 import { CONCEPT_RULES } from '../../src/knowledge/loader.js';
 import {
@@ -615,6 +615,74 @@ describe('sfi.interpret output is unchanged by the helper extraction', () => {
     // With every rule filtered out nothing could apply, so the honest line is
     // the "nothing was checked" one, not "rules ran and matched nothing".
     expect(none.value.data.completeness.rulesConsidered).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6a. The invariant that keeps the shared-container remedy OUT of this file
+// ---------------------------------------------------------------------------
+
+describe('shared-container coverage types cannot reach the vault-coverage-missing bucket', () => {
+  const sharedTypes = new Set(Object.values(SHARED_CONTAINER_TYPES).flat());
+
+  /**
+   * `classifyRuleCoverage` used to append a remedy sentence for a
+   * `retrievedNotParsedTypes` family found among the `vault-coverage-missing`
+   * blockers. That sentence was unreachable AND false, so it was deleted — and
+   * this test is what keeps the deletion honest.
+   *
+   * The proof it encodes: a rule can only reach step 3 (vault-coverage-missing)
+   * if step 2 did not prove it inapplicable. Every rule that names a
+   * shared-container type in `dependsOnCoverage` also binds `componentTypes` to
+   * that SAME type with a node criterion — a PROVABLE bind — so any other root
+   * exits at step 2, and the only root that survives is the shared-container
+   * type itself, whose node exists only when its member file WAS parsed (which
+   * takes the type out of `retrievedNotParsedTypes`).
+   *
+   * If this ever fails, the case became reachable: restore a remedy that states
+   * the TRUE cause (the shared container returned without this member — never
+   * "the files are on disk and nothing read them"), and cover it with a test
+   * over a vault the refresh can actually produce.
+   */
+  it('every rule depending on one binds its root to that same type', () => {
+    const offenders = CONCEPT_RULES.filter((rule) =>
+      rule.dependsOnCoverage.some((t) => sharedTypes.has(t)),
+    ).filter((rule) => {
+      const bound = rule.bind.componentTypes;
+      if (bound === undefined) return true;
+      const shared = rule.dependsOnCoverage.filter((t) => sharedTypes.has(t));
+      return !shared.every((t) => bound.length === 1 && bound[0] === t);
+    });
+    expect(offenders.map((r) => r.id)).toEqual([]);
+  });
+
+  it('and those binds are node-shaped, so step 2 can PROVE them inapplicable', () => {
+    const dependents = CONCEPT_RULES.filter((rule) =>
+      rule.dependsOnCoverage.some((t) => sharedTypes.has(t)),
+    );
+    // Non-empty, or the invariant above is vacuous.
+    expect(dependents.length).toBeGreaterThan(0);
+    for (const rule of dependents) {
+      // A node bind: no edgeType, and at least one criterion the node branch
+      // reads (`componentTypes` alone qualifies).
+      expect(rule.bind.edgeType).toBeUndefined();
+      expect(rule.bind.componentTypes).toBeDefined();
+      const report = classifyRuleCoverage({
+        rootType: 'CustomObject',
+        selectedRules: [rule],
+        interpretations: [],
+        slice: { nodes: [], edges: [] },
+        rootId: PLAIN_FIELD,
+        // Pretend the whole shared-container plane is missing — the rule STILL
+        // never reaches the coverage bucket, because step 2 already proved it
+        // inapplicable to this root.
+        missingCoverageTypes: new Set(rule.dependsOnCoverage),
+        coverageKnown: true,
+        sliceTruncated: false,
+      });
+      expect(report.rulesNotApplicable).toBe(1);
+      expect(report.rulesNotEvaluable).toBe(0);
+    }
   });
 });
 

@@ -2710,3 +2710,230 @@ describe('whyCantUserSeeRecordHandler — objectApiName / profileApiName aliases
     expect(r.error.kind).toBe('invalid-query');
   });
 });
+
+// =============================================================================
+// EXTERNAL-OWD AUDIENCE (spec row 1): `evaluateOWD` ranked the INTERNAL
+// org-wide default for EXTERNAL (Experience Cloud / portal / guest) users.
+// Salesforce keeps two OWD columns per object and applies them to disjoint
+// audiences, so on an object whose internal OWD outranks its external one a
+// community profile with object Read got a confident `visible` — the exact
+// "checked and found nothing" vs "did not check" conflation, in a security
+// answer. These tests own the four audience paths and the byte-identity of the
+// internal one.
+// =============================================================================
+
+/** Internal ReadWrite / external Private — the columns DISAGREE for read. */
+const EXT_SPLIT_OBJ = 'CustomObject:ExtSplitObj';
+/** Internal ReadWrite / external Read — agree for read, DISAGREE for edit. */
+const EXT_READ_OBJ = 'CustomObject:ExtReadObj';
+/** Internal Private / external Private — the columns AGREE at every level. */
+const EXT_AGREE_OBJ = 'CustomObject:ExtAgreeObj';
+/** Internal ReadWrite, NO external column declared at all. */
+const EXT_NO_COLUMN_OBJ = 'CustomObject:ExtNoColumnObj';
+
+const EXTERNAL_PROFILE = 'Profile:Community Login User';
+const INTERNAL_PROFILE = 'Profile:Internal Staff';
+const UNLICENSED_PROFILE = 'Profile:No Licence Profile';
+
+/** Full object CRUD so the plane-A precondition never masks the OWD step. */
+const fullCrudEdge = (fromId: string, toId: string): Edge =>
+  makeEdge({
+    fromId,
+    toId,
+    edgeType: 'grantedBy',
+    properties: {
+      allowRead: true,
+      allowCreate: true,
+      allowEdit: true,
+      allowDelete: true,
+      viewAllRecords: false,
+      modifyAllRecords: false,
+    },
+  });
+
+const externalOwdAudienceSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: EXT_SPLIT_OBJ,
+      apiName: 'ExtSplitObj',
+      properties: { sharingModel: 'ReadWrite', externalSharingModel: 'Private' },
+    }),
+    makeNode({
+      id: EXT_READ_OBJ,
+      apiName: 'ExtReadObj',
+      properties: { sharingModel: 'ReadWrite', externalSharingModel: 'Read' },
+    }),
+    makeNode({
+      id: EXT_AGREE_OBJ,
+      apiName: 'ExtAgreeObj',
+      properties: { sharingModel: 'Private', externalSharingModel: 'Private' },
+    }),
+    makeNode({
+      id: EXT_NO_COLUMN_OBJ,
+      apiName: 'ExtNoColumnObj',
+      properties: { sharingModel: 'ReadWrite' },
+    }),
+    makeNode({
+      id: EXTERNAL_PROFILE,
+      type: 'Profile',
+      apiName: 'Community Login User',
+      properties: { userLicense: 'Customer Community Login' },
+    }),
+    makeNode({
+      id: INTERNAL_PROFILE,
+      type: 'Profile',
+      apiName: 'Internal Staff',
+      properties: { userLicense: 'Salesforce' },
+    }),
+    // No `userLicense` at all — the audience is genuinely undeterminable.
+    makeNode({
+      id: UNLICENSED_PROFILE,
+      type: 'Profile',
+      apiName: 'No Licence Profile',
+      properties: {},
+    }),
+  ],
+  edges: [
+    EXT_SPLIT_OBJ,
+    EXT_READ_OBJ,
+    EXT_AGREE_OBJ,
+    EXT_NO_COLUMN_OBJ,
+  ].flatMap((obj) => [
+    fullCrudEdge(EXTERNAL_PROFILE, obj),
+    fullCrudEdge(INTERNAL_PROFILE, obj),
+    fullCrudEdge(UNLICENSED_PROFILE, obj),
+  ]),
+};
+
+describe('whyCantUserSeeRecordHandler — OWD audience (internal vs external column)', () => {
+  let extStore: GraphStore;
+  let extDir: string;
+  let extCtx: Context;
+
+  beforeAll(async () => {
+    extDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ext-owd-'));
+    const opened = await openGraph(join(extDir, 'ext-owd.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    extStore = opened.value;
+    const imported = await importExtractionResults(extStore, [externalOwdAudienceSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    extCtx = { vaultRoot: extDir, manifest: FIXTURE_MANIFEST, graph: extStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(extStore);
+    rmSync(extDir, { recursive: true, force: true });
+  });
+
+  const owdStepOf = async (
+    componentId: string,
+    profileId: string,
+    accessLevel?: 'read' | 'edit' | 'delete',
+  ) => {
+    const r = await whyCantUserSeeRecordHandler(extCtx, {
+      componentId,
+      userContext: { profileId },
+      ...(accessLevel === undefined ? {} : { accessLevel }),
+    });
+    if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
+    return { step: r.value.data.reasoning[0]!, out: r.value.data };
+  };
+
+  it('an EXTERNAL-licence profile is ranked against externalSharingModel, never the internal OWD', async () => {
+    const { step, out } = await owdStepOf(EXT_SPLIT_OBJ, EXTERNAL_PROFILE);
+    expect(step.stage).toBe('OWD');
+    // The defect: this was `visible`, off the internal ReadWrite.
+    expect(step.verdict).toBe('restricted');
+    expect(step.reason).toContain("EXTERNAL OWD 'Private'");
+    expect(step.reason).toContain('Customer Community Login');
+    // The internal token may be NAMED as the one that does not apply, but it
+    // must never be the token the verdict was taken from.
+    expect(step.reason).not.toContain("OWD 'ReadWrite' grants");
+    // No modeled stage grants it, and the unmodeled tail is honest `unknown`.
+    expect(out.verdict).not.toBe('visible');
+  });
+
+  it('an INTERNAL-licence profile keeps the pre-existing OWD step verbatim', async () => {
+    const { step, out } = await owdStepOf(EXT_SPLIT_OBJ, INTERNAL_PROFILE);
+    // Byte-identity guard: the internal path must be unchanged by this stage
+    // becoming audience-aware, character for character.
+    expect(step).toEqual({
+      stage: 'OWD',
+      verdict: 'visible',
+      reason:
+        "OWD 'ReadWrite' grants read access to all records (given the user has object read permission — checked separately as the object read precondition)",
+    });
+    expect(out.verdict).toBe('visible');
+    expect(out.boundaryNote ?? '').not.toContain('enableExternalSharingModel');
+  });
+
+  it('an UNDETERMINABLE audience is `unknown` naming both columns — never a silent internal fallback', async () => {
+    const { step, out } = await owdStepOf(EXT_SPLIT_OBJ, UNLICENSED_PROFILE);
+    expect(step.verdict).toBe('unknown');
+    expect(step.reason).toContain('DISAGREE');
+    expect(step.reason).toContain("'ReadWrite'");
+    expect(step.reason).toContain("'Private'");
+    expect(out.verdict).toBe('unknown');
+    // An audience-indeterminate OWD must NOT truncate the cascade the way a
+    // no-OWD entity does: every later stage is still evaluated and returned.
+    expect(out.reasoning.length).toBeGreaterThan(1);
+    expect(out.reasoning.map((s) => s.stage)).toContain('PermissionGrant');
+  });
+
+  it('an UNDETERMINABLE audience changes nothing when the two columns agree', async () => {
+    const { step } = await owdStepOf(EXT_AGREE_OBJ, UNLICENSED_PROFILE);
+    expect(step).toEqual({
+      stage: 'OWD',
+      verdict: 'restricted',
+      reason:
+        "OWD 'Private' does not grant read access org-wide; downstream grants may apply",
+    });
+  });
+
+  it('an EXTERNAL subject on an object with NO external column is `unknown`, not the internal answer', async () => {
+    const { step, out } = await owdStepOf(EXT_NO_COLUMN_OBJ, EXTERNAL_PROFILE);
+    expect(step.verdict).toBe('unknown');
+    expect(step.reason).toContain('does not carry for this object');
+    expect(out.verdict).not.toBe('visible');
+    // Still a full chain, not the single-step no-OWD short circuit.
+    expect(out.reasoning.length).toBeGreaterThan(1);
+  });
+
+  it('the external verdict tracks the EXTERNAL column at every access level', async () => {
+    // ExtReadObj: internal ReadWrite (visible for read AND edit) vs external
+    // Read (visible for read, restricted for edit). An external subject must
+    // follow the external column at both levels, so read and edit DIVERGE.
+    const extRead = await owdStepOf(EXT_READ_OBJ, EXTERNAL_PROFILE, 'read');
+    const extEdit = await owdStepOf(EXT_READ_OBJ, EXTERNAL_PROFILE, 'edit');
+    expect(extRead.step.verdict).toBe('visible');
+    expect(extEdit.step.verdict).toBe('restricted');
+    // The internal subject sees the internal column at both, so it does not.
+    const intRead = await owdStepOf(EXT_READ_OBJ, INTERNAL_PROFILE, 'read');
+    const intEdit = await owdStepOf(EXT_READ_OBJ, INTERNAL_PROFILE, 'edit');
+    expect(intRead.step.verdict).toBe('visible');
+    expect(intEdit.step.verdict).toBe('visible');
+  });
+
+  it('discloses the enableExternalSharingModel assumption exactly when the external column was used', async () => {
+    const external = await owdStepOf(EXT_SPLIT_OBJ, EXTERNAL_PROFILE);
+    const internal = await owdStepOf(EXT_SPLIT_OBJ, INTERNAL_PROFILE);
+    expect(external.out.boundaryNote ?? '').toContain(
+      'SharingSettings.enableExternalSharingModel',
+    );
+    expect(internal.out.boundaryNote ?? '').not.toContain(
+      'SharingSettings.enableExternalSharingModel',
+    );
+  });
+
+  it('a profile that is not in the vault is `unknown`, not assumed internal', async () => {
+    const r = await whyCantUserSeeRecordHandler(extCtx, {
+      componentId: EXT_SPLIT_OBJ,
+      userContext: { profileId: 'Profile:Not In Vault' },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const owd = r.value.data.reasoning[0]!;
+    expect(owd.verdict).toBe('unknown');
+    expect(owd.reason).toContain('is not in this vault');
+  });
+});
