@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-21T19:29:39.105Z",
-  "toolCount": 215,
+  "generatedAt": "2026-08-21T23:29:24.391Z",
+  "toolCount": 216,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -820,6 +820,10 @@
         {
           "name": "sfi.object_access_audit",
           "description": "Given a CustomObject canonical id (`CustomObject:{ApiName}`), enumerate every Profile and PermissionSet that grants OBJECT-level access via incoming `grantedBy` e..."
+        },
+        {
+          "name": "sfi.object_360",
+          "description": "\"Tell me EVERYTHING about this OBJECT\" - the object-tier counterpart to `field_360`, and the tool for \"what is {Object} and what is attached to it\", \"what would I..."
         },
         {
           "name": "sfi.recordtype_availability",

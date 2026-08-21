@@ -163,7 +163,6 @@ import { buildMixedFreshness } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { mdTable } from '../answer-render.js';
-import { EDGE_SEMANTICS } from '../knowledge/loader.js';
 import type { Context } from '../server.js';
 
 import {
@@ -171,9 +170,13 @@ import {
   buildUsageSourceCoverageCaveat,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import { classifyEdgeSemantics } from './edge-semantics-classify.js';
 import { buildSafeToDeleteEvidenceEnvelope } from './evidence-envelope.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
+import { normalizeFieldId } from './field-360.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { scanFlowConditionFieldReaders } from './flow-condition-field-readers-scan.js';
+import { scanSupplementalFlowFieldWriters } from './flow-field-writers-scan.js';
 import { hybridTrust } from './hybrid-trust.js';
 import { resolveFieldAlias } from './input-aliases.js';
 import {
@@ -228,6 +231,16 @@ const CATEGORY_ORDER = [
   'analytics',
   'ui',
   'frontend',
+  // OBJECT-TIER categories. Reached only through the four object-tier edge
+  // types added to `EDGE_SEMANTICS` for `object_360` (`lookupTo`, `triggersOn`,
+  // `parentOf`, `sharedWith`). None of those edge types lands on a CustomField
+  // on this edge model, so `safe_to_delete_field` never emits them — they are
+  // declared here so the shared `classifyEdge` return type and `CATEGORY_NOTES`
+  // stay TOTAL over the curated table rather than silently returning a category
+  // with no note behind it.
+  'relationship',
+  'automation',
+  'containment',
   'unknown',
 ] as const;
 
@@ -355,6 +368,22 @@ export interface SafeToDeleteFieldExample {
    * field) keeps its own row.
    */
   readonly alsoVia?: readonly ReasonCategory[];
+  /**
+   * SUPPLEMENTAL-FLOW-EVIDENCE: the reconstruction that produced this row when
+   * it did NOT come from an incoming graph edge — `flow-condition-reads-scan`
+   * (a Flow decision / record-trigger filter that TESTS this field: extracted as
+   * a `firesWhen` edge to a synthetic ConditionalContext with the field on its
+   * `fieldRefs`, never as a `readsFrom` edge ONTO the field) or
+   * `flow-field-writers-scan` (a `<recordCreates>`/`<recordUpdates>`
+   * `<inputAssignments>` write through an SObject variable, which mints no
+   * `writesTo` edge either).
+   *
+   * Absent on every edge-derived row. Present rows are HEURISTIC by provenance
+   * even though the Flow XML names the field literally, and they force the
+   * response's `trust.confidence` to `heuristic` — see the limitation this
+   * stamps.
+   */
+  readonly via?: 'flow-condition-reads-scan' | 'flow-field-writers-scan';
 }
 
 /**
@@ -482,54 +511,19 @@ export interface PiiCompliance {
 /**
  * Classify one incoming edge into a (category, verdict) pair.
  *
- * RM-1b: the per-edge `(edgeType, sourceType) → {category, verdict}` mapping —
- * the formula-tokenizer special case (checked first), every per-source-type
- * result, and every per-edgeType default — is curated DATA in the two-track
- * concept model (`packages/mcp/model/edge-semantics.yaml` → the generated,
- * frozen `EDGE_SEMANTICS`). This function only applies that lookup; the mapping
- * it yields is byte-identical to the former inline switch. The verdict lattice,
- * per-category aggregation, coverage caveat, and PII escalation stay in this
- * file.
- *
- * Lookup order (mirrors the data table):
- *   1. formula-tokenizer special case — a `references` edge whose extractor
- *      `source` marker is `formula-tokenizer` is a formula reference
- *      (`{formula, blocking}`), regardless of the source node's type. The
- *      `references` edgeType overlaps validation rules and frontend components,
- *      but the marker is the source of truth for what the tokenizer extracted.
- *   2. `byEdgeType[edgeType].bySourceType[sourceType]` — keyed by the referrer
- *      node's ComponentType (e.g. `usedInLayout`/`grantedBy` classify to
- *      `review`: the platform auto-handles the field's removal and nothing
- *      breaks — a heads-up, not a hard dependency).
- *   3. `byEdgeType[edgeType].default` — the edge type is known but the source
- *      ComponentType is not listed.
- *   4. `EDGE_SEMANTICS.default` — the edge type itself is not in the table.
+ * The lookup itself now lives in the import-free leaf
+ * `./edge-semantics-classify.js` so `sfi.object_360` — a `vault`-plane tool —
+ * can share the SAME curated deletion vocabulary without inheriting this
+ * module's live-plane reach (`live-population-check.js`). Re-exported here,
+ * narrowed to this tool's `ReasonCategory` / `Verdict` unions, so every
+ * existing importer (including the `classifyEdge` golden-lock parity test) is
+ * unchanged and the two tools can never disagree about what an edge means.
  */
 export const classifyEdge = (
   edge: Edge,
   fromNode: Node,
 ): { category: ReasonCategory; verdict: Verdict } => {
-  // Ordered source-keyed special cases, first match wins. Keyed on the extractor
-  // `source` marker because `references` has several producers whose semantics
-  // differ and whose referrer ComponentType does not tell them apart — a
-  // CustomField-sourced `references` edge is a formula reference, a roll-up
-  // coupling, or a resolved cross-object traversal depending ONLY on `source`.
-  // Classifying by type alone made the tool cite a roll-up summary that did not
-  // exist. `fromType`, when the rule carries one, scopes it further.
-  for (const rule of EDGE_SEMANTICS.bySource) {
-    if (edge.edgeType !== rule.edgeType) continue;
-    if (edge.source !== rule.source) continue;
-    if (rule.fromType !== undefined && fromNode.type !== rule.fromType) continue;
-    return {
-      category: rule.category as ReasonCategory,
-      verdict: rule.verdict as Verdict,
-    };
-  }
-  const rule = EDGE_SEMANTICS.byEdgeType[edge.edgeType];
-  const resolved =
-    rule === undefined
-      ? EDGE_SEMANTICS.default
-      : (rule.bySourceType[fromNode.type] ?? rule.default);
+  const resolved = classifyEdgeSemantics(edge, fromNode);
   return {
     category: resolved.category as ReasonCategory,
     verdict: resolved.verdict as Verdict,
@@ -571,6 +565,12 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
       'A Lightning page (FlexiPage) references this field. Removing the field will leave the page with a broken element.',
     frontend:
       'A Lightning Web Component, Aura bundle, Visualforce page, or Visualforce component references this field. Heuristic-confidence matches (LWC/Aura scanners) may include false positives; spot-check the bundle source before deleting.',
+    relationship:
+      'A relationship field on another object points AT this object (`lookupTo`). A master-detail parent cannot be deleted while children exist — the platform refuses outright and cascade-deletes the children if you force the relationship away first; a lookup requires the referencing field to go first. Object-tier only: no CustomField carries an incoming `lookupTo` edge.',
+    automation:
+      'Automation is BOUND to this object by a `triggersOn` edge (an ApexTrigger or a record-triggered Flow). Neither carries a parentId, so this edge is the only evidence the binding exists, and Salesforce will not delete an object that still has one attached. The binding is listed but NOT evaluated: whether the automation fires for any given record depends on entry criteria this tool does not run. Object-tier only.',
+    containment:
+      'A component this object OWNS (`parentOf`). Containment is not an external dependency — the child is destroyed with the parent automatically and does not block the delete — but it IS the blast radius, so it is reported as `review`, never `blocking`. Object-tier only: `safe_to_delete_field` skips `parentOf` before classification.',
     unknown:
       'An incoming dependency edge was found whose source/type combination is not in the v2.0b classification table. Review the impact via sfi.get_impact before deleting.',
   },
@@ -588,6 +588,7 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
  */
 const formatExampleCitation = (e: SafeToDeleteFieldExample): string => {
   const qualifiers: string[] = [];
+  if (e.via !== undefined) qualifiers.push(`found by ${e.via}, heuristic`);
   if (e.rollupRole !== undefined) qualifiers.push(`as ${e.rollupRole}`);
   if (e.traversalPath !== undefined) qualifiers.push(`via ${e.traversalPath}`);
   if (e.firerId !== undefined) qualifiers.push(`fired by ${e.firerId}`);
@@ -938,15 +939,22 @@ const coreSafeToDeleteFieldHandler = async (
     );
   }
 
-  if (!input.fieldId.startsWith(CUSTOM_FIELD_PREFIX)) {
+  // SIBLING-TOOLS-DISAGREED-ON-INPUT-FORM: `sfi.field_360` promotes the short
+  // `<Object>.<Field>` form to canonical; this tool refused it with
+  // `invalid-query`. One user typing `Contact.Employee_ID__c` got a full
+  // forensic report from one field tool and a refusal from the other, on the
+  // same vault, in the same session. Accept the same forms the sibling does —
+  // any OTHER `Type:Name` prefix still refuses, which is the check that matters.
+  const normalizedFieldId = normalizeFieldId(input.fieldId);
+  if (normalizedFieldId === null) {
     return err({
       kind: 'invalid-query',
-      message: `fieldId must start with '${CUSTOM_FIELD_PREFIX}'; got '${input.fieldId}'`,
+      message: `fieldId must be a CustomField canonical id ('${CUSTOM_FIELD_PREFIX}<Object>.<Field>') or its '<Object>.<Field>' short form; got '${input.fieldId}'`,
       path: 'fieldId',
     });
   }
 
-  const fieldId = input.fieldId as ComponentId;
+  const fieldId = normalizedFieldId;
 
   const nodeResult = await getNodeById(ctx.graph, fieldId);
   if (!nodeResult.ok) {
@@ -1027,43 +1035,48 @@ const coreSafeToDeleteFieldHandler = async (
     isStandardObject &&
     !node.apiName.endsWith('__c') &&
     !node.apiName.endsWith('__s');
-  if (isStandardField) {
-    return ok({
-      data: {
-        fieldId,
-        verdict: 'blocking',
-        reasoning: [
-          {
-            category: 'unknown',
-            verdict: 'blocking',
-            count: 1,
-            examples: [],
-            note:
-              `This is a standard field on ${objectApi} (${node.apiName}). Standard fields are undeletable via metadata — that verdict is intrinsic and does not depend on clearing Apex or formula references.`,
-          },
-        ],
-        trust: {
-          provenance: 'offline_snapshot',
-          confidence: 'declared',
-          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
-          completeness: { status: 'complete' },
-          limitations: [
-            'Standard-field deletion is platform-blocked; dependency counts are informational only.',
-          ],
-        },
-      },
-      vaultState: {
-        sourceTreeHash: ctx.manifest.sourceTreeHash,
-        refreshedAt: ctx.manifest.refreshedAt,
-      },
-    });
-  }
-
   // A platform system/audit field (synthesized into the vault for reference,
   // e.g. CreatedById/SystemModstamp on a standard object) is Salesforce-owned
   // and cannot be deleted at all — short-circuit to a blocking verdict rather
-  // than reasoning over its (absent) dependency edges.
-  if (nodeResult.value.properties['system'] === true) {
+  // than reasoning over its dependency edges.
+  const isSystemField = node.properties['system'] === true;
+  if (isStandardField || isSystemField) {
+    // UNDELETABLE-FIELD-COUNT-WAS-FABRICATED. Both short-circuits used to emit
+    // `count: 1` with `examples: []` — a number nothing had counted. On the
+    // reference vault `CustomField:Contact.Id` has 85 real usage referrers (55
+    // Apex/Flow reads, 16 writes, 12 formulas) that `field_360` prints in full;
+    // this tool answered "1". `SafeToDeleteFieldReason.count` is documented as
+    // "the total number of referrers in this category", so a caller rendering
+    // the reasoning chain read one dependency where there were 85, on the tool
+    // whose entire job is dependency counting. The verdict is intrinsic and does
+    // not change; the count now reflects what the graph actually holds.
+    const undeletableEdges = await listEdges(ctx.graph, fieldId, {
+      direction: 'in',
+    });
+    if (!undeletableEdges.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${undeletableEdges.error.message}`,
+      });
+    }
+    const usageReferrerCount = undeletableEdges.value.filter(
+      (e) => e.edgeType !== 'parentOf' && e.edgeType !== 'grantedBy',
+    ).length;
+    const grantCount = undeletableEdges.value.filter(
+      (e) => e.edgeType === 'grantedBy',
+    ).length;
+    // UNDELETABLE-FIELD-CLAIMED-COMPLETE-COVERAGE. `completeness: 'complete'`
+    // was asserted unconditionally here, on vaults whose own coverage rows say
+    // `partial` (the reference vault is missing Report, Dashboard, WorkflowRule,
+    // EscalationRule and AutoResponseRule). The VERDICT does not depend on
+    // coverage — a standard field is undeletable whatever the vault holds — but
+    // the referrer count printed beside it does, and stamping the whole response
+    // `complete` told the reader otherwise. The verdict's independence from
+    // coverage is stated in the limitation instead, where it is true.
+    const undeletableCaveat = buildCoverageCaveat(ctx);
+    const intrinsicNote = isStandardField
+      ? `This is a standard field on ${objectApi} (${node.apiName}). Standard fields are undeletable via metadata — that verdict is intrinsic and does not depend on clearing Apex or formula references.`
+      : 'This is a platform-managed system/audit field (e.g. CreatedDate, OwnerId, SystemModstamp). Salesforce owns it — it cannot be deleted. (It is synthesized into the vault as a reference anchor, not a custom field.)';
     return ok({
       data: {
         fieldId,
@@ -1072,18 +1085,35 @@ const coreSafeToDeleteFieldHandler = async (
           {
             category: 'unknown',
             verdict: 'blocking',
-            count: 1,
+            count: usageReferrerCount,
             examples: [],
-            note: 'This is a platform-managed system/audit field (e.g. CreatedDate, OwnerId, SystemModstamp). Salesforce owns it — it cannot be deleted. (It is synthesized into the vault as a reference anchor, not a custom field.)',
+            note:
+              `${intrinsicNote} The count beside this reason is the number of USAGE referrer edges the graph holds for it (${usageReferrerCount}; ${grantCount} field-level security grant(s) and the parent-object containment edge are excluded) — informational context, not a deletion blocker, since the block is intrinsic. Call \`sfi.field_360\` or \`sfi.get_impact\` to enumerate them.`,
           },
         ],
+        ...(undeletableCaveat !== undefined
+          ? { coverageCaveat: undeletableCaveat }
+          : {}),
         trust: {
           provenance: 'offline_snapshot',
           confidence: 'declared',
           freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
-          completeness: { status: 'complete' },
+          completeness: {
+            status:
+              undeletableCaveat === undefined
+                ? ('complete' as const)
+                : undeletableCaveat.status,
+            ...(undeletableCaveat !== undefined
+              ? { missingCoverage: undeletableCaveat.missingCoverage }
+              : {}),
+          },
           limitations: [
-            'System fields are platform-guaranteed; this verdict does not depend on dependency-edge coverage.',
+            isStandardField
+              ? 'Standard-field deletion is platform-blocked; the referrer count is informational only and the BLOCKING verdict does not depend on dependency-edge coverage.'
+              : 'System fields are platform-guaranteed; the referrer count is informational only and the BLOCKING verdict does not depend on dependency-edge coverage.',
+            ...(undeletableCaveat !== undefined
+              ? [undeletableCaveat.message]
+              : []),
           ],
         },
       },
@@ -1212,6 +1242,93 @@ const coreSafeToDeleteFieldHandler = async (
     }
   }
 
+  // SUPPLEMENTAL-FLOW-EVIDENCE — the two Flow dependencies that mint NO incoming
+  // edge onto the field, and which this tool therefore could not see at all:
+  //
+  //   1. a Flow DECISION / record-trigger filter that tests the field. The
+  //      condition extractor stores it as a `firesWhen` edge from the Flow to a
+  //      synthetic `ConditionalContext` node carrying the field on its
+  //      `fieldRefs` property — there is no edge onto the field, so the incoming
+  //      walk above never sees it.
+  //   2. a Flow `<recordCreates>` / `<recordUpdates>` `<inputAssignments>` write
+  //      routed through an SObject VARIABLE rather than `$Record`, which mints no
+  //      `writesTo` edge.
+  //
+  // `field_360` has composed both for releases; `safe_to_delete_field` had
+  // neither, so the two tools disagreed about whether a Flow touches a field —
+  // and the disagreement fell on the destructive side. Measured on the reference
+  // vault: `CustomField:APXT_CongaSign__Transaction__c.Parent_a7s__c` is tested
+  // by two record-triggered Flow decisions (`$Record.Parent_a7s__c IsNull`, and
+  // assigned from in a third element) and this tool reported `reasoning: []` —
+  // ZERO referrers. Only the vault's stale-builder and partial-coverage caveats
+  // held the verdict at `review`; on a current, fully-covered vault the same
+  // field reaches a bare `safe`. A destructive-advice tool that cannot see a
+  // dependency its own sibling prints is the worst failure this file can have.
+  //
+  // Filed under `flow` (the category whose note already reads "Flow definitions
+  // read or write this field. The Flow XML names the field literally") at
+  // `blocking`, matching how the tool classifies every other Flow read/write.
+  // The PROVENANCE is what differs, not the consequence, so it is disclosed on
+  // the example (`via`), in a limitation, and by forcing `trust.confidence` to
+  // `heuristic` — never by softening the verdict.
+  //
+  // Deduped against everything already bucketed: a Flow already cited by a real
+  // edge, and a Flow already named as the `firerId` of a ConditionalContext row,
+  // must not be counted twice. The two rows name DIFFERENT components (the
+  // synthetic context vs the Flow), which is why the `firerId` check is needed on
+  // top of the id check.
+  const knownReferrerIds = new Set<string>();
+  for (const bucket of buckets.values()) {
+    for (const ex of bucket.examples) {
+      knownReferrerIds.add(ex.id as string);
+      if (ex.firerId !== undefined) knownReferrerIds.add(ex.firerId as string);
+    }
+  }
+  const addFlowReferrer = (example: SafeToDeleteFieldExample): void => {
+    const existing = buckets.get('flow');
+    if (existing === undefined) {
+      buckets.set('flow', { verdict: 'blocking', examples: [example], count: 1 });
+      return;
+    }
+    existing.verdict = promoteVerdict(existing.verdict, 'blocking');
+    existing.count += 1;
+    existing.examples.push(example);
+  };
+
+  const conditionScan = await scanFlowConditionFieldReaders(ctx, fieldId);
+  let supplementalConditionReaders = 0;
+  for (const reader of conditionScan.readers) {
+    if (knownReferrerIds.has(reader.flowId as string)) continue;
+    knownReferrerIds.add(reader.flowId as string);
+    supplementalConditionReaders += 1;
+    addFlowReferrer({
+      id: reader.flowId,
+      type: 'Flow',
+      apiName: reader.flowApiName,
+      via: 'flow-condition-reads-scan',
+    });
+  }
+
+  let supplementalFlowWriters = 0;
+  if (objectApi !== null) {
+    const writers = await scanSupplementalFlowFieldWriters(
+      ctx,
+      objectApi,
+      node.apiName,
+    );
+    for (const writer of writers) {
+      if (knownReferrerIds.has(writer.componentId as string)) continue;
+      knownReferrerIds.add(writer.componentId as string);
+      supplementalFlowWriters += 1;
+      addFlowReferrer({
+        id: writer.componentId,
+        type: 'Flow',
+        apiName: writer.apiName,
+        via: 'flow-field-writers-scan',
+      });
+    }
+  }
+
   // Report / Dashboard usage is folded onto the field as a property by
   // `applyReportDashboardPersistence`. Inject it as an `analytics` (blocking)
   // reason so a field used only in a report column / dashboard component never
@@ -1235,6 +1352,7 @@ const coreSafeToDeleteFieldHandler = async (
   // additional remainder is added. Examples are unioned by id — both sides
   // mint the same `Report:{Folder}/{Name}` identity.
   const rdUsage = reportDashboardUsageDetail(nodeResult.value);
+  let analyticsCountIsFloor = false;
   if (rdUsage.usedInReport || rdUsage.usedInDashboard) {
     const existing = buckets.get('analytics');
     const existingExamples = existing?.examples ?? [];
@@ -1266,6 +1384,23 @@ const coreSafeToDeleteFieldHandler = async (
     const added =
       Math.max(0, reportCount - alreadyCounted('Report')) +
       Math.max(0, dashboardCount - alreadyCounted('Dashboard'));
+    // ANALYTICS-COUNT-IS-A-FLOOR-NOT-A-TOTAL. When the fold stamped the boolean
+    // but no name list and no truncation total — every field on a vault built
+    // before the name property existed; 303 fields carry `usedInReport: true`
+    // and NONE carry names on the reference vault — `Math.max(names.length, 1)`
+    // above yields 1. The vault knows "at least one", not "exactly one", but
+    // `SafeToDeleteFieldReason.count` is documented as "the total number of
+    // referrers in this category", so 1 reads as a total and the checklist
+    // renders "**analytics** (1)" with no examples behind it. The count stays
+    // (dropping it would under-report a blocker); what changes is that the
+    // response now says out loud that it is a lower bound.
+    analyticsCountIsFloor =
+      (rdUsage.usedInReport &&
+        rdUsage.reportNames.length === 0 &&
+        rdUsage.reportsTruncatedTotal === undefined) ||
+      (rdUsage.usedInDashboard &&
+        rdUsage.dashboardNames.length === 0 &&
+        rdUsage.dashboardsTruncatedTotal === undefined);
     buckets.set('analytics', {
       verdict: 'blocking',
       examples: [...existingExamples, ...foldExamples],
@@ -1294,9 +1429,15 @@ const coreSafeToDeleteFieldHandler = async (
 
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
 
-  const baseConfidence = reasoning.some((r) => r.verdict === 'risky')
-    ? ('heuristic' as const)
-    : ('declared' as const);
+  const supplementalFlowTotal =
+    supplementalConditionReaders + supplementalFlowWriters;
+  // SUPPLEMENTAL-FLOW-EVIDENCE: a reconstruction is heuristic by provenance even
+  // when its underlying fact is declared in the Flow XML, so a verdict that
+  // leans on one must not report `declared`.
+  const baseConfidence =
+    reasoning.some((r) => r.verdict === 'risky') || supplementalFlowTotal > 0
+      ? ('heuristic' as const)
+      : ('declared' as const);
   const baseCompleteness = {
     status: coverageCaveat === undefined ? ('complete' as const) : coverageCaveat.status,
     ...(coverageCaveat !== undefined
@@ -1310,6 +1451,30 @@ const coreSafeToDeleteFieldHandler = async (
     // still a verdict computed from incomplete edge families, so the reader is
     // told even though the verdict did not move.
     ...(builderVersionCaveat !== undefined ? [builderVersionCaveat] : []),
+    // SUPPLEMENTAL-FLOW-EVIDENCE — say which rows are reconstructions and which
+    // reconstruction found them; a `blocking` row a caller cannot trace back to
+    // an edge is otherwise indistinguishable from a declared dependency.
+    ...(supplementalFlowTotal > 0
+      ? [
+          `${supplementalFlowTotal} \`flow\` referrer(s) were RECONSTRUCTED, not read from an incoming edge` +
+            `${supplementalConditionReaders > 0 ? ` — ${supplementalConditionReaders} by \`flow-condition-reads-scan\` from Flow decision / record-trigger filter conditions (stored as a firesWhen edge to a synthetic ConditionalContext, never as an edge onto the field)` : ''}` +
+            `${supplementalFlowWriters > 0 ? `${supplementalConditionReaders > 0 ? ',' : ' —'} ${supplementalFlowWriters} by \`flow-field-writers-scan\` from a Flow \`<inputAssignments>\` write routed through an SObject variable rather than $Record (mints no writesTo edge)` : ''}` +
+            `. Each such example carries \`via\`. The Flow XML names the field literally, so these are real dependencies and are classified \`blocking\` like any other Flow read/write — but the ATTRIBUTION is a source/property scan, so this response's confidence is reported as \`heuristic\`; confirm the Flow before deleting.`,
+        ]
+      : []),
+    // Residual: the ConditionalContext walk has a ceiling. A flow-condition
+    // referrer past it is MISSED, so absence of `flow` rows is not proof of none.
+    ...(conditionScan.truncated
+      ? [
+          `Flow decision/filter referrer reconstruction was CAPPED at ${conditionScan.scannedCount} of ${conditionScan.totalCount} ConditionalContext nodes (SFI_CONDITION_SCAN_MAX) — a Flow condition on this field in the un-scanned tail is NOT reflected in the verdict. Treat the absence of a \`flow\` condition referrer as UNCHECKED beyond that cap.`,
+        ]
+      : []),
+    // ANALYTICS-COUNT-IS-A-FLOOR-NOT-A-TOTAL (see the fold above).
+    ...(analyticsCountIsFloor
+      ? [
+          'The `analytics` count is a LOWER BOUND, not a total: this vault carries the folded `usedInReport` / `usedInDashboard` BOOLEAN with no report/dashboard name list, so the tool knows "at least one" and counted 1 per flagged family. The empty `examples` array means "names not captured", NEVER "zero reports". Run `sfi refresh --no-pull` to repopulate the names, then re-run for the real count and the list of what would break.',
+        ]
+      : []),
     REPORT_DASHBOARD_USAGE_CAVEAT,
     ...(flsGrantCount > 0
       ? [

@@ -674,6 +674,141 @@ describe('unusedComponentsHandler — coverage caveat (P13-STAGED-absence-batter
   });
 });
 
+// UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN. This tool tells a human something is
+// safe to delete, so its zeros are load-bearing. Measured on a real vault whose
+// refresh never retrieved Reports or Dashboards (`retrieved: 0, pending: true`
+// on both coverage rows): `sfi.unused_components { types: ['Report'] }` returned
+// `{ byType: { Report: 0 }, components: [], truncated: false }` — byte-identical
+// to a type that WAS fully scanned and found entirely in use. The `coverageCaveat`
+// did not close the gap: it is the REFERRER axis ("a field used only by reports
+// would read unused"), its text is the same whichever type you scanned, and it
+// fires just as loudly on a fully-scanned type.
+describe('unusedComponentsHandler — unchecked zeros (scanned axis)', () => {
+  it('flags a scanned type the vault never retrieved instead of reporting a clean 0', async () => {
+    const notRetrieved: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: [
+        {
+          type: 'Report',
+          requested: true,
+          retrieved: 0,
+          pending: true,
+          errored: false,
+          neverModeled: false,
+        },
+      ],
+    };
+    const result = await unusedComponentsHandler(
+      { ...ctx, manifest: notRetrieved },
+      { types: ['Report'] },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // The bare count is unchanged — and on its own, still reads as "none unused".
+    expect(data.byType['Report']).toBe(0);
+    // …which is why the zero must now be itemised as UNCHECKED.
+    expect(data.uncheckedTypes).toBeDefined();
+    expect(data.uncheckedTypes?.[0]?.type).toBe('Report');
+    expect(data.uncheckedTypes?.[0]?.reason).toBe('not-retrieved');
+    expect(data.uncheckedTypes?.[0]?.note).toContain('NOT CHECKED');
+  });
+
+  it('separates a CONFIRMED-empty family from a never-retrieved one', async () => {
+    const confirmedEmpty: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: [
+        {
+          type: 'Letterhead',
+          requested: true,
+          retrieved: 0,
+          retrieveConfirmed: true,
+          errored: false,
+          neverModeled: false,
+        },
+      ],
+    };
+    const result = await unusedComponentsHandler(
+      { ...ctx, manifest: confirmedEmpty },
+      { types: ['Letterhead'] },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.uncheckedTypes?.[0]?.reason).toBe('confirmed-empty');
+    expect(result.value.data.uncheckedTypes?.[0]?.note).toContain('checked zero');
+  });
+
+  // UNUSED-PAGE-CURSOR-SKIPS-TRIMMED-ROWS. `paginateLegacy`'s default byte
+  // budget (38 KB) bounds the components ARRAY, while the global response guard
+  // measures the WHOLE envelope against ~39 KB and tail-truncates the array
+  // AFTER this handler minted `nextOffset`/`nextCursor` for the untrimmed page.
+  // Measured on a real vault: `sfi.unused_components { limit: 500 }` returned 59
+  // rows carrying a cursor for offset 118, so following that cursor — which the
+  // guard's own note calls authoritative — SKIPPED 59 unused components, and
+  // page 2 skipped 63 more. The handler's page must fit the envelope so its
+  // resume token stays truthful.
+  it('keeps the page inside the response envelope so the cursor cannot skip rows', async () => {
+    const bigDir = mkdtempSync(join(tmpdir(), 'sfi-unused-bigpage-'));
+    try {
+      const o = await openGraph(join(bigDir, 'g.db'));
+      expect(o.ok).toBe(true);
+      if (!o.ok) return;
+      const bigStore = o.value;
+      // 400 unreferenced classes — far more than one page can carry, so the
+      // page-size decision (not the data volume) is what is under test.
+      const nodes: Node[] = [];
+      for (let i = 0; i < 400; i++) {
+        const name = `UnreferencedServiceImplementation${String(i).padStart(4, '0')}`;
+        nodes.push(
+          makeNode({
+            id: `ApexClass:${name}`,
+            type: 'ApexClass',
+            apiName: name,
+            label: name,
+            sourcePath: `classes/${name}.cls`,
+          }),
+        );
+      }
+      const imported = await importExtractionResults(bigStore, [{ nodes, edges: [] }]);
+      expect(imported.ok).toBe(true);
+      const bigCtx: Context = {
+        vaultRoot: bigDir,
+        manifest: FIXTURE_MANIFEST,
+        graph: bigStore,
+      };
+      const r = await unusedComponentsHandler(bigCtx, {
+        types: ['ApexClass'],
+        limit: 500,
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const data = r.value.data;
+      expect(data.truncated).toBe(true);
+      expect(data.components.length).toBeGreaterThan(10);
+      // FAIL-BEFORE: the `data` object serialized to ~39 KB, so the global guard
+      // halved `components` while `nextOffset` / `nextCursor` kept pointing past
+      // the deleted rows.
+      const dataBytes = Buffer.byteLength(JSON.stringify(data), 'utf8');
+      expect(dataBytes).toBeLessThanOrEqual(36_000);
+      // The resume point must be exactly where the returned page ends.
+      expect(data.nextOffset).toBe(data.components.length);
+      expect(data.pageInfo?.returnedCount).toBe(data.components.length);
+      await closeGraph(bigStore);
+    } finally {
+      rmSync(bigDir, { recursive: true, force: true });
+    }
+  });
+
+  it('omits `uncheckedTypes` entirely when every scanned type had instances', async () => {
+    // ApexClass IS seeded in this fixture, so its 0-or-more count is a checked
+    // number; the response must stay byte-identical to before.
+    const result = await unusedComponentsHandler(ctx, { types: ['ApexClass'] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.uncheckedTypes).toBeUndefined();
+  });
+});
+
 // Perf regression guard: the "unused" verdict reads each scanned node's INCOMING
 // edges. It MUST fetch them in one batched `listEdgesForNodes` round-trip per
 // type, not an N+1 `listEdges`-per-node loop — that N+1 (one DuckDB round-trip

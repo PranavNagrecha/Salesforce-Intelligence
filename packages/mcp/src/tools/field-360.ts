@@ -91,6 +91,7 @@ import {
   CONCEPT_REASONING_UNAVAILABLE_NOTE,
   type ConceptReasoningEnvelope,
 } from './concept-reasoning.js';
+import { buildUsageSourceCoverageCaveat } from './coverage-trust.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { scanFlowConditionFieldReaders } from './flow-condition-field-readers-scan.js';
@@ -260,6 +261,26 @@ export interface Field360Section {
  * re-run `sfi refresh --no-pull` to repopulate the names on an existing vault.
  */
 export interface Field360ReportUsage {
+  /**
+   * The folded boolean signal per family. REQUIRED, because the name arrays
+   * alone cannot carry it: on a vault refreshed before the name property existed
+   * (`usedInReports` absent — every field on the reference vault, 303 of which
+   * carry `usedInReport: true` and NONE of which carry a name list) this block
+   * was `{ reportNames: [], dashboardNames: [] }`, which is byte-identical
+   * whether the report flag, the dashboard flag, or both are set. A consumer
+   * reading `reportNames.length === 0` got "zero reports" — the precise
+   * empty-list-as-zero misread `report-dashboard-usage.ts` warns callers against.
+   * The prose in `boundaries[]` was right all along; this JSON was not.
+   */
+  readonly usedInReport: boolean;
+  readonly usedInDashboard: boolean;
+  /**
+   * False when the vault carries the boolean flags but no name lists at all —
+   * i.e. an EMPTY `reportNames` / `dashboardNames` means "names not in this
+   * vault", never "no reports". Re-run `sfi refresh --no-pull` to repopulate
+   * them. True once at least one family's names are present.
+   */
+  readonly namesAvailable: boolean;
   /** Capped (first 50), sorted api-names of referencing reports. */
   readonly reportNames: readonly string[];
   /** True total when `reportNames` was truncated by the fold-time cap; absent otherwise. */
@@ -279,6 +300,20 @@ export interface Field360Summary {
   readonly totalIncomingEdges: number;
   /** Profile / PermissionSet field-level security grants (access, not usage). */
   readonly flsGrantCount?: number;
+  /**
+   * Incoming usage referrers that reached NO section — either the composition
+   * table has no branch for their `(edgeType, sourceType)` pair, or the graph
+   * holds no node row for the referrer at all. Absent when zero.
+   *
+   * Read it as the reconciliation term: `totalIncomingEdges` counts every usage
+   * edge, the sections count only the ones a branch recognised, and this is the
+   * difference. It is NOT a risk score and NOT an "other" bucket — it is the
+   * number of dependencies whose kind this tool could not determine, listed by
+   * id in `boundaries[]`. Non-zero means the section counts are a FLOOR; run
+   * `sfi.safe_to_delete_field` or `sfi.get_impact`, which classify from the
+   * curated deletion vocabulary and do reach these edges.
+   */
+  readonly unclassifiedReferrerCount?: number;
 }
 
 /** Output payload wrapped inside `McpResponse` on success. */
@@ -383,8 +418,13 @@ export interface Field360Output {
  * the latter is promoted by adding the prefix. Anything else (a
  * non-CustomField canonical id, e.g., `ApexClass:X`) is rejected by
  * the handler with `invalid-query`.
+ *
+ * EXPORTED so `safe_to_delete_field` applies the IDENTICAL rule rather than a
+ * copy of it. The two field tools used to disagree about what a field id is —
+ * `Contact.Employee_ID__c` answered here and refused there — and a hand-copied
+ * second predicate is how that gap reopens. One function, one behaviour.
  */
-const normalizeFieldId = (raw: string): ComponentId | null => {
+export const normalizeFieldId = (raw: string): ComponentId | null => {
   if (raw.startsWith(CUSTOM_FIELD_PREFIX)) return raw as ComponentId;
   // Reject other prefix forms (`ApexClass:`, `Flow:`, etc.) outright.
   if (raw.includes(':')) return null;
@@ -607,6 +647,17 @@ const computeRisk = (
   isFormula: boolean,
   dependenciesCount: number,
   foldedConditionCount: number,
+  /**
+   * Referrers the composition table could not file into any section, plus
+   * referrers whose source node the graph has no row for. NOT zero: 126 such
+   * edges exist on the reference vault. They are real incoming dependencies
+   * whose KIND is unknown, so they cannot be scored on any axis — but they can
+   * and must stop the answer reading `low` / `narrow-footprint`, which is what
+   * `hed__Course__c.Department_Name__c` (two ReportType referrers,
+   * `safe_to_delete_field` verdict `blocking`) reported before this argument
+   * existed.
+   */
+  unclassifiedReferrerCount = 0,
 ): { level: 'low' | 'medium' | 'high'; factors: string[] } => {
   const writers = perSectionCounts['writers'] ?? 0;
   const readers = perSectionCounts['readers'] ?? 0;
@@ -650,13 +701,17 @@ const computeRisk = (
     return { level: 'high', factors };
   }
 
-  // `low` — every axis below threshold AND no PII.
+  // `low` — every axis below threshold AND no PII AND nothing unaccounted for.
+  // An uncategorised referrer is not a low-risk one; it is one whose risk was
+  // never measured, and `narrow-footprint` is a positive claim about the whole
+  // footprint that a tool holding unclassified referrers has not earned.
   if (
     writers <= 1 &&
     readers <= 3 &&
     integrations === 0 &&
     emails === 0 &&
     automations === 0 &&
+    unclassifiedReferrerCount === 0 &&
     !isPii
   ) {
     return { level: 'low', factors: ['narrow-footprint'] };
@@ -667,6 +722,9 @@ const computeRisk = (
   if (writers > 1) mediumFactors.push(`${writers}-writers`);
   if (readers > 3) mediumFactors.push(`${readers}-readers`);
   if (emails > 0) mediumFactors.push(`${emails}-emails`);
+  if (unclassifiedReferrerCount > 0) {
+    mediumFactors.push(`${unclassifiedReferrerCount}-unclassified-referrers`);
+  }
   if (mediumFactors.length === 0) mediumFactors.push('moderate-footprint');
   return { level: 'medium', factors: mediumFactors };
 };
@@ -718,22 +776,34 @@ const emptyBuckets = (): SectionBuckets => ({
 
 /**
  * Classify one incoming edge into the appropriate content section per
- * the PLAN-v3.0 §4 composition table. An edge that doesn't fit any
- * recognised section (the sparse-graph case for unrecognised
- * extractors) is dropped silently — the synthesis tier does not
- * fabricate categories for unrecognised inputs.
+ * the PLAN-v3.0 §4 composition table.
+ *
+ * UNCLASSIFIED-REFERRERS-READ-AS-ABSENCE: an edge that fits no branch used to
+ * be dropped with no trace, which turned a referrer the tool could not
+ * CATEGORISE into a field that reads as having NO referrer — the exact
+ * empty-vs-unchecked conflation this tool's honesty axis exists to prevent, and
+ * measurable: on the reference vault 126 incoming edges (79 `WebLink`
+ * `references`, 47 `ReportType` `references`) over ~70 fields vanish this way,
+ * while `summary.totalIncomingEdges` still counts them — so the summary and the
+ * sections disagreed with nothing to explain the gap. Worse, the SAME
+ * `ReportType` edge is `{analytics, blocking}` to `safe_to_delete_field`, so one
+ * field read `riskLevel: "low" / narrow-footprint` here and `blocking` there.
+ *
+ * Returns `false` when nothing matched so the caller can COUNT and DISCLOSE the
+ * referrer instead of losing it. No section is fabricated for it: the composition
+ * table is curated and inventing a bucket would make the row's category a guess.
  */
 const classifyIncomingEdge = (
   edge: Edge,
   source: Node,
   buckets: SectionBuckets,
-): void => {
+): boolean => {
   const row = buildRow(edge, source);
 
   // `validates`: ValidationRule incoming references.
   if (edge.edgeType === 'references' && source.type === 'ValidationRule') {
     buckets.validates.push(row);
-    return;
+    return true;
   }
 
   // `formulas`: incoming `references` from the formula tokenizer OR from the
@@ -752,7 +822,7 @@ const classifyIncomingEdge = (
       (edge.source === 'relationship-resolver' && source.type === 'CustomField'))
   ) {
     buckets.formulas.push(row);
-    return;
+    return true;
   }
 
   // `rollups`: incoming `references` from a roll-up summary field on the PARENT
@@ -765,7 +835,7 @@ const classifyIncomingEdge = (
   // than either being wrong alone.
   if (edge.edgeType === 'references' && edge.source === 'rollup-summary') {
     buckets.rollups.push(row);
-    return;
+    return true;
   }
 
   // `emails`: incoming references from EmailTemplate via v3.0 body-merge.
@@ -775,13 +845,13 @@ const classifyIncomingEdge = (
     edge.properties['role'] === 'body-merge'
   ) {
     buckets.emails.push(row);
-    return;
+    return true;
   }
 
   // `writers`: incoming writesTo from Apex/Flow/Trigger/Workflow/PB.
   if (edge.edgeType === 'writesTo') {
     buckets.writers.push(row);
-    return;
+    return true;
   }
 
   // `readers`: incoming readsFrom from Apex/Flow/LWC/Aura/VF.
@@ -816,42 +886,42 @@ const classifyIncomingEdge = (
     // correct, because a declarative condition is not SOQL at all.
     if (source.type === 'ConditionalContext') {
       buckets.automations.push(row);
-      return;
+      return true;
     }
     // Frontend code types fold into `ui` if the edge marks a UI role.
     if (UI_NODE_TYPES.has(source.type) && CODE_NODE_TYPES.has(source.type)) {
       // LWC/Aura/VF are BOTH code and UI; route to UI bucket here.
       buckets.ui.push(row);
-      return;
+      return true;
     }
     buckets.readers.push(row);
-    return;
+    return true;
   }
 
   // `ui`: incoming usedInLayout.
   if (edge.edgeType === 'usedInLayout') {
     buckets.ui.push(row);
-    return;
+    return true;
   }
 
   // `automations`: firesWhen + automation node types' incoming
   // references (DuplicateRule, MatchingRule, ConditionalContext, etc.).
   if (edge.edgeType === 'firesWhen') {
     buckets.automations.push(row);
-    return;
+    return true;
   }
   if (
     AUTOMATION_NODE_TYPES.has(source.type) &&
     edge.edgeType === 'references'
   ) {
     buckets.automations.push(row);
-    return;
+    return true;
   }
 
   // `integrations`: incoming references/exposes from integration types.
   if (INTEGRATION_NODE_TYPES.has(source.type)) {
     buckets.integrations.push(row);
-    return;
+    return true;
   }
 
   // `listViews`: incoming references from a ListView (CR-CAP-02 / CR-CAP-13).
@@ -865,7 +935,7 @@ const classifyIncomingEdge = (
   // dispatch explicit.
   if (source.type === 'ListView' && edge.edgeType === 'references') {
     buckets.listViews.push(row);
-    return;
+    return true;
   }
 
   // UI-only types (Layout, FlexiPage, QuickAction, CustomTab) outside the
@@ -876,9 +946,33 @@ const classifyIncomingEdge = (
   // scraped page reference from a resolved related-list column.
   if (UI_NODE_TYPES.has(source.type) && edge.edgeType === 'references') {
     buckets.ui.push(row);
-    return;
+    return true;
   }
+
+  // Nothing matched. The caller counts and DISCLOSES this referrer rather than
+  // dropping it — see the JSDoc above.
+  return false;
 };
+
+/**
+ * The `ComponentType` a not-in-vault dependency TARGET id names, for the small
+ * set of prefixes a formula `references` edge can legitimately point at.
+ *
+ * Used only by the `dependencies` walk, whose targets are formula-tokenizer
+ * references. Deliberately an ALLOW-LIST rather than a blind cast of whatever
+ * precedes the colon: the id prefix is a string, `ComponentType` is a closed
+ * union, and widening one into the other on trust is how a fabricated type
+ * reaches a caller. A prefix outside this map yields no row — the target is
+ * counted and named in `boundaries[]` instead.
+ */
+const DEPENDENCY_TARGET_TYPE_BY_PREFIX: Readonly<Record<string, ComponentType>> =
+  Object.freeze({
+    CustomField: 'CustomField',
+    CustomObject: 'CustomObject',
+    GlobalValueSet: 'GlobalValueSet',
+    CustomLabel: 'CustomLabel',
+    CustomMetadataRecord: 'CustomMetadataRecord',
+  });
 
 /**
  * The `sfi.field_360` handler. See module JSDoc for the composition
@@ -954,12 +1048,30 @@ export const field360Handler = async (
   // index below sees exactly the edges that will be reported (pairing against a
   // row the sparse-graph guard then drops would lose a dependency).
   const resolvedIncoming: { edge: Edge; source: Node }[] = [];
+  // Referrer edges whose SOURCE node the graph has no row for. Every other
+  // composition tool drops these silently; counting them keeps a sparse-graph
+  // miss from reading as "nothing references this field". Measured 0 on the
+  // reference vault (no incoming CustomField edge there has a missing source),
+  // so this is a guard on a real but currently-empty hole, not a fix for an
+  // observed loss — which is exactly why it must be COUNTED rather than assumed
+  // to stay zero.
+  let unresolvedReferrerCount = 0;
   for (const edge of incoming) {
     // Skip structural parentOf — never part of a forensic answer.
     if (edge.edgeType === 'parentOf') continue;
+    // Skip FLS grants: they are ACCESS, not usage, are counted separately into
+    // `summary.flsGrantCount` from `incoming`, and match no section branch — so
+    // resolving them only to have `classifyIncomingEdge` reject them would make
+    // every grant look like an unclassified referrer below. (A real org has tens
+    // of thousands of these; skipping them here also avoids that many node
+    // lookups per call.)
+    if (edge.edgeType === 'grantedBy') continue;
     const sr = await resolveEdgeSource(ctx, edge);
     if (!sr.ok) return sr;
-    if (sr.value === null) continue;
+    if (sr.value === null) {
+      unresolvedReferrerCount += 1;
+      continue;
+    }
     resolvedIncoming.push({ edge, source: sr.value });
   }
 
@@ -982,10 +1094,16 @@ export const field360Handler = async (
     resolvedIncoming.map((r) => r.edge),
   );
 
-  // PASS 2 — classify.
+  // PASS 2 — classify. An edge no branch recognises is COUNTED and named rather
+  // than dropped (see `classifyIncomingEdge`'s JSDoc): the composition table is
+  // curated, so "no section fits" is a gap in the table, never evidence that the
+  // referrer does not exist.
+  const unclassified: { edge: Edge; source: Node }[] = [];
   for (const { edge, source } of resolvedIncoming) {
     if (restated.isRestatingCondition(edge)) continue;
-    classifyIncomingEdge(edge, source, buckets);
+    if (!classifyIncomingEdge(edge, source, buckets)) {
+      unclassified.push({ edge, source });
+    }
   }
 
   // Supplemental Flow writers from source XML (SObject-variable assignments the
@@ -1068,6 +1186,24 @@ export const field360Handler = async (
   }
 
   // `dependencies`: OUTGOING references for formula fields only.
+  //
+  // FORMULA-DEPENDENCY-ON-A-PLATFORM-FIELD-READ-AS-NO-DEPENDENCY: a target with
+  // no node row used to be `continue`d past, so a formula that references a
+  // platform / audit / managed-package field the refresh never modeled as its own
+  // node (`Id`, `Name`, `CreatedDate`, `CreatedById`, `Owner`) lost that row.
+  // Measured on the reference vault: 36 of 364 dependency rows (9.9%) across 29
+  // formula fields, and for 14 of those fields EVERY dependency was dropped — so
+  // `field_360` answered `dependencies: { rows: [], count: 0 }` for a field whose
+  // formula body is literally `CASESAFEID(Id)`. That is the same
+  // edge-whose-endpoint-has-no-node blind spot measured on the object tier, one
+  // tier down, and "0" is the worst possible way to report it.
+  //
+  // The edge itself is evidence enough to cite the target: the id names the
+  // component, and `DEPENDENCY_TARGET_TYPE_BY_PREFIX` gives its type WITHOUT
+  // guessing (a prefix outside that allow-list yields no row and is disclosed
+  // instead). The row is stamped `targetNotModeled: true` so a renderer can say
+  // "referenced, not modeled" rather than implying the vault holds the target.
+  const unmodeledDependencyTargets: ComponentId[] = [];
   if (isFormula) {
     const outResult = await listEdges(ctx.graph, fieldId, {
       direction: 'out',
@@ -1087,7 +1223,23 @@ export const field360Handler = async (
           message: `graph query failed: ${targetResult.error.message}`,
         });
       }
-      if (targetResult.value === null) continue;
+      if (targetResult.value === null) {
+        unmodeledDependencyTargets.push(edge.toId);
+        const prefix = edge.toId.slice(0, edge.toId.indexOf(':'));
+        const targetType = DEPENDENCY_TARGET_TYPE_BY_PREFIX[prefix];
+        if (targetType !== undefined) {
+          buckets.dependencies.push({
+            componentId: edge.toId,
+            componentType: targetType,
+            componentApiName: edge.toId.slice(prefix.length + 1),
+            edgeType: edge.edgeType,
+            confidence: edge.confidence,
+            source: edge.source,
+            properties: { ...edge.properties, targetNotModeled: true },
+          });
+        }
+        continue;
+      }
       // Build a row whose componentId is the dependency target.
       buckets.dependencies.push(buildRow(edge, targetResult.value));
     }
@@ -1233,11 +1385,13 @@ export const field360Handler = async (
     isFormula,
     buckets.dependencies.length,
     restated.suppressedConditionCount,
+    unclassified.length + unresolvedReferrerCount,
   );
 
   const grantedByCount = incoming.filter(
     (e) => e.edgeType === 'grantedBy',
   ).length;
+  const unclassifiedReferrerTotal = unclassified.length + unresolvedReferrerCount;
   const summary: Field360Summary = {
     perSectionCounts,
     riskLevel: risk.level,
@@ -1246,6 +1400,9 @@ export const field360Handler = async (
       (e) => e.edgeType !== 'parentOf' && e.edgeType !== 'grantedBy',
     ).length,
     ...(grantedByCount > 0 ? { flsGrantCount: grantedByCount } : {}),
+    ...(unclassifiedReferrerTotal > 0
+      ? { unclassifiedReferrerCount: unclassifiedReferrerTotal }
+      : {}),
   };
 
   const overallConfidence = computeOverallConfidence(
@@ -1258,6 +1415,39 @@ export const field360Handler = async (
     FIELD_360_Q165_DISCLOSURE,
     'list view column AND filter field IDENTITY are composed into the `listViews` section (heuristic regex; a row\'s `referenceKind` is `fieldRef` for a column, `filterRef` for a filter predicate, or `columnAndFilter` for both) — but the saved view\'s runtime filter PREDICATE EVALUATION (whether a given record passes the filter) stays unmodeled and remains in dataNotAvailable as `list-view-filters`',
   ];
+  // UNCLASSIFIED-REFERRERS-READ-AS-ABSENCE: name every referrer no section
+  // holds, with its id and the edge that produced it, so the reader can go look
+  // instead of concluding from `count: 0` that nothing is there. Capped at 10
+  // ids with the true total stated, per the truncation rule.
+  if (unclassified.length > 0) {
+    const CAP = 10;
+    const cited = unclassified
+      .map(({ edge, source }) => `${source.id} (${source.type} ${edge.edgeType})`)
+      .sort()
+      .slice(0, CAP);
+    const more =
+      unclassified.length > CAP
+        ? `, +${unclassified.length - CAP} more not listed`
+        : '';
+    boundaries.push(
+      `${unclassified.length} incoming referrer(s) matched NO field_360 section because the composition table has no branch for their (edge type, referrer type) pair — they ARE counted in summary.totalIncomingEdges and summary.unclassifiedReferrerCount, so every section count above is a FLOOR, not a total: ${cited.join('; ')}${more}. This is a gap in the table, NOT evidence the field is unused — \`sfi.safe_to_delete_field\` classifies these same edges from the curated deletion vocabulary (a ReportType reference, for example, is \`analytics\`/blocking there). Run it or \`sfi.get_impact\` before treating this field as unreferenced.`,
+    );
+  }
+  if (unresolvedReferrerCount > 0) {
+    boundaries.push(
+      `${unresolvedReferrerCount} incoming edge(s) name a referrer the graph has NO node row for (a sparse-graph miss), so their identity could not be resolved and they appear in no section. They are counted in summary.unclassifiedReferrerCount. Re-run \`sfi refresh\` to model the missing referrer(s).`,
+    );
+  }
+  // FORMULA-DEPENDENCY-ON-A-PLATFORM-FIELD-READ-AS-NO-DEPENDENCY: a formula
+  // target the vault never modeled as a node is still a real dependency of this
+  // formula. It is listed in `dependencies` from the edge alone, stamped
+  // `targetNotModeled: true` — and said out loud here, because "referenced but
+  // not modeled" and "modeled and inspectable" are different claims.
+  if (unmodeledDependencyTargets.length > 0) {
+    boundaries.push(
+      `${unmodeledDependencyTargets.length} of this formula's dependency target(s) are NOT modeled as their own vault node — platform / audit / managed-package fields (Id, Name, CreatedDate, CreatedById, Owner) that the refresh does not retrieve as components. They are listed in \`dependencies\` from the reference edge alone with \`properties.targetNotModeled: true\`, so the row cites the id but the vault holds no definition to inspect: ${[...unmodeledDependencyTargets].sort().slice(0, 10).join(', ')}${unmodeledDependencyTargets.length > 10 ? `, +${unmodeledDependencyTargets.length - 10} more` : ''}.`,
+    );
+  }
   // Referrer collapse, disclosed rather than silent: a validation rule whose
   // formula BOTH references and tests this field is one referrer reached by two
   // edges tokenized from one string, so its `automations` row is folded into the
@@ -1318,8 +1508,13 @@ export const field360Handler = async (
         analytics.dashboardsTruncatedTotal,
       ),
     ].filter((x): x is string => x !== null);
+    const namesMissing =
+      analytics.reportNames.length === 0 && analytics.dashboardNames.length === 0;
     boundaries.push(
-      `this field IS referenced by ${where.join(' and ')} (folded reports-pull usage) — it is NOT unused; weigh that before deleting.`,
+      `this field IS referenced by ${where.join(' and ')} (folded reports-pull usage) — it is NOT unused; weigh that before deleting.` +
+        (namesMissing
+          ? ' WHICH report(s)/dashboard(s) is not in this vault: the fold stamped only the boolean flag, so the empty `reportUsage.reportNames` / `reportUsage.dashboardNames` arrays mean "names not captured", NOT "zero reports" (`reportUsage.namesAvailable` is false). Re-run `sfi refresh --no-pull` to repopulate the names on this vault.'
+          : ''),
     );
   } else if (analyticsCoverage.status === 'complete') {
     boundaries.push(
@@ -1327,6 +1522,31 @@ export const field360Handler = async (
     );
   } else {
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);
+  }
+  // EMPTY-SECTION-ON-A-COVERAGE-DEGRADED-VAULT-READ-AS-NONE. Every section above
+  // is an ABSENCE claim when it is empty, and an absence claim is only as strong
+  // as the coverage behind it. `field_360` had no such disclosure at all: on the
+  // reference vault — whose coverage rows report Report, Dashboard, WorkflowRule,
+  // EscalationRule and AutoResponseRule as NOT retrieved — it printed
+  // `automations: 0` / `writers: 0` with nothing to say those families were never
+  // looked at, while `safe_to_delete_field` on the SAME field printed
+  // "Treat absence of dependencies in those families as 'not checked', not
+  // 'none'." Two tools, one vault, opposite epistemics.
+  //
+  // Same contract as the sibling (`USAGE_SOURCE_FAMILIES.CustomField` via
+  // `coverage-trust.ts`) so the two cannot drift into naming different families.
+  // `fireOnUnknownCoverage` is NOT set: this is a forensic readout, not a
+  // destructive verdict, and a legacy vault with no coverage rows must not be
+  // false-flagged (the vault-coverage-honesty rule).
+  const usageCoverageCaveat = buildUsageSourceCoverageCaveat(
+    ctx,
+    'CustomField',
+    'Referrer enumeration',
+  );
+  if (usageCoverageCaveat !== undefined) {
+    boundaries.push(
+      `${usageCoverageCaveat.message} Every empty section above is therefore "not found among the families this vault retrieved", NOT "none exists".`,
+    );
   }
   // Always disclose the static-SOQL boundary when any reader exists.
   if ((sectionsBuilt['readers']?.rows.length ?? 0) > 0) {
@@ -1414,6 +1634,10 @@ export const field360Handler = async (
   const reportUsage: Field360ReportUsage | undefined =
     analytics.usedInReport || analytics.usedInDashboard
       ? {
+          usedInReport: analytics.usedInReport,
+          usedInDashboard: analytics.usedInDashboard,
+          namesAvailable:
+            analytics.reportNames.length > 0 || analytics.dashboardNames.length > 0,
           reportNames: analytics.reportNames,
           ...(analytics.reportsTruncatedTotal !== undefined
             ? { reportsTruncatedTotal: analytics.reportsTruncatedTotal }

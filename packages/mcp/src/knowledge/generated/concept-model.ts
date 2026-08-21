@@ -233,6 +233,30 @@ export const EDGE_SEMANTICS: EdgeSemantics = Object.freeze({
       bySourceType: {},
       default: { category: 'permission', verdict: 'review' },
     },
+    lookupTo: {
+      bySourceType: {
+        CustomField: { category: 'relationship', verdict: 'blocking' },
+      },
+      default: { category: 'relationship', verdict: 'blocking' },
+    },
+    triggersOn: {
+      bySourceType: {
+        ApexTrigger: { category: 'apex', verdict: 'blocking' },
+        Flow: { category: 'flow', verdict: 'blocking' },
+      },
+      default: { category: 'automation', verdict: 'blocking' },
+    },
+    parentOf: {
+      bySourceType: {},
+      default: { category: 'containment', verdict: 'review' },
+    },
+    sharedWith: {
+      bySourceType: {
+        Queue: { category: 'sharing', verdict: 'blocking' },
+        SharingRule: { category: 'sharing', verdict: 'blocking' },
+      },
+      default: { category: 'sharing', verdict: 'review' },
+    },
   },
   default: { category: 'unknown', verdict: 'risky' },
 });

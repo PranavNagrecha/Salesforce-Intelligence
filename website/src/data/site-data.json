@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-08-21T19:29:39.105Z",
+  "generatedAt": "2026-08-21T23:29:24.391Z",
   "version": "0.3.0",
-  "toolCount": 215,
+  "toolCount": 216,
   "skillCount": 26,
   "agentCount": 4,
   "commandCount": 5,
-  "componentTypeCount": 102,
+  "componentTypeCount": 103,
   "edgeTypeCount": 23,
   "conceptCount": 143,
   "conceptRuleCount": 195,
@@ -13,13 +13,13 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 295,
-        "cases": 5962
+        "files": 296,
+        "cases": 6033
       },
       {
         "name": "extractors",
-        "files": 86,
-        "cases": 1154
+        "files": 87,
+        "cases": 1170
       },
       {
         "name": "cli",
@@ -62,10 +62,10 @@
         "cases": 50
       }
     ],
-    "totalCases": 8746,
-    "totalFiles": 494,
+    "totalCases": 8833,
+    "totalFiles": 496,
     "packageCount": 10,
-    "approx": 8700
+    "approx": 8800
   },
   "integrationSuiteCount": 3,
   "gates": [
@@ -90,14 +90,14 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 295,
-      "cases": 5962,
-      "description": "The 215 read-only tools + router + grounding layer"
+      "files": 296,
+      "cases": 6033,
+      "description": "The 216 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 86,
-      "cases": 1154,
+      "files": 87,
+      "cases": 1170,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {

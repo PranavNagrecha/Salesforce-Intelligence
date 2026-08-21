@@ -38,6 +38,17 @@
  *
  * Output: per-granter CRUD matrix + summary counts. `declared` confidence —
  * object permissions are declared profile/permission-set metadata.
+ *
+ * OBJECT-ACCESS-SUMMARY-MIXES-GRANTER-KINDS: `summary.create` / `read` /
+ * `edit` / `delete` / `viewAll` / `modifyAll` are ROW counts over Profiles +
+ * PermissionSets + the reverse-derived PermissionSetGroup rows (which COPY a
+ * member permission set's flags). They answer neither "how many profiles" nor
+ * "how many distinct actors". Measured on a real hub object: `summary.create`
+ * = 35 while Profiles = 20, PermissionSets = 9, and the remaining 6 were PSG
+ * duplicates of those same permission sets. `summary.byGranterType` splits the
+ * matrix per kind over DISTINCT granters, which is the shape of the question
+ * admins ask ("X profiles who can create it, X who can edit"). Neither is ever
+ * a USER count — assignment data is not in the vault (`assignmentDisclosure`).
  */
 
 import type {
@@ -149,12 +160,45 @@ export interface ObjectAccessAuditOutput {
     readonly granters: number;
     /** DISTINct Profile/PermissionSet count (unique `granterId`). */
     readonly distinctGranters: number;
+    /**
+     * ROW counts spanning ALL THREE granter kinds — Profiles, PermissionSets
+     * AND the reverse-derived PermissionSetGroup rows that COPY a member
+     * permission set's flags. Do NOT read `create` as "N profiles can create
+     * this": on a real hub object it was 35 while the profile answer was 20 and
+     * the permission-set answer 9, the remaining 6 being PSG duplicates of
+     * those same permission sets. Use `byGranterType` for the per-kind,
+     * distinct-actor answer.
+     */
     readonly create: number;
     readonly read: number;
     readonly edit: number;
     readonly delete: number;
     readonly viewAll: number;
     readonly modifyAll: number;
+    /**
+     * OBJECT-ACCESS-SUMMARY-MIXES-GRANTER-KINDS: per-kind CRUD counted over
+     * DISTINCT granters, which is the shape of the question people actually
+     * ask — "how many PROFILES will be affected", "X profiles who can create
+     * it, X who can edit". Flags are OR-ed across a granter's rows (a grant is
+     * additive), so one actor is counted once however many paths reach it.
+     * `PermissionSetGroup` rows are reverse-derived duplicates of their member
+     * permission set's flags — real access paths, but never a separate
+     * population to add to the other two.
+     */
+    readonly byGranterType: Readonly<
+      Record<
+        'Profile' | 'PermissionSet' | 'PermissionSetGroup',
+        {
+          readonly granters: number;
+          readonly create: number;
+          readonly read: number;
+          readonly edit: number;
+          readonly delete: number;
+          readonly viewAll: number;
+          readonly modifyAll: number;
+        }
+      >
+    >;
   };
   /** Present when user/assignment data is not in the vault. */
   readonly assignmentDisclosure?: string;
@@ -242,6 +286,15 @@ export const objectAccessAuditHandler = async (
     const assignmentDisclosure =
       `${USER_ASSIGNMENT_NOT_IN_VAULT} ${PERMSET_INTERSECTION_NOT_AVAILABLE}` +
       (related.length > 0 ? ` Referenced permission sets: ${related}.` : '');
+    const zeroKind = {
+      granters: 0,
+      create: 0,
+      read: 0,
+      edit: 0,
+      delete: 0,
+      viewAll: 0,
+      modifyAll: 0,
+    } as const;
     return ok({
       data: {
         componentId,
@@ -249,6 +302,13 @@ export const objectAccessAuditHandler = async (
         objectLabel: psNode.label ?? psNode.apiName,
         notModeled: false,
         grants: [],
+        // OBJECT-ACCESS-PERMSET-MODE-ZEROS: this branch is a DISCLOSURE mode —
+        // it exists to say "the vault cannot tell you who HOLDS this permission
+        // set". Its all-zero summary is BY CONSTRUCTION, not a finding: a
+        // caller reading `{ granters: 0, create: 0, … }` for a permission set
+        // must not conclude the set grants nothing. Say so in `note` rather
+        // than leaving the zeros to speak for themselves.
+        note: `This is PERMISSION-SET DISCLOSURE mode, not an access audit: \`${componentId}\` is a PermissionSet, so the zeros in \`summary\` are BY CONSTRUCTION and do NOT mean this permission set grants nothing. To audit what it grants on an object, call this tool with that OBJECT (\`objectApiName\`) and read the row whose \`granterId\` is \`${componentId}\`; for the set's full grant surface use \`sfi.effective_permissions\`.`,
         summary: {
           granters: 0,
           distinctGranters: 0,
@@ -258,6 +318,11 @@ export const objectAccessAuditHandler = async (
           delete: 0,
           viewAll: 0,
           modifyAll: 0,
+          byGranterType: {
+            Profile: zeroKind,
+            PermissionSet: zeroKind,
+            PermissionSetGroup: zeroKind,
+          },
         },
         assignmentDisclosure,
       },
@@ -389,6 +454,62 @@ export const objectAccessAuditHandler = async (
   grants.sort(compareGrants);
 
   const distinctGranters = new Set(grants.map((g) => g.granterId)).size;
+  // OBJECT-ACCESS-SUMMARY-MIXES-GRANTER-KINDS: the flat `create` / `edit` /…
+  // tallies below are ROW counts over Profiles + PermissionSets + the
+  // reverse-derived PermissionSetGroup rows that COPY a member permission set's
+  // flags, so a caller asking the question people actually ask ("how many
+  // PROFILES can create this?") read a number that was neither the profile
+  // population nor a distinct-actor count. Measured on a real hub object:
+  // `summary.create` = 35, while Profiles = 20, PermissionSets = 9 and the
+  // remaining 6 were PSG duplicates of those same permission sets. Split it,
+  // per kind, over DISTINCT granters, OR-ing flags across a granter's rows
+  // (grants are additive) so one actor counts once however many paths reach it.
+  const perKind = (
+    kind: ObjectAccessGrant['granterType'],
+  ): {
+    granters: number;
+    create: number;
+    read: number;
+    edit: number;
+    delete: number;
+    viewAll: number;
+    modifyAll: number;
+  } => {
+    const merged = new Map<string, ObjectAccessGrant>();
+    for (const g of grants) {
+      if (g.granterType !== kind) continue;
+      const prior = merged.get(g.granterId);
+      merged.set(
+        g.granterId,
+        prior === undefined
+          ? g
+          : {
+              ...prior,
+              allowCreate: prior.allowCreate || g.allowCreate,
+              allowRead: prior.allowRead || g.allowRead,
+              allowEdit: prior.allowEdit || g.allowEdit,
+              allowDelete: prior.allowDelete || g.allowDelete,
+              viewAllRecords: prior.viewAllRecords || g.viewAllRecords,
+              modifyAllRecords: prior.modifyAllRecords || g.modifyAllRecords,
+            },
+      );
+    }
+    const rows = [...merged.values()];
+    return {
+      granters: rows.length,
+      create: rows.filter((g) => g.allowCreate).length,
+      read: rows.filter((g) => g.allowRead).length,
+      edit: rows.filter((g) => g.allowEdit).length,
+      delete: rows.filter((g) => g.allowDelete).length,
+      viewAll: rows.filter((g) => g.viewAllRecords).length,
+      modifyAll: rows.filter((g) => g.modifyAllRecords).length,
+    };
+  };
+  const byGranterType = {
+    Profile: perKind('Profile'),
+    PermissionSet: perKind('PermissionSet'),
+    PermissionSetGroup: perKind('PermissionSetGroup'),
+  };
   const summary = {
     granters: grants.length,
     distinctGranters,
@@ -398,7 +519,15 @@ export const objectAccessAuditHandler = async (
     delete: grants.filter((g) => g.allowDelete).length,
     viewAll: grants.filter((g) => g.viewAllRecords).length,
     modifyAll: grants.filter((g) => g.modifyAllRecords).length,
+    byGranterType,
   };
+  // Fires whenever there is anything to mis-read: the flat tallies are row
+  // counts over mixed populations even when no granter has two paths, so this
+  // note is NOT gated on `grants.length > distinctGranters`.
+  const kindNote =
+    grants.length > 0
+      ? `\`summary.create\` / \`read\` / \`edit\` / \`delete\` / \`viewAll\` / \`modifyAll\` are ROW counts spanning Profiles, PermissionSets AND PermissionSetGroup rows (which COPY their member permission set's flags) — they are NOT a profile count and NOT a distinct-actor count. For "how many PROFILES can create/edit this", read \`summary.byGranterType.Profile\` (${byGranterType.Profile.granters} profile(s): ${byGranterType.Profile.create} create, ${byGranterType.Profile.read} read, ${byGranterType.Profile.edit} edit, ${byGranterType.Profile.delete} delete); permission sets are \`byGranterType.PermissionSet\` (${byGranterType.PermissionSet.granters}). These are ACCESS grants on the object, never a USER count — see \`assignmentDisclosure\`.`
+      : undefined;
   const multiPathNote =
     grants.length > distinctGranters
       ? `${grants.length} grant rows come from ${distinctGranters} distinct Profile/PermissionSet/PermissionSetGroup(s) — a granter that grants access through more than one path appears in multiple rows. Count actors by \`summary.distinctGranters\`, not row count.`
@@ -410,7 +539,9 @@ export const objectAccessAuditHandler = async (
           ? ` ${mutingPsgIds.size} of those group(s) (${[...mutingPsgIds].sort().join(', ')}) reference a muting permission set — muting is NOT subtracted here (this roster shows raw grant paths), so effective access may be lower; use \`sfi.effective_permissions\` for the muting-correct net grant (R6-06).`
           : '')
       : undefined;
-  const note = [multiPathNote, psgNote].filter((n) => n !== undefined).join(' ');
+  const note = [kindNote, multiPathNote, psgNote]
+    .filter((n) => n !== undefined)
+    .join(' ');
   const assignmentDisclosure = userAssignmentUnavailable(ctx)
     ? `${USER_ASSIGNMENT_NOT_IN_VAULT} ${PERMSET_INTERSECTION_NOT_AVAILABLE}`
     : undefined;

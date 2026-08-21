@@ -32,10 +32,16 @@
  *     per-`listEdges` path left the intra-group order DuckDB-unspecified.
  *     The cap-identity test in `get-impact.test.ts` is the contract for
  *     this pinned prefix.
- *   - Unknown `componentId` resolves to `ok({ impact: { nodes: [],
- *     edges: [] }, traversedEdgeTypes: [] })`. The graph cannot
- *     distinguish "missing component" from "component with no incoming
- *     edges", and either is a valid empty impact set.
+ *   - Unknown `componentId` is REFUSED with `component-not-found`
+ *     (GET-IMPACT-UNKNOWN-ID-READS-AS-SAFE). It previously resolved to
+ *     `ok({ impact: { nodes: [], edges: [] } })` with the disclosure
+ *     "Complete impact slice … 0 node(s) / 0 edge(s)" on the claim that the
+ *     graph "cannot distinguish a missing component from one with no incoming
+ *     edges" — which is untrue: `getNodeById` plus an unfiltered inbound-edge
+ *     probe separates them exactly, as `sfi.find_component_usages` already
+ *     does. A typo therefore read as a proven "nothing breaks". A PHANTOM root
+ *     (no node row but referenced by inbound edges) still answers from those
+ *     edges, disclosed in the `disclosure`.
  *   - Sort: nodes by id ASC, edges by `(fromId, toId, edgeType,
  *     source)` — matches `getSubgraph`'s deterministic output so
  *     consumer fixtures can share comparison logic across tools.
@@ -54,6 +60,7 @@ import {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   getNodeById,
+  listEdges,
   listEdgesForNodes,
   listNodesByIds,
 } from '@sf-intelligence/graph';
@@ -144,9 +151,14 @@ export type GetImpactInput = z.infer<typeof getImpactInputSchema>;
  *   - `impact.edges`: every incoming edge visited during the walk,
  *     deduped on `(fromId, toId, edgeType, source)`. Sorted by the same
  *     tuple.
- *   - `traversedEdgeTypes`: the distinct edge types that actually
- *     contributed to the impact set. Lets callers cite which kinds of
- *     dependencies the answer rests on. Sorted alphabetically.
+ *   - `traversedEdgeTypes`: the distinct edge types the WALK followed.
+ *     GET-IMPACT-TRUNCATION-DROPS-FAMILIES: this is the walk's reach, NOT
+ *     the returned slice's contents — the count caps and the byte budget can
+ *     drop every edge of a type the walk did follow, so a type listed here
+ *     may have ZERO rows in `impact.edges`. When `truncated` is true, read
+ *     `truncationReason.omittedEdgeTypes` /
+ *     `truncationReason.omittedReferrerTypes` for the families that were
+ *     found and then cut. Sorted alphabetically.
  */
 export interface GetImpactOutput {
   readonly impact: {
@@ -162,13 +174,71 @@ export interface GetImpactOutput {
    * why, and how to widen it.
    */
   readonly truncationReason?: {
-    readonly reason: 'node-cap' | 'edge-cap' | 'payload-budget';
+    readonly reason: 'node-cap' | 'edge-cap' | 'payload-budget' | 'dropped-endpoint';
     readonly nodeCap: number;
     readonly edgeCap: number;
     readonly payloadByteBudget: number;
     readonly returnedNodes: number;
     readonly returnedEdges: number;
+    /**
+     * GET-IMPACT-TRUNCATION-DROPS-FAMILIES: how many nodes/edges the walk
+     * actually collected BEFORE the caps and the byte budget cut it down.
+     * Without these, `returnedEdges: 18` on a hub with 234 inbound edges reads
+     * like a complete answer with a generic `truncated` flag.
+     */
+    readonly walkedNodes: number;
+    readonly walkedEdges: number;
+    /**
+     * Edge types the walk followed that have ZERO rows left in `impact.edges`.
+     * Trimming is by component-id ORDER (`enforceGraphPayloadBudget` drops the
+     * id-sorted TAIL), so it removes whole alphabetically-late families rather
+     * than a proportional sample — every `Flow:`/`ValidationRule:`/`WebLink:`
+     * referrer can vanish while every `ApexClass:` referrer survives. Empty
+     * when nothing was lost by family.
+     */
+    readonly omittedEdgeTypes: readonly string[];
+    /**
+     * Referrer component-type prefixes the walk found that have ZERO rows left
+     * in `impact.edges` — the "which families disappeared" axis of the same
+     * order-biased trim. Re-query with `edgeTypes` narrowed to one of these to
+     * see it.
+     */
+    readonly omittedReferrerTypes: readonly string[];
     readonly remedy: string;
+  };
+  /**
+   * GET-IMPACT-DROPPED-ENDPOINT-EDGE-LOSS: present ONLY when ≥1 collected edge
+   * was removed from `impact.edges` because an ENDPOINT is absent from
+   * `impact.nodes`. The shared `enforceGraphPayloadBudget` filters every such
+   * edge (rightly — a consumer must not deref a missing node), but the removal
+   * was invisible: `truncated` stayed false and the disclosure still opened
+   * "Complete impact slice". Two distinct causes, kept separate because the
+   * remedies differ:
+   *
+   *   - `phantomEndpointCount` — the id was requested but has NO node row (a
+   *     PHANTOM: referenced by edges, never retrieved — typically a standard or
+   *     managed-package component). A PHANTOM ROOT loses ITS WHOLE DEPENDENT
+   *     SET this way. Measured on a real vault: an impact walk on a phantom
+   *     standard object returned `14 node(s) / 0 edge(s)`, `truncated: false`,
+   *     "Complete impact slice" — 14 granting containers with nothing
+   *     connecting them to anything.
+   *   - `nodeCapExcludedCount` — the walk admitted the EDGE and only then hit
+   *     the 200-node cap, so the endpoint was never requested. Measured: a hub
+   *     object's slice carried one such edge whose Flow referrer is fully
+   *     present in the vault.
+   *
+   * Either way the dropped edges are REAL references;
+   * `sfi.find_component_usages` (no node join) enumerates them.
+   */
+  readonly droppedEndpointEdges?: {
+    readonly count: number;
+    /** Endpoint requested but no node row exists — a true phantom. */
+    readonly phantomEndpointCount: number;
+    /** Endpoint never requested because the node cap closed first. */
+    readonly nodeCapExcludedCount: number;
+    /** Distinct missing endpoint ids, sorted, capped at 25. */
+    readonly endpointIds: readonly string[];
+    readonly note: string;
   };
   /** True when ≥1 node had an oversized property value summarised to bound payload. */
   readonly payloadSlimmed: boolean;
@@ -385,6 +455,45 @@ const formatFoldedReportUsageNote = (
   );
 };
 
+/**
+ * GET-IMPACT-TRUNCATION-DROPS-FAMILIES: name the referrer families the walk
+ * FOUND and the response then dropped. `enforceGraphPayloadBudget` trims the
+ * id-sorted TAIL, so truncation is not a proportional sample — it deletes whole
+ * alphabetically-late families. Measured on a real vault: a hub object's walk
+ * collected 6 referrer families and the returned slice held only `ApexClass`;
+ * every `Flow` / `ValidationRule` / `WebLink` dependent was gone while
+ * `truncated: true` said nothing about WHICH dependents vanished.
+ */
+const formatOmittedFamilyNote = (params: {
+  readonly returnedEdges: number;
+  readonly walkedEdges: number;
+  readonly omittedEdgeTypes: readonly string[];
+  readonly omittedReferrerTypes: readonly string[];
+}): string => {
+  if (
+    params.omittedEdgeTypes.length === 0 &&
+    params.omittedReferrerTypes.length === 0
+  ) {
+    return '';
+  }
+  const parts: string[] = [];
+  if (params.omittedReferrerTypes.length > 0) {
+    parts.push(`referrer type(s) ${params.omittedReferrerTypes.join(', ')}`);
+  }
+  if (params.omittedEdgeTypes.length > 0) {
+    parts.push(`edge type(s) ${params.omittedEdgeTypes.join(', ')}`);
+  }
+  return (
+    ` ENTIRE DEPENDENT FAMILIES WERE DROPPED: this slice returns` +
+    ` ${params.returnedEdges} of the ${params.walkedEdges} dependency edge(s)` +
+    ` the walk collected, and the trim is by component-id ORDER (the id-sorted` +
+    ` TAIL is cut), not a proportional sample — so ${parts.join(' and ')} were` +
+    ` FOUND by the walk and are NOT in this slice. Do NOT read the families` +
+    ` present here as the complete dependent set; re-query with \`edgeTypes\`` +
+    ` narrowed to a missing type to see it.`
+  );
+};
+
 /** Verbatim honesty note combining count caps, truncation, and payload size. */
 const buildImpactDisclosure = (params: {
   readonly componentId: string;
@@ -399,6 +508,9 @@ const buildImpactDisclosure = (params: {
   readonly byteTrimmed: boolean;
   readonly rootIsObject: boolean;
   readonly rootIsField: boolean;
+  readonly walkedEdges: number;
+  readonly omittedEdgeTypes: readonly string[];
+  readonly omittedReferrerTypes: readonly string[];
   readonly reportUsage?: ReportDashboardUsageDetail;
 }): string => {
   const payloadLabel = formatPayloadSize(params.payloadBytes);
@@ -457,10 +569,16 @@ const buildImpactDisclosure = (params: {
     const cap = params.byteTrimmed
       ? `trimmed to fit the ~${Math.round(GRAPH_MAX_PAYLOAD_BYTES / 1000)} KB response budget`
       : `capped at ${IMPACT_MAX_NODES} nodes / ${IMPACT_MAX_EDGES} edges`;
+    const omittedNote = formatOmittedFamilyNote({
+      returnedEdges: params.edgeCount,
+      walkedEdges: params.walkedEdges,
+      omittedEdgeTypes: params.omittedEdgeTypes,
+      omittedReferrerTypes: params.omittedReferrerTypes,
+    });
     return (
       `Impact slice ${cap} and TRUNCATED: ` +
       `\`${params.componentId}\` is a hub or has a wide dependency fan-in (${countSummary}; ` +
-      `estimated JSON payload ${payloadLabel}).${slimNote} ` +
+      `estimated JSON payload ${payloadLabel}).${slimNote}${omittedNote} ` +
       `Re-query with fewer hops or a narrower edgeTypes filter for a complete view.` +
       lookupCaveat +
       reportNote +
@@ -475,6 +593,25 @@ const buildImpactDisclosure = (params: {
       `Impact slice within ${params.hops} hop(s): ${countSummary} (within count cap), ` +
       `but estimated JSON payload is still ${payloadLabel} after per-node slimming.${heavyNote}${slimNote} ` +
       `Re-query with fewer hops or edgeTypes excluding grantedBy to shrink the response.` +
+      lookupCaveat +
+      reportNote +
+      structuralNote +
+      referrerBlindNote
+    );
+  }
+
+  // GET-IMPACT-EMPTY-READS-COMPLETE: an empty dependent set is the one answer
+  // "Complete impact slice" must never open with — the same payload carries a
+  // `coverageCaveat` saying coverage is PARTIAL, so the two contradicted each
+  // other and the reader kept the confident half. "Complete" describes the CAP
+  // (nothing was cut), never the KNOWLEDGE, so an empty slice says so plainly.
+  if (params.edgeCount === 0) {
+    return (
+      `NO dependent edges found within ${params.hops} hop(s) for ` +
+      `\`${params.componentId}\` (nothing was cut by the ${IMPACT_MAX_NODES}-node / ` +
+      `${IMPACT_MAX_EDGES}-edge cap). This is "no modeled dependency was FOUND", ` +
+      `NOT a proven "nothing depends on it" — see \`coverageCaveat\` for the ` +
+      `dependency families this vault did not fully retrieve.${slimNote}` +
       lookupCaveat +
       reportNote +
       structuralNote +
@@ -692,6 +829,51 @@ export const getImpactHandler = async (
     frontier = expanded.next;
   }
 
+  // GET-IMPACT-UNKNOWN-ID-READS-AS-SAFE: an id that does not exist in this
+  // vault used to resolve to `ok({ nodes: [], edges: [] })` with the disclosure
+  // "Complete impact slice … 0 node(s) / 0 edge(s)". A typo'd or wrong-prefix
+  // component ("contact", `CustomObject:Zzz_Nope__c`) therefore read as a
+  // PROVEN "nothing breaks if you change this" — the single most dangerous
+  // sentence this tool can emit. The old rationale ("the graph cannot
+  // distinguish a missing component from one with no incoming edges") is false:
+  // `getNodeById` + an unfiltered inbound-edge probe separates them exactly,
+  // which is what the sibling `sfi.find_component_usages` already does. Refuse
+  // with the same `component-not-found` classification.
+  //
+  // Cost is paid ONLY on the empty path (the probe never runs when the walk
+  // found an edge), and a PHANTOM root — no node row but referenced by inbound
+  // edges (a managed-package / standard object reached only through permission
+  // or lookup edges) — still answers, since its edges prove it exists.
+  let rootIsPhantom = false;
+  if (collectedEdges.length === 0) {
+    const rootNodeProbe = await getNodeById(ctx.graph, rootId);
+    if (!rootNodeProbe.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${rootNodeProbe.error.message}`,
+      });
+    }
+    if (rootNodeProbe.value === null) {
+      // No node row. An `edgeTypes` filter may have hidden real inbound edges,
+      // so probe UNFILTERED before calling the id unknown.
+      const anyInbound = await listEdges(ctx.graph, rootId, { direction: 'in' });
+      if (!anyInbound.ok) {
+        return err({
+          kind: 'internal',
+          message: `graph query failed: ${anyInbound.error.message}`,
+        });
+      }
+      if (anyInbound.value.length === 0) {
+        return err({
+          kind: 'component-not-found',
+          message: `no component or referring edge matches \`${rootId}\` in this vault — an impact walk over an id that does not exist would return an empty slice that reads like a proven "nothing depends on this". Check the type prefix and api-name spelling (\`sfi.resolve\` disambiguates a bare name).`,
+          path: rootId,
+        });
+      }
+      rootIsPhantom = true;
+    }
+  }
+
   const nodeIds = [...visitedNodes].sort().slice(0, IMPACT_MAX_NODES);
   if (visitedNodes.size > IMPACT_MAX_NODES) {
     truncated = true;
@@ -732,8 +914,59 @@ export const getImpactHandler = async (
   const { nodes: slimNodes, slimmedCount } = slimGraphNodes(sortedNodes);
   // Per-node slimming bounds fat properties but not the slice total; enforce a
   // hard byte budget so the response always fits the MCP client's token limit.
+  // GET-IMPACT-DROPPED-ENDPOINT-EDGE-LOSS: measure the edges the shared
+  // dangling-edge filter inside `enforceGraphPayloadBudget` is about to delete
+  // because an endpoint is absent from the fetched node set. Two causes, kept
+  // apart because they are different bugs with different remedies:
+  //   - PHANTOM: the id WAS requested (`nodeIds`) but `listNodesByIds` returned
+  //     no row. For a phantom ROOT this silently deletes the entire dependent
+  //     set — previously reported as `truncated: false` + "Complete impact
+  //     slice … 14 node(s) / 0 edge(s)".
+  //   - NODE-CAP: `expandIncoming` pushes the EDGE into `collectedEdges` and
+  //     only THEN checks `visitedNodes.size >= IMPACT_MAX_NODES`, so the last
+  //     edges admitted at the cap boundary reference ids that were never
+  //     requested. Their referrers are fully present in the vault.
+  const fetchedNodeIds = new Set<string>(slimNodes.map((n) => n.id));
+  const requestedNodeIds = new Set<string>(nodeIds);
+  const missingEndpointIds = new Set<string>();
+  let droppedEdgeCount = 0;
+  let phantomEndpointCount = 0;
+  let nodeCapExcludedCount = 0;
+  for (const edge of edgesCapped) {
+    const missing = [edge.fromId, edge.toId].filter(
+      (id) => !fetchedNodeIds.has(id),
+    );
+    if (missing.length === 0) continue;
+    droppedEdgeCount += 1;
+    for (const id of missing) missingEndpointIds.add(id);
+    // Classify by the WORST cause on this edge: a true phantom is the more
+    // serious signal, so it wins when both apply.
+    if (missing.some((id) => requestedNodeIds.has(id))) phantomEndpointCount += 1;
+    else nodeCapExcludedCount += 1;
+  }
   const budgeted = enforceGraphPayloadBudget(rootId, slimNodes, edgesCapped);
-  const finalTruncated = truncated || budgeted.trimmed;
+  // An edge silently deleted is a partial answer, whatever the mechanism —
+  // `truncated: false` on a slice that lost every one of its edges is the
+  // "capped list, truncated flag says clean" failure mode.
+  const finalTruncated = truncated || budgeted.trimmed || droppedEdgeCount > 0;
+  const droppedEndpointEdges =
+    droppedEdgeCount > 0
+      ? {
+          count: droppedEdgeCount,
+          phantomEndpointCount,
+          nodeCapExcludedCount,
+          endpointIds: [...missingEndpointIds].sort().slice(0, 25),
+          note:
+            `${droppedEdgeCount} collected edge(s) are NOT in \`impact.edges\`: an endpoint is absent from \`impact.nodes\`, and an edge with a missing endpoint is filtered out of the returned slice. ` +
+            (phantomEndpointCount > 0
+              ? `${phantomEndpointCount} of them point at a PHANTOM — an id referenced by edges but never retrieved into this vault (typically a standard or managed-package component), so a phantom ROOT loses its whole dependent set here. `
+              : '') +
+            (nodeCapExcludedCount > 0
+              ? `${nodeCapExcludedCount} of them reference a component the ${IMPACT_MAX_NODES}-node cap excluded — those referrers ARE in the vault, they just did not fit this slice. `
+              : '') +
+            `These are REAL references that were FOUND and then dropped — do not read their absence as "nothing depends on this". Use \`sfi.find_component_usages\` on the same id to enumerate them (it reads the edge table without a node join).`,
+        }
+      : undefined;
   const sortedTypes = [...traversedTypes].sort();
   const impact = { nodes: budgeted.nodes, edges: budgeted.edges };
   const estimatedPayloadBytes = estimateGraphPayloadBytes(impact);
@@ -750,6 +983,25 @@ export const getImpactHandler = async (
         })()
       : undefined;
 
+  // GET-IMPACT-TRUNCATION-DROPS-FAMILIES: diff what the walk COLLECTED against
+  // what survived the caps + byte budget. `enforceGraphPayloadBudget` drops the
+  // id-sorted TAIL, so the loss is not a proportional sample — whole referrer
+  // families (every `Flow:`, every `ValidationRule:`) disappear while
+  // alphabetically-early ones survive intact. Measured on a real vault: a hub
+  // object walked 6 referrer families and returned only `ApexClass`.
+  const returnedEdgeTypes = new Set<string>(budgeted.edges.map((e) => e.edgeType));
+  const omittedEdgeTypes = [...traversedTypes]
+    .filter((t) => !returnedEdgeTypes.has(t))
+    .sort();
+  const returnedReferrerTypes = new Set<string>(
+    budgeted.edges.map((e) => describeId(e.fromId).typePrefix),
+  );
+  const omittedReferrerTypes = [
+    ...new Set(collectedEdges.map((e) => describeId(e.fromId).typePrefix)),
+  ]
+    .filter((t) => t !== '' && !returnedReferrerTypes.has(t))
+    .sort();
+
   const disclosure = buildImpactDisclosure({
     componentId: input.componentId,
     rootIsObject: rootId.startsWith('CustomObject:'),
@@ -763,8 +1015,20 @@ export const getImpactHandler = async (
     edges: budgeted.edges,
     slimmedCount,
     byteTrimmed: budgeted.trimmed,
+    walkedEdges: collectedEdges.length,
+    omittedEdgeTypes,
+    omittedReferrerTypes,
     ...(reportUsage !== undefined ? { reportUsage } : {}),
   });
+  // A phantom root (no node row, but inbound edges prove it is referenced)
+  // answers from those edges — say so, mirroring `find_component_usages`, so a
+  // caller does not read the missing definition as a missing component.
+  const rootPhantomNote = rootIsPhantom
+    ? ` \`${rootId}\` is a PHANTOM — referenced by inbound edges but NOT retrieved into this vault, so its own definition is unavailable.`
+    : '';
+  const droppedEdgeNote =
+    droppedEndpointEdges !== undefined ? ` ${droppedEndpointEdges.note}` : '';
+  const disclosureText = `${disclosure}${rootPhantomNote}${droppedEdgeNote}`;
 
   // I3b (empty ≠ none): an impact walk with NO dependent edges is exactly where
   // "nothing depends on this" is dangerous — name the dependency families the
@@ -774,10 +1038,18 @@ export const getImpactHandler = async (
   // When folded report/dashboard names are present, the empty edge set is NOT
   // "nothing depends on this" for analytics — still emit coverageCaveat for
   // other missing families, but `reportUsage` carries the named dependents.
-  const coverageCaveat =
-    budgeted.edges.length === 0
-      ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
-      : undefined;
+  // GET-IMPACT-PARENTOF-ONLY-SUPPRESSES-CAVEAT: a slice whose ONLY inbound edge
+  // is the structural `parentOf` from the owning object has ZERO usage
+  // dependents — the disclosure already says so ("no usage dependents were
+  // found") — yet `edges.length === 0` was false, so the empty≠none caveat did
+  // not fire and the honest half of the answer was unreachable on exactly that
+  // shape. Measured: a ValidationRule whose only inbound edge is its parent
+  // object returned `coverageCaveat: undefined` while claiming no dependents.
+  // Treat parentOf-only as empty for the caveat, matching the disclosure.
+  const hasUsageDependent = budgeted.edges.some((e) => e.edgeType !== 'parentOf');
+  const coverageCaveat = !hasUsageDependent
+    ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
+    : undefined;
 
   // Same "empty is not none" hazard as `sfi.get_edges`, and more absolute than a
   // coverage gap: an edge type in `UNPRODUCED_EDGE_TYPES` has NO producer in the
@@ -801,18 +1073,29 @@ export const getImpactHandler = async (
 
   const truncationReason = finalTruncated
     ? {
+        // Endpoint-drop loss is reported when it is the only cause —
+        // labelling it `node-cap` (the old fall-through) pointed the reader at
+        // a cap that was never hit.
         reason: budgeted.trimmed
           ? ('payload-budget' as const)
           : budgeted.edges.length >= IMPACT_MAX_EDGES
             ? ('edge-cap' as const)
-            : ('node-cap' as const),
+            : !truncated && droppedEdgeCount > 0
+              ? ('dropped-endpoint' as const)
+              : ('node-cap' as const),
         nodeCap: IMPACT_MAX_NODES,
         edgeCap: IMPACT_MAX_EDGES,
         payloadByteBudget: GRAPH_MAX_PAYLOAD_BYTES,
         returnedNodes: budgeted.nodes.length,
         returnedEdges: budgeted.edges.length,
+        walkedNodes: visitedNodes.size,
+        walkedEdges: collectedEdges.length,
+        omittedEdgeTypes,
+        omittedReferrerTypes,
         remedy:
-          'Impact slice is PARTIAL. Re-query with fewer `hops` or a narrower `edgeTypes` filter for a complete view of this hub.',
+          omittedReferrerTypes.length > 0 || omittedEdgeTypes.length > 0
+            ? `Impact slice is PARTIAL and WHOLE DEPENDENT FAMILIES ARE MISSING (see \`omittedReferrerTypes\` / \`omittedEdgeTypes\`) — the trim drops the id-sorted TAIL, not a proportional sample. Re-query with \`edgeTypes\` narrowed to a missing type (one call per family) to enumerate what is not shown here.`
+            : 'Impact slice is PARTIAL. Re-query with fewer `hops` or a narrower `edgeTypes` filter for a complete view of this hub.',
       }
     : undefined;
 
@@ -836,11 +1119,12 @@ export const getImpactHandler = async (
       truncated: finalTruncated,
       ...(truncationReason !== undefined ? { truncationReason } : {}),
       estimatedPayloadBytes,
+      ...(droppedEndpointEdges !== undefined ? { droppedEndpointEdges } : {}),
       payloadSlimmed: slimmedCount > 0,
       soundness,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(unproducedEdgeTypes !== undefined ? { unproducedEdgeTypes } : {}),
-      disclosure,
+      disclosure: disclosureText,
       ...(diagram !== undefined ? { diagram } : {}),
       ...(diagramOmittedReason !== undefined ? { diagramOmittedReason } : {}),
       ...(reportUsage !== undefined ? { reportUsage } : {}),

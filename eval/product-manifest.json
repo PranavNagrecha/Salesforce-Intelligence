@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 215,
+    "total": 216,
     "advertised": 19,
     "hidden": 5,
     "defaultProfile": "core",
@@ -155,6 +155,7 @@
         "sfi.meaningful_test_audit",
         "sfi.method_reachability",
         "sfi.nonselective_soql",
+        "sfi.object_360",
         "sfi.object_access_audit",
         "sfi.omniscript_flow",
         "sfi.omniuicard_widget_breakdown",
@@ -406,7 +407,8 @@
       "TimeSheetTemplate",
       "WaveDashboard",
       "WaveDataflow",
-      "WaveXmd"
+      "WaveXmd",
+      "SharingSet"
     ],
     "edgeTypes": [
       "parentOf",
@@ -440,7 +442,7 @@
       "schema_version"
     ],
     "schemaVersion": 1,
-    "componentTypeCount": 102,
+    "componentTypeCount": 103,
     "edgeTypeCount": 23
   },
   "conceptModel": {
@@ -458,6 +460,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:2051aecdbf51c79cea16bec5e81e6dc1d61913e07f294ba862f3d4feea7dce69",
-  "identityHash": "sha256:0ddadaeff81e5b73388c0dbedb7fb55baff54ad5fc139befcbc46ff2cc6c2ad2"
+  "catalogHash": "sha256:532aa70f5b9b0a813d8a96a2b7d145aa17054af54872f1ad52f75689a4f16601",
+  "identityHash": "sha256:cffd8996ce04074dc8ee884d0c3334969e009efe1cd25f287ef519e00fd35c23"
 }

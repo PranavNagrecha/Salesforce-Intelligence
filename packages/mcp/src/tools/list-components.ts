@@ -196,6 +196,9 @@ export const COMPONENT_TYPES = [
   'WaveDashboard',
   'WaveDataflow',
   'WaveXmd',
+  // Experience Cloud / portal record-access tier (user-field-to-record-field
+  // matching that grants portal users records without a sharing rule).
+  'SharingSet',
 ] as const satisfies readonly ComponentType[];
 
 /**

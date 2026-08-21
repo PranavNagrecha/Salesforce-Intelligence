@@ -511,6 +511,70 @@ const deriveFlowGraphArgs = (
   }
   return args;
 };
+/**
+ * Tokens that sit in front of the literal word "object" but are NOT the
+ * object's name. Without this, "delete this object" binds `objectApiName:
+ * "this"` and the tool answers about a component that does not exist — the
+ * exact failure mode `deriveObjectApiFromQuestion` already has on "delete it".
+ */
+const OBJECT_360_NON_NAMES: ReadonlySet<string> = new Set([
+  'the', 'this', 'that', 'a', 'an', 'each', 'every', 'any', 'some', 'which',
+  'what', 'whose', 'custom', 'standard', 'managed', 'new', 'old', 'same',
+  'other', 'another', 'parent', 'child', 'junction', 'related', 'whole',
+  'entire', 'first', 'second', 'my', 'our', 'their', 'its', 'per', 'one',
+  'no', 'and', 'or', 'of', 'to', 'on', 'for', 'about', 'sobject',
+]);
+
+/**
+ * Bind `object_360` to the object the question NAMES. Returns `undefined` when
+ * the question is about objects in general ("what objects can I delete?"), so
+ * the object-360 rule cannot steal an org-wide cleanup sweep and hand the tool
+ * an argument it would have to invent. Two shapes are accepted, in order:
+ *
+ *   1. `<Name> object` — "the Contact object", "the Foo__c object". The token
+ *      immediately before the literal word "object", rejected against
+ *      `OBJECT_360_NON_NAMES`.
+ *   2. a bare custom-suffix token anywhere — `Foo__c` / `Foo__mdt` / `Foo__e`.
+ *
+ * Reads the ORIGINAL `question` (not the lowercased routing text) so the bound
+ * api name keeps its real casing — `Contact`, not `contact`.
+ */
+/**
+ * A question framed as an OBJECT BRIEF — "this object" plus at least one other
+ * facet of the brief. Such a question routinely contains a field-population
+ * sub-question ("how many fields are populated"), and the field-population
+ * rule's own patterns claimed the whole thing, routing an eight-part offline
+ * brief to a LIVE tool that fails closed. Used as a NEGATIVE lookahead there so
+ * a single-facet population ask ("how many fields on the Contact object are
+ * populated") is untouched.
+ */
+const OBJECT_BRIEF_FRAME =
+  String.raw`(?!.*\bthis\s+objects?\b[^?!]{0,250}\b(?:automations?|profiles?|delete|remove|retire|where\s+is\s+it\s+used)\b)`;
+
+const deriveObject360Args = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  const source = question ?? q;
+  for (const match of source.matchAll(
+    /\b([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e|__b)?)\s+objects?\b/gi,
+  )) {
+    const capture = match[1];
+    if (capture !== undefined && !OBJECT_360_NON_NAMES.has(capture.toLowerCase())) {
+      return { objectApiName: capture };
+    }
+  }
+  const custom = source.match(/\b([A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e|b))\b/);
+  if (custom?.[1] !== undefined) return { objectApiName: custom[1] };
+  // "tell me everything about Contact" names the object with no `object` token
+  // and no custom suffix. Take the capitalised noun after `about`, which is the
+  // only naming slot in that shape.
+  const bare = source.match(/\babout\s+(?:the\s+)?([A-Z][A-Za-z0-9_]*)\b/);
+  if (bare?.[1] !== undefined && !OBJECT_360_NON_NAMES.has(bare[1].toLowerCase())) {
+    return { objectApiName: bare[1] };
+  }
+  return undefined;
+};
 
 /** Optional hop depth from `get_impact … hops=2` phrasing. */
 const deriveImpactHops = (q: string): number | undefined => {
@@ -1203,6 +1267,16 @@ const RULES: readonly Rule[] = [
     patterns: [/\bfield_360\b/],
   },
   {
+    intent: 'object-360',
+    plane: 'vault',
+    tools: ['sfi.object_360'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit object_360 invocation.',
+    suggestArgs: deriveObject360Args,
+    patterns: [/\bobject_360\b/],
+  },
+  {
     intent: 'safe-to-delete',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.safe_to_delete_field', 'sfi.interpret'],
@@ -1795,6 +1869,41 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // OBJECT BRIEF, COMPOUND FORM — placed EARLY, ahead of every generic
+    // count/population/usage rule, because those match on single tokens the
+    // brief happens to contain and there is no end to guarding them one at a
+    // time. The owner's own question is the canonical case:
+    //
+    //   "What is this object, where is it used, what is being done, how many
+    //    fields are populated, is it still used recently, what are the
+    //    automations, can we delete it, which profiles will be affected by it"
+    //
+    // Before this rule it routed to `field-population` on "fields ... populated"
+    // (a LIVE tool that fails closed offline, at HIGH confidence); guarding that
+    // rule simply handed it to `metadata-count`, which derived the nonsense
+    // `parentId: "CustomObject:it"`. The brief frame is the dominant intent and
+    // is claimed here.
+    //
+    // PRECISION: requires the literal `this object` AND a second facet, so it
+    // cannot fire on a single-facet question. "how many fields on the Contact
+    // object are populated" has no `this object` frame and keeps its live route.
+    // The object NAME comes from the conversation, not the sentence, which is
+    // why this is resolve-led and why `sfi.object_360` is registered in
+    // CONTINUATION_TOOL_TYPES.
+    intent: 'object-360',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.object_360'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'A compound brief about ONE object the conversation already named — what it is, what it owns, what points at it, its automations and their active state, who can reach it, and the record-data questions this plane cannot answer named rather than guessed.',
+    suggestArgs: deriveObject360Args,
+    patterns: [
+      /\bthis\s+objects?\b[^?!]{0,220}\b(?:used|using|usage|automations?|profiles?|recently|delete|remove|retire|populated|what\s+is\s+being\s+done)\b/,
+      /\b(?:used|using|usage|automations?|profiles?|recently|delete|remove|retire)\b[^?!]{0,220}\bthis\s+objects?\b/,
+    ],
+  },
+  {
     intent: 'field-population',
     plane: 'hybrid',
     tools: ['sfi.resolve', 'sfi.live_field_population'],
@@ -1804,7 +1913,15 @@ const RULES: readonly Rule[] = [
     patterns: [
       // "populated"/"filled" are field-specific; "empty/blank/null" only count
       // near a field/value (so "empty queues" doesn't get swallowed here).
-      /\b(populated|filled)\b/,
+      // GUARD: an object BRIEF that contains a population sub-question is not a
+      // field-population ask. The owner's own question — "what is this object,
+      // where is it used, ... how many fields are populated, ... what are the
+      // automations, can we delete it, which profiles will be affected" — was
+      // claimed here at HIGH confidence and routed to a LIVE tool that fails
+      // closed offline, so the whole brief was unreachable. A single-facet
+      // population question ("how many fields on the Contact object are
+      // populated") carries no `this object` frame and still lands here.
+      new RegExp(`^${OBJECT_BRIEF_FRAME}.*\\b(populated|filled)\\b`),
       // "field population for X" / "population rate" — the noun "population"
       // (vs the adjective "populated"). Battery gap. Guarded (P4): "the FLOW
       // THAT fires the 'General Population RR Group' step" uses "population"
@@ -1814,8 +1931,8 @@ const RULES: readonly Rule[] = [
       // "which Account fields are empty" fell through to metadata-count
       // (vault plane) instead of this hybrid live-data intent.
       /\b(empty|blank|null)\b.*\b(fields?|values?)\b/,
-      /\b(fields?|values?)\b.*\b(empty|blank|null|populated|filled)\b/,
-      /\bhow\s+many\b.*\b(have|with|without)\b.*\b(field|value|filled|set)\b/,
+      new RegExp(`^${OBJECT_BRIEF_FRAME}.*\\b(fields?|values?)\\b.*\\b(empty|blank|null|populated|filled)\\b`),
+      new RegExp(`^${OBJECT_BRIEF_FRAME}.*\\bhow\\s+many\\b.*\\b(have|with|without)\\b.*\\b(field|value|filled|set)\\b`),
       /\b(actually|really)\s+(populated|filled)\b/,
       // Router-v2 P4 needs-live reachability: "fill rate", "completeness of
       // key fields", and "how many X have a blank Y" are all the same live
@@ -3249,6 +3366,118 @@ const RULES: readonly Rule[] = [
       // knowledge question on guidance.
       /\bprofiles?\b[^.?!]{0,60}\b(?:mfa|multi[-\s]?factor|password\s+polic\w*|session\s+(?:security|timeout|settings?))\b/,
       /\b(?:mfa|multi[-\s]?factor|password\s+polic\w*|session\s+(?:security|timeout|settings?))\b[^.?!]{0,60}\bprofiles?\b/,
+    ],
+  },
+  // === Object-tier 360 / delete safety (vault) ==============================
+  {
+    // MUST precede `unused-components`, whose `\bwhat\b.*\bcan i delete\b`
+    // pattern was swallowing "…what automations touch it, can I delete it" for
+    // a NAMED object and answering with an org-wide dead-component dump under
+    // `appliedScope.object: null` — a 40 KB answer about other components.
+    //
+    // ALSO precedes the EARLY safe-to-delete precision rule below, whose
+    // "safe to delete" cue is FIELD vocabulary: "is it safe to delete the
+    // Foo__c object" routed to `safe_to_delete_field`, which takes a
+    // `CustomField:` id and cannot answer about an object at all. Placing this
+    // rule first is safe because every pattern here additionally requires an
+    // OBJECT-NAMING token, which no field question carries — "is
+    // Account.Description safe to delete" and "before deleting X, Y, Z" keep
+    // their existing route.
+    //
+    // FIELD GUARD (review finding): the comment below claimed "every pattern
+    // here additionally requires an OBJECT-NAMING token, which no field
+    // question carries". False — a field question routinely names its parent
+    // object. Measured steals: "can I delete the Description field on the
+    // Contact object", "is it safe to delete the Rating field on the Account
+    // object", "can we remove the Fax field from the Contact object" all
+    // landed here and were answered ABOUT THE OBJECT. The delete patterns
+    // therefore refuse any question containing the word `field`.
+    //
+    // HIGH PRECISION BY CONSTRUCTION: every pattern requires BOTH a 360 /
+    // delete-verdict cue AND a token that NAMES an object (the word "object"
+    // preceded by something that is not a determiner, or a `__c` api name), so
+    // the org-wide sweeps ("what objects can I delete", "which custom objects
+    // are unused") keep falling through to `unused-components`. `suggestArgs`
+    // carries the resolved name into `objectApiName`, because a route that
+    // names the right tool and hands it no arguments is still a wrong answer.
+    intent: 'object-360',
+    plane: 'vault',
+    tools: ['sfi.object_360'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Everything about ONE object — identity, two-tier usage (object edges UNION field-level roll-up), automations, permissions, analytics, and a delete verdict.',
+    suggestArgs: deriveObject360Args,
+    patterns: [
+      // "everything / the full picture / a 360 about the <X> object"
+      /\b(everything|all\s+about|full\s+(picture|profile|view)|complete\s+(picture|profile)|360)\b[^?!]{0,60}\b(?!the\b|this\b|that\b|a\b|an\b|each\b|every\b|any\b|some\b|which\b|what\b|custom\b|standard\b|managed\b|new\b|same\b|other\b|another\b|parent\b|child\b|junction\b|related\b|sobject\b)[a-z][a-z0-9_]*(?:__c|__mdt|__e|__b)?\s+object\b/,
+      // same, object named first: "the <X> object — tell me everything"
+      /\b(?!the\b|this\b|that\b|a\b|an\b|each\b|every\b|any\b|some\b|which\b|what\b|custom\b|standard\b|managed\b|new\b|same\b|other\b|another\b|parent\b|child\b|junction\b|related\b|sobject\b)[a-z][a-z0-9_]*(?:__c|__mdt|__e|__b)?\s+object\b[^?!]{0,60}\b(everything|full\s+(picture|profile|view)|complete\s+(picture|profile))\b/,
+      // "can/should I delete|retire|remove the <X> object"
+      /^(?![^?!]*\bfields?\b).*\b(can|could|should)\s+(i|we)\s+(safely\s+)?(delete|remove|retire|drop|deprecate|get\s+rid\s+of)\b[^?!]{0,60}\b(?!the\b|this\b|that\b|a\b|an\b|each\b|every\b|any\b|some\b|which\b|what\b|custom\b|standard\b|managed\b|new\b|same\b|other\b|another\b|parent\b|child\b|junction\b|related\b|sobject\b)[a-z][a-z0-9_]*(?:__c|__mdt|__e|__b)?\s+object\b/,
+      // same, object named first: "…the <X> object, can I delete it"
+      /^(?![^?!]*\bfields?\b).*\b(?!the\b|this\b|that\b|a\b|an\b|each\b|every\b|any\b|some\b|which\b|what\b|custom\b|standard\b|managed\b|new\b|same\b|other\b|another\b|parent\b|child\b|junction\b|related\b|sobject\b)[a-z][a-z0-9_]*(?:__c|__mdt|__e|__b)?\s+object\b[^?!]{0,90}\b(can|could|should)\s+(i|we)\s+(safely\s+)?(delete|remove|retire|drop|deprecate)\b/,
+      // "is it safe to delete the <X> object"
+      /^(?![^?!]*\bfields?\b).*\b(safe|ok|okay)\s+to\s+(delete|remove|retire|drop)\b[^?!]{0,60}\b(?!the\b|this\b|that\b|a\b|an\b|each\b|every\b|any\b|some\b|which\b|what\b|custom\b|standard\b|managed\b|new\b|same\b|other\b|another\b|parent\b|child\b|junction\b|related\b|sobject\b)[a-z][a-z0-9_]*(?:__c|__mdt|__e|__b)?\s+object\b/,
+      // "object 360 for <X>" / "360 on the <X> object"
+      /\bobject[\s_-]*360\b/,
+    ],
+  },
+  {
+    // COMPANION RULE — the shapes real people use, which the precise rule above
+    // cannot reach because every one of its patterns needs the literal word
+    // `object` with a NAME beside it.
+    //
+    // Measured misses that motivated this, the first being the product owner's
+    // own question verbatim:
+    //   "What is this object, where is it used, what is being done, how many
+    //    fields are populated, is it still used recently, what are the
+    //    automations, can we delete it, which profiles will be affected by it"
+    //      -> `field-population`, a LIVE tool that fails closed offline, at
+    //         HIGH confidence. `this object` carries no name, so the precise
+    //         rule's naming slot never fills.
+    //   "tell me everything about Contact"            -> unrouted (no `object` token)
+    //   "can we delete Payment__c"                    -> unrouted (no `object` token)
+    //   "what is the Case object used for"            -> unrouted (no delete/360 cue)
+    //   "is the Payment__c object still used recently" -> unrouted
+    //
+    // This rule is RESOLVE-LED (`sfi.resolve` first, `needsResolve: true`)
+    // precisely because it is looser: a bare capitalised noun may not be an
+    // object at all, and resolve is the product's own disambiguator. It is
+    // guarded twice — against `field` (the steal the rule above had) and
+    // against every other component-type noun, so "tell me everything about the
+    // Send_Welcome_Email flow" and "what can you tell me about the
+    // AccountService class" keep their routes.
+    intent: 'object-360',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.object_360'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Everything the vault holds about ONE object, assembled as an admin brief — identity and last schema change, what it owns, what points at it from outside, automations with their active state, access by profile, analytics, and the record-data questions this plane cannot answer named explicitly rather than guessed.',
+    suggestArgs: deriveObject360Args,
+    patterns: [
+      // A NAMED object plus any facet of the brief.
+      // SINGULAR `object` only: "which objects have the most stacked automation"
+      // is an ORG-WIDE sweep and belongs to automation-risk. `automations?` is
+      // absent from the facet list for the same reason — "what automation
+      // already exists on the <X> object" is `automation-on-object`'s question,
+      // and a brief must be asked for as a brief.
+      /^(?![^?!]*\b(?:fields?|flows?|classes|class|triggers?|reports?|dashboards?|layouts?|pages?|templates?|queues?|roles?|permission\s+sets?|validation\s+rules?)\b).*\b[a-z][a-z0-9_]*(?:__c|__mdt|__e|__b)?\s+object\b[^?!]{0,90}\b(?:used|using|usage|profiles?|recently|still\s+in\s+use|everything|tell\s+me|what\s+is|what\s+can|depends?|references?|related)\b/,
+      // The facet first, the named object second.
+      /^(?![^?!]*\b(?:fields?|flows?|classes|class|triggers?|reports?|dashboards?|layouts?|pages?|templates?|queues?|roles?|permission\s+sets?|validation\s+rules?)\b).*\b(?:used|using|usage|profiles?|recently|everything|tell\s+me\s+about|what\s+can\s+you\s+tell\s+me\s+about|related\s+to)\b[^?!]{0,90}\b[a-z][a-z0-9_]*(?:__c|__mdt|__e|__b)?\s+object\b/,
+      // A bare custom api name with a brief or delete cue and no `object` token.
+      // EXACTLY ONE custom api name. Two or more is a FIELD LIST, and a dotted
+      // `Object.Field__c` is a field outright — both belong to
+      // safe_to_delete_field, which is what a reader asking about a field wants.
+      /^(?![^?!]*\b(?:fields?|flows?|classes|class|triggers?|reports?|dashboards?)\b)(?![^?!]*\.[a-z][a-z0-9_]*__(?:c|mdt|e|b)\b)(?!(?:[^?!]*?__(?:c|mdt|e|b)\b){2}).*\b(?:everything|all\s+about|full\s+(?:picture|profile|view)|360|tell\s+me\s+about|what\s+can\s+you\s+tell\s+me\s+about|(?:can|could|should)\s+(?:i|we)\s+(?:safely\s+)?(?:delete|remove|retire|drop|deprecate))\b[^?!]{0,60}\b[a-z][a-z0-9_]*__(?:c|mdt|e|b)\b/,
+      // "tell me everything about <Name>" with no suffix and no `object` token.
+      // NOTE: `normalize()` lowercases the question before any pattern runs, so
+      // a capitalisation cue is unavailable here — an earlier draft keyed on
+      // `[A-Z]` and could never fire. The name is therefore matched
+      // case-insensitively and the rule leans on `sfi.resolve` (this rule is
+      // resolve-led) plus the component-type guard to reject a non-object.
+      /^(?![^?!]*\b(?:fields?|flows?|classes|class|triggers?|reports?|dashboards?|layouts?|pages?|templates?|queues?|roles?|permission\s+sets?|validation\s+rules?|rules?)\b).*\b(?:tell\s+me\s+everything\s+about|everything\s+(?:about|related\s+to)|what\s+can\s+you\s+tell\s+me\s+about|give\s+me\s+(?:a\s+)?(?:full|complete)\s+(?:picture|profile|view)\s+of)\s+(?:the\s+)?[a-z][a-z0-9_]{2,}\b/i,
     ],
   },
   {

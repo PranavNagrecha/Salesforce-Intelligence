@@ -145,6 +145,8 @@ export { extractSecuritySettings } from './security-settings.js';
 export type { TrustedIpRange } from './security-settings.js';
 export { extractSessionSettings } from './session-settings.js';
 export { extractSharingRules } from './sharing-rules.js';
+export { extractSharingSet } from './sharing-set.js';
+export type { SharingSetAccessMapping } from './sharing-set.js';
 export { extractSkill } from './skill.js';
 export {
   buildDescribeFieldExtraction,
