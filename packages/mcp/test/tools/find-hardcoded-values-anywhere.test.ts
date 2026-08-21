@@ -834,3 +834,74 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallbac
     expect(joined).not.toContain('CR-07');
   });
 });
+
+describe('findHardcodedValuesAnywhereHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', () => {
+  let localDir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    localDir = mkdtempSync(join(tmpdir(), 'sfi-fhva-unscanned-'));
+    const opened = await openGraph(join(localDir, 'graph.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    localStore = opened.value;
+    const imported = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          // Scanned and clean.
+          makeNode({
+            id: 'ApexClass:ScannedClean',
+            type: 'ApexClass',
+            apiName: 'ScannedClean',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+          // Never scanned: no `qualityIssues` KEY at all. The apex-scope loop
+          // skips it silently, so the corpus read as clean.
+          makeNode({
+            id: 'ApexTrigger:NeverScanned',
+            type: 'ApexTrigger',
+            apiName: 'NeverScanned',
+            properties: {},
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    localCtx = { vaultRoot: localDir, manifest: MANIFEST, graph: localStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
+  it('names the unscanned Apex nodes instead of implying the corpus is clean', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(localCtx, {
+      category: 'id',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches).toEqual([]);
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+    ]);
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'NOT SCANNED IN THIS VAULT',
+    );
+  });
+
+  it('says nothing about Apex coverage when the caller excluded the apex scope', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(localCtx, {
+      category: 'id',
+      scope: ['formula'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage).toBeUndefined();
+    expect(r.value.data.boundaries.join(' ')).not.toContain(
+      'NOT SCANNED IN THIS VAULT',
+    );
+  });
+});

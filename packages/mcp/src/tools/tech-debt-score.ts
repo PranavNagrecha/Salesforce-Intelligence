@@ -58,6 +58,13 @@ import { firstNonEmpty } from './input-aliases.js';
 import {
   processBuilderMigrationCandidatesHandler,
 } from './process-builder-migration-candidates.js';
+import {
+  buildNotCheckedTypesNote,
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  NOT_APEX_TYPES,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 import { nodeScanLimit } from './scan-cap.js';
 import {
   unassignedPermissionSetsHandler,
@@ -293,6 +300,21 @@ export interface TechDebtScoreOutput {
    * part of `overallScore`.
    */
   readonly hardcodedIdCount: number | null;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of Apex nodes read vs
+   * nodes that actually carry a `qualityIssues` scan, feeding the `codeQuality`
+   * axis. Present ONLY when the axis ran AND some node was never scanned — the
+   * path where the axis is computed over part of the Apex surface and presented
+   * as whole. A fully-scanned vault omits it and its response is unchanged.
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
+  /**
+   * Types the `codeQuality` axis structurally cannot cover on any vault after
+   * any refresh — currently `Flow`, because the recognizers read Apex syntax.
+   * Present ONLY when the axis contributes to the score, where a reader could
+   * otherwise take "code quality" to span every automation surface.
+   */
+  readonly notCheckedTypes?: typeof NOT_APEX_TYPES;
   readonly boundaries: readonly string[];
 }
 
@@ -387,11 +409,25 @@ const computeApiVersionDistribution = async (
 };
 
 /**
- * Aggregate v2.1 `qualityIssues` arrays across every ApexClass /
- * ApexTrigger / Flow node. Each node's `qualityIssues` is an array of
- * objects with `severity: 'critical' | 'high' | 'medium' | 'low'`.
- * When NO node carries the `qualityIssues` property (v2.1 hasn't
- * shipped to this vault), returns null — signals "extractor not run".
+ * Aggregate `qualityIssues` arrays across every ApexClass / ApexTrigger node.
+ * Each node's `qualityIssues` is an array of objects with
+ * `severity: 'critical' | 'high' | 'medium' | 'low'`. When NO node carries the
+ * `qualityIssues` property, returns null — signals "extractor not run", and the
+ * whole codeQuality category is EXCLUDED rather than scored as zero.
+ *
+ * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS, twice over.
+ *
+ *  1. `Flow` used to be in this fetch. It contributed exactly 0 of 275 nodes on
+ *     a real vault, because every recognizer reads Apex syntax and a Flow has
+ *     none — so loading it was 275 wasted node reads that could never move the
+ *     score. It is now named in {@link NOT_APEX_TYPES} on the response instead
+ *     of silently scanned. Dropping it cannot change any score: a Flow node
+ *     could never carry the property in the first place.
+ *  2. `anyNodeHasIssuesProperty` is an ANY, so 192-of-192 ApexClasses scanned
+ *     and 0-of-22 ApexTriggers scanned reported "extractor ran" and said
+ *     nothing at all about the triggers — a codeQuality axis computed over
+ *     two-thirds of the Apex surface, presented as whole. {@link coverage}
+ *     carries the per-type split so the caller can see it.
  */
 const computeCodeQualityCounts = async (
   ctx: Context,
@@ -402,6 +438,8 @@ const computeCodeQualityCounts = async (
         readonly high: number;
         readonly medium: number;
         readonly anyNodeHasIssuesProperty: boolean;
+        /** Per-type nodes-read vs nodes-actually-scanned for the Apex types. */
+        readonly coverage: readonly QualityScanTypeCoverage[];
       }
     | null,
     string
@@ -414,13 +452,12 @@ const computeCodeQualityCounts = async (
   if (!cs.ok) return err(cs.error);
   const ts = await fetchType('ApexTrigger');
   if (!ts.ok) return err(ts.error);
-  const fs = await fetchType('Flow');
-  if (!fs.ok) return err(fs.error);
+  const apexNodes = [...cs.value, ...ts.value];
   let critical = 0;
   let high = 0;
   let medium = 0;
   let anyNodeHasIssuesProperty = false;
-  for (const n of [...cs.value, ...ts.value, ...fs.value]) {
+  for (const n of apexNodes) {
     const issues = n.properties['qualityIssues'];
     if (!Array.isArray(issues)) continue;
     anyNodeHasIssuesProperty = true;
@@ -433,7 +470,13 @@ const computeCodeQualityCounts = async (
     }
   }
   if (!anyNodeHasIssuesProperty) return ok(null);
-  return ok({ critical, high, medium, anyNodeHasIssuesProperty });
+  return ok({
+    critical,
+    high,
+    medium,
+    anyNodeHasIssuesProperty,
+    coverage: censusQualityScanCoverage(apexNodes),
+  });
 };
 
 /**
@@ -696,7 +739,7 @@ export const techDebtScoreHandler = async (
     excluded.push({
       category: 'codeQuality',
       reason: 'extractor-not-run',
-      note: 'v2.1 qualityIssues data is not present on any ApexClass / ApexTrigger / Flow node. Run the v2.1 code-quality recognizer pass to compute this category.',
+      note: 'qualityIssues data is not present on any ApexClass / ApexTrigger node, so the code-quality recognizers never ran over this vault. Re-run `sfi refresh` to compute this category. (Flow is not scanned by design — the recognizers read Apex syntax; see `notCheckedTypes`.)',
     });
   }
   if (!freshnessExtractorRan && !excludedByUser.has('freshness')) {
@@ -885,6 +928,24 @@ export const techDebtScoreHandler = async (
   if (codeQualityExtractorRan && !excludedSet.has('codeQuality')) {
     boundaries.push(CODE_QUALITY_HEURISTIC_DISCLOSURE);
   }
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. The `extractor-not-run` exclusion
+  // above only fires when NO node anywhere carries the property, so a vault
+  // with 192-of-192 ApexClasses scanned and 0-of-22 ApexTriggers scanned scored
+  // the codeQuality axis off two-thirds of the Apex surface and said nothing.
+  // These two notes fire only when the axis actually contributes — an excluded
+  // axis is already disclosed as excluded, and re-disclosing it would mislead.
+  const codeQualityAxisContributes =
+    codeQualityExtractorRan && !excludedSet.has('codeQuality');
+  const qualityScanCoverage = cq?.coverage ?? [];
+  const unscannedNote = codeQualityAxisContributes
+    ? buildUnscannedNodesNote(qualityScanCoverage)
+    : undefined;
+  if (unscannedNote !== undefined) boundaries.push(unscannedNote);
+  // The permanent, refresh-proof half: `Flow` can never carry a finding.
+  const notCheckedNote = codeQualityAxisContributes
+    ? buildNotCheckedTypesNote(NOT_APEX_TYPES)
+    : undefined;
+  if (notCheckedNote !== undefined) boundaries.push(notCheckedNote);
   // When freshness is INCLUDED, state honestly that the never-modified count is
   // not available (no createdDate in the vault) rather than emit a fabricated 0.
   // When freshness is excluded the extractor-not-run note already covers it.
@@ -943,6 +1004,8 @@ export const techDebtScoreHandler = async (
       },
       recommendedActions: orderedRecs,
       hardcodedIdCount,
+      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
+      ...(codeQualityAxisContributes ? { notCheckedTypes: NOT_APEX_TYPES } : {}),
       boundaries,
     },
     vaultState: {

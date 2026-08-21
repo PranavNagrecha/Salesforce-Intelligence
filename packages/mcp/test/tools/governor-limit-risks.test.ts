@@ -603,3 +603,39 @@ describe('governorLimitRisksHandler — class scope (guard)', () => {
     expect(r.error.kind).toBe('invalid-query');
   });
 });
+
+describe('governorLimitRisksHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', () => {
+  it('an UNSCANNED trigger answers "not checked", never CLEAN', async () => {
+    // `ApexTrigger:DangerTrigger` carries NO `qualityIssues` key — the shape a
+    // vault built before the trigger extractor ran the recognizers holds for
+    // all of its triggers. It used to return `classes: []`, `boundaries: []`,
+    // byte-identical to a scanned-and-clean trigger, on the surface where a
+    // per-DML SOQL-in-loop hurts most.
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexTrigger:DangerTrigger',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes).toEqual([]);
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+    ]);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('NOT SCANNED IN THIS VAULT');
+    expect(joined).toContain('sfi refresh');
+    // The soundness envelope reads the SAME property, so `complete: true` must
+    // not read as a proven-clean static analysis of an unscanned node.
+    expect(joined).toContain('`soundness` envelope');
+  });
+
+  it('a SCANNED-and-clean class stays byte-identical (no note, no coverage field)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes).toEqual([]);
+    expect(r.value.data.qualityScanCoverage).toBeUndefined();
+    expect(r.value.data.boundaries).toEqual([]);
+  });
+});

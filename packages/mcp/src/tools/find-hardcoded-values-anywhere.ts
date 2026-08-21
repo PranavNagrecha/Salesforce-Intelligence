@@ -97,6 +97,11 @@ import type { Context } from '../server.js';
 
 import { mergeInputAliases } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 
@@ -307,6 +312,15 @@ export interface FindHardcodedValuesAnywhereOutput {
     'restriction-rule': number;
     'custom-label': number;
   }>;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of the Apex nodes
+   * read vs the ones that actually carry a `qualityIssues` scan. Present ONLY
+   * when the `apex` scope ran AND some node in it was never scanned — the path
+   * where a missing `apex` row means "not checked", not "nothing hardcoded in
+   * Apex". Absent when the caller excluded the `apex` scope, and absent on a
+   * fully-scanned vault, whose response is unchanged.
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
   /**
@@ -540,6 +554,10 @@ export const findHardcodedValuesAnywhereHandler = async (
   // so the boundary disclosure fires after the scan completes.
   let ranApexSourceEmailScan = false;
 
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type coverage of the Apex nodes
+  // this call actually read, populated only when the `apex` scope runs.
+  let apexQualityScanCoverage: readonly QualityScanTypeCoverage[] = [];
+
   // --- Apex scope: compose v2.1 qualityIssues[] for hardcoded rules. ---
   // CR-22 B4: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET forward
   // (window-by-window) so findings on node 501+ are reachable — the old MAX_PAGES
@@ -553,6 +571,12 @@ export const findHardcodedValuesAnywhereHandler = async (
       });
     }
     incompleteTypes.push(...scan.value.incompleteTypes);
+    // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. The `continue` below skips every
+    // node with no `qualityIssues` key — silently, and on a vault built before
+    // the trigger extractor ran the recognizers that is all 22 ApexTriggers.
+    // Census the set BEFORE the skip so the response can name what it did not
+    // read instead of implying the Apex corpus came back clean.
+    apexQualityScanCoverage = censusQualityScanCoverage(scan.value.nodes);
     for (const node of scan.value.nodes) {
       const raw = node.properties['qualityIssues'];
       if (!Array.isArray(raw)) continue;
@@ -851,6 +875,12 @@ export const findHardcodedValuesAnywhereHandler = async (
     if (sawTestClass) boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
     if (ranApexSourceEmailScan) boundaries.push(APEX_SOURCE_EMAIL_SCAN_DISCLOSURE);
   }
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Lives OUTSIDE the
+  // `sorted.length > 0` gate above because the zero-match response IS the
+  // false-clean one.
+  const unscannedApexNote = buildUnscannedNodesNote(apexQualityScanCoverage);
+  if (unscannedApexNote !== undefined) boundaries.push(unscannedApexNote);
+
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
   if (incompleteTypes.length > 0) {
@@ -863,6 +893,9 @@ export const findHardcodedValuesAnywhereHandler = async (
       totalCount: sorted.length,
       byCategory,
       bySource,
+      ...(unscannedApexNote !== undefined
+        ? { qualityScanCoverage: apexQualityScanCoverage }
+        : {}),
       boundaries,
       truncated,
       ...(isPaged ? { limit, offset } : {}),

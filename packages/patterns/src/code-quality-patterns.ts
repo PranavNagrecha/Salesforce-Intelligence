@@ -1,8 +1,15 @@
 /**
  * Code-quality pattern recognizers for Apex source.
  *
- * The v2.1 sub-milestone shipping the 15-rule Apex quality catalog
- * documented in `docs/vendor/salesforce-metadata/ApexQualitySemantics.md`.
+ * The Apex quality catalog. THIS FILE is the catalog: every recognizer,
+ * its severity and its blind spots are declared below and nowhere else.
+ *
+ * It used to cite a vendored `docs/vendor/salesforce-metadata/*.md` spec that
+ * this repository does not ship, from nineteen sites including host-facing MCP
+ * tool descriptions — so a host could quote a section number at a user for a
+ * document nobody could open. Every such citation is gone; what the sections
+ * said is stated inline, next to the code that implements it, where it cannot
+ * drift out of sync with the behaviour.
  *
  * Each recognizer is a heuristic pattern matcher that consumes raw
  * `.cls` / `.trigger` source plus the small metadata bag the extractor
@@ -33,12 +40,12 @@
  *   detection. The recognizers that need to SEE string contents
  *   (`hardcoded-id`, `hardcoded-email`, `hardcoded-username`,
  *   `hardcoded-sandbox-data`) opt out by working on the raw source
- *   directly. This is the only deviation from v0.3's strip-first
- *   posture, documented in §"Tokenization input" of
- *   `ApexQualitySemantics.md`.
+ *   directly. This is the only deviation from the strip-first posture:
+ *   a hardcoded literal IS the string, so blanking strings first would
+ *   blank the very evidence these four recognizers look for.
  *
- * Known limitations (mirroring ApexQualitySemantics.md §"Known
- * limitations"):
+ * Known limitations — the recognizers are pattern matchers, not a compiler,
+ * and these are the shapes they provably cannot see:
  *
  * - **Cross-method blindness.** A method that delegates the dangerous
  *   operation to a helper is analyzed in isolation; the helper's
@@ -95,7 +102,7 @@
  *   when a containing method is known, or `'class' / 'trigger'` for
  *   recognizers that flag a declaration rather than a body span.
  * - `explanation`: brief human-readable why-this-matters string.
- *   Full reasoning lives in `ApexQualitySemantics.md`.
+ *   Each recognizer's own comment block below carries the full reasoning.
  * - `confidence`: always the literal `'heuristic'`.
  */
 export interface QualityIssue {
@@ -554,8 +561,8 @@ const detectHardcodedIds = (source: string): readonly QualityIssue[] => {
 
 // ---------- recognizer 4: hardcoded-email ---------------------------------
 
-// Strict email shape: local@domain.tld. Matches the conservative
-// pattern from ApexQualitySemantics.md §4. Whole-literal match so
+// Strict email shape: local@domain.tld. Deliberately conservative —
+// whole-literal match so
 // a string like 'Email: foo@bar.com' isn't flagged piecemeal.
 const EMAIL_LITERAL_PATTERN =
   /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
@@ -1351,8 +1358,8 @@ const WITHOUT_SHARING_CLASS_PATTERN =
  * Determine whether the source lines immediately preceding the
  * declaration at `decOffset` contain a substantive comment. The
  * recognizer's "substantive" bar is a single comment of 10+
- * non-whitespace characters within the 2 lines preceding (per
- * ApexQualitySemantics.md §9).
+ * non-whitespace characters within the 2 lines preceding — long enough
+ * that a bare `// TODO` does not count as a justification.
  *
  * We read the RAW source for this check because we want to see the
  * actual comment text, not the blanked-out stripped version.
@@ -1570,8 +1577,7 @@ const detectFakeAssertion = (
 
 // ---------- recognizer 14: hardcoded-sandbox-test-data --------------------
 
-// Sandbox-specific literal shapes per ApexQualitySemantics.md §14.
-// Covers:
+// Sandbox-specific literal shapes. Covers:
 //   - username `.sandbox` / `.dev` / `.uat` / `.fullcopy` suffix.
 //   - org-prefix `myorg__sandbox` shapes.
 //   - Lightning URL containing a `/sandbox` segment.
@@ -1721,9 +1727,8 @@ export const detectCodeQualityIssues = (
   ];
 
   // Sort by line number (extracted from the `location` field), then
-  // rule id, so output is stable and matches the source-order
-  // convention `ApexQualitySemantics.md` §"Recognizer module
-  // integration" calls out.
+  // rule id, so the output is a stable source-order list every caller can
+  // compare by deep equality without re-sorting.
   return issues.slice().sort((a, b) => {
     const la = parseLineFromLocation(a.location);
     const lb = parseLineFromLocation(b.location);

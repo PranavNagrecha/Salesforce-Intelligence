@@ -6,8 +6,8 @@
  * `properties.qualityIssues[]` array the v2.1 `code-quality-patterns`
  * recognizer family populates for ApexClass / ApexTrigger nodes,
  * narrows to the two CRUD/FLS rules, groups by class, and emits the
- * verbatim Q80 false-positive disclosure inherited from
- * `ApexQualitySemantics.md` §§ 6-7.
+ * verbatim false-positive disclosure the two recognizers carry (see
+ * `packages/patterns/src/code-quality-patterns.ts`).
  *
  * **CRUD/FLS rule subset:**
  *   - `missing-crud-check` — DML (`insert`/`update`/`delete`/`upsert`/
@@ -25,10 +25,8 @@
  * Both rules are skipped for test classes (`properties.isTest:
  * true`) — the v2.1 recognizer's own honesty boundary.
  *
- * **Honesty axis — Q80 verbatim disclosure** (per
- * `ApexQualitySemantics.md` §§ 6-7 and the v2.1 R3 §4 disclosure
- * language). The CRUD/FLS recognizer has a HIGH false-positive rate
- * because:
+ * **Honesty axis — the verbatim false-positive disclosure.** The CRUD/FLS
+ * recognizer has a HIGH false-positive rate because:
  *
  *   - Custom security utility helpers (e.g.
  *     `SecurityUtils.canCreate(account)`) are invisible — the
@@ -74,6 +72,11 @@ import type { Context } from '../server.js';
 import { partitionByBaseline } from './finding-suppression.js';
 import { firstNonEmpty, resolveApexClassAlias } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 
@@ -107,7 +110,7 @@ const SEVERITY_SET: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Q80 verbatim disclosure (per ApexQualitySemantics.md §§ 6-7). The
+ * The verbatim false-positive disclosure. The
  * CRUD/FLS recognizer has a HIGH false-positive rate because custom
  * security utility methods are invisible. Surfaced verbatim in
  * `boundaries[]` when at least one finding is returned.
@@ -249,6 +252,13 @@ export interface CrudFlsAuditOutput {
   readonly suppressedFindingCount: number;
   /** Per-rule counter across the FULL matched set. */
   readonly byRule: Readonly<Record<string, number>>;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
+   * nodes that actually carry a `qualityIssues` scan. Present ONLY when some
+   * node was never scanned — the path where zero findings means "not checked",
+   * not "clean". A fully-scanned vault omits it and its response is unchanged.
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
   /** Verbatim Q80 + dataflow + dynamic-SOQL disclosures. */
   readonly boundaries: readonly string[];
   /** Page size applied to this response (echoes the request; default 100). */
@@ -510,6 +520,17 @@ export const crudFlsAuditHandler = async (
           DYNAMIC_SOQL_DISCLOSURE,
         ];
 
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. `detectCodeQualityIssues` ran from
+  // the ApexClass extractor ONLY, so on a vault built before the trigger
+  // extractor was wired every ApexTrigger answers with zero findings and NO
+  // disclosure — a CRUD/FLS audit of a trigger, which is precisely where
+  // CRUD/FLS bugs live, read as CLEAN. This note lives OUTSIDE the
+  // zero-findings gate because the zero-finding response is the false-clean
+  // one. It disappears entirely once the vault is refreshed.
+  const qualityScanCoverage = censusQualityScanCoverage(nodesToProcess);
+  const unscannedNote = buildUnscannedNodesNote(qualityScanCoverage);
+  if (unscannedNote !== undefined) boundaries.push(unscannedNote);
+
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full multi-window scan reaches node 501+
   // and completes. Lives OUTSIDE the zero-findings gate because risky classes
@@ -530,6 +551,7 @@ export const crudFlsAuditHandler = async (
       totalFindingCount,
       suppressedFindingCount,
       byRule,
+      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
       boundaries,
       limit,
       offset,

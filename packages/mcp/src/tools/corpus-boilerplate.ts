@@ -67,6 +67,26 @@ const RULES: readonly BoilerplateRule[] = [
     marker: 'Every response also carries `conceptReasoning`',
     endsAtDescriptionEnd: true,
   },
+  {
+    // FLOW-ORDER-IS-ALPHABETICAL. The within-phase-order caveat is carried
+    // VERBATIM by both SOE composition tools, because they must stay in
+    // lockstep — a host reading either one must get the same contract. Two
+    // carriers is enough to matter: the block is ~110 words dense in
+    // `flow`/`order`/`phase`/`trigger`, the exact vocabulary that separates the
+    // flow tools from each other, so indexing it twice would depress those
+    // terms' IDF across the whole corpus for no retrieval gain.
+    id: 'within-phase-order-caveat',
+    marker: ' WITHIN-PHASE ORDER IS NOT DETERMINED:',
+    // The block ends at the three-state explanation, NOT at the `sfi refresh`
+    // mention — that phrase appears MID-block and closes with a paren, so the
+    // old tail matched nothing and the rule half-matched. A half-matched rule
+    // is deliberately left ALONE (never truncated to the end), so the whole
+    // ~1.1 KB block stayed in the indexed document for BOTH tools that carry
+    // it — which is precisely the repeated-text IDF poisoning this module
+    // exists to prevent. Pinned by corpus-boilerplate.test.ts.
+    tail: 'because there is no gap to close).',
+    endsAtDescriptionEnd: false,
+  },
 ];
 
 /** The markers, for the guard test that pins advertised-present / indexed-absent. */

@@ -821,3 +821,89 @@ describe('techDebtScoreHandler — past-cap score completeness (CR-12 de-cap)', 
     expect(r.value.data.categories.codeQuality.rawCount).toBe(2);
   });
 });
+
+describe('techDebtScoreHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-partial-scan-'));
+    const opened = await openGraph(join(tempDir, 'partial.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    // The real vault's shape: every ApexClass scanned, every ApexTrigger not.
+    // `anyNodeHasIssuesProperty` is an ANY, so this scored the codeQuality axis
+    // off part of the Apex surface and said nothing at all — the exclusion hook
+    // only fires when NO node anywhere carries the property.
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:Smelly',
+            apiName: 'Smelly',
+            apiVersion: 58,
+            properties: {
+              qualityIssues: [{ severity: 'critical', rule: 'soql-in-loop' }],
+            },
+          }),
+          makeNode({
+            id: 'ApexTrigger:NeverScanned',
+            type: 'ApexTrigger',
+            apiName: 'NeverScanned',
+            sourcePath: 'unused.trigger',
+            properties: {},
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('discloses PARTIAL scan coverage, which the extractor-not-run exclusion never covered', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The axis DOES contribute — this is not the exclusion path.
+    expect(
+      r.value.data.excludedCategories.map((e) => e.category),
+    ).not.toContain('codeQuality');
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+    ]);
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'NOT SCANNED IN THIS VAULT',
+    );
+  });
+
+  it('names Flow as permanently not-checked whenever the axis contributes', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.notCheckedTypes?.map((n) => n.type)).toEqual(['Flow']);
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'NOT CHECKED BY DESIGN',
+    );
+  });
+
+  it('says nothing when the axis is EXCLUDED — an excluded axis is already disclosed', async () => {
+    const r = await techDebtScoreHandler(ctx, {
+      excludeCategories: ['codeQuality'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage).toBeUndefined();
+    expect(r.value.data.notCheckedTypes).toBeUndefined();
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).not.toContain('NOT SCANNED IN THIS VAULT');
+    expect(joined).not.toContain('NOT CHECKED BY DESIGN');
+  });
+});

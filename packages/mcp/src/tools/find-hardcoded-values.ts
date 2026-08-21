@@ -10,8 +10,8 @@
  * time for ApexClass / ApexTrigger nodes.
  *
  * **Hardcoded-value rule subset** — the four rules below are the
- * hardcoded-literal slice of the v2.1 catalog
- * (`ApexQualitySemantics.md` §§ 3, 4, 5, 14):
+ * hardcoded-literal slice of the recognizer catalog in
+ * `packages/patterns/src/code-quality-patterns.ts`:
  *   - `hardcoded-id` — 15- or 18-character Salesforce ID literal with
  *     a recognized key prefix. Sandbox/production IDs differ.
  *   - `hardcoded-email` — strict email-shaped literal. Move to Custom
@@ -33,8 +33,8 @@
  * Omitted means "all four rules"; an unrecognized category falls
  * through the schema's enum so the handler never sees one.
  *
- * **Refusal-pattern axis** (per `ApexQualitySemantics.md` §3 and the
- * v2.1 R3 §5 disclosure language): hardcoded IDs inside `@isTest`
+ * **Refusal-pattern axis** (the `hardcoded-id` recognizer's own
+ * boundary): hardcoded IDs inside `@isTest`
  * classes are often intentional fixtures — the recognizer flags them,
  * but the skill must surface the refusal-pattern disclosure verbatim
  * so the user knows the finding may be a false positive. The
@@ -69,7 +69,17 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  argsFingerprint,
+  decodeCursor,
+  DEFAULT_PAGE_BYTE_BUDGET,
+  paginateLegacy,
+} from './page-cursor.js';
+import {
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
@@ -199,6 +209,14 @@ export interface FindHardcodedValuesOutput {
     readonly url: number;
     readonly 'sandbox-data': number;
   }>;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
+   * nodes that actually carry a `qualityIssues` scan. Present ONLY when some
+   * node in scope was never scanned — the path where `matches: []` means "not
+   * checked", not "no hardcoded values here". A fully-scanned vault omits it
+   * and its response is unchanged.
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
   /** Verbatim honesty disclosures. */
   readonly boundaries: readonly string[];
   /** True when the matched count exceeded `limit` (more matches behind this page). */
@@ -356,10 +374,14 @@ export const findHardcodedValuesHandler = async (
     });
   }
   let componentIdMatched = false;
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. The nodes the caller's scope
+  // ACTUALLY selected, kept so the response can say how many of them carry a
+  // quality scan at all. Without it an empty result read as "no hardcoded
+  // values in this scope" even when the scope was never scanned.
+  const nodesInScope: Node[] = [];
   for (const node of scan.value.nodes) {
     // Apply the caller scope BEFORE reading findings so a scoped call reports
-    // only its target's matches (and an empty result honestly means "no
-    // hardcoded values in this scope", not "unscanned").
+    // only its target's matches.
     if (input.componentId !== undefined) {
       if (node.id !== input.componentId) continue;
       componentIdMatched = true;
@@ -367,6 +389,7 @@ export const findHardcodedValuesHandler = async (
     if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
       continue;
     }
+    nodesInScope.push(node);
     const raw = (node as Node).properties['qualityIssues'];
     if (!Array.isArray(raw)) continue;
     const inTest = isTestClass(node);
@@ -436,20 +459,6 @@ export const findHardcodedValuesHandler = async (
     offset = decoded.value.o;
   }
 
-  const paged = paginateLegacy(sorted, {
-    offset,
-    limit,
-    keyOf: matchKey,
-    binding: {
-      tool: FIND_HARDCODED_TOOL,
-      vaultHash: ctx.manifest.sourceTreeHash,
-      argsFingerprint: fingerprint,
-    },
-  });
-  const slice = paged.items;
-  const truncated = paged.hasMore;
-  const emitCursor = paged.nextCursor !== null;
-
   const boundaries: string[] = [];
   if (sorted.length > 0) {
     boundaries.push(HEURISTIC_CONFIDENCE_DISCLOSURE);
@@ -457,6 +466,15 @@ export const findHardcodedValuesHandler = async (
       boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
     }
   }
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. `SCANNED_TYPES` includes
+  // ApexTrigger, but `detectCodeQualityIssues` ran from the ApexClass extractor
+  // ONLY — so on a vault built before the trigger extractor was wired, a
+  // hardcoded-Id hunt over any trigger returned `matches: []`, `boundaries: []`,
+  // indistinguishable from a clean trigger. Lives OUTSIDE the zero-findings
+  // gate because the zero-finding response IS the false-clean one.
+  const qualityScanCoverage = censusQualityScanCoverage(nodesInScope);
+  const unscannedNote = buildUnscannedNodesNote(qualityScanCoverage);
+  if (unscannedNote !== undefined) boundaries.push(unscannedNote);
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes,
   // so this is honestly false for any real org (strictly better than the old
@@ -467,6 +485,42 @@ export const findHardcodedValuesHandler = async (
       scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
     );
   }
+
+  // The boundaries and `qualityScanCoverage` ride in the SAME envelope as the
+  // paged `matches`, so charge them against the page budget. Built ABOVE the
+  // pagination for exactly that reason — none of them depends on the page, only
+  // on `sorted` / `nodesInScope` / `scan.value`.
+  //
+  // WHY: adding the NOT-SCANNED note took the default no-args response from
+  // 39,701 to 40,115 bytes, past the global ~40 KB guard. The guard trims the
+  // largest array, so `matches` came back with 50 rows while
+  // `pageInfo.returnedCount` still said 100 and `nextCursor` resumed at offset
+  // 100 — 50 of 112 findings unreachable through the tool's own pagination. A
+  // disclosure added to stop a false-clean answer must not silently drop
+  // findings to make room for itself.
+  const disclosureBytes = Buffer.byteLength(
+    JSON.stringify({ boundaries, qualityScanCoverage }),
+    'utf8',
+  );
+  const matchesByteBudget = Math.max(
+    12_000,
+    DEFAULT_PAGE_BYTE_BUDGET - disclosureBytes,
+  );
+
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    keyOf: matchKey,
+    byteBudget: matchesByteBudget,
+    binding: {
+      tool: FIND_HARDCODED_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   // Emit the paging fields ONLY on a paged response (truncated OR a resumed
   // offset>0). A whole-fits no-cursor call omits limit/offset/nextOffset/
@@ -479,6 +533,7 @@ export const findHardcodedValuesHandler = async (
       matches: slice,
       totalCount: sorted.length,
       byCategory,
+      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
       boundaries,
       truncated,
       ...(input.componentId !== undefined || input.nameContains !== undefined
