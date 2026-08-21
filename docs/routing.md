@@ -159,6 +159,34 @@ is vector discrimination across long documents.
 
 ---
 
+### 4.1 The shortlist is not ordered by the score it prints
+
+`route_question` emits each candidate's **lexical cosine** as `score`, but it
+orders the shortlist by a *different*, unemitted key: a candidate a deterministic
+rule NAMED is fused to `min(1, cosine + REGEX_BONUS)` (`REGEX_BONUS = 0.25`,
+`route-question.ts:1273`). So a rule-named tool with cosine `0.483` sits above a
+funnel-only tool with cosine `0.523`, and nothing in the payload says why.
+
+Measured, on `"which orgs in our fleet have drifted most from the baseline?"`:
+
+```
+1. sfi.fleet_find            0.4830      <- named by the funnel-advisory rule, fused 0.733
+2. sfi.fleet_drift_ranking   0.5230      <- funnel-only, fused 0.523
+```
+
+This is not a sorting bug — the order is the intended one, and the fusion is
+deliberate. It is a REPORTING gap: the ordering key is invisible, so a reader
+(human or host) sees a list that looks mis-sorted and cannot tell a rule-named
+candidate from a funnel-found one. If you are debugging "why is this tool first",
+check whether a rule named it before you touch a single funnel weight.
+
+Note the asymmetry this creates for the goldset harness: it grades
+`route.tools[0]`, which on an `unrouted` question is the funnel-promotion
+fallback, NOT `candidates[0]`. A question can therefore be graded a miss while
+the shortlist ranks the correct tool first and the host answers correctly.
+
+---
+
 ## 5. Funnel-primary (`funnel-advisory`) routes
 
 When **no deterministic intent matches**, the router does not simply give up.

@@ -3471,6 +3471,41 @@ describe('community-access must not steal live login-ACTIVITY questions', () => 
   }
 });
 
+describe('community-access must not steal the GUEST-exposure questions', () => {
+  // `guest-exposure` is declared ~1150 lines below `community-access`, so it
+  // only ever sees a question this rule declined. It did not decline
+  // "What can guest users see across our Experience Cloud communities?" — the
+  // INVENTORY frame matched (`What` … `Experience Cloud` 31 chars later) and
+  // the asker got a community roster instead of the guest exposure surface.
+  // A guest is UNAUTHENTICATED; a login/membership catalog is exactly the
+  // thing that cannot answer for them.
+  const guest = [
+    'What can guest users see across our Experience Cloud communities?',
+    'which communities expose data to guest users?',
+    'show me the guest profile access on our partner portal',
+    'what can unauthenticated visitors reach on our community?',
+  ];
+  for (const question of guest) {
+    it(`leaves it to guest-exposure: "${question}"`, () => {
+      const route = classifyQuestion(question);
+      expect(route.intent).not.toBe('community-access');
+    });
+  }
+
+  // The guard must not cost the declared-access questions it exists to serve.
+  const declared: readonly (readonly [string, string])[] = [
+    ['what communities does this org have and who can log into them?', 'community-access'],
+    ['is self-registration enabled on my community?', 'community-access'],
+    ['which members can log into the customer portal', 'community-access'],
+    ['list our experience cloud sites', 'community-access'],
+  ];
+  for (const [question, intent] of declared) {
+    it(`still claims the DECLARED-access question: "${question}"`, () => {
+      expect(classifyQuestion(question).intent).toBe(intent);
+    });
+  }
+});
+
 describe('cdc-enablement must not steal the field-history neighbours', () => {
   // "change data capture" and "field history tracking" are the standing lexical
   // collision in this corpus — the TF-IDF funnel cannot separate them, because

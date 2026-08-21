@@ -1677,12 +1677,24 @@ const RULES: readonly Rule[] = [
       // `community` within 40 chars, so the INVENTORY frame claimed it. All
       // three slack patterns are guarded; only `self registration` is not,
       // because that token cannot appear in an activity question.
+      //
+      // SECOND GUARD, same shape, different neighbour: `guest-exposure` sits
+      // ~1150 lines BELOW this rule, so it never gets a turn on a question this
+      // one claims. "What can guest users see across our Experience Cloud
+      // communities?" opens `What` with `Experience Cloud` 31 chars later, so
+      // the INVENTORY frame took it and answered with a community ROSTER — but
+      // a guest is by definition UNAUTHENTICATED, which is the one thing a
+      // login/membership catalog does not describe. The same three patterns
+      // therefore also refuse `guest` / `unauthenticated`, letting the question
+      // fall through to `sfi.guest_exposure_report`. `self registration` stays
+      // unguarded: self-signup is an authenticated-member switch, not a guest
+      // surface.
       // INVENTORY frame: "what/which/list/show … communities".
-      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b)).*\b(?:what|which|list|show|how\s+many)\b[^.?!]{0,40}\b(?:communit(?:y|ies)|experience\s+cloud(?:\s+sites?)?|experience\s+sites?)\b/,
+      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b|\bguests?\b|\bunauthenticated\b)).*\b(?:what|which|list|show|how\s+many)\b[^.?!]{0,40}\b(?:communit(?:y|ies)|experience\s+cloud(?:\s+sites?)?|experience\s+sites?)\b/,
       // COMMUNITY noun -> login / membership / signup frame.
-      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b)).*\b(?:communit(?:y|ies)|experience\s+cloud|experience\s+site|(?:customer|partner|self[-\s]?service)\s+portal)\b[^.?!]{0,60}\b(?:log\s?ins?|log(?:ged|ging)?\s?in(?:to)?|sign\s?in|sign(?:s|ed)?\s+(?:themselves\s+)?up|regist(?:er|ration)\w*|members?|member\s+profiles?|url\s+path)\b/,
+      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b|\bguests?\b|\bunauthenticated\b)).*\b(?:communit(?:y|ies)|experience\s+cloud|experience\s+site|(?:customer|partner|self[-\s]?service)\s+portal)\b[^.?!]{0,60}\b(?:log\s?ins?|log(?:ged|ging)?\s?in(?:to)?|sign\s?in|sign(?:s|ed)?\s+(?:themselves\s+)?up|regist(?:er|ration)\w*|members?|member\s+profiles?|url\s+path)\b/,
       // login / membership / signup frame -> COMMUNITY noun.
-      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b)).*\b(?:log\s?in(?:to)?|log(?:ged|ging)?\s?in(?:to)?|sign\s?in|sign(?:s|ed)?\s+(?:themselves\s+)?up|regist(?:er|ration)\w*|members?)\b[^.?!]{0,60}\b(?:communit(?:y|ies)|experience\s+cloud|experience\s+site|(?:customer|partner|self[-\s]?service)\s+portal)\b/,
+      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b|\bguests?\b|\bunauthenticated\b)).*\b(?:log\s?in(?:to)?|log(?:ged|ging)?\s?in(?:to)?|sign\s?in|sign(?:s|ed)?\s+(?:themselves\s+)?up|regist(?:er|ration)\w*|members?)\b[^.?!]{0,60}\b(?:communit(?:y|ies)|experience\s+cloud|experience\s+site|(?:customer|partner|self[-\s]?service)\s+portal)\b/,
       // `self registration` / `selfRegProfile` is unambiguously the community
       // self-signup switch — no other Salesforce surface carries the term.
       /\bself[-\s]?regist(?:er|ration)\w*\b|\bselfregprofile\b/,
