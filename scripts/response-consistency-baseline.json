@@ -25,6 +25,16 @@
     "userId": [
       "sfi.live_record_access"
     ],
+    "profileId": [
+      "sfi.effective_permissions",
+      "sfi.layout_for_user",
+      "sfi.live_access_oracle",
+      "sfi.profile_security",
+      "sfi.recordtype_availability",
+      "sfi.tab_availability",
+      "sfi.user_ability",
+      "sfi.what_if_split_profile"
+    ],
     "afterId": [
       "sfi.live_permset_holders"
     ],
@@ -50,6 +60,7 @@
       "sfi.why_field_changed"
     ],
     "objectId": [
+      "sfi.action_chain",
       "sfi.automation_risk_report",
       "sfi.domain_clusters",
       "sfi.effective_permissions",
@@ -70,15 +81,6 @@
       "sfi.find_apex_usages",
       "sfi.find_code_usages",
       "sfi.find_field_anywhere"
-    ],
-    "profileId": [
-      "sfi.effective_permissions",
-      "sfi.layout_for_user",
-      "sfi.profile_security",
-      "sfi.recordtype_availability",
-      "sfi.tab_availability",
-      "sfi.user_ability",
-      "sfi.what_if_split_profile"
     ],
     "communityId": [
       "sfi.guest_exposure_report"
