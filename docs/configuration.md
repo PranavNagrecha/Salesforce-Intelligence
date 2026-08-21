@@ -574,6 +574,71 @@ is marked with its outcome (`retrieved` / `already-present` / `refused`). A
 new hit after a drain re-queues the id; draining twice is a no-op. The watch
 daemon drains automatically with `--drain-demand-queue`.
 
+## Concept reasoning on composed tools (`includeConceptReasoning`)
+
+`sfi.field_360`, `sfi.explain_apex_method`, `sfi.what_happens_on_save` and
+`sfi.get_component` each run the deterministic concept-rule engine over the
+component they resolved and return cited claims plus a `completeness` digest.
+
+**DEFAULT ON.** Pass `includeConceptReasoning: false` to opt out. The engine was
+previously reachable only through `sfi.interpret`, which required a pre-resolved
+canonical component id — measured, ZERO of 193 rules could fire in any answer a
+user actually asks for.
+
+Read `completeness` BEFORE the claims. It keeps four states apart, and the
+distinction is the point:
+
+| state | meaning |
+|---|---|
+| fired | the rule matched |
+| checked clean | evaluated against this component, matched nothing |
+| provably inapplicable | the rule's type gate excludes this component type |
+| not evaluable | the vault lacks the metadata, OR the bind shape could not be proven inapplicable |
+
+`notEvaluable` is split at the wire into `vault-coverage-missing` (a real gap a
+refresh closes, and the remedy is named) and `shape-not-provable` (the rule ran
+and matched nothing, but inapplicability could not be PROVEN). Only the first
+drives `absence.status: 'not-checked'`. Classification fails toward
+"could not determine" — never toward "correctly skipped", which would read as a
+clean bill of health.
+
+When `noRuleCoversComponentType` is true, NOTHING was analysed and an empty
+claims list is SILENCE, not a clean result.
+
+The block is attached AFTER the response budget is enforced, and it is the
+completeness ENUMERATION that is capped for size, never the cited claims.
+`sfi.interpret` remains the uncapped surface, and on a metadata probe
+(`maxBodyBytes`) the flag is ignored outright — stated in the response rather
+than silently dropped.
+
+## Profile Id ↔ API-name map (`meta/profile-name-map.json`)
+
+Built by `sfi refresh` from two org reads and used ONLY by the live plane. It
+exists because the two halves of a parity question are keyed differently: a live
+user carries a `ProfileId` and a MUTABLE display label ("System Administrator"),
+while every offline Profile node is keyed by metadata API name ("Admin") — which
+SOQL never returns. Measured on one org, 43 of 52 profiles happened to match by
+name and **9 did not, 3 of them org-CUSTOM**, so a static standard-profile alias
+table is NOT sufficient.
+
+The map is built by joining `listMetadata -m Profile` (`{id, fullName}`) against
+`SELECT Id, Name FROM Profile` on the 15-character Id.
+
+**Consumers resolve on the ID, never the label.** Labels can be renamed and
+re-used, and a label-keyed lookup would silently resolve a user to the WRONG
+profile and then report the resulting diff as a permission finding
+indistinguishable from a real one. The label is joined anyway so a rename is
+detectable (surfaced as a disclosure) and so the unjoinable count is knowable.
+
+Absent, corrupt, or empty map ⇒ the tool REFUSES with `invalid-query` naming the
+remedy. It never falls back to name-matching and never diffs against a
+profile-less bundle, which would emit a flood of false understatements and blame
+the offline engine for a mapping gap. `profileId` is the always-available escape
+hatch and works with no map at all.
+
+Skipped on `--no-pull` (no org contact in that mode); any previous map stays.
+It contains org data and lives in the gitignored vault — never a tracked file.
+
 ## Permission dependencies (`meta/permission-dependencies.json`)
 
 The platform's own `PermissionDependency` graph — "user permission X requires
