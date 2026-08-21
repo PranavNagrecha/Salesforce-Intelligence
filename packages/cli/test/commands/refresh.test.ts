@@ -748,6 +748,58 @@ describe('objectsToExpandManifest (B29 auto-expansion)', () => {
     ];
     expect(objectsToExpandManifest(results)).toEqual([]);
   });
+
+  // CHANGEEVENT-EXPANSION-NEVER-CONVERGES. A Change Data Capture entity reaches
+  // this gate on TWO automation edges — a channel member's `references` and an
+  // Apex CDC trigger's `triggersOn` — but the platform synthesises it and the
+  // Metadata API emits no component, so a retrieve can NEVER create the node.
+  // Naming it meant every refresh re-requested the same entity and logged the
+  // same warning, forever: the phantom could not converge.
+  it('FAIL-BEFORE/PASS-AFTER: never expands a ChangeEvent entity (no refresh can retrieve one)', () => {
+    const results: ExtractionResult[] = [
+      {
+        nodes: [mkNode('ApexTrigger:T')],
+        edges: [
+          // Standard CDC, via a channel member's declared reference.
+          mkEdge('references', 'CustomObject:AccountChangeEvent'),
+          // Custom CDC, via an Apex CDC trigger's declared object binding.
+          mkEdge('triggersOn', 'CustomObject:Order__ChangeEvent'),
+          // A managed CDC stream — same rule, namespaced.
+          mkEdge('references', 'CustomObject:ns__Widget__ChangeEvent'),
+          // A genuinely retrievable phantom must STILL be expanded.
+          mkEdge('triggersOn', 'CustomObject:Admissions_Template__c'),
+        ],
+      },
+    ];
+    expect(objectsToExpandManifest(results)).toEqual(['Admissions_Template__c']);
+  });
+
+  it('CONVERGENCE: a vault whose only phantoms are ChangeEvents asks for nothing', () => {
+    const results: ExtractionResult[] = [
+      {
+        nodes: [mkNode('ApexTrigger:T')],
+        edges: [
+          mkEdge('triggersOn', 'CustomObject:ContactChangeEvent'),
+          mkEdge('references', 'CustomObject:CaseChangeEvent'),
+        ],
+      },
+    ];
+    // The invariant: the request set is EMPTY, so a second refresh over the same
+    // extraction cannot re-request anything — the loop terminates.
+    expect(objectsToExpandManifest(results)).toEqual([]);
+    expect(objectsToExpandManifest(results)).toEqual(objectsToExpandManifest(results));
+  });
+
+  it('a real custom object whose name merely CONTAINS ChangeEvent is still expanded', () => {
+    const results: ExtractionResult[] = [
+      {
+        nodes: [mkNode('ApexTrigger:T')],
+        // `__c` makes it a retrievable custom object, not a CDC stream.
+        edges: [mkEdge('triggersOn', 'CustomObject:ChangeEvent_Log__c')],
+      },
+    ];
+    expect(objectsToExpandManifest(results)).toEqual(['ChangeEvent_Log__c']);
+  });
 });
 
 describe('buildFolderedReportManifest', () => {

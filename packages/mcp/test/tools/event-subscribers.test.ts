@@ -1079,3 +1079,124 @@ describe('eventSubscribersHandler — bounded graph queries (catalog)', () => {
     expect(wide.edgeQueries + wide.nodeQueries).toBeLessThan(10);
   });
 });
+
+// =============================================================================
+// EVENT-SUBSCRIBERS-CANNOT-SEE-UNRETRIEVED-EVENTS
+//
+// `validateEventId` is a pure `__e`-SUFFIX SYNTAX check, so single-event mode
+// went straight from "the id looks like an event" to `listEdges` — and answered
+// "no subscribers found for this event" for a Platform Event this org's own
+// metadata NAMES but never retrieved (a managed-package event, or one outside
+// the retrieve scope). That is "did not check" rendered as "checked and found
+// nothing". Catalog mode had the matching defect at inventory scale: it listed
+// only RETRIEVED events, with no statement that others are referenced.
+// =============================================================================
+
+describe('eventSubscribersHandler — retrieval state is separate from subscription', () => {
+  const PHANTOM_EVENT = 'CustomObject:pkg__Vendor_Signal__e';
+  const RETRIEVED_EVENT = 'CustomObject:Local_Signal__e';
+
+  /**
+   * Mirrors a real vault: one retrieved event node, plus a second event that
+   * exists ONLY as an edge target (a permission grant naming it), exactly as a
+   * managed-package event appears after a wildcard retrieve.
+   */
+  const phantomSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: RETRIEVED_EVENT, apiName: 'Local_Signal__e' }),
+      makeNode({ id: 'ApexClass:LocalSignalHandler', type: 'ApexClass', apiName: 'LocalSignalHandler' }),
+      makeNode({ id: 'PermissionSet:Integration', type: 'PermissionSet', apiName: 'Integration' }),
+    ],
+    edges: [
+      makeEdge({
+        fromId: 'ApexClass:LocalSignalHandler',
+        toId: RETRIEVED_EVENT,
+        edgeType: 'listensTo',
+        source: 'apex-class-extractor',
+      }),
+      // The phantom's ONLY trace: a grant that names it. No node is ever created.
+      makeEdge({
+        fromId: 'PermissionSet:Integration',
+        toId: PHANTOM_EVENT,
+        edgeType: 'grantedBy',
+        source: 'permission-set-extractor',
+      }),
+    ],
+  };
+
+  let dir: string;
+  let s: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-evsub-phantom-'));
+    const opened = await openGraph(join(dir, 'evsub.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    s = opened.value;
+    const imported = await importExtractionResults(s, [phantomSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+  });
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a referenced-but-unretrieved event reports NOT RETRIEVED, not "no subscribers"', async () => {
+    const result = await eventSubscribersHandler(localCtx, { eventId: PHANTOM_EVENT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Still `ok` and still returns the edge-derived lists — a subscriber's edge
+    // can exist even when the event node does not, so refusing would lose data.
+    expect(result.value.data.eventRetrieved).toBe(false);
+    // The not-retrieved verdict must be read BEFORE any subscriber statement.
+    expect(result.value.data.boundaries[0]).toMatch(/EVENT NOT IN THIS VAULT/);
+    expect(result.value.data.boundaries[0]).toMatch(/never retrieved/i);
+  });
+
+  it('a RETRIEVED event carries no retrieval flag and no extra boundary (unchanged response)', async () => {
+    const result = await eventSubscribersHandler(localCtx, { eventId: RETRIEVED_EVENT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Absent, not `true` — the key must not appear at all on the healthy path.
+    expect('eventRetrieved' in result.value.data).toBe(false);
+    expect(result.value.data.boundaries.some((b) => b.includes('EVENT NOT IN THIS VAULT'))).toBe(false);
+    expect(result.value.data.subscribers).toHaveLength(1);
+  });
+
+  it('catalog mode counts the events it could NOT list, so a partial inventory cannot pass for the whole', async () => {
+    const result = await eventSubscribersHandler(localCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // INVARIANT: retrieved + referenced-not-retrieved accounts for every `__e`
+    // id the graph knows about — the listed slice is never the whole story.
+    expect(data.events?.map((e) => e.eventId)).toEqual([RETRIEVED_EVENT]);
+    expect(data.referencedNotRetrievedEventCount).toBe(1);
+    expect(data.referencedNotRetrievedEvents).toEqual([PHANTOM_EVENT]);
+    expect(data.boundaries.some((b) => b.includes('PARTIAL INVENTORY'))).toBe(true);
+  });
+
+  it('a vault whose every event IS retrieved emits no partial-inventory fields', async () => {
+    const cleanSeed: ExtractionResult = {
+      nodes: [makeNode({ id: RETRIEVED_EVENT, apiName: 'Local_Signal__e' })],
+      edges: [],
+    };
+    const cleanDir = mkdtempSync(join(tmpdir(), 'sfi-evsub-clean-'));
+    const opened = await openGraph(join(cleanDir, 'evsub.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const cleanStore = opened.value;
+    const imported = await importExtractionResults(cleanStore, [cleanSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const cleanCtx = { vaultRoot: cleanDir, manifest: FIXTURE_MANIFEST, graph: cleanStore } as Context;
+
+    const result = await eventSubscribersHandler(cleanCtx, {});
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect('referencedNotRetrievedEventCount' in result.value.data).toBe(false);
+      expect(result.value.data.boundaries).toHaveLength(1);
+    }
+    await closeGraph(cleanStore);
+    rmSync(cleanDir, { recursive: true, force: true });
+  });
+});

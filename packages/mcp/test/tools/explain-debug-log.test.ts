@@ -279,3 +279,149 @@ describe('explain_debug_log — natural input aliases', () => {
     expect(parsed.error.issues.some((i) => i.path.join('.') === 'logText')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// EXPLAIN-DEBUG-LOG-CLEAN-VERDICT-FROM-PAGE-ONE
+//
+// The governor cross-reference used to call `governorLimitRisksHandler(ctx, {})`
+// — ORG-WIDE mode, whose `classes` array is a PAGE (default limit 100) whose
+// `truncated` / `nextOffset` / `nextCursor` were never read. A class named in
+// the log that sorted PAST that page boundary was simply absent from the lookup,
+// and the handler then emitted the affirmative "has no static soql/dml-in-loop
+// finding" — a clean verdict produced by not looking.
+//
+// The invariant asserted here is scale-INDEPENDENT: the verdict for a named
+// class must not depend on how many OTHER risky classes sort ahead of it. The
+// fixture seeds strictly more risky classes than the page holds and names the
+// one that sorts last, so a reintroduced page-one lookup fails hard.
+// ---------------------------------------------------------------------------
+
+/** Classes that must precede the target under the engine's id-ASC ordering. */
+const CROWD_SIZE = 120;
+/** Sorts after every `ApexClass:Crowd###` id, and after `ApexClass:` letters A-Y. */
+const LATE_CLASS_ID = 'ApexClass:zzTailEscalationService';
+
+const riskyIssue = (line: number) => ({
+  rule: 'soql-in-loop',
+  severity: 'critical',
+  location: `line ${line.toString()}`,
+  explanation: 'SOQL query inside a loop body.',
+});
+
+const crowdedSeed = (): ExtractionResult => {
+  const nodes: Node[] = [];
+  for (let i = 0; i < CROWD_SIZE; i += 1) {
+    const name = `Crowd${String(i).padStart(3, '0')}`;
+    nodes.push(
+      node({
+        id: `ApexClass:${name}`,
+        type: 'ApexClass',
+        apiName: name,
+        properties: { qualityIssues: [riskyIssue(i + 1)] },
+      }),
+    );
+  }
+  nodes.push(
+    node({
+      id: LATE_CLASS_ID,
+      type: 'ApexClass',
+      apiName: 'zzTailEscalationService',
+      properties: { qualityIssues: [riskyIssue(5)] },
+    }),
+    // A second late-sorting class with NO findings — the clean-verdict subject.
+    node({ id: 'ApexClass:zzQuietService', type: 'ApexClass', apiName: 'zzQuietService' }),
+  );
+  return { nodes, edges: [] };
+};
+
+const crowdedLog = (className: string): string =>
+  [
+    '61.0 APEX_CODE,FINEST;APEX_PROFILING,INFO;DB,INFO;SYSTEM,DEBUG',
+    '09:00:00.1 (1000000)|EXECUTION_STARTED',
+    `09:00:00.1 (1200000)|CODE_UNIT_STARTED|[EXTERNAL]|${className}.run()`,
+    `09:00:00.1 (1900000)|METHOD_ENTRY|[5]|${className}.run()`,
+    '09:00:00.2 (21000000)|SOQL_EXECUTE_BEGIN|[5]|Aggregations:0|SELECT Id FROM Case',
+    '09:00:00.2 (24000000)|SOQL_EXECUTE_END|[5]|Rows:3',
+    '09:00:00.9 (900000000)|LIMIT_USAGE_FOR_NS|(default)|',
+    '  Number of SOQL queries: 101 out of 100',
+    `09:00:00.9 (901000000)|METHOD_EXIT|[5]|${className}.run()`,
+    '09:00:00.9 (902000000)|FATAL_ERROR|System.LimitException: Too many SOQL queries: 101',
+    '',
+    `Class.${className}.run: line 5, column 1`,
+    '09:00:00.9 (903000000)|EXECUTION_FINISHED',
+  ].join('\n');
+
+describe('explainDebugLogHandler — governor cross-reference scope (page-boundary honesty)', () => {
+  let crowdedDir: string;
+  let crowdedStore: GraphStore;
+  let crowdedCtx: Context;
+
+  beforeAll(async () => {
+    crowdedDir = mkdtempSync(join(tmpdir(), 'sfi-explain-debug-log-crowd-'));
+    const o = await openGraph(join(crowdedDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    crowdedStore = o.value;
+    const i = await importExtractionResults(crowdedStore, [crowdedSeed()]);
+    if (!i.ok) throw new Error(i.error.message);
+    crowdedCtx = { vaultRoot: crowdedDir, manifest: MANIFEST, graph: crowdedStore };
+  });
+  afterAll(async () => {
+    await closeGraph(crowdedStore);
+    rmSync(crowdedDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: reports the named class’s finding even when it sorts past the org-wide page', async () => {
+    // Margin, not a magic number: strictly MORE risky classes exist than the
+    // engine's default page holds, and the named one sorts after all of them.
+    expect(CROWD_SIZE).toBeGreaterThan(100);
+
+    const result = await explainDebugLogHandler(crowdedCtx, {
+      logText: crowdedLog('zzTailEscalationService'),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const xref = result.value.data.governorRiskCrossRef;
+    expect(xref).not.toBeNull();
+    if (xref === null) return;
+
+    expect(xref.classesWithRisks.map((c) => c.componentId)).toContain(LATE_CLASS_ID);
+    expect(
+      xref.classesWithRisks.find((c) => c.componentId === LATE_CLASS_ID)?.matchedRisks,
+    ).not.toHaveLength(0);
+    // The affirmative "clean" note must NOT be emitted for a class that has one.
+    expect(xref.note).toBeNull();
+  });
+
+  it('names exactly the components the scan covered — never a claim about unscanned classes', async () => {
+    const result = await explainDebugLogHandler(crowdedCtx, {
+      logText: crowdedLog('zzQuietService'),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const xref = result.value.data.governorRiskCrossRef;
+    expect(xref).not.toBeNull();
+    if (xref === null) return;
+
+    // The clean verdict covers ONLY the resolved component the log named — not
+    // the 120 other risky classes in the vault, which were never queried.
+    expect(xref.scannedComponents).toEqual(['ApexClass:zzQuietService']);
+    expect(xref.uncheckedComponents).toBeUndefined();
+    expect(xref.classesWithRisks).toHaveLength(0);
+    expect(xref.note).not.toBeNull();
+    // An affirmative must NAME its subject, so a reader can tell whether the
+    // scan reached the class they care about.
+    expect(xref.note).toContain('ApexClass:zzQuietService');
+    expect(xref.note).toMatch(/per-component scope/i);
+  });
+
+  it('an unresolved name is reported as unresolved, never folded into the clean verdict', async () => {
+    const result = await explainDebugLogHandler(crowdedCtx, {
+      logText: crowdedLog('NotInThisVaultService'),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.unresolvedApex).toContain('ApexClass:NotInThisVaultService');
+    const xref = result.value.data.governorRiskCrossRef;
+    expect(xref?.scannedComponents).toEqual([]);
+  });
+});

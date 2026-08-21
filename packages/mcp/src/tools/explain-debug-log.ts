@@ -203,6 +203,20 @@ export interface GovernorRiskCrossRef {
   readonly mappedStaticRules: readonly string[];
   /** Resolved Apex classes from the log that carry a static loop risk. */
   readonly classesWithRisks: readonly GovernorRiskClassRef[];
+  /**
+   * The Apex components the static engine was ACTUALLY queried for — one scoped
+   * `governor_limit_risks` call each. This is the evidence behind an affirmative
+   * "no static finding" note: without it, "the Apex named in the log is clean"
+   * was a claim about whichever classes happened to land on the engine's first
+   * PAGE, not about the classes in the log.
+   */
+  readonly scannedComponents: readonly ComponentId[];
+  /**
+   * Present ONLY when non-empty: named Apex components whose scoped scan could
+   * not be run, so their governor-risk status is UNKNOWN — never folded into the
+   * clean verdict. Absent on the normal path, keeping that response shape lean.
+   */
+  readonly uncheckedComponents?: readonly ComponentId[];
   /** Honest note when nothing correlated (fail-closed, never fabricated). */
   readonly note: string | null;
 }
@@ -398,6 +412,31 @@ export const collectApexIdentifiers = (
   return out;
 };
 
+/**
+ * Ceiling on how many component ids a cross-reference note NAMES inline. The
+ * COUNT is always exact and `scannedComponents` always carries the full list;
+ * only the prose is bounded, so a 50-frame stack cannot bloat the note.
+ */
+const MAX_NAMED_SCANNED = 5;
+
+/** Comma-joined id list, capped, with an honest "and N more" tail. */
+const namedList = (ids: readonly ComponentId[]): string => {
+  const head = ids.slice(0, MAX_NAMED_SCANNED).join(', ');
+  const rest = ids.length - Math.min(ids.length, MAX_NAMED_SCANNED);
+  return rest > 0 ? `${head}, and ${rest.toString()} more` : head;
+};
+
+/**
+ * Subject phrase for an affirmative cross-reference note: names WHICH components
+ * the clean verdict covers. The old wording ("The Apex named in the log") named
+ * nothing, so a reader could not tell whether the scan had actually reached the
+ * class they cared about.
+ */
+const describeScanned = (ids: readonly ComponentId[]): string =>
+  ids.length === 1
+    ? `The Apex named in the log (${ids[0] as string})`
+    : `Each of the ${ids.length.toString()} Apex component(s) named in the log (${namedList(ids)})`;
+
 /** `governor_limit_risks` rule ids each limit type maps to (may be empty). */
 const LIMIT_TO_STATIC_RULES: Readonly<Record<GovernorLimitType, readonly string[]>> =
   Object.freeze({
@@ -505,18 +544,40 @@ export const explainDebugLogHandler = async (
     tried.push('governor-limit (classify runtime limit + cross-reference governor_limit_risks)');
     const mappedStaticRules = LIMIT_TO_STATIC_RULES[detectedLimit.limitType];
     const classesWithRisks: GovernorRiskClassRef[] = [];
+    // The scan LEDGER: which named components the static engine was actually
+    // asked about, and which could not be asked. An affirmative "clean" note is
+    // only emitted over `scannedApexIds`, and only when `uncheckedApexIds` is
+    // empty — otherwise the note names the gap instead of asserting clean.
+    const scannedApexIds: ComponentId[] = [];
+    const uncheckedApexIds: ComponentId[] = [];
     let note: string | null = null;
 
     if (resolvedApexIds.length === 0) {
       note =
         'No Apex class from the log resolved to a vault node, so the fired limit could not be pinned to a specific static finding — run sfi.governor_limit_risks for the org-wide loop-risk scan, or paste the full stack trace so the running class is named.';
     } else {
-      const risksR = await governorLimitRisksHandler(ctx, {});
-      if (!risksR.ok) return err(risksR.error);
-      const byId = new Map(risksR.value.data.classes.map((c) => [c.componentId, c] as const));
+      // EXPLAIN-DEBUG-LOG-CLEAN-VERDICT-FROM-PAGE-ONE: this used to call
+      // `governorLimitRisksHandler(ctx, {})` — the ORG-WIDE mode, whose `classes`
+      // array is a PAGE (default limit 100) and whose `truncated` / `nextOffset`
+      // / `nextCursor` were never read. A class named in the log that sorted past
+      // the page boundary was simply absent from the lookup, and the handler
+      // then emitted the affirmative "has no static soql/dml-in-loop finding" —
+      // a confident clean verdict produced by not looking. Ask the engine about
+      // exactly the components the log names instead, one SCOPED call each: a
+      // scoped call returns at most that one class, so there is no page to fall
+      // off, and it is also cheaper than the org-wide scan it replaces.
       const mapped = new Set(mappedStaticRules);
       for (const id of resolvedApexIds) {
-        const entry = byId.get(id);
+        const scoped = await governorLimitRisksHandler(ctx, { componentId: id });
+        if (!scoped.ok) {
+          // A scan that could not run is NOT a clean result. Record it as
+          // UNKNOWN and let the note say so, rather than silently omitting the
+          // class and folding it into the affirmative below.
+          uncheckedApexIds.push(id);
+          continue;
+        }
+        scannedApexIds.push(id);
+        const entry = scoped.value.data.classes.find((c) => c.componentId === id);
         if (entry === undefined || entry.risks.length === 0) continue;
         const matchedRisks = entry.risks.filter((r) => mapped.has(r.rule));
         classesWithRisks.push({
@@ -547,7 +608,9 @@ export const explainDebugLogHandler = async (
       }
       if (classesWithRisks.length === 0) {
         note =
-          'The Apex named in the log has no static soql/dml-in-loop finding — the limit may come from a caller, a called static method, or dynamic SOQL (Database.query) the static scanner cannot see. Walk the callers with sfi.call_graph.';
+          uncheckedApexIds.length > 0
+            ? `${describeScanned(scannedApexIds)} carries no static soql/dml-in-loop finding, but ${uncheckedApexIds.length.toString()} further named component(s) could NOT be scanned (${namedList(uncheckedApexIds)}) — their static risk is UNKNOWN, not clean. Re-run sfi.governor_limit_risks on those ids directly.`
+            : `${describeScanned(scannedApexIds)} carries no static soql/dml-in-loop finding — each was queried INDIVIDUALLY against the static engine (per-component scope, not a page of an org-wide list). The limit may still come from a caller, a called static method, or dynamic SOQL (Database.query) the static scanner cannot see. Walk the callers with sfi.call_graph.`;
       } else if (matchedIds.size === 0) {
         note = `The named Apex carries governor-risk findings, but none maps to the fired "${detectedLimit.limitType}" limit specifically — see allRisks for the full set.`;
       }
@@ -559,6 +622,10 @@ export const explainDebugLogHandler = async (
       limitType: detectedLimit.limitType,
       mappedStaticRules,
       classesWithRisks,
+      scannedComponents: scannedApexIds,
+      ...(uncheckedApexIds.length > 0
+        ? { uncheckedComponents: uncheckedApexIds }
+        : {}),
       note,
     };
   }

@@ -99,7 +99,7 @@ describe('classifyPhantom + managedNamespaceOf', () => {
     expect(managedNamespaceOf('CustomObject:Account')).toBeUndefined();
   });
 
-  it('applies the six-bucket precedence', () => {
+  it('applies the bucket precedence', () => {
     expect(classifyPhantom('WorkflowAlert:X.Y', ['references'], ['references'], 'notModeled')).toBe('blindspot-manifest');
     expect(classifyPhantom('CustomObject:ns__M__c', ['grantedBy'], ['grantedBy'], 'covered')).toBe('managed-extension');
     expect(classifyPhantom('CustomObject:Account', ['grantedBy'], ['grantedBy'], 'covered')).toBe('standard-field-phantom');
@@ -167,5 +167,102 @@ describe('get_component returns a classified stub for a phantom', () => {
     if (r.ok) return;
     expect(r.error.stub?.classification).toBe('automation-critical');
     expect(r.error.stub?.demandRetrievable).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CHANGEEVENT-IS-NOT-A-RETRIEVE-GAP
+//
+// A `CustomObject:{X}ChangeEvent` dangling target used to fall through to the
+// coverage/edge-shape buckets: `AccountChangeEvent` (no `__`, PascalCase) came
+// out `standard-field-phantom` — "treat it as standard" — while
+// `Order__ChangeEvent` reached by an automation edge came out
+// `automation-critical`, i.e. DEMAND-RETRIEVABLE. Both remedies are impossible:
+// the platform synthesises a Change Event and the Metadata API emits no
+// component for it, so no refresh on any org can produce the node. The
+// automation-critical verdict is what made the refresh re-request the same
+// entity forever.
+// ---------------------------------------------------------------------------
+
+const CHANGE_EVENT_SEED: ExtractionResult = {
+  nodes: [node('ApexTrigger:Cdc_Trig', 'ApexTrigger'), node('PermissionSet:Acme_PS2', 'PermissionSet')],
+  edges: [
+    // Standard CDC reached by a permission grant (the shape a real vault shows).
+    edge('PermissionSet:Acme_PS2', 'grantedBy', 'CustomObject:AccountChangeEvent'),
+    // Custom CDC reached by an Apex CDC trigger's declared object binding.
+    edge('ApexTrigger:Cdc_Trig', 'triggersOn', 'CustomObject:Order__ChangeEvent'),
+    // Managed CDC stream — namespaced, same structural verdict.
+    edge('PlatformEventChannelMember:M', 'references', 'CustomObject:ns__Widget__ChangeEvent'),
+  ],
+};
+
+describe('phantom taxonomy — Change Data Capture entities are structural, not a coverage gap', () => {
+  let cdcDir: string;
+  let cdcStore: GraphStore;
+  let cdcCtx: Context;
+
+  beforeAll(async () => {
+    cdcDir = mkdtempSync(join(tmpdir(), 'sfi-phantom-cdc-'));
+    const opened = await openGraph(join(cdcDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    cdcStore = opened.value;
+    const imp = await importExtractionResults(cdcStore, [CHANGE_EVENT_SEED]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    cdcCtx = { vaultRoot: cdcDir, manifest: MANIFEST, graph: cdcStore };
+  });
+  afterAll(async () => {
+    await closeGraph(cdcStore);
+    rmSync(cdcDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: classifies every ChangeEvent shape as change-event-stream', () => {
+    // Standard CDC: previously `standard-field-phantom` ("treat it as standard").
+    expect(classifyPhantom('CustomObject:AccountChangeEvent', ['grantedBy'], ['grantedBy'], 'covered')).toBe('change-event-stream');
+    // Custom CDC on an automation edge: previously `automation-critical`, i.e.
+    // a demand-retrieve candidate the retrieve can never satisfy.
+    expect(classifyPhantom('CustomObject:Order__ChangeEvent', ['triggersOn'], ['triggersOn'], 'covered')).toBe('change-event-stream');
+    // Managed CDC: previously `managed-extension`.
+    expect(classifyPhantom('CustomObject:ns__Widget__ChangeEvent', ['references'], ['references'], 'covered')).toBe('change-event-stream');
+    // Precedence: the verdict does not depend on coverage — a "widen the
+    // manifest" remedy is just as impossible as "retrieve it".
+    expect(classifyPhantom('CustomObject:CaseChangeEvent', ['references'], ['references'], 'notModeled')).toBe('change-event-stream');
+  });
+
+  it('does NOT capture a retrievable custom object whose name merely contains ChangeEvent', () => {
+    expect(classifyPhantom('CustomObject:ChangeEvent_Log__c', ['triggersOn'], ['triggersOn'], 'covered')).toBe('automation-critical');
+    expect(classifyPhantom('CustomObject:Signal__e', ['listensTo'], ['listensTo'], 'covered')).toBe('automation-critical');
+  });
+
+  it('a ChangeEvent stub is never demand-retrievable and its remedy never promises a refresh', async () => {
+    for (const id of [
+      'CustomObject:AccountChangeEvent',
+      'CustomObject:Order__ChangeEvent',
+      'CustomObject:ns__Widget__ChangeEvent',
+    ]) {
+      const stub = await buildReferenceStub(cdcCtx, id);
+      expect(stub).not.toBeNull();
+      if (stub === null) continue;
+      expect(stub.classification).toBe('change-event-stream');
+      // The load-bearing invariant: the product must not offer a fix-it it
+      // cannot deliver. `sfi refresh` appears ONLY inside an explicit negation.
+      expect(stub.demandRetrievable).toBe(false);
+      expect(stub.remedy).toMatch(/no `sfi refresh`/);
+      expect(stub.remedy).toMatch(/STRUCTURAL, not a coverage gap/);
+    }
+  });
+
+  it('get_component answers a ChangeEvent with the structural fact, not a retrieve prompt', async () => {
+    const result = await getComponentHandler(cdcCtx, {
+      id: 'CustomObject:Order__ChangeEvent',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+    expect(result.error.message).toMatch(/STRUCTURAL, not a coverage gap/);
+    // Points at the component that IS retrievable: `Order__ChangeEvent` is the
+    // CDC name for the custom object `Order__c` (the `__c` the name dropped).
+    expect(result.error.message).toContain('CustomObject:Order__c');
+    // Must NOT repeat the generic phantom remedy.
+    expect(result.error.message).not.toMatch(/Run `sfi refresh` if it should be retrievable/);
   });
 });

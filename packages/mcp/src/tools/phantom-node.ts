@@ -12,11 +12,21 @@
  * This mirrors the SOE `referencedButNotModeled` disclosure (soe-admission.ts)
  * and generalizes it so any `component-not-found` path can be honest about a
  * phantom. Keep the two messages consistent in spirit.
+ *
+ * ONE id shape is STRUCTURAL rather than a coverage gap: a Change Data Capture
+ * entity (`CustomObject:AccountChangeEvent`). No refresh on any org can retrieve
+ * it, so the generic "Run `sfi refresh` if it should be retrievable" remedy is a
+ * fix-it the product cannot deliver; that branch says so explicitly and points
+ * at the parent object instead.
  */
 
 import type { ComponentId } from '@sf-intelligence/contracts';
 import { STANDARD_OBJECT_FIELD_SNAPSHOT } from '@sf-intelligence/extractors';
-import { listEdges } from '@sf-intelligence/graph';
+import {
+  changeEventParentApiName,
+  isChangeEventEntityId,
+  listEdges,
+} from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
 
@@ -59,6 +69,31 @@ export const phantomAwareNotFoundMessage = async (
 ): Promise<string> => {
   const inbound = await listEdges(ctx.graph, id, { direction: 'in' });
   const refs = inbound.ok ? inbound.value.length : 0;
+  // CHANGEEVENT-IS-NOT-A-RETRIEVE-GAP: a `CustomObject:{X}ChangeEvent` target is
+  // a Change Data Capture stream the platform synthesises; the Metadata API
+  // emits no component for it on ANY org. The generic phantom message below ends
+  // in "Run `sfi refresh` if it should be retrievable" — a fix-it that can never
+  // work here, and one that reads the absence as a coverage gap. Answer with the
+  // STRUCTURAL fact instead. Keyed on id SHAPE alone (not edges/coverage), so
+  // this is the one branch that must precede the reference count.
+  if (isChangeEventEntityId(id)) {
+    const parent = changeEventParentApiName(id.slice('CustomObject:'.length));
+    return (
+      `\`${id}\` is a Change Data Capture (CDC) stream entity, NOT a retrievable ` +
+      `${kindLabel} — the platform synthesises it from the parent object's CDC ` +
+      `configuration and the Metadata API never emits it as a component, so no ` +
+      `\`sfi refresh\` on any org can put it in this vault. This is STRUCTURAL, not a ` +
+      `coverage gap` +
+      (refs > 0
+        ? `; ${refs} edge(s) in this org already point at it (e.g. an Apex CDC trigger ` +
+          `or a channel member).`
+        : '.') +
+      (parent !== null
+        ? ` Read \`CustomObject:${parent}\` for the object itself, or ` +
+          `\`sfi.cdc_subscribers\` for what reacts to the stream.`
+        : ' Use `sfi.cdc_subscribers` for what reacts to the stream.')
+    );
+  }
   if (refs === 0) {
     if (standardObjectApiName(id) !== null) {
       return (

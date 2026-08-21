@@ -42,6 +42,7 @@ import {
   importExtractionResults,
   type ImportCounts,
   INCREMENTAL_DELTA_CAP,
+  isChangeEventEntityId,
   persistResolveIndexArtifact,
   countNodesByType,
   listEdges,
@@ -3572,6 +3573,13 @@ const AUTOMATION_EDGE_TYPES: ReadonlySet<string> = new Set([
  * phantom; this names it explicitly so the second pass pulls it and the analysis
  * is not left with a hole. Returns sorted, de-duplicated API names; empty when
  * nothing automation-relevant is missing.
+ *
+ * EXCLUDED: Change Data Capture entities (`AccountChangeEvent`,
+ * `Order__ChangeEvent`). They are reached by the same automation edges but are
+ * synthesised by the platform and never emitted by the Metadata API, so
+ * requesting them can never create the node — including them made every refresh
+ * re-request the same entity forever. They are disclosed as a structural
+ * `change-event-stream` phantom instead.
  */
 export const objectsToExpandManifest = (
   results: readonly ExtractionResult[],
@@ -3586,6 +3594,16 @@ export const objectsToExpandManifest = (
       if (!AUTOMATION_EDGE_TYPES.has(edge.edgeType)) continue;
       if (!edge.toId.startsWith('CustomObject:')) continue;
       if (nodeIds.has(edge.toId)) continue;
+      // CHANGEEVENT-EXPANSION-NEVER-CONVERGES: a Change Data Capture entity
+      // (`AccountChangeEvent`, `Order__ChangeEvent`) reaches this loop on TWO
+      // automation edges — a channel member's `references` and an Apex CDC
+      // trigger's `triggersOn` — but it is synthesised by the platform and the
+      // Metadata API emits no folder for it on any org. Requesting it can never
+      // create the node, so without this gate every refresh re-requests the
+      // same entity and logs the same warning, forever. Excluded here and
+      // classified `change-event-stream` by the phantom taxonomy, which states
+      // the gap as STRUCTURAL rather than offering a refresh that cannot work.
+      if (isChangeEventEntityId(edge.toId as ComponentId)) continue;
       missing.add(edge.toId.slice('CustomObject:'.length));
     }
   }
@@ -5207,6 +5225,8 @@ const demandCoverageStatusOf = (
 
 const DEMAND_REFUSAL_REASON: Record<PhantomClassification, string> = {
   'automation-critical': 'automation-critical',
+  'change-event-stream':
+    'a Change Data Capture stream entity — the platform synthesises it and the Metadata API never emits it on any org, so NO retrieve (targeted or wildcard) can ever produce it. Structural, not a coverage gap; read the parent object instead',
   'blindspot-manifest':
     'its ComponentType was never retrieved — widen the manifest with a plain `sfi refresh`, not a targeted pull',
   'managed-extension': 'a managed-package member — its source is not retrievable',
