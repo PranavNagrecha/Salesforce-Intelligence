@@ -86,8 +86,66 @@ import {
 } from '../semantic-funnel.js';
 import type { Context } from '../server.js';
 
+import { analysisCategory, oneLiner } from './catalog-gateway.js';
 import { resolveGlossaryAlias } from './resolve.js';
+import { V01_TOOLS } from './roster.js';
 import { CORE_PROFILE_TOOLS, toolProfile } from './tool-profile.js';
+
+/**
+ * Per-tool one-line summary + capability category, keyed by canonical tool name.
+ *
+ * WHY THE SHORTLIST NEEDS THIS. `route_question` is built on "the funnel advises,
+ * the host LLM decides" — but under the DEFAULT `core` tool profile the host is
+ * advertised 19 of 207 tools, so for the other 188 a candidate row names a tool
+ * whose description is nowhere in the host's context. Recovering it costs one
+ * `sfi.describe_analysis` round trip PER CANDIDATE, which no real host makes. The
+ * host was being asked to choose between names.
+ *
+ * The semantics already existed one module away: `sfi.list_analyses` renders the
+ * same `oneLiner(description)` + `analysisCategory(name)` for every analysis. This map
+ * plumbs them into the shortlist itself, where the decision is actually made.
+ *
+ * Deliberately NOT a change to ranking: no score, no order, and no funnel input
+ * moves. Recall@1 and recall@8 are byte-identical before and after — this changes
+ * only whether the model at the other end can use a shortlist that already
+ * contains the right tool ~90% of the time.
+ *
+ * Built once, lazily, and cached: the roster is static for the process lifetime.
+ */
+let candidateFactsCache: ReadonlyMap<string, { oneLiner: string; category: string }> | null = null;
+const candidateFacts = (): ReadonlyMap<string, { oneLiner: string; category: string }> => {
+  if (candidateFactsCache !== null) return candidateFactsCache;
+  const m = new Map<string, { oneLiner: string; category: string }>();
+  for (const t of V01_TOOLS) {
+    m.set(t.name, { oneLiner: oneLiner(t.description), category: analysisCategory(t.name) });
+  }
+  candidateFactsCache = m;
+  return m;
+};
+
+/**
+ * Attach `answers` (and backfill `category`) to every shortlist row.
+ *
+ * `category` is filled ONLY where it is `null`. A funnel-scored row already
+ * carries the capability-map category, which is the more specific signal;
+ * `analysisCategory` is the coarse `core/search/what-if/live/...` bucket and is used
+ * as the fallback. Route-INSERTED rows previously hard-coded `null` here even
+ * though the field was declared and documented — that inconsistency is the one
+ * this closes.
+ */
+const withCandidateFacts = (
+  cands: readonly ToolCandidate[],
+): readonly (ToolCandidate & { readonly answers: string })[] => {
+  const facts = candidateFacts();
+  return cands.map((c) => {
+    const f = facts.get(c.tool);
+    return {
+      ...c,
+      ...(c.category === null && f !== undefined ? { category: f.category } : {}),
+      answers: f?.oneLiner ?? '',
+    };
+  });
+};
 
 /**
  * Max token count for the bare-component resolve fallback. A short phrase the
@@ -362,7 +420,13 @@ export interface RouteQuestionOutput {
    * the deterministic route is authoritative (Design A). Offline TF-IDF over the
    * capability map; no neural model, no network.
    */
-  readonly toolCandidates?: readonly ToolCandidate[];
+  /**
+   * The meaning-ranked shortlist. Each row carries `answers` — the tool's
+   * one-line summary — because under the default `core` profile the host has no
+   * description for 188 of 207 tools and would otherwise be choosing between
+   * bare names. See `withCandidateFacts`.
+   */
+  readonly toolCandidates?: readonly (ToolCandidate & { readonly answers: string })[];
   /**
    * CAE-02 planner contract: present alongside `toolCandidates`. States the loop
    * the host LLM owns — the candidates are primary, the LLM decides: read question →
@@ -2012,7 +2076,7 @@ const refusalResponse = async (
               .join(', ')}`
           : renderRouteMarkdown(route),
       trust: routeTrust(),
-      ...(cands.length > 0 ? { toolCandidates: cands } : {}),
+      ...(cands.length > 0 ? { toolCandidates: withCandidateFacts(cands) } : {}),
       ...(guidance !== undefined ? { guidance } : {}),
     },
     vaultState: {
@@ -3357,9 +3421,11 @@ export const routeQuestionHandler = async (
   // A funnel-advisory route reuses the EXACT candidate list stage 7 gated on
   // (P2 §3): recomputing over the replaced route would re-enter the regex-bonus
   // fusion (intent is no longer 'unrouted') and let gate and output disagree.
-  const toolCandidates = wantCandidates
-    ? advisoryCandidates ?? buildFunnelCandidates(route, input.question, routeToolArgs, input.mode)
-    : [];
+  const toolCandidates = withCandidateFacts(
+    wantCandidates
+      ? advisoryCandidates ?? buildFunnelCandidates(route, input.question, routeToolArgs, input.mode)
+      : [],
+  );
   const guidance =
     toolCandidates.length > 0 ? guidanceForMode(input.mode, toolCandidates) : undefined;
   return ok({
