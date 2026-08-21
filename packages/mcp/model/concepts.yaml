@@ -1927,3 +1927,32 @@ concepts:
     docs:
       - label: Metadata API Developer Guide — Group
         url: https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_group.htm
+
+  # LANE-D COMMUNITIES — community-login-access-population. ONE new concept
+  # covering the AUTHENTICATED login surface of an Experience Cloud site, the
+  # complement of the already-shipped
+  # concept:network-guest-and-selfreg-exposure-posture (which names the
+  # UNAUTHENTICATED guest posture). Grounded on Network node properties that the
+  # extractor already emits: `allowInternalUserLogin` (tri-state boolean via
+  # optionalBoolean) and, newly, `selfRegProfile` (tri-state string via
+  # optionalString) beside the existing `selfRegistration` boolean. Both rules
+  # under it are pure-YAML expressible node rules — no engine change.
+  #
+  # DELIBERATELY NOT AUTHORED: a rule matching `selfRegistration == true` AND
+  # `selfRegProfile isNull true`. On a vault built before selfRegProfile was
+  # extracted the property is ABSENT, and the isNull operator is a NULLISH test
+  # that matches an absent key as readily as a declared null — so such a rule
+  # would assert "self-registration is on and no profile is declared" on a vault
+  # whose builder never LOOKED. That is the one conflation this product does not
+  # make. The key-presence distinction is not expressible in YAML, so the
+  # not-declared case is disclosed by the tool that can see key presence
+  # (sfi.community_catalog), never asserted as a concept claim here.
+  #
+  # ORG-INDEPENDENT general Salesforce truth only; no vault counts.
+  concept:community-login-access-population:
+    kind: access-mechanism
+    label: An Experience Cloud site admits logins through three separate declared doors
+    summary: 'WHO CAN LOG IN to an Experience Cloud site is decided by THREE INDEPENDENT declared doors, and reading any one of them as the whole answer is the usual mistake. (1) MEMBERSHIP — the site declares member profiles and permission sets; a user holding one of them can be a member of the site. (2) SELF-REGISTRATION — when the self-registration switch is on, an anonymous visitor from the open internet can create their OWN authenticated account without an administrator, and the site self-registration profile names the profile that new account is CREATED AS, so that profile object and field permissions become reachable by anyone who chooses to sign up. (3) INTERNAL USER LOGIN — a separate switch decides whether the org OWN internal users may log into the site at all. These are declared metadata switches: they name who is PERMITTED to hold a login, never which named people actually hold one (user assignment is record data an offline metadata snapshot does not contain), and never what a logged-in user can then SEE, which is governed separately by external organization-wide defaults, sharing sets, and record-level sharing. A door that is switched off, or whose switch is absent from the metadata, asserts nothing.'
+    docs:
+      - label: Metadata API Developer Guide — Network
+        url: https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_network.htm

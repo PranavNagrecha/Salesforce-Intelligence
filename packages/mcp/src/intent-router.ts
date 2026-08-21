@@ -1644,6 +1644,51 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // ROUTE-COMMUNITY-LOGIN-MISBINDS-INACTIVE-USERS — "what communities does
+    // this org have and who can log into them?" is a PURE OFFLINE METADATA
+    // question (Network + CustomSite), but the `inactive-users` rule below
+    // binds on `who … log in` and sent it to the LIVE inactive-user roster,
+    // which answered `confidence: high, plane: live` and then returned a
+    // consent error. This rule sits IMMEDIATELY ABOVE it and is additive: every
+    // pattern requires an Experience-Cloud NOUN (community / experience cloud /
+    // experience site / customer|partner|self-service portal) or the
+    // unambiguous `self registration` token, so a genuine "which users haven't
+    // logged in" / "list dormant users" roster question — which carries no such
+    // noun — still falls through to `inactive-users` unchanged.
+    intent: 'community-access',
+    plane: 'vault',
+    tools: ['sfi.community_catalog', 'sfi.guest_exposure_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Which communities exist and who is DECLARED able to log into them (member profiles and permission sets, self-registration and the profile it grants, internal-user login) is offline Network + CustomSite metadata: community_catalog joins the two, and guest_exposure_report covers the unauthenticated guest half. Not a live login-activity roster lookup — no live plane or consent is involved. Which named PEOPLE hold a community login is record data and is not answerable from the vault.',
+    patterns: [
+      // ACTIVITY-GUARDED (patterns 2-3). A community noun sitting within 60
+      // chars of a login verb ALSO matches a genuine LastLoginDate roster
+      // question scoped to a community — "which community users haven't
+      // logged in for 90 days" — which belongs to `inactive-users` on the
+      // LIVE plane. The stated guard ("a roster question carries no
+      // community noun") is false whenever the asker scopes it. So the two
+      // slack patterns additionally REFUSE the dormancy vocabulary that
+      // `inactive-users` binds on. Pattern 1 (inventory) and pattern 4
+      // (self-registration) need no guard — neither can be read as an
+      // activity question — CORRECTED: pattern 1 needs it too. "which community
+      // users haven't logged in for 90 days" opens with `which` and carries
+      // `community` within 40 chars, so the INVENTORY frame claimed it. All
+      // three slack patterns are guarded; only `self registration` is not,
+      // because that token cannot appear in an activity question.
+      // INVENTORY frame: "what/which/list/show … communities".
+      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b)).*\b(?:what|which|list|show|how\s+many)\b[^.?!]{0,40}\b(?:communit(?:y|ies)|experience\s+cloud(?:\s+sites?)?|experience\s+sites?)\b/,
+      // COMMUNITY noun -> login / membership / signup frame.
+      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b)).*\b(?:communit(?:y|ies)|experience\s+cloud|experience\s+site|(?:customer|partner|self[-\s]?service)\s+portal)\b[^.?!]{0,60}\b(?:log\s?ins?|log(?:ged|ging)?\s?in(?:to)?|sign\s?in|sign(?:s|ed)?\s+(?:themselves\s+)?up|regist(?:er|ration)\w*|members?|member\s+profiles?|url\s+path)\b/,
+      // login / membership / signup frame -> COMMUNITY noun.
+      /^(?!.*(?:\bhaven'?t\b|\bhasn'?t\b|\bnever\b|\blast\s+login\b|\bdormant\b|\bstale\b|\binactive\b|\bin\s+\d+\s+(?:days?|weeks?|months?)\b)).*\b(?:log\s?in(?:to)?|log(?:ged|ging)?\s?in(?:to)?|sign\s?in|sign(?:s|ed)?\s+(?:themselves\s+)?up|regist(?:er|ration)\w*|members?)\b[^.?!]{0,60}\b(?:communit(?:y|ies)|experience\s+cloud|experience\s+site|(?:customer|partner|self[-\s]?service)\s+portal)\b/,
+      // `self registration` / `selfRegProfile` is unambiguously the community
+      // self-signup switch — no other Salesforce surface carries the term.
+      /\bself[-\s]?regist(?:er|ration)\w*\b|\bselfregprofile\b/,
+    ],
+  },
+  {
     intent: 'inactive-users',
     plane: 'live',
     tools: ['sfi.live_inactive_users'],

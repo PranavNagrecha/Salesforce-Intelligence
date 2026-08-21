@@ -4884,3 +4884,51 @@ conceptRules:
     dependsOnCoverage:
       - Group
       - Role
+  # LANE-D COMMUNITIES — two NODE rules on the new
+  # concept:community-login-access-population, APPENDED at EOF (the compiler
+  # groups rules by their `concept:` field, not file position). Each binds ONE
+  # grounded Network property the extractor emits verbatim, so no engine change
+  # and no new operator is needed.
+  #
+  # Rule 1 needs BOTH clauses. `selfRegistration == true` alone is already
+  # claimed by rule:network/self-registration (the guest/exposure-posture
+  # concept); what is NEW here is the JOIN to the profile that self-signup
+  # actually GRANTS, which only exists when `selfRegProfile` is a present
+  # non-null string. `isNull: false` is the right operator precisely because it
+  # holds ONLY for a PRESENT value: on a vault whose Network nodes predate the
+  # selfRegProfile extraction the key is absent, the clause fails, and the rule
+  # correctly asserts NOTHING rather than guessing. The two rules are siblings,
+  # not one multi-key rule, so each claim stays independently grounded and
+  # self-disclosing (the same shape the four shipped Network switch rules use).
+  #
+  # `allowInternalUserLogin` is deliberately EXCLUDED from the guest/exposure
+  # concept (it governs INTERNAL user login, not unauthenticated guest reach) —
+  # this concept is where it belongs.
+  - id: rule:network/self-registration-grants-profile
+    concept: concept:community-login-access-population
+    bind:
+      componentTypes:
+        - Network
+      whereProperty:
+        - key: selfRegistration
+          equals: true
+        - key: selfRegProfile
+          isNull: false
+    interpretation: '{ids} has SELF-REGISTRATION enabled AND declares the profile that a self-registered visitor is CREATED AS — so anyone on the open internet who chooses to sign up receives an authenticated account carrying that profile object, field, and Apex permissions, with no administrator in the loop. This is the door that turns an anonymous visitor into a permissioned user, and it is the profile — not the switch alone — that decides what the new account can do. Review that profile as if it were granted to the public. Both facts are DECLARED site metadata; they name what self-registration GRANTS, not which records a new account can then see (that additionally depends on the external organization-wide defaults, sharing sets, and record-level sharing an offline metadata snapshot does not hold), and not how many people have actually registered (record data the vault does not contain).'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - Network
+  - id: rule:network/internal-user-login-allowed
+    concept: concept:community-login-access-population
+    bind:
+      componentTypes:
+        - Network
+      whereProperty:
+        key: allowInternalUserLogin
+        equals: true
+    interpretation: '{ids} allows INTERNAL USER LOGIN — the org own internal users may log into this Experience Cloud site, a door entirely separate from the site declared member profiles and from self-registration. Internal users entering through it are subject to their INTERNAL permissions and the INTERNAL organization-wide defaults, not the external ones that govern community users, so an access review scoped only to community member profiles will miss this population. This is a DECLARED site-level toggle: it names that the door is open, NOT which internal users use it (user activity is record data an offline metadata snapshot does not hold).'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - Network

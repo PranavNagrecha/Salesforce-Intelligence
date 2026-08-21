@@ -83,6 +83,7 @@
       "sfi.find_field_anywhere"
     ],
     "communityId": [
+      "sfi.community_catalog",
       "sfi.guest_exposure_report"
     ],
     "recordTypeId": [

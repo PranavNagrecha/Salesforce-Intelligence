@@ -238,6 +238,8 @@ describe('dispatchTool', () => {
     'sfi.who_can_run',
     'sfi.who_can_access_object',
     'sfi.guest_exposure_report',
+    // LANE-D COMMUNITIES — offline "who can log into this community?".
+    'sfi.community_catalog',
     'sfi.why_cant_user_see_record',
     'sfi.layout_for_user',
     'sfi.user_ability',
@@ -620,6 +622,7 @@ describe('V01_TOOLS', () => {
       'sfi.who_can_run',
       'sfi.who_can_access_object',
       'sfi.guest_exposure_report',
+      'sfi.community_catalog',
       'sfi.why_cant_user_see_record',
       'sfi.layout_for_user',
       'sfi.user_ability',

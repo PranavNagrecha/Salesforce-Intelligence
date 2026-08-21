@@ -1554,6 +1554,16 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
         { label: 'Metadata API Developer Guide — Group', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_group.htm' },
       ],
     },
+    'concept:community-login-access-population': {
+      id: 'concept:community-login-access-population',
+      kind: 'access-mechanism',
+      label: 'An Experience Cloud site admits logins through three separate declared doors',
+      summary:
+        'WHO CAN LOG IN to an Experience Cloud site is decided by THREE INDEPENDENT declared doors, and reading any one of them as the whole answer is the usual mistake. (1) MEMBERSHIP — the site declares member profiles and permission sets; a user holding one of them can be a member of the site. (2) SELF-REGISTRATION — when the self-registration switch is on, an anonymous visitor from the open internet can create their OWN authenticated account without an administrator, and the site self-registration profile names the profile that new account is CREATED AS, so that profile object and field permissions become reachable by anyone who chooses to sign up. (3) INTERNAL USER LOGIN — a separate switch decides whether the org OWN internal users may log into the site at all. These are declared metadata switches: they name who is PERMITTED to hold a login, never which named people actually hold one (user assignment is record data an offline metadata snapshot does not contain), and never what a logged-in user can then SEE, which is governed separately by external organization-wide defaults, sharing sets, and record-level sharing. A door that is switched off, or whose switch is absent from the metadata, asserts nothing.',
+      docs: [
+        { label: 'Metadata API Developer Guide — Network', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_network.htm' },
+      ],
+    },
   });
 
 /**
@@ -3617,5 +3627,25 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['Group', 'Role'],
+  },
+  {
+    id: 'rule:network/self-registration-grants-profile',
+    concept: 'concept:community-login-access-population',
+    bind: { componentTypes: ['Network'], whereProperty: [{ key: 'selfRegistration', equals: true }, { key: 'selfRegProfile', isNull: false }] },
+    interpretation:
+      '{ids} has SELF-REGISTRATION enabled AND declares the profile that a self-registered visitor is CREATED AS — so anyone on the open internet who chooses to sign up receives an authenticated account carrying that profile object, field, and Apex permissions, with no administrator in the loop. This is the door that turns an anonymous visitor into a permissioned user, and it is the profile — not the switch alone — that decides what the new account can do. Review that profile as if it were granted to the public. Both facts are DECLARED site metadata; they name what self-registration GRANTS, not which records a new account can then see (that additionally depends on the external organization-wide defaults, sharing sets, and record-level sharing an offline metadata snapshot does not hold), and not how many people have actually registered (record data the vault does not contain).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['Network'],
+  },
+  {
+    id: 'rule:network/internal-user-login-allowed',
+    concept: 'concept:community-login-access-population',
+    bind: { componentTypes: ['Network'], whereProperty: { key: 'allowInternalUserLogin', equals: true } },
+    interpretation:
+      '{ids} allows INTERNAL USER LOGIN — the org own internal users may log into this Experience Cloud site, a door entirely separate from the site declared member profiles and from self-registration. Internal users entering through it are subject to their INTERNAL permissions and the INTERNAL organization-wide defaults, not the external ones that govern community users, so an access review scoped only to community member profiles will miss this population. This is a DECLARED site-level toggle: it names that the door is open, NOT which internal users use it (user activity is record data an offline metadata snapshot does not hold).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['Network'],
   },
 ]);

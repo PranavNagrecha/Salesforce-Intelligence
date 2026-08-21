@@ -8093,3 +8093,143 @@ describe('concept:group-role-subordinates-transitive-membership — rule:group/r
     expect(interpret(rule, slice, COMPLETE)).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// LANE-D COMMUNITIES — concept:community-login-access-population. TWO sibling
+// NODE rules over a Network's grounded login switches, the AUTHENTICATED
+// complement of the guest/self-reg exposure concept:
+//   - self-registration-grants-profile: selfRegistration === true AND
+//     selfRegProfile is a PRESENT non-null value (the profile self-signup
+//     GRANTS). The isNull:false operator is load-bearing — on a vault whose
+//     Network nodes predate the selfRegProfile extraction the key is ABSENT and
+//     the rule must assert NOTHING rather than guess.
+//   - internal-user-login-allowed: allowInternalUserLogin === true, the switch
+//     the guest/exposure concept deliberately excludes.
+// ---------------------------------------------------------------------------
+
+describe('concept:community-login-access-population — Network login-door NODE rules', () => {
+  const NET = 'Network:Ns__MemberPortal';
+
+  it('ships the concept as an access-mechanism naming three separate doors and no user list', () => {
+    const concept = CONCEPTS['concept:community-login-access-population'];
+    expect(concept).toBeDefined();
+    expect(concept!.kind).toBe('access-mechanism');
+    expect(concept!.summary).toContain('THREE INDEPENDENT declared doors');
+    expect(concept!.summary.toLowerCase()).toContain('never which named people actually hold one');
+  });
+
+  it('rule:network/self-registration-grants-profile is a two-clause Network node rule, declared, citing ONLY the network', () => {
+    const rule = ruleById('rule:network/self-registration-grants-profile');
+    expect(rule.concept).toBe('concept:community-login-access-population');
+    expect(rule.bind.componentTypes).toEqual(['Network']);
+    expect(rule.bind.whereProperty).toEqual([
+      { key: 'selfRegistration', equals: true },
+      { key: 'selfRegProfile', isNull: false },
+    ]);
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['Network']);
+
+    const slice: GroundedSlice = {
+      nodes: [
+        node(NET, 'Network', {
+          selfRegistration: true,
+          selfRegProfile: 'Self Signup User',
+        }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, NET);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:community-login-access-population');
+    expect(only.groundedIn).toEqual([NET]);
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+    expect(only.claim).toContain(NET);
+    expect(only.claim.toUpperCase()).toContain('SELF-REGISTRATION');
+    expect(only.claim.toUpperCase()).toContain('CREATED AS');
+  });
+
+  it('[the honesty case] does NOT fire when selfRegProfile is an ABSENT key — an unextracted vault must assert nothing', () => {
+    const rule = ruleById('rule:network/self-registration-grants-profile');
+    // Exactly the shape of a Network node built before selfRegProfile existed:
+    // self-registration ON, and NO selfRegProfile key at all.
+    const preExtraction: GroundedSlice = {
+      nodes: [node(NET, 'Network', { selfRegistration: true })],
+      edges: [],
+    };
+    expect(interpret(rule, preExtraction, COMPLETE, NET)).toEqual([]);
+    // A declared-null value (read, found undeclared — a custom Apex handler)
+    // likewise fires nothing: the rule claims a GRANT, and there is none named.
+    const declaredNull: GroundedSlice = {
+      nodes: [node(NET, 'Network', { selfRegistration: true, selfRegProfile: null })],
+      edges: [],
+    };
+    expect(interpret(rule, declaredNull, COMPLETE, NET)).toEqual([]);
+  });
+
+  it('does NOT fire when self-registration is OFF even though a profile is named', () => {
+    const rule = ruleById('rule:network/self-registration-grants-profile');
+    const slice: GroundedSlice = {
+      nodes: [
+        node(NET, 'Network', {
+          selfRegistration: false,
+          selfRegProfile: 'Self Signup User',
+        }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE, NET)).toEqual([]);
+  });
+
+  it('rule:network/internal-user-login-allowed fires on the switch the guest concept excludes', () => {
+    const rule = ruleById('rule:network/internal-user-login-allowed');
+    expect(rule.concept).toBe('concept:community-login-access-population');
+    expect(rule.bind.componentTypes).toEqual(['Network']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'allowInternalUserLogin', equals: true });
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['Network']);
+
+    const slice: GroundedSlice = {
+      nodes: [node(NET, 'Network', { allowInternalUserLogin: true })],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, NET);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toEqual([NET]);
+    expect(out[0]!.claim).toContain(NET);
+    expect(out[0]!.claim.toUpperCase()).toContain('INTERNAL USER LOGIN');
+    expect(out[0]!.confidence).toBe('declared');
+
+    // OFF and absent both stay silent (absence is never a fabricated false).
+    const off: GroundedSlice = {
+      nodes: [node(NET, 'Network', { allowInternalUserLogin: false })],
+      edges: [],
+    };
+    const bare: GroundedSlice = { nodes: [node(NET, 'Network', {})], edges: [] };
+    expect(interpret(rule, off, COMPLETE, NET)).toEqual([]);
+    expect(interpret(rule, bare, COMPLETE, NET)).toEqual([]);
+  });
+
+  it('[type guard] a non-Network node carrying the same properties fires neither rule', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node('CustomObject:Ns__Site', 'CustomObject', {
+          selfRegistration: true,
+          selfRegProfile: 'Self Signup User',
+          allowInternalUserLogin: true,
+        }),
+      ],
+      edges: [],
+    };
+    for (const id of [
+      'rule:network/self-registration-grants-profile',
+      'rule:network/internal-user-login-allowed',
+    ]) {
+      expect(interpret(ruleById(id), slice, COMPLETE, 'CustomObject:Ns__Site')).toEqual([]);
+    }
+  });
+});
