@@ -500,7 +500,14 @@ const PASTED_DEBUG_LOG_FRAME = new RegExp(
     //     refusing, even though nothing in this product fetches a log.
     String.raw`\b(?:pasted|attached|here'?s)\b[^.?!]{0,40}\blogs?\b`,
     String.raw`\blogs?\b[^.?!]{0,40}\b(?:below|above|attached|pasted|at\s+the\s+(?:bottom|top|end))\b`,
-    // (c) The asker says outright that they supplied it.
+    // (c) A READ verb applied to a demonstrative that sits DIRECTLY on
+    //     "debug log". Adjacency is the whole discriminator: "read THIS DEBUG
+    //     LOG" is a paste, while "read this SANDBOX'S debug logs" is a
+    //     retrieval — the possessive between the demonstrative and the noun is
+    //     what makes it one. Retrieval verbs (pull / fetch / download /
+    //     retrieve / get) are deliberately absent from this list.
+    String.raw`\b(?:read|parse|trace|analy[sz]e|interpret|explain|summari[sz]e|profile|walk\s+me\s+through|tell\s+me\s+about)\b[^.?!]{0,30}\b(?:this|that|the)\s+(?:apex\s+)?debug\s+log\b`,
+    // (d) The asker says outright that they supplied it.
     String.raw`\b(?:i|we)\s+(?:just\s+)?(?:pasted|attached|shared|captured)\b`,
   ].join('|'),
   'i',
