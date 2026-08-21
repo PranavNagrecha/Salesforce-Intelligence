@@ -3241,15 +3241,18 @@ const METADATA_API_NAME: Partial<Record<ComponentType, string>> = {
   // the `CustomMetadata` type as `{Type}.{Record}.md-meta.xml` files. The
   // `__mdt` type definitions themselves come down separately as CustomObject.
   CustomMetadataRecord: 'CustomMetadata',
-  // SessionSettings is NOT a top-level Metadata API xmlName — the org describe
-  // exposes only the generic `Settings` container (which also carries Security,
-  // Search, etc.), and `Session.settings-meta.xml` lands under `settings/`. So
-  // the internal `SessionSettings` type must alias to `Settings` or
-  // `selectManifestTypes` drops it before retrieve ever runs (the B20
-  // silent-drop class). The dispatcher then routes only the `Session.settings-meta.xml`
-  // file into the SessionSettings extractor; the container's other settings
-  // files are counted as uncovered (honest, not silently swallowed).
+  // Neither SessionSettings nor SecuritySettings is a top-level Metadata API
+  // xmlName — the org describe exposes only the generic `Settings` container
+  // (which also carries Search, Chatter, etc.), and the file lands under
+  // `settings/`. So both internal types must alias to `Settings` or
+  // `selectManifestTypes` drops them before retrieve ever runs (the B20
+  // silent-drop class). The dispatcher then routes `Security.settings-meta.xml`
+  // into the SecuritySettings extractor, which co-emits BOTH org-level
+  // singletons (session settings are a nested block of that same file —
+  // Salesforce emits no `Session.settings-meta.xml`); the container's other
+  // settings files are counted as uncovered (honest, not silently swallowed).
   SessionSettings: 'Settings',
+  SecuritySettings: 'Settings',
   // Finding #38: FieldServiceSettings is, per the Metadata API's Settings
   // architecture (`meta_settings.htm`), one more member of the SAME generic
   // `Settings` container as SessionSettings above — the org describe does

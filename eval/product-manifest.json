@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 211,
+    "total": 212,
     "advertised": 19,
     "hidden": 4,
     "defaultProfile": "core",
@@ -188,6 +188,7 @@
         "sfi.search_apex_source",
         "sfi.search_components",
         "sfi.search_flow_metadata",
+        "sfi.security_settings",
         "sfi.synthesize_answer",
         "sfi.tab_availability",
         "sfi.tech_debt_score",
@@ -379,6 +380,7 @@
       "PlatformEventChannel",
       "PlatformEventChannelMember",
       "SessionSettings",
+      "SecuritySettings",
       "StandardValueSet",
       "EntitlementProcess",
       "MilestoneType",
@@ -435,7 +437,7 @@
       "schema_version"
     ],
     "schemaVersion": 1,
-    "componentTypeCount": 101,
+    "componentTypeCount": 102,
     "edgeTypeCount": 23
   },
   "conceptModel": {
@@ -453,6 +455,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:6c2f1399545a4ea2119a02afc9fd1c22f9aee1d74bca790c3afacd986494f08f",
-  "identityHash": "sha256:f8223d41436ba6b9b1f44d0a181513b233aa3aff5dd99225342472b234618198"
+  "catalogHash": "sha256:05c47b80babe0402cbdbe4b31a07a7c2faddfb514bc53e60833b6e1eab6c5da4",
+  "identityHash": "sha256:25a8ee98f79a4f4b59768603f66d70024722b031582ca42515064ce851fff89d"
 }

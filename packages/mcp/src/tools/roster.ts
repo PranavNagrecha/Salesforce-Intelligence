@@ -1703,6 +1703,20 @@ const PROFILE_SECURITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.
 });
 
 /**
+ * Concrete JSON Schema for `sfi.security_settings`. Mirrors
+ * `securitySettingsInputSchema` — no required input (these are ORG-LEVEL
+ * singletons); `limit` / `offset` page the trusted-IP window list ONLY, every
+ * other section is returned whole.
+ */
+const SECURITY_SETTINGS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    limit: { type: 'number', minimum: 1, maximum: 500 },
+    offset: { type: 'number', minimum: 0 },
+  },
+});
+
+/**
  * Concrete JSON Schema for `sfi.lightning_pages`. Mirrors
  * `lightningPagesInputSchema` — a required `componentId`
  * (`CustomObject:X` for the forward, `FlexiPage:X` for the reverse) +
@@ -4884,6 +4898,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "\"What are this profile's login & session security policies?\" — a focused security-audit surface separate from `user_ability` (which is \"what can it RUN or DO\"). Given a `Profile:X` (`profileId`; a bare apiName is coerced): `loginIpRanges[]` of `{startAddress, endAddress}` windows (declared Profile metadata, already extracted from `<loginIpRanges>`) + `loginIpRangeCount`; `loginHoursByDay[]` of `{day, startTime, endTime}` per-weekday windows (declared, extracted from `<loginHours>`'s `{day}Start`/`{day}End` children — minutes since midnight, GMT; a weekday absent from the list is unrestricted) + `loginHoursRestricted` (whether ANY login-hours window is defined, from the extracted `loginHoursDefined` flag); and `sessionSecuritySettings` (`mfaRequired` / `requiresStrongAuth` / `sessionTimeoutMinutes` from the single org-wide `SessionSettings:default` node, or `null` when that node is absent). `declared` confidence. `boundaryNote`: the user must be ASSIGNED this profile at runtime to be restricted; org-wide MFA/session settings are REFRESH-GATED — a vault built before the SessionSettings type shipped returns `sessionSecuritySettings: null` until a re-refresh pulls it. Profile-only: a `PermissionSet:` id (or any non-`Profile:` prefix) → `invalid-query` (permission sets carry no login security); unknown Profile → `component-not-found`.",
     inputSchema: PROFILE_SECURITY_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.security_settings',
+    description:
+      "\"What are my ORG-WIDE security settings — and what can this product NOT see?\" One call over `settings/Security.settings-meta.xml` (root `<SecuritySettings>`), which produces two org-level singletons. Returns `passwordPolicy` (`complexity`, `expiration`, `lockoutInterval`, `maxLoginAttempts`, `minimumPasswordLength`, `historyRestriction`, `minimumPasswordLifetime`, `obscureSecretAnswer`, `questionRestriction`, plus `allDeclared` verbatim); `sessionSecurity` (`sessionTimeout` as the RAW ENUM string — `FourHours`, never a number — plus `forceLogoutOnSessionTimeout`, `lockSessionsToIp` / `lockSessionsToDomain`, `enforceIpRangesEveryRequest`, CSRF and content-sniffing switches, `referrerPolicy`/`referrerPolicyDirective`, `enableMFADirectUILoginOptIn`, the four `clickjackProtection` switches — which are NESTED inside `<sessionSettings>`, not top-level — and `allDeclared` with `declaredKeyCount`); `networkAccess` (`trustedIpRanges[]` of `{start, end, description}` with `trustedIpRangeCount`, paged by `limit`/`offset`); `singleSignOn`; and `orgToggles` (every top-level scalar verbatim: `enableRequireHttpsConnection`, `enableAdminLoginAsAnyUser`, `canUsersGrantLoginAccess`, `redirectBlockModeEnabled`, the COEP/COOP header switches, …). VALUES ARE VERBATIM STRINGS — Salesforce settings values are discrete enums, and coercing them is how a declared four-hour timeout previously became `null`. `sessionTimeoutMinutes` is the single exception and is OUR derivation, labelled by `sessionTimeoutMinutesDerivedFrom` (Salesforce emits no minute count); an enum this build does not know maps to `null`, never a guess. `notCovered[]` is the other half of the answer and is DATA, not prose: each row carries `setting`, `label`, `status` (`not-declared-in-this-org-file` — the element is absent, which is silence and NOT \"disabled\"; `not-modeled-by-this-build` — the data is in the vault and no extractor reads it, including the sibling `*.settings-meta.xml` files counted from the vault itself; `not-metadata` — login history, per-user MFA enforcement and password-expiry STATE are record data no refresh can ever reach; `not-in-vault` — the file is missing, which a refresh CAN fix), `closableByRefresh`, `reason`, and `whereInstead`. Most rows are COMPUTED (a null property, an unread nested block, a directory listing), not hardcoded. `declared` confidence. `boundaryNote`: these are ORG-WIDE defaults — a profile can override session timeout and password policy in Setup and this file does not record whether one does. `coverageCaveat` appears ONLY when a singleton is missing from the vault. No required input; unknown/extra args are ignored.",
+    inputSchema: SECURITY_SETTINGS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.lightning_pages',

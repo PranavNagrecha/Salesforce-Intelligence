@@ -162,8 +162,10 @@ export const COMPONENT_TYPES = [
   // CR-CAP-18 — platform-event publish/stream-routing topology.
   'PlatformEventChannel',
   'PlatformEventChannelMember',
-  // Session / MFA security + standard-picklist tiers.
+  // Org security-settings + standard-picklist tiers. One source file
+  // (`settings/Security.settings-meta.xml`) produces BOTH security singletons.
   'SessionSettings',
+  'SecuritySettings',
   'StandardValueSet',
   // R6-18 — Service Cloud entitlement/SLA + Omni-Channel routing tier.
   'EntitlementProcess',

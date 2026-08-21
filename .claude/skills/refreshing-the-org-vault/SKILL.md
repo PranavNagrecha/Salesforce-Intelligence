@@ -24,7 +24,7 @@ finish for the vault to be usable:
    --target-org <alias> --output-dir org-kb/source/`. Network step.
    The slow one for real orgs.
 2. **Extract** — walk `org-kb/source/`, dispatch each file to the
-   matching extractor (101 component types including Reports,
+   matching extractor (102 component types including Reports,
    FlexiPages, Permission Set Groups, OmniStudio, CPQ, etc.).
    Per-file failures are captured, not fatal.
 3. **Import** — load extracted nodes and edges into the DuckDB graph

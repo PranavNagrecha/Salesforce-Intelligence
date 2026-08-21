@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-20T23:56:15.360Z",
-  "toolCount": 211,
+  "generatedAt": "2026-08-21T13:57:35.726Z",
+  "toolCount": 212,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -772,6 +772,10 @@
         {
           "name": "sfi.profile_security",
           "description": "\"What are this profile's login & session security policies?\" - a focused security-audit surface separate from `user_ability` (which is \"what can it RUN or DO\")."
+        },
+        {
+          "name": "sfi.security_settings",
+          "description": "\"What are my ORG-WIDE security settings - and what can this product NOT see?\" One call over `settings/Security.settings-meta.xml` (root `<SecuritySettings>`), whi..."
         },
         {
           "name": "sfi.lightning_pages",

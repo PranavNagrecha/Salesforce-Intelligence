@@ -136,6 +136,8 @@ export { extractRecordType } from './record-type.js';
 export { extractRemoteSiteSetting } from './remote-site-setting.js';
 export { extractRole } from './role.js';
 export { extractSamlSsoConfig } from './saml-sso-config.js';
+export { extractSecuritySettings } from './security-settings.js';
+export type { TrustedIpRange } from './security-settings.js';
 export { extractSessionSettings } from './session-settings.js';
 export { extractSharingRules } from './sharing-rules.js';
 export { extractSkill } from './skill.js';
