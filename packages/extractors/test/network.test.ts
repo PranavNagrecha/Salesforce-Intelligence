@@ -218,6 +218,126 @@ describe('extractNetwork', () => {
     });
   });
 
+  describe('NETWORK-DROPS-SELFREGPROFILE — the self-registration profile', () => {
+    it('surfaces selfRegProfile and mints its own declared edge when it is NOT a member profile', async () => {
+      // Self-registration ON, and the profile a self-registered visitor is
+      // created as is NOT in networkMemberGroups. Pre-fix the element was
+      // parsed past and dropped, so "self-registration is on" shipped with no
+      // answer to "as WHAT?".
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Network xmlns="http://soap.sforce.com/2006/04/metadata">
+    <networkMemberGroups>
+        <profile>Existing Member Profile</profile>
+    </networkMemberGroups>
+    <selfRegProfile>Self Signup User</selfRegProfile>
+    <selfRegistration>true</selfRegistration>
+    <status>Live</status>
+</Network>`;
+      const { dir, path } = await writeTempXml('SignupPortal.network-meta.xml', xml);
+      try {
+        const result = await extractNetwork(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        expect(node.properties['selfRegistration']).toBe(true);
+        expect(node.properties['selfRegProfile']).toBe('Self Signup User');
+        const selfRegEdges = result.value.edges.filter(
+          (e) => e.properties['via'] === 'selfRegProfile',
+        );
+        expect(selfRegEdges).toEqual([
+          {
+            fromId: 'Network:SignupPortal',
+            toId: 'Profile:Self Signup User',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'selfRegProfile' },
+          },
+        ]);
+        // The member edge is untouched and still carries its own marker.
+        expect(
+          result.value.edges.filter((e) => e.toId === 'Profile:Existing Member Profile'),
+        ).toEqual([
+          {
+            fromId: 'Network:SignupPortal',
+            toId: 'Profile:Existing Member Profile',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'memberProfile' },
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('folds the marker onto the existing member edge instead of minting a colliding duplicate', async () => {
+      // The self-registration profile is ALSO a declared member profile — the
+      // common real shape. The edges primary key is
+      // (fromId, toId, edgeType, source), so a second Network -> Profile row
+      // would collide on import and one would silently win. Exactly ONE edge
+      // must exist, carrying BOTH facts.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Network xmlns="http://soap.sforce.com/2006/04/metadata">
+    <networkMemberGroups>
+        <profile>Community Login User</profile>
+        <profile>Staff Profile</profile>
+    </networkMemberGroups>
+    <selfRegProfile>Community Login User</selfRegProfile>
+    <selfRegistration>true</selfRegistration>
+    <status>Live</status>
+</Network>`;
+      const { dir, path } = await writeTempXml('MemberSignup.network-meta.xml', xml);
+      try {
+        const result = await extractNetwork(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const toTarget = result.value.edges.filter(
+          (e) => e.toId === 'Profile:Community Login User',
+        );
+        expect(toTarget).toHaveLength(1);
+        expect(toTarget[0]!.properties).toEqual({
+          via: 'memberProfile',
+          alsoSelfRegProfile: true,
+        });
+        // The unrelated member profile keeps its unmarked properties.
+        const other = result.value.edges.filter(
+          (e) => e.toId === 'Profile:Staff Profile',
+        );
+        expect(other[0]!.properties).toEqual({ via: 'memberProfile' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves selfRegProfile null (and mints no edge) when the element is absent', async () => {
+      // Self-registration ON with NO declared profile is a REAL state (a custom
+      // Apex registration handler assigns it). The extractor must not fabricate
+      // a target, and must not conflate it with the element being unread.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Network xmlns="http://soap.sforce.com/2006/04/metadata">
+    <selfRegistration>true</selfRegistration>
+    <status>Live</status>
+</Network>`;
+      const { dir, path } = await writeTempXml('HandlerSignup.network-meta.xml', xml);
+      try {
+        const result = await extractNetwork(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        // The KEY is present with a null value — "looked, found nothing
+        // declared" — which is what lets a consumer tell this apart from a
+        // vault whose builder never read the element at all.
+        expect(Object.prototype.hasOwnProperty.call(node.properties, 'selfRegProfile')).toBe(true);
+        expect(node.properties['selfRegProfile']).toBeNull();
+        expect(result.value.edges).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found for a missing file', async () => {
       const result = await extractNetwork('/does/not/exist.network-meta.xml');

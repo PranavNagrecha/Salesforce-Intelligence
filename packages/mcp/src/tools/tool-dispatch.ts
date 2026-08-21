@@ -108,6 +108,10 @@ import {
   codeQualityAuditInputSchema,
 } from './code-quality-audit.js';
 import {
+  communityCatalogHandler,
+  communityCatalogInputSchema,
+} from './community-catalog.js';
+import {
   compareComponentsHandler,
   compareComponentsInputSchema,
 } from './compare-components.js';
@@ -1815,6 +1819,14 @@ export const dispatchTool = async (
         args,
         endpointCatalogInputSchema,
         endpointCatalogHandler,
+      );
+    // Communities tier — the offline "who can log into this community?" answer.
+    case 'sfi.community_catalog':
+      return runTool(
+        ctx,
+        args,
+        communityCatalogInputSchema,
+        communityCatalogHandler,
       );
     // v2.9 R4 — vocabulary + semantic-disambiguation tier.
     case 'sfi.field_meaning':

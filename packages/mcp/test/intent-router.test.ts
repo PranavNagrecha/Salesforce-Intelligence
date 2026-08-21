@@ -3356,3 +3356,36 @@ describe('ENGINE-ARC §2c — zombie-accounts arm (NEW)', () => {
       .toBe('permset-user-roster');
   });
 });
+
+describe('community-access must not steal live login-ACTIVITY questions', () => {
+  // The rule sits immediately above `inactive-users` and every pattern requires
+  // an Experience-Cloud noun, on the reasoning that a dormancy roster question
+  // "carries no such noun". False the moment the asker scopes it to a
+  // community: "which community users haven't logged in for 90 days" opens with
+  // `which` and carries `community` within 40 chars, so even the INVENTORY
+  // pattern claimed it — and answered a LIVE LastLoginDate question from
+  // offline Network metadata, with a reason string that is false for it.
+  const activity = [
+    "which community users haven't logged in for 90 days",
+    'last login for partner portal users',
+  ];
+  for (const question of activity) {
+    it(`defers to the live roster: "${question}"`, () => {
+      const route = classifyQuestion(question);
+      expect(route.intent).not.toBe('community-access');
+      expect(route.tools).not.toContain('sfi.community_catalog');
+    });
+  }
+
+  const declared: readonly (readonly [string, string])[] = [
+    ['what communities does this org have and who can log into them?', 'community-access'],
+    ['is self-registration enabled on my community?', 'community-access'],
+    ['which members can log into the customer portal', 'community-access'],
+    ['list our experience cloud sites', 'community-access'],
+  ];
+  for (const [question, intent] of declared) {
+    it(`still claims the DECLARED-access question: "${question}"`, () => {
+      expect(classifyQuestion(question).intent).toBe(intent);
+    });
+  }
+});

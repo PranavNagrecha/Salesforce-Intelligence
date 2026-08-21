@@ -87,6 +87,13 @@ const readAndValidateXml = async (
  *     `Live` community is publicly reachable.
  *   - `selfRegistration` (the CRITICAL security property — when `true`,
  *     unauthenticated visitors can create their own login).
+ *   - `selfRegProfile` (`<selfRegProfile>` — the Profile a self-registered
+ *     visitor is CREATED AS, i.e. what self-registration actually GRANTS).
+ *     Tri-state like the switches: a string when declared, `null` when the
+ *     element is absent. `selfRegistration: true` with a `null`
+ *     `selfRegProfile` is a real and distinct state (the site self-registers
+ *     through a custom Apex registration handler, or the profile is resolved
+ *     at runtime) — it is NEVER collapsed into "no self-registration profile".
  *   - the guest-access switches present in the retrieved XML:
  *     `enableGuestFileAccess`, `enableGuestChatter`,
  *     `enableGuestMemberVisibility`, `allowInternalUserLogin`. Each is
@@ -99,9 +106,19 @@ const readAndValidateXml = async (
  * them: `<site>` → `CustomSite:{name}` (the Force.com/community site container)
  * and `<picassoSite>` → `ExperienceBundle:{name}` (the Builder page tree), plus
  * one edge per `<networkMemberGroups>` member `<profile>` → `Profile:{name}` and
- * `<permissionSet>` → `PermissionSet:{name}`. All are dangling-by-design when the
+ * `<permissionSet>` → `PermissionSet:{name}`, plus `<selfRegProfile>` →
+ * `Profile:{name}` (`properties.via: 'selfRegProfile'`) — the "who can sign
+ * themselves up, and AS WHAT" linkage. All are dangling-by-design when the
  * referenced component was not retrieved into the vault (impact tools surface
  * that gap).
+ *
+ * NETWORK-DROPS-SELFREGPROFILE: the self-registration profile is frequently ALSO
+ * a declared member profile, and the `edges` primary key is
+ * `(fromId, toId, edgeType, source)` — a second `Network → Profile:X` row would
+ * COLLIDE on import and one of the two would silently win. So when the target
+ * already carries a member edge the existing row is kept in place and marked
+ * `alsoSelfRegProfile: true` rather than duplicated; only a self-reg profile
+ * that is NOT a declared member mints its own `via: 'selfRegProfile'` row.
  *
  * The guest USER PROFILE is NOT referenced from here — that linkage is a naming
  * convention keyed off the `CustomSite` label, emitted (heuristic) by the
@@ -154,6 +171,10 @@ export const extractNetwork = async (
   const apiName = deriveComponentApiName(path, NETWORK_FILE_SUFFIX);
   const site = optionalString(rootObj, 'site');
   const picassoSite = optionalString(rootObj, 'picassoSite');
+  // NETWORK-DROPS-SELFREGPROFILE: `<selfRegProfile>` names the Profile a
+  // self-registered visitor is created as. It was parsed past and dropped, so
+  // "self-registration is ON" shipped with no answer to "as WHAT?".
+  const selfRegProfile = optionalString(rootObj, 'selfRegProfile');
 
   // Collect declared member profiles / permission sets (the community's
   // AUTHENTICATED member population, distinct from the guest user). Each value
@@ -188,6 +209,7 @@ export const extractNetwork = async (
     properties: {
       status: optionalString(rootObj, 'status'),
       selfRegistration: optionalBoolean(rootObj, 'selfRegistration'),
+      selfRegProfile,
       enableGuestFileAccess: optionalBoolean(rootObj, 'enableGuestFileAccess'),
       enableGuestChatter: optionalBoolean(rootObj, 'enableGuestChatter'),
       enableGuestMemberVisibility: optionalBoolean(rootObj, 'enableGuestMemberVisibility'),
@@ -255,6 +277,34 @@ export const extractNetwork = async (
       source: EXTRACTOR_SOURCE,
       properties: { via: 'memberPermissionSet' },
     });
+  }
+
+  // NETWORK-DROPS-SELFREGPROFILE: wire the self-registration profile as a
+  // DECLARED reference — for a community with `selfRegistration: true` this is
+  // the "who can sign themselves up, and AS WHAT" answer. Emitted AFTER the
+  // member loops so an existing member edge to the same Profile keeps its
+  // position (the edges primary key is (fromId, toId, edgeType, source), so a
+  // duplicate row would collide on import); that row is marked
+  // `alsoSelfRegProfile: true` instead of being duplicated or overwritten.
+  if (selfRegProfile !== null) {
+    const selfRegTargetId = `Profile:${selfRegProfile}`;
+    const existingIndex = edges.findIndex((e) => e.toId === selfRegTargetId);
+    if (existingIndex === -1) {
+      edges.push({
+        fromId: node.id,
+        toId: selfRegTargetId,
+        edgeType: 'references',
+        confidence: 'declared',
+        source: EXTRACTOR_SOURCE,
+        properties: { via: 'selfRegProfile' },
+      });
+    } else {
+      const existing = edges[existingIndex] as Edge;
+      edges[existingIndex] = {
+        ...existing,
+        properties: { ...existing.properties, alsoSelfRegProfile: true },
+      };
+    }
   }
 
   return ok({ nodes: [node], edges });

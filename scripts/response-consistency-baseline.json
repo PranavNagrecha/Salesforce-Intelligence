@@ -81,6 +81,7 @@
       "sfi.what_if_split_profile"
     ],
     "communityId": [
+      "sfi.community_catalog",
       "sfi.guest_exposure_report"
     ],
     "recordTypeId": [

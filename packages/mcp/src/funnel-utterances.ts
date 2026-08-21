@@ -2014,6 +2014,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what external systems do we push data to via outbound messages?',
     'what outbound messages does this org send and to which endpoints?',
   ],
+  'sfi.community_catalog': [
+    'what communities does this org have and who can log into them?',
+    'list every experience cloud community in this org',
+    'who can log into our customer community?',
+    'which profiles are members of this community?',
+    'can people sign themselves up for the community, and what profile do they get?',
+    'is self registration enabled on any of our communities?',
+    'can internal users log in to the partner community?',
+    'what is the login page and url path for our community site?',
+  ],
   'sfi.endpoint_catalog': [
     'what external endpoints does this org call out to?',
     'show me all named credentials and callout URLs',
@@ -3143,5 +3153,28 @@ export const INTERPRET_CONCEPT_CARDS: Readonly<Record<string, readonly string[]>
     "If I share to this group, does the whole role-and-subordinates tree get access?",
     "What roles does this public group transitively include?",
     "Does a role-and-subordinates group member reach every role beneath it?",
+  ],
+  // LANE-D COMMUNITIES — the first community concept cards. Four Network rules
+  // and a guest-record-default-owner rule already shipped with NO card, so no
+  // community concept was NL-reachable through interpret at all. Phrased as
+  // reasoning questions ("what does it mean that…", "what is the implication
+  // of…"), which is what the concept layer answers; the inventory phrasings
+  // ("list every community", "who can log into them") belong to
+  // sfi.community_catalog's own utterances and are deliberately NOT duplicated
+  // here — pasting the same paragraph into two documents is what has broken
+  // routing for untouched tools before.
+  'concept:network-guest-and-selfreg-exposure-posture': [
+    "What does it mean that this Experience Cloud site has self-registration turned on?",
+    "What is the security implication of enabling guest file access on a community?",
+    "Does letting the guest user reach Chatter widen what an anonymous visitor can see?",
+    "Why is guest member visibility on an Experience Cloud site a concern?",
+    "How exposed is this community to unauthenticated visitors?",
+  ],
+  'concept:community-login-access-population': [
+    "What does it mean that this Experience Cloud site allows internal user login?",
+    "If self-registration is on, what profile does a new signup get and why does that matter?",
+    "What are the implications of self-registration handing out a profile automatically?",
+    "Which separate doors admit someone into an Experience Cloud site?",
+    "Do internal users logging into a community fall under the internal or the external sharing model?",
   ],
 };

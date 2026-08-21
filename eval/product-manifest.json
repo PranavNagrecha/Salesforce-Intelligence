@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 211,
+    "total": 212,
     "advertised": 19,
     "hidden": 4,
     "defaultProfile": "core",
@@ -28,6 +28,7 @@
         "sfi.cdc_subscribers",
         "sfi.changed_since",
         "sfi.code_quality_audit",
+        "sfi.community_catalog",
         "sfi.compare_components",
         "sfi.compare_object_across_vaults",
         "sfi.compare_profile_across_vaults",
@@ -439,9 +440,9 @@
     "edgeTypeCount": 23
   },
   "conceptModel": {
-    "concepts": 142,
-    "rules": 193,
-    "contentHash": "sha256:5131be283d6ded2f2c612a185b1110a85954d4834e5bdd1eb4a82cbf331d65a9",
+    "concepts": 143,
+    "rules": 195,
+    "contentHash": "sha256:512868130b5d07db4deba1753633c43ecc8ff5811a2877b04b60a904b857a60d",
     "modelVersion": "0.0.1"
   },
   "networkCapabilities": [
@@ -453,6 +454,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:6c2f1399545a4ea2119a02afc9fd1c22f9aee1d74bca790c3afacd986494f08f",
-  "identityHash": "sha256:f8223d41436ba6b9b1f44d0a181513b233aa3aff5dd99225342472b234618198"
+  "catalogHash": "sha256:6944149d9ab4a4a4fc768185c1d59205a7ae5b9813b9e1f7c6f7e20bfc509dd7",
+  "identityHash": "sha256:b67d1f730a753eb88c7fa374652df4f7514eb0f0f0333c739b5475e2ee19012e"
 }

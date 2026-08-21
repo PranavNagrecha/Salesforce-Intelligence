@@ -365,6 +365,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'Which permission sets are redundant or duplicate and could be consolidated?',
       'Summarize sharing for the Account object.',
       'What can unauthenticated guest users see in my community?',
+      'What communities does this org have and who can log into them?',
       'What access would this user gain if I assign the Sales Console permission set?',
     ],
     tools: [
@@ -375,6 +376,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.unassigned_permission_sets',
       'sfi.permission_set_consolidation',
       'sfi.guest_exposure_report',
+      'sfi.community_catalog',
       'sfi.what_if_assign_permset',
       'sfi.what_if_revoke_permset',
     ],
