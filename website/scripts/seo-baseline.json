@@ -5,6 +5,7 @@
     "h1": "404",
     "jsonLdTypes": [
       "Organization",
+      "Person",
       "WebSite"
     ]
   },
@@ -14,8 +15,11 @@
     "h1": "Portable Salesforce Agent Skills, backed by grounded MCP tools",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -26,8 +30,11 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -38,8 +45,26 @@
     "jsonLdTypes": [
       "Blog",
       "BreadcrumbList",
+      "ImageObject",
       "ItemList",
       "Organization",
+      "Person",
+      "WebPage",
+      "WebSite"
+    ]
+  },
+  "/blog/delete-unused-salesforce-fields": {
+    "title": "Can I Delete This Salesforce Field? A Dependency-First Field Cleanup Method",
+    "canonical": "https://sfi.auditforce.cloud/blog/delete-unused-salesforce-fields",
+    "h1": "Can I delete this Salesforce field?",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "ImageObject",
+      "Organization",
+      "Person",
+      "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -49,8 +74,11 @@
     "h1": "Reasoning about your org, not just retrieving it",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -61,8 +89,11 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -73,8 +104,41 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
+      "WebSite"
+    ]
+  },
+  "/blog/sf-intelligence-0-3-0": {
+    "title": "sf-intelligence 0.3.0 - core-by-default tools, scoped consent, and the upgrade path",
+    "canonical": "https://sfi.auditforce.cloud/blog/sf-intelligence-0-3-0",
+    "h1": "0.3.0 — safer defaults, and claims that have to prove themselves",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "ImageObject",
+      "Organization",
+      "Person",
+      "TechArticle",
+      "WebPage",
+      "WebSite"
+    ]
+  },
+  "/blog/what-does-this-salesforce-flow-do": {
+    "title": "What Does This Salesforce Flow Do? How to Read a Flow You Did Not Build",
+    "canonical": "https://sfi.auditforce.cloud/blog/what-does-this-salesforce-flow-do",
+    "h1": "What does this Flow do?",
+    "jsonLdTypes": [
+      "BreadcrumbList",
+      "FAQPage",
+      "ImageObject",
+      "Organization",
+      "Person",
+      "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -84,8 +148,11 @@
     "h1": "The full Salesforce capability map",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "ItemList",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -96,19 +163,25 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "CollectionPage",
+      "ImageObject",
       "ItemList",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
   "/compare/dx0": {
-    "title": "sf-intelligence vs dx0 - sf-intelligence",
+    "title": "sf-intelligence vs dx0 for Salesforce Org Analysis",
     "canonical": "https://sfi.auditforce.cloud/compare/dx0",
     "h1": "sf-intelligence vs dx0",
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -119,29 +192,38 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
   "/compare/hubbl": {
-    "title": "sf-intelligence vs Hubbl - sf-intelligence",
+    "title": "sf-intelligence vs Hubbl for Salesforce Org Audits",
     "canonical": "https://sfi.auditforce.cloud/compare/hubbl",
     "h1": "sf-intelligence vs Hubbl",
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
   "/compare/metazoa": {
-    "title": "sf-intelligence vs Metazoa Snapshot - sf-intelligence",
+    "title": "sf-intelligence vs Metazoa Snapshot for Org Management",
     "canonical": "https://sfi.auditforce.cloud/compare/metazoa",
     "h1": "sf-intelligence vs Metazoa Snapshot",
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -152,7 +234,10 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -163,7 +248,10 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -173,7 +261,10 @@
     "h1": "Configure sf-intelligence safely",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -184,7 +275,10 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -194,8 +288,11 @@
     "h1": "Install sf-intelligence and answer your first org question",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -206,7 +303,10 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "DefinedTermSet",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -221,9 +321,12 @@
     "canonical": "https://sfi.auditforce.cloud/",
     "h1": "SALESFORCE ORGINTELLIGENCE YOUR AICAN TRUST.",
     "jsonLdTypes": [
+      "ImageObject",
       "Organization",
+      "Person",
       "SoftwareApplication",
       "SoftwareSourceCode",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -233,7 +336,10 @@
     "h1": "What the sf-intelligence license allows",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -243,20 +349,26 @@
     "h1": "A read-only Salesforce MCP server for grounded org intelligence",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "SoftwareApplication",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
   "/tools": {
-    "title": "209 Salesforce MCP Tools: Complete sf-intelligence Reference",
+    "title": "211 Salesforce MCP Tools: Complete sf-intelligence Reference",
     "canonical": "https://sfi.auditforce.cloud/tools",
-    "h1": "All 209 Salesforce tools",
+    "h1": "All 211 Salesforce tools",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "ItemList",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -266,8 +378,11 @@
     "h1": "How sf-intelligence keeps Salesforce org analysis read-only and grounded",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -278,8 +393,11 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "CollectionPage",
+      "ImageObject",
       "ItemList",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -290,7 +408,10 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -300,8 +421,11 @@
     "h1": "Claude Salesforce MCP server",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -312,8 +436,11 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -323,8 +450,11 @@
     "h1": "Salesforce impact analysis",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -334,8 +464,11 @@
     "h1": "Map Salesforce dependencies before you change fields, Flows or Apex",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -345,8 +478,11 @@
     "h1": "Analyze Salesforce metadata with grounded, read-only org intelligence",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -356,7 +492,11 @@
     "h1": "Salesforce sharing &amp; visibility troubleshooting",
     "jsonLdTypes": [
       "BreadcrumbList",
+      "ImageObject",
       "Organization",
+      "Person",
+      "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -366,9 +506,11 @@
     "h1": "What breaks if I delete this?",
     "jsonLdTypes": [
       "BreadcrumbList",
-      "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   },
@@ -379,8 +521,11 @@
     "jsonLdTypes": [
       "BreadcrumbList",
       "FAQPage",
+      "ImageObject",
       "Organization",
+      "Person",
       "TechArticle",
+      "WebPage",
       "WebSite"
     ]
   }
