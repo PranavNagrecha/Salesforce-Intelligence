@@ -705,8 +705,9 @@ Claude's flow:
 
 1. **Classify** → Lightning record page question. The page
    INVENTORY is in scope; the per-profile ACTIVATION is not.
-2. **Split it.** Fire `sfi.lightning_pages` for the pages that exist
-   on the object; do NOT claim the activation half.
+2. **Split it.** Call `sfi.run_analysis` with
+   `{ "name": "sfi.lightning_pages", "args": { … } }` for the pages that
+   exist on the object; do NOT claim the activation half.
 3. **Respond:**
 
 > Half of this is answerable and half isn't, so here's the split.
