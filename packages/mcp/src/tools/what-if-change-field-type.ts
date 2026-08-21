@@ -232,7 +232,7 @@ export interface WhatIfChangeFieldTypeOutput {
  * rendering is a code-review concern, not silent drift.
  */
 const DISCLOSURE =
-  "v2.3 what-if analysis is composition over the v2.2 vault state. Compatibility classification follows the matrix in WhatIfSemantics.md; edge cases (e.g., very-short Text → LongTextArea, Lookup → Text where the foreign-key semantic is acceptable as a string) may behave compatibly in practice. Dynamic SOQL, reflective field access (`obj.get('FieldName')`), and runtime computation are invisible to the recognizer; review the listed impacts before applying the change.";
+  "v2.3 what-if analysis is composition over the v2.2 vault state. Compatibility classification follows a fixed per-transition matrix; edge cases (e.g., very-short Text → LongTextArea, Lookup → Text where the foreign-key semantic is acceptable as a string) may behave compatibly in practice. Dynamic SOQL, reflective field access (`obj.get('FieldName')`), and runtime computation are invisible to the recognizer; review the listed impacts before applying the change.";
 
 const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
   const coverage = summarizeCoverage(ctx.manifest, FIELD_CHANGE_REQUIRED_COVERAGE);

@@ -551,6 +551,29 @@ describe('explainApexMethodHandler', () => {
     expect(result.value.data.qualityIssues).toEqual([]);
   });
 
+  it('QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS: an empty mirror on an UNSCANNED node says NOT CHECKED', async () => {
+    // The array shape is kept — callers depend on it — but a node that carries
+    // no `qualityIssues` KEY was never scanned, and `[]` alone said "we looked
+    // and found nothing" about a node nothing looked at.
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: ALL_CLASSIFIERS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.qualityIssues).toEqual([]);
+    expect(result.value.data.disclosure).toContain('NOT CHECKED, not clean');
+    expect(result.value.data.disclosure).toContain('sfi refresh');
+  });
+
+  it('a SCANNED node says nothing extra — the disclosure stays byte-identical', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: TEST_CLASS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.disclosure).not.toContain('NOT CHECKED, not clean');
+  });
+
   it('surfaces qualityIssues as objects when the v2.1 mirror is populated (F8: was always [])', async () => {
     const result = await explainApexMethodHandler(ctx, {
       classApiName: TEST_CLASS_ID,

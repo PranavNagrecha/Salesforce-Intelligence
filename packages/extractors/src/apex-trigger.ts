@@ -8,6 +8,7 @@ import type {
   Result,
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
+import { detectCodeQualityIssues } from '@sf-intelligence/patterns';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import {
@@ -323,6 +324,28 @@ export const extractApexTrigger = async (
   // false. Mirrors the apex-class.ts boolean-property approach so
   // consumers can filter triggers by property without distinguishing
   // "absent" from "false".
+  // QUALITY-SCAN-SKIPS-TRIGGERS. The code-quality recognizer family ran from
+  // `apex-class.ts` ONLY, so every ApexTrigger node shipped without a
+  // `qualityIssues` property and `sfi.crud_fls_audit` answered CLEAN for
+  // triggers — which is exactly where CRUD/FLS bugs live, because a trigger
+  // does DML on `Trigger.new` in system context by default.
+  //
+  // A trigger IS Apex source, and all 17 recognizers were checked against
+  // trigger shape before turning them on: the class-shaped ones cannot
+  // false-fire (`without-sharing-no-comment` requires the literal `class`
+  // keyword, which no trigger carries; `fake-assertion` and
+  // `hardcoded-sandbox-test-data` are gated on `isTest`, and a trigger is never
+  // a test class). One recognizer — `trigger-no-recursion-guard` — is TRIGGER
+  // shaped and was dead code until now: it matches on a `trigger X on` header
+  // that no ApexClass source can contain.
+  //
+  // `isTest: false` is a fact about the platform, not a default: Salesforce has
+  // no `@isTest` trigger.
+  const qualityIssues = detectCodeQualityIssues(source, {
+    apiVersion: meta.apiVersion,
+    isTest: false,
+  });
+
   const baseProperties = {
     status: meta.status,
     triggerObject: header.objectApiName,
@@ -330,6 +353,11 @@ export const extractApexTrigger = async (
     isPlatformEventSubscriber,
     lineCount: countLines(source),
     sourceBytes: Buffer.byteLength(source, 'utf-8'),
+    // Always present, empty array on the clean path — mirrors `apex-class.ts`.
+    // The KEY's presence is what lets a consumer tell "scanned, clean" from
+    // "this vault predates trigger scanning"; dropping the empty array would
+    // collapse those two into one silent answer.
+    qualityIssues,
   };
   const properties =
     scannerResult.warnings.length === 0

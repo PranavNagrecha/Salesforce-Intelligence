@@ -175,6 +175,15 @@ import {
   findRollupRecalcSteps,
   rollupScanTruncationNote,
 } from './soe-rollup-recalc.js';
+import {
+  buildWithinPhaseOrder,
+  censusFlowTriggerOrders,
+  collectAmbiguousPhases,
+  isTriggerOrderCoverageGap,
+  sortFlowFirersByTriggerOrder,
+  type SoeWithinPhaseOrder,
+  TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT,
+} from './soe-trigger-order.js';
 
 // Re-export the shared phase-omission contract so this module's public type +
 // value surface is unchanged after the definitions moved to soe-payload-bounds
@@ -310,6 +319,14 @@ export interface SoeStepAction {
  * identify the firer; `conditional` references the ConditionalContext
  * gate when one exists; `actions` lists what the step will do at
  * runtime.
+ *
+ * `stepIndex` orders the PHASES, and ONLY the phases. Between two steps in the
+ * SAME phase it is a reading position, not an execution order: Salesforce does
+ * not define which of two same-kind automations in one phase runs first, except
+ * where record-triggered flows declare distinct `<Flow><triggerOrder>` values
+ * (which this composition sorts by — see `soe-trigger-order.ts`). Whenever a
+ * phase holds two or more steps the response carries `withinPhaseOrder` saying
+ * so; never present a within-phase sequence as the order things happen in.
  */
 export interface SoeStep {
   readonly phase: SoePhase;
@@ -444,6 +461,23 @@ export interface WhatHappensOnSaveOutput {
    * Absent on an un-filtered call.
    */
   readonly appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
+  /**
+   * FLOW-ORDER-IS-ALPHABETICAL. Present ONLY when this composition has a phase
+   * holding two or more steps — the only shape in which the consecutive
+   * `stepIndex` values could be read as a run order. Names those phases, which
+   * of the three trigger-order states this object is in (`triggerOrderState`),
+   * and — when extracted — how many of its record-triggered flows declare one.
+   */
+  readonly withinPhaseOrder?: SoeWithinPhaseOrder;
+  /**
+   * Present ONLY when `withinPhaseOrder` is present AND this object HAS
+   * record-triggered flows whose `<Flow><triggerOrder>` this vault never
+   * extracted — a gap a `sfi refresh` closes. An object with no
+   * record-triggered flows never carries it: there was nothing to extract, so
+   * claiming a vault gap there would be a fabricated caveat with a remediation
+   * that changes nothing.
+   */
+  readonly coverageCaveat?: typeof TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
   /**
    * True when per-step action lists were trimmed to fit the MCP response
    * budget. Every step is still present and in order — only the heaviest
@@ -995,8 +1029,30 @@ export const whatHappensOnSaveHandler = async (
     if (edgeToObject.properties['triggerType'] === 'RecordBeforeSave') beforeSaveFlows.push(entry);
     else afterSaveFlows.push(entry);
   }
-  for (const { firer, recordTriggerType } of beforeSaveFlows) {
+  // FLOW-ORDER-IS-ALPHABETICAL. Within one phase these arrays were emitted in
+  // ascending component id and numbered as if that were the run order. Sort by
+  // the ONE thing Salesforce lets an admin declare — `<Flow><triggerOrder>` —
+  // falling back to ascending id, which is what the sort collapses to on a
+  // vault that never extracted the property or an org where no flow declares
+  // one. See `soe-trigger-order.ts`; the residual ambiguity is disclosed in
+  // `withinPhaseOrder` below rather than papered over with a numbered list.
+  const orderedBeforeSaveFlows = sortFlowFirersByTriggerOrder(beforeSaveFlows);
+  const orderedAfterSaveFlows = sortFlowFirersByTriggerOrder(afterSaveFlows);
+  // The census covers the record-triggered flows that actually reach THIS
+  // response's phases — i.e. those surviving the per-event filter below.
+  //
+  // It used to be taken over every flow resolved for the object, BEFORE that
+  // filter, on the reasoning that the vault's extraction state is a property of
+  // the vault rather than of the DML event. True of the vault, but the caveat
+  // it gates says "the flow steps below are ordered by ascending component id
+  // only" — and on `event: "delete"` there are no flow steps below. That
+  // fabricated a Flow.triggerOrder coverage gap, plus a `sfi refresh`
+  // remediation that would change nothing, on a composition whose only
+  // ambiguous phase was two Apex triggers.
+  const eventFlowFirers: Node[] = [];
+  for (const { firer, recordTriggerType } of orderedBeforeSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, input.event)) continue;
+    eventFlowFirers.push(firer);
     const stepResult = await buildStep(ctx, firer, 'before-save-flows', stepIndex);
     if (!stepResult.ok) {
       return err({ kind: 'internal', message: stepResult.error });
@@ -1211,8 +1267,9 @@ export const whatHappensOnSaveHandler = async (
   // transaction. They are collected and emitted in post-save-async instead.
   const matchedFlows: Node[] = [];
   const scheduledOnlyAfterSaveFlows: Node[] = [];
-  for (const { firer, recordTriggerType } of afterSaveFlows) {
+  for (const { firer, recordTriggerType } of orderedAfterSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, input.event)) continue;
+    eventFlowFirers.push(firer);
     const hasImmediateConnector = firer.properties['hasImmediateConnector'] as boolean | undefined;
     const scheduledPathTypes = firer.properties['scheduledPathTypes'] as string[] | undefined;
     const isScheduledOnly =
@@ -1385,6 +1442,8 @@ export const whatHappensOnSaveHandler = async (
     entitlementProcessNotes?: readonly EntitlementProcessNote[];
     entitlementProcessNotesTruncated?: boolean;
     conceptReasoning?: ConceptReasoningEnvelope;
+    withinPhaseOrder?: SoeWithinPhaseOrder;
+    coverageCaveat?: typeof TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
   } = {
     objectApiName: input.objectApiName,
     appliedScope,
@@ -1416,6 +1475,31 @@ export const whatHappensOnSaveHandler = async (
   // it rather than imply every aggregating parent was found.
   if (rollupResult.value.scanTruncated) {
     data.disclosure = `${data.disclosure} ${rollupScanTruncationNote()}`;
+  }
+
+  // FLOW-ORDER-IS-ALPHABETICAL. Emitted ONLY when at least one phase holds two
+  // or more steps — the only shape in which the consecutive `stepIndex` values
+  // could be read as a run order. Computed from the FULL pre-truncation
+  // `phaseCounts` (ambiguity is a fact about the org, not about what survived
+  // the byte budget) and attached BEFORE the budget pass so its bytes are
+  // measured rather than re-inflating the payload past the guard. A response
+  // with at most one step per phase is byte-identical to before this existed.
+  const flowTriggerOrderCensus = censusFlowTriggerOrders(eventFlowFirers);
+  const withinPhaseOrder = buildWithinPhaseOrder(
+    collectAmbiguousPhases(phaseCounts),
+    flowTriggerOrderCensus,
+  );
+  if (withinPhaseOrder !== undefined) {
+    data.withinPhaseOrder = withinPhaseOrder;
+    // A vault built before `<Flow><triggerOrder>` was extracted has a gap a
+    // refresh CAN close — so it is a coverageCaveat, not an inherent boundary.
+    // Gated on the census state and NOT on `!extracted`: an object with NO
+    // record-triggered flows is `not-applicable`, and asserting a vault gap
+    // there fabricated a coverage claim (plus a `sfi refresh` remediation that
+    // would change nothing) on a phase made of validation rules or triggers.
+    if (isTriggerOrderCoverageGap(flowTriggerOrderCensus)) {
+      data.coverageCaveat = TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
+    }
   }
 
   // On a densely-automated standard object (e.g. Contact) the per-step action

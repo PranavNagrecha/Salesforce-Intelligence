@@ -519,3 +519,64 @@ describe('testCoverageGapsHandler — pagination + byte budget (B25)', () => {
     expect('pageInfo' in r.value.data).toBe(false);
   });
 });
+
+describe('testCoverageGapsHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', () => {
+  let localDir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    localDir = mkdtempSync(join(tmpdir(), 'sfi-tcg-unscanned-'));
+    const opened = await openGraph(join(localDir, 'graph.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    localStore = opened.value;
+    const imported = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          // A production class, covered by a test class that was NEVER scanned.
+          makeNode({ id: 'ApexClass:Prod', apiName: 'Prod' }),
+          makeNode({
+            id: 'ApexClass:ProdTest',
+            apiName: 'ProdTest',
+            // `isTest` but no `qualityIssues` KEY: the fake-assertion
+            // recognizer never ran over it, so it can never raise a finding
+            // and `Prod` is silently classified as adequately covered.
+            properties: { isTest: true },
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:ProdTest',
+            toId: 'ApexClass:Prod',
+            edgeType: 'callsApex',
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    localCtx = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
+  it('a zero-gap answer built on UNSCANNED test classes says so', async () => {
+    const r = await testCoverageGapsHandler(localCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // No gaps — which is exactly the shape the defect produced.
+    expect(r.value.data.gaps).toEqual([]);
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 0 },
+    ]);
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'NOT SCANNED IN THIS VAULT',
+    );
+  });
+});

@@ -128,6 +128,23 @@ export const toNonEmptyString = (value: unknown): string | null => {
 };
 
 /**
+ * Coerce an XML scalar element to a finite integer, or `null`.
+ *
+ * `FLOW_XML_PARSER_OPTIONS` sets `parseTagValue: false`, so every element
+ * arrives as a STRING — `<triggerOrder>500</triggerOrder>` is `'500'`, not
+ * `500`. A missing element, an empty one, or anything that is not a finite
+ * integer becomes `null`, which callers must read as "the flow declares none",
+ * never as `0` (a real Salesforce trigger order starts at 1).
+ */
+export const toNullableInteger = (value: unknown): number | null => {
+  const s = toNonEmptyString(value);
+  if (s === null) return null;
+  if (!/^-?\d+$/.test(s)) return null;
+  const n = Number.parseInt(s, 10);
+  return Number.isSafeInteger(n) ? n : null;
+};
+
+/**
  * Read and strictly-validate a file as XML. fast-xml-parser's `parse()`
  * is permissive (it silently truncates on mismatched tags), so we
  * validate first to surface malformed input as `parse-error` rather than
@@ -273,6 +290,27 @@ const extractStartProperties = (
     hasImmediateConnector,
   };
 };
+
+/**
+ * Read `<Flow><triggerOrder>` — the admin-declared Flow Trigger Order of a
+ * record-triggered flow relative to the other record-triggered flows on the
+ * same object and same trigger type (legal values 1-2000).
+ *
+ * IT IS A TOP-LEVEL `<Flow>` CHILD, a sibling of `<start>` and `<status>` — NOT
+ * a `<start>` child, which is where the Flow Builder UI's placement of the
+ * setting makes everyone (including this repo's first draft) look for it.
+ * Measured across a real 275-flow vault: all 24 declarations sit after
+ * `</start>`. Reading it off `<start>` finds nothing and would report every
+ * flow as declaring no order — a false "checked and found none".
+ *
+ * `null` means the flow DECLARES NONE, which is not the same as "unknown":
+ * Salesforce runs flows that declare an order first, ascending, and gives no
+ * guarantee at all between flows that share a value or declare none. The SOE
+ * tools read this to order the flow phases and to say which flows the order is
+ * actually knowable for — see `soe-trigger-order.ts`.
+ */
+const extractTriggerOrder = (rootObj: Record<string, unknown>): number | null =>
+  toNullableInteger(rootObj['triggerOrder']);
 
 /**
  * The `<scheduledPaths><scheduledPaths><pathType>` marker Salesforce stamps on
@@ -2013,6 +2051,13 @@ export const extractFlow = async (
       // use this to place these flows in post-save-async rather than
       // post-save-flows.
       hasImmediateConnector: startProps.hasImmediateConnector,
+      // <Flow><triggerOrder> (top-level, NOT under <start>) — the declared Flow
+      // Trigger Order (1-2000), or null when this flow declares none. ALWAYS
+      // written (null included) so a consumer can tell "this flow declares no
+      // order" from "this vault was built before the property was extracted at
+      // all": the KEY's absence is the only honest signal of the latter. See
+      // extractTriggerOrder + soe-trigger-order.ts.
+      triggerOrder: extractTriggerOrder(rootObj),
       // bundle-4(a): every <actionCalls> element's {actionType, actionName}
       // (apex AND non-apex). Apex calls also get a `callsApex` edge; non-apex
       // action types (e.g. activateSessionPermSet) emit no edge, so this list

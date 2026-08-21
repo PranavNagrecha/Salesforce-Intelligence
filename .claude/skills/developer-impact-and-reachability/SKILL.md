@@ -67,8 +67,7 @@ verdict wrong and a test→method mapping incomplete, so treat
 
 The v2.3 composer boundary: **the composers project, not
 predict.** Each what-if composer reads the v2.2-vintage vault state,
-applies a per-tool rule set from
-`docs/vendor/salesforce-metadata/WhatIfSemantics.md`, and returns a
+applies its own per-tool rule set, and returns a
 structured impact list. Runtime evaluation, dataflow analysis,
 cross-class transitive analysis, and dynamic Apex are all invisible.
 Each finding's `confidence` is the worst confidence on the walk path
@@ -152,8 +151,8 @@ The 16 tools split by question shape. Pick the right entry point.
 
 ### Category A — What-if change projection (v2.3, 11 composers)
 
-Each composer reads the v2.2-vintage vault state, applies its rule
-set from `WhatIfSemantics.md`, and returns:
+Each composer reads the v2.2-vintage vault state, applies its own rule
+set, and returns:
 
 - `findings: WhatIfImpactItem[]` — one entry per affected component.
 - `summary` — per-tool aggregations.
@@ -239,8 +238,7 @@ Surface the verbatim Q105 disclosure:
 
 #### `sfi.what_if_change_field_type`
 
-Driven by the field-type compatibility matrix in
-`WhatIfSemantics.md` §"Field-type compatibility matrix". For each
+Driven by a fixed field-type compatibility matrix. For each
 transition `[c]` (forward-compatible), `[l]` (lossy), or `[b]`
 (breaking), emits findings only for references that are type-
 sensitive. Categories typically spread across `metadata-blocker`

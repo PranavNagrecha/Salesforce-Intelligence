@@ -94,6 +94,17 @@ import {
   rollupScanTruncationNote,
   type RollupRecalcStep,
 } from './soe-rollup-recalc.js';
+import {
+  type AmbiguousPhaseForEvent,
+  buildWithinPhaseOrderCaveat,
+  censusFlowTriggerOrders,
+  collectAmbiguousPhases,
+  type FlowTriggerOrderCensus,
+  type FlowTriggerOrderCensusState,
+  isTriggerOrderCoverageGap,
+  sortFlowFirersByTriggerOrder,
+  TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT,
+} from './soe-trigger-order.js';
 
 // Re-export the shared phase-omission contract so this module's public surface
 // is unchanged after the definitions moved to soe-payload-bounds. `AUTOMATION_PHASES`
@@ -134,7 +145,14 @@ export interface SoeStepAction {
   readonly description: string;
 }
 
-/** Same SoeStep shape as `what_happens_on_save`. */
+/**
+ * Same SoeStep shape as `what_happens_on_save` — including its `stepIndex`
+ * contract: the index orders the PHASES and is only a reading position between
+ * two steps INSIDE one phase, because Salesforce defines no order there except
+ * via a record-triggered flow's `<Flow><triggerOrder>`. See that tool's
+ * `SoeStep` JSDoc and `soe-trigger-order.ts`; the residual ambiguity is named
+ * in this response's `withinPhaseOrder`.
+ */
 export interface SoeStep {
   readonly phase: SoePhase;
   readonly stepIndex: number;
@@ -242,6 +260,31 @@ export interface OrderOfExecutionOutput {
    * whole-composition). Absent on an un-filtered call.
    */
   readonly appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
+  /**
+   * FLOW-ORDER-IS-ALPHABETICAL. Present ONLY when some event's composition has
+   * a phase holding two or more steps — the only shape in which the consecutive
+   * `stepIndex` values could be read as a run order. Names those phases (with
+   * the event each belongs to), which of the three trigger-order states this
+   * object is in (`triggerOrderState`), and — when extracted — how many of its
+   * record-triggered flows declare one.
+   */
+  readonly withinPhaseOrder?: {
+    readonly determined: false;
+    readonly ambiguousPhases: readonly AmbiguousPhaseForEvent[];
+    readonly triggerOrderState: FlowTriggerOrderCensusState;
+    readonly flowsDeclaringTriggerOrder?: number;
+    readonly flowsWithoutTriggerOrder?: number;
+    readonly caveat: string;
+  };
+  /**
+   * Present ONLY when `withinPhaseOrder` is present AND this object HAS
+   * record-triggered flows whose `<Flow><triggerOrder>` this vault never
+   * extracted — a gap a `sfi refresh` closes. An object with no
+   * record-triggered flows never carries it: there was nothing to extract, so
+   * claiming a vault gap there would be a fabricated caveat with a remediation
+   * that changes nothing.
+   */
+  readonly coverageCaveat?: typeof TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
 }
 
 /**
@@ -590,7 +633,12 @@ const composeForEvent = async (
   event: SoeEvent,
   inactiveCollector: Map<ComponentId, InactiveConfiguredFirer>,
   rollupSteps: readonly RollupRecalcStep[],
-): Promise<Result<SoePerEvent, string>> => {
+): Promise<
+  Result<
+    { readonly perEvent: SoePerEvent; readonly flowCensus: FlowTriggerOrderCensus },
+    string
+  >
+> => {
   const soe: SoeStep[] = [];
   let stepIndex = 0;
 
@@ -624,7 +672,18 @@ const composeForEvent = async (
     if (edgeToObject.properties['triggerType'] === 'RecordBeforeSave') beforeSaveFlows.push(entry);
     else afterSaveFlows.push(entry);
   }
-  for (const { firer, recordTriggerType } of beforeSaveFlows) {
+  // FLOW-ORDER-IS-ALPHABETICAL — identical treatment to `what_happens_on_save`
+  // (the two SOE tools must stay in lockstep). Sort by the declared
+  // `<Flow><triggerOrder>` where one exists, ascending component id otherwise
+  // — which is exactly the pre-existing order on a vault that never extracted
+  // the property. See `soe-trigger-order.ts`.
+  const orderedBeforeSaveFlows = sortFlowFirersByTriggerOrder(beforeSaveFlows);
+  const orderedAfterSaveFlows = sortFlowFirersByTriggerOrder(afterSaveFlows);
+  const flowCensus = censusFlowTriggerOrders([
+    ...orderedBeforeSaveFlows.map((e) => e.firer),
+    ...orderedAfterSaveFlows.map((e) => e.firer),
+  ]);
+  for (const { firer, recordTriggerType } of orderedBeforeSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, event)) continue;
     const stepResult = await buildStep(ctx, firer, 'before-save-flows', stepIndex);
     if (!stepResult.ok) return err(stepResult.error);
@@ -809,7 +868,7 @@ const composeForEvent = async (
   // do NOT run synchronously in the triggering transaction. They are collected
   // here and emitted in post-save-async below.
   const scheduledOnlyAfterSaveFlows: Node[] = [];
-  for (const { firer, recordTriggerType } of afterSaveFlows) {
+  for (const { firer, recordTriggerType } of orderedAfterSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, event)) continue;
     const hasImmediateConnector = firer.properties['hasImmediateConnector'] as boolean | undefined;
     const scheduledPathTypes = firer.properties['scheduledPathTypes'] as string[] | undefined;
@@ -897,14 +956,17 @@ const composeForEvent = async (
   const activeComponents = soe.filter((s) => s.phase !== 'save').length;
 
   return ok({
-    soe,
-    summary: {
-      totalSteps: soe.length,
-      activeComponents,
-      conditionalSteps,
-      asyncFanOut,
-      phaseCounts: tallyPhaseCounts(soe),
+    perEvent: {
+      soe,
+      summary: {
+        totalSteps: soe.length,
+        activeComponents,
+        conditionalSteps,
+        asyncFanOut,
+        phaseCounts: tallyPhaseCounts(soe),
+      },
     },
+    flowCensus,
   });
 };
 
@@ -1012,6 +1074,11 @@ export const orderOfExecutionHandler = async (
     delete: emptyPerEvent(),
     undelete: emptyPerEvent(),
   };
+  // FLOW-ORDER-IS-ALPHABETICAL. The four per-event compositions resolve the SAME
+  // record-triggered flow set for the object, so the trigger-order census they
+  // produce is identical; keep the last one (any one) for the response-level
+  // `withinPhaseOrder`. Undefined only when no event composed at all.
+  let flowCensus: FlowTriggerOrderCensus | undefined;
   for (const event of SOE_EVENTS) {
     const perEventResult = await composeForEvent(
       ctx,
@@ -1024,6 +1091,7 @@ export const orderOfExecutionHandler = async (
     if (!perEventResult.ok) {
       return err({ kind: 'internal', message: perEventResult.error });
     }
+    flowCensus = perEventResult.value.flowCensus;
     // Optional single-phase filter (recovery path for a phase truncated out of
     // the full four-event view). Each event's `soe` returns only the requested
     // phase; `summary` is left whole (still the full phase distribution) so the
@@ -1033,10 +1101,12 @@ export const orderOfExecutionHandler = async (
     byEvent[event] =
       input.phase !== undefined
         ? {
-            ...perEventResult.value,
-            soe: perEventResult.value.soe.filter((s) => s.phase === input.phase),
+            ...perEventResult.value.perEvent,
+            soe: perEventResult.value.perEvent.soe.filter(
+              (s) => s.phase === input.phase,
+            ),
           }
-        : perEventResult.value;
+        : perEventResult.value.perEvent;
   }
 
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
@@ -1050,6 +1120,15 @@ export const orderOfExecutionHandler = async (
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
     truncated?: boolean;
     appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
+    withinPhaseOrder?: {
+      readonly determined: false;
+      readonly ambiguousPhases: readonly AmbiguousPhaseForEvent[];
+      readonly triggerOrderState: FlowTriggerOrderCensusState;
+      readonly flowsDeclaringTriggerOrder?: number;
+      readonly flowsWithoutTriggerOrder?: number;
+      readonly caveat: string;
+    };
+    coverageCaveat?: typeof TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
   } = {
     objectApiName: input.objectApiName,
     appliedScope,
@@ -1070,6 +1149,44 @@ export const orderOfExecutionHandler = async (
   // it rather than imply every aggregating parent was found.
   if (rollupResult.value.scanTruncated) {
     data.disclosure = `${data.disclosure} ${rollupScanTruncationNote()}`;
+  }
+
+  // FLOW-ORDER-IS-ALPHABETICAL. One response-level block covering all four
+  // events, its `ambiguousPhases` naming the event each ambiguous phase belongs
+  // to (the four compositions do not share a phase distribution). Emitted ONLY
+  // when some event holds a phase with two or more steps — the only shape in
+  // which consecutive `stepIndex` values could read as a run order — so a
+  // sparsely-automated object's response is byte-identical to before. Attached
+  // BEFORE the byte-budget passes below so its bytes are measured, not
+  // re-inflated past the guard.
+  const ambiguousPhases: AmbiguousPhaseForEvent[] = [];
+  for (const event of SOE_EVENTS) {
+    for (const entry of collectAmbiguousPhases(
+      byEvent[event].summary.phaseCounts,
+    )) {
+      ambiguousPhases.push({ event, ...entry });
+    }
+  }
+  if (ambiguousPhases.length > 0 && flowCensus !== undefined) {
+    data.withinPhaseOrder = {
+      determined: false,
+      ambiguousPhases,
+      triggerOrderState: flowCensus.state,
+      ...(flowCensus.state === 'extracted'
+        ? {
+            flowsDeclaringTriggerOrder: flowCensus.declared,
+            flowsWithoutTriggerOrder: flowCensus.undeclared,
+          }
+        : {}),
+      caveat: buildWithinPhaseOrderCaveat(flowCensus),
+    };
+    // A gap a refresh CAN close, so it rides the coverageCaveat channel — but
+    // ONLY when the object actually has record-triggered flows. With none, the
+    // census is `not-applicable` and a `Flow.triggerOrder` coverage claim would
+    // be fabricated: nothing was missed and a refresh would change nothing.
+    if (isTriggerOrderCoverageGap(flowCensus)) {
+      data.coverageCaveat = TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
+    }
   }
 
   // The four-event payload is the heaviest SOE surface in the product; on a

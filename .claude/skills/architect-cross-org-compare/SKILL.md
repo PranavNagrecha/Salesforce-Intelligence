@@ -196,8 +196,8 @@ result warrants.
 > detection. Pass `includeVolatileProperties: true` if you need the
 > unfiltered diff.
 
-The volatile-property allowlist is inherited verbatim from v2.0c's
-`SnapshotSemantics.md` — v3.1 does NOT extend it. Properties
+The volatile-property allowlist is inherited verbatim from the
+snapshot-diff allowlist — cross-vault compare does NOT extend it. Properties
 volatile only in cross-vault but not in snapshot contexts are a
 future v3.2 concern.
 

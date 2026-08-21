@@ -33,14 +33,30 @@ cascade, present severity-bucketed findings clearly, and surface the
 recognizer's blind spots verbatim so the developer doesn't act on a
 finding that's a false positive without verifying.
 
-The v2.1 catalog ships **15 Apex recognizers** plus one Flow
-recognizer (`flow-loop-over-collection`) documented in
-`docs/vendor/salesforce-metadata/ApexQualitySemantics.md`. Every
-recognizer's output rides in `properties.qualityIssues[]` on the
-parent ApexClass / ApexTrigger / Flow node — the MCP tools READ this
-mirror, they do not re-run the recognizer at request time. A vault
-refreshed before v2.1 ran returns empty `issues` lists; that IS the
-honest "nothing to report" answer.
+The recognizer catalog is declared in one place — the product's
+`code-quality-patterns` module — and nowhere else. Every recognizer's
+output rides in `properties.qualityIssues[]` on the parent ApexClass /
+ApexTrigger node: the MCP tools READ this mirror, they do not re-run the
+recognizer at request time.
+
+Two absences, and they are NOT the same answer:
+
+- **Flow is not Apex.** The recognizers read Apex syntax, so no Flow ever
+  carries a `qualityIssues` finding, on any vault, after any refresh.
+  `sfi.code_quality_audit` names this in `notCheckedTypes` and points at
+  the Flow-side tools (`sfi.flow_bulkification_audit`,
+  `sfi.flow_fault_audit`). Never report a Flow as clean on this basis.
+- **A vault built before a type was scanned.** Its nodes carry no
+  `qualityIssues` property at all. Every tool that composes over the
+  mirror says so by name in `boundaries[]` and in `qualityScanCoverage` —
+  `sfi.code_quality_audit`, `sfi.crud_fls_audit`,
+  `sfi.governor_limit_risks`, `sfi.find_hardcoded_values`,
+  `sfi.find_hardcoded_values_anywhere`, `sfi.tech_debt_score` and
+  `sfi.test_coverage_gaps` (whose zero-gap answer is exactly what an
+  unscanned test-class set produces). `sfi.explain_apex_method` carries
+  the same distinction in its `disclosure` instead. The fix is
+  `sfi refresh`. An empty `issues` list on such a vault is "not checked",
+  NOT "nothing to report" — surface the boundary rather than the zero.
 
 The boundary that matters for developers: **the quality recognizer
 is a pattern matcher, not a compiler AST.** It tokenizes Apex source

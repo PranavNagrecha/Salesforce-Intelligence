@@ -31,8 +31,8 @@
  *      any fake-assertion findings and the coverage chain exists,
  *      the class is omitted from the response (it's NOT a gap).
  *
- * **Honesty axis** (per `ApexQualitySemantics.md` § 13 and the
- * v2.1 R3 §5 disclosure language for `sfi.test_coverage_gaps`):
+ * **Honesty axis** (the `fake-assertion` recognizer's own boundary — see
+ * `packages/patterns/src/code-quality-patterns.ts`):
  *
  *   - The meaningful-assertion heuristic recognizes
  *     `System.assert(condition)` with a non-literal condition and
@@ -83,6 +83,11 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 
 /** Per-type cap matching `listNodesByType`'s default. */
 const LIST_PAGE_SIZE = 500;
@@ -179,6 +184,16 @@ export interface TestCoverageGapsOutput {
   readonly totalGapsCount: number;
   /** Per-status counter across the FULL matched set. */
   readonly byStatus: Readonly<Record<CoverageStatus, number>>;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Nodes read vs nodes that actually
+   * carry a `qualityIssues` scan, over the TEST classes whose `fake-assertion`
+   * findings drive the `fake-coverage` / `low-quality-coverage` verdicts.
+   * Present ONLY when some test class was never scanned — the path where a
+   * class is classified as adequately covered because nothing could be read
+   * about the tests covering it. A fully-scanned vault omits it and its
+   * response is unchanged.
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
   /** Verbatim honesty disclosures; empty when no gaps. */
   readonly boundaries: readonly string[];
   /** Page size applied to this response (echoes the request; default 200). */
@@ -350,9 +365,16 @@ export const testCoverageGapsHandler = async (
   const testClassIds = new Set<ComponentId>();
   const testFakeAssertionsByClass = new Map<ComponentId, readonly string[]>();
   const nonTestClassNodes: Node[] = [];
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. The test classes whose
+  // `qualityIssues` this tool actually reads — kept so the response can say how
+  // many of them carry a scan at all. A test class with no `qualityIssues` KEY
+  // can never produce a `fake-assertion`, so every class it covers is silently
+  // classified as adequately covered.
+  const testClassNodes: Node[] = [];
   for (const node of classesRes.value) {
     if (isTestClass(node)) {
       testClassIds.add(node.id);
+      testClassNodes.push(node);
       const fakes = collectFakeAssertions(node);
       if (fakes.length > 0) {
         testFakeAssertionsByClass.set(node.id, fakes);
@@ -493,11 +515,19 @@ export const testCoverageGapsHandler = async (
           DEPTH_CAP_DISCLOSURE,
         ];
 
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Lives OUTSIDE the zero-gaps gate:
+  // "no gaps" is precisely the answer an unscanned test-class set produces, so
+  // it is the one that most needs to say what was never read.
+  const qualityScanCoverage = censusQualityScanCoverage(testClassNodes);
+  const unscannedNote = buildUnscannedNodesNote(qualityScanCoverage);
+  if (unscannedNote !== undefined) boundaries.push(unscannedNote);
+
   return ok({
     data: {
       gaps: kept,
       totalGapsCount: sorted.length,
       byStatus,
+      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
       boundaries,
       limit,
       offset,

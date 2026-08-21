@@ -64,11 +64,14 @@
  *     the recognizer emits — the same shape `governor_limit_risks` /
  *     `code_quality_audit` consume. (Earlier this tool read it with a
  *     string-array reader, which dropped every object finding and made the
- *     mirror permanently `[]`.) When the class node doesn't yet carry it
- *     (the v2.0f vault pre-dates v2.1 R2), the property is absent or empty;
- *     the handler surfaces `qualityIssues: []` rather than the absent
- *     case, signalling "we looked and found nothing" per the v2.0
- *     honesty-axis convention.
+ *     mirror permanently `[]`.) When the node carries no `qualityIssues` KEY
+ *     at all it was never scanned, and `qualityIssues: []` alone said "we
+ *     looked and found nothing" about a node nothing looked at — on a real
+ *     vault, all 22 ApexTriggers. The array shape is kept (callers depend on
+ *     it) but the `disclosure` now carries
+ *     {@link QUALITY_NOT_SCANNED_SUFFIX} on that path, so an empty mirror
+ *     reads as NOT CHECKED rather than CLEAN
+ *     (QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS).
  */
 
 import type {
@@ -110,6 +113,14 @@ const DISCLOSURE = 'Structured narrative; Claude composes prose';
 
 const UNRESOLVED_CALLS_SUFFIX =
   ' Unresolved callsApex targets from the heuristic Apex scanner are listed in unresolvedCallTargets — they are not verified vault components.';
+/**
+ * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Appended when the resolved node
+ * carries no `qualityIssues` KEY at all — it was never scanned, so the empty
+ * `qualityIssues` array is "not checked", never "clean".
+ */
+const QUALITY_NOT_SCANNED_SUFFIX =
+  ' This component carries no `qualityIssues` property, so the code-quality recognizers never ran over its source: the empty `qualityIssues` array below is NOT CHECKED, not clean. This vault predates the extractor that scans this component type — re-run `sfi refresh` to close the gap.';
+
 const UNRESOLVED_FIELDS_SUFFIX =
   ' Field accesses whose receiver could not be resolved to an object — Apex `this`/`super` members and un-type-resolved local variables (e.g. a loop variable) — are listed in unresolvedFieldAccess as raw `receiver.field` tokens, NOT in fieldAccess; they are not verified object fields.';
 
@@ -679,7 +690,10 @@ export const explainApexMethodHandler = async (
         : '') +
       (fieldAccessResult.value.unresolved.length > 0
         ? UNRESOLVED_FIELDS_SUFFIX
-        : ''),
+        : '') +
+      (Object.hasOwn(node.properties, 'qualityIssues')
+        ? ''
+        : QUALITY_NOT_SCANNED_SUFFIX),
   };
 
   const annotations = await annotationsBlockFor(ctx, classId);

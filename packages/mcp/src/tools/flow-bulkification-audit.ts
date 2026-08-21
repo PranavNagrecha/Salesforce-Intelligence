@@ -18,6 +18,23 @@
  *     body. One SOQL per iteration. HIGH severity.
  *   - `filterless-get-records` — a Get Records (lookup) ANYWHERE with no filter
  *     / where clause: an unbounded query smell. MEDIUM severity.
+ *   - `subflow-in-loop`          — a Subflow element inside a Loop body. The
+ *     called flow runs once per iteration and whatever DML / SOQL IT performs is
+ *     multiplied by the iteration count. MEDIUM severity, because the callee's
+ *     body is a DIFFERENT flow and is NOT opened here — the per-iteration
+ *     invocation is proven, the DML inside it is not.
+ *   - `action-in-loop`           — an `<actionCalls>` element (invocable Apex,
+ *     email, platform action) inside a Loop body. Same shape, same reason: one
+ *     invocation per iteration, callee body not modeled at all. MEDIUM.
+ *
+ * BULKIFICATION-AUDIT-RECORDOPS-ONLY. The detector used to iterate
+ * `projection.recordOps` and NOTHING else, so a `Loop -> Subflow(DML)` or
+ * `Loop -> Action(Apex DML)` flow — the most common real-world bulkification
+ * bug — returned zero risks and read as clean. The two rules above close the
+ * detection half. The `loopBodyCoverage` census closes the other half: every
+ * response now states how many loop bodies were walked and how many held a
+ * subflow, an action, or a canvas element type the projection does not model,
+ * so a ZERO is a measured zero rather than an unexamined one.
  *
  * The detection is factored into a PURE function
  * ({@link detectFlowBulkificationRisks}) that takes a parsed
@@ -81,7 +98,9 @@ const FLOW_BULK_DEFAULT_LIMIT = 100;
 export type FlowBulkRule =
   | 'dml-in-loop'
   | 'get-records-in-loop'
-  | 'filterless-get-records';
+  | 'filterless-get-records'
+  | 'subflow-in-loop'
+  | 'action-in-loop';
 
 /** Two-tier severity — loop anti-patterns are HIGH, filterless queries MEDIUM. */
 export type FlowBulkSeverity = 'high' | 'medium';
@@ -135,8 +154,53 @@ export interface FlowBulkRisk {
   readonly loop: string | null;
   /** The record-op's target SObject (`null` when the projection could not resolve it). */
   readonly object: string | null;
+  /**
+   * For `subflow-in-loop` / `action-in-loop`: what the loop body invokes once
+   * per iteration — the target flow's api name, or `{actionType}:{actionName}`.
+   * Absent on the three record-op rules, whose work is IN this flow.
+   *
+   * Its body is deliberately NOT opened here. A subflow's DML lives in a
+   * different flow (audit it by its own entry in this same tool); an invocable
+   * action's body is Apex or a platform action this projection cannot see at
+   * all. So the finding proves the per-iteration INVOCATION and says plainly
+   * that the work inside it was not checked — it never claims the callee is
+   * clean, and never claims it is dirty.
+   */
+  readonly callee?: string;
   /** Human-readable, org-agnostic explanation. */
   readonly explanation: string;
+}
+
+/**
+ * What the loop-body walk actually examined, per response. Present ALWAYS, so a
+ * zero risk count is a MEASURED zero.
+ *
+ * Before this existed the detector looked only at record ops; a loop body full
+ * of subflows and invocable actions produced `soundness.complete: true` and
+ * `staticCoverage: 'full'`, which said "checked and clean" about elements it
+ * had never looked at.
+ */
+export interface FlowBulkLoopBodyCoverage {
+  /** Loop elements whose body was walked across every scanned flow. */
+  readonly loopsScanned: number;
+  /** Of those, how many hold at least one Subflow element. */
+  readonly loopsWithSubflow: number;
+  /** Of those, how many hold at least one `<actionCalls>` element. */
+  readonly loopsWithAction: number;
+  /**
+   * Of those, how many hold at least one canvas element whose TYPE the flow
+   * projection does not model (collection filter / sort, wait, custom
+   * elements). Those cannot be classified either way — named, never counted as
+   * clean. See `FlowGraphProjection.unmodeled`.
+   */
+  readonly loopsWithUnmodeledElement: number;
+  /**
+   * Names of the unmodeled element types found inside loop bodies, deduped and
+   * sorted, capped at {@link UNMODELED_IN_LOOP_CAP}. Empty when there are none.
+   */
+  readonly unmodeledElementsInLoops: readonly string[];
+  /** True when the cap above trimmed the list. */
+  readonly unmodeledElementsTruncated: boolean;
 }
 
 /** One per-Flow entry: identity + its risks. Mirrors the governor per-class entry. */
@@ -178,6 +242,8 @@ export interface FlowBulkificationAuditOutput {
   readonly truncated: boolean;
   /** Static blind spots: `complete: false` when a Flow's source could not be parsed. */
   readonly soundness: FlowBulkSoundness;
+  /** What the loop-body walk examined — so a zero is a measured zero. */
+  readonly loopBodyCoverage: FlowBulkLoopBodyCoverage;
   /** Provenance / confidence / completeness for the answer. */
   readonly trust: TrustSummary;
   /** Page size applied. Present only on a PAGED response (`truncated` or `offset > 0`). */
@@ -263,7 +329,31 @@ export const computeLoopBody = (
  */
 export const detectFlowBulkificationRisks = (
   projection: FlowGraphProjection,
-): readonly FlowBulkRisk[] => {
+): readonly FlowBulkRisk[] => detectFlowBulkification(projection).risks;
+
+/**
+ * Per-flow loop-body census, summed across the scan by the handler.
+ * `unmodeledElementsInLoops` is the raw (uncapped, unsorted) set for one flow.
+ */
+export interface FlowBulkLoopBodyTally {
+  readonly loopsScanned: number;
+  readonly loopsWithSubflow: number;
+  readonly loopsWithAction: number;
+  readonly loopsWithUnmodeledElement: number;
+  readonly unmodeledElementsInLoops: readonly string[];
+}
+
+/**
+ * The full pure pass: the risks AND the census of what the loop-body walk
+ * looked at. {@link detectFlowBulkificationRisks} is the risks-only projection
+ * of this, kept because it is the unit-test and public entry point.
+ */
+export const detectFlowBulkification = (
+  projection: FlowGraphProjection,
+): {
+  readonly risks: readonly FlowBulkRisk[];
+  readonly loopBody: FlowBulkLoopBodyTally;
+} => {
   const adjacency = buildAdjacency(projection.connectors);
 
   // Per-loop body sets, keyed by loop name.
@@ -322,6 +412,56 @@ export const detectFlowBulkificationRisks = (
     }
   }
 
+  // BULKIFICATION-AUDIT-RECORDOPS-ONLY — the elements the loop over
+  // `projection.recordOps` above structurally cannot see. A Subflow or an
+  // `<actionCalls>` in a loop body runs once per iteration exactly like a DML
+  // does; the difference is only that the WORK it performs lives in another
+  // flow or in Apex, which this projection does not hold. So the finding proves
+  // the invocation and names the callee, and its severity is MEDIUM rather than
+  // HIGH precisely because the DML inside the callee is unproven here — not
+  // absent, unproven. `innermostLoopFor` reuses the same innermost-wins rule as
+  // the record-op walk so a nested loop cites the tightest loop.
+  const innermostLoopFor = (elementName: string): string | null => {
+    let innermost: string | null = null;
+    let size = Number.POSITIVE_INFINITY;
+    for (const [loopName, body] of loopBodies) {
+      if (body.has(elementName) && body.size < size) {
+        innermost = loopName;
+        size = body.size;
+      }
+    }
+    return innermost;
+  };
+
+  for (const subflow of projection.subflows) {
+    const loop = innermostLoopFor(subflow.name);
+    if (loop === null) continue;
+    risks.push({
+      rule: 'subflow-in-loop',
+      severity: 'medium',
+      location: subflow.name,
+      loop,
+      object: null,
+      callee: subflow.targetFlowId,
+      explanation: `Subflow '${subflow.name}' is invoked inside the body of loop '${loop}', so the called flow '${subflow.targetFlowId}' runs once per iteration and every DML / Get Records IT performs is multiplied by the iteration count. This audit did NOT open the called flow — its body is a separate flow, so this finding is "invoked per iteration", never "the callee is clean". Read '${subflow.targetFlowId}''s own entry in this audit${subflow.resolved ? '' : ' — note the target flow was not resolved in this vault, so it may not have one'}, then move the work out of the loop or bulkify the callee.`,
+    });
+  }
+
+  for (const action of projection.actions) {
+    const loop = innermostLoopFor(action.name);
+    if (loop === null) continue;
+    const callee = `${action.actionType ?? 'unknown-type'}:${action.actionName ?? 'unknown-action'}`;
+    risks.push({
+      rule: 'action-in-loop',
+      severity: 'medium',
+      location: action.name,
+      loop,
+      object: null,
+      callee,
+      explanation: `Action '${action.name}' (${callee}) is invoked inside the body of loop '${loop}', so it runs once per iteration. What the action DOES — Apex DML, a callout, an email send — is not modeled by the flow projection at all, so this finding is "invoked per iteration", never a claim that the action is safe. For an Apex invocable, audit the class with governor_limit_risks; otherwise move the invocation out of the loop and pass a collection.`,
+    });
+  }
+
   risks.sort((a, b) =>
     a.location !== b.location
       ? a.location < b.location
@@ -333,7 +473,44 @@ export const detectFlowBulkificationRisks = (
           ? 1
           : 0,
   );
-  return risks;
+
+  // The census. Counted over LOOPS (not elements) because the question a reader
+  // asks is "did you look inside the loops", and a loop with three subflows is
+  // one loop that was looked into.
+  const unmodeledNames = new Set(projection.unmodeled);
+  const subflowNames = new Set(projection.subflows.map((f) => f.name));
+  const actionNames = new Set(projection.actions.map((a) => a.name));
+  let loopsWithSubflow = 0;
+  let loopsWithAction = 0;
+  let loopsWithUnmodeledElement = 0;
+  const unmodeledInLoops = new Set<string>();
+  for (const body of loopBodies.values()) {
+    let sawSubflow = false;
+    let sawAction = false;
+    let sawUnmodeled = false;
+    for (const element of body) {
+      if (subflowNames.has(element)) sawSubflow = true;
+      if (actionNames.has(element)) sawAction = true;
+      if (unmodeledNames.has(element)) {
+        sawUnmodeled = true;
+        unmodeledInLoops.add(element);
+      }
+    }
+    if (sawSubflow) loopsWithSubflow += 1;
+    if (sawAction) loopsWithAction += 1;
+    if (sawUnmodeled) loopsWithUnmodeledElement += 1;
+  }
+
+  return {
+    risks,
+    loopBody: {
+      loopsScanned: loopBodies.size,
+      loopsWithSubflow,
+      loopsWithAction,
+      loopsWithUnmodeledElement,
+      unmodeledElementsInLoops: [...unmodeledInLoops],
+    },
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -343,6 +520,25 @@ export const detectFlowBulkificationRisks = (
 const FLOW_UNPARSED_NOTE =
   'Source could not be read / parsed for these Flows (missing or malformed `.flow-meta.xml`), so their loop bodies were NOT scanned — an empty finding for them is "not checked", not proven clean. Re-run /sfi-refresh.';
 
+/** Cap on the unmodeled-element names echoed back in `loopBodyCoverage`. */
+const UNMODELED_IN_LOOP_CAP = 25;
+
+/**
+ * The verbatim callee boundary — the honest half of `subflow-in-loop` /
+ * `action-in-loop`. Emitted whenever a loop body held a subflow or an action,
+ * whether or not that produced a finding, because the reader's question is what
+ * was and was not established.
+ */
+const FLOW_BULK_CALLEE_DISCLOSURE =
+  'A `subflow-in-loop` / `action-in-loop` finding proves the per-iteration INVOCATION only. The callee\'s body is NOT opened by this audit — a Subflow\'s DML lives in a different Flow (read that flow\'s own entry here), and an invocable Action\'s body is Apex or a platform action the Flow projection cannot see at all (audit the class with `governor_limit_risks`). So such a finding is never a claim that the callee performs DML, and its absence is never a claim that it does not.';
+
+/**
+ * The verbatim loop-body coverage statement. Emitted on EVERY response — a
+ * measured zero has to be stated to be a zero rather than an omission.
+ */
+const loopBodyCoverageNote = (coverage: FlowBulkLoopBodyCoverage): string =>
+  `Loop-body coverage: ${coverage.loopsScanned} loop body/bodies walked across the scanned Flows — ${coverage.loopsWithSubflow} contained a Subflow, ${coverage.loopsWithAction} contained an invocable Action, ${coverage.loopsWithUnmodeledElement} contained a canvas element type this projection does not model${coverage.unmodeledElementsInLoops.length > 0 ? ` (${coverage.unmodeledElementsInLoops.join(', ')}${coverage.unmodeledElementsTruncated ? ', …' : ''})` : ''}. Record Create / Update / Delete / Get inside those bodies is detected structurally; a Subflow or Action inside them is detected as an invocation but its callee body is not opened; an unmodeled element inside them is NOT classified either way.`;
+
 /**
  * Read + project ONE Flow's source on demand and run the pure detector.
  * Returns `null` (and records the blind spot via the caller) when the source is
@@ -351,7 +547,10 @@ const FLOW_UNPARSED_NOTE =
 const auditOneFlow = async (
   ctx: Context,
   node: Node,
-): Promise<readonly FlowBulkRisk[] | null> => {
+): Promise<{
+  readonly risks: readonly FlowBulkRisk[];
+  readonly loopBody: FlowBulkLoopBodyTally;
+} | null> => {
   if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
     return null;
   }
@@ -363,7 +562,7 @@ const auditOneFlow = async (
   }
   const projected = parseFlowGraphSource(xml);
   if (!projected.ok) return null;
-  return detectFlowBulkificationRisks(projected.value);
+  return detectFlowBulkification(projected.value);
 };
 
 /**
@@ -394,13 +593,27 @@ export const flowBulkificationAuditHandler = async (
   let totalRiskCount = 0;
   let scannedFlowCount = 0;
 
+  let loopsScanned = 0;
+  let loopsWithSubflow = 0;
+  let loopsWithAction = 0;
+  let loopsWithUnmodeledElement = 0;
+  const unmodeledInLoops = new Set<string>();
+
   for (const node of scan.value.nodes) {
     scannedFlowCount += 1;
-    const risks = await auditOneFlow(ctx, node);
-    if (risks === null) {
+    const audited = await auditOneFlow(ctx, node);
+    if (audited === null) {
       unparsedIds.push(node.id);
       continue;
     }
+    loopsScanned += audited.loopBody.loopsScanned;
+    loopsWithSubflow += audited.loopBody.loopsWithSubflow;
+    loopsWithAction += audited.loopBody.loopsWithAction;
+    loopsWithUnmodeledElement += audited.loopBody.loopsWithUnmodeledElement;
+    for (const name of audited.loopBody.unmodeledElementsInLoops) {
+      unmodeledInLoops.add(name);
+    }
+    const { risks } = audited;
     if (risks.length === 0) continue;
     for (const risk of risks) {
       byRule[risk.rule] = (byRule[risk.rule] ?? 0) + 1;
@@ -408,6 +621,16 @@ export const flowBulkificationAuditHandler = async (
     }
     entries.push({ componentId: node.id, apiName: node.apiName, risks });
   }
+
+  const sortedUnmodeled = [...unmodeledInLoops].sort();
+  const loopBodyCoverage: FlowBulkLoopBodyCoverage = {
+    loopsScanned,
+    loopsWithSubflow,
+    loopsWithAction,
+    loopsWithUnmodeledElement,
+    unmodeledElementsInLoops: sortedUnmodeled.slice(0, UNMODELED_IN_LOOP_CAP),
+    unmodeledElementsTruncated: sortedUnmodeled.length > UNMODELED_IN_LOOP_CAP,
+  };
 
   entries.sort((a, b) =>
     a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0,
@@ -435,6 +658,14 @@ export const flowBulkificationAuditHandler = async (
   if (entries.length > 0) {
     boundaries.push(FLOW_BULK_ITERATION_DISCLOSURE, FLOW_BULK_CONFIDENCE_DISCLOSURE);
   }
+  // BULKIFICATION-AUDIT-RECORDOPS-ONLY. Stated on EVERY response, findings or
+  // not: the whole defect was that a loop body full of subflows and actions
+  // produced a clean-looking zero, so the count of what was walked is exactly
+  // the sentence a reader needed and did not get.
+  boundaries.push(loopBodyCoverageNote(loopBodyCoverage));
+  if (loopBodyCoverage.loopsWithSubflow > 0 || loopBodyCoverage.loopsWithAction > 0) {
+    boundaries.push(FLOW_BULK_CALLEE_DISCLOSURE);
+  }
   if (scan.value.scanIncomplete) {
     boundaries.push(
       scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
@@ -444,10 +675,19 @@ export const flowBulkificationAuditHandler = async (
     boundaries.push(FLOW_UNPARSED_NOTE);
   }
 
+  // An unmodeled canvas element inside a loop body is a real static blind spot:
+  // the projection cannot say whether it performs work, so the loop cannot be
+  // called clean. Report `partial` rather than let the trust block say the scan
+  // saw everything it walked past.
+  const missingCoverage: string[] = [];
+  if (unparsedIds.length > 0) missingCoverage.push('Flow (unparseable source)');
+  if (loopBodyCoverage.loopsWithUnmodeledElement > 0) {
+    missingCoverage.push('Flow loop body (canvas element type not modeled)');
+  }
   const completeness: TrustSummary['completeness'] =
-    unparsedIds.length === 0
+    missingCoverage.length === 0
       ? { status: 'complete' }
-      : { status: 'partial', missingCoverage: ['Flow (unparseable source)'] };
+      : { status: 'partial', missingCoverage };
 
   const isPaged = truncated || offset > 0;
 
@@ -461,6 +701,7 @@ export const flowBulkificationAuditHandler = async (
       boundaries,
       truncated,
       soundness,
+      loopBodyCoverage,
       trust: offlineTrust(ctx, completeness),
       ...(isPaged ? { limit, offset } : {}),
       ...(truncated ? { nextOffset: offset + slice.length } : {}),

@@ -195,7 +195,13 @@ describe('codeQualityAuditHandler', () => {
     expect(joined).toMatch(/industry-consensus/i);
   });
 
-  it('returns empty issues and no boundaries when no rule matches the filter', async () => {
+  it('returns empty issues and no FINDING boundaries when no rule matches the filter', async () => {
+    // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. This used to assert
+    // `boundaries.length === 0` — a zero with nothing said about it. That is
+    // the exact false-clean shape the coverage disclosure closes: the org-wide
+    // path now always states what was NOT scanned (this fixture holds a node
+    // with no `qualityIssues` key) and what can never be scanned (Flow). The
+    // three FINDING-conditional boundaries stay gated on there being findings.
     const r = await codeQualityAuditHandler(ctx, {
       ruleFilter: ['no-such-rule'],
     });
@@ -203,7 +209,11 @@ describe('codeQualityAuditHandler', () => {
     if (!r.ok) return;
     expect(r.value.data.totalCount).toBe(0);
     expect(r.value.data.issues.length).toBe(0);
-    expect(r.value.data.boundaries.length).toBe(0);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).not.toMatch(/heuristic/i);
+    expect(joined).not.toMatch(/industry-consensus/i);
+    expect(joined).toContain('NOT SCANNED IN THIS VAULT');
+    expect(joined).toContain('NOT CHECKED BY DESIGN');
     expect(r.value.data.truncated).toBe(false);
   });
 

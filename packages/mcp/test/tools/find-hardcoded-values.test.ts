@@ -241,7 +241,10 @@ describe('findHardcodedValuesHandler', () => {
   });
 
   it('returns empty matches and empty boundaries when nothing matches the category', async () => {
-    // Build a transient ctx whose nodes have no hardcoded-literal rules.
+    // Build a transient ctx whose node WAS scanned and came back clean —
+    // `qualityIssues: []` present, empty. That is the only shape entitled to a
+    // silent empty response; a node with no `qualityIssues` KEY was never
+    // scanned and is covered by the next test.
     const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fhv-empty-'));
     const opened = await openGraph(join(localDir, 'empty.db'));
     expect(opened.ok).toBe(true);
@@ -250,7 +253,11 @@ describe('findHardcodedValuesHandler', () => {
     const imp = await importExtractionResults(localStore, [
       {
         nodes: [
-          makeNode({ id: 'ApexClass:JustClean', apiName: 'JustClean' }),
+          makeNode({
+            id: 'ApexClass:JustClean',
+            apiName: 'JustClean',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
         ],
         edges: [],
       },
@@ -267,6 +274,69 @@ describe('findHardcodedValuesHandler', () => {
     if (!r.ok) return;
     expect(r.value.data.matches.length).toBe(0);
     expect(r.value.data.boundaries.length).toBe(0);
+    expect(r.value.data.qualityScanCoverage).toBeUndefined();
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
+  it('QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS: an UNSCANNED trigger is "not checked", not clean', async () => {
+    // The false-clean shape: `SCANNED_TYPES` includes ApexTrigger, but the
+    // recognizers ran from the ApexClass extractor only, so a vault built
+    // before the trigger extractor was wired returned `matches: []`,
+    // `boundaries: []` for every trigger — byte-identical to a clean one.
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fhv-unscanned-'));
+    const opened = await openGraph(join(localDir, 'unscanned.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    const imp = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          // Scanned + clean.
+          makeNode({
+            id: 'ApexClass:ScannedClean',
+            apiName: 'ScannedClean',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+          // Never scanned: no `qualityIssues` KEY at all.
+          makeNode({
+            id: 'ApexTrigger:NeverScanned',
+            type: 'ApexTrigger',
+            apiName: 'NeverScanned',
+            sourcePath: 'unused.trigger',
+            properties: {},
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) return;
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+    const r = await findHardcodedValuesHandler(localCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches.length).toBe(0);
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+    ]);
+    expect(r.value.data.boundaries.join(' ')).toContain('NOT SCANNED IN THIS VAULT');
+
+    // ...and the note follows the SCOPE: a call scoped to the scanned class
+    // alone has no gap to report and stays byte-identical.
+    const scoped = await findHardcodedValuesHandler(localCtx, {
+      componentId: 'ApexClass:ScannedClean',
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    expect(scoped.value.data.qualityScanCoverage).toBeUndefined();
+    expect(scoped.value.data.boundaries.length).toBe(0);
+
     await closeGraph(localStore);
     rmSync(localDir, { recursive: true, force: true });
   });

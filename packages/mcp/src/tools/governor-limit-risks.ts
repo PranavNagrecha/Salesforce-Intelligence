@@ -12,8 +12,8 @@
  * the trigger as additional context.
  *
  * **Governor-limit rule subset** — the three rules below are the
- * governor-limit-relevant slice of the v2.1 catalog
- * (`ApexQualitySemantics.md` §§ 1, 2, 12):
+ * governor-limit-relevant slice of the recognizer catalog in
+ * `packages/patterns/src/code-quality-patterns.ts`:
  *   - `soql-in-loop` — SOQL inside a loop body. Risks the
  *     100-SOQL-per-transaction governor limit.
  *   - `dml-in-loop` — DML inside a loop body. Risks the
@@ -80,6 +80,11 @@ import type { Context } from '../server.js';
 
 import { partitionByBaseline } from './finding-suppression.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 import { soundnessFromDynamicApexIds, type Soundness } from './soundness.js';
@@ -216,6 +221,14 @@ export interface GovernorLimitRisksOutput {
   readonly suppressedRiskCount: number;
   /** Per-rule counter across the FULL matched set. */
   readonly byRule: Readonly<Record<string, number>>;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
+   * nodes that actually carry a `qualityIssues` scan. Present ONLY when some
+   * node in scope was never scanned — the path where `classes: []` means "not
+   * checked", not "clean". A fully-scanned vault omits it and its response is
+   * unchanged.
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
   /** Verbatim honesty disclosures; empty when nothing matched. */
   readonly boundaries: readonly string[];
   /** True when the class-level slice was trimmed to `limit`. */
@@ -603,6 +616,26 @@ export const governorLimitRisksHandler = async (
           GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE,
         ];
 
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. `detectCodeQualityIssues` ran from
+  // the ApexClass extractor ONLY, so on a vault built before the trigger
+  // extractor was wired every ApexTrigger answers `classes: []`, `boundaries:
+  // []` — byte-identical to a clean trigger, and a trigger's per-DML invocation
+  // is exactly where a SOQL-in-loop hurts most. Lives OUTSIDE the zero-findings
+  // gate because the zero-finding response IS the false-clean one. It
+  // disappears entirely once the vault is refreshed.
+  const qualityScanCoverage = censusQualityScanCoverage(nodesToProcess);
+  const unscannedNote = buildUnscannedNodesNote(qualityScanCoverage);
+  if (unscannedNote !== undefined) {
+    boundaries.push(unscannedNote);
+    // The `soundness` envelope below is read off the SAME property: a node with
+    // no `qualityIssues` key cannot carry the `dynamic-apex` signal either, so
+    // say that here rather than let `complete: true` read as a proven-clean
+    // static analysis of an unscanned node.
+    boundaries.push(
+      'The `soundness` envelope is derived from the same `qualityIssues` property: a node that carries no scan cannot carry the `dynamic-apex` signal, so `complete: true` covers only the nodes named as scanned above.',
+    );
+  }
+
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
   // Lives OUTSIDE the zero-findings gate because risky classes could be among
@@ -638,6 +671,7 @@ export const governorLimitRisksHandler = async (
       totalRiskCount,
       suppressedRiskCount,
       byRule,
+      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
       boundaries,
       truncated,
       soundness: soundnessFromDynamicApexIds([...dynamicApexIds]),

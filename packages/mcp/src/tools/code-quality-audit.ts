@@ -30,7 +30,8 @@
  * highest-priority findings surface first in the slice the response
  * carries.
  *
- * **Honesty axis** (per the v2.1 spec and `ApexQualitySemantics.md`):
+ * **Honesty axis** (each recognizer's own declared boundary, in
+ * `packages/patterns/src/code-quality-patterns.ts`):
  *   - Pattern recognition is heuristic — every finding carries
  *     `confidence: 'heuristic'`. The recognizer cannot verify the
  *     developer's intent; false positives are expected. The
@@ -76,6 +77,14 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  buildNotCheckedTypesNote,
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  NOT_APEX_TYPES,
+  type NotCheckedType,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 
@@ -86,17 +95,21 @@ const CODE_QUALITY_AUDIT_MAX_LIMIT = 500;
 const CODE_QUALITY_AUDIT_DEFAULT_LIMIT = 100;
 
 /**
- * The ComponentTypes the v2.1 quality recognizers populate. v2.1 R2
- * wires `ApexClass`; future recognizer extensions can append
- * `ApexTrigger` / `Flow` without changing the tool surface (the
- * `properties.qualityIssues` mirror is per-node, not per-type).
- * Keeping the array centralized makes the additional-type onboarding
- * a one-line diff.
+ * The ComponentTypes the quality recognizers actually populate.
+ *
+ * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. This list used to carry `Flow` as an
+ * aspiration ("future recognizer extensions can append it") and the tool
+ * advertised the coverage as fact, while `Flow` contributed 0 of 275 nodes on a
+ * real vault — because every recognizer reads APEX syntax and a Flow has none.
+ * `Flow` is not a pending gap a refresh closes; it is structurally out of
+ * reach, so it moved to {@link NOT_APEX_TYPES} where it is NAMED on every
+ * org-wide response instead of silently scanned for a property that cannot
+ * exist. `ApexTrigger` is genuinely covered now that the trigger extractor runs
+ * the recognizers.
  */
 const QUALITY_SCANNED_TYPES: readonly ComponentType[] = [
   'ApexClass',
   'ApexTrigger',
-  'Flow',
 ];
 
 /** The five-tier severity scale, ordered HIGHEST → LOWEST. */
@@ -133,7 +146,7 @@ const HEURISTIC_CONFIDENCE_DISCLOSURE =
 const DYNAMIC_BLIND_SPOT_DISCLOSURE =
   'static recognition has dynamic blind spots — dynamic SOQL strings, reflective field access, and dynamic method dispatch are invisible to the recognizer. The list above is what the recognizer SAW; what it missed is harder to enumerate.';
 const SEVERITY_CONSENSUS_DISCLOSURE =
-  'severity assignments are industry-consensus mappings per ApexQualitySemantics.md; v2.1 does not support per-organization severity overrides.';
+  'severity assignments are fixed industry-consensus mappings declared by the recognizer that raised the finding; per-organization severity overrides are not supported.';
 
 /**
  * Zod schema for the `sfi.code_quality_audit` tool input.
@@ -271,6 +284,21 @@ export interface CodeQualityAuditOutput {
   /** FULL count of matched findings before slicing to `limit`. */
   readonly totalCount: number;
   readonly summary: CodeQualityAuditSummary;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
+   * nodes that actually carry a `qualityIssues` scan. Present ONLY on the
+   * org-wide path (a class-scoped call is about one named node, and its own
+   * unscanned state is already in `boundaries`). A type whose `scanned` is
+   * below its `nodes` returned "not checked", never "clean".
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
+  /**
+   * Types this audit structurally cannot cover on any vault after any refresh —
+   * currently `Flow`, because the recognizers read Apex syntax. Present ONLY on
+   * the org-wide path, where a reader could otherwise assume the audit spans
+   * every automation surface.
+   */
+  readonly notCheckedTypes?: readonly NotCheckedType[];
   /** Verbatim honesty disclosures; empty when the response has no findings. */
   readonly boundaries: readonly string[];
   /** True when the matched count exceeded `limit` and `issues` was sliced. */
@@ -533,6 +561,19 @@ export const codeQualityAuditHandler = async (
           SEVERITY_CONSENSUS_DISCLOSURE,
         ];
 
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Both notes live OUTSIDE the
+  // zero-findings gate on purpose: a zero-finding response IS the false-clean
+  // shape, so it is the one that most needs to say what was not scanned.
+  const qualityScanCoverage = censusQualityScanCoverage(nodesToProcess);
+  const unscannedNote = buildUnscannedNodesNote(qualityScanCoverage);
+  if (unscannedNote !== undefined) boundaries.push(unscannedNote);
+  // The permanent, refresh-proof half. Only on the org-wide path: a caller who
+  // named one Apex class did not ask about Flows, and its response stays
+  // byte-identical.
+  const notCheckedNote =
+    scopeId === null ? buildNotCheckedTypesNote(NOT_APEX_TYPES) : undefined;
+  if (notCheckedNote !== undefined) boundaries.push(notCheckedNote);
+
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
   // Lives OUTSIDE the zero-findings gate because findings could be among the
@@ -554,6 +595,9 @@ export const codeQualityAuditHandler = async (
       issues: slice,
       totalCount: sorted.length,
       summary: { bySeverity, byRule, byType },
+      ...(scopeId === null
+        ? { qualityScanCoverage, notCheckedTypes: NOT_APEX_TYPES }
+        : {}),
       boundaries,
       truncated,
       ...(isPaged ? { limit, offset } : {}),
