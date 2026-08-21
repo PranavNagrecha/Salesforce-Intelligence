@@ -34,7 +34,7 @@ import {
   openGraph,
   type GraphStore,
 } from '@sf-intelligence/graph';
-import type { CoverageSummary } from '@sf-intelligence/vault';
+import type { CoverageSummary, ExtendedVaultManifest } from '@sf-intelligence/vault';
 
 import { CHAINED_RULES } from '../../src/knowledge/chained-rules.js';
 import { COMPOUND_RULES } from '../../src/knowledge/compound-rules.js';
@@ -1533,5 +1533,152 @@ describe('interpretHandler — WorkflowRule A14 grounding honesty (WORKFLOWRULE-
     expect(trust.completeness.status).not.toBe('complete');
     expect(coverageCaveat).toBeDefined();
     expect(coverageCaveat).toContain('WorkflowRule');
+  });
+});
+
+// =============================================================================
+// A SHARED-CONTAINER MEMBER THAT NEVER ARRIVED reaches the reasoning engine
+// (spec row 7). Two concept rules declare `dependsOnCoverage:
+// ['SessionSettings']`, and the vault's `settings` container is dispatched by
+// exact filename: `Session.settings-meta.xml` → SessionSettings. While a
+// `{retrieveConfirmed: true, retrieved: 0}` SessionSettings row read as COVERED,
+// `summarizeCoverage(...).missingCoverage` was empty, so `sfi.interpret`
+// reported `complete` coverage over a plane nothing had ever read. Measured on
+// the probe vault before the fix: `sfi.interpret {componentId: CustomObject:…,
+// concepts: ['concept:session-security-posture']}` returned
+// `trust.completeness: {"status":"complete"}` with NO coverageCaveat.
+//
+// THE VAULT STATE UNDER TEST IS THE ONE THE PIPELINE ACTUALLY PRODUCES. The
+// earlier version of this block asserted over an incoherent vault — a
+// SessionSettings NODE in the graph while the manifest said `retrieved: 0` —
+// which the refresh cannot emit: the node exists only if the member file was
+// parsed, and parsing it makes `retrieved` ≥ 1. Here the unparsed vault has NO
+// SessionSettings node (the container came back without that member), and the
+// parsed control has one.
+// =============================================================================
+describe('interpretHandler — a shared-container plane that never parsed hedges the answer', () => {
+  const SESSION_ID = 'SessionSettings:default';
+  const OBJECT_ID = 'CustomObject:Widget__c';
+  const MFA_RULES = [
+    'rule:security/session-mfa-required',
+    'rule:security/session-strong-auth-required',
+  ];
+
+  /**
+   * `settings/` returned 139 members and none of them was
+   * `Session.settings-meta.xml`, so the SessionSettings zero is a BUILD
+   * outcome. No SessionSettings node can exist in this vault.
+   */
+  const UNPARSED_MANIFEST: ExtendedVaultManifest = {
+    ...FIXTURE_MANIFEST,
+    skippedDirectories: { settings: 139 },
+    coverage: [
+      { type: 'SessionSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+    ],
+  };
+
+  /** The same vault with the member present and parsed — the control. */
+  const PARSED_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      { type: 'SessionSettings', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+    ],
+  };
+
+  /** The unparsed vault: an object to anchor on, and NO SessionSettings node. */
+  let uDir: string;
+  let uStore: GraphStore;
+  /** The parsed vault: the same object PLUS the parsed SessionSettings node. */
+  let pDir: string;
+  let pStore: GraphStore;
+
+  const objectNode = makeNode({
+    id: OBJECT_ID,
+    type: 'CustomObject',
+    apiName: 'Widget__c',
+  });
+
+  beforeAll(async () => {
+    uDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-interpret-unparsed-'));
+    const u = await openGraph(join(uDir, 'u.db'));
+    if (!u.ok) throw new Error(u.error.message);
+    uStore = u.value;
+    const uSeed: ExtractionResult = { nodes: [objectNode], edges: [] };
+    const uImported = await importExtractionResults(uStore, [uSeed]);
+    if (!uImported.ok) throw new Error(uImported.error.message);
+
+    pDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-interpret-parsed-'));
+    const p = await openGraph(join(pDir, 'p.db'));
+    if (!p.ok) throw new Error(p.error.message);
+    pStore = p.value;
+    const pSeed: ExtractionResult = {
+      nodes: [
+        objectNode,
+        makeNode({
+          id: SESSION_ID,
+          type: 'SessionSettings',
+          apiName: 'SessionSettings',
+          properties: { mfaRequired: true, requiresStrongAuth: true },
+        }),
+      ],
+      edges: [],
+    };
+    const pImported = await importExtractionResults(pStore, [pSeed]);
+    if (!pImported.ok) throw new Error(pImported.error.message);
+  });
+
+  afterAll(async () => {
+    await closeGraph(uStore);
+    await closeGraph(pStore);
+    rmSync(uDir, { recursive: true, force: true });
+    rmSync(pDir, { recursive: true, force: true });
+  });
+
+  it('the unparsed state is exactly this: the SessionSettings node does NOT exist', async () => {
+    const ctx = { vaultRoot: uDir, manifest: UNPARSED_MANIFEST, graph: uStore } as unknown as Context;
+    const r = await interpretHandler(ctx, { componentId: SESSION_ID, ruleIds: MFA_RULES });
+    // The pipeline cannot hand you a node for a member that never arrived —
+    // which is why no test here may assert over "node present + retrieved 0".
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('reports partial coverage and names SessionSettings when the plane never parsed', async () => {
+    const ctx = { vaultRoot: uDir, manifest: UNPARSED_MANIFEST, graph: uStore } as unknown as Context;
+    const r = await interpretHandler(ctx, { componentId: OBJECT_ID, ruleIds: MFA_RULES });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The load-bearing assertion: NOT `complete` over a plane nothing read.
+    expect(d.trust.completeness.status).toBe('partial');
+    expect(d.trust.completeness.missingCoverage).toContain('SessionSettings');
+    expect(d.coverageCaveat).toBeDefined();
+    expect(d.coverageCaveat).toContain('SessionSettings');
+    // The two rules bind `componentTypes: ['SessionSettings']`, so against a
+    // CustomObject root they are PROVABLY inapplicable — never "checked clean".
+    expect(d.completeness.rulesNotApplicable).toBe(2);
+    expect(d.completeness.rulesCheckedClean).toBe(0);
+    expect(d.completeness.noRuleCoversComponentType).toBe(true);
+    // And the summary must not invent a remedy: the files are NOT on disk, and
+    // nothing here may claim they are.
+    expect(d.completeness.summary).not.toContain('on disk');
+    expect(d.completeness.summary).not.toContain('re-retrieve does NOT close them');
+  });
+
+  it('stays `complete` — byte-for-byte the old behaviour — once the member IS parsed', async () => {
+    const ctx = { vaultRoot: pDir, manifest: PARSED_MANIFEST, graph: pStore } as unknown as Context;
+    const r = await interpretHandler(ctx, { componentId: SESSION_ID, ruleIds: MFA_RULES });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.trust.completeness.status).toBe('complete');
+    expect(d.coverageCaveat ?? null).toBeNull();
+    // Both rules fire against real data — proving the hedge above was caused by
+    // coverage, not by the rules being unable to match this node.
+    expect(d.rulesFired).toBe(2);
+    expect(d.trust.completeness.missingCoverage).toBeUndefined();
   });
 });

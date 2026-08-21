@@ -255,6 +255,157 @@ const owdRank = (sharingModel: string): number | null => {
 };
 
 /**
+ * The verdict ONE OWD token yields for one operation: `visible` when the token
+ * outranks the operation, `restricted` when it does not, `null` when the token
+ * is not a recognised OWD value (the caller then reports `unknown`).
+ *
+ * Extracted from {@link evaluateOWD} so the INTERNAL and EXTERNAL baselines can
+ * be ranked by identical logic and COMPARED — the comparison is what decides
+ * whether the subject's audience is material to this answer at all.
+ */
+const owdVerdictFor = (
+  token: string,
+  level: AccessLevel,
+): 'visible' | 'restricted' | null => {
+  const rank = owdRank(token);
+  if (rank === null) return null;
+  return rank >= ACCESS_RANK[level] ? 'visible' : 'restricted';
+};
+
+/**
+ * Which sharing baseline governs the subject user.
+ *
+ *   - `internal` — a standard/platform/integration licence. The object's
+ *     `sharingModel` (the internal org-wide default) governs.
+ *   - `external` — an Experience Cloud / portal / guest / external-identity
+ *     licence. The object's `externalSharingModel` governs; the internal OWD
+ *     does NOT apply to this user at all.
+ *   - `unknown` — no profile supplied, the profile is not in this vault, it
+ *     carries no `userLicense`, or the licence name is not one this build
+ *     recognises. NEVER silently treated as `internal`.
+ */
+type SubjectAudience = 'internal' | 'external' | 'unknown';
+
+/**
+ * User licences that make their holder an EXTERNAL (Experience Cloud / portal /
+ * guest) user. For these the governing record-access baseline is the object's
+ * `externalSharingModel`, not `sharingModel` — Salesforce evaluates the two
+ * columns against disjoint audiences.
+ *
+ * Matched case-insensitively on the whitespace-collapsed licence name. A licence
+ * NOT in this set and not in {@link INTERNAL_USER_LICENCES} is `unknown`, not
+ * `internal`: guessing "internal" is exactly the conflation this stage exists to
+ * stop.
+ */
+const EXTERNAL_USER_LICENCES: ReadonlySet<string> = new Set(
+  [
+    'customer community',
+    'customer community login',
+    'customer community plus',
+    'customer community plus login',
+    'partner community',
+    'partner community login',
+    'channel account',
+    'customer portal manager',
+    'customer portal manager standard',
+    'customer portal manager custom',
+    'high volume customer portal',
+    'overage high volume customer portal',
+    'authenticated website',
+    'overage authenticated website',
+    'gold partner',
+    'silver partner',
+    'bronze partner',
+    'guest user license',
+    'external identity',
+    'external identity login',
+    'external apps',
+    'external apps login',
+    'chatter external',
+    'external einstein agent',
+  ],
+);
+
+/**
+ * User licences whose holders are INTERNAL org users — the audience the object's
+ * `sharingModel` governs. Chatter Free / Chatter Only / Identity are internal
+ * licences despite their limited CRM reach; only the Experience Cloud / portal
+ * families in {@link EXTERNAL_USER_LICENCES} sit on the external column.
+ */
+const INTERNAL_USER_LICENCES: ReadonlySet<string> = new Set(
+  [
+    'salesforce',
+    'salesforce platform',
+    'salesforce platform one',
+    'salesforce integration',
+    'force.com - app subscription',
+    'force.com - one app',
+    'identity',
+    'chatter free',
+    'chatter only',
+    'work.com only',
+    'knowledge only user',
+    'content only',
+    'company communities',
+    'premier support',
+    'einstein agent',
+    'analytics cloud integration user',
+    'analytics cloud security user',
+    'sales insights integration user',
+    'salesforceiq integration user',
+    'crm integration user',
+  ],
+);
+
+/**
+ * Classify a raw `Profile.userLicense` value into the audience whose OWD column
+ * governs it. Exact membership decides first; the two prefix rules below are a
+ * documented HEURISTIC for the member-based licence variants Salesforce keeps
+ * adding to the same families (`Customer Community …`, `Partner Community …`,
+ * `External …`) and only ever resolve to `external`. Anything else is `unknown`.
+ */
+const classifyUserLicence = (raw: string): SubjectAudience => {
+  const name = raw.trim().replace(/\s+/gu, ' ').toLowerCase();
+  if (name.length === 0) return 'unknown';
+  if (EXTERNAL_USER_LICENCES.has(name)) return 'external';
+  if (INTERNAL_USER_LICENCES.has(name)) return 'internal';
+  if (
+    name.startsWith('customer community') ||
+    name.startsWith('partner community') ||
+    name.startsWith('external ')
+  ) {
+    return 'external';
+  }
+  return 'unknown';
+};
+
+/**
+ * The subject's audience plus the licence name that decided it, so every
+ * disclosure can quote the evidence rather than assert a classification.
+ */
+interface SubjectLicence {
+  readonly audience: SubjectAudience;
+  /** The raw `userLicense` read off the profile node, or `null` when absent. */
+  readonly licence: string | null;
+  /** Why the audience is `unknown` — surfaced verbatim in the OWD step. */
+  readonly unknownReason: string | null;
+}
+
+/**
+ * Standing qualifier on any answer that consulted the EXTERNAL column. The org
+ * switch that puts that column in force (`SharingSettings.enableExternalSharingModel`)
+ * IS retrieved into the vault's `settings/` container but is NOT parsed by this
+ * build, so using the external baseline is a stated ASSUMPTION, never a check.
+ * Naming the unknown is the contract; prescribing a Setup remedy this build
+ * cannot verify is not.
+ */
+const EXTERNAL_OWD_IN_FORCE_ASSUMPTION =
+  'ASSUMPTION: this answer takes the external sharing model to be IN FORCE. The org ' +
+  'switch that decides that (`SharingSettings.enableExternalSharingModel`) is retrieved ' +
+  'into this vault but NOT parsed by this build, so it was assumed, not checked — see ' +
+  'sfi.coverage_report `topUncoveredFamilies`.';
+
+/**
  * Does a `grantedBy` object-permission edge satisfy the object-level READ
  * PRECONDITION? To SEE a record at all a user needs object Read CRUD; in
  * Salesforce object Edit, Delete, and Create each IMPLY Read (you cannot enable
@@ -571,14 +722,56 @@ const step = (
     : { stage, verdict, reason, traversed };
 
 /**
- * Evaluate the OWD stage from the target component's
- * `properties.sharingModel`. Per the cascade spec:
+ * Result of the OWD stage. Carries the step plus the two things the caller
+ * needs that a bare step cannot express.
+ */
+interface OwdEvaluation {
+  readonly step: AccessReasoningStep;
+  /**
+   * `true` when the step is `unknown` because the SUBJECT'S AUDIENCE (internal
+   * vs external) could not be applied, NOT because the entity has no OWD. The
+   * caller must NOT short-circuit on this one: every later stage is still
+   * meaningful (a View All Data bypass, for instance, is audience-independent),
+   * so the cascade runs and `aggregateVerdict` settles on `unknown` unless a
+   * genuinely `visible` step appears.
+   */
+  readonly audienceIndeterminate: boolean;
+  /**
+   * Disclosure to append to `boundaryNote` when the EXTERNAL column was
+   * consulted or weighed. `null` on the purely internal path, which keeps every
+   * internal-user answer byte-identical.
+   */
+  readonly externalNote: string | null;
+}
+
+/**
+ * Evaluate the OWD stage against the baseline that governs THIS SUBJECT.
+ *
+ * Salesforce keeps two org-wide defaults per object and applies them to
+ * DISJOINT audiences: `sharingModel` governs internal users, `externalSharingModel`
+ * governs Experience Cloud / portal / guest users. Ranking the internal column
+ * for an external user is not a conservative approximation — it is a different
+ * question, and on this product's probe org 40 objects rank internal strictly
+ * above external, so it produced confident `visible` verdicts for community
+ * profiles that cannot see those records.
+ *
+ * Per the cascade spec, for the governing column:
  *   - `sharingModel === null` → `unknown` (entity variant has no OWD).
  *   - `Read`/`ReadWrite`/`FullAccess` → `visible`.
  *   - `Private`/`ControlledByParent` → `restricted`.
  *   - any other value → `unknown` (defensive; the extractor enforces
  *     the allowed set at extraction time but the metadata model could
  *     widen).
+ *
+ * Audience selection:
+ *   - `external` subject → the external column decides; an absent or
+ *     unrecognised external value is `unknown`, never a fallback to internal.
+ *   - `unknown` subject → `unknown` ONLY when the two columns would disagree for
+ *     this operation. When they agree (or the object declares no external
+ *     column) the audience cannot change the answer, so the internal path runs
+ *     and the response is byte-identical to before this stage became
+ *     audience-aware.
+ *   - `internal` subject → the internal column, exactly as before.
  *
  * The "missing component" branch lived here before journal 0160's
  * silent-accept fix; the caller now refuses with `component-not-found`
@@ -587,45 +780,177 @@ const step = (
 const evaluateOWD = (
   componentNode: Node,
   level: AccessLevel,
-): AccessReasoningStep => {
+  subject: SubjectLicence,
+): OwdEvaluation => {
+  const plain = (s: AccessReasoningStep): OwdEvaluation => ({
+    step: s,
+    audienceIndeterminate: false,
+    externalNote: null,
+  });
   const sharingModel = componentNode.properties['sharingModel'];
   if (sharingModel === null || sharingModel === undefined) {
-    return step(
-      'OWD',
-      'unknown',
-      'OWD not defined for this entity variant',
+    return plain(
+      step('OWD', 'unknown', 'OWD not defined for this entity variant'),
     );
   }
   if (typeof sharingModel !== 'string') {
-    return step(
-      'OWD',
-      'unknown',
-      `OWD value is not a string: ${String(sharingModel)}`,
+    return plain(
+      step('OWD', 'unknown', `OWD value is not a string: ${String(sharingModel)}`),
     );
   }
-  const rank = owdRank(sharingModel);
-  if (rank === null) {
-    return step('OWD', 'unknown', `unrecognised OWD value: ${sharingModel}`);
+  const internalVerdict = owdVerdictFor(sharingModel, level);
+  if (internalVerdict === null) {
+    return plain(
+      step('OWD', 'unknown', `unrecognised OWD value: ${sharingModel}`),
+    );
   }
-  if (rank >= ACCESS_RANK[level]) {
-    return step(
-      'OWD',
-      'visible',
-      // RV11: the precondition is now operation-aware (computeMutedObjectAccess),
-      // so this claim is finally TRUE for edit/delete — and we name the actual
-      // bit checked (object ${level}), not the old "object-Read precondition"
-      // misnomer that lied for edit/delete.
-      `OWD '${sharingModel}' grants ${level} access to all records (given the user has object ${level} permission — checked separately as the object ${level} precondition)`,
+
+  // The EXTERNAL column, when the object declares one. `externalSharingModel` is
+  // extracted onto every CustomObject node that has one; entity variants with no
+  // external records carry `null` and there is nothing to disagree with.
+  const externalRaw = componentNode.properties['externalSharingModel'];
+  const externalModel = typeof externalRaw === 'string' ? externalRaw : null;
+  const externalVerdict =
+    externalModel === null ? null : owdVerdictFor(externalModel, level);
+
+  // (1) The subject IS external: the external column is the governing baseline.
+  // The internal OWD does not apply to a community / portal / guest user at all,
+  // so it is never consulted here — reading it was the defect this branch fixes.
+  if (subject.audience === 'external') {
+    const licence = subject.licence ?? 'an external licence';
+    if (externalVerdict === null) {
+      return {
+        step: step(
+          'OWD',
+          'unknown',
+          `the subject's profile carries the EXTERNAL user licence '${licence}', so the ` +
+            `governing baseline is this object's externalSharingModel — which this vault ` +
+            `${externalModel === null ? 'does not carry for this object' : `records as the unrecognised value '${externalModel}'`}. ` +
+            `The internal OWD '${sharingModel}' governs INTERNAL users only and is NOT ` +
+            `applied to an external user; downstream grants may still apply`,
+        ),
+        audienceIndeterminate: true,
+        externalNote: EXTERNAL_OWD_IN_FORCE_ASSUMPTION,
+      };
+    }
+    return {
+      step: step(
+        'OWD',
+        externalVerdict,
+        externalVerdict === 'visible'
+          ? `EXTERNAL OWD '${externalModel}' grants ${level} access to all records for this ` +
+            `user's audience (profile licence '${licence}' is an EXTERNAL user licence, so the ` +
+            `object's externalSharingModel governs, not the internal OWD '${sharingModel}'), ` +
+            `given the user has object ${level} permission — checked separately as the object ` +
+            `${level} precondition`
+          : `EXTERNAL OWD '${externalModel}' does not grant ${level} access for this user's ` +
+            `audience (profile licence '${licence}' is an EXTERNAL user licence, so the object's ` +
+            `externalSharingModel governs, not the internal OWD '${sharingModel}'); downstream ` +
+            `grants may apply`,
+      ),
+      audienceIndeterminate: false,
+      externalNote: EXTERNAL_OWD_IN_FORCE_ASSUMPTION,
+    };
+  }
+
+  // (2) The audience could not be established AND the two baselines disagree for
+  // THIS operation, so the internal answer and the external answer are opposite
+  // verdicts. Report `unknown` and say which column each would have given —
+  // falling back to the internal model here would be a coin flip presented as a
+  // fact. Materiality is the gate: when the columns agree (or the object has no
+  // external column), the audience cannot change the verdict and this branch is
+  // never taken, so those answers stay byte-identical.
+  if (
+    subject.audience === 'unknown' &&
+    externalVerdict !== null &&
+    externalVerdict !== internalVerdict
+  ) {
+    return {
+      step: step(
+        'OWD',
+        'unknown',
+        `this object's two org-wide defaults DISAGREE for ${level} — internal ` +
+          `sharingModel '${sharingModel}' would be ${internalVerdict}, external ` +
+          `externalSharingModel '${externalModel}' would be ${externalVerdict} — and the ` +
+          `subject's audience could not be established (${subject.unknownReason ?? 'no user licence available'}), ` +
+          `so neither column can be applied. Supply a profileId whose Profile node carries a ` +
+          `userLicense to resolve this`,
+      ),
+      audienceIndeterminate: true,
+      externalNote: EXTERNAL_OWD_IN_FORCE_ASSUMPTION,
+    };
+  }
+
+  // (3) Internal subject, or an audience that cannot change the verdict: the
+  // internal org-wide default governs, exactly as before.
+  if (internalVerdict === 'visible') {
+    return plain(
+      step(
+        'OWD',
+        'visible',
+        // RV11: the precondition is now operation-aware (computeMutedObjectAccess),
+        // so this claim is finally TRUE for edit/delete — and we name the actual
+        // bit checked (object ${level}), not the old "object-Read precondition"
+        // misnomer that lied for edit/delete.
+        `OWD '${sharingModel}' grants ${level} access to all records (given the user has object ${level} permission — checked separately as the object ${level} precondition)`,
+      ),
     );
   }
   // The OWD does not grant THIS operation org-wide (e.g. a Read OWD for an edit
   // check, or anything but FullAccess for delete) — a downstream grant /
   // ownership / Modify-All may still apply, so continue the cascade.
-  return step(
-    'OWD',
-    'restricted',
-    `OWD '${sharingModel}' does not grant ${level} access org-wide; downstream grants may apply`,
+  return plain(
+    step(
+      'OWD',
+      'restricted',
+      `OWD '${sharingModel}' does not grant ${level} access org-wide; downstream grants may apply`,
+    ),
   );
+};
+
+/**
+ * Resolve the subject's audience from the supplied profile. One `getNodeById`
+ * on the coerced `Profile:` id; every failure mode (no profile supplied, profile
+ * absent from the vault, no `userLicense` property, unrecognised licence name)
+ * lands on `unknown` WITH the reason, never on a silent `internal`.
+ */
+const resolveSubjectLicence = async (
+  ctx: Context,
+  profileId: string | null,
+): Promise<Result<SubjectLicence, string>> => {
+  if (profileId === null) {
+    return ok({
+      audience: 'unknown',
+      licence: null,
+      unknownReason: 'no profile was supplied in userContext',
+    });
+  }
+  const result = await getNodeById(ctx.graph, profileId as ComponentId);
+  if (!result.ok) return err(result.error.message);
+  if (result.value === null) {
+    return ok({
+      audience: 'unknown',
+      licence: null,
+      unknownReason: `profile \`${profileId}\` is not in this vault, so its user licence is unknown`,
+    });
+  }
+  const raw = result.value.properties['userLicense'];
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return ok({
+      audience: 'unknown',
+      licence: null,
+      unknownReason: `profile \`${profileId}\` carries no userLicense property in this vault`,
+    });
+  }
+  const audience = classifyUserLicence(raw);
+  return ok({
+    audience,
+    licence: raw,
+    unknownReason:
+      audience === 'unknown'
+        ? `user licence '${raw}' is not one this build classifies as internal or external`
+        : null,
+  });
 };
 
 /**
@@ -2552,8 +2877,26 @@ export const whyCantUserSeeRecordHandler = async (
   // alone, with zero object permission, does NOT make a record visible; that was
   // the H1 bug. The OWD's `visible` verdict only survives to the aggregate when
   // the precondition (checked just below) passed.
-  const owdStep = evaluateOWD(nodeResult.value, level);
-  if (owdStep.verdict === 'unknown') {
+  //
+  // The OWD stage is AUDIENCE-AWARE: `appliedScope.profile` (already coerced
+  // above) is resolved to the subject's user licence, and an EXTERNAL licence
+  // switches the governing baseline to `externalSharingModel`. See
+  // {@link evaluateOWD} — when the two columns cannot change the verdict the
+  // internal path runs unchanged.
+  const subjectLicenceResult = await resolveSubjectLicence(ctx, appliedScope.profile);
+  if (!subjectLicenceResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${subjectLicenceResult.error}`,
+    });
+  }
+  const owdEvaluation = evaluateOWD(nodeResult.value, level, subjectLicenceResult.value);
+  const owdStep = owdEvaluation.step;
+  // An `unknown` OWD short-circuits ONLY when the entity itself has no usable
+  // OWD. An audience-indeterminate `unknown` must NOT: the later stages still
+  // carry real information (a View All Data bypass is audience-independent), and
+  // truncating the chain there would throw that away.
+  if (owdStep.verdict === 'unknown' && !owdEvaluation.audienceIndeterminate) {
     return ok({
       data: {
         verdict: owdStep.verdict,
@@ -2824,8 +3167,14 @@ export const whyCantUserSeeRecordHandler = async (
         : {}),
       // The declared-only qualifier leads EVERY verdict — it is the reason
       // this tool and `sfi.effective_permissions` can disagree on the same
-      // containers, and this tool's error direction is a wrong DENY.
-      boundaryNote: [DECLARED_ONLY_BYPASS_NOTE, situationalBoundaryNote]
+      // containers, and this tool's error direction is a wrong DENY. The
+      // external-OWD assumption rides last and ONLY when the external column was
+      // actually consulted or weighed, so a purely internal answer is unchanged.
+      boundaryNote: [
+        DECLARED_ONLY_BYPASS_NOTE,
+        situationalBoundaryNote,
+        owdEvaluation.externalNote ?? '',
+      ]
         .filter((part) => part.length > 0)
         .join(' '),
     },

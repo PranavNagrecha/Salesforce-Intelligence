@@ -458,6 +458,18 @@ export const healthCheckHandler = async (
       `vault coverage is partial for requested metadata: ${coverage.partialTypes.join(', ')}`,
     );
   }
+  // NOT PARSED, MEMBER NEVER ARRIVED — its own issue, not folded into the
+  // partial line. A partial type asks for a re-retrieve; this one cannot be
+  // closed that way (the shared container already came back, without this
+  // type's member file), so naming the wrong remedy would send the operator in
+  // a circle. Emitted only when the vault has the condition, so an unaffected
+  // vault's `issues` list is unchanged.
+  const notParsedTypes = coverage.retrievedNotParsedTypes ?? [];
+  if (notParsedTypes.length > 0) {
+    issues.push(
+      `vault reports zero rows for ${notParsedTypes.join(', ')} but the shared retrieve container holding them came back WITHOUT their member file — nothing was read for them, and whether the org simply does not have the feature enabled or the file failed to come back CANNOT be told from this vault; treat those planes as NOT CHECKED, never as "the org has none" (a re-retrieve does not change it: the container already returned without the member — see sfi.coverage_report for the per-type detail)`,
+    );
+  }
 
   // PROFILE-COBATCH detect+disclose (trust-critical): the last refresh
   // produced profiles WITHOUT their permission grant sections (a split

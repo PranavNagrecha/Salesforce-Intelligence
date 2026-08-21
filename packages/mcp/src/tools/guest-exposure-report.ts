@@ -77,6 +77,45 @@ const MAX_LIMIT = 200;
 const FINDINGS_BYTE_BUDGET = 36_000;
 /** Page size when draining a node type. */
 const SCAN_PAGE_SIZE = 500;
+/**
+ * Per-response row cap for the `orphanGuestRules` bucket, and its own byte
+ * budget. The bucket shipped with NO contract at all: on a vault holding 600
+ * guest sharing rules and no community surface it put 500 rows and a 28,463-
+ * character disclosure naming every one of their ids into a payload with a
+ * 40 KB budget. The global envelope guard then tail-trimmed the array to 62
+ * rows while the disclosure still said 500 were "listed in `orphanGuestRules`"
+ * — a response contradicting itself about a record-level grant to
+ * unauthenticated visitors, with the dropped tail unreachable from any call
+ * (`limit`/`offset` page `findings`, not this bucket).
+ */
+const ORPHAN_RULE_PAGE_LIMIT = 50;
+const ORPHAN_RULE_BYTE_BUDGET = 6_000;
+/** How many rule ids the orphan disclosure may name inline (never all of them). */
+const ORPHAN_RULE_IDS_NAMED = 10;
+/**
+ * Floor for the `findings` byte budget once the orphan page has taken its
+ * share. The two lists ride in ONE envelope, so the orphan bytes are charged
+ * against the findings slice rather than pushing the pair over the global cap
+ * and inviting the guard to trim whichever list it finds largest.
+ */
+const FINDINGS_BYTE_BUDGET_FLOOR = 12_000;
+/**
+ * The orphan block costs more than its rows. Charging only the rows left the
+ * DISCLOSURE (up to ~2 KB once it names 10 ids inline and appends the remedy
+ * sentence — the `communityId`-scoped wording is the longest) and the
+ * `orphanGuestRulesPage` marker uncounted, so a saturated orphan page plus a
+ * full findings page cleared FINDINGS_BYTE_BUDGET and then blew the GLOBAL
+ * ~40 KB guard. The guard trims the largest array, which halved `findings`
+ * while `pageInfo.returnedCount` and `nextCursor` still described the untrimmed
+ * page — leaving the dropped `critical` rows unreachable from any call.
+ *
+ * That is the same self-contradiction the orphan paging was added to close,
+ * displaced from `orphanGuestRules` onto `findings`. It survived because the
+ * paging was measured on the FAIL-CLOSED vault, which has zero findings and so
+ * cannot exhibit the collision — the honesty equivalent of testing the happy
+ * path. `guest-exposure-envelope.test.ts` now pins the collision shape itself.
+ */
+const ORPHAN_BLOCK_OVERHEAD_BYTES = 3_000;
 
 /** Zod schema for the `sfi.guest_exposure_report` tool input. */
 export const guestExposureReportInputSchema = z.object({
@@ -120,6 +159,14 @@ export const guestExposureReportInputSchema = z.object({
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
+  /**
+   * Offset into the `orphanGuestRules` bucket — its OWN paging axis, because
+   * `limit`/`offset`/`cursor` page `findings` and cannot reach this list.
+   * Without it, every unattributable guest rule past the per-response cap was
+   * unrecoverable from any call. Echoed back in `orphanGuestRulesPage`, whose
+   * `nextOffset` is the value to pass next.
+   */
+  orphanOffset: z.number().int().min(0).optional(),
 });
 
 export type GuestExposureReportInput = z.infer<typeof guestExposureReportInputSchema>;
@@ -204,6 +251,31 @@ export interface CommunitySummary {
   readonly criticalCount: number;
 }
 
+/**
+ * A guest sharing rule this run could NOT attach to any community — the mirror
+ * of the `orphanNetworks` disclosure. The rule's `siteName` matched none of the
+ * three keys a community is matched on (any modeled CustomSite api name, any
+ * modeled site label, any modeled Network api name), or the rule declares no
+ * `siteName` at all. It is a REAL declared record-level grant to
+ * unauthenticated visitors; this bucket exists so it is reported as
+ * UNATTRIBUTED rather than dropped.
+ *
+ * The Network key is EVERY modeled Network, not only those correlated through a
+ * modeled CustomSite: a Network whose `<site>` names an unmodeled CustomSite is
+ * still a Network this vault holds, and denying it in one disclosure while
+ * naming it in the next made a single response contradict itself.
+ */
+export interface OrphanGuestRule {
+  /** The `SharingRule:{Object}.{Rule}` node id — a real vault id. */
+  readonly ruleId: string;
+  /** The rule's declared `siteName`, or null when it declares none. */
+  readonly siteName: string | null;
+  /** The object the rule is filed under, or null when the id has no object part. */
+  readonly objectApiName: string | null;
+  /** The rule's declared `accessLevel`, or null when absent. */
+  readonly accessLevel: string | null;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface GuestExposureReportOutput {
   readonly communities: readonly CommunitySummary[];
@@ -236,6 +308,40 @@ export interface GuestExposureReportOutput {
   readonly truncated: boolean;
   /** True when a Profile/SharingRule scan hit the per-type node cap. */
   readonly scanTruncated: boolean;
+  /**
+   * Guest sharing rules that attach to NO modeled community — see
+   * {@link OrphanGuestRule}. Present ONLY when at least one rule was
+   * unattributable, so a vault whose every guest rule matched is byte-identical
+   * to before this bucket existed.
+   *
+   * PAGED on its own axis (`orphanOffset` in, {@link orphanGuestRulesPage} out)
+   * and capped per response, so the rows delivered can never disagree with the
+   * count the disclosure states. Read the count from `orphanGuestRulesPage`,
+   * never from `orphanGuestRules.length`.
+   *
+   * Emitted under EVERY scope, including a `communityId` scope (where the rows
+   * stay out of `findings`) and the fail-closed no-Experience-Cloud-surface
+   * response (where every guest rule is unattributable by construction).
+   * Membership is judged against all modeled communities, so a row here is
+   * genuinely unattributable — never merely outside the caller's scope.
+   */
+  readonly orphanGuestRules?: readonly OrphanGuestRule[];
+  /**
+   * Paging state for {@link orphanGuestRules} — present exactly when that
+   * bucket is. `totalCount` is every unattributable rule in scope;
+   * `returnedCount` is how many rows this response actually carries;
+   * `nextOffset` is the `orphanOffset` to pass for the rest (null when
+   * exhausted). This exists so a truncated bucket announces itself instead of
+   * being silently shortened by the envelope guard.
+   */
+  readonly orphanGuestRulesPage?: {
+    readonly totalCount: number;
+    readonly returnedCount: number;
+    readonly offset: number;
+    readonly limit: number;
+    readonly hasMore: boolean;
+    readonly nextOffset: number | null;
+  };
   /** Headline confidence is HEURISTIC — the guest-profile linkage is a convention. */
   readonly confidence: 'heuristic';
   readonly disclosures: readonly string[];
@@ -280,12 +386,111 @@ const objectOfFieldId = (fieldId: string): string | null => {
 const findingObjectApiName = (f: ExposureFinding): string | null => {
   if (f.nodeId.startsWith(OBJECT_PREFIX)) return f.nodeId.slice(OBJECT_PREFIX.length);
   if (f.nodeId.startsWith(FIELD_PREFIX)) return objectOfFieldId(f.nodeId);
-  if (f.kind === 'guest-sharing-rule' && f.nodeId.startsWith(SHARING_RULE_PREFIX)) {
-    const rest = f.nodeId.slice(SHARING_RULE_PREFIX.length);
-    const dot = rest.indexOf('.');
-    return dot === -1 ? null : rest.slice(0, dot);
-  }
+  if (f.kind === 'guest-sharing-rule') return objectOfSharingRuleId(f.nodeId);
   return null;
+};
+
+/**
+ * Object api-name for a `SharingRule:{Object}.{Rule}` id — rules are filed under
+ * their object. Shared by {@link findingObjectApiName} and the orphan-rule
+ * bucket so an orphaned rule is scoped on exactly the axis a matched one is.
+ */
+function objectOfSharingRuleId(ruleId: string): string | null {
+  if (!ruleId.startsWith(SHARING_RULE_PREFIX)) return null;
+  const rest = ruleId.slice(SHARING_RULE_PREFIX.length);
+  const dot = rest.indexOf('.');
+  return dot === -1 ? null : rest.slice(0, dot);
+}
+
+/** One page of the `orphanGuestRules` bucket plus the counts that describe it. */
+interface OrphanRulePage {
+  readonly rows: readonly OrphanGuestRule[];
+  /** Unattributable rules in scope, BEFORE this page's cap. */
+  readonly totalCount: number;
+  /** Offset actually applied (clamped into the bucket). */
+  readonly offset: number;
+  readonly hasMore: boolean;
+  readonly nextOffset: number | null;
+}
+
+/**
+ * Slice the unattributable-rule bucket to one honest page: at most
+ * {@link ORPHAN_RULE_PAGE_LIMIT} rows and {@link ORPHAN_RULE_BYTE_BUDGET}
+ * bytes, with the total kept alongside so no consumer has to infer it from
+ * `rows.length`. Input order is the id sort `orphanRowsFor` applies, so paging
+ * is stable across calls.
+ */
+const pageOrphanRules = (
+  all: readonly OrphanGuestRule[],
+  offsetInput: number,
+): OrphanRulePage => {
+  const offset = Math.min(offsetInput, all.length);
+  const rows: OrphanGuestRule[] = [];
+  let bytes = 0;
+  for (let i = offset; i < all.length && rows.length < ORPHAN_RULE_PAGE_LIMIT; i += 1) {
+    const row = all[i]!;
+    const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8') + 1;
+    // Always keep at least one row, so a single oversized row still makes
+    // forward progress instead of stalling the page at zero.
+    if (rows.length > 0 && bytes + rowBytes > ORPHAN_RULE_BYTE_BUDGET) break;
+    bytes += rowBytes;
+    rows.push(row);
+  }
+  const end = offset + rows.length;
+  return {
+    rows,
+    totalCount: all.length,
+    offset,
+    hasMore: end < all.length,
+    nextOffset: end < all.length ? end : null,
+  };
+};
+
+/** The `orphanGuestRulesPage` marker for a page (emitted whenever rows exist). */
+const orphanPageMarker = (
+  page: OrphanRulePage,
+): NonNullable<GuestExposureReportOutput['orphanGuestRulesPage']> => ({
+  totalCount: page.totalCount,
+  returnedCount: page.rows.length,
+  offset: page.offset,
+  limit: ORPHAN_RULE_PAGE_LIMIT,
+  hasMore: page.hasMore,
+  nextOffset: page.nextOffset,
+});
+
+/**
+ * Sentence-initial count for the orphan bucket. When the SharingRule scan hit
+ * the per-type node cap the bucket total is a FLOOR, not the org's number, so
+ * the bare count would overstate what was established (a 600-rule vault reports
+ * 500 — the scan cap — and "500 guest sharing rules ARE modeled" is then false).
+ */
+const orphanCountPhrase = (total: number, scanTruncated: boolean): string =>
+  scanTruncated ? `At least ${total}` : `${total}`;
+
+/**
+ * The sentence that reconciles the bucket's COUNT with the rows actually
+ * delivered, and names at most {@link ORPHAN_RULE_IDS_NAMED} ids inline. The
+ * previous wording asserted every rule was "listed in `orphanGuestRules`" and
+ * spelled out 500 ids, both of which the envelope guard then falsified.
+ */
+const orphanListingSentence = (page: OrphanRulePage): string => {
+  if (page.rows.length === 0) {
+    return `\`orphanGuestRules\` is EMPTY in this response — the requested \`orphanOffset\` is at or past the end of the ${page.totalCount}-row bucket; re-call with \`orphanOffset: 0\` to read it from the start.`;
+  }
+  const named = page.rows.slice(0, ORPHAN_RULE_IDS_NAMED).map((r) => r.ruleId);
+  const unnamed = page.rows.length - named.length;
+  const ids = `ids on this page: ${named.join(', ')}${
+    unnamed > 0 ? `, … (+${unnamed} more, each present as a row)` : ''
+  }`;
+  if (page.rows.length === page.totalCount) {
+    return `\`orphanGuestRules\` carries all ${page.totalCount} of them (${ids}).`;
+  }
+  const last = page.offset + page.rows.length - 1;
+  return `\`orphanGuestRules\` carries ${page.rows.length} of the ${page.totalCount} — rows ${page.offset}–${last} of the id-sorted bucket (${ids}); the other ${page.totalCount - page.rows.length} are counted here but NOT in this response${
+    page.nextOffset !== null
+      ? `, so re-call with \`orphanOffset: ${page.nextOffset}\` for the next page (\`orphanGuestRulesPage\` carries the paging state)`
+      : ''
+  }.`;
 };
 
 /** Drain every node of a type (paginating past the graph's 500-row cap). */
@@ -439,9 +644,77 @@ export const guestExposureReportHandler = async (
     refreshedAt: ctx.manifest.refreshedAt,
   };
 
+  // Guest sharing rules (CR-CAP-16), grouped by their Experience-Cloud site
+  // name — the SAME nodes who_can_access_object surfaces.
+  //
+  // SCANNED ABOVE THE FAIL-CLOSED RETURN BELOW, deliberately. It used to sit
+  // after it, so a vault holding guest rules but NO CustomSite/Network node —
+  // exactly the "vault predates the Experience Cloud extraction" case that
+  // return's own disclosure names — dropped every guest rule: no finding, no
+  // `orphanGuestRules` bucket, no per-rule naming, `totalFindings: 0`. That is
+  // the silent drop this bucket exists to end, on the highest-stakes surface
+  // this tool has, and the early return was reintroducing it.
+  const scanLimit = clampedNodeScanLimit();
+  let scanTruncated = false;
+  const rulesResult = await listNodesByType(ctx.graph, 'SharingRule', { limit: scanLimit });
+  if (!rulesResult.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${rulesResult.error.message}` });
+  }
+  if (scanHitCap(rulesResult.value.length, scanLimit)) scanTruncated = true;
+  const guestRulesBySite = new Map<string, Node[]>();
+  // Every guest rule seen, attributable or not. A rule whose declared `siteName`
+  // hits none of the three keys a community is matched on (site apiName, site
+  // label, Network apiName) — or that declares no `siteName` at all — used to be
+  // DROPPED in silence: no finding, no bucket, no disclosure, while the mirror
+  // case (a Network naming an unmodeled CustomSite) did get a disclosure. A
+  // guest sharing rule is a record-level grant to unauthenticated visitors;
+  // dropping one without saying so is the "checked and found nothing" vs "did
+  // not check" conflation.
+  const allGuestRules: Node[] = [];
+  for (const rule of rulesResult.value) {
+    if (stringProp(rule.properties, 'ruleType') !== 'guest') continue;
+    allGuestRules.push(rule);
+    const siteName = stringProp(rule.properties, 'siteName');
+    if (siteName === null) continue;
+    const bucket = guestRulesBySite.get(siteName) ?? [];
+    bucket.push(rule);
+    guestRulesBySite.set(siteName, bucket);
+  }
+  /** Project guest rules into `orphanGuestRules` rows, honouring the object scope. */
+  const orphanRowsFor = (rules: readonly Node[]): OrphanGuestRule[] =>
+    rules
+      .map((rule) => ({
+        ruleId: rule.id,
+        siteName: stringProp(rule.properties, 'siteName'),
+        objectApiName: objectOfSharingRuleId(rule.id),
+        accessLevel: stringProp(rule.properties, 'accessLevel'),
+      }))
+      .filter((row) => objectScope === null || row.objectApiName === objectScope)
+      .sort((a, b) => (a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0));
+
   // FAIL CLOSED: no community family modeled at all → never claim "no exposure".
   if (allSites.length === 0 && allNetworks.length === 0) {
     const coverage = summarizeCoverage(ctx.manifest, ['Network', 'CustomSite']);
+    // With no modeled community at all, EVERY guest rule is unattributable by
+    // construction — there is nothing to attribute one to. They are reported
+    // here rather than dropped.
+    const orphanRulePage = pageOrphanRules(
+      orphanRowsFor(allGuestRules),
+      input.orphanOffset ?? 0,
+    );
+    const failClosedDisclosures = [
+      'No Experience Cloud surface in the vault — no Network or CustomSite node is modeled. The org may have no communities/sites, OR the vault predates the Experience Cloud extraction (R6-17). Re-run `/sfi-refresh` to pull Network / CustomSite / ExperienceBundle before treating this as "no guest exposure".',
+    ];
+    if (orphanRulePage.totalCount > 0) {
+      failClosedDisclosures.push(
+        `${orphanCountPhrase(orphanRulePage.totalCount, scanTruncated)} guest sharing rule(s) ARE modeled in this vault and NONE of them could be attributed to a community — there is no modeled CustomSite or Network to attribute them to. They are declared record-level grants to unauthenticated visitors, each row carrying its object and \`accessLevel\`. ${orphanListingSentence(orphanRulePage)} None of them are counted in \`summary.totalFindings\`, which stays 0 because no community surface was audited. Never read \`findings: []\` here as "no guest exposure".`,
+      );
+    }
+    if (scanTruncated) {
+      failClosedDisclosures.push(
+        'A SharingRule scan hit the per-type node cap (SFI_NODE_SCAN_LIMIT) — some guest sharing rules may be missing from `orphanGuestRules`.',
+      );
+    }
     return ok({
       data: {
         communities: [],
@@ -460,11 +733,15 @@ export const guestExposureReportHandler = async (
         offset: 0,
         hasMore: false,
         truncated: false,
-        scanTruncated: false,
+        scanTruncated,
+        ...(orphanRulePage.totalCount > 0
+          ? {
+              orphanGuestRules: orphanRulePage.rows,
+              orphanGuestRulesPage: orphanPageMarker(orphanRulePage),
+            }
+          : {}),
         confidence: 'heuristic',
-        disclosures: [
-          'No Experience Cloud surface in the vault — no Network or CustomSite node is modeled. The org may have no communities/sites, OR the vault predates the Experience Cloud extraction (R6-17). Re-run `/sfi-refresh` to pull Network / CustomSite / ExperienceBundle before treating this as "no guest exposure".',
-        ],
+        disclosures: failClosedDisclosures,
         boundaryNote:
           'Fail-closed: absence of a modeled Experience Cloud surface is reported as "not checked", never as "no exposure".',
         trust: offlineTrust(ctx, {
@@ -482,6 +759,28 @@ export const guestExposureReportHandler = async (
     const siteName = stringProp(net.properties, 'site');
     if (siteName !== null) networkBySiteApiName.set(siteName, net);
   }
+
+  // Every name a guest rule's `siteName` can attribute onto, across ALL modeled
+  // communities — NOT just the scoped ones. Whether a rule is attributable is a
+  // property of the VAULT, not of this call's scope. Deriving it from the scoped
+  // subset made another community's rule look "orphaned" under a `communityId`
+  // scope, which is why the bucket used to be suppressed there outright;
+  // computing it globally lets the bucket stay correct under every scope.
+  const attributableSiteNames = new Set<string>();
+  for (const site of allSites) {
+    attributableSiteNames.add(site.apiName);
+    attributableSiteNames.add(stringProp(site.properties, 'masterLabel') ?? site.apiName);
+  }
+  // EVERY modeled Network api name, not only the ones correlated through a
+  // MODELED CustomSite. Deriving the Network keys from `allSites` meant a
+  // Network whose `<site>` names an unmodeled CustomSite contributed NO key —
+  // so a guest rule declaring that Network landed in `orphanGuestRules` under a
+  // disclosure reading "matches no ... Network api name in this vault", while
+  // the very next disclosure in the SAME payload named that Network as one that
+  // "reference[s] a CustomSite not modeled in this vault". One response, two
+  // contradictory claims about the same node. A Network the vault holds is
+  // present whether or not its site is, so its api name is attributable.
+  for (const net of allNetworks) attributableSiteNames.add(net.apiName);
 
   // Scope: a CustomSite id keeps that site; a Network id keeps the site it
   // references (so `Network:X` and `CustomSite:X` both resolve to one surface).
@@ -513,25 +812,6 @@ export const guestExposureReportHandler = async (
     const collected = await collectPiiInventoryFields(ctx, { classification: cls });
     if (!collected.ok) return collected;
     for (const f of collected.value.fields) piiById.set(f.id, f);
-  }
-
-  // Guest sharing rules (CR-CAP-16), grouped by their Experience-Cloud site
-  // name — the SAME nodes who_can_access_object surfaces.
-  const scanLimit = clampedNodeScanLimit();
-  let scanTruncated = false;
-  const rulesResult = await listNodesByType(ctx.graph, 'SharingRule', { limit: scanLimit });
-  if (!rulesResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${rulesResult.error.message}` });
-  }
-  if (scanHitCap(rulesResult.value.length, scanLimit)) scanTruncated = true;
-  const guestRulesBySite = new Map<string, Node[]>();
-  for (const rule of rulesResult.value) {
-    if (stringProp(rule.properties, 'ruleType') !== 'guest') continue;
-    const siteName = stringProp(rule.properties, 'siteName');
-    if (siteName === null) continue;
-    const bucket = guestRulesBySite.get(siteName) ?? [];
-    bucket.push(rule);
-    guestRulesBySite.set(siteName, bucket);
   }
 
   const communities: CommunitySummary[] = [];
@@ -756,6 +1036,44 @@ export const guestExposureReportHandler = async (
     }
   }
 
+  // Guest sharing rules that attach to NO modeled community — the mirror of
+  // `orphanNetworks`, and the bucket whose absence made this tool drop real
+  // guest grants in silence. Membership is decided against EVERY modeled
+  // community (`attributableSiteNames`), so a rule is listed only when it is
+  // genuinely unattributable, never merely out of the caller's scope.
+  //
+  // It is computed under a `communityId` scope TOO. Suppressing it there
+  // restored full silence for the rule most likely to belong to the scoped
+  // community: an unattributable rule belongs to NO community, so it may well
+  // belong to this one — a site-label mismatch is exactly how a rule becomes
+  // unattributable. The rules stay OUT of `findings` and out of every
+  // community's `findingCount` under that scope (they are not attributed to
+  // it), and the disclosure below says so. Under an OBJECT scope the same
+  // filter the findings get is applied, so the bucket never widens past the
+  // scope the caller asked for.
+  const orphanRulePage = pageOrphanRules(
+    orphanRowsFor(
+      allGuestRules.filter((rule) => {
+        const siteName = stringProp(rule.properties, 'siteName');
+        return siteName === null || !attributableSiteNames.has(siteName);
+      }),
+    ),
+    input.orphanOffset ?? 0,
+  );
+  // The orphan rows and the findings page share ONE envelope, so charge the
+  // orphan bytes against the findings slice. Otherwise a full findings page
+  // plus a full orphan page overruns the global budget and the guard trims
+  // whichever array it finds largest — which is how the bucket came to be
+  // silently shortened while its own disclosure still claimed every row.
+  const findingsByteBudget = Math.max(
+    FINDINGS_BYTE_BUDGET_FLOOR,
+    FINDINGS_BYTE_BUDGET -
+      (orphanRulePage.rows.length > 0
+        ? Buffer.byteLength(JSON.stringify(orphanRulePage.rows), 'utf8') +
+          ORPHAN_BLOCK_OVERHEAD_BYTES
+        : 0),
+  );
+
   // Rank: severity (critical→low), then kind, then nodeId — a stable total order.
   findings.sort((a, b) => {
     if (a.severity !== b.severity) return SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity];
@@ -788,7 +1106,7 @@ export const guestExposureReportHandler = async (
   const paged = paginateLegacy(findings, {
     offset,
     limit,
-    byteBudget: FINDINGS_BYTE_BUDGET,
+    byteBudget: findingsByteBudget,
     keyOf: (f) => `${f.severity}|${f.communityId}|${f.kind}|${f.nodeId}`,
     binding: {
       tool: 'sfi.guest_exposure_report',
@@ -817,6 +1135,22 @@ export const guestExposureReportHandler = async (
   if (orphanNetworks.length > 0) {
     disclosures.push(
       `${orphanNetworks.length} Network(s) reference a CustomSite not modeled in this vault (${orphanNetworks.join(', ')}) — their site container / guest profile was not retrieved, so their guest exposure is NOT audited here.`,
+    );
+  }
+  if (orphanRulePage.totalCount > 0) {
+    const unattributable = `${orphanCountPhrase(orphanRulePage.totalCount, scanTruncated)} guest sharing rule(s) could NOT be attributed to ANY modeled community — each declares a site name that matches no CustomSite api name, site label, or Network api name in this vault (or declares none at all). They ARE declared record-level grants to unauthenticated visitors and are NOT counted in any community's \`findingCount\``;
+    // REMEDY. When this same payload already names Networks whose CustomSite is
+    // not modeled, that IS the diagnosed cause of an unmatched site name —
+    // sending the operator to Setup to "confirm each rule's site" would point
+    // them away from a gap the vault has already identified for them.
+    const remedy =
+      orphanNetworks.length > 0
+        ? ` This payload already names a likelier cause than an org-side discrepancy: ${orphanNetworks.length} modeled Network(s) reference a CustomSite this vault does not model (the Network disclosure above), so a rule naming one of those missing sites lands here. Retrieve the missing CustomSite — include CustomSite / Network / ExperienceBundle in the next \`/sfi-refresh\` — and re-run before treating any of these as a Setup problem.`
+        : ` Include the missing CustomSite/Network in the next \`/sfi-refresh\` and re-run; only if a rule's site name is still unmatched after a complete retrieve is it worth confirming that site in Setup.`;
+    disclosures.push(
+      communityId === undefined
+        ? `${unattributable}, so this report's per-community guest exposure is INCOMPLETE for them — never read their absence from \`findings\` as "no exposure". ${orphanListingSentence(orphanRulePage)}${remedy}`
+        : `${unattributable}, this one included. Because they belong to NO community, one of them may well belong to '${communityId}' — a site-label mismatch is exactly how a rule becomes unattributable — so this SCOPED answer is INCOMPLETE for them: never read their absence from \`findings\` as "no guest exposure on this community". ${orphanListingSentence(orphanRulePage)}${remedy}`,
     );
   }
   if (scanTruncated) {
@@ -852,6 +1186,12 @@ export const guestExposureReportHandler = async (
       hasMore: paged.hasMore,
       truncated,
       scanTruncated,
+      ...(orphanRulePage.totalCount > 0
+        ? {
+            orphanGuestRules: orphanRulePage.rows,
+            orphanGuestRulesPage: orphanPageMarker(orphanRulePage),
+          }
+        : {}),
       confidence: 'heuristic',
       disclosures,
       boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s)${objectScope !== null ? `, scoped to object '${objectScope}'` : ''}; ${bySeverity.critical} critical (public write on a PII object), ${bySeverity.high} high. Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. \`appliedScope\` echoes the scope actually applied. Confidence is heuristic — the guest-profile linkage is a naming convention.`,

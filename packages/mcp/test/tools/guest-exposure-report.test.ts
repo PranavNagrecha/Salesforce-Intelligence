@@ -459,3 +459,550 @@ describe('guestExposureReportHandler — network + object componentId scope (gua
     }
   });
 });
+
+// =============================================================================
+// ORPHAN GUEST SHARING RULES (spec row 8). A guest rule is matched to a
+// community against a 3-key name set (CustomSite api name, site label, Network
+// api name). A rule matching none of them — or declaring no `siteName` at all —
+// was DROPPED SILENTLY: no finding, no bucket, no disclosure, while the mirror
+// case (a Network naming an unmodeled CustomSite) already emitted an
+// `orphanNetworks` disclosure. A dropped guest rule is a real declared
+// record-level grant to unauthenticated visitors.
+//
+// The probe vault could NOT exercise this: it holds 31 SharingRule nodes and
+// ALL 31 are `criteria` rules — zero guest rules — so the whole guest-rule path
+// is inert there and this behaviour is fixture-proved by necessity.
+// =============================================================================
+
+const ORPHAN_SITE = 'CustomSite:HelpCentre';
+
+/**
+ * One community with a matching guest rule (the control), plus three rules that
+ * cannot be attributed: a wrong site name, a rule filed under a second object,
+ * and a rule declaring no `siteName` at all.
+ */
+const orphanSeed: ExtractionResult = {
+  nodes: [
+    node({
+      id: 'Network:HelpCentre',
+      type: 'Network',
+      apiName: 'HelpCentre',
+      properties: { status: 'Live', site: 'HelpCentre' },
+    }),
+    node({
+      id: ORPHAN_SITE,
+      type: 'CustomSite',
+      apiName: 'HelpCentre',
+      label: 'HelpCentre',
+      properties: {
+        active: true,
+        siteType: 'ChatterNetwork',
+        masterLabel: 'HelpCentre',
+        guestProfileName: 'HelpCentre Profile',
+      },
+    }),
+    node({
+      id: 'Profile:HelpCentre Profile',
+      type: 'Profile',
+      apiName: 'HelpCentre Profile',
+      properties: { userPermissions: [] },
+    }),
+    node({
+      id: 'CustomObject:Case',
+      type: 'CustomObject',
+      apiName: 'Case',
+      label: 'Case',
+      properties: { sharingModel: 'Private' },
+    }),
+    node({
+      id: 'CustomObject:Order',
+      type: 'CustomObject',
+      apiName: 'Order',
+      label: 'Order',
+      properties: { sharingModel: 'Private' },
+    }),
+    // CONTROL: matches the site api name, so it becomes a finding.
+    node({
+      id: 'SharingRule:Case.Guest_Matched',
+      type: 'SharingRule',
+      apiName: 'Case.Guest_Matched',
+      properties: {
+        ruleType: 'guest',
+        accessLevel: 'Read',
+        siteName: 'HelpCentre',
+        sObjectType: 'Case',
+      },
+    }),
+    // ORPHAN 1: names a site this vault does not model.
+    node({
+      id: 'SharingRule:Case.Guest_Unmatched',
+      type: 'SharingRule',
+      apiName: 'Case.Guest_Unmatched',
+      properties: {
+        ruleType: 'guest',
+        accessLevel: 'Edit',
+        siteName: 'RetiredPortal',
+        sObjectType: 'Case',
+      },
+    }),
+    // ORPHAN 2: same, on a DIFFERENT object — the object-scope axis.
+    node({
+      id: 'SharingRule:Order.Guest_Unmatched',
+      type: 'SharingRule',
+      apiName: 'Order.Guest_Unmatched',
+      properties: {
+        ruleType: 'guest',
+        accessLevel: 'Read',
+        siteName: 'RetiredPortal',
+        sObjectType: 'Order',
+      },
+    }),
+    // ORPHAN 3: declares NO siteName — dropped before the name set was even
+    // consulted.
+    node({
+      id: 'SharingRule:Case.Guest_NoSite',
+      type: 'SharingRule',
+      apiName: 'Case.Guest_NoSite',
+      properties: { ruleType: 'guest', accessLevel: 'Read', sObjectType: 'Case' },
+    }),
+    // A CRITERIA rule must never enter the guest bucket at all.
+    node({
+      id: 'SharingRule:Case.Criteria_Rule',
+      type: 'SharingRule',
+      apiName: 'Case.Criteria_Rule',
+      properties: { ruleType: 'criteria', accessLevel: 'Read', sObjectType: 'Case' },
+    }),
+  ],
+  edges: [
+    edge({
+      fromId: 'Network:HelpCentre',
+      toId: ORPHAN_SITE,
+      edgeType: 'references',
+      properties: { via: 'site' },
+    }),
+    edge({
+      fromId: 'Profile:HelpCentre Profile',
+      toId: 'CustomObject:Case',
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+  ],
+};
+
+describe('guestExposureReportHandler — orphan guest sharing rules', () => {
+  let orphanStore: GraphStore;
+  let orphanDir: string;
+  let orphanCtx: Context;
+
+  beforeAll(async () => {
+    orphanDir = mkdtempSync(join(tmpdir(), 'sfi-guest-orphan-'));
+    const opened = await openGraph(join(orphanDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    orphanStore = opened.value;
+    const imported = await importExtractionResults(orphanStore, [orphanSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    orphanCtx = { vaultRoot: orphanDir, manifest: MANIFEST, graph: orphanStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(orphanStore);
+    rmSync(orphanDir, { recursive: true, force: true });
+  });
+
+  it('buckets and discloses every guest rule that attached to no community', async () => {
+    const r = await guestExposureReportHandler(orphanCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    // The control rule became a finding and is therefore NOT an orphan.
+    const ruleFindings = d.findings.filter((f) => f.kind === 'guest-sharing-rule');
+    expect(ruleFindings.map((f) => f.nodeId)).toEqual(['SharingRule:Case.Guest_Matched']);
+
+    // The three unattributable rules are all present — none silently dropped.
+    const orphans = d.orphanGuestRules ?? [];
+    expect(orphans.map((o) => o.ruleId)).toEqual([
+      'SharingRule:Case.Guest_NoSite',
+      'SharingRule:Case.Guest_Unmatched',
+      'SharingRule:Order.Guest_Unmatched',
+    ]);
+    // A criteria rule is not a guest rule and must not appear anywhere.
+    expect(orphans.some((o) => o.ruleId.includes('Criteria'))).toBe(false);
+    // The bucket carries the evidence, not just an id.
+    const noSite = orphans.find((o) => o.ruleId === 'SharingRule:Case.Guest_NoSite')!;
+    expect(noSite.siteName).toBeNull();
+    expect(noSite.objectApiName).toBe('Case');
+    const unmatched = orphans.find((o) => o.ruleId === 'SharingRule:Case.Guest_Unmatched')!;
+    expect(unmatched.siteName).toBe('RetiredPortal');
+    expect(unmatched.accessLevel).toBe('Edit');
+
+    // INVARIANT: every guest rule in the vault is either a finding or an orphan.
+    // Nothing may fall between the two buckets — that gap WAS the defect.
+    const accounted = new Set([
+      ...ruleFindings.map((f) => f.nodeId),
+      ...orphans.map((o) => o.ruleId),
+    ]);
+    for (const id of [
+      'SharingRule:Case.Guest_Matched',
+      'SharingRule:Case.Guest_Unmatched',
+      'SharingRule:Order.Guest_Unmatched',
+      'SharingRule:Case.Guest_NoSite',
+    ]) {
+      expect(accounted.has(id)).toBe(true);
+    }
+
+    // And it is DISCLOSED, mirroring the orphanNetworks disclosure.
+    const disclosure = d.disclosures.find((s) => s.includes('could NOT be attributed'));
+    expect(disclosure).toBeDefined();
+    expect(disclosure).toContain('SharingRule:Case.Guest_Unmatched');
+    expect(disclosure).toContain('never read their absence');
+  });
+
+  it('honours the object scope on the orphan bucket, exactly as on findings', async () => {
+    const r = await guestExposureReportHandler(orphanCtx, { objectApiName: 'Case' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const orphans = r.value.data.orphanGuestRules ?? [];
+    expect(orphans.map((o) => o.ruleId)).toEqual([
+      'SharingRule:Case.Guest_NoSite',
+      'SharingRule:Case.Guest_Unmatched',
+    ]);
+  });
+
+  it('still names the unattributable rules under a communityId scope, and keeps them out of findings', async () => {
+    // The bucket used to be suppressed here on the rationale that other
+    // communities' rules are out of scope, not orphaned. That rationale does
+    // not hold: an unattributable rule belongs to NO community, so it may well
+    // belong to the SCOPED one — a site-label mismatch is exactly how a rule
+    // becomes unattributable — and suppressing it restored the full silence
+    // this bucket exists to end, for the rules most likely to be in scope.
+    const r = await guestExposureReportHandler(orphanCtx, { communityId: ORPHAN_SITE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    const orphans = d.orphanGuestRules ?? [];
+    expect(orphans.map((o) => o.ruleId)).toEqual([
+      'SharingRule:Case.Guest_NoSite',
+      'SharingRule:Case.Guest_Unmatched',
+      'SharingRule:Order.Guest_Unmatched',
+    ]);
+    // …but NOT counted as this community's exposure: they are absent from
+    // `findings` and from its `findingCount`.
+    expect(d.findings.some((f) => orphans.some((o) => o.ruleId === f.nodeId))).toBe(false);
+    // The rule that DOES attribute to this community is still a finding, so the
+    // scoped answer did not simply widen into a full run.
+    expect(
+      d.findings.filter((f) => f.kind === 'guest-sharing-rule').map((f) => f.nodeId),
+    ).toEqual(['SharingRule:Case.Guest_Matched']);
+
+    const disclosure = d.disclosures.find((line) => line.includes('could NOT be attributed'));
+    expect(disclosure).toBeDefined();
+    expect(disclosure).toContain('SharingRule:Case.Guest_Unmatched');
+    expect(disclosure).toContain(ORPHAN_SITE);
+    expect(disclosure).toContain('may well belong to');
+  });
+
+  it('judges attribution against ALL communities, so another site\'s rule is not a false orphan', async () => {
+    // `Guest_Matched` attributes to the modeled site. Under a scope that does
+    // NOT include it, it must still be treated as attributable — the bucket
+    // reports unattributable rules, never merely out-of-scope ones.
+    const r = await guestExposureReportHandler(orphanCtx, { communityId: ORPHAN_SITE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      (r.value.data.orphanGuestRules ?? []).some(
+        (o) => o.ruleId === 'SharingRule:Case.Guest_Matched',
+      ),
+    ).toBe(false);
+  });
+
+  // FAIL-CLOSED PATH: guest rules but NO Experience Cloud surface at all. The
+  // scan used to run BELOW the early return, so every guest rule vanished:
+  // `findings: []`, no bucket, no disclosure, `totalFindings: 0` — the exact
+  // silent drop this bucket exists to end, on the vault state that early
+  // return's own disclosure names ("the vault predates the Experience Cloud
+  // extraction").
+  it('reports every guest rule as an orphan when NO community surface is modeled', async () => {
+    const bareDir = mkdtempSync(join(tmpdir(), 'sfi-guest-nosurface-'));
+    const opened = await openGraph(join(bareDir, 'g.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    try {
+      const imported = await importExtractionResults(opened.value, [
+        {
+          nodes: [
+            node({
+              id: 'SharingRule:Case.Guest_Edit',
+              type: 'SharingRule',
+              apiName: 'Case.Guest_Edit',
+              properties: {
+                ruleType: 'guest',
+                accessLevel: 'Edit',
+                siteName: 'HelpCentre',
+                sObjectType: 'Case',
+              },
+            }),
+            node({
+              id: 'SharingRule:Case.Guest_Read',
+              type: 'SharingRule',
+              apiName: 'Case.Guest_Read',
+              properties: {
+                ruleType: 'guest',
+                accessLevel: 'Read',
+                siteName: 'HelpCentre',
+                sObjectType: 'Case',
+              },
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      expect(imported.ok).toBe(true);
+      const bareCtx = {
+        vaultRoot: bareDir,
+        manifest: MANIFEST,
+        graph: opened.value,
+      } as unknown as Context;
+      const r = await guestExposureReportHandler(bareCtx, {});
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      // Still fail-closed on the community surface itself…
+      expect(d.communities).toEqual([]);
+      expect(d.summary.totalFindings).toBe(0);
+      // …but the guest rules are NAMED, not dropped.
+      expect((d.orphanGuestRules ?? []).map((o) => o.ruleId)).toEqual([
+        'SharingRule:Case.Guest_Edit',
+        'SharingRule:Case.Guest_Read',
+      ]);
+      const disclosure = d.disclosures.find((line) => line.includes('guest sharing rule(s)'));
+      expect(disclosure).toBeDefined();
+      expect(disclosure).toContain('SharingRule:Case.Guest_Edit');
+      expect(disclosure).toContain('no guest exposure');
+    } finally {
+      await closeGraph(opened.value);
+      rmSync(bareDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// GUEST-ORPHAN-BUCKET-HAS-NO-PAGING-CONTRACT.
+//
+// The bucket shipped with no cap and no marker. On a vault holding 600 guest
+// sharing rules and no community surface it emitted 500 rows plus a 28,463-
+// character disclosure naming every id, at ~102 KB against a 40 KB budget. The
+// global envelope guard then tail-trimmed the array to 62 rows while the
+// disclosure still claimed all 500 were "listed in `orphanGuestRules`", and the
+// dropped 438 grants were unreachable from any call (`limit`/`offset` page
+// `findings`, not this bucket). These tests hold the repaired contract: the
+// count never disagrees with the rows delivered, the inline id list is capped,
+// and `orphanOffset` reaches every row.
+// =============================================================================
+describe('guestExposureReportHandler — orphan bucket paging contract', () => {
+  const RULE_COUNT = 120;
+  let pageStore: GraphStore;
+  let pageDir: string;
+  let pageCtx: Context;
+  const allIds = Array.from(
+    { length: RULE_COUNT },
+    (_, i) => `SharingRule:Case.Guest_R${String(i).padStart(3, '0')}`,
+  );
+
+  beforeAll(async () => {
+    pageDir = mkdtempSync(join(tmpdir(), 'sfi-guest-orphan-page-'));
+    const opened = await openGraph(join(pageDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    pageStore = opened.value;
+    const imported = await importExtractionResults(pageStore, [
+      {
+        nodes: allIds.map((id) =>
+          node({
+            id,
+            type: 'SharingRule',
+            apiName: id.slice('SharingRule:'.length),
+            properties: {
+              ruleType: 'guest',
+              accessLevel: 'Read',
+              siteName: 'NoSuchSite',
+              sObjectType: 'Case',
+            },
+          }),
+        ),
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    pageCtx = { vaultRoot: pageDir, manifest: MANIFEST, graph: pageStore } as unknown as Context;
+  });
+
+  afterAll(async () => {
+    await closeGraph(pageStore);
+    rmSync(pageDir, { recursive: true, force: true });
+  });
+
+  it('caps the page, states the total, and never disagrees with the rows delivered', async () => {
+    const r = await guestExposureReportHandler(pageCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const page = d.orphanGuestRulesPage;
+    expect(page).toBeDefined();
+    if (page === undefined) return;
+
+    expect(page.totalCount).toBe(RULE_COUNT);
+    expect(page.returnedCount).toBe((d.orphanGuestRules ?? []).length);
+    expect(page.returnedCount).toBeLessThanOrEqual(page.limit);
+    expect(page.returnedCount).toBeLessThan(RULE_COUNT);
+    expect(page.hasMore).toBe(true);
+    expect(page.nextOffset).toBe(page.offset + page.returnedCount);
+
+    // The disclosure states BOTH numbers and names only a capped id sample —
+    // it used to spell out every id, which is what made the string 28 KB.
+    const disclosure = d.disclosures.find((line) => line.includes('guest sharing rule(s)'));
+    expect(disclosure).toBeDefined();
+    expect(disclosure).toContain(`carries ${String(page.returnedCount)} of the ${String(RULE_COUNT)}`);
+    expect((disclosure?.match(/SharingRule:/g) ?? []).length).toBeLessThanOrEqual(10);
+    expect(disclosure).toContain('orphanOffset');
+  });
+
+  it('reaches every dropped row through orphanOffset — none is unrecoverable', async () => {
+    const seen: string[] = [];
+    let offset: number | null = 0;
+    let guard = 0;
+    while (offset !== null && guard < 50) {
+      guard += 1;
+      const r: Awaited<ReturnType<typeof guestExposureReportHandler>> =
+        await guestExposureReportHandler(pageCtx, { orphanOffset: offset });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const page = r.value.data.orphanGuestRulesPage;
+      expect(page).toBeDefined();
+      if (page === undefined) return;
+      expect(page.totalCount).toBe(RULE_COUNT);
+      expect(page.returnedCount).toBe((r.value.data.orphanGuestRules ?? []).length);
+      seen.push(...(r.value.data.orphanGuestRules ?? []).map((o) => o.ruleId));
+      offset = page.nextOffset;
+    }
+    expect(seen).toEqual(allIds);
+  });
+});
+
+// =============================================================================
+// GUEST-ORPHAN-DISCLOSURE-DENIES-A-NETWORK-THE-SAME-PAYLOAD-NAMES.
+//
+// `attributableSiteNames` collected Network api names by walking MODELED sites,
+// so a Network whose `<site>` points at an unmodeled CustomSite contributed no
+// key. A guest rule declaring that Network then landed in `orphanGuestRules`
+// under "matches no ... Network api name in this vault", while the disclosure
+// directly above it said "1 Network(s) reference a CustomSite not modeled in
+// this vault (Network:Partner_Net)" — one payload, two contradictory claims
+// about the same node.
+// =============================================================================
+describe('guestExposureReportHandler — a Network the vault holds is attributable', () => {
+  let netStore: GraphStore;
+  let netDir: string;
+  let netCtx: Context;
+
+  beforeAll(async () => {
+    netDir = mkdtempSync(join(tmpdir(), 'sfi-guest-unmodeled-site-'));
+    const opened = await openGraph(join(netDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    netStore = opened.value;
+    const imported = await importExtractionResults(netStore, [
+      {
+        nodes: [
+          node({
+            id: 'CustomSite:Help_Portal',
+            type: 'CustomSite',
+            apiName: 'Help_Portal',
+            label: 'Help Portal',
+            properties: { active: true, siteType: 'ChatterNetwork', masterLabel: 'Help Portal' },
+          }),
+          node({
+            id: 'Network:Help_Net',
+            type: 'Network',
+            apiName: 'Help_Net',
+            properties: { status: 'Live', site: 'Help_Portal' },
+          }),
+          // The Network whose CustomSite this vault does NOT model.
+          node({
+            id: 'Network:Partner_Net',
+            type: 'Network',
+            apiName: 'Partner_Net',
+            properties: { status: 'Live', site: 'Missing_Portal' },
+          }),
+          node({
+            id: 'SharingRule:Account.Guest_Names_Network',
+            type: 'SharingRule',
+            apiName: 'Account.Guest_Names_Network',
+            properties: {
+              ruleType: 'guest',
+              accessLevel: 'Read',
+              siteName: 'Partner_Net',
+              sObjectType: 'Account',
+            },
+          }),
+          node({
+            id: 'SharingRule:Account.Guest_Names_Missing_Site',
+            type: 'SharingRule',
+            apiName: 'Account.Guest_Names_Missing_Site',
+            properties: {
+              ruleType: 'guest',
+              accessLevel: 'Read',
+              siteName: 'Missing_Portal',
+              sObjectType: 'Account',
+            },
+          }),
+        ],
+        edges: [
+          edge({
+            fromId: 'Network:Help_Net',
+            toId: 'CustomSite:Help_Portal',
+            edgeType: 'references',
+            properties: { via: 'site' },
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    netCtx = { vaultRoot: netDir, manifest: MANIFEST, graph: netStore } as unknown as Context;
+  });
+
+  afterAll(async () => {
+    await closeGraph(netStore);
+    rmSync(netDir, { recursive: true, force: true });
+  });
+
+  it('does not orphan a rule that names a modeled Network with an unmodeled site', async () => {
+    const r = await guestExposureReportHandler(netCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    // The Network IS named as holding an unmodeled CustomSite…
+    const networkDisclosure = d.disclosures.find((line) =>
+      line.includes('reference a CustomSite not modeled'),
+    );
+    expect(networkDisclosure).toContain('Network:Partner_Net');
+
+    // …so the rule declaring that Network must NOT be reported as matching no
+    // Network api name in this vault.
+    const orphanIds = (d.orphanGuestRules ?? []).map((o) => o.ruleId);
+    expect(orphanIds).toEqual(['SharingRule:Account.Guest_Names_Missing_Site']);
+  });
+
+  it('points the remedy at the diagnosed missing CustomSite, not at Setup', async () => {
+    const r = await guestExposureReportHandler(netCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const disclosure = r.value.data.disclosures.find((line) =>
+      line.includes('could NOT be attributed'),
+    );
+    expect(disclosure).toBeDefined();
+    expect(disclosure).toContain('likelier cause');
+    expect(disclosure).toContain('reference a CustomSite this vault does not model');
+    expect(disclosure).not.toContain("Confirm each rule's site in Setup");
+  });
+});

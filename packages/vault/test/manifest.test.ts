@@ -15,7 +15,9 @@ import {
   rankUncoveredFamilies,
   readCoverageEntries,
   readSkippedDirectories,
+  retrievedNotParsedTypes,
   saveManifest,
+  SHARED_CONTAINER_TYPES,
   summarizeCoverage,
   type ExtendedVaultManifest,
 } from '../src/manifest.js';
@@ -734,5 +736,137 @@ describe('rankUncoveredFamilies (CR-CAP-20)', () => {
         modeledType: true,
       },
     ]);
+  });
+});
+
+// =============================================================================
+// NOT PARSED, MEMBER NEVER ARRIVED (spec row 7). `{requested:true,
+// retrieveConfirmed:true, retrieved:0}` was read as COVERED — "the describe
+// confirmed the type and the clean retrieve returned zero members, so the org
+// genuinely has none". That reading is only sound when the type's OWN file was
+// among what came back. For a type dispatched by exact filename out of a SHARED
+// container, it was not: the container returned (139 `settings/` files landed on
+// the probe org), the dispatcher for the filename ships, and still nothing
+// parsed — so the zero is a BUILD outcome, not an org fact. That made
+// `SessionSettings` and `FieldServiceSettings` read as covered — and, because
+// this summary is what `sfi.interpret` feeds its `dependsOnCoverage` hedge, the
+// reasoning engine reported `complete` coverage over a plane it had never read.
+// NOTE the cause, since it decides the remedy: neither member file is on disk
+// (Salesforce nests session settings inside `Security.settings-meta.xml` and
+// emits no `Session.settings` file at all), so a re-retrieve closes nothing.
+// =============================================================================
+
+/** A manifest with the shared `settings/` container walked past (or not). */
+const settingsContainerManifest = (skippedSettingsFiles: number): ExtendedVaultManifest => ({
+  ...sampleManifest(),
+  ...(skippedSettingsFiles > 0 ? { skippedDirectories: { settings: skippedSettingsFiles } } : {}),
+  coverage: [
+    { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+    { type: 'SessionSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+    { type: 'FieldServiceSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+    // A confirmed-empty type whose OWN container the dispatcher DOES handle —
+    // its zero is honest and must stay covered. Scopes the fix to the class.
+    { type: 'WorkflowRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+  ],
+});
+
+const SETTINGS_TYPES = ['SessionSettings', 'FieldServiceSettings', 'WorkflowRule', 'CustomObject'];
+
+describe('summarizeCoverage — retrieved but not parsed', () => {
+  it('every type in SHARED_CONTAINER_TYPES resolves once its container is skipped', () => {
+    // The table is the whole definition of the class — assert it end to end
+    // rather than spot-checking two names, so adding a type to the table
+    // automatically extends the guarantee.
+    for (const [container, types] of Object.entries(SHARED_CONTAINER_TYPES)) {
+      const manifest: ExtendedVaultManifest = {
+        ...sampleManifest(),
+        skippedDirectories: { [container]: 1 },
+        coverage: types.map((type) => ({
+          type,
+          requested: true,
+          retrieved: 0,
+          errored: false,
+          neverModeled: false,
+          retrieveConfirmed: true,
+        })),
+      };
+      const resolved = retrievedNotParsedTypes(manifest);
+      for (const type of types) expect(resolved.has(type)).toBe(true);
+      const summary = summarizeCoverage(manifest, types);
+      expect(summary.coveredTypes).toEqual([]);
+      expect([...(summary.retrievedNotParsedTypes ?? [])].sort()).toEqual([...types].sort());
+      expect(summary.status).toBe('partial');
+    }
+  });
+
+  it('demotes ONLY the shared-container types out of covered, never the whole confirmed-empty class', () => {
+    const summary = summarizeCoverage(settingsContainerManifest(139), SETTINGS_TYPES);
+    // The two settings types leave `covered` …
+    expect(summary.coveredTypes).not.toContain('SessionSettings');
+    expect(summary.coveredTypes).not.toContain('FieldServiceSettings');
+    // … while a confirmed-empty type the dispatcher DOES handle stays covered.
+    expect(summary.coveredTypes).toContain('WorkflowRule');
+    expect(summary.coveredTypes).toContain('CustomObject');
+    expect(summary.retrievedNotParsedTypes).toEqual([
+      'FieldServiceSettings',
+      'SessionSettings',
+    ]);
+  });
+
+  it('feeds missingCoverage — the set every dependsOnCoverage hedge reads', () => {
+    const summary = summarizeCoverage(settingsContainerManifest(139), ['SessionSettings']);
+    // This is EXACTLY the call `sfi.interpret` makes for a rule declaring
+    // `dependsOnCoverage: ['SessionSettings']`. It used to return `complete`
+    // with an empty missingCoverage, so the rule was never hedged.
+    expect(summary.status).toBe('partial');
+    expect(summary.missingCoverage).toContain('SessionSettings');
+  });
+
+  it('keeps the state OUT of partialTypes — the two have opposite remedies', () => {
+    const summary = summarizeCoverage(settingsContainerManifest(139), SETTINGS_TYPES);
+    // `partial` means "re-retrieve it". The container already came back without
+    // these members, so folding them in would prescribe a fix that cannot work.
+    expect(summary.partialTypes).not.toContain('SessionSettings');
+    expect(summary.partialTypes).not.toContain('FieldServiceSettings');
+  });
+
+  it('is INERT when the container was fully dispatched — no key, byte-identical summary', () => {
+    const clean = summarizeCoverage(settingsContainerManifest(0), SETTINGS_TYPES);
+    expect(clean.status).toBe('complete');
+    expect([...clean.coveredTypes].sort()).toEqual([...SETTINGS_TYPES].sort());
+    // Absent, not empty — an unaffected vault serialises exactly as before.
+    expect('retrievedNotParsedTypes' in clean).toBe(false);
+    expect(retrievedNotParsedTypes(settingsContainerManifest(0)).size).toBe(0);
+  });
+
+  it('reads the container evidence from the CLI raw-dir coverage row too', () => {
+    // A manifest that carries the skipped-dir `neverModeled` row but no
+    // `skippedDirectories` map must still resolve — the evidence is the same
+    // fact recorded in the other place.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'SessionSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'settings', requested: true, retrieved: 139, errored: false, neverModeled: true },
+      ],
+    };
+    expect(retrievedNotParsedTypes(manifest).has('SessionSettings')).toBe(true);
+    expect(summarizeCoverage(manifest, ['SessionSettings']).coveredTypes).toEqual([]);
+  });
+
+  it('does NOT fire on a retrieved:0 row without the confirmation signal (that is still partial)', () => {
+    // Precedence guard: an unconfirmed empty row is `partial` (case (c)), and
+    // must not be relabelled as retrieved-but-not-parsed — the two states have
+    // different remedies and conflating them would hide a real retrieve gap.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: { settings: 139 },
+      coverage: [
+        { type: 'SessionSettings', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+    const summary = summarizeCoverage(manifest, ['SessionSettings']);
+    expect(summary.partialTypes).toEqual(['SessionSettings']);
+    expect('retrievedNotParsedTypes' in summary).toBe(false);
   });
 });

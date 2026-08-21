@@ -44,7 +44,9 @@ export {
   rankUncoveredFamilies,
   readCoverageEntries,
   readSkippedDirectories,
+  retrievedNotParsedTypes,
   saveManifest,
+  SHARED_CONTAINER_TYPES,
   summarizeCoverage,
 } from './manifest.js';
 export type {
