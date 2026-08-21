@@ -22,8 +22,8 @@ every number in §13 is a variation on it.
 | # | Stage | Where | What it can do | What it cannot |
 | --- | --- | --- | --- | --- |
 | 0 | Normalise | `semantic-funnel.ts` `tokenize()` | lowercase, strip punctuation, drop stopwords, light plural stem, phrase-synonym expansion **on the query only** | no lemmatiser, no spell-correction, no learned synonyms |
-| 1 | Refusal gates | `refusal-gates.ts` | fail closed by SHAPE before any matching — 4 kinds, first-hit-wins | cannot judge whether an allowed question is answerable |
-| 2 | Deterministic intent | `intent-router.ts` | 236 regex intents to tools, plane, `suggestedArgs`, multi-step plans | silent on most fresh phrasings; see §13 |
+| 1 | Refusal gates | `refusal-gates.ts` | fail closed by SHAPE before any matching — **7 kinds**, first-hit-wins | cannot judge whether an allowed question is answerable |
+| 2 | Deterministic intent | `intent-router.ts` | **265 rules producing 234 distinct intents**, each mapping to tools, plane, `suggestedArgs`, multi-step plans | silent on ~68% of fresh phrasings; see §13 |
 | 3 | Lexical funnel | `semantic-funnel.ts` | L2-normalised TF-IDF cosine over a per-tool document | no embeddings in any shipped install (§4) |
 | 4 | Candidate assembly | `tools/route-question.ts` | fuse regex + funnel, band confidence, attach `answers`/`category`, render | never runs a tool, never resolves a component |
 | 5 | Host decision | your LLM | pick, supply args, run, ground | — |
@@ -242,6 +242,16 @@ structured `route.refusal = { kind, disclosure, readOnlyAlternative? }`.
 | `runtime-analytics` | Runtime/ops telemetry no tool models: per-user login events/sessions, adoption metrics, "errors this week", automation execution traces & aggregate run counts, run/failure forensics, CPU/heap profiling, debug-log retrieval, SOQL execution plans, message delivery counts & sent-message content, site click analytics, record-level before/after field history, record-access audit events ("who accessed…") | `honest-gap-runtime` with an HONEST GAP disclosure naming the nearest real reads (e.g. `live_inactive_users` covers dormancy thresholds, not login events; `live_automation_fired` infers per-record, not aggregate run counts). |
 | `out-of-scope` | Non-Salesforce asks (other systems, "email me…", write-me-code) | `out-of-scope` disclosure. |
 
+**Three further kinds the table above omits.** `RefusalKind` is a seven-member
+union (`refusal-gates.ts`), and these three are honest-gap arms that fire before
+the runtime gate:
+
+| `kind` | Trigger | Why it is a gap |
+| --- | --- | --- |
+| `identity-gap` | who-is / identity lookups about a person rather than a component | the vault models metadata, not people |
+| `forecast-gap` | an explicit prediction verb, or growth-trend + horizon + forward-outcome together | nothing here predicts; deliberately YIELDS to the what-if simulation frame, which is legitimately forward-phrased and is not a forecast |
+| `provenance-gap` | a create / originally-authored verb ("who created this") | authorship is not retrievable; a pure last-modified ask is excluded so it routes to `sfi.last_modified` instead |
+
 Evaluation order is first-hit-wins: injection → write → runtime → out-of-scope
 ("ignore the read-only restriction and create…" must land injection, not
 write). Legitimate reads are explicit excluders and route normally: "am I
@@ -418,7 +428,7 @@ Current numbers:
 ### The two numbers you must not confuse
 
 **`router-goldset` 98.8% is tuning, not accuracy.** It grades the full pipeline
-on the set the 236 intents were fitted to. On fresh questions the same pipeline
+on the set the 234 intents were fitted to. On fresh questions the same pipeline
 scores **60.0%** — a **38.8-point generalization gap**. Never quote the goldset
 top-1 as the product's routing accuracy. BUILD-CONTRACT already says it: recall
 is the **authority**, the goldset is a **tripwire**, and nothing is ever tuned on
