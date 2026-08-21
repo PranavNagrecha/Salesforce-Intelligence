@@ -7,10 +7,9 @@
  * subscribers — Apex triggers, Apex classes, and Flows that listen to
  * `*ChangeEvent` or `*__ChangeEvent` synthetic events.
  *
- * Per the task definition the tool LEVERAGES THE EXISTING `listensTo`
- * EDGE FAMILY (produced by v1.5 R3) rather than introducing a new
- * `subscribesToChange` edge type — CDC events are recognized by NAME
- * PATTERN on the target apiName:
+ * The tool LEVERAGES EXISTING EDGE FAMILIES rather than introducing a
+ * new `subscribesToChange` edge type — CDC events are recognized by
+ * NAME PATTERN on the target apiName:
  *
  *   - Standard objects: `{ObjectName}ChangeEvent` (no separator).
  *   - Custom objects: `{ObjectNameWithout__c}__ChangeEvent`.
@@ -18,14 +17,29 @@
  * The architect's question this tool answers: "if the data on this
  * object changes via the platform's CDC stream, what code runs?"
  *
+ * TWO edge families answer it, not one. A Flow / Apex class subscribes
+ * via `listensTo`; an APEX CDC TRIGGER does not. `apex-trigger.ts`
+ * emits `triggersOn` unconditionally from the trigger header and gates
+ * the extra `listensTo` edge on the `__e` Platform Event suffix, so
+ * `trigger X on AccountChangeEvent` produces `triggersOn` into
+ * `CustomObject:AccountChangeEvent` and NO `listensTo` edge at all.
+ * Reading only `listensTo` made every Apex CDC trigger invisible; the
+ * scan now reads both, tagging the `triggersOn` rows with
+ * `subscriptionEdge` so the mechanisms stay tellable apart.
+ *
  * Implementation notes:
  *   - When `sObjectFilter` is supplied, we resolve the synthetic
  *     ChangeEvent id from the filter (e.g., `Account` →
  *     `AccountChangeEvent`; `Order__c` → `Order__ChangeEvent`) and
- *     scan incoming `listensTo` edges for that single event.
- *   - When omitted, we walk every CustomObject node whose apiName
- *     matches the CDC name-pattern rule and aggregate their incoming
- *     `listensTo` edges.
+ *     scan that single event's incoming subscription edges.
+ *   - When omitted, the scan set comes from Change Event EDGE TARGETS,
+ *     not from retrieved nodes. A `{X}ChangeEvent` is synthesised by
+ *     the platform and the Metadata API never emits it, so a
+ *     ChangeEvent is never a node on ANY org: the previous node-only
+ *     walk returned an EMPTY scan set every time, and the tool still
+ *     reported `totalSubscribers: 0` — a "did not check" presented as
+ *     "checked and found nothing". `summary.scannedChangeEvents` now
+ *     reports the denominator, and an empty scan set says so.
  *   - Subscribers are restricted to the same three node types as
  *     `event_subscribers`: ApexTrigger, ApexClass, Flow. Other node
  *     types (e.g., a hypothetical custom subscriber) are filtered out
@@ -38,7 +52,7 @@
  *   - Honesty axis (verbatim in `disclosure`): CDC subscription
  *     detection here recognizes by NAME PATTERN only. The
  *     `EventBus.subscribe(...)` programmatic registration path is
- *     invisible to v2.8. (CR-CAP-18: the DECLARED per-member filter
+ *     invisible. (CR-CAP-18: the DECLARED per-member filter
  *     expressions in `*.platformEventChannelMember-meta.xml` ARE now
  *     extracted — surfaced on the publish-side `references` edge — but
  *     that is the declared XML text, NOT runtime filter evaluation of
@@ -54,7 +68,13 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import {
+  danglingTargetIdsMatching,
+  getNodeById,
+  isChangeEventApiName,
+  listEdges,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -99,16 +119,11 @@ const STANDARD_CHANGE_EVENT_SUFFIX = 'ChangeEvent';
  */
 const CUSTOM_OBJECT_SUFFIX = '__c';
 
-/**
- * Recognize whether an apiName (the part after `CustomObject:`)
- * matches the CDC event name pattern. Returns `true` for any name
- * ending in `ChangeEvent` (standard form) or `__ChangeEvent` (custom
- * form). Returns `false` for `__e`-suffixed Platform Events and for
- * regular sObjects.
- */
-const isChangeEventApiName = (apiName: string): boolean =>
-  apiName.endsWith(STANDARD_CHANGE_EVENT_SUFFIX) &&
-  apiName.length > STANDARD_CHANGE_EVENT_SUFFIX.length;
+// Recognizing a CDC event name (`AccountChangeEvent` / `Order__ChangeEvent`,
+// never a `__e` Platform Event or a regular sObject) is `isChangeEventApiName`
+// from `@sf-intelligence/graph` — the SAME predicate the phantom classifier and
+// the refresh's auto-expansion gate read, so this tool cannot disagree with the
+// surface that decides a ChangeEvent is unretrievable.
 
 /**
  * Compute the CDC event apiName for a given sObject apiName. Standard
@@ -157,6 +172,16 @@ export interface CdcSubscriber {
   readonly subscriberType: 'ApexClass' | 'ApexTrigger' | 'Flow';
   readonly changeEventName: string;
   readonly source: string;
+  /**
+   * Present ONLY (as `'triggersOn'`) when the row came from the subscriber's
+   * DECLARED `triggersOn` edge rather than a `listensTo` edge — the Apex CDC
+   * trigger case. `trigger X on AccountChangeEvent (after insert)` mints
+   * `triggersOn` and NEVER `listensTo` (the trigger extractor gates `listensTo`
+   * on the `__e` Platform Event suffix), so a tool reading only `listensTo`
+   * cannot see any Apex CDC trigger. Absent on a `listensTo` row, which keeps
+   * that row byte-identical to the pre-fix shape.
+   */
+  readonly subscriptionEdge?: 'triggersOn';
 }
 
 /**
@@ -196,11 +221,20 @@ export interface CdcSubscribersOutput {
     readonly totalChannelMembers: number;
     /**
      * Count of DISTINCT Change Events that are enabled — via a modeled
-     * `listensTo` subscriber OR a channel-member selection. Counting
-     * membership (not only subscribed events) is what stops an
-     * enabled-but-unsubscribed CDC stream from reading as `0`.
+     * subscriber OR a channel-member selection. Counting membership (not only
+     * subscribed events) is what stops an enabled-but-unsubscribed CDC stream
+     * from reading as `0`.
      */
     readonly uniqueChangeEvents: number;
+    /**
+     * How many Change Events this call actually SCANNED for subscribers — the
+     * denominator that makes `totalSubscribers: 0` interpretable. `0` here means
+     * NOTHING WAS CHECKED (no Change Event is referenced anywhere in this
+     * vault), which is a different answer from "every stream was checked and
+     * none has a subscriber". Before this existed the two were indistinguishable
+     * in the response.
+     */
+    readonly scannedChangeEvents: number;
   };
   readonly disclosure: string;
 }
@@ -216,7 +250,23 @@ export interface CdcSubscribersOutput {
  * filter EVALUATION of which records flow through the channel.
  */
 const CDC_SUBSCRIBERS_DISCLOSURE =
-  'v2.8 recognizes CDC subscribers by name pattern on the `listensTo` edge target (objects ending in `ChangeEvent` or `__ChangeEvent`). The `EventBus.subscribe(...)` registration is NOT modeled, so subscribers may exist that this tool cannot see. `channelMembers` surfaces CDC ENABLEMENT: a `PlatformEventChannelMember` that selects a Change Event means CDC is on for that object even when no code subscribes — an empty `subscribers` list with a non-empty `channelMembers` list is "enabled, no modeled subscribers", NOT "CDC unused". CR-CAP-18: per-member filter expressions in `*.platformEventChannelMember-meta.xml` ARE extracted (declared XML text — NOT runtime filter evaluation of which records flow).';
+  'CDC subscribers are recognized by name pattern on the edge TARGET (objects ending in `ChangeEvent` or `__ChangeEvent`) across two edge families: a Flow / Apex-class `listensTo` edge, and an Apex CDC trigger\'s declared `triggersOn` edge — `trigger X on AccountChangeEvent` mints `triggersOn` and never `listensTo`, so a row carrying `subscriptionEdge: "triggersOn"` is that trigger. STRUCTURAL: a `{X}ChangeEvent` is synthesised by the platform and is NEVER a retrievable CustomObject on any org, so the scan set is built from Change Event edge TARGETS, not from retrieved nodes — `summary.scannedChangeEvents` reports how many were actually checked, and `0` there means nothing was checked rather than nothing was found. The `EventBus.subscribe(...)` registration is NOT modeled, so subscribers may exist that this tool cannot see. `channelMembers` surfaces CDC ENABLEMENT: a `PlatformEventChannelMember` that selects a Change Event means CDC is on for that object even when no code subscribes — an empty `subscribers` list with a non-empty `channelMembers` list is "enabled, no modeled subscribers", NOT "CDC unused". CR-CAP-18: per-member filter expressions in `*.platformEventChannelMember-meta.xml` ARE extracted (declared XML text — NOT runtime filter evaluation of which records flow).';
+
+/**
+ * Appended when the scan set was EMPTY — no Change Event is referenced by any
+ * edge in this vault, so `totalSubscribers: 0` is "nothing to check", not "every
+ * stream checked, none subscribed". Emitted only on that path.
+ */
+const CDC_NOTHING_SCANNED_NOTE =
+  ' NOTE: `scannedChangeEvents` is 0 — this vault holds NO reference to any Change Event (no CDC trigger, no channel member, no subscriber edge), so nothing was scanned. Read this as "this vault records no CDC usage", NOT as "CDC streams were checked and found unsubscribed". If the org does use CDC, the referencing metadata was not retrieved.';
+
+/**
+ * Appended in SCOPED mode when the requested object\'s Change Event is not
+ * referenced by anything in the vault — the same "nothing to check" shape as
+ * {@link CDC_NOTHING_SCANNED_NOTE} but named to the one stream asked about.
+ */
+const cdcScopedNothingReferencedNote = (changeEventName: string): string =>
+  ` NOTE: nothing in this vault references \`${changeEventName}\` — no subscriber edge, no channel member. A \`{X}ChangeEvent\` is never a retrievable component, so its ABSENCE from the graph is expected and proves nothing about the org: this is "no CDC usage recorded for this object", NOT "CDC checked and unused".`;
 
 /**
  * Extra disclosure line appended when CDC is ENABLED (channel members
@@ -267,8 +317,26 @@ const resolveSubscriber = async (
     subscriberType: node.type as 'ApexClass' | 'ApexTrigger' | 'Flow',
     changeEventName,
     source: edge.source,
+    // Tag ONLY the triggersOn rows, so a `listensTo` row is byte-identical to
+    // the pre-fix shape and the two subscription mechanisms stay tellable apart.
+    ...(edge.edgeType === 'triggersOn'
+      ? { subscriptionEdge: 'triggersOn' as const }
+      : {}),
   });
 };
+
+/**
+ * The edge families that record a CDC subscription, in scan order.
+ *
+ * `listensTo` is what the Flow / Apex-class extractors emit. `triggersOn` is
+ * what an Apex CDC TRIGGER emits: `apex-trigger.ts` writes `triggersOn`
+ * unconditionally from the trigger header and gates the extra `listensTo` edge
+ * on the `__e` Platform Event suffix, so a CDC trigger has a `triggersOn` edge
+ * into `CustomObject:{X}ChangeEvent` and NO `listensTo` edge at all. Reading
+ * only `listensTo` therefore made every Apex CDC trigger invisible to this tool.
+ * This reads the edge that already exists rather than minting a new type.
+ */
+const CDC_SUBSCRIPTION_EDGE_TYPES = ['listensTo', 'triggersOn'] as const;
 
 /**
  * Collect every Change Event id present in the graph. Used when the
@@ -278,21 +346,36 @@ const resolveSubscriber = async (
 const collectChangeEventIds = async (
   ctx: Context,
 ): Promise<Result<readonly ComponentId[], string>> => {
-  // CustomObject is the only node type that holds CDC event names; the
-  // synthetic ChangeEvent type from the AsyncTopologySemantics spec
-  // becomes a CustomObject in the v2.8 graph because the v1.5 R3
-  // `listensTo` producers emit `CustomObject:` targets (not a new
-  // synthetic prefix). Walk every CustomObject and filter by the
-  // CDC name-pattern rule.
+  const ids = new Set<ComponentId>();
+
+  // A retrieved ChangeEvent NODE. Structurally impossible on a real org (see
+  // below) but read anyway, so the scan set is defined by what the graph holds
+  // rather than by an assumption about what the platform emits.
   const result = await listNodesByType(ctx.graph, 'CustomObject', {
     limit: 500,
   });
   if (!result.ok) return err(result.error.message);
-  const ids: ComponentId[] = [];
   for (const node of result.value) {
-    if (isChangeEventApiName(node.apiName)) ids.push(node.id);
+    if (isChangeEventApiName(node.apiName)) ids.add(node.id);
   }
-  return ok(ids);
+
+  // THE LOAD-BEARING SOURCE. A `{X}ChangeEvent` is synthesised by the platform
+  // and the Metadata API emits no component for it, so a ChangeEvent is NEVER a
+  // retrieved node on ANY org — the node scan above returns nothing, always.
+  // Scanning only nodes therefore meant org-wide mode checked ZERO events and
+  // still reported `totalSubscribers: 0`: "did not check" rendered as "checked
+  // and found nothing". The events that exist are the DANGLING edge targets an
+  // Apex CDC trigger (`triggersOn`) or a channel member (`references`) points
+  // at. `%CustomObject:%` is an over-broad SQL prefilter over dangling targets
+  // only; the exact CDC name shape is decided in JS.
+  const dangling = await danglingTargetIdsMatching(ctx.graph, CHANGE_EVENT_ID_PREFIX);
+  if (!dangling.ok) return err(dangling.error.message);
+  for (const id of dangling.value) {
+    if (!id.startsWith(CHANGE_EVENT_ID_PREFIX)) continue;
+    if (isChangeEventApiName(id.slice(CHANGE_EVENT_ID_PREFIX.length))) ids.add(id);
+  }
+
+  return ok([...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
 };
 
 /**
@@ -421,6 +504,9 @@ export const cdcSubscribersHandler = async (
 
   const subscribers: CdcSubscriber[] = [];
   const uniqueEvents = new Set<string>();
+  // The denominator behind `totalSubscribers`. Counted per event actually walked
+  // so a `0` result can say whether anything was checked at all.
+  let scannedChangeEvents = 0;
   for (const eventId of eventIds) {
     // Recover the event's apiName from the canonical id form
     // `CustomObject:{ApiName}` — splitting on the first ':' is the
@@ -430,28 +516,33 @@ export const cdcSubscribersHandler = async (
     const apiName = eventId.slice(colon + 1);
     if (!isChangeEventApiName(apiName)) continue;
 
-    const edgesResult = await listEdges(ctx.graph, eventId, {
-      direction: 'in',
-      edgeType: 'listensTo',
-    });
-    if (!edgesResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${edgesResult.error.message}`,
-      });
-    }
+    scannedChangeEvents += 1;
     let producedAtLeastOne = false;
-    for (const edge of edgesResult.value) {
-      const resolved = await resolveSubscriber(ctx, edge, apiName);
-      if (!resolved.ok) {
+    // Both subscription edge families — `listensTo` (Flow / Apex class) and
+    // `triggersOn` (the Apex CDC trigger, which never emits `listensTo`).
+    for (const edgeType of CDC_SUBSCRIPTION_EDGE_TYPES) {
+      const edgesResult = await listEdges(ctx.graph, eventId, {
+        direction: 'in',
+        edgeType,
+      });
+      if (!edgesResult.ok) {
         return err({
           kind: 'internal',
-          message: `graph query failed: ${resolved.error}`,
+          message: `graph query failed: ${edgesResult.error.message}`,
         });
       }
-      if (resolved.value !== null) {
-        subscribers.push(resolved.value);
-        producedAtLeastOne = true;
+      for (const edge of edgesResult.value) {
+        const resolved = await resolveSubscriber(ctx, edge, apiName);
+        if (!resolved.ok) {
+          return err({
+            kind: 'internal',
+            message: `graph query failed: ${resolved.error}`,
+          });
+        }
+        if (resolved.value !== null) {
+          subscribers.push(resolved.value);
+          producedAtLeastOne = true;
+        }
       }
     }
     if (producedAtLeastOne) uniqueEvents.add(apiName);
@@ -474,10 +565,21 @@ export const cdcSubscribersHandler = async (
 
   // When CDC is enabled (members present) but no code subscribes, make the
   // "0 subscribers ≠ 0 usage" distinction explicit in the disclosure.
-  const disclosure =
-    channelMembers.length > 0 && sorted.length === 0
-      ? CDC_SUBSCRIBERS_DISCLOSURE + CDC_ENABLED_NO_SUBSCRIBERS_NOTE
-      : CDC_SUBSCRIBERS_DISCLOSURE;
+  let disclosure = CDC_SUBSCRIBERS_DISCLOSURE;
+  if (channelMembers.length > 0 && sorted.length === 0) {
+    disclosure += CDC_ENABLED_NO_SUBSCRIBERS_NOTE;
+  }
+  // Separate the two ways a `0` can arise. Org-wide with an EMPTY scan set means
+  // nothing was checked; a scoped call with no subscriber and no membership
+  // means that one stream is referenced by nothing. Both were previously
+  // indistinguishable from "checked every stream, found no subscriber".
+  if (objectFilter === undefined) {
+    if (scannedChangeEvents === 0) disclosure += CDC_NOTHING_SCANNED_NOTE;
+  } else if (sorted.length === 0 && channelMembers.length === 0) {
+    disclosure += cdcScopedNothingReferencedNote(
+      sObjectApiNameToCdcEventName(objectFilter),
+    );
+  }
 
   return ok({
     data: {
@@ -487,6 +589,7 @@ export const cdcSubscribersHandler = async (
         totalSubscribers: sorted.length,
         totalChannelMembers: channelMembers.length,
         uniqueChangeEvents: uniqueEvents.size,
+        scannedChangeEvents,
       },
       disclosure,
     },

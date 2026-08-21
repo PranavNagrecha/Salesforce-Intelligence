@@ -546,3 +546,135 @@ describe('cdcSubscribersInputSchema', () => {
     ).toBe(false);
   });
 });
+
+// =============================================================================
+// CDC-SUBSCRIBERS-SCANS-NOTHING-AND-REPORTS-ZERO
+//
+// The fixtures above seed a ChangeEvent NODE. A real org never has one: the
+// platform synthesises `{X}ChangeEvent` and the Metadata API emits no component
+// for it, so it exists ONLY as a dangling edge target. Two consequences the
+// fixtures hid:
+//
+//   1. Org-wide mode built its scan set from `listNodesByType('CustomObject')`,
+//      which on a real vault yields ZERO ChangeEvents — so it checked nothing
+//      and still reported `totalSubscribers: 0`.
+//   2. An APEX CDC TRIGGER emits `triggersOn`, never `listensTo` (the trigger
+//      extractor gates `listensTo` on the `__e` suffix), so reading only
+//      `listensTo` made every Apex CDC trigger invisible.
+//
+// These fixtures use the REAL shape — dangling ChangeEvent targets, no node.
+// =============================================================================
+
+const REAL_SHAPE_EVENT = 'CustomObject:ContactChangeEvent';
+const REAL_SHAPE_TRIGGER = 'ApexTrigger:ContactChangeCdcHandler';
+
+/**
+ * Exactly what `apex-trigger.ts` produces for
+ * `trigger ContactChangeCdcHandler on ContactChangeEvent (after insert)`:
+ * a `triggersOn` edge into a target that is NOT and can never be a node.
+ */
+const realShapeCdcSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: REAL_SHAPE_TRIGGER,
+      type: 'ApexTrigger',
+      apiName: 'ContactChangeCdcHandler',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: REAL_SHAPE_TRIGGER,
+      toId: REAL_SHAPE_EVENT,
+      edgeType: 'triggersOn',
+      source: 'apex-trigger-extractor',
+    }),
+  ],
+};
+
+const withCdcStore = async <T>(
+  seedData: ExtractionResult,
+  run: (ctx: Context) => Promise<T>,
+): Promise<T> => {
+  const dir = mkdtempSync(join(tmpdir(), 'sfi-cdc-real-'));
+  const opened = await openGraph(join(dir, 'cdc.db'));
+  if (!opened.ok) throw new Error(opened.error.message);
+  const store = opened.value;
+  const imported = await importExtractionResults(store, [seedData]);
+  if (!imported.ok) throw new Error(imported.error.message);
+  const out = await run({ vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store } as Context);
+  await closeGraph(store);
+  rmSync(dir, { recursive: true, force: true });
+  return out;
+};
+
+describe('cdcSubscribersHandler — real-org shape (ChangeEvent is never a node)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: org-wide mode finds an Apex CDC trigger that has only a triggersOn edge', async () => {
+    const result = await withCdcStore(realShapeCdcSeed, (c) => cdcSubscribersHandler(c, {}));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.subscribers.map((s) => s.subscriberId)).toEqual([REAL_SHAPE_TRIGGER]);
+    // The row must SAY which mechanism found it — a `listensTo` row is untagged.
+    expect(data.subscribers[0]?.subscriptionEdge).toBe('triggersOn');
+    expect(data.subscribers[0]?.changeEventName).toBe('ContactChangeEvent');
+    // The stream WAS walked, so `0` and `1` are now distinguishable answers.
+    expect(data.summary.scannedChangeEvents).toBeGreaterThan(0);
+    expect(data.summary.uniqueChangeEvents).toBe(1);
+  });
+
+  it('scoped mode finds the same trigger through the object filter', async () => {
+    const result = await withCdcStore(realShapeCdcSeed, (c) =>
+      cdcSubscribersHandler(c, { sObjectFilter: 'Contact' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.subscribers.map((s) => s.subscriberId)).toEqual([REAL_SHAPE_TRIGGER]);
+  });
+
+  it('a `listensTo` subscriber row stays untagged, so the two mechanisms are tellable apart', async () => {
+    const result = await withCdcStore(accountCdcSeed, (c) => cdcSubscribersHandler(c, {}));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const sub of result.value.data.subscribers) {
+      expect('subscriptionEdge' in sub).toBe(false);
+    }
+  });
+
+  it('an empty scan set says NOTHING WAS CHECKED rather than reporting a bare zero', async () => {
+    const emptySeed: ExtractionResult = {
+      nodes: [makeNode({ id: 'CustomObject:Account', apiName: 'Account' })],
+      edges: [],
+    };
+    const result = await withCdcStore(emptySeed, (c) => cdcSubscribersHandler(c, {}));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // The distinction the old response could not express: 0 found AND 0 checked.
+    expect(data.summary.totalSubscribers).toBe(0);
+    expect(data.summary.scannedChangeEvents).toBe(0);
+    expect(data.disclosure).toMatch(/nothing was scanned/i);
+    expect(data.disclosure).toMatch(/`scannedChangeEvents` is 0/);
+  });
+
+  it('the nothing-scanned note is ABSENT once a stream was actually walked', async () => {
+    const result = await withCdcStore(realShapeCdcSeed, (c) => cdcSubscribersHandler(c, {}));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.scannedChangeEvents).toBeGreaterThan(0);
+    expect(result.value.data.disclosure).not.toMatch(/nothing was scanned/i);
+  });
+
+  it('a scoped miss says the stream is referenced by nothing, not that CDC was checked and unused', async () => {
+    const emptySeed: ExtractionResult = {
+      nodes: [makeNode({ id: 'CustomObject:Account', apiName: 'Account' })],
+      edges: [],
+    };
+    const result = await withCdcStore(emptySeed, (c) =>
+      cdcSubscribersHandler(c, { sObjectFilter: 'Lead' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.disclosure).toContain('LeadChangeEvent');
+    expect(result.value.data.disclosure).toMatch(/NOT "CDC checked and unused"/);
+  });
+});

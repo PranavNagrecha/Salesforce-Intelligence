@@ -95,7 +95,10 @@ export type {
   RunGraphQueryOptions,
 } from './query-graph.js';
 export {
+  changeEventParentApiName,
   classifyPhantom,
+  isChangeEventApiName,
+  isChangeEventEntityId,
   managedNamespaceOf,
   type CoverageStatus,
 } from './phantom-classify.js';

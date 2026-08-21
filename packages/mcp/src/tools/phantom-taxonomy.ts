@@ -2,7 +2,7 @@
  * P7-reference-stub-nodes — the phantom taxonomy classifier, computed ON DEMAND.
  *
  * A referenced-but-unretrieved id (an edge target with no node) is classified
- * into one of the seven `PhantomClassification` buckets — the same taxonomy
+ * into one of the eight `PhantomClassification` buckets — the same taxonomy
  * measured in
  * `docs/reports/phantom-taxonomy-audit.md` (GATE 0) — from its inbound edge
  * kinds, its id shape, and the manifest coverage of its ComponentType. The
@@ -48,6 +48,8 @@ const coverageStatusOf = (ctx: Context, type: string): CoverageStatus => {
 const REMEDY: Record<PhantomClassification, string> = {
   'automation-critical':
     'Automation or code depends on this but it was never retrieved. It is a demand-retrieve candidate — run `sfi refresh --components <id>` to pull it.',
+  'change-event-stream':
+    'A Change Data Capture (CDC) stream entity. The platform synthesises it from its parent object’s CDC configuration and the Metadata API never emits it as a retrievable component on ANY org, so this is STRUCTURAL, not a coverage gap: no `sfi refresh` and no wider retrieve manifest can ever populate it. Read the parent object instead (strip the `ChangeEvent` / `__ChangeEvent` suffix), and use `sfi.cdc_subscribers` for who reacts to the stream.',
   'blindspot-manifest':
     'Its ComponentType was never retrieved (a manifest gap). Widen the retrieve manifest and run /sfi-refresh; see sfi.retrieve_blindspot_report.',
   'managed-extension':

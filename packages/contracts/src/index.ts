@@ -1155,6 +1155,7 @@ export interface McpResponse<T> {
  */
 export type PhantomClassification =
   | 'automation-critical' //   automation/code references it — a demand-retrieve candidate
+  | 'change-event-stream' //   a Change Data Capture stream entity (`{X}ChangeEvent`) — synthesised by the platform, NEVER emitted by the Metadata API on any org, so no retrieve manifest can ever produce it. Structural, not a coverage gap.
   | 'blindspot-manifest' //    its whole ComponentType was never retrieved (widen the manifest)
   | 'managed-extension' //     managed-package member (namespaced) — stub forever
   | 'standard-field-phantom' // standard object or a field on one — stub forever

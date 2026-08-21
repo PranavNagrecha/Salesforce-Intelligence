@@ -27,10 +27,24 @@
  *
  * Implementation notes:
  *   - One `listEdges(eventId, { direction: 'in', edgeType: 'listensTo' })`
- *     call retrieves every candidate edge; `getNodeById` then resolves
- *     each `fromId` to a `Node`. The graph cannot distinguish "event
- *     does not exist" from "event has no subscribers", and both
- *     resolve to an empty subscriber list (the v1.5 honest case).
+ *     call retrieves every candidate edge; a batched `listNodesByIds`
+ *     then resolves each `fromId` to a `Node`.
+ *   - "Event does not exist" and "event has no subscribers" ARE
+ *     distinguished. The handler resolves the event NODE first:
+ *     `validateEventId` only checks the `__e` id SYNTAX, so without
+ *     that lookup a Platform Event this org's metadata NAMES but never
+ *     retrieved (a managed-package event, or one outside the retrieve
+ *     scope) answered "no subscribers found" — a confident empty over a
+ *     definition the vault never read. A missing node now sets
+ *     `eventRetrieved: false` and leads `boundaries` with the
+ *     `phantomAwareNotFoundMessage` verdict, while the edge-derived
+ *     lists are still returned (a subscriber's `listensTo` edge can
+ *     exist even when the event node does not). A retrieved event's
+ *     response is unchanged.
+ *   - Catalog mode enumerates RETRIEVED event nodes only, so it also
+ *     reports `referencedNotRetrievedEventCount` / `…Events` (and a
+ *     matching boundary) when the org names `__e` ids the vault lacks —
+ *     otherwise a partial inventory reads as the complete one.
  *   - Subscribers are restricted to the three node types the v1.5 R3
  *     extractors emit `listensTo` from: ApexTrigger, ApexClass, Flow.
  *     Other node types (e.g., a hypothetical future Process Builder
@@ -64,6 +78,8 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
+  danglingTargetIdsMatching,
+  getNodeById,
   listEdges,
   listEdgesForNodes,
   listNodesByIds,
@@ -72,6 +88,8 @@ import {
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the
@@ -278,6 +296,30 @@ export interface EventSubscribersOutput {
    * supplied). Empty when no PlatformEventChannelMember binds the event.
    */
   readonly channels?: readonly EventChannelBinding[];
+  /**
+   * Present ONLY (as `false`) when the requested event's OWN node is NOT in this
+   * vault — the event is named by other metadata (a permission grant, a
+   * subscriber's edge) but was never retrieved. Without it an empty
+   * `subscribers` list for such an id is indistinguishable from a retrieved
+   * event that genuinely has none: "did not check" rendered as "checked and
+   * found nothing". Absent (and every other field byte-identical) whenever the
+   * event node IS present.
+   */
+  readonly eventRetrieved?: false;
+  /**
+   * CATALOG mode only, and present ONLY when non-zero: the count of Platform
+   * Events this org's OWN metadata names (via any edge) whose definition was
+   * never retrieved, so they are missing from `events[]`. Without it the catalog
+   * reads as the org's complete Platform Event inventory when it is only the
+   * retrieved slice.
+   */
+  readonly referencedNotRetrievedEventCount?: number;
+  /**
+   * CATALOG mode only, present alongside {@link referencedNotRetrievedEventCount}:
+   * the referenced-but-not-retrieved event ids themselves (capped), so the
+   * caller can name what is missing instead of only counting it.
+   */
+  readonly referencedNotRetrievedEvents?: readonly ComponentId[];
   /** §C3 honesty: heuristic-detection + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
 }
@@ -306,6 +348,46 @@ const EVENT_SUB_PUBLISHER_DISCLOSURE =
  */
 const EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE =
   'CRITICAL ROLE DISTINCTION: `publishers` (writesTo edges) = code that EMITS this event; `subscribers` (listensTo edges) = code that RECEIVES it. A Flow with a <recordCreates> element on this event is a PUBLISHER, not a subscriber — it appears in `publishers`, never in `subscribers`. A non-empty `publishers` list with an empty `subscribers` list means the event fires but nothing internal consumes it (check `channels` for external consumers such as AWS EventBridge).';
+
+/**
+ * Ceiling on the referenced-but-not-retrieved event ids NAMED in catalog mode.
+ * The COUNT is always exact; only the name list is capped, so a pathological
+ * org cannot blow the response budget while still being told how many it has.
+ */
+const MAX_NAMED_PHANTOM_EVENTS = 25;
+
+/**
+ * EVENT-SUBSCRIBERS-CANNOT-SEE-UNRETRIEVED-EVENTS: single-event mode used to run
+ * `validateEventId` (a pure `__e`-suffix SYNTAX check) straight into `listEdges`,
+ * so an event this org's own metadata names but never retrieved answered "no
+ * subscribers found" — the tool's own empty-list disclosure, which speaks only
+ * about detection blind spots, not about the event being absent from the vault.
+ * When the node is missing this line leads the boundaries with the
+ * {@link phantomAwareNotFoundMessage} verdict so the reader sees "never
+ * retrieved" before any statement about subscribers.
+ */
+const eventNotRetrievedDisclosure = (phantomMessage: string): string =>
+  `EVENT NOT IN THIS VAULT — the subscriber/publisher lists below are what the ` +
+  `graph holds for the id, NOT a reading of the event's own definition: ` +
+  `${phantomMessage} An empty list here is "not retrieved", not "nothing subscribes".`;
+
+/**
+ * Catalog-mode counterpart: `events[]` enumerates RETRIEVED Platform Event nodes
+ * only, so an org whose events are mostly managed-package or out-of-scope
+ * reported a confident, silently-partial inventory. Emitted only when at least
+ * one referenced-but-unretrieved `__e` id exists.
+ */
+const catalogPartialDisclosure = (
+  count: number,
+  named: readonly ComponentId[],
+): string =>
+  `PARTIAL INVENTORY: \`events[]\` lists only Platform Events whose own definition ` +
+  `was RETRIEVED into this vault. ${count.toString()} further Platform Event(s) are named by ` +
+  `this org's own metadata (permission grants, subscriber edges) but were never ` +
+  `retrieved, so they are absent from the list above and their subscriber counts ` +
+  `are unknown — typically managed-package events or ones outside the retrieve ` +
+  `scope. ${named.length < count ? `First ${named.length.toString()} of them: ` : 'They are: '}` +
+  `${named.join(', ')}. Do NOT read this list as the org's complete event inventory.`;
 
 /**
  * Validate that `eventId` is a syntactically valid Platform Event id.
@@ -627,8 +709,40 @@ export const eventSubscribersHandler = async (
       });
     }
     events.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
+
+    // The catalog above is the RETRIEVED slice. Count the Platform Events this
+    // org's own metadata names via a dangling edge target so a partial
+    // inventory can never present itself as the whole one. `%CustomObject:%` is
+    // an over-broad SQL prefilter over dangling targets ONLY (a small set); the
+    // exact `CustomObject:…__e` shape is decided in JS, where `_` is not a
+    // wildcard.
+    const danglingResult = await danglingTargetIdsMatching(ctx.graph, EVENT_ID_PREFIX);
+    if (!danglingResult.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${danglingResult.error.message}` });
+    }
+    const phantomEventIds = danglingResult.value.filter(
+      (id) => id.startsWith(EVENT_ID_PREFIX) && id.endsWith(EVENT_API_NAME_SUFFIX),
+    );
+    const namedPhantoms = phantomEventIds.slice(0, MAX_NAMED_PHANTOM_EVENTS);
     return ok({
-      data: { subscribers: [], eventApiName: null, events: events.slice(0, limit), boundaries: [EVENT_SUB_HEURISTIC_DISCLOSURE] },
+      data: {
+        subscribers: [],
+        eventApiName: null,
+        events: events.slice(0, limit),
+        ...(phantomEventIds.length > 0
+          ? {
+              referencedNotRetrievedEventCount: phantomEventIds.length,
+              referencedNotRetrievedEvents: namedPhantoms,
+            }
+          : {}),
+        boundaries:
+          phantomEventIds.length > 0
+            ? [
+                EVENT_SUB_HEURISTIC_DISCLOSURE,
+                catalogPartialDisclosure(phantomEventIds.length, namedPhantoms),
+              ]
+            : [EVENT_SUB_HEURISTIC_DISCLOSURE],
+      },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
         refreshedAt: ctx.manifest.refreshedAt,
@@ -644,6 +758,19 @@ export const eventSubscribersHandler = async (
       path: input.eventId !== undefined ? 'eventId' : 'eventApiName',
     });
   }
+
+  // `validateEventId` is a SYNTAX check (`CustomObject:…__e`) — it says nothing
+  // about whether the vault holds the event. Resolve the node so an id this org
+  // references but never retrieved is reported as NOT RETRIEVED instead of
+  // answering "no subscribers" about a definition we never read.
+  const eventNodeResult = await getNodeById(ctx.graph, requestedEventId);
+  if (!eventNodeResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${eventNodeResult.error.message}`,
+    });
+  }
+  const eventNodeMissing = eventNodeResult.value === null;
 
   const edgesResult = await listEdges(ctx.graph, requestedEventId, {
     direction: 'in',
@@ -713,7 +840,7 @@ export const eventSubscribersHandler = async (
   }
   const publishers = publishersResult.value;
 
-  const boundaries =
+  const baseBoundaries =
     sorted.length === 0
       ? [
           EVENT_SUB_HEURISTIC_DISCLOSURE,
@@ -728,9 +855,27 @@ export const eventSubscribersHandler = async (
           EVENT_SUB_PUBLISHER_DISCLOSURE,
           EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE,
         ];
+  // Lead with the not-retrieved verdict so it is read BEFORE any statement about
+  // subscribers. Emitted only on the missing-node path, so a retrieved event's
+  // response is byte-identical to before.
+  const boundaries = eventNodeMissing
+    ? [
+        eventNotRetrievedDisclosure(
+          await phantomAwareNotFoundMessage(ctx, requestedEventId, 'Platform Event'),
+        ),
+        ...baseBoundaries,
+      ]
+    : baseBoundaries;
 
   return ok({
-    data: { subscribers: sorted, eventApiName: apiName, channels, publishers, boundaries },
+    data: {
+      subscribers: sorted,
+      eventApiName: apiName,
+      channels,
+      publishers,
+      ...(eventNodeMissing ? { eventRetrieved: false as const } : {}),
+      boundaries,
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,
