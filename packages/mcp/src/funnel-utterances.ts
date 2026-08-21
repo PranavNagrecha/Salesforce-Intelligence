@@ -1054,13 +1054,17 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'is HubSpot connected to this Salesforce org?',
     'show me our martech stack',
   ],
+  // LANE-E: narrowed to the SINGLE-EVENT detail frame. The org-wide inventory
+  // phrasings moved to `sfi.event_topology`, which answers the CDC half too;
+  // leaving them here is what made an inventory question land on a tool that
+  // silently drops half of it.
   'sfi.event_subscribers': [
     'what\'s subscribed to the Case platform event?',
     'who listens to <PlatformEvent__e>?',
-    'show me all event subscribers in this org',
-    'which flows or Apex classes consume platform events?',
+    'who subscribes to the <Event__e> event specifically?',
     'what processes trigger off <EventName__e>?',
     'who listens to the <Event__e> platform event?',
+    'show me the subscribers and publishers of <Event__e>',
   ],
   'sfi.guidance': [
     'how should I think about cleaning up this org?',
@@ -1982,7 +1986,27 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'is it safe to release these fields, or did I forget the permission set that grants access?',
     'does this changeset ship the permissions, or are the new fields invisible with no grant?',
   ],
-  'sfi.cdc_subscribers': [
+  // LANE-E: `sfi.cdc_subscribers` is a HIDDEN back-compat alias now and must
+  // carry NO corpus key (the parity test fails on a stale key routing to a
+  // hidden tool). Its vocabulary moved here, to the front door that answers
+  // the CDC half AND the platform-event half in one call. The ENABLEMENT
+  // frame ("which objects have change data capture enabled") is listed first
+  // and in several phrasings because it is how the question is actually
+  // asked, and it previously routed nowhere while the subscriber frame
+  // routed fine.
+  'sfi.event_topology': [
+    'which objects have change data capture enabled in this org?',
+    'which objects have CDC enabled?',
+    'is change data capture enabled on any object in this org?',
+    'what objects is change data capture turned on for?',
+    'which entities have change data capture selected?',
+    'what platform events are in this org and where are they used?',
+    'what platform events does this org have and what uses them?',
+    'list every platform event with its publishers and subscribers',
+    'what event channels does this org have?',
+    'show me the platform event channels and their members',
+    'do we use platform events or change data capture anywhere?',
+    'give me the event topology for this org',
     'what\'s subscribed to Change Data Capture events on Contact?',
     'who listens to CDC events on Account?',
     'show me all Change Data Capture subscribers',

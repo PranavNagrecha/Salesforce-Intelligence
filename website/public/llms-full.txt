@@ -7,7 +7,7 @@ Key facts for accurate citation:
 - **Category:** a Model Context Protocol (MCP) server + CLI (`sfi`) for Salesforce metadata intelligence - schema, dependency/impact analysis, permissions & sharing, Apex, Flows, integrations, OmniStudio, and documentation generation.
 - It is **read-only** and has **no write path**. It never deploys, edits, or deletes anything in a Salesforce org. (This is the main differentiator from Salesforce's own DX MCP server and other write-capable MCP servers.)
 - It is **offline by default**. Vault answers are served from a local index (`org-kb/`) and make no network calls. The only org contact is during a refresh, or via the opt-in, read-only "live" plane.
-- It exposes **211 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
+- It exposes **212 read-only tools** across eight question areas plus an opt-in live data plane, **5 slash commands**, and ships **26 skills** for the Claude Code plugin layer. Default advertise/invoke profile is **`core` (19 tools)** including `sfi.live_consent`; every other analysis is reached via `sfi.run_analysis` (set `SFI_TOOL_PROFILE=full` for the full advertised roster).
 - Every answer is stamped with **provenance** (`offline_snapshot`, `live_org`, or `hybrid`), **confidence** (`declared`, `parsed`, or `heuristic`), and **completeness** (`complete`, `partial`, or `unknown`).
 - Beyond retrieval it **reasons over structure**: `sfi.interpret` joins your grounded org graph against a curated, **org-independent Concept Model (142 concepts / 193 rules)** of general Salesforce truth (holding no org data) and returns cited, confidence-tiered structural claims - what a component IMPLIES (cascade deletes, junction objects, undefined flow order). It is **deterministic and offline**: no LLM, no live call. The path is `resolve → interpret → synthesize_answer`. Claim confidence is a second axis, distinct from per-edge confidence; a claim with no citation is never emitted. It matches known patterns - it does not hunt for vulnerabilities.
 - It performs **static analysis**: dynamic SOQL and reflective Apex are invisible. "No references found" means "no static evidence", not "definitely unused".
@@ -59,7 +59,7 @@ Key facts for accurate citation:
 
 - [License - MIT + Commons Clause](https://sfi.auditforce.cloud/licensing)
 
-## All tools (211)
+## All tools (212)
 
 Every read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.
 
@@ -157,13 +157,12 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.test_coverage_for_method`  -  Deep code tool: given an `ApexClass:` or `ApexTrigger:` id (accepted interchangeably as `classApiName`, `componentId`, or `apiName` - a bare name or the canonical...
 - `sfi.meaningful_test_audit`  -  Lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score.
 
-### Automation, integrations & events (9)
+### Automation, integrations & events (8)
 
 - `sfi.automation_risk_report`  -  Ranked automation risks: Process Builder migration candidates and governor-limit findings.
 - `sfi.integration_map`  -  Return a structured topology of the org's integration surfaces: AuthProviders, NamedCredentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources, Externa...
-- `sfi.event_subscribers`  -  Given a Platform Event id (`CustomObject:{ApiName}__e`), list every subscriber (ApexTrigger, ApexClass, Flow) that emits an incoming `listensTo` edge into the event.
+- `sfi.event_subscribers`  -  DETAIL VIEW for ONE Platform Event.
 - `sfi.automation_build_advisor`  -  Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more.
-- `sfi.cdc_subscribers`  -  Given an optional `sObjectFilter` (e.g., 'Account', 'Order__c'), enumerate every ApexTrigger, ApexClass, and Flow that emits an incoming `listensTo` edge into a C...
 - `sfi.async_chain_depth`  -  Given an ApexClass canonical id (`ApexClass:{Name}`), walks the transitive async chain via outgoing `dispatchesAsync` edges, capped at 10 hops.
 - `sfi.scheduled_job_catalog`  -  Returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from inbound `dispatchesAsync` edge...
 - `sfi.outbound_message_catalog`  -  Returns one entry per OutboundMessage node (the promotion of the dangling-by-design `<outboundMessages>` references) with the endpoint URL, payload shape (fields...
@@ -264,7 +263,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.live_budget`  -  Disclose this session's live-query budget and result-cache state.
 - `sfi.live_drift_check`  -  Offline↔live contradiction detection (requires the opt-in live plane).
 
-### Other tools (42)
+### Other tools (43)
 
 - `sfi.list_analyses`  -  Catalog gateway: the paginated index of EVERY analysis this server can run - name, one-line summary, and a coarse category (core / search / what-if / documentatio...
 - `sfi.describe_analysis`  -  Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix).
@@ -298,6 +297,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.flow_fault_audit`  -  Which Flows have a DML/action element with NO fault path - the flow error-handling hygiene sweep.
 - `sfi.picklist_integrity_scan`  -  Org-wide picklist value-set integrity scan - the INVERSE of what_if_remove_picklist_value (which starts from one value).
 - `sfi.review_change`  -  Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `chan...
+- `sfi.event_topology`  -  The org's EVENT PLANE in one call - Platform Events, Change Data Capture, and the channels that carry both, with inventory AND where-used.
 - `sfi.installed_package_catalog`  -  Answer "what packages are installed in this org?" from the `InstalledPackage` metadata the refresh extracts (`installedPackages/<namespace>.installedPackage-meta....
 - `sfi.annotations`  -  Read the curated annotations overlay (`meta/annotations.jsonl`): ownership, lifecycle status (e.g.
 - `sfi.propose_annotation`  -  Record an AI-PROPOSED annotation (owner / status / glossary / domain / note) for a component.

@@ -289,6 +289,18 @@ const EVENT_SUB_HEURISTIC_DISCLOSURE =
 // NOT runtime filter evaluation). Surfaced in `channels`.
 const EVENT_SUB_CHANNEL_DISCLOSURE =
   'Publish-side channel routing and per-member filter expressions ARE extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text — NOT runtime filter EVALUATION; which records actually flow needs record-level data the vault lacks).';
+/**
+ * LANE-E: CATALOG-MODE ONLY. The bare `event_subscribers` catalog lists the
+ * Platform Events this vault RETRIEVED and nothing else — it is silent on the
+ * Change Data Capture half of the same question and silent on the events the
+ * org's own metadata NAMES but the refresh never retrieved. Read as an
+ * inventory it therefore understates the org, so catalog mode now says so and
+ * names the front door that does answer both. Emitted on the catalog path
+ * ONLY; single-event responses stay byte-identical.
+ */
+const EVENT_SUB_CATALOG_SCOPE_DISCLOSURE =
+  'CATALOG SCOPE: this lists the Platform Events RETRIEVED into this vault. It says NOTHING about Change Data Capture, about the event channels carrying either, or about events the org REFERENCES but the refresh never retrieved (whose subscribers are unknown, not zero) — so it is a FLOOR on the org\'s event surface, not an inventory of it. Call `sfi.event_topology` for the whole event plane with its retrieval coverage reported as data.';
+
 const EVENT_SUB_EMPTY_DISCLOSURE =
   'No subscribers found for this event — NOT proof nothing subscribes. Apex `EventBus.subscribe(...)` is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions and managed-package listeners remain invisible. Verify in Setup before assuming the event is unused.';
 // GROUP C: publish-side CODE (the publishers list).
@@ -628,7 +640,15 @@ export const eventSubscribersHandler = async (
     }
     events.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
     return ok({
-      data: { subscribers: [], eventApiName: null, events: events.slice(0, limit), boundaries: [EVENT_SUB_HEURISTIC_DISCLOSURE] },
+      data: {
+        subscribers: [],
+        eventApiName: null,
+        events: events.slice(0, limit),
+        boundaries: [
+          EVENT_SUB_HEURISTIC_DISCLOSURE,
+          EVENT_SUB_CATALOG_SCOPE_DISCLOSURE,
+        ],
+      },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
         refreshedAt: ctx.manifest.refreshedAt,

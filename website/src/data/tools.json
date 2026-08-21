@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-20T23:56:15.360Z",
-  "toolCount": 211,
+  "generatedAt": "2026-08-21T13:54:37.065Z",
+  "toolCount": 212,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -349,15 +349,11 @@
         },
         {
           "name": "sfi.event_subscribers",
-          "description": "Given a Platform Event id (`CustomObject:{ApiName}__e`), list every subscriber (ApexTrigger, ApexClass, Flow) that emits an incoming `listensTo` edge into the event."
+          "description": "DETAIL VIEW for ONE Platform Event."
         },
         {
           "name": "sfi.automation_build_advisor",
           "description": "Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more."
-        },
-        {
-          "name": "sfi.cdc_subscribers",
-          "description": "Given an optional `sObjectFilter` (e.g., 'Account', 'Order__c'), enumerate every ApexTrigger, ApexClass, and Flow that emits an incoming `listensTo` edge into a C..."
         },
         {
           "name": "sfi.async_chain_depth",
@@ -852,6 +848,10 @@
         {
           "name": "sfi.review_change",
           "description": "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `chan..."
+        },
+        {
+          "name": "sfi.event_topology",
+          "description": "The org's EVENT PLANE in one call - Platform Events, Change Data Capture, and the channels that carry both, with inventory AND where-used."
         },
         {
           "name": "sfi.installed_package_catalog",

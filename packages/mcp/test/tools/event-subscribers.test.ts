@@ -1079,3 +1079,22 @@ describe('eventSubscribersHandler — bounded graph queries (catalog)', () => {
     expect(wide.edgeQueries + wide.nodeQueries).toBeLessThan(10);
   });
 });
+
+describe('event_subscribers — catalog mode declares its own scope (LANE-E)', () => {
+  it('catalog mode says it covers neither CDC nor referenced-but-not-retrieved events', async () => {
+    const result = await eventSubscribersHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const text = result.value.data.boundaries.join(' ');
+    expect(text).toContain('CATALOG SCOPE');
+    expect(text).toContain('Change Data Capture');
+    expect(text).toContain('sfi.event_topology');
+  });
+
+  it('single-event mode does NOT carry the catalog-scope line (byte-identical path)', async () => {
+    const result = await eventSubscribersHandler(ctx, { eventId: ORDER_EVENT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.boundaries.join(' ')).not.toContain('CATALOG SCOPE');
+  });
+});

@@ -413,17 +413,17 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
     id: 'integration',
     title: 'Integrations & external systems',
     description:
-      'Map how the org talks to the outside world — named credentials, endpoints, outbound messages, and change-data-capture subscribers.',
+      'Map how the org talks to the outside world — named credentials, endpoints, outbound messages, platform events, and change data capture.',
     exampleQuestions: [
       'What external systems does this org talk to?',
       'List every outbound endpoint.',
-      'Who subscribes to change events?',
+      'Which objects have change data capture enabled?',
     ],
     tools: [
       'sfi.integration_map',
       'sfi.endpoint_catalog',
       'sfi.outbound_message_catalog',
-      'sfi.cdc_subscribers',
+      'sfi.event_topology',
     ],
   },
   {

@@ -4966,18 +4966,61 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // M9 — who subscribes to CHANGE DATA CAPTURE specifically. The
-    // event-subscribers rule below leads with event_subscribers; anchor CDC + a
-    // subscriber verb so cdc_subscribers leads and a bare CDC catalog ask is safe.
+    // LANE-E — CHANGE DATA CAPTURE, both frames.
+    //
+    // The SUBSCRIBER frame ("who subscribes to CDC on Account") already
+    // routed; the ENABLEMENT frame ("which objects have change data capture
+    // enabled in this org?") — the way the question is actually asked —
+    // matched nothing, fell through to `unrouted`, and the funnel's top pick
+    // blew the response budget so the user got an oversize error and no
+    // answer. Both frames now land on `sfi.event_topology`, which reports
+    // enablement (the channel-member selection), the code that reacts, and
+    // whether a zero is a CHECKED zero.
+    //
+    // `sfi.cdc_subscribers` is a hidden back-compat alias and is deliberately
+    // NOT routed here (a retired roster entry keeps working by name only).
     intent: 'cdc-subscribers',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.cdc_subscribers', 'sfi.event_subscribers'],
+    tools: ['sfi.resolve', 'sfi.event_topology', 'sfi.event_subscribers'],
     liveRequired: false,
     needsResolve: true,
-    reason: 'Who subscribes to Change Data Capture events on an object (cdc_subscribers), distinct from platform-event subscribers.',
+    reason:
+      'Change Data Capture: which entities have it enabled and what reacts to the stream (event_topology), distinct from platform-event subscribers.',
     patterns: [
       /\b(change\s+data\s+capture|cdc)\b[^.?!]{0,40}\b(subscrib\w*|listen\w*|consum\w*)\b/,
       /\b(subscrib\w*|listen\w*|consum\w*)\b[^.?!]{0,30}\b(change\s+data\s+capture|cdc)\b/,
+    ],
+  },
+  {
+    // LANE-E — the CDC ENABLEMENT frame, which had NO rule at all.
+    //
+    // "Which objects have change data capture enabled in this org?" is the
+    // owner's own phrasing and it fell through to `unrouted`; the funnel's
+    // top pick then blew the ~40 KB response budget, so the user got an
+    // `oversize` error and no answer. The SUBSCRIBER frame above routed fine
+    // the whole time — the gap was the frame, not the capability.
+    //
+    // Separate rule rather than more patterns on the rule above because this
+    // frame names NO component (`needsResolve: false`): telling the host to
+    // resolve a component the user never mentioned is the same defect the D6
+    // event-catalog fix removed. `event_topology` narrows by `objectApiName`
+    // when one IS named, so a bare call stays correct either way.
+    //
+    // Deliberately keyed on the STATE ("turned on", "enabled", "selected"),
+    // never the ACT ("turning on CDC for Contact"), so the fan-out question
+    // that legitimately belongs to the subscriber rule above is untouched.
+    intent: 'cdc-enablement',
+    plane: 'vault',
+    tools: ['sfi.event_topology'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Which entities have Change Data Capture enabled — read from the PlatformEventChannelMember selections, with the coverage that makes a zero readable as checked or unchecked (event_topology).',
+    patterns: [
+      /\b(change\s+data\s+capture|cdc)\b[^.?!]{0,40}\b(enabled?|turned\s+on|switched\s+on|selected)\b/,
+      /\b(enabled?|turned\s+on|switched\s+on|selected)\b[^.?!]{0,30}\b(change\s+data\s+capture|cdc)\b/,
+      /\b(objects?|entities|entity|sobjects?)\b[^.?!]{0,40}\b(change\s+data\s+capture|cdc)\b/,
+      /\b(change\s+data\s+capture|cdc)\b[^.?!]{0,40}\b(objects?|entities|entity|sobjects?)\b/,
     ],
   },
   {
@@ -5012,15 +5055,23 @@ const RULES: readonly Rule[] = [
     // that was never named.
     intent: 'event-catalog',
     plane: 'vault',
-    tools: ['sfi.event_subscribers'],
+    // LANE-E: repointed from `event_subscribers` (which answers the Platform
+    // Event half confidently and silently drops the CDC half, and says
+    // nothing about the events the org NAMES but the vault never retrieved)
+    // to the front door that answers both and reports retrieval coverage as
+    // data. `event_subscribers` stays second for the single-event follow-up.
+    tools: ['sfi.event_topology', 'sfi.event_subscribers'],
     liveRequired: false,
     needsResolve: false,
     reason:
-      'Lists every Platform Event the org publishes with its subscriber count (event_subscribers catalog mode — call with no eventId).',
+      "The org's event plane: every Platform Event with its publishers/subscribers, the entities with Change Data Capture enabled, the channels carrying both, and the events referenced but never retrieved (event_topology).",
     patterns: [
       /\bwhat\s+(platform\s+events?|cdc\s+channels?)\b/,
       /\b(platform\s+events?)\b.*\b(publish|emit|defined|exist|list|are\s+there)\b/,
       /\bplatform\s+events?\b(?:\s+in\s+(?:this\s+)?(?:the\s+)?org)?\b/,
+      // "event channels" — the owner's second goal, previously unrouted.
+      /\bevent\s+channels?\b/,
+      /\bplatform\s*event\s*channel\s*members?\b/,
     ],
   },
   {

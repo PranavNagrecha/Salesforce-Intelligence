@@ -3,9 +3,9 @@
   "version": "0.3.0",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 211,
+    "total": 212,
     "advertised": 19,
-    "hidden": 4,
+    "hidden": 5,
     "defaultProfile": "core",
     "activeProfile": "core",
     "profiles": {
@@ -25,7 +25,6 @@
         "sfi.blast_radius_live",
         "sfi.call_graph",
         "sfi.capabilities",
-        "sfi.cdc_subscribers",
         "sfi.changed_since",
         "sfi.code_quality_audit",
         "sfi.compare_components",
@@ -53,6 +52,7 @@
         "sfi.empty_queues_and_groups",
         "sfi.endpoint_catalog",
         "sfi.event_subscribers",
+        "sfi.event_topology",
         "sfi.explain_apex_method",
         "sfi.explain_debug_log",
         "sfi.explain_error",
@@ -293,6 +293,7 @@
       "sfi.baseline_acknowledge"
     ],
     "hiddenNames": [
+      "sfi.cdc_subscribers",
       "sfi.churn",
       "sfi.field_cleanup_candidates",
       "sfi.find_apex_usages",
@@ -453,6 +454,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:6c2f1399545a4ea2119a02afc9fd1c22f9aee1d74bca790c3afacd986494f08f",
-  "identityHash": "sha256:f8223d41436ba6b9b1f44d0a181513b233aa3aff5dd99225342472b234618198"
+  "catalogHash": "sha256:50bb50a770b99f0e62714cae23aa0448ea0632bf9f8947bde89b5df049e08b76",
+  "identityHash": "sha256:28806dd1be05f6f4384416b3e62c76dfe09a835a47a69226ea0678c02acb03eb"
 }

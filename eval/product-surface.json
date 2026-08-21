@@ -1,5 +1,5 @@
 {
-  "toolCount": 211,
+  "toolCount": 212,
   "advertisedToolCount": 19,
   "defaultProfile": "core",
   "activeProfile": "core",
@@ -12,6 +12,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:6c2f1399545a4ea2119a02afc9fd1c22f9aee1d74bca790c3afacd986494f08f",
-  "identityHash": "sha256:f8223d41436ba6b9b1f44d0a181513b233aa3aff5dd99225342472b234618198"
+  "catalogHash": "sha256:50bb50a770b99f0e62714cae23aa0448ea0632bf9f8947bde89b5df049e08b76",
+  "identityHash": "sha256:28806dd1be05f6f4384416b3e62c76dfe09a835a47a69226ea0678c02acb03eb"
 }

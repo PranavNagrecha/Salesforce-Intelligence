@@ -338,7 +338,11 @@ describe('dispatchTool', () => {
     // R6-16 — pre-deploy change-review gate.
     'sfi.review_change',
     // v2.8 R2 — async + integration deep tier.
+    // LANE-E: cdc_subscribers is now a HIDDEN back-compat alias (still
+    // dispatchable, un-advertised); event_topology is the advertised front
+    // door that replaced it, so the roster stays net-flat.
     'sfi.cdc_subscribers',
+    'sfi.event_topology',
     'sfi.async_chain_depth',
     'sfi.scheduled_job_catalog',
     'sfi.outbound_message_catalog',
@@ -710,6 +714,7 @@ describe('V01_TOOLS', () => {
       'sfi.tests_for_change',
       'sfi.review_change',
       'sfi.cdc_subscribers',
+      'sfi.event_topology',
       'sfi.async_chain_depth',
       'sfi.scheduled_job_catalog',
       'sfi.outbound_message_catalog',
