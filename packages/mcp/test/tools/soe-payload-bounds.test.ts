@@ -4,7 +4,7 @@ import {
   type BoundableStep,
   enforceSoeByteBudget,
   reconcileSoePhasesOmittedAfterGlobalTrim,
-  SOE_MAX_PAYLOAD_BYTES,
+  soeBudgetBytes,
   soeTruncationNote,
 } from '../../src/tools/soe-payload-bounds.js';
 
@@ -47,10 +47,10 @@ describe('enforceSoeByteBudget', () => {
     }));
     const payload = { soe: steps };
 
-    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+    expect(sizeOf(payload)).toBeGreaterThan(soeBudgetBytes()); // precondition
     const result = enforceSoeByteBudget(payload, [steps]);
 
-    expect(sizeOf(payload)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES); // now fits
+    expect(sizeOf(payload)).toBeLessThanOrEqual(soeBudgetBytes()); // now fits
     expect(result.truncated).toBe(true);
     expect(result.conditionalsTrimmed).toBeGreaterThan(0);
     expect(payload.soe).toHaveLength(60); // every step survives
@@ -79,10 +79,10 @@ describe('enforceSoeByteBudget', () => {
     const update = Array.from({ length: 300 }, (_u, i) => baseStep(i + 300));
     const payload = { byEvent: { insert: { soe: insert }, update: { soe: update } } };
 
-    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+    expect(sizeOf(payload)).toBeGreaterThan(soeBudgetBytes()); // precondition
     const result = enforceSoeByteBudget(payload, [insert, update]);
 
-    expect(sizeOf(payload)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES); // now fits
+    expect(sizeOf(payload)).toBeLessThanOrEqual(soeBudgetBytes()); // now fits
     expect(result.stepsOmitted).toBeGreaterThan(0);
     // Each event keeps at least one step — never emptied.
     expect(insert.length).toBeGreaterThanOrEqual(1);
@@ -108,7 +108,7 @@ describe('enforceSoeByteBudget', () => {
     const steps = Array.from({ length: 400 }, (_u, i) => baseStep(i));
     const payload = { soe: steps, summary: { totalSteps: steps.length } };
 
-    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+    expect(sizeOf(payload)).toBeGreaterThan(soeBudgetBytes()); // precondition
 
     // Control: the DEFAULT behaviour drops trailing steps to fit.
     const control = Array.from({ length: 400 }, (_u, i) => baseStep(i));
@@ -132,12 +132,12 @@ describe('enforceSoeByteBudget', () => {
     const steps = [heavy, alsoHeavy, tiny];
     const payload = { soe: steps, summary: { totalSteps: steps.length } };
 
-    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+    expect(sizeOf(payload)).toBeGreaterThan(soeBudgetBytes()); // precondition
 
     const result = enforceSoeByteBudget(payload, [steps]);
 
     // Fits now, and reports honestly.
-    expect(sizeOf(payload)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+    expect(sizeOf(payload)).toBeLessThanOrEqual(soeBudgetBytes());
     expect(result.truncated).toBe(true);
     expect(result.actionsOmitted).toBeGreaterThan(0);
 
@@ -159,10 +159,10 @@ describe('enforceSoeByteBudget', () => {
     );
     const payload = { soe: steps };
 
-    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES);
+    expect(sizeOf(payload)).toBeGreaterThan(soeBudgetBytes());
     const result = enforceSoeByteBudget(payload, [steps]);
 
-    expect(sizeOf(payload)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+    expect(sizeOf(payload)).toBeLessThanOrEqual(soeBudgetBytes());
     expect(result.truncated).toBe(true);
     expect(payload.soe).toHaveLength(400); // every step survives
   });
@@ -173,10 +173,10 @@ describe('enforceSoeByteBudget', () => {
     const steps = [heavy, alsoHeavy];
     const payload = { soe: steps, summary: { totalSteps: steps.length } };
 
-    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+    expect(sizeOf(payload)).toBeGreaterThan(soeBudgetBytes()); // precondition
 
     const reserve = 6_000;
-    const target = SOE_MAX_PAYLOAD_BYTES - reserve;
+    const target = soeBudgetBytes() - reserve;
     const result = enforceSoeByteBudget(payload, [steps], { budgetBytes: target });
 
     // Trimmed to the RESERVED ceiling, not the full budget — leaving room for
@@ -185,27 +185,27 @@ describe('enforceSoeByteBudget', () => {
     expect(result.truncated).toBe(true);
     // Even after the reserve, a ~`reserve`-byte disclosure note still fits under
     // the hard SOE ceiling.
-    expect(sizeOf(payload) + reserve).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+    expect(sizeOf(payload) + reserve).toBeLessThanOrEqual(soeBudgetBytes());
   });
 
-  it('budgetBytes is clamped to SOE_MAX_PAYLOAD_BYTES — a caller can never RAISE the ceiling above the global guard', () => {
+  it('budgetBytes is clamped to soeBudgetBytes() — a caller can never RAISE the ceiling above the global guard', () => {
     const heavy = stepWithActions(2000, 'Heavy');
     const payload = { soe: [heavy] };
-    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+    expect(sizeOf(payload)).toBeGreaterThan(soeBudgetBytes()); // precondition
 
     // Ask for a budget well above the hard ceiling; it must still enforce the
     // ceiling (the option only ever RESERVES headroom, never grants more).
     const result = enforceSoeByteBudget(payload, [payload.soe], {
-      budgetBytes: SOE_MAX_PAYLOAD_BYTES * 10,
+      budgetBytes: soeBudgetBytes() * 10,
     });
-    expect(sizeOf(payload)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+    expect(sizeOf(payload)).toBeLessThanOrEqual(soeBudgetBytes());
     expect(result.truncated).toBe(true);
   });
 
   it('soeTruncationNote names the action count and the budget', () => {
     const note = soeTruncationNote({ truncated: true, actionsOmitted: 42, conditionalsTrimmed: 0, stepsOmitted: 0 });
     expect(note).toContain('42');
-    expect(note).toContain(`${Math.round(SOE_MAX_PAYLOAD_BYTES / 1000)} KB`);
+    expect(note).toContain(`${Math.round(soeBudgetBytes() / 1000)} KB`);
     expect(note).toMatch(/actionsOmitted/);
   });
 

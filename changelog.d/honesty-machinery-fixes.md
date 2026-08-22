@@ -69,3 +69,44 @@
   `isFrameworkSubclass` / `isCallableDispatch`; each tool prepends only its own
   verdict framing, and a drift test pins the shared body byte-identical across
   both surfaces.
+
+- **A trimmed page left its pointer past rows the caller never received.** A
+  cursor-aware handler computes `nextOffset = offset + page length` and mints a
+  `nextCursor` for it; the global response guard then tail-trimmed that very
+  page and left the pointer alone, while printing *"use this tool's own
+  nextCursor to page (the handler's pagination is authoritative)"* — false
+  exactly when it was printed. The pointer advanced by rows delivered **plus**
+  rows dropped, so whole windows were unreachable: walking
+  `code_quality_audit` to exhaustion at `limit: 500` and a 12 KB budget reached
+  94 of 647 rows across seven gaps, and `unused_fields_deep` at a 30 KB budget
+  reached 281 of 570 across twenty-one. The guard now identifies the paged list
+  by MATCHING a trimmed list's pre-trim length against the page size the
+  payload itself publishes, corrects `nextOffset` to the rows actually
+  delivered, and removes the opaque `nextCursor` (which encodes the pre-trim
+  offset and cannot be rewritten from outside the handler). Where the paged
+  list cannot be positively identified the pointer is REMOVED rather than
+  guessed, and the response says the page cannot be resumed. Both walks now
+  reach every row, contiguously, with no gaps or overlaps — and neither tool
+  was touched.
+
+- **The save-order cap sat above the ceiling it had to clear.**
+  `SOE_MAX_PAYLOAD_BYTES` was hard-coded at 40 000 — the same number as the
+  global response budget's default, which reserves 1 024 of it for the
+  envelope's own fields, so the reducer's effective ceiling is 38 976. A
+  save-order payload fitted to exactly its own limit was therefore
+  unconditionally re-trimmed by a reducer that IS allowed to drop steps,
+  undoing the tool-local guard's `allowStepDrop: false` promise one layer up: a
+  57-step object lost 29 of them. The tool-local cap is now DERIVED from the
+  global budget and its reserve, so `tool-local < global effective` holds by
+  construction at every value of `SFI_MAX_RESPONSE_BYTES`, and the test pins
+  the ordering rather than the numbers. That object now returns 57 of 57.
+
+- **One inactive-roster census, and it stops prescribing a flag it then
+  negates.** `what_happens_on_save` and `order_of_execution` each carried a
+  byte-identical private copy of the census block under a comment promising the
+  two would stay in lockstep; it now lives once in `soe-active.ts`, beside the
+  predicate it counts over, with a cross-tool test pinning both renderings
+  byte-identical. In its new home the note is conditional on what the caller
+  actually sent: a `{phase}`-only call used to read "re-query with
+  `includeInactive: true` for the full list" immediately followed by "stays
+  suppressed even when `includeInactive: true` was passed".

@@ -2926,6 +2926,75 @@ describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer
     );
   });
 
+  // S4 — each sentence must be conditional on what the caller actually SENT.
+  // `included = requested && !phaseFiltered` fired the phase-filtered branch on
+  // EVERY phase-filtered call, so a caller who passed only `{phase}` read
+  // "re-query with includeInactive: true for the full list" immediately
+  // followed by "stays suppressed even when includeInactive: true was passed".
+  it('phase WITHOUT includeInactive: one remedy, and it does not prescribe a flag it then negates', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const note = r.value.data.inactiveSummary.note;
+    // The census is unconditional — the check happened either way.
+    expect(note).toContain('They were CHECKED and counted, not skipped.');
+    expect(note).toContain("An INACTIVE component is in NO phase's firing sequence");
+    // Nothing was passed, so nothing may be described as passed.
+    expect(note).not.toContain('was passed');
+    // The phase filter suppressed it, not the byte-budget default.
+    expect(note).not.toContain('omitted by default');
+    // Exactly ONE remedy, and it is reachable: both knobs are advertised.
+    expect(note.match(/for the full list/g)).toHaveLength(1);
+    expect(note).toContain(
+      're-query without `phase`, and with includeInactive: true, for the full list.',
+    );
+  });
+
+  it('phase WITH includeInactive: the remedy drops the flag already sent', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+      includeInactive: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const note = r.value.data.inactiveSummary.note;
+    expect(note).toContain(
+      'even though includeInactive: true was passed — re-query without `phase` for the full list.',
+    );
+    // It was NOT omitted by default — the caller asked for it and the phase
+    // filter is what withheld it.
+    expect(note).not.toContain('omitted by default');
+    expect(note.match(/for the full list/g)).toHaveLength(1);
+  });
+
+  it('no phase: the two unfiltered branches are untouched', async () => {
+    const bare = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+    });
+    const asked = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      includeInactive: true,
+    });
+    expect(bare.ok && asked.ok).toBe(true);
+    if (!bare.ok || !asked.ok) return;
+    expect(bare.value.data.inactiveSummary.note).toContain(
+      'The roster is omitted by default so the byte budget goes to the automation that actually runs — re-query with includeInactive: true for the full list.',
+    );
+    expect(bare.value.data.inactiveSummary.included).toBe(false);
+    expect(asked.value.data.inactiveSummary.note).toContain(
+      'The full roster is in inactiveConfigured because includeInactive: true was passed.',
+    );
+    expect(asked.value.data.inactiveSummary.included).toBe(true);
+  });
+
   it('FIX 3 (4): the phase-filtered shortfall check RUNS and compares only the requested phase', async () => {
     // The pure comparison, which the handler no longer skips under a filter.
     const counts = tallyPhaseCounts([

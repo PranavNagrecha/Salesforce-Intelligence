@@ -248,10 +248,10 @@ export interface NestedSaveChain {
 /**
  * Bytes of nested-save `soe` payload one action-chain response may carry.
  *
- * A single composed save order is allowed up to `SOE_MAX_PAYLOAD_BYTES`
- * (40 KB) by the save-order engine, and a lead convert nests FOUR of them —
- * so a densely-automated org would blow the 45 KB whole-response budget four
- * times over and the dispatcher would mangle or reject the answer. Rather than
+ * A single composed save order is allowed up to `soeBudgetBytes()` (derived
+ * from the global response budget) by the save-order engine, and a lead
+ * convert nests FOUR of them — so a densely-automated org would blow the
+ * 45 KB whole-response budget four times over and the dispatcher would mangle or reject the answer. Rather than
  * let that happen, the largest nested chains shed their step sequences first,
  * keeping every chain's SUMMARY and naming the recovery call. Sized so the
  * chain scaffolding (steps, notes, disclosures, evidence envelope) still fits

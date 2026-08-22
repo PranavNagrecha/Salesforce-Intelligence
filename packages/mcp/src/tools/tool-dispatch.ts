@@ -589,7 +589,10 @@ import {
   packageImpactHandler,
   packageImpactInputSchema,
 } from './package-impact.js';
-import { hasHandlerCursor } from './page-cursor.js';
+import {
+  hasHandlerCursor,
+  reconcileHandlerPageAfterGlobalTrim,
+} from './page-cursor.js';
 import {
   permissionSetConsolidationHandler,
   permissionSetConsolidationInputSchema,
@@ -627,6 +630,10 @@ import {
   recordtypeAvailabilityInputSchema,
 } from './recordtype-availability.js';
 import { resolveHandler, resolveInputSchema } from './resolve.js';
+import {
+  responseBudgetBytes as resolveResponseBudgetBytes,
+  responseReductionCap,
+} from './response-budget.js';
 import {
   retrieveBlindspotReportHandler,
   retrieveBlindspotReportInputSchema,
@@ -2205,26 +2212,17 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
 // route-question's gateway envelopes); re-exported here as the public API.
 
 
-export const MAX_RESPONSE_BYTES = 45_000;
-
 /**
- * Default for the GLOBAL escalating response budget (P13-GUARD-global-size).
- * Sits BELOW `MAX_RESPONSE_BYTES` so the budget's truncate/slim passes rescue
- * a payload before it ever reaches the hard ceiling, and well under the ~55 KB
- * observed client rejection including envelope overhead. Override with
- * `SFI_MAX_RESPONSE_BYTES` (floor 2 000 — below that the error envelope itself
- * wouldn't fit).
+ * The budget primitives live in `response-budget.ts` — a LEAF module both this
+ * guard and the tool-local `enforceSoeByteBudget` import, so the tool-local cap
+ * can be DERIVED from the global one instead of hard-coded beside it. Re-
+ * exported here because that is where callers have always imported them from.
  */
-export const RESPONSE_BUDGET_DEFAULT_BYTES = 40_000;
-
-/** Resolve the active response budget from `SFI_MAX_RESPONSE_BYTES`. */
-export const responseBudgetBytes = (): number => {
-  const raw = process.env['SFI_MAX_RESPONSE_BYTES'];
-  const parsed = raw === undefined || raw === '' ? NaN : Number(raw);
-  return Number.isFinite(parsed) && parsed >= 2_000
-    ? Math.min(Math.floor(parsed), MAX_RESPONSE_BYTES)
-    : RESPONSE_BUDGET_DEFAULT_BYTES;
-};
+export {
+  MAX_RESPONSE_BYTES,
+  RESPONSE_BUDGET_DEFAULT_BYTES,
+  responseBudgetBytes,
+} from './response-budget.js';
 
 /** Narrowing context `runTool` threads through so the guard can speak the tool's own language. */
 interface ResponseNarrowing {
@@ -2383,10 +2381,11 @@ const truncateDataArrays = (
   dropped: number;
   truncatedPaths: readonly string[];
   keptByPath: Readonly<Record<string, number>>;
+  originalByPath: Readonly<Record<string, number>>;
 } => {
   const data = body['data'];
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-    return { dropped: 0, truncatedPaths: [], keptByPath: {} };
+    return { dropped: 0, truncatedPaths: [], keptByPath: {}, originalByPath: {} };
   }
   const record = data as Record<string, unknown>;
   const candidates = [...collectTrimCandidates(record)].sort(
@@ -2395,8 +2394,10 @@ const truncateDataArrays = (
   let dropped = 0;
   const truncatedPaths: string[] = [];
   const keptByPath: Record<string, number> = {};
+  const originalByPath: Record<string, number> = {};
   for (const candidate of candidates) {
     let list = candidate.owner[candidate.key] as unknown[];
+    const originalLength = list.length;
     const droppedBefore = dropped;
     while (list.length > TRUNCATE_KEEP_MIN && utf8Bytes(body) > cap) {
       const keep = Math.max(TRUNCATE_KEEP_MIN, Math.floor(list.length / 2));
@@ -2407,10 +2408,15 @@ const truncateDataArrays = (
     if (dropped > droppedBefore) {
       truncatedPaths.push(candidate.path);
       keptByPath[candidate.path] = list.length;
+      // The PRE-trim length is what identifies a handler's own page: a
+      // cursor-aware payload publishes the size of the page it built, and a
+      // trimmed list whose original length matches it IS that page. See
+      // `reconcileHandlerPageAfterGlobalTrim`.
+      originalByPath[candidate.path] = originalLength;
     }
     if (utf8Bytes(body) <= cap) break;
   }
-  return { dropped, truncatedPaths, keptByPath };
+  return { dropped, truncatedPaths, keptByPath, originalByPath };
 };
 
 /** Pass 2 — slim every long string under a node to a head + trim marker. */
@@ -2489,7 +2495,7 @@ export const jsonResult = (
   bodyInput: unknown,
   narrowing?: ResponseNarrowing,
 ): CallToolResult => {
-  const cap = responseBudgetBytes();
+  const cap = resolveResponseBudgetBytes();
   /**
    * MCP-01 (b): always pair text (backward-compatible hosts) with
    * `structuredContent` (hosts that honor outputSchema). Text remains the
@@ -2602,11 +2608,11 @@ export const jsonResult = (
 
   // Reserve room for the responseBudget and estimatedPayloadBytes fields so
   // the check applies to the final serialized envelope, not only its body.
-  const reductionCap = Math.max(1, cap - Math.min(1_024, Math.floor(cap / 4)));
-  const { dropped, truncatedPaths, keptByPath } = truncateDataArrays(
-    clone,
-    reductionCap,
-  );
+  // ONE definition, in `response-budget.ts`, because the tool-local caps are
+  // derived from it — see `toolLocalPayloadBudgetBytes`.
+  const reductionCap = responseReductionCap();
+  const { dropped, truncatedPaths, keptByPath, originalByPath } =
+    truncateDataArrays(clone, reductionCap);
   // SOE-omission honesty (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES):
   // when the global tail-truncation just shortened a composed-SOE `data.soe`, a
   // later automation phase `summary.phaseCounts` still claims may have been
@@ -2619,6 +2625,22 @@ export const jsonResult = (
   if (dropped > 0) {
     reconcileSoePhasesOmittedAfterGlobalTrim((clone as { data?: unknown }).data);
   }
+  // The same law for the OTHER thing a tail-trim silently falsifies: a
+  // handler's own page pointer. `nextOffset` / `nextCursor` were computed from
+  // the page the handler BUILT, and pass 1 has just shortened it, so the
+  // pointer advances by delivered PLUS dropped and whole windows become
+  // unreachable. Correct it when the trimmed list can be POSITIVELY matched to
+  // the handler's published page size, remove it when it cannot — never leave
+  // it pointing past rows the caller never received. No-op on every payload
+  // without handler pagination.
+  const handlerPage =
+    dropped > 0
+      ? reconcileHandlerPageAfterGlobalTrim((clone as { data?: unknown }).data, {
+          truncatedPaths,
+          keptByPath,
+          originalByPath,
+        })
+      : 'none';
   let stringsSlimmed = 0;
   if (utf8Bytes(clone) > reductionCap) {
     stringsSlimmed = slimDataStrings(clone);
@@ -2662,6 +2684,19 @@ export const jsonResult = (
           ', ',
         )}. Only a leading prefix of each is present; a count published elsewhere in this response describes the FULL list, not the rows shown.`
       : '';
+    // The handler's pagination is authoritative ONLY while this guard has left
+    // it alone. Once pass 1 trimmed the handler's own page, saying so was false
+    // exactly when it was printed.
+    const leadNote =
+      handlerPage === 'corrected'
+        ? 'Response exceeded the byte budget and rows were trimmed from this tool’s OWN page. Its nextOffset has been CORRECTED to the last row actually delivered, and nextCursor removed — an opaque cursor encodes the pre-trim offset and cannot be rewritten from outside the handler. Resume with the corrected offset; a smaller limit avoids the trim entirely.'
+        : handlerPage === 'invalidated'
+          ? 'Response exceeded the byte budget and rows were trimmed from this tool’s OWN page, so its pagination pointer no longer describes the rows you received. It has been REMOVED rather than left to skip the dropped rows: this response cannot be resumed — re-query with a smaller limit.'
+          : handlerPaginated
+            ? 'Response exceeded the byte budget and long strings were trimmed; use this tool’s own nextCursor to page (the handler’s pagination is authoritative).'
+            : emitApproxNextOffset
+              ? 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed). The nextOffset is approximate — re-query from it for the dropped tail.'
+              : 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed); the dropped tail cannot be resumed from this response — narrow the query or page with limit/offset for complete rows.';
     clone['responseBudget'] = {
       applied: true,
       ...(dropped > 0
@@ -2673,14 +2708,9 @@ export const jsonResult = (
               (typeof offset === 'number' ? offset : 0) + keptOfPagedList,
           }
         : {}),
+      ...(handlerPage === 'none' ? {} : { handlerPagination: handlerPage }),
       ...(stringsSlimmed > 0 ? { stringsSlimmed } : {}),
-      note: `${
-        handlerPaginated
-          ? 'Response exceeded the byte budget and long strings were trimmed; use this tool’s own nextCursor to page (the handler’s pagination is authoritative).'
-          : emitApproxNextOffset
-            ? 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed). The nextOffset is approximate — re-query from it for the dropped tail.'
-            : 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed); the dropped tail cannot be resumed from this response — narrow the query or page with limit/offset for complete rows.'
-      }${nestedNote}`,
+      note: `${leadNote}${nestedNote}`,
     };
     const reduced = toEnvelope(clone);
     if (fits(JSON.stringify(reduced))) return result(reduced);

@@ -68,8 +68,10 @@ import {
 import { resolveObjectAlias } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import {
+  buildInactiveSummary,
   type InactiveConfiguredFirer,
   skipInactiveSoeFirer,
+  type SoeInactiveSummary,
   sortedInactiveConfigured,
 } from './soe-active.js';
 import {
@@ -86,7 +88,7 @@ import {
   type BoundableStep,
   computePhasesOmitted,
   enforceSoeByteBudget,
-  SOE_MAX_PAYLOAD_BYTES,
+  soeBudgetBytes,
   type SoeBudgetResult,
   type SoePhase,
   type SoePhaseCounts,
@@ -526,69 +528,14 @@ const DEFAULT_OOE_PAGE_LIMIT = 200;
 const MAX_OOE_PAGE_LIMIT = 500;
 
 /**
- * The ALWAYS-PRESENT census of inactive configured automation on the target
- * object. It replaces "the `inactiveConfigured` array, omitted when empty" —
- * a shape in which `total: 0` and "never checked" were indistinguishable.
- *
- * Mirrors `what_happens_on_save`'s block byte-for-byte; the two SOE tools must
- * stay in lockstep, so a rewording here is a code-review concern, not a drift.
+ * The inactive-roster census is defined ONCE in `soe-active.ts`, beside
+ * `InactiveConfiguredFirer` and the active/inactive predicate it counts over.
+ * Re-exported here so this module's public type surface is unchanged. Both
+ * save-order tools used to carry a byte-identical private copy under a comment
+ * promising they would stay in lockstep — the same drift seam that let two
+ * constants named `UNPROVEN_REGISTRATION_DISCLOSURE` ship different text.
  */
-export interface SoeInactiveSummary {
-  /** How many configured components on this object are INACTIVE. Zero is CHECKED. */
-  readonly total: number;
-  /** Per component type, non-zero entries only, key-sorted. */
-  readonly byType: Readonly<Record<string, number>>;
-  /** True when `inactiveConfigured` carries the full roster in this response. */
-  readonly included: boolean;
-  /** Verbatim explanation — see {@link buildInactiveSummary}. */
-  readonly note: string;
-}
-
-/** Per-`componentType` tally of an inactive roster, key-sorted for stability. */
-const inactiveByType = (
-  firers: readonly InactiveConfiguredFirer[],
-): Readonly<Record<string, number>> => {
-  const counts = new Map<string, number>();
-  for (const f of firers) counts.set(f.componentType, (counts.get(f.componentType) ?? 0) + 1);
-  return Object.fromEntries(
-    [...counts.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
-  );
-};
-
-const inactiveOmittedNote = (total: number): string =>
-  `${total} automation components are configured on this object but INACTIVE (Draft / Obsolete Flow, inactive WorkflowRule / ValidationRule) and therefore do not fire on this save. They were CHECKED and counted, not skipped. The roster is omitted by default so the byte budget goes to the automation that actually runs — re-query with includeInactive: true for the full list.`;
-
-const inactiveIncludedNote = (total: number): string =>
-  `${total} automation components are configured on this object but INACTIVE (Draft / Obsolete Flow, inactive WorkflowRule / ValidationRule) and therefore do not fire on this save. They were CHECKED and counted, not skipped. The full roster is in inactiveConfigured because includeInactive: true was passed.`;
-
-/**
- * Why a `phase`-filtered query never ships the roster: an inactive component
- * is not in ANY phase's firing sequence, so returning it under a phase filter
- * would answer a question the caller did not ask. Half-honouring the request
- * silently would be worse than saying so.
- */
-const INACTIVE_ROSTER_PHASE_SUPPRESSED_NOTE =
-  "An INACTIVE component is in NO phase's firing sequence, so the roster stays suppressed on a phase-filtered query even when includeInactive: true was passed — re-query without `phase` for the full list.";
-
-/** Build the always-present {@link SoeInactiveSummary}. */
-const buildInactiveSummary = (
-  firers: readonly InactiveConfiguredFirer[],
-  requested: boolean,
-  phaseFiltered: boolean,
-): SoeInactiveSummary => {
-  const included = requested && !phaseFiltered;
-  const total = firers.length;
-  return {
-    total,
-    byType: inactiveByType(firers),
-    included,
-    note: included
-      ? inactiveIncludedNote(total)
-      : phaseFiltered
-        ? `${inactiveOmittedNote(total)} ${INACTIVE_ROSTER_PHASE_SUPPRESSED_NOTE}`
-        : inactiveOmittedNote(total),
-  };
-};
+export type { SoeInactiveSummary };
 
 /**
  * FIX 3 (5). Per-event paging state, present ONLY when a per-event `soe` was
@@ -1500,7 +1447,7 @@ const sizeOfBytes = (value: unknown): number =>
   Buffer.byteLength(JSON.stringify(value), 'utf8');
 
 /**
- * Headroom reserved below {@link SOE_MAX_PAYLOAD_BYTES} for the honesty
+ * Headroom reserved below {@link soeBudgetBytes} for the honesty
  * scaffolding the four-event view appends AFTER byte-budget enforcement — the
  * per-event `phasesOmitted` arrays and the phases-dropped disclosure note. Those
  * additions are measured by `enforceSoeByteBudget` only if they are reserved
@@ -1897,7 +1844,7 @@ export const orderOfExecutionHandler = async (
   // `what_happens_on_save`: it stays within budget instead of re-inflating past
   // it and forcing the global guard to mangle the disclosure.
   let budget = enforceSoeByteBudget(data, containers, {
-    budgetBytes: SOE_MAX_PAYLOAD_BYTES - OOE_HONESTY_RESERVE_BYTES,
+    budgetBytes: soeBudgetBytes() - OOE_HONESTY_RESERVE_BYTES,
   });
   const soeOnlyBytes = sizeOfBytes(data);
   attachEnvelopeHonesty(budget);
@@ -1908,11 +1855,11 @@ export const orderOfExecutionHandler = async (
   // for its growth as more steps drop), then re-attach against the new
   // survivors. `phasesOmitted` is bounded by phase-count, so this converges and
   // guarantees the final `data` is within budget without the global guard.
-  if (sizeOfBytes(data) > SOE_MAX_PAYLOAD_BYTES) {
+  if (sizeOfBytes(data) > soeBudgetBytes()) {
     const honestyBytes = sizeOfBytes(data) - soeOnlyBytes;
     const budget2 = enforceSoeByteBudget(data, containers, {
       budgetBytes:
-        SOE_MAX_PAYLOAD_BYTES - honestyBytes - OOE_HONESTY_RESERVE_BYTES,
+        soeBudgetBytes() - honestyBytes - OOE_HONESTY_RESERVE_BYTES,
     });
     budget = {
       truncated: budget.truncated || budget2.truncated,

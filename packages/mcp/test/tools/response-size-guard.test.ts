@@ -12,6 +12,7 @@ import {
   responseBudgetBytes,
   runTool,
 } from '../../src/tools/index.js';
+import { soeBudgetBytes } from '../../src/tools/soe-payload-bounds.js';
 
 /**
  * Unit tests for the GLOBAL escalating response budget in `jsonResult`
@@ -967,5 +968,311 @@ describe('jsonResult nextOffset indexes the paged list (B7)', () => {
       readonly responseBudget: { readonly nextOffset: number };
     };
     expect(parsed.responseBudget.nextOffset).toBe(40 + parsed.data.rows.length);
+  });
+});
+
+/**
+ * The handler's page pointer must describe the rows the caller RECEIVED.
+ *
+ * A cursor-aware handler builds a page, computes `nextOffset = offset + page
+ * length` and mints a `nextCursor` for it. `jsonResult` then finds the envelope
+ * over budget and tail-trims the largest `data` array — that same page — and
+ * used to leave the pointer alone while printing *"use this tool's own
+ * nextCursor to page (the handler's pagination is authoritative)"*. The pointer
+ * advanced by delivered PLUS dropped, so whole windows were unreachable.
+ *
+ * Measured on a real vault before the fix, `code_quality_audit` at
+ * `limit: 500` / `SFI_MAX_RESPONSE_BYTES=12000`, walked to exhaustion:
+ *   94 of 647 rows, seven gaps, plus 628..647 never reached.
+ * After: 647 of 647, contiguous, no gaps, no overlaps.
+ */
+describe('jsonResult reconciles a HANDLER page pointer it trimmed underneath', () => {
+  /** A corpus big enough that any page of it blows a small budget. */
+  const CORPUS = Array.from({ length: 400 }, (_, i) => ({
+    id: `Issue:${String(i).padStart(3, '0')}`,
+    ruleId: 'apex-soql-in-loop',
+    detail: `finding number ${i} with a realistic amount of explanatory padding text`,
+  }));
+
+  /** A cursor-aware handler, in the shape `code_quality_audit` actually emits. */
+  const fakeHandler = (
+    offset: number,
+    limit: number,
+  ): Record<string, unknown> => {
+    const slice = CORPUS.slice(offset, offset + limit);
+    const truncated = offset + slice.length < CORPUS.length;
+    return {
+      data: {
+        issues: slice,
+        totalCount: CORPUS.length,
+        truncated,
+        limit,
+        offset,
+        ...(truncated ? { nextOffset: offset + slice.length } : {}),
+        ...(truncated
+          ? {
+              nextCursor: `opaque-token-for-${offset + slice.length}`,
+              pageInfo: {
+                totalCount: CORPUS.length,
+                returnedCount: slice.length,
+                hasMore: true,
+                nextCursor: `opaque-token-for-${offset + slice.length}`,
+              },
+            }
+          : {}),
+      },
+      vaultState: VAULT_STATE,
+    };
+  };
+
+  /** Walk to exhaustion through `jsonResult`, following `data.nextOffset`. */
+  const walk = (
+    limit: number,
+  ): {
+    readonly rows: readonly string[];
+    readonly ranges: readonly (readonly [number, number])[];
+    readonly steps: number;
+  } => {
+    const rows: string[] = [];
+    const ranges: (readonly [number, number])[] = [];
+    let offset = 0;
+    let steps = 0;
+    for (;;) {
+      steps += 1;
+      if (steps > 500) throw new Error('walk did not terminate');
+      const body = fakeHandler(offset, limit);
+      const text = envelopeText(
+        jsonResult(body, {
+          args: { limit, offset },
+          knobs: ['limit', 'offset', 'cursor'],
+        }),
+      );
+      const parsed = JSON.parse(text) as {
+        readonly error?: unknown;
+        readonly data?: {
+          readonly issues: readonly { readonly id: string }[];
+          readonly nextOffset?: number;
+        };
+      };
+      if (parsed.error !== undefined || parsed.data === undefined) {
+        throw new Error('walk hit an oversize error');
+      }
+      const delivered = parsed.data.issues.length;
+      for (const row of parsed.data.issues) rows.push(row.id);
+      ranges.push([offset, offset + delivered] as const);
+      const next = parsed.data.nextOffset;
+      if (next === undefined) break;
+      if (next <= offset) throw new Error(`pointer did not advance: ${next}`);
+      offset = next;
+    }
+    return { rows, ranges, steps };
+  };
+
+  it('a full walk at a large limit reaches EVERY row — no gaps, no duplicates', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    const { rows, ranges } = walk(400);
+    // Pre-fix: the pointer advanced by delivered + dropped, so the union was a
+    // small fraction of the corpus and the ranges left gaps between them.
+    expect(new Set(rows).size).toBe(CORPUS.length);
+    expect(rows).toHaveLength(CORPUS.length);
+    let reached = 0;
+    for (const [from, to] of ranges) {
+      expect(from).toBe(reached); // no gap, and no overlap
+      reached = to;
+    }
+    expect(reached).toBe(CORPUS.length);
+  });
+
+  it('a small limit that never trips the budget is byte-identical to before', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '40000';
+    const body = fakeHandler(0, 10);
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: Record<string, unknown>;
+      readonly responseBudget?: unknown;
+    };
+    expect(parsed.responseBudget).toBeUndefined();
+    expect(parsed.data['nextOffset']).toBe(10);
+    expect(parsed.data['nextCursor']).toBe('opaque-token-for-10');
+  });
+
+  it('CORRECTS the pointer to rows delivered and removes the uncorrectable cursor', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    const parsed = JSON.parse(envelopeText(jsonResult(fakeHandler(100, 200)))) as {
+      readonly data: {
+        readonly issues: readonly unknown[];
+        readonly nextOffset?: number;
+        readonly nextCursor?: string;
+        readonly truncated: boolean;
+        readonly pageInfo?: {
+          readonly returnedCount: number;
+          readonly nextCursor: string | null;
+          readonly hasMore: boolean;
+        };
+      };
+      readonly responseBudget: {
+        readonly handlerPagination?: string;
+        readonly note: string;
+      };
+    };
+    const delivered = parsed.data.issues.length;
+    expect(delivered).toBeLessThan(200);
+    // Pre-fix this was 100 + 200 = 300, whatever `delivered` happened to be.
+    expect(parsed.data.nextOffset).toBe(100 + delivered);
+    // An opaque cursor encodes the PRE-trim offset and cannot be rewritten
+    // from outside the handler, so it is removed rather than left to overshoot.
+    expect(parsed.data.nextCursor).toBeUndefined();
+    expect(parsed.data.pageInfo?.nextCursor).toBeNull();
+    expect(parsed.data.pageInfo?.returnedCount).toBe(delivered);
+    expect(parsed.data.truncated).toBe(true);
+    expect(parsed.responseBudget.handlerPagination).toBe('corrected');
+    // …and the false claim of handler authority is gone.
+    expect(parsed.responseBudget.note).not.toContain(
+      'the handler’s pagination is authoritative',
+    );
+    expect(parsed.responseBudget.note).toContain('has been CORRECTED');
+  });
+
+  it("mints a pointer on a LAST page the handler thought was complete", () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    // offset 200 + limit 200 == totalCount, so the handler emits NO pointer at
+    // all. The guard then drops rows, and pre-fix the payload said
+    // `truncated: false` with no pointer — a cut page read as a complete one.
+    const parsed = JSON.parse(envelopeText(jsonResult(fakeHandler(200, 200)))) as {
+      readonly data: {
+        readonly issues: readonly unknown[];
+        readonly nextOffset?: number;
+        readonly truncated: boolean;
+      };
+      readonly responseBudget: { readonly handlerPagination?: string };
+    };
+    const delivered = parsed.data.issues.length;
+    expect(delivered).toBeLessThan(200);
+    expect(parsed.data.truncated).toBe(true);
+    expect(parsed.data.nextOffset).toBe(200 + delivered);
+    expect(parsed.responseBudget.handlerPagination).toBe('corrected');
+  });
+
+  it('INVALIDATES rather than guesses when the paged list cannot be identified', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    // Two same-sized top-level lists and a page size that matches BOTH — the
+    // guard cannot tell which one `offset` pages, so it must not pick one.
+    const rows = (tag: string): readonly unknown[] =>
+      Array.from({ length: 200 }, (_, i) => ({
+        id: `${tag}:${i}`,
+        detail: `row ${i} with a realistic amount of explanatory padding text`,
+      }));
+    const body = {
+      data: {
+        issues: rows('Issue'),
+        skipped: rows('Skipped'),
+        totalCount: 400,
+        truncated: true,
+        limit: 200,
+        offset: 0,
+        nextOffset: 200,
+        nextCursor: 'opaque-token-for-200',
+        pageInfo: {
+          totalCount: 400,
+          returnedCount: 200,
+          hasMore: true,
+          nextCursor: 'opaque-token-for-200',
+        },
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: {
+        readonly nextOffset?: number;
+        readonly nextCursor?: string;
+        readonly truncated: boolean;
+        readonly pageInfo?: { readonly nextCursor: string | null };
+      };
+      readonly responseBudget: {
+        readonly handlerPagination?: string;
+        readonly note: string;
+      };
+    };
+    expect(parsed.responseBudget.handlerPagination).toBe('invalidated');
+    expect(parsed.data.nextOffset).toBeUndefined();
+    expect(parsed.data.nextCursor).toBeUndefined();
+    expect(parsed.data.pageInfo?.nextCursor).toBeNull();
+    // "there is more" survives — a cut page must never read as a complete one.
+    expect(parsed.data.truncated).toBe(true);
+    expect(parsed.responseBudget.note).toContain('has been REMOVED');
+    expect(parsed.responseBudget.note).not.toContain(
+      'the handler’s pagination is authoritative',
+    );
+  });
+
+  it('leaves a handler pointer alone when only STRINGS were slimmed', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    const body = {
+      data: {
+        issues: Array.from({ length: 4 }, (_, i) => ({ id: `Issue:${i}` })),
+        blob: 'y'.repeat(20_000),
+        totalCount: 400,
+        truncated: true,
+        limit: 4,
+        offset: 0,
+        nextOffset: 4,
+        nextCursor: 'opaque-token-for-4',
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: {
+        readonly nextOffset?: number;
+        readonly nextCursor?: string;
+      };
+      readonly responseBudget: {
+        readonly handlerPagination?: string;
+        readonly note: string;
+      };
+    };
+    // No list was trimmed, so the handler's pointer is still exactly right and
+    // the "pagination is authoritative" sentence is still true.
+    expect(parsed.data.nextOffset).toBe(4);
+    expect(parsed.data.nextCursor).toBe('opaque-token-for-4');
+    expect(parsed.responseBudget.handlerPagination).toBeUndefined();
+    expect(parsed.responseBudget.note).toContain(
+      'the handler’s pagination is authoritative',
+    );
+  });
+});
+
+/**
+ * The tool-local cap and the global reducer's ceiling, pinned where it matters:
+ * a payload a composing tool fitted to ITS cap must pass the global guard
+ * untouched. Pre-fix the two numbers were both 40 000 while the global guard
+ * reserves 1 024 of its budget, so "fitted" payloads were unconditionally
+ * re-trimmed by a reducer that drops steps — the tool-local guard's
+ * `allowStepDrop: false` promise undone one layer up.
+ */
+describe('a payload fitted to the tool-local cap clears the global guard', () => {
+  /** `data` whose serialized size is exactly `target` bytes. */
+  const dataOfExactly = (target: number): Record<string, unknown> => {
+    const shell = { verdict: 'safe', pad: '' };
+    const overhead = Buffer.byteLength(JSON.stringify(shell), 'utf8');
+    return { ...shell, pad: 'p'.repeat(target - overhead) };
+  };
+
+  it('is NOT trimmed, at the default budget and at a lowered one', () => {
+    for (const raw of [undefined, '12000', '6000'] as const) {
+      if (raw === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = raw;
+      const body = {
+        data: dataOfExactly(soeBudgetBytes()),
+        vaultState: VAULT_STATE,
+      };
+      const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+        readonly error?: unknown;
+        readonly responseBudget?: unknown;
+      };
+      const label = `SFI_MAX_RESPONSE_BYTES=${String(raw)}`;
+      // Pre-fix, at the default budget, `data` of exactly 40 000 bytes landed
+      // 1 024 over the reducer's 38 976 ceiling and came back slimmed.
+      expect(parsed.error, label).toBeUndefined();
+      expect(parsed.responseBudget, label).toBeUndefined();
+    }
   });
 });
