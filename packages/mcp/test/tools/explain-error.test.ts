@@ -13,6 +13,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { explainDebugLogHandler } from '../../src/tools/explain-debug-log.js';
 import {
   detectStatusCode,
   explainErrorHandler,
@@ -345,6 +346,126 @@ describe('explain_error — status-code taxonomy (category-level)', () => {
     const r = await explainErrorHandler(ctx, { errorText: 'anything' });
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect(r.value.data.disclosure).toContain('string matching against declared metadata');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FIX 10 — explain_error must not be silent about a System.LimitException.
+//
+// The detector already existed one module over and is now SHARED
+// (`./governor-limit-signature.js`), so the two tools cannot disagree about the
+// same string. That is what the cross-tool table below asserts.
+// ---------------------------------------------------------------------------
+
+/** Limit strings the two tools must classify IDENTICALLY. */
+const LIMIT_STRINGS: readonly string[] = [
+  'System.LimitException: Too many SOQL queries: 101',
+  'System.LimitException: Too many DML statements: 151',
+  'System.LimitException: Too many query rows: 50001',
+  'System.LimitException: Apex CPU time limit exceeded',
+  'System.LimitException: Apex heap size too large: 7000000',
+  'Number of SOQL queries: 101 out of 100',
+];
+
+describe('explain_error — runtime governor-limit signature (FIX 10)', () => {
+  it('classifies System.LimitException instead of returning a fully-null `none`', async () => {
+    // FAIL-BEFORE: the taxonomy held only DML/API status codes, so this string
+    // returned disposition 'none' with every field null — while
+    // sfi.explain_debug_log classified it as `soql`, 101.
+    const r = await explainErrorHandler(ctx, {
+      errorText: 'System.LimitException: Too many SOQL queries: 101',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.disposition).not.toBe('none');
+    expect(d.disposition).toBe('matched');
+    expect(d.detectedLimit?.limitType).toBe('soql');
+    expect(d.detectedLimit?.actual).toBe(101);
+    expect(d.triedStrategies).toContain(
+      'governor-limit signature (runtime limit classification)',
+    );
+    // Category-level, never a source match: no candidate is fabricated.
+    expect(d.candidates).toEqual([]);
+    expect(d.boundaries.join(' ')).toContain('consumed across the WHOLE transaction');
+    // The static cross-reference REUSES LIMIT_TO_STATIC_RULES rather than
+    // re-deriving it: soql maps to soql-in-loop.
+    expect(d.nextSteps.join(' ')).toContain('sfi.explain_debug_log');
+    expect(d.nextSteps.join(' ')).toContain('soql-in-loop');
+    // And it stops telling the caller to paste what they just pasted.
+    expect(d.nextSteps.join(' ').toLowerCase()).not.toContain('paste the full error');
+  });
+
+  it('CROSS-TOOL CONSISTENCY: explain_error and explain_debug_log return the SAME detectedLimit', async () => {
+    // This is the test that makes the re-use load-bearing rather than
+    // incidental — a second copy of the classifier would drift and fail here.
+    for (const text of LIMIT_STRINGS) {
+      const viaError = await explainErrorHandler(ctx, { errorText: text });
+      const viaLog = await explainDebugLogHandler(ctx, { logText: text });
+      expect(viaError.ok).toBe(true);
+      expect(viaLog.ok).toBe(true);
+      if (!viaError.ok || !viaLog.ok) return;
+      expect(viaError.value.data.detectedLimit).not.toBeNull();
+      expect(viaError.value.data.detectedLimit).toEqual(
+        viaLog.value.data.detectedLimit,
+      );
+    }
+  });
+
+  it('a limit signature and a status code are DIFFERENT AXES and do not compete', async () => {
+    const r = await explainErrorHandler(ctx, {
+      errorText:
+        'UNABLE_TO_LOCK_ROW, unable to obtain exclusive access to this record\nSystem.LimitException: Too many SOQL queries: 101',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.categoryExplanation?.statusCode).toBe('UNABLE_TO_LOCK_ROW');
+    expect(d.detectedLimit?.limitType).toBe('soql');
+  });
+
+  it('a text with no limit signature reports detectedLimit: null (not a fabricated other)', async () => {
+    const r = await explainErrorHandler(ctx, {
+      errorText: 'REQUIRED_FIELD_MISSING, Required fields are missing: [Name]',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.detectedLimit).toBeNull();
+    expect(r.value.data.triedStrategies).not.toContain(
+      'governor-limit signature (runtime limit classification)',
+    );
+  });
+
+  it('an unrecognised System.*Exception stays `none` and names the GAP instead of asking for another paste', async () => {
+    // FAIL-BEFORE: nextSteps told the caller to "Paste the FULL error" — which
+    // is what they had just pasted — and nothing said the Apex exception
+    // hierarchy is simply not modelled here.
+    const r = await explainErrorHandler(ctx, {
+      errorText: 'System.NullPointerException: Attempt to de-reference a null object',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.disposition).toBe('none');
+    // Asserted BEFORE the new field so the pre-fix failure is a WRONG VALUE
+    // (the old nextSteps said "Paste the FULL error"), not a missing symbol.
+    expect(d.nextSteps.join(' ').toLowerCase()).not.toContain('paste the full error');
+    expect(d.nextSteps.join(' ')).toContain('sfi.explain_debug_log');
+    expect(d.boundaries).toContain(
+      "This is an Apex RUNTIME exception (System.NullPointerException), not a DML / API status code. This tool's taxonomy covers 13 DML and API status codes and the runtime governor-limit signatures; it does not model the Apex exception hierarchy. For a runtime failure, sfi.explain_debug_log reads the debug log — stack frames, the fired limit, and the static governor-risk cross-reference. That is a GAP IN THIS TOOL, not a claim that nothing explains your error.",
+    );
+    expect(d.detectedLimit).toBeNull();
+  });
+
+  it('the disclosure names BOTH category-level recognizers', async () => {
+    const r = await explainErrorHandler(ctx, { errorText: 'anything' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosure).toContain('categoryExplanation');
+    expect(r.value.data.disclosure).toContain('detectedLimit');
+    expect(r.value.data.disclosure).toContain(
+      'the SAME detector sfi.explain_debug_log uses',
+    );
   });
 });
 

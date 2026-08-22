@@ -15,21 +15,30 @@
  * edge type the trigger emits and projects a per-edge
  * `WhatIfImpactItem`:
  *
- *   | Outgoing edge | What it represented | Impact category    | Verdict   |
- *   |---------------|---------------------|--------------------|-----------|
- *   | triggersOn    | The object the trigger listens to | metadata-blocker | blocking |
- *   | callsApex     | Apex classes the trigger invokes  | code-needs-update | risky |
- *   | dispatchesAsync | Async jobs the trigger queues   | code-needs-update | risky |
- *   | readsFrom     | Fields the trigger reads          | code-needs-update | risky |
- *   | writesTo      | Fields the trigger writes         | metadata-blocker | blocking |
- *   | listensTo     | Platform Event subscription       | metadata-blocker | blocking |
+ *   | Outgoing edge   | What it represented               | Impact category   | Verdict  |
+ *   |-----------------|-----------------------------------|-------------------|----------|
+ *   | triggersOn      | The object the trigger listens to | NOT an impact — `entryPoints` | — |
+ *   | listensTo       | Platform Event subscription       | NOT an impact — `entryPoints` | — |
+ *   | callsApex       | Apex classes the trigger invokes  | code-needs-update | risky    |
+ *   | dispatchesAsync | Async jobs the trigger queues     | code-needs-update | risky    |
+ *   | readsFrom       | Fields the trigger reads          | input-only        | NONE     |
+ *   | writesTo        | Fields the trigger writes         | metadata-blocker  | blocking |
  *
- * The verdict differential between `readsFrom` (`risky`) and `writesTo`
- * (`blocking`) reflects the fail-conservative posture: a write the
- * trigger silently stops doing is a behavior change other downstream
- * automation may rely on; a read the trigger silently stops doing
- * usually just means the trigger no longer evaluates a guard. Both
- * are surfaced; the verdict difference drives renderer grouping.
+ * **An entry point is not a dependent.** `triggersOn` and `listensTo`
+ * name the trigger's OWN ATTACHMENT POINT, not something downstream of
+ * it. Every trigger has exactly one `triggersOn`, so classifying it
+ * `blocking` made the verdict unconditional — measured org-wide, every
+ * trigger returned `blocking` and the headline therefore carried no
+ * information. Both edge types are RECATEGORISED (never dropped) into
+ * the `entryPoints` block, which reports the same identities under a
+ * label that says what they actually are.
+ *
+ * **`readsFrom` is an INPUT, not an effect.** Reading a field is an
+ * input to this automation, not a downstream consequence of it: the
+ * field is unchanged and nothing downstream of the field is affected.
+ * It is surfaced with `category: 'input-only'` and contributes NOTHING
+ * to the verdict. `writesTo` keeps `blocking` — a write other
+ * automation may consume is fail-conservative and correct.
  *
  * **The parent-object axis.** Triggers attach to exactly one
  * SObject via the declared `triggersOn` edge. The response surfaces
@@ -46,16 +55,33 @@
  * populates events, so the empty case should only occur for malformed
  * trigger headers).
  *
- * **Aggregate verdict.** Mirrors R2a's `WhatIfChangeFieldType` and
- * the sibling `WhatIfDeactivateFlow`:
- *   - `safe` if there are NO impacts at all (a trigger that fires but
- *     does nothing of consequence — should never happen with the v0.1
- *     extractor's mandatory `triggersOn` emission).
- *   - `blocking` if ANY `metadata-blocker` impact appears (the
- *     declared `triggersOn` to the parent object plus any writes/Platform
- *     Event subscription).
- *   - `risky` if no `metadata-blocker` but at least one
- *     `code-needs-update` impact.
+ * **Two axes: runtime state and dependency structure.** The response
+ * carries BOTH, because they answer different questions and a single
+ * word cannot.
+ *
+ *   - `structuralVerdict` is what the dependency structure says, over
+ *     the VERDICT-BEARING impacts only (`input-only` entries are
+ *     excluded). Cascade, mirroring R2a's `aggregateVerdict`:
+ *       * `safe` when there is no verdict-bearing impact at all — and
+ *         then `notProvenHarmless` states what that `safe` does and does
+ *         not prove, because `safe` alone over-claims.
+ *       * `blocking` if ANY `metadata-blocker` impact appears (a write
+ *         other automation may consume).
+ *       * `risky` if no `metadata-blocker` but at least one
+ *         `code-needs-update` impact.
+ *   - `verdict` is the HEADLINE and consults `runtimeState`: a trigger
+ *     that does not run today gets `already-inactive`, because telling
+ *     the caller "disabling this would break things" about a handler
+ *     that is already off is false. `already-inactive` says the one true
+ *     thing (it is already off) WITHOUT claiming the second (nothing
+ *     depends on it) — the dependents are still listed in `impacts` and
+ *     still described by `structuralVerdict`.
+ *   - `runtimeState.currentlyRunning` is `null`, never `false`, when the
+ *     vault does not record a status: absence is UNKNOWN, not "off".
+ *
+ * Only `structuralVerdict` is coverage-downgraded ({@link
+ * attachCoverageToWhatIf}); being switched off is not a
+ * coverage-dependent claim, so `already-inactive` is never downgraded.
  *
  * **Honesty axis.** v2.3 surfaces the verbatim disclosure per the
  * WhatIfSemantics.md fail-conservative posture. Disabling is a
@@ -77,11 +103,10 @@
  *     downstream node's identity. Sparse-graph misses are silently
  *     dropped — matches the tolerance every other composition tool
  *     uses.
- *   - The `triggersOn` edge is surfaced both as the `parentObject`
- *     scalar (the renderer's "automation on Account" line) AND as an
- *     impact entry (the structural diff the deactivation produces).
- *     Surfacing it twice keeps the impact list complete while giving
- *     the renderer fast access to the parent identity.
+ *   - The `triggersOn` edge is surfaced as the `parentObject` scalar
+ *     (the renderer's "automation on Account" line) AND as an
+ *     `entryPoints` row. It is NOT an impact: it is where the trigger
+ *     attaches, not something the trigger affects.
  *   - Impacts are sorted by `(category, componentId)` ASC for
  *     deterministic output.
  */
@@ -126,7 +151,13 @@ type Category =
   | 'integration-touch'
   | 'test-class-update'
   | 'invisible-risk'
-  | 'configuration-only';
+  | 'configuration-only'
+  /**
+   * A dependency THIS trigger consumes (a field it reads), not a dependent
+   * on it. Surfaced for completeness and EXCLUDED from the verdict — see
+   * {@link isVerdictBearing}.
+   */
+  | 'input-only';
 
 /**
  * One impact entry in the response's `impacts` array. Mirrors the
@@ -142,6 +173,49 @@ export interface WhatIfImpactItem {
   readonly explanation: string;
 }
 
+/**
+ * One ENTRY POINT of the trigger — where the runtime hands control TO it.
+ * `triggersOn` (the SObject the handler is attached to) and `listensTo` (the
+ * Platform Event it subscribes to) used to be reported as `impacts`, which
+ * made every trigger read `blocking`: an entry point is not a dependent.
+ * They are recategorised here rather than dropped, so the identity a caller
+ * used to read out of `impacts` is still in the response.
+ */
+export interface WhatIfEntryPoint {
+  readonly kind: 'triggersOn' | 'listensTo';
+  readonly componentId: ComponentId;
+  readonly note: string;
+}
+
+/**
+ * The RUNTIME-STATE axis — does this component run in the org today? Separate
+ * from the dependency structure because they are different questions.
+ *
+ *   - `status` is the vault's recorded activation status, or `null` when the
+ *     vault does not carry one. Never `''` — an empty string reads as a value.
+ *   - `currentlyRunning` is `true` / `false` only when the status says so, and
+ *     `null` when it is absent or unrecognised. NEVER a fabricated `false`.
+ *   - `note` states, in one sentence, what that means for the verdict.
+ */
+export interface WhatIfRuntimeState {
+  readonly status: string | null;
+  readonly currentlyRunning: boolean | null;
+  readonly note: string;
+}
+
+/**
+ * The headline verdict vocabulary for this tool: the shared what-if
+ * {@link Verdict} plus `already-inactive`.
+ *
+ * `already-inactive` is a FOURTH word on purpose. `safe` already means "no
+ * impacts at all" and is coverage-downgraded to `review`, so reusing it would
+ * make an inactive-but-heavily-depended-on trigger read identically to a
+ * genuinely inert one. `already-inactive` asserts only that the component does
+ * not run today; what depends on it is reported by `structuralVerdict` and
+ * `impacts`.
+ */
+export type TriggerDisableVerdict = Verdict | 'already-inactive';
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface WhatIfDisableTriggerOutput {
   readonly triggerId: ComponentId;
@@ -149,8 +223,22 @@ export interface WhatIfDisableTriggerOutput {
   readonly status: string;
   readonly parentObject: ComponentId | null;
   readonly events: readonly string[];
+  /** Where the runtime enters this trigger. NOT impacts — see {@link WhatIfEntryPoint}. */
+  readonly entryPoints: readonly WhatIfEntryPoint[];
   readonly impacts: readonly WhatIfImpactItem[];
-  readonly verdict: Verdict;
+  /** Does it run today? Its own axis; see {@link WhatIfRuntimeState}. */
+  readonly runtimeState: WhatIfRuntimeState;
+  /** HEADLINE. `already-inactive` when the trigger does not run today. */
+  readonly verdict: TriggerDisableVerdict;
+  /** What the dependency structure says, independent of runtime state. */
+  readonly structuralVerdict: Verdict;
+  /**
+   * Present exactly when `structuralVerdict === 'safe'` — i.e. when no
+   * verdict-bearing impact was found. States what that `safe` does NOT prove,
+   * because an empty result is a statement about the edge types walked, not a
+   * proof of harmlessness.
+   */
+  readonly notProvenHarmless?: string;
   readonly coverageCaveat?: CoverageCaveat;
   readonly trust: TrustSummary;
   readonly disclosure: string;
@@ -165,7 +253,19 @@ export interface WhatIfDisableTriggerOutput {
  * "trigger-framework-partial" caveat appended.
  */
 const DISCLOSURE =
-  "v2.3 what-if analysis is composition over the v2.2 vault state. Disabling a trigger stops every action listed in impacts; the trigger definition remains in the org and a later re-enable restores the effects. The v0.3 apex-scanner's edge confidence is heuristic for most outgoing edges; spot-check the trigger body when a finding's confidence is heuristic. Indirect dispatch via trigger framework base classes (TriggerHandler, fflib) may be partially invisible to the recognizer.";
+  "v2.3 what-if analysis is composition over the v2.2 vault state. Disabling a trigger stops the downstream effects listed in impacts; entries with category 'input-only' are dependencies the trigger CONSUMES (fields it reads) and stop nothing downstream, and entryPoints names where the trigger attaches rather than anything it affects. The trigger definition remains in the org and a later re-enable restores the effects. The v0.3 apex-scanner's edge confidence is heuristic for most outgoing edges; spot-check the trigger body when a finding's confidence is heuristic. Indirect dispatch via trigger framework base classes (TriggerHandler, fflib) may be partially invisible to the recognizer.";
+
+/**
+ * Verbatim: what a `safe` structural verdict does NOT prove. Emitted whenever
+ * there is no verdict-bearing impact, because `safe` on its own over-claims —
+ * absence of a modelled edge is a statement about the edge types walked.
+ */
+const NOT_PROVEN_HARMLESS =
+  'No downstream effect is visible in this vault. That is a statement about the edge types walked (writesTo, callsApex, dispatchesAsync, sendsEmail, subflow references), not a proof that disabling is harmless — dynamic dispatch, managed-package callers, and framework wiring are invisible here.';
+
+/** Verbatim: the vault records no activation status, so "runs today" is UNKNOWN. */
+const UNKNOWN_RUNTIME_STATE_NOTE =
+  "This component's activation status is not recorded in this vault, so whether it runs today is UNKNOWN — not assumed active and not assumed inactive. Treat the verdict as the structural answer only, and confirm the status in the org.";
 
 /**
  * Zod schema for the `sfi.what_if_disable_trigger` tool input.
@@ -209,20 +309,35 @@ const readTriggerEvents = (node: Node): readonly string[] => {
 };
 
 /**
+ * The trigger's own ENTRY POINTS, mapped to the verbatim `entryPoints` note.
+ * An edge type in this table is where the runtime hands control TO the
+ * trigger, so it is never an impact — it is recategorised, not dropped.
+ */
+const ENTRY_POINT_NOTES: Readonly<Record<string, string>> = Object.freeze({
+  triggersOn:
+    'the object this trigger attaches to; disabling removes the handler here',
+  listensTo:
+    'the Platform Event this trigger subscribes to; disabling removes the subscription here',
+});
+
+/** The `entryPoints` note for an edge type, or `undefined` when it is a real impact. */
+const entryPointNoteFor = (edgeType: string): string | undefined =>
+  ENTRY_POINT_NOTES[edgeType];
+
+/**
  * Classify one outgoing edge into a `(category, verdict)` pair. The
- * rule table is documented in the module JSDoc above.
- *   - `triggersOn` and `listensTo` are declared metadata: disabling
- *     the trigger removes the runtime handler for the SObject /
- *     Platform Event subscription. Blocking.
+ * rule table is documented in the module JSDoc above. Entry-point edge
+ * types ({@link ENTRY_POINT_NOTES}) never reach this function.
  *   - `writesTo` is metadata-declared from the v0.3 apex-scanner;
  *     stopping a write is a behavior change other automation may
  *     depend on. Blocking.
  *   - `callsApex` and `dispatchesAsync` are code-needs-update: the
  *     called class may have side effects the trigger's deactivation
  *     now skips.
- *   - `readsFrom` is also code-needs-update with `risky`: stopping a
- *     read usually just means the trigger no longer evaluates a guard,
- *     but the caller still wants to see the finding.
+ *   - `readsFrom` is `input-only`: a field the trigger CONSUMES. It is
+ *     surfaced (nothing is dropped) but contributes NOTHING to the
+ *     verdict — the field is unchanged and nothing downstream of it is
+ *     affected, so rating a read `risky` was a category error.
  *   - Unknown edge types fall through to `configuration-only` /
  *     `risky` so the caller still sees the finding rather than the
  *     tool silently dropping it.
@@ -231,10 +346,6 @@ const classifyOutgoingEdge = (
   edge: Edge,
 ): { category: Category; verdict: Verdict } => {
   switch (edge.edgeType) {
-    case 'triggersOn':
-      return { category: 'metadata-blocker', verdict: 'blocking' };
-    case 'listensTo':
-      return { category: 'metadata-blocker', verdict: 'blocking' };
     case 'writesTo':
       return { category: 'metadata-blocker', verdict: 'blocking' };
     case 'callsApex':
@@ -242,7 +353,8 @@ const classifyOutgoingEdge = (
     case 'dispatchesAsync':
       return { category: 'code-needs-update', verdict: 'risky' };
     case 'readsFrom':
-      return { category: 'code-needs-update', verdict: 'risky' };
+      // `input-only` carries no verdict; see {@link isVerdictBearing}.
+      return { category: 'input-only', verdict: 'safe' };
     default:
       return { category: 'configuration-only', verdict: 'risky' };
   }
@@ -259,33 +371,43 @@ const buildExplanation = (
   edge: Edge,
   triggerApiName: string,
 ): string => {
+  // A read is an INPUT to this trigger, not an action with downstream
+  // consequences. The old sentence ("…stops this action.") was factually
+  // wrong: disabling the trigger removes the read, and that is all.
+  if (edge.edgeType === 'readsFrom') {
+    return `ApexTrigger '${triggerApiName}' reads ${toNode.type} '${toNode.apiName}'. Disabling the trigger removes that read; '${toNode.apiName}' itself is unchanged and nothing downstream of it is affected. Listed because it is a dependency of this trigger, not a dependent on it.`;
+  }
   const verb =
     edge.edgeType === 'writesTo'
       ? 'writes to'
-      : edge.edgeType === 'readsFrom'
-        ? 'reads from'
-        : edge.edgeType === 'callsApex'
-          ? 'calls'
-          : edge.edgeType === 'dispatchesAsync'
-            ? 'dispatches async'
-            : edge.edgeType === 'triggersOn'
-              ? 'triggers on'
-              : edge.edgeType === 'listensTo'
-                ? 'subscribes to platform event'
-                : 'references';
+      : edge.edgeType === 'callsApex'
+        ? 'calls'
+        : edge.edgeType === 'dispatchesAsync'
+          ? 'dispatches async'
+          : 'references';
   return `ApexTrigger '${triggerApiName}' ${verb} ${toNode.type} '${toNode.apiName}'; disabling the trigger stops this action.`;
 };
 
 /**
- * Aggregate the per-impact verdicts into the headline severity. The
- * cascade mirrors R2a's `aggregateVerdict`.
+ * TRUE when an impact is a DEPENDENT of this trigger — something downstream
+ * that stops. `input-only` entries are dependencies the trigger CONSUMES and
+ * are excluded: they are reported, but they never move the verdict.
+ */
+const isVerdictBearing = (impact: WhatIfImpactItem): boolean =>
+  impact.category !== 'input-only';
+
+/**
+ * Aggregate the verdict-bearing impacts into the STRUCTURAL severity. The
+ * cascade mirrors R2a's `aggregateVerdict`; the filter is what stops an
+ * input-only read from producing a downstream-effect verdict.
  */
 const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
-  if (impacts.length === 0) return 'safe';
-  for (const impact of impacts) {
+  const dependents = impacts.filter(isVerdictBearing);
+  if (dependents.length === 0) return 'safe';
+  for (const impact of dependents) {
     if (impact.category === 'metadata-blocker') return 'blocking';
   }
-  for (const impact of impacts) {
+  for (const impact of dependents) {
     if (
       impact.category === 'code-needs-update' ||
       impact.category === 'integration-touch'
@@ -294,6 +416,43 @@ const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
     }
   }
   return 'risky';
+};
+
+/**
+ * Resolve the RUNTIME-STATE axis from the trigger's recorded status.
+ *
+ * The ApexTrigger extractor writes the `Active` / `Inactive` enum. Anything
+ * else — an absent property, an empty string, an unrecognised value — yields
+ * `currentlyRunning: null` with the UNKNOWN note. A fabricated `false` here
+ * would assert "this trigger is off" on the strength of a missing property,
+ * which is exactly the absence-as-fact error this tool exists to avoid.
+ *
+ * @param dependentCount the number of VERDICT-BEARING impacts — the things
+ *   that would be affected if the trigger were re-enabled.
+ */
+const resolveRuntimeState = (
+  status: string,
+  dependentCount: number,
+): WhatIfRuntimeState => {
+  if (status === 'Active') {
+    return {
+      status,
+      currentlyRunning: true,
+      note: 'This ApexTrigger is Active — it runs in the org today, so the headline verdict is the structural verdict.',
+    };
+  }
+  if (status === 'Inactive') {
+    return {
+      status,
+      currentlyRunning: false,
+      note: `This ApexTrigger is ${status} — it does not run in the org today, so disabling it changes no runtime behaviour. structuralVerdict below describes what WOULD stop if it were Active. That is NOT a claim that nothing depends on it: ${dependentCount} dependent(s) are listed in impacts, and they will be affected if it is ever reactivated.`,
+    };
+  }
+  return {
+    status: status.length > 0 ? status : null,
+    currentlyRunning: null,
+    note: UNKNOWN_RUNTIME_STATE_NOTE,
+  };
 };
 
 /**
@@ -401,6 +560,7 @@ export const whatIfDisableTriggerHandler = async (
   }
 
   const impacts: WhatIfImpactItem[] = [];
+  const entryPoints: WhatIfEntryPoint[] = [];
   for (const edge of edgesResult.value) {
     // `parentOf` is structural — the trigger's container relationship —
     // and never an impact. `firesWhen` is the deferred v2.0a.1
@@ -420,6 +580,18 @@ export const whatIfDisableTriggerHandler = async (
       // Sparse-graph case: drop silently.
       continue;
     }
+    // The trigger's OWN entry points are recategorised here, not dropped: the
+    // node is resolved first, so an `entryPoints` row can never name an id the
+    // graph has no node for.
+    const entryNote = entryPointNoteFor(edge.edgeType);
+    if (entryNote !== undefined) {
+      entryPoints.push({
+        kind: edge.edgeType as WhatIfEntryPoint['kind'],
+        componentId: toNode.id,
+        note: entryNote,
+      });
+      continue;
+    }
     const { category } = classifyOutgoingEdge(edge);
     impacts.push({
       category,
@@ -432,12 +604,26 @@ export const whatIfDisableTriggerHandler = async (
   }
 
   const sortedImpacts = [...impacts].sort(compareImpacts);
+  const sortedEntryPoints = [...entryPoints].sort((a, b) =>
+    a.kind !== b.kind
+      ? a.kind < b.kind
+        ? -1
+        : 1
+      : a.componentId < b.componentId
+        ? -1
+        : a.componentId > b.componentId
+          ? 1
+          : 0,
+  );
 
   const parentObjectResult = await findParentObject(ctx, triggerId);
   if (!parentObjectResult.ok) {
     return err({ kind: 'internal', message: parentObjectResult.error });
   }
 
+  // The STRUCTURAL axis is what gets coverage-downgraded: "nothing depends on
+  // this" is a coverage-dependent claim. "It is already switched off" is not,
+  // so the headline `already-inactive` is never downgraded.
   const rawVerdict = aggregateVerdict(sortedImpacts);
   const coverage = attachCoverageToWhatIf(
     ctx,
@@ -445,16 +631,33 @@ export const whatIfDisableTriggerHandler = async (
     'Trigger disable impact',
     rawVerdict,
   );
+  const structuralVerdict = coverage.verdict as Verdict;
+
+  const status = readTriggerStatus(triggerNode);
+  const dependentCount = sortedImpacts.filter(isVerdictBearing).length;
+  const runtimeState = resolveRuntimeState(status, dependentCount);
+  // `currentlyRunning === null` (status unknown) deliberately does NOT take
+  // this branch: an unrecorded status is not evidence the trigger is off.
+  const verdict: TriggerDisableVerdict =
+    runtimeState.currentlyRunning === false
+      ? 'already-inactive'
+      : structuralVerdict;
 
   return ok({
     data: {
       triggerId,
       apiName: triggerNode.apiName,
-      status: readTriggerStatus(triggerNode),
+      status,
       parentObject: parentObjectResult.value,
       events: readTriggerEvents(triggerNode),
+      entryPoints: sortedEntryPoints,
       impacts: sortedImpacts,
-      verdict: coverage.verdict as Verdict,
+      runtimeState,
+      verdict,
+      structuralVerdict,
+      ...(dependentCount === 0
+        ? { notProvenHarmless: NOT_PROVEN_HARMLESS }
+        : {}),
       ...(coverage.coverageCaveat !== undefined
         ? { coverageCaveat: coverage.coverageCaveat }
         : {}),

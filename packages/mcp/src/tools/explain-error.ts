@@ -42,6 +42,21 @@
  *      producer is object automation (e.g. CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY)
  *      it cross-references the graph — the triggers/flows declared on the hinted
  *      object — from the `triggersOn` edges.
+ *   6. Runtime governor-limit signature — a `System.LimitException`, a bare
+ *      `Too many … : N`, a CPU/heap signature, or an exceeding `LIMIT_USAGE`
+ *      row is CLASSIFIED (which limit fired, the actual, the ceiling) via the
+ *      SHARED `parseGovernorLimit` in `./governor-limit-signature.js` — the
+ *      SAME detector `sfi.explain_debug_log` uses, so the two tools cannot
+ *      disagree about one string. Category-level like strategy 5: it says
+ *      WHICH limit blew, never which component consumed it (a limit is
+ *      consumed across the whole transaction). A recognised limit therefore
+ *      makes the response `matched`, never `none`, even with zero candidates.
+ *
+ * NOT MODELLED: the Apex exception hierarchy. A `System.*Exception` other than
+ * `LimitException` is recognised as an Apex RUNTIME error and pointed at
+ * `sfi.explain_debug_log`; this tool's taxonomy is DML / API status codes plus
+ * the governor-limit signatures, and it says so rather than asking the caller
+ * to paste again what they already pasted.
  *
  * FAIL CLOSED: no confident source → disposition `none` with what was tried and
  * concrete next steps (e.g. `sfi.what_happens_on_save` on the object) — a source
@@ -69,6 +84,11 @@ import { z } from 'zod';
 import { STATUS_CODE_TAXONOMY } from '../knowledge/loader.js';
 import type { Context } from '../server.js';
 
+import {
+  type DetectedGovernorLimit,
+  LIMIT_TO_STATIC_RULES,
+  parseGovernorLimit,
+} from './governor-limit-signature.js';
 import { mergeInputAliases } from './input-aliases.js';
 
 /** Page size for the full ValidationRule scan (LIST_MAX_LIMIT is 500). */
@@ -89,7 +109,20 @@ const MIN_SUBSTRING_MESSAGE_LEN = 10;
 
 /** Verbatim honesty disclosure, surfaced on every response. */
 const EXPLAIN_ERROR_DISCLOSURE =
-  "This maps a pasted error back to the org component that most likely produced it — string matching against declared metadata, NOT a runtime trace. A `declared`-confidence candidate is an EXACT match on a declared name/message; `heuristic` candidates are normalized/substring/listing guesses (an org can reuse one validation message across rules, or edit it since the error fired). disposition 'matched' = one confident source; 'ambiguous' = several plausible, confirm before acting; 'none' = nothing matched confidently (a recognized status code still explains the CATEGORY). Verify the candidate's canonical id before acting.";
+  "This maps a pasted error back to the org component that most likely produced it — string matching against declared metadata, NOT a runtime trace. A `declared`-confidence candidate is an EXACT match on a declared name/message; `heuristic` candidates are normalized/substring/listing guesses (an org can reuse one validation message across rules, or edit it since the error fired). disposition 'matched' = one confident source; 'ambiguous' = several plausible, confirm before acting; 'none' = nothing matched confidently. TWO category-level recognizers still explain a paste that matched no source: the REST/API status-code taxonomy (categoryExplanation) and the runtime governor-limit signature (detectedLimit) — the latter is the SAME detector sfi.explain_debug_log uses, so the two tools cannot disagree about one string. Neither names the component that produced the error; both say what CLASS of failure it is. Verify the candidate's canonical id before acting.";
+
+/**
+ * Verbatim: what this tool does NOT model, for an Apex runtime exception it
+ * cannot resolve. `{name}` is the recognized `System.*Exception`; `{n}` is the
+ * LIVE size of the status-code taxonomy, interpolated rather than hard-coded so
+ * the sentence cannot rot when the taxonomy grows.
+ *
+ * It deliberately borrows `action_chain`'s shape — "That is a GAP IN THIS TOOL,
+ * not a claim that …" — and it replaces the old advice to paste the full error,
+ * which told the caller to paste what they had just pasted.
+ */
+const apexRuntimeExceptionGap = (exceptionName: string): string =>
+  `This is an Apex RUNTIME exception (System.${exceptionName}), not a DML / API status code. This tool's taxonomy covers ${Object.keys(STATUS_CODE_TAXONOMY).length.toString()} DML and API status codes and the runtime governor-limit signatures; it does not model the Apex exception hierarchy. For a runtime failure, sfi.explain_debug_log reads the debug log — stack frames, the fired limit, and the static governor-risk cross-reference. That is a GAP IN THIS TOOL, not a claim that nothing explains your error.`;
 
 // ---------------------------------------------------------------------------
 // Input schema
@@ -196,6 +229,14 @@ export interface ExplainErrorOutput {
   readonly truncated: boolean;
   /** Category-level explanation when a status code is recognized, else null. */
   readonly categoryExplanation: StatusCodeCategory | null;
+  /**
+   * The runtime governor limit the paste carries, or `null` when the text
+   * holds no limit signature. Produced by the SHARED `parseGovernorLimit`, so
+   * this is byte-for-byte the `detectedLimit` `sfi.explain_debug_log` returns
+   * for the same string. Category-level: it names WHICH limit fired, never
+   * which component consumed it.
+   */
+  readonly detectedLimit: DetectedGovernorLimit | null;
   /** Which match strategies were attempted (transparency on a `none` result). */
   readonly triedStrategies: readonly string[];
   /** Concrete follow-ups (e.g. `sfi.what_happens_on_save`) — always populated. */
@@ -777,6 +818,18 @@ export const explainErrorHandler = async (
     };
   }
 
+  // Strategy 6 — runtime governor-limit signature. The detector is the SAME one
+  // sfi.explain_debug_log uses (parseGovernorLimit, lifted to
+  // ./governor-limit-signature.js because explain-debug-log already imports
+  // FROM this module and the reverse import would close a cycle); this is a
+  // RE-USE, not a second implementation, so the two tools can never disagree
+  // about one string. It is a DIFFERENT AXIS from strategy 5 — a paste can
+  // carry both a status code and a limit signature, and they must not compete.
+  const detectedLimit = parseGovernorLimit(errorText);
+  if (detectedLimit !== null) {
+    tried.push('governor-limit signature (runtime limit classification)');
+  }
+
   // Rank: confidence DESC, then matchKind DESC, then id ASC (total order).
   candidates.sort((a, b) => {
     const c = (CONF_RANK[b.confidence] ?? 0) - (CONF_RANK[a.confidence] ?? 0);
@@ -798,21 +851,64 @@ export const explainErrorHandler = async (
   else if (declaredCount > 1) disposition = 'ambiguous';
   else if (declaredCount === 1) disposition = 'matched';
   else disposition = page.length === 1 ? 'matched' : 'ambiguous';
+  // A recognized runtime limit is an EXPLANATION at the category level, exactly
+  // as a recognized status code is, so the response must not fail closed as
+  // `none`. It never overrides a candidate-derived disposition — the two axes
+  // do not compete.
+  if (disposition === 'none' && detectedLimit !== null) disposition = 'matched';
 
-  // Next steps — always actionable, fail-closed guidance on `none`.
-  if (disposition === 'none') {
-    if (objectHint !== undefined) {
+  // Next steps — always actionable, fail-closed guidance when nothing matched.
+  // Keyed on `page.length === 0`, not on `disposition`: strategy 6 can lift the
+  // disposition to `matched` with zero candidates, and "confirm the candidate
+  // id" would then name a candidate that does not exist. For every pre-strategy-6
+  // input the two conditions are identical, so this is behaviour-preserving.
+  const apexRuntimeException = apexFrame?.systemException ?? null;
+  if (page.length === 0) {
+    if (detectedLimit !== null) {
+      // A limit is a TRANSACTION-level failure; save-order enumeration is the
+      // wrong next move, so the limit path replaces that guidance entirely.
       nextSteps.push(
-        `Run sfi.what_happens_on_save on CustomObject:${objectHint} to enumerate every rule, flow, and trigger that fires on save.`,
+        'Run sfi.explain_debug_log against the debug log for the stack frames and the static governor-risk cross-reference.',
       );
+      const mappedStaticRules = LIMIT_TO_STATIC_RULES[detectedLimit.limitType];
+      // The mapping is REUSED from the shared module, never re-derived here.
+      // An empty list is a CHECKED zero — no static rule models this limit — so
+      // the sentence is omitted rather than naming a rule that does not exist.
+      if (mappedStaticRules.length > 0) {
+        const target =
+          apexFrame?.className !== null && apexFrame?.className !== undefined
+            ? `ApexClass:${apexFrame.className}`
+            : apexFrame?.triggerName !== null && apexFrame?.triggerName !== undefined
+              ? `ApexTrigger:${apexFrame.triggerName}`
+              : 'the suspected class';
+        nextSteps.push(
+          `Run sfi.governor_limit_risks on ${target} for the static ${mappedStaticRules.join(' / ')} findings that map to this limit.`,
+        );
+      }
     } else {
-      nextSteps.push(
-        'Pass the `object` the save was on so validation/duplicate rules and on-save automation can be enumerated (sfi.what_happens_on_save).',
-      );
+      if (apexRuntimeException !== null) {
+        nextSteps.push(
+          'Run sfi.explain_debug_log against the debug log — it reads the stack frames, the fired governor limit, and the static governor-risk cross-reference.',
+        );
+      }
+      if (objectHint !== undefined) {
+        nextSteps.push(
+          `Run sfi.what_happens_on_save on CustomObject:${objectHint} to enumerate every rule, flow, and trigger that fires on save.`,
+        );
+      } else {
+        nextSteps.push(
+          'Pass the `object` the save was on so validation/duplicate rules and on-save automation can be enumerated (sfi.what_happens_on_save).',
+        );
+      }
+      // Suppressed for a recognized Apex runtime exception: the caller already
+      // pasted the whole thing, and the gap is in this tool's model, not in
+      // their paste. The boundary below says so instead.
+      if (apexRuntimeException === null) {
+        nextSteps.push(
+          'Paste the FULL error (status code + the "Flow API Name:" line or "Class.X.method: line N" stack frame) so the exact source can be resolved.',
+        );
+      }
     }
-    nextSteps.push(
-      'Paste the FULL error (status code + the "Flow API Name:" line or "Class.X.method: line N" stack frame) so the exact source can be resolved.',
-    );
   } else {
     nextSteps.push(
       'Confirm the candidate id, then use sfi.explain_flow / sfi.explain_apex_method / sfi.get_component to see the logic behind it.',
@@ -837,6 +933,15 @@ export const explainErrorHandler = async (
       `The status code ${detectedStatusCode} was recognized and explained at the CATEGORY level, but no specific source component was matched — the category names the component TYPES that can produce it, not the exact one.`,
     );
   }
+  if (detectedLimit !== null) {
+    boundaries.push(
+      `A runtime governor limit (${detectedLimit.limitType}) was recognized and classified at the CATEGORY level, not matched to a source component — a governor limit is consumed across the WHOLE transaction, so the frame that threw is not necessarily the code that consumed it.`,
+    );
+  }
+  // The gap statement: an Apex runtime exception this tool does not model.
+  if (detectedLimit === null && apexRuntimeException !== null && page.length === 0) {
+    boundaries.push(apexRuntimeExceptionGap(apexRuntimeException));
+  }
 
   const topConfidence: 'declared' | 'heuristic' | 'none' =
     page.length === 0 ? 'none' : page[0]!.confidence;
@@ -849,6 +954,7 @@ export const explainErrorHandler = async (
       candidates: page,
       truncated,
       categoryExplanation,
+      detectedLimit,
       triedStrategies: tried,
       nextSteps,
       confidence: topConfidence,

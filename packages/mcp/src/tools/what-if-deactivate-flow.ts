@@ -16,13 +16,28 @@
  *
  *   | Edge (direction) | What it represented | Impact category    | Verdict   |
  *   |------------------|---------------------|--------------------|-----------|
- *   | triggersOn (out) | The object the Flow listened to | metadata-blocker | blocking |
+ *   | triggersOn (out) | The object the Flow listened to | NOT an impact — `entryPoints` | — |
+ *   | listensTo (out)  | Platform Event the Flow subscribes to | NOT an impact — `entryPoints` | — |
  *   | callsApex (out)  | Apex action calls the Flow made | code-needs-update | risky |
- *   | readsFrom (out)  | Record lookups the Flow performed | metadata-blocker | blocking |
+ *   | readsFrom (out)  | Record lookups the Flow performed | input-only | NONE |
  *   | writesTo (out)   | Record writes (creates/updates/deletes) | metadata-blocker | blocking |
  *   | sendsEmail (out) | Email templates the Flow sent     | metadata-blocker | blocking |
  *   | references/subflow (out) | Subflows THIS Flow invokes    | metadata-blocker | blocking |
  *   | references/subflow (IN)  | Parent Flows that invoke THIS Flow as a subflow | broken-caller | blocking if any Active |
+ *
+ * **An entry point is not a dependent.** `triggersOn` (and `listensTo`,
+ * if the extractor ever mints one from a Flow) is the Flow's OWN START
+ * — where the runtime hands control TO it — not something downstream of
+ * it. Classifying it `blocking` made the verdict near-unconditional for
+ * every record-triggered Flow. It is RECATEGORISED into `entryPoints`,
+ * never dropped: the same identity is still in the response.
+ *
+ * **`readsFrom` is an INPUT, not an effect.** A Get Records lookup is
+ * an input to this Flow, not a downstream consequence of it: the record
+ * / field is unchanged and nothing downstream of it is affected.
+ * Rating it `metadata-blocker` / `blocking` was the sharpest instance
+ * of the category error. It is surfaced with `category: 'input-only'`
+ * and contributes NOTHING to the verdict.
  *
  * R6-02 adds the INCOMING side. Before it the composer walked only
  * OUTGOING edges, so a subflow called by N parents had zero surfaced
@@ -42,21 +57,37 @@
  * want to render them so the user understands what gating logic is
  * being removed.
  *
- * **Aggregate verdict.** Mirrors R2a's `WhatIfChangeFieldType` verdict
- * cascade:
- *   - `safe` if there are NO impacts at all (a Flow that exists but
- *     does nothing — the deactivation has no observable effect).
- *   - `blocking` if ANY `metadata-blocker` impact appears (record
- *     writes / reads / triggers / email sends / subflow invocations would
- *     silently stop), OR any `broken-caller` is an ACTIVE parent Flow
- *     (R6-02: a live parent breaks at runtime — a subflow with active
- *     parents must not read `safe`).
- *   - `risky` if no blocker but at least one `code-needs-update` impact
- *     (Apex calls the Flow made are now skipped), or a `broken-caller`
- *     whose parents are all inactive (Draft / Obsolete — surfaced, but
- *     not currently running).
- *   - `unknown` is reserved (never returned by this tool — the Flow
- *     either has impacts or it doesn't).
+ * **Two axes: runtime state and dependency structure.** The response
+ * carries BOTH, because they answer different questions.
+ *
+ *   - `structuralVerdict` is what the dependency structure says, over
+ *     the VERDICT-BEARING impacts only (`input-only` excluded). Cascade,
+ *     mirroring R2a's `WhatIfChangeFieldType`:
+ *       * `safe` when there is no verdict-bearing impact at all — and
+ *         then `notProvenHarmless` states what that `safe` does and does
+ *         not prove, because `safe` alone over-claims.
+ *       * `blocking` if ANY `metadata-blocker` impact appears (record
+ *         writes / email sends / subflow invocations would silently
+ *         stop), OR any `broken-caller` is an ACTIVE parent Flow (R6-02:
+ *         a live parent breaks at runtime).
+ *       * `risky` if no blocker but at least one `code-needs-update`
+ *         impact, or a `broken-caller` whose parents are all inactive.
+ *       * `unknown` is reserved (never returned by this tool).
+ *   - `verdict` is the HEADLINE and consults `runtimeState`: a Flow that
+ *     does not run today (Draft / Obsolete / InvalidDraft) gets
+ *     `already-inactive`, because telling the caller "deactivating this
+ *     would break things" about automation that is already off is false.
+ *     Measured org-wide, 67 of 71 non-Active Flows read `blocking`.
+ *     `already-inactive` asserts the one true thing (it is already off)
+ *     WITHOUT claiming the second (nothing depends on it) — the
+ *     dependents stay in `impacts` and in `structuralVerdict`.
+ *   - `runtimeState.currentlyRunning` is `null`, never `false`, when the
+ *     vault records no status: absence is UNKNOWN, not "off".
+ *
+ * This is the reasoning the tool ALREADY applies to its callers ("this
+ * parent is Obsolete, so it is not currently running"), applied at last
+ * to its own subject. Only `structuralVerdict` is coverage-downgraded;
+ * being switched off is not a coverage-dependent claim.
  *
  * **Honesty axis.** v2.3 surfaces the verbatim disclosure per the
  * WhatIfSemantics.md fail-conservative posture. Deactivation does NOT
@@ -144,7 +175,13 @@ type Category =
   | 'test-class-update'
   | 'invisible-risk'
   | 'configuration-only'
-  | 'broken-caller';
+  | 'broken-caller'
+  /**
+   * A dependency THIS Flow consumes (a record / field it reads), not a
+   * dependent on it. Surfaced for completeness and EXCLUDED from the verdict
+   * — see {@link isVerdictBearing}.
+   */
+  | 'input-only';
 
 /**
  * One impact entry in the response's `impacts` array. Mirrors the
@@ -176,6 +213,49 @@ export interface WhatIfDeactivateFlowFiringCondition {
   readonly expression: string;
 }
 
+/**
+ * One ENTRY POINT of the Flow — where the runtime hands control TO it.
+ * `triggersOn` (the SObject the record-triggered Flow starts on) and
+ * `listensTo` (a Platform Event subscription) used to be reported as
+ * `impacts`, which pinned the verdict: an entry point is not a dependent.
+ * They are recategorised here rather than dropped, so the identity a caller
+ * used to read out of `impacts` is still in the response.
+ */
+export interface WhatIfEntryPoint {
+  readonly kind: 'triggersOn' | 'listensTo';
+  readonly componentId: ComponentId;
+  readonly note: string;
+}
+
+/**
+ * The RUNTIME-STATE axis — does this Flow run in the org today? Separate from
+ * the dependency structure because they are different questions.
+ *
+ *   - `status` is the vault's recorded status, or `null` when the vault does
+ *     not carry one. Never `''` — an empty string reads as a value.
+ *   - `currentlyRunning` is `true` / `false` only when the status says so, and
+ *     `null` when it is absent or unrecognised. NEVER a fabricated `false`.
+ *   - `note` states, in one sentence, what that means for the verdict.
+ */
+export interface WhatIfRuntimeState {
+  readonly status: string | null;
+  readonly currentlyRunning: boolean | null;
+  readonly note: string;
+}
+
+/**
+ * The headline verdict vocabulary for this tool: the shared what-if
+ * {@link Verdict} plus `already-inactive`.
+ *
+ * `already-inactive` is a FOURTH word on purpose. `safe` already means "no
+ * impacts at all" and is coverage-downgraded to `review`, so reusing it would
+ * make an inactive-but-heavily-depended-on Flow read identically to a
+ * genuinely inert one. `already-inactive` asserts only that the Flow does not
+ * run today; what depends on it is reported by `structuralVerdict` and
+ * `impacts`.
+ */
+export type FlowDeactivateVerdict = Verdict | 'already-inactive';
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface WhatIfDeactivateFlowOutput {
   /**
@@ -191,8 +271,21 @@ export interface WhatIfDeactivateFlowOutput {
   readonly apiName: string;
   readonly status: string;
   readonly firingConditions: readonly WhatIfDeactivateFlowFiringCondition[];
+  /** Where the runtime enters this Flow. NOT impacts — see {@link WhatIfEntryPoint}. */
+  readonly entryPoints: readonly WhatIfEntryPoint[];
   readonly impacts: readonly WhatIfImpactItem[];
-  readonly verdict: Verdict;
+  /** Does it run today? Its own axis; see {@link WhatIfRuntimeState}. */
+  readonly runtimeState: WhatIfRuntimeState;
+  /** HEADLINE. `already-inactive` when the Flow does not run today. */
+  readonly verdict: FlowDeactivateVerdict;
+  /** What the dependency structure says, independent of runtime state. */
+  readonly structuralVerdict: Verdict;
+  /**
+   * Present exactly when there is no verdict-bearing impact. States what that
+   * `safe` does NOT prove, because an empty result is a statement about the
+   * edge types walked, not a proof of harmlessness.
+   */
+  readonly notProvenHarmless?: string;
   readonly coverageCaveat?: CoverageCaveat;
   readonly trust: TrustSummary;
   readonly disclosure: string;
@@ -206,7 +299,35 @@ export interface WhatIfDeactivateFlowOutput {
  * tool surface uniform.
  */
 const DISCLOSURE =
-  "v2.3 what-if analysis is composition over the v2.2 vault state. Deactivating a Flow stops every action listed in impacts; the Flow's definition remains in the org and a later reactivation restores the effects. R6-02: parent Flows that invoke this Flow as a subflow (declared <subflows> calls) are now surfaced as broken-caller impacts — an ACTIVE parent forces a blocking verdict because its subflow-call step fails at runtime. Apex code that invokes the Flow via Flow.Interview or @InvocableMethod chains is STILL invisible to the heuristic walker, as are non-metadata launch points (quick actions, buttons, screen-flow entry); review callers via sfi.find_code_usages targeting the Flow id before relying on this finding.";
+  "v2.3 what-if analysis is composition over the v2.2 vault state. Deactivating a Flow stops the downstream effects listed in impacts; entries with category 'input-only' are dependencies the Flow CONSUMES (records / fields it reads) and stop nothing downstream, and entryPoints names where the Flow starts rather than anything it affects; the Flow's definition remains in the org and a later reactivation restores the effects. R6-02: parent Flows that invoke this Flow as a subflow (declared <subflows> calls) are now surfaced as broken-caller impacts — an ACTIVE parent forces a blocking verdict because its subflow-call step fails at runtime. Apex code that invokes the Flow via Flow.Interview or @InvocableMethod chains is STILL invisible to the heuristic walker, as are non-metadata launch points (quick actions, buttons, screen-flow entry); review callers via sfi.find_code_usages targeting the Flow id before relying on this finding.";
+
+/**
+ * Verbatim: what a `safe` structural verdict does NOT prove. Emitted whenever
+ * there is no verdict-bearing impact, because `safe` on its own over-claims —
+ * absence of a modelled edge is a statement about the edge types walked.
+ */
+const NOT_PROVEN_HARMLESS =
+  'No downstream effect is visible in this vault. That is a statement about the edge types walked (writesTo, callsApex, dispatchesAsync, sendsEmail, subflow references), not a proof that disabling is harmless — dynamic dispatch, managed-package callers, and framework wiring are invisible here.';
+
+/** Verbatim: the vault records no activation status, so "runs today" is UNKNOWN. */
+const UNKNOWN_RUNTIME_STATE_NOTE =
+  "This component's activation status is not recorded in this vault, so whether it runs today is UNKNOWN — not assumed active and not assumed inactive. Treat the verdict as the structural answer only, and confirm the status in the org.";
+
+/**
+ * The Flow's own ENTRY POINTS, mapped to the verbatim `entryPoints` note. An
+ * edge type in this table is where the runtime hands control TO the Flow, so
+ * it is never an impact — it is recategorised, not dropped.
+ */
+const ENTRY_POINT_NOTES: Readonly<Record<string, string>> = Object.freeze({
+  triggersOn:
+    'the object this Flow starts on; deactivating removes the record-trigger here',
+  listensTo:
+    'the Platform Event this Flow subscribes to; deactivating removes the subscription here',
+});
+
+/** The `entryPoints` note for an edge type, or `undefined` when it is a real impact. */
+const entryPointNoteFor = (edgeType: string): string | undefined =>
+  ENTRY_POINT_NOTES[edgeType];
 
 /**
  * Zod schema for the `sfi.what_if_deactivate_flow` tool input.
@@ -294,25 +415,26 @@ const readFlowStatus = (node: Node): string => {
 
 /**
  * Classify one outgoing edge into a `(category, verdict)` pair. The
- * rule table is documented in the module JSDoc above. `triggersOn`,
- * `readsFrom`, `writesTo`, and `sendsEmail` are metadata-declared
- * (the Flow XML names them literally) so the verdict is `blocking`;
- * `callsApex` is `code-needs-update` because the called Apex class
- * may have side effects the Flow's deactivation now skips. Unknown
- * edge types fall through to `configuration-only` / `risky` so the
- * caller still sees the finding rather than the tool silently
- * dropping it.
+ * rule table is documented in the module JSDoc above. Entry-point edge
+ * types ({@link ENTRY_POINT_NOTES}) never reach this function.
+ * `writesTo` and `sendsEmail` are metadata-declared (the Flow XML names
+ * them literally) and are real downstream effects, so the verdict is
+ * `blocking`; `callsApex` is `code-needs-update` because the called
+ * Apex class may have side effects the Flow's deactivation now skips;
+ * `readsFrom` is `input-only` — a record the Flow CONSUMES, surfaced but
+ * never verdict-bearing. Unknown edge types fall through to
+ * `configuration-only` / `risky` so the caller still sees the finding
+ * rather than the tool silently dropping it.
  */
 const classifyOutgoingEdge = (
   edge: Edge,
 ): { category: Category; verdict: Verdict } => {
   switch (edge.edgeType) {
-    case 'triggersOn':
-      return { category: 'metadata-blocker', verdict: 'blocking' };
     case 'callsApex':
       return { category: 'code-needs-update', verdict: 'risky' };
     case 'readsFrom':
-      return { category: 'metadata-blocker', verdict: 'blocking' };
+      // `input-only` carries no verdict; see {@link isVerdictBearing}.
+      return { category: 'input-only', verdict: 'safe' };
     case 'writesTo':
       return { category: 'metadata-blocker', verdict: 'blocking' };
     case 'sendsEmail':
@@ -351,25 +473,35 @@ const buildExplanation = (
   ) {
     return `Flow '${flowApiName}' invokes subflow '${toNode.apiName}'; deactivating the Flow stops that subflow from running in this path.`;
   }
+  // A read is an INPUT to this Flow, not an action with downstream
+  // consequences. The old sentence ("…stops this action.") was factually
+  // wrong: deactivating the Flow removes the read, and that is all.
+  if (edge.edgeType === 'readsFrom') {
+    return `Flow '${flowApiName}' reads ${toNode.type} '${toNode.apiName}'. Deactivating the Flow removes that read; '${toNode.apiName}' itself is unchanged and nothing downstream of it is affected. Listed because it is a dependency of this Flow, not a dependent on it.`;
+  }
   const verb =
     edge.edgeType === 'writesTo'
       ? 'writes to'
-      : edge.edgeType === 'readsFrom'
-        ? 'reads from'
-        : edge.edgeType === 'callsApex'
-          ? 'calls'
-          : edge.edgeType === 'triggersOn'
-            ? 'triggers on'
-            : edge.edgeType === 'sendsEmail'
-              ? 'sends email via'
-              : 'references';
+      : edge.edgeType === 'callsApex'
+        ? 'calls'
+        : edge.edgeType === 'sendsEmail'
+          ? 'sends email via'
+          : 'references';
   return `Flow '${flowApiName}' ${verb} ${toNode.type} '${toNode.apiName}'; deactivating the Flow stops this action.`;
 };
 
 /**
- * Aggregate the per-impact verdicts into the headline severity. The
+ * TRUE when an impact is a DEPENDENT of this Flow — something downstream that
+ * stops. `input-only` entries are dependencies the Flow CONSUMES and are
+ * excluded: they are reported, but they never move the verdict.
+ */
+const isVerdictBearing = (impact: WhatIfImpactItem): boolean =>
+  impact.category !== 'input-only';
+
+/**
+ * Aggregate the verdict-bearing impacts into the STRUCTURAL severity. The
  * cascade mirrors R2a's `aggregateVerdict`:
- *   - empty impacts → `safe`.
+ *   - no verdict-bearing impact → `safe` (plus `notProvenHarmless`).
  *   - any `metadata-blocker` → `blocking`.
  *   - any non-blocker `code-needs-update` / `integration-touch` → `risky`.
  *   - only `configuration-only` / `broken-caller` → `risky` (the finding
@@ -384,11 +516,12 @@ const buildExplanation = (
  * inactive (Draft / Obsolete) is surfaced but stays `risky`, not `safe`.
  */
 const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
-  if (impacts.length === 0) return 'safe';
-  for (const impact of impacts) {
+  const dependents = impacts.filter(isVerdictBearing);
+  if (dependents.length === 0) return 'safe';
+  for (const impact of dependents) {
     if (impact.category === 'metadata-blocker') return 'blocking';
   }
-  for (const impact of impacts) {
+  for (const impact of dependents) {
     if (
       impact.category === 'code-needs-update' ||
       impact.category === 'integration-touch'
@@ -397,6 +530,44 @@ const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
     }
   }
   return 'risky';
+};
+
+/**
+ * Resolve the RUNTIME-STATE axis from the Flow's recorded status.
+ *
+ * The Flow extractor writes the `Active` / `Draft` / `Obsolete` /
+ * `InvalidDraft` enum. Anything else — an absent property, an empty string, an
+ * unrecognised value — yields `currentlyRunning: null` with the UNKNOWN note.
+ * A fabricated `false` here would assert "this Flow is off" on the strength of
+ * a missing property, which is exactly the absence-as-fact error this tool
+ * exists to avoid.
+ *
+ * @param dependentCount the number of VERDICT-BEARING impacts — the things
+ *   that would be affected if the Flow were reactivated.
+ */
+const resolveRuntimeState = (
+  status: string,
+  dependentCount: number,
+): WhatIfRuntimeState => {
+  if (status === 'Active') {
+    return {
+      status,
+      currentlyRunning: true,
+      note: 'This Flow is Active — it runs in the org today, so the headline verdict is the structural verdict.',
+    };
+  }
+  if (status === 'Draft' || status === 'Obsolete' || status === 'InvalidDraft') {
+    return {
+      status,
+      currentlyRunning: false,
+      note: `This Flow is ${status} — it does not run in the org today, so deactivating it changes no runtime behaviour. structuralVerdict below describes what WOULD stop if it were Active. That is NOT a claim that nothing depends on it: ${dependentCount} dependent(s) are listed in impacts, and they will be affected if it is ever reactivated.`,
+    };
+  }
+  return {
+    status: status.length > 0 ? status : null,
+    currentlyRunning: null,
+    note: UNKNOWN_RUNTIME_STATE_NOTE,
+  };
 };
 
 /**
@@ -591,6 +762,7 @@ const whatIfDeactivateFlowFromNode = async (
   const outTargetById = new Map(outTargetsResult.value.map((n) => [n.id, n]));
 
   const impacts: WhatIfImpactItem[] = [];
+  const entryPoints: WhatIfEntryPoint[] = [];
   for (const edge of edgesResult.value) {
     // Structural edges: `parentOf` is the Flow's container relationship,
     // `firesWhen` is the gating-condition primitive surfaced separately
@@ -601,6 +773,18 @@ const whatIfDeactivateFlowFromNode = async (
       // Sparse-graph case: the edge points at an id the graph has no
       // node row for. Drop silently — matches the tolerance every
       // other composition tool uses.
+      continue;
+    }
+    // The Flow's OWN entry points are recategorised here, not dropped: the
+    // node is resolved first, so an `entryPoints` row can never name an id the
+    // graph has no node for.
+    const entryNote = entryPointNoteFor(edge.edgeType);
+    if (entryNote !== undefined) {
+      entryPoints.push({
+        kind: edge.edgeType as WhatIfEntryPoint['kind'],
+        componentId: toNode.id,
+        note: entryNote,
+      });
       continue;
     }
     const { category } = classifyOutgoingEdge(edge);
@@ -620,7 +804,12 @@ const whatIfDeactivateFlowFromNode = async (
   // the event (an incoming `listensTo` edge) loses its trigger. Those
   // subscribers are not reachable by the single outgoing-edge walk above —
   // they sit one hop past the event object — so surface them explicitly.
-  const seenSubscribers = new Set<string>(impacts.map((i) => i.componentId));
+  // Entry-point ids are included so the second hop dedupes EXACTLY as it did
+  // when `triggersOn` / `listensTo` targets still sat in `impacts`.
+  const seenSubscribers = new Set<string>([
+    ...impacts.map((i) => i.componentId),
+    ...entryPoints.map((e) => e.componentId),
+  ]);
   // Batched second hop. Collect the published-event objects in outer-edge order,
   // fetch ALL their incoming listensTo edges in ONE `listEdgesForNodes`, then
   // resolve the distinct subscriber nodes in ONE `listNodesByIds` — replacing
@@ -692,12 +881,26 @@ const whatIfDeactivateFlowFromNode = async (
   impacts.push(...brokenCallersResult.value.impacts);
 
   const sortedImpacts = [...impacts].sort(compareImpacts);
+  const sortedEntryPoints = [...entryPoints].sort((a, b) =>
+    a.kind !== b.kind
+      ? a.kind < b.kind
+        ? -1
+        : 1
+      : a.componentId < b.componentId
+        ? -1
+        : a.componentId > b.componentId
+          ? 1
+          : 0,
+  );
 
   const firingConditionsResult = await collectFiringConditions(ctx, flowId);
   if (!firingConditionsResult.ok) {
     return err({ kind: 'internal', message: firingConditionsResult.error });
   }
 
+  // The STRUCTURAL axis is what gets coverage-downgraded: "nothing depends on
+  // this" is a coverage-dependent claim. "It is already switched off" is not,
+  // so the headline `already-inactive` is never downgraded.
   const rawVerdict = escalateForActiveCallers(
     aggregateVerdict(sortedImpacts),
     brokenCallersResult.value.hasActiveBrokenCaller,
@@ -708,6 +911,17 @@ const whatIfDeactivateFlowFromNode = async (
     'Flow deactivation impact',
     rawVerdict,
   );
+  const structuralVerdict = coverage.verdict as Verdict;
+
+  const status = readFlowStatus(flowNode);
+  const dependentCount = sortedImpacts.filter(isVerdictBearing).length;
+  const runtimeState = resolveRuntimeState(status, dependentCount);
+  // `currentlyRunning === null` (status unknown) deliberately does NOT take
+  // this branch: an unrecorded status is not evidence the Flow is off.
+  const verdict: FlowDeactivateVerdict =
+    runtimeState.currentlyRunning === false
+      ? 'already-inactive'
+      : structuralVerdict;
 
   // The deactivation tool surfaces a stripped apiName for caller
   // convenience (so the renderer can render "Flow X" rather than
@@ -722,10 +936,16 @@ const whatIfDeactivateFlowFromNode = async (
       appliedScope: { component: flowId, mode: 'component' },
       flowId,
       apiName,
-      status: readFlowStatus(flowNode),
+      status,
       firingConditions: firingConditionsResult.value,
+      entryPoints: sortedEntryPoints,
       impacts: sortedImpacts,
-      verdict: coverage.verdict as Verdict,
+      runtimeState,
+      verdict,
+      structuralVerdict,
+      ...(dependentCount === 0
+        ? { notProvenHarmless: NOT_PROVEN_HARMLESS }
+        : {}),
       ...(coverage.coverageCaveat !== undefined
         ? { coverageCaveat: coverage.coverageCaveat }
         : {}),
