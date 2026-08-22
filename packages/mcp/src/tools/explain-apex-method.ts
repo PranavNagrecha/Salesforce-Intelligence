@@ -88,7 +88,16 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
-import { isUnresolvedFieldReceiver } from './apex-receiver.js';
+import {
+  apexReceiverDemotionCounts,
+  apexReceiverDemotionNote,
+  apexReceiverNotCheckedNote,
+  apexReceiverTokens,
+  classifyApexTarget,
+  resolveApexReceivers,
+  type ApexReceiverDemotionCounts,
+  type ApexUnresolvedTarget,
+} from './apex-receiver.js';
 import { coercePrefix } from './coerce-id.js';
 import {
   buildReservedConceptReasoning,
@@ -123,6 +132,17 @@ const QUALITY_NOT_SCANNED_SUFFIX =
 
 const UNRESOLVED_FIELDS_SUFFIX =
   ' Field accesses whose receiver could not be resolved to an object — Apex `this`/`super` members and un-type-resolved local variables (e.g. a loop variable) — are listed in unresolvedFieldAccess as raw `receiver.field` tokens, NOT in fieldAccess; they are not verified object fields.';
+
+/**
+ * APEX-RECEIVER-VERIFIED. `fieldAccess` used to be whatever the Apex scanner's
+ * TEXTUAL receiver split produced, checked against nothing: an Apex class name,
+ * an inner DTO, a `__r` traversal, and a describe token (`Contact.fields`) all
+ * read as real object fields. Every receiver is now verified against the vault
+ * in one batched query before its id is claimed. This names that check ran, so
+ * a caller can tell a verified list from the old unverified one.
+ */
+const RECEIVER_VERIFIED_SUFFIX =
+  ' Every `readsFrom`/`writesTo` receiver behind fieldAccess is VERIFIED against this vault: a `CustomField:` id is claimed ONLY when its receiver names an SObject node here. Anything else is a raw token in unresolvedFieldAccess with a typed reason (see unresolvedFieldAccessReasons) — demoted and named, never dropped and never claimed.';
 
 /**
  * Zod schema for the `sfi.explain_apex_method` tool input.
@@ -277,13 +297,43 @@ export interface ExplainApexMethodOutput {
   readonly unresolvedCallTargets: readonly string[];
   readonly fieldAccess: readonly ExplainApexFieldAccess[];
   /**
-   * Heuristic `readsFrom`/`writesTo` edges whose RECEIVER did not resolve to an
-   * object — Apex `this`/`super` members (e.g. `this.caseLogId`) and
-   * un-type-resolved local variables (e.g. `acc.Status__c` where `acc` is a loop
-   * variable). Raw `receiver.field` tokens, scanner-only, NOT real object fields.
-   * Segregated out of `fieldAccess` the same way `unresolvedCallTargets` is.
+   * `readsFrom`/`writesTo` edges whose RECEIVER is not an SObject in this vault.
+   * Raw `receiver.field` tokens, NOT component ids and NOT object fields —
+   * segregated out of `fieldAccess` the same way `unresolvedCallTargets` is.
+   *
+   * Originally this held only the shapes a LEXICAL test could catch (Apex
+   * `this`/`super` members, lowercase locals like `acc.Status__c`). It now also
+   * holds every receiver the vault says is not an SObject: an Apex class or
+   * trigger name, an inner DTO, a `__r` traversal, a describe token
+   * (`Contact.fields`). Those used to reach `fieldAccess` as if they were real
+   * fields. Read {@link ExplainApexMethodOutput.unresolvedFieldAccessReasons}
+   * for WHY each one is here — the tokens alone cannot say.
    */
   readonly unresolvedFieldAccess: readonly string[];
+  /**
+   * The same tokens as `unresolvedFieldAccess`, each with the typed reason it
+   * was demoted. Kept beside the string list (rather than replacing it) because
+   * callers pin that list's shape.
+   *
+   * `receiver-not-in-vault` is the one tier that cannot be read either way: it
+   * mixes a real standard SObject this vault did not retrieve with an Apex
+   * system type and an inner class, and nothing here separates them.
+   */
+  readonly unresolvedFieldAccessReasons: readonly ApexUnresolvedTarget[];
+  /**
+   * Did the receiver verification actually RUN? `checked: false` means the
+   * batched vault lookup FAILED, so `fieldAccess` is empty because nothing
+   * could be verified — never because the class touches no fields. `demoted`
+   * is `null` on that path (no census exists), and every target appears in
+   * `unresolvedFieldAccess` with reason `receiver-not-verified`.
+   */
+  readonly receiverVerification: {
+    readonly checked: boolean;
+    /** Why the check did not run. `null` when it did. */
+    readonly reason: string | null;
+    /** Per-reason census of demoted targets. `null` when `checked` is false. */
+    readonly demoted: ApexReceiverDemotionCounts | null;
+  };
   readonly qualityIssues: readonly ExplainApexQualityIssue[];
   readonly disclosure: string;  /** P13-ANNOT-tools: curated annotations for the CLASS (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
@@ -537,6 +587,10 @@ const collectFieldAccess = async (
     {
       readonly resolved: readonly ExplainApexFieldAccess[];
       readonly unresolved: readonly string[];
+      readonly unresolvedReasons: readonly ApexUnresolvedTarget[];
+      /** False when the receiver-verification query failed; `reason` says why. */
+      readonly checked: boolean;
+      readonly checkFailureReason: string | null;
     },
     string
   >
@@ -570,20 +624,40 @@ const collectFieldAccess = async (
     }
   }
 
-  // Segregate unresolved receivers (this/super members, local-var aliases) into
-  // their own bucket — they are not real object fields. De-dupe the raw tokens
-  // (a resolved `FeedComment.CommentBody` and its alias `comment.CommentBody`
-  // both appear; the alias goes here, the resolved one stays in fieldAccess).
+  // APEX-RECEIVER-VERIFIED. Ask the vault ONCE what every receiver token IS,
+  // then keep in `fieldAccess` only the ids whose receiver names an SObject
+  // NODE here. The old lexical test caught `this.x` and lowercase locals and
+  // nothing else, so an Apex class name, an inner DTO, a `__r` traversal and a
+  // describe token all reached `fieldAccess` as if they were object fields.
+  //
+  // A FAILED probe is reported, never worked around: falling back to the
+  // lexical guess is the defect. Everything is demoted with
+  // `receiver-not-verified` and `checked` goes false.
+  const probe = await resolveApexReceivers(ctx.graph, apexReceiverTokens(access.keys()));
+  const index = probe.ok ? probe.value : null;
+
+  // De-dupe the raw tokens (a resolved `FeedComment.CommentBody` and its alias
+  // `comment.CommentBody` both appear; the alias goes here, the resolved one
+  // stays in fieldAccess). First reason wins — the tiers are disjoint per id.
   const out: ExplainApexFieldAccess[] = [];
-  const unresolved = new Set<string>();
+  const unresolved = new Map<string, ApexUnresolvedTarget>();
   for (const [fieldId, accessType] of access) {
-    if (isUnresolvedFieldReceiver(fieldId)) {
-      unresolved.add(stripPrefix(fieldId));
-    } else {
+    const verdict = classifyApexTarget(fieldId, index);
+    if (verdict.resolved) {
       out.push({ fieldId, accessType });
+      continue;
+    }
+    if (!unresolved.has(verdict.unresolved.token)) {
+      unresolved.set(verdict.unresolved.token, verdict.unresolved);
     }
   }
-  return ok({ resolved: out, unresolved: [...unresolved] });
+  return ok({
+    resolved: out,
+    unresolved: [...unresolved.keys()],
+    unresolvedReasons: [...unresolved.values()],
+    checked: probe.ok,
+    checkFailureReason: probe.ok ? null : probe.error,
+  });
 };
 
 /**
@@ -688,6 +762,14 @@ export const explainApexMethodHandler = async (
     unresolvedCallTargets: callsResult.value.unresolvedCallTargets,
     fieldAccess: fieldAccessResult.value.resolved,
     unresolvedFieldAccess: fieldAccessResult.value.unresolved,
+    unresolvedFieldAccessReasons: fieldAccessResult.value.unresolvedReasons,
+    receiverVerification: {
+      checked: fieldAccessResult.value.checked,
+      reason: fieldAccessResult.value.checkFailureReason,
+      demoted: fieldAccessResult.value.checked
+        ? apexReceiverDemotionCounts(fieldAccessResult.value.unresolvedReasons)
+        : null,
+    },
     qualityIssues: readQualityIssues(node),
     disclosure:
       DISCLOSURE +
@@ -697,6 +779,21 @@ export const explainApexMethodHandler = async (
       (fieldAccessResult.value.unresolved.length > 0
         ? UNRESOLVED_FIELDS_SUFFIX
         : '') +
+      // The verification axis rides `disclosure` because this tool has no
+      // `boundaries[]`. It is ALWAYS said — a demotion census of zero has to
+      // read as CHECKED-and-nothing-demoted, and a failed probe has to read as
+      // NOT CHECKED. Silence would collapse the two.
+      (fieldAccessResult.value.checked
+        ? RECEIVER_VERIFIED_SUFFIX +
+          apexReceiverDemotionNote(
+            apexReceiverDemotionCounts(fieldAccessResult.value.unresolvedReasons),
+            'fieldAccess',
+            'unresolvedFieldAccess',
+          )
+        : apexReceiverNotCheckedNote(
+            fieldAccessResult.value.checkFailureReason ?? 'reason not reported',
+            'fieldAccess',
+          )) +
       (Object.hasOwn(node.properties, 'qualityIssues')
         ? ''
         : QUALITY_NOT_SCANNED_SUFFIX),

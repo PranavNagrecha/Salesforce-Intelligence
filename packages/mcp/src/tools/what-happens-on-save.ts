@@ -135,8 +135,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
-  isUnresolvedApexCallTarget,
-  isUnresolvedFieldReceiver,
+  soeReceiverVerificationNote,
+  verifyStepActionReceivers,
+  type ApexReceiverVerification,
+  type ReceiverVerifiableStep,
 } from './apex-receiver.js';
 import {
   buildReservedConceptReasoning,
@@ -343,6 +345,19 @@ export interface SoeStep {
    */
   readonly actionsOmitted?: number;
   /**
+   * APEX-RECEIVER-VERIFIED. Count of this step's edges demoted OUT of `actions`
+   * because the Apex scanner's textual receiver does not name a real component
+   * — an Apex class or trigger name, an inner DTO, a `__r` traversal, a
+   * describe token, an untyped local. Distinct from `actionsOmitted`, which is
+   * a byte-budget trim of REAL actions.
+   *
+   * Present only when this step lost rows. The raw tokens and the per-reason
+   * census live once per response on
+   * {@link WhatHappensOnSaveOutput.receiverVerification}; naming them per step
+   * as well would cost the byte budget the steps need.
+   */
+  readonly unresolvedActionsOmitted?: number;
+  /**
    * True when this step's `conditional` had its `expression`/`fieldRefs`
    * dropped to fit the response budget — the `conditionContextId` remains, so
    * the full condition is fetchable via `get_component`. Absent when intact.
@@ -438,6 +453,27 @@ export interface WhatHappensOnSaveOutput {
     readonly phaseCounts: SoePhaseCounts;
   };
   readonly disclosure: string;
+  /**
+   * APEX-RECEIVER-VERIFIED. What the receiver check did, for the whole
+   * composition. ALWAYS present, because the three states it separates are all
+   * meaningful and an absent block would collapse them:
+   *
+   *   - `checked: true` with an empty `demoted` census — every Apex
+   *     field-access receiver in this composition names an SObject node here.
+   *     A CHECKED zero.
+   *   - `checked: true` with a census — those rows were found NOT to name a
+   *     component and were demoted out of `soe[].actions`. `tokens` names them
+   *     as RAW TOKENS (capped; the census is complete), and each losing step
+   *     carries `unresolvedActionsOmitted`.
+   *   - `checked: false` — the verification query FAILED. Every field-access
+   *     row is demoted with `receiver-not-verified` and `reason` says why;
+   *     nothing is claimed on the lexical guess.
+     *
+   * Scope is the WHOLE composition, like `summary` — a `phase` filter narrows
+   * the returned steps but not this census, so the two never disagree about the
+   * same object.
+   */
+  readonly receiverVerification: ApexReceiverVerification;
   /**
    * Automation configured on this object but inactive (Draft/Obsolete Flow,
    * active:false rule/process). Omitted when empty.
@@ -707,24 +743,14 @@ const buildActions = async (
     ) {
       continue;
     }
-    // Drop heuristic apex-scanner edges to UNRESOLVED receivers — a `readsFrom`/
-    // `writesTo` to an Apex `this`/local-var field (`CustomField:this.x`,
-    // `CustomField:acc.y`) or a `callsApex`/`dispatchesAsync` to a local-var
-    // "class" (`ApexClass:acc`/`oldMap`) is a parse artifact, not a real save-time
-    // action. (Same segregation explain_apex_method makes; conservative — real
-    // standard/custom/namespaced receivers are kept.)
-    if (
-      (edge.edgeType === 'readsFrom' || edge.edgeType === 'writesTo') &&
-      isUnresolvedFieldReceiver(edge.toId)
-    ) {
-      continue;
-    }
-    if (
-      (edge.edgeType === 'callsApex' || edge.edgeType === 'dispatchesAsync') &&
-      isUnresolvedApexCallTarget(edge.toId)
-    ) {
-      continue;
-    }
+    // APEX-RECEIVER-VERIFIED. Apex-scanner artifacts used to be dropped HERE,
+    // by a lexical test that only caught `this.x` / lowercase locals — so an
+    // Apex class name, an inner DTO, a `__r` traversal and a describe token
+    // survived as save-time FIELD actions on components that do not exist.
+    // The decision now happens ONCE per composition in
+    // `verifySoeActionReceivers`, which checks each receiver against the vault
+    // and DISCLOSES what it demoted instead of deleting it silently. Everything
+    // is emitted here; nothing downstream reads `actions` before that pass.
     actions.push({
       kind: edge.edgeType,
       targetId: edge.toId,
@@ -1377,6 +1403,18 @@ export const whatHappensOnSaveHandler = async (
     stepIndex += 1;
   }
 
+  // APEX-RECEIVER-VERIFIED. ONE batched vault lookup answers, for every
+  // field-access receiver the whole composition would emit, whether it names an
+  // SObject here. Anything that does not is demoted out of `actions` with a
+  // typed reason. It runs BEFORE `conditionalCount` / `phaseCounts` so every
+  // downstream census counts the verified action lists, and it is a single
+  // query so the pinned "query count does not scale with object fan-out" budget
+  // is unchanged.
+  const receiverVerification = await verifyStepActionReceivers(
+    ctx.graph,
+    soe as unknown as ReceiverVerifiableStep[],
+  );
+
   const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
   // `phaseCounts` / `activeComponents` are computed from the FULL composition so
@@ -1435,6 +1473,7 @@ export const whatHappensOnSaveHandler = async (
       phaseCounts: SoePhaseCounts;
     };
     disclosure: string;
+    receiverVerification: ApexReceiverVerification;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
     phasesOmitted?: readonly SoePhaseOmission[];
     appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
@@ -1467,7 +1506,12 @@ export const whatHappensOnSaveHandler = async (
       phaseCounts,
     },
     soe: visibleSoe,
-    disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
+    receiverVerification,
+    // The verification axis rides `disclosure` because this tool has no
+    // `boundaries[]`. Always appended: a zero census must read as CHECKED, and
+    // a failed probe must read as NOT CHECKED. Attached BEFORE the byte-budget
+    // pass so its bytes are measured, never re-inflating the payload after.
+    disclosure: `${composeSoeDisclosure(DISCLOSURE, objectModeled)}${soeReceiverVerificationNote(receiverVerification)}`,
   };
 
   // The org-wide Summary-field scan behind post-save-rollup-recalc hit the

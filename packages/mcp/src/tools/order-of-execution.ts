@@ -58,8 +58,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
-  isUnresolvedApexCallTarget,
-  isUnresolvedFieldReceiver,
+  soeReceiverVerificationNote,
+  verifyStepActionReceivers,
+  type ApexReceiverVerification,
+  type ReceiverVerifiableStep,
 } from './apex-receiver.js';
 import { resolveObjectAlias } from './input-aliases.js';
 import {
@@ -168,6 +170,15 @@ export interface SoeStep {
    */
   readonly actionsOmitted?: number;
   /**
+   * APEX-RECEIVER-VERIFIED. Count of this step's edges demoted OUT of `actions`
+   * because the Apex scanner's textual receiver names no real component.
+   * Distinct from `actionsOmitted`, which is a byte-budget trim of REAL
+   * actions. The tokens and the per-reason census live once per response on
+   * {@link OrderOfExecutionOutput.receiverVerification}. Absent when this step
+   * lost nothing. Mirrors the what_happens_on_save SoeStep.
+   */
+  readonly unresolvedActionsOmitted?: number;
+  /**
    * True when this step's `conditional` had its `expression`/`fieldRefs`
    * dropped to fit the response budget — the `conditionContextId` remains, so
    * the full condition is fetchable via `get_component`. Absent when intact.
@@ -242,6 +253,19 @@ export interface OrderOfExecutionOutput {
   readonly objectModeled: boolean;
   readonly byEvent: Readonly<Record<SoeEvent, SoePerEvent>>;
   readonly disclosure: string;
+  /**
+   * APEX-RECEIVER-VERIFIED. What the receiver check did, across ALL FOUR
+   * events' compositions. ALWAYS present — `checked: true` with an empty
+   * `demoted` census is a CHECKED zero (every field-access receiver names an
+   * SObject here), a census names what was demoted out of `soe[].actions`, and
+   * `checked: false` means the verification query FAILED and nothing was
+   * claimed on the lexical guess. Mirrors `what_happens_on_save`.
+     *
+   * Scope is the WHOLE composition, like `summary` — a `phase` filter narrows
+   * the returned steps but not this census, so the two never disagree about the
+   * same object.
+   */
+  readonly receiverVerification: ApexReceiverVerification;
   /**
    * Automation configured on this object but inactive (Draft/Obsolete Flow,
    * active:false rule/process). Omitted when empty.
@@ -432,22 +456,13 @@ const buildActions = async (
     ) {
       continue;
     }
-    // Drop heuristic apex-scanner edges to UNRESOLVED receivers (Apex
-    // `this`/local-var field accesses, local-var "class" call targets) — parse
-    // artifacts, not real save-time actions. Mirrors what_happens_on_save /
-    // explain_apex_method; conservative (real receivers kept).
-    if (
-      (edge.edgeType === 'readsFrom' || edge.edgeType === 'writesTo') &&
-      isUnresolvedFieldReceiver(edge.toId)
-    ) {
-      continue;
-    }
-    if (
-      (edge.edgeType === 'callsApex' || edge.edgeType === 'dispatchesAsync') &&
-      isUnresolvedApexCallTarget(edge.toId)
-    ) {
-      continue;
-    }
+    // APEX-RECEIVER-VERIFIED. Apex-scanner artifacts used to be dropped HERE by
+    // a lexical test that only caught `this.x` / lowercase locals, so an Apex
+    // class name, an inner DTO, a `__r` traversal and a describe token survived
+    // as save-time FIELD actions on components that do not exist. The decision
+    // now happens ONCE per composition against the vault (see
+    // `verifyStepActionReceivers`), and what it demotes is DISCLOSED rather
+    // than deleted. Mirrors what_happens_on_save exactly.
     actions.push({
       kind: edge.edgeType,
       targetId: edge.toId,
@@ -1079,6 +1094,14 @@ export const orderOfExecutionHandler = async (
   // produce is identical; keep the last one (any one) for the response-level
   // `withinPhaseOrder`. Undefined only when no event composed at all.
   let flowCensus: FlowTriggerOrderCensus | undefined;
+  // Every composed step, INCLUDING any a `phase` filter narrows out of the
+  // returned arrays. The receiver check runs over the WHOLE composition so the
+  // block it produces has the same scope as `summary` (which also stays
+  // whole-composition under a filter) and so `what_happens_on_save` — which
+  // verifies its full `soe` before deriving `visibleSoe` — reports the same
+  // census for the same object. The filtered array shares these step objects,
+  // so the in-place partition reaches it either way.
+  const allComposedSteps: SoeStep[] = [];
   for (const event of SOE_EVENTS) {
     const perEventResult = await composeForEvent(
       ctx,
@@ -1098,6 +1121,7 @@ export const orderOfExecutionHandler = async (
     // caller keeps the complete counts. Filtering here — before enforcement —
     // means the small per-phase slice never blows the byte budget, so a phase
     // the full view dropped is recoverable in one call.
+    allComposedSteps.push(...perEventResult.value.perEvent.soe);
     byEvent[event] =
       input.phase !== undefined
         ? {
@@ -1109,6 +1133,16 @@ export const orderOfExecutionHandler = async (
         : perEventResult.value.perEvent;
   }
 
+  // APEX-RECEIVER-VERIFIED. ONE batched vault lookup answers, for every
+  // field-access receiver ALL FOUR events would emit, whether it names an
+  // SObject here; anything that does not is demoted out of `actions` with a
+  // typed reason. As a single query it leaves the pinned "query count does not
+  // scale with object fan-out" budget unchanged.
+  const receiverVerification = await verifyStepActionReceivers(
+    ctx.graph,
+    allComposedSteps as unknown as ReceiverVerifiableStep[],
+  );
+
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
 
   const data: {
@@ -1117,6 +1151,7 @@ export const orderOfExecutionHandler = async (
     objectModeled: boolean;
     byEvent: Record<SoeEvent, SoePerEvent>;
     disclosure: string;
+    receiverVerification: ApexReceiverVerification;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
     truncated?: boolean;
     appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
@@ -1141,7 +1176,13 @@ export const orderOfExecutionHandler = async (
       : {}),
     ...(input.phase !== undefined ? { appliedPhaseFilter: input.phase } : {}),
     byEvent,
-    disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
+    receiverVerification,
+    // The verification axis rides `disclosure` (this tool has no
+    // `boundaries[]`) and is folded in BEFORE `baseDisclosure` is captured, so
+    // `attachEnvelopeHonesty`'s rebuild-from-base keeps it on every pass
+    // instead of dropping it. Always appended: a zero census must read as
+    // CHECKED, and a failed probe must read as NOT CHECKED.
+    disclosure: `${composeSoeDisclosure(DISCLOSURE, objectModeled)}${soeReceiverVerificationNote(receiverVerification)}`,
   };
 
   // The org-wide Summary-field scan behind post-save-rollup-recalc hit the

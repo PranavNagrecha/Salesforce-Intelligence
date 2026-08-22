@@ -69,7 +69,15 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { isUnresolvedApexCallTarget, isUnresolvedFieldReceiver } from './apex-receiver.js';
+import {
+  APEX_RECEIVER_REASON_GLOSS,
+  apexReceiverTokens,
+  classifyApexTarget,
+  isUnresolvedApexCallTarget,
+  isUnresolvedFieldReceiver,
+  resolveApexReceivers,
+  type ApexReceiverUnresolvedReason,
+} from './apex-receiver.js';
 import {
   buildEmptyTraversalCoverageCaveat,
   type CoverageCaveat,
@@ -263,6 +271,28 @@ export interface GetImpactOutput {
    */
   readonly unproducedEdgeTypes?: string;
   readonly disclosure: string;
+  /**
+   * APEX-RECEIVER-VERIFIED. Present ONLY when the root is a `CustomField:` id —
+   * the one shape whose RECEIVER the Apex scanner may have invented.
+   *
+   *   - `checked: true, verdict: null` — the receiver names an SObject node in
+   *     this vault. A CHECKED pass, so the walk is about a real field.
+   *   - `checked: true` with a `verdict` — the receiver was CHECKED and does
+   *     NOT name an SObject here. The provable non-components
+   *     (`apex-type-receiver`, `describe-token`) are refused before the walk;
+   *     the two tiers that survive here (`receiver-not-in-vault`,
+   *     `relationship-traversal`) are answered but must NOT be read as a proven
+   *     field — `receiver-not-in-vault` in particular mixes an unretrieved
+   *     standard SObject with an Apex system type, and nothing here separates
+   *     them.
+   *   - `checked: false` — the verification query FAILED; `reason` says why and
+   *     the root is unverified rather than assumed good.
+   */
+  readonly rootReceiverVerification?: {
+    readonly checked: boolean;
+    readonly reason: string | null;
+    readonly verdict: ApexReceiverUnresolvedReason | null;
+  };
   /**
    * R6-19: a ```` ```mermaid graph TD ``` ```` fence visualizing the impact
    * slice — nodes labeled `{ComponentType}: {apiName}` (the root rendered as
@@ -799,6 +829,51 @@ export const getImpactHandler = async (
       });
     }
   }
+
+  // APEX-RECEIVER-VERIFIED. The lexical test above only catches a LOWERCASE
+  // receiver, so `CustomField:SomeApexClass.someMember` — an Apex static member
+  // the scanner keyed on its textual receiver — sailed through as a real field.
+  // Measured on a real vault: the walk answered with a dependent slice for such
+  // an id and its own disclosure called the missing definition "a PHANTOM …
+  // typically a standard or managed-package component", when the vault holds an
+  // `ApexClass` node by that exact name. Ask the vault what the receiver IS.
+  //
+  // Only the PROVABLE non-components are refused (`apex-type-receiver`,
+  // `describe-token`). `receiver-not-in-vault` and `relationship-traversal` are
+  // answered and DISCLOSED instead: the first genuinely mixes an unretrieved
+  // standard SObject with an Apex system type and nothing here separates them,
+  // and refusing either would cost real recall to buy no extra honesty.
+  let rootReceiverCheck: {
+    checked: boolean;
+    reason: string | null;
+    verdict: ApexReceiverUnresolvedReason | null;
+  } = { checked: true, reason: null, verdict: null };
+  if (rootId.startsWith('CustomField:')) {
+    const receiverProbe = await resolveApexReceivers(
+      ctx.graph,
+      apexReceiverTokens([rootId]),
+    );
+    if (!receiverProbe.ok) {
+      // NOT CHECKED — never a silent fall back to the lexical guess. The walk
+      // still answers (a failed side-probe must not fail a complete answer),
+      // but the disclosure says the root was not verified.
+      rootReceiverCheck = { checked: false, reason: receiverProbe.error, verdict: null };
+    } else {
+      const verdict = classifyApexTarget(rootId, receiverProbe.value);
+      if (!verdict.resolved) {
+        const reason = verdict.unresolved.reason;
+        rootReceiverCheck = { checked: true, reason: null, verdict: reason };
+        if (reason === 'apex-type-receiver' || reason === 'describe-token') {
+          return err({
+            kind: 'invalid-query',
+            message:
+              `\`${rootId}\` is not a Salesforce field. Its receiver was CHECKED against this vault: ${APEX_RECEIVER_REASON_GLOSS[reason]}. The Apex scanner keys \`readsFrom\`/\`writesTo\` edges on the TEXTUAL receiver, so this id exists only as a parse artifact — an impact slice built from its inbound edges would name real referrers of a component that does not exist. Ask about the Apex type itself, or about the real field the code assigns from.`,
+            path: 'componentId',
+          });
+        }
+      }
+    }
+  }
   const visitedNodes = new Set<ComponentId>([rootId]);
   const visitedEdges = new Set<string>();
   const collectedEdges: Edge[] = [];
@@ -1028,7 +1103,20 @@ export const getImpactHandler = async (
     : '';
   const droppedEdgeNote =
     droppedEndpointEdges !== undefined ? ` ${droppedEndpointEdges.note}` : '';
-  const disclosureText = `${disclosure}${rootPhantomNote}${droppedEdgeNote}`;
+  // APEX-RECEIVER-VERIFIED. Said out loud whenever the root is a `CustomField:`
+  // id, because the three states are not interchangeable and silence would
+  // collapse them: verified-real, CHECKED-and-not-an-SObject-here (answered,
+  // not claimed), and NOT CHECKED. Without this a `receiver-not-in-vault` root
+  // reached the phantom sentence below and was described as "typically a
+  // standard or managed-package component" on no evidence at all.
+  const rootReceiverNote = !rootId.startsWith('CustomField:')
+    ? ''
+    : !rootReceiverCheck.checked
+      ? ` NOT CHECKED — the query that verifies this id's Apex receiver against the vault FAILED (${rootReceiverCheck.reason ?? 'reason not reported'}), so whether \`${rootId}\` names a real field is UNVERIFIED here; do not read the slice below as proof that it does.`
+      : rootReceiverCheck.verdict === null
+        ? ` The receiver of \`${rootId}\` was CHECKED against this vault and names an SObject node here, so this slice is about a real field.`
+        : ` The receiver of \`${rootId}\` was CHECKED against this vault and does NOT name an SObject node here — ${APEX_RECEIVER_REASON_GLOSS[rootReceiverCheck.verdict]}. The referrers below are REAL edges, but the id they point at is not a confirmed field: treat this as "what references this token", not "what breaks if you change this field".`;
+  const disclosureText = `${disclosure}${rootReceiverNote}${rootPhantomNote}${droppedEdgeNote}`;
 
   // I3b (empty ≠ none): an impact walk with NO dependent edges is exactly where
   // "nothing depends on this" is dangerous — name the dependency families the
@@ -1124,6 +1212,13 @@ export const getImpactHandler = async (
       soundness,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(unproducedEdgeTypes !== undefined ? { unproducedEdgeTypes } : {}),
+      // Structured twin of `rootReceiverNote`, so a caller reading fields
+      // rather than prose still learns whether the root was verified. Emitted
+      // only for a `CustomField:` root — every other prefix has no receiver to
+      // check, and an always-present block would imply one.
+      ...(rootId.startsWith('CustomField:')
+        ? { rootReceiverVerification: rootReceiverCheck }
+        : {}),
       disclosure: disclosureText,
       ...(diagram !== undefined ? { diagram } : {}),
       ...(diagramOmittedReason !== undefined ? { diagramOmittedReason } : {}),

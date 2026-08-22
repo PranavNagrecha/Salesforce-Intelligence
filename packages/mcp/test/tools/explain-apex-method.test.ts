@@ -71,6 +71,17 @@ const RW_FIELD_ID = 'CustomField:Account.Description__c';
 
 const allClassifiersSeed: ExtractionResult = {
   nodes: [
+    // APEX-RECEIVER-VERIFIED: `fieldAccess` now claims a `CustomField:` id ONLY
+    // when its RECEIVER names an SObject node in the vault, so the object the
+    // fixture's real fields hang off has to exist. Without this node the two
+    // Account fields below are (correctly) demoted as `receiver-not-in-vault`.
+    makeNode({
+      id: 'CustomObject:Account',
+      type: 'CustomObject',
+      apiName: 'Account',
+      label: 'Account',
+      sourcePath: 'objects/Account.object-meta.xml',
+    }),
     makeNode({
       id: CALLEE_ID,
       type: 'ApexClass',
@@ -340,6 +351,84 @@ const noKeywordSyncSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 7: APEX-RECEIVER-VERIFIED. A class whose scanner edges are keyed on the
+// TEXTUAL receiver. `ResultBox` is a real ApexClass NODE here, so
+// `CustomField:ResultBox.isComplete` is an Apex MEMBER, not a field on any
+// object — yet it reached `fieldAccess` at `parsed` confidence, the top tier,
+// naming a component that does not exist. The describe token, the `__r`
+// traversal and the unvaulted receiver are the other shapes the lexical test
+// let through. `CustomObject:BoxedObj` is the control receiver.
+// =============================================================================
+
+const RECEIVER_CLASS_ID = 'ApexClass:ReceiverProbe';
+const RECEIVER_APEX_TYPE_ID = 'ApexClass:ResultBox';
+
+const receiverVerificationSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: 'CustomObject:BoxedObj',
+      type: 'CustomObject',
+      apiName: 'BoxedObj',
+      sourcePath: 'objects/BoxedObj.object-meta.xml',
+    }),
+    makeNode({ id: RECEIVER_APEX_TYPE_ID, apiName: 'ResultBox', label: 'ResultBox' }),
+    makeNode({
+      id: RECEIVER_CLASS_ID,
+      apiName: 'ReceiverProbe',
+      label: 'ReceiverProbe',
+      properties: { status: 'Active', modifiers: ['public'], isTest: false },
+    }),
+  ],
+  edges: [
+    // Control: a real field on a real object. STAYS in fieldAccess.
+    makeEdge({
+      fromId: RECEIVER_CLASS_ID,
+      toId: 'CustomField:BoxedObj.Stage__c',
+      edgeType: 'readsFrom',
+      confidence: 'parsed',
+      source: 'apex-ast',
+    }),
+    // The defect: an Apex class member, emitted as a field at `parsed`.
+    makeEdge({
+      fromId: RECEIVER_CLASS_ID,
+      toId: 'CustomField:ResultBox.isComplete',
+      edgeType: 'readsFrom',
+      confidence: 'parsed',
+      source: 'apex-ast',
+    }),
+    makeEdge({
+      fromId: RECEIVER_CLASS_ID,
+      toId: 'CustomField:ResultBox.isComplete',
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      source: 'apex-ast',
+    }),
+    makeEdge({
+      fromId: RECEIVER_CLASS_ID,
+      toId: 'CustomField:BoxedObj.fields',
+      edgeType: 'readsFrom',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+    makeEdge({
+      fromId: RECEIVER_CLASS_ID,
+      toId: 'CustomField:BoxedParent__r.Code__c',
+      edgeType: 'readsFrom',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+    makeEdge({
+      fromId: RECEIVER_CLASS_ID,
+      toId: 'CustomField:UnvaultedThing.Name',
+      edgeType: 'readsFrom',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+  ],
+};
+
+
 // One shared graph store + Context across the suite.
 let tempDir: string;
 let store: GraphStore;
@@ -360,6 +449,7 @@ beforeAll(async () => {
     noKeywordBatchSeed,
     noKeywordQueueableSeed,
     noKeywordSyncSeed,
+    receiverVerificationSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -665,6 +755,94 @@ describe('explainApexMethodHandler', () => {
     if (result.ok) return;
     expect(result.error.kind).toBe('invalid-query');
     expect(result.error.path).toBe('classApiName');
+  });
+});
+
+// =============================================================================
+// APEX-RECEIVER-VERIFIED (FAIL-BEFORE / PASS-AFTER)
+//
+// `fieldAccess` used to be whatever the scanner's textual receiver split
+// produced, verified against nothing. A receiver that merely LOOKED like an
+// SObject was claimed as one, so an Apex class member reached the resolved
+// field list at `parsed` confidence — the top tier — for a field that does not
+// exist. Receivers are now checked against the vault in one batched query.
+// =============================================================================
+
+describe('explainApexMethodHandler — verified field-access receivers', () => {
+  const probe = async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: RECEIVER_CLASS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('handler failed');
+    return result.value.data;
+  };
+
+  it('does not claim an Apex class MEMBER as a field, at any confidence', async () => {
+    const data = await probe();
+    // FAILS BEFORE: `CustomField:ResultBox.isComplete` was a fieldAccess row.
+    expect(data.fieldAccess.map((f) => f.fieldId)).not.toContain(
+      'CustomField:ResultBox.isComplete',
+    );
+    // The control field on a real object is untouched.
+    expect(data.fieldAccess.map((f) => f.fieldId)).toContain(
+      'CustomField:BoxedObj.Stage__c',
+    );
+  });
+
+  it('demotes describe tokens, __r traversals and unvaulted receivers with a reason', async () => {
+    const data = await probe();
+    const ids = data.fieldAccess.map((f) => f.fieldId);
+    expect(ids).not.toContain('CustomField:BoxedObj.fields');
+    expect(ids).not.toContain('CustomField:BoxedParent__r.Code__c');
+    expect(ids).not.toContain('CustomField:UnvaultedThing.Name');
+    // Demoted, NOT dropped: each is a raw token with a typed reason.
+    expect([...data.unresolvedFieldAccessReasons].sort((a, b) =>
+      a.token.localeCompare(b.token),
+    )).toEqual([
+      { token: 'BoxedObj.fields', reason: 'describe-token' },
+      { token: 'BoxedParent__r.Code__c', reason: 'relationship-traversal' },
+      { token: 'ResultBox.isComplete', reason: 'apex-type-receiver' },
+      { token: 'UnvaultedThing.Name', reason: 'receiver-not-in-vault' },
+    ]);
+    // The string list stays the shape callers pin, and holds the same tokens.
+    expect([...data.unresolvedFieldAccess].sort()).toEqual([
+      'BoxedObj.fields',
+      'BoxedParent__r.Code__c',
+      'ResultBox.isComplete',
+      'UnvaultedThing.Name',
+    ]);
+  });
+
+  it('reports the check as CHECKED with a complete per-reason census', async () => {
+    const data = await probe();
+    expect(data.receiverVerification).toEqual({
+      checked: true,
+      reason: null,
+      demoted: {
+        'apex-type-receiver': 1,
+        'describe-token': 1,
+        'relationship-traversal': 1,
+        'receiver-not-in-vault': 1,
+      },
+    });
+    expect(data.disclosure).toContain('VERIFIED against this vault');
+    expect(data.disclosure).toContain('apex-type-receiver');
+  });
+
+  it('a class with only real receivers reads CHECKED-and-nothing-demoted', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: ALL_CLASSIFIERS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // This class DOES carry two lexical artifacts (this.* / a local), so the
+    // census is non-empty — but nothing here is an apex-type or a not-in-vault
+    // receiver, and the two Account fields survive as verified components.
+    expect(data.receiverVerification.checked).toBe(true);
+    expect(data.receiverVerification.demoted).toEqual({ 'unresolved-receiver': 2 });
+    expect(data.fieldAccess).toHaveLength(2);
   });
 });
 
