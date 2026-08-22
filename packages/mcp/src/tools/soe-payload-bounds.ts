@@ -72,12 +72,6 @@ export interface BoundableStep {
 }
 
 /**
- * Target ceiling for a composed SOE payload, in bytes. Set below the global
- * `MAX_RESPONSE_BYTES` (~45 KB) dispatch guard with headroom for the envelope
- * (`vaultState`, `disclosure`, the truncation note) so a payload that passes
- * this check also clears the global guard.
- */
-/**
  * The cap a composed SOE payload is fitted to, DERIVED from the global response
  * budget.
  *

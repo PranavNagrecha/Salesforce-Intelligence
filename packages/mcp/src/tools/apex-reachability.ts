@@ -46,8 +46,10 @@ import type { Context } from '../server.js';
  *                a class nobody calls is dead even when profiles grant access
  *                to it.
  *
- * Kept in ONE place. `find_dead_code`'s CTE exclusion list is pinned equal to
- * this by a drift test — that test is what stops the next allow-list.
+ * Hand-copied to `object-360.ts` and `find-component-usages.ts` (each as
+ * `NON_USAGE_EDGE_TYPES`). Only `find_dead_code`'s version is drift-tested
+ * against this one, leaving the other two copies to drift silently. This is
+ * technical debt: a unified definition would prevent divergence.
  */
 export const NOT_USAGE_EDGE_TYPES = ['parentOf', 'grantedBy'] as const;
 

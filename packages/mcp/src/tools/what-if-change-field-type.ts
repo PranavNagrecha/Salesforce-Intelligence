@@ -10,9 +10,8 @@
  * verdict (`safe` / `review` / `risky` / `blocking`), and a verbatim
  * boundary-disclosure string the caller may surface to the user.
  *
- * **Compatibility classification.** Sourced from the field-type matrix
- * in `docs/vendor/salesforce-metadata/WhatIfSemantics.md` §
- * "Field-type compatibility matrix":
+ * **Compatibility classification.** Sourced from a field-type compatibility
+ * matrix (three verdicts: forward-compatible, lossy, breaking):
  *
  *   - `forward-compatible` ([c]): the existing reference set continues
  *     to compile; semantic shifts may exist but are minor (e.g., Text →
@@ -25,8 +24,7 @@
  *
  * **Per-edge category assignment.** For each incoming edge, the tool
  * classifies the source node + edge type into a `WhatIfImpactItem`
- * category per the matrix in WhatIfSemantics.md § "Per-transition
- * finding rules":
+ * category based on internal transition rules:
  *
  *   | Source type                    | Edge type      | Category            |
  *   |--------------------------------|----------------|---------------------|
@@ -118,9 +116,8 @@ import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
 
 /**
- * The set of Salesforce field types this tool recognises. Mirrors the
- * compatibility matrix in `WhatIfSemantics.md`. Inputs outside this
- * union surface as `invalid-query`.
+ * The set of Salesforce field types this tool recognises. Inputs outside
+ * this union surface as `invalid-query`.
  */
 const FIELD_TYPES = [
   'Text',
@@ -168,8 +165,9 @@ const FIELD_CHANGE_REQUIRED_COVERAGE = [
 ] as const;
 
 /**
- * One finding category in the `WhatIfImpactItem` shape, mirroring
- * WhatIfSemantics.md § "Category assignment rules".
+ * One finding category in the `WhatIfImpactItem` shape: metadata-blocker,
+ * code-needs-update, integration-touch, test-class-update, invisible-risk,
+ * or configuration-only.
  */
 type Category =
   | 'metadata-blocker'
@@ -253,8 +251,7 @@ const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
  * `to`. Encoded as a `Map<from, Map<to, Compatibility>>` so per-pair
  * lookups are O(1). Cells marked `'breaking'` are the default for any
  * pair not in the table; the matrix lists only the non-breaking cells
- * explicitly, mirroring `WhatIfSemantics.md`. Same-type transitions
- * (the diagonal) are forward-compatible.
+ * explicitly. Same-type transitions (the diagonal) are forward-compatible.
  */
 const COMPATIBILITY_MATRIX: ReadonlyMap<
   FieldType,
@@ -485,8 +482,7 @@ const STRUCTURED_SEMANTIC_TYPES = new Set<FieldType>([
 /**
  * Classify the (from, to) field-type pair via the compatibility
  * matrix. Same-type transitions are `forward-compatible` (a no-op);
- * pairs not explicitly listed default to `breaking` (the
- * fail-conservative posture documented in WhatIfSemantics.md).
+ * pairs not explicitly listed default to `breaking` (fail-conservative).
  */
 const classifyTransition = (
   from: FieldType | 'Unknown',
@@ -578,8 +574,7 @@ const classifyCategory = (edge: Edge, fromNode: Node): Category => {
 
 /**
  * Per-(transition, category) emit rule. Returns `true` when the edge
- * should produce a finding for the given compatibility verdict. Encodes
- * the rules from WhatIfSemantics.md § "Per-transition finding rules":
+ * should produce a finding for the given compatibility verdict:
  *
  *   - For `breaking`: every recognised edge emits.
  *   - For `lossy`: every recognised edge emits (the data shift may

@@ -14,9 +14,8 @@
  * `newSignature` string. The parameter is accepted for v2.3.1
  * description (so a caller can echo the before/after for renderer
  * context), but it does NOT influence which callers are flagged. Per
- * the WhatIfSemantics.md "Cross-class transitive analysis not
- * available" boundary, every direct caller of the method is treated
- * as "needs update" — fail-conservative. A future-milestone tool with
+ * Cross-class transitive analysis is not available: every direct
+ * caller of the method is treated as "needs update" — fail-conservative. A future-milestone tool with
  * Apex AST capability could parse the signature and surface only the
  * callers whose call-sites would actually compile-fail under the new
  * signature; v2.3 flags every caller for human review.
@@ -48,8 +47,8 @@
  *     `code-needs-update` impact. The Flow caller's confidence is
  *     `parsed` (the Flow `<actionCalls>` block is parsed out of the
  *     Flow XML by the flow extractor — flow.ts emits `confidence:
- *     'parsed'`) per the WhatIfSemantics.md "Flow caller (when target
- *     is @InvocableMethod)" rule.
+ *     'parsed'`) when the target is @InvocableMethod (Flow callers
+ *     have known confidence: parsed, from the Flow XML).
  *   - For each LWC / Aura / VF caller with an outgoing `callsApex`
  *     edge to the target class AND `properties.methodName ===
  *     methodName`, surface a `code-needs-update` impact. The frontend
@@ -57,8 +56,8 @@
  *     `@salesforce/apex/{Class}.{method}` import pattern and
  *     `heuristic` for the inferred-from-source paths.
  *
- * **Test class identification.** Per the WhatIfSemantics.md "Test
- * class identification" rules, a test class needs update when it:
+ * **Test class identification.** Per internal semantics, a test class
+ * needs update when it:
  *
  *   - Has an outgoing `coversTest` edge to the target class — NOTE: this
  *     branch is DEAD on every real vault. `coversTest` is a declared
@@ -92,12 +91,10 @@
  *     metadata-declared, so a Flow call-site to a renamed method is
  *     a metadata-deploy blocker).
  *
- * **Honesty axis.** v2.3 surfaces the verbatim disclosure per the
- * WhatIfSemantics.md fail-conservative posture. The
- * `Boundary disclosure (surfaced ALWAYS for this tool)` text from
- * WhatIfSemantics.md is the prefix; the v2.3 anchor on dynamic Apex
- * blind-spots applies (reflective `Type.forName + invoke` paths are
- * invisible). Test-class identification reduces, in practice, to "an
+ * **Honesty axis.** v2.3 surfaces the verbatim disclosure using a
+ * fail-conservative posture: all direct callers are flagged for review.
+ * Dynamic Apex blind-spots apply (reflective `Type.forName + invoke`
+ * paths are invisible). Test-class identification reduces, in practice, to "an
  * `@isTest` class with a DIRECT `callsApex` call-site to the target": the
  * `{TargetClassName}Test` naming convention is not implemented at all, and
  * `coversTest` has no producer. An empty `testClassesNeedingUpdate` therefore
@@ -110,8 +107,8 @@
  *   - `methodName` is required, non-empty.
  *   - `newSignature` is optional — accepted for caller-side rendering
  *     and echoed verbatim in the response so the renderer can produce
- *     before/after output. The tool does NOT validate it as Apex
- *     syntax (per WhatIfSemantics.md "Signature parsing").
+ *     before/after output. The tool does NOT validate the signature
+ *     as Apex syntax.
  *   - Unknown ids resolve to `component-not-found`.
  *   - One `listEdges(classId, { direction: 'in', edgeType: 'callsApex' })`
  *     fan-out enumerates every incoming method-call edge. Per-caller
@@ -219,9 +216,9 @@ export interface WhatIfChangeMethodSignatureOutput {
 }
 
 /**
- * The verbatim disclosure surfaced in every response. Mirrors the
- * WhatIfSemantics.md "Boundary disclosure (surfaced ALWAYS for this
- * tool)" text so the test suite can lock the phrasing.
+ * The verbatim disclosure surfaced in every response. Documents the
+ * honesty boundaries (caller confidence, test identification, dynamic
+ * dispatch) so the test suite can lock the phrasing.
  */
 const DISCLOSURE =
   "caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified in ONE way that actually works: an incoming `callsApex` edge from a class whose `properties.isTest` is true. The `coversTest` edge this tool ALSO walks is declared in the contract but is emitted by NO extractor, graph-build mint, or enricher in this product (see `UNPRODUCED_EDGE_TYPES`), so on a real vault that walk ALWAYS returns nothing - Salesforce does not declare test-to-class coverage anywhere in the metadata source format (coverage is a RUNTIME artifact of a test run). Read an empty `testClassesNeedingUpdate` as \"test-coverage mapping UNAVAILABLE for this class\", never as \"no tests cover this class\": a test class that exercises the target only indirectly - through a helper, a trigger, or dynamic dispatch - has no `callsApex` edge to it and is invisible here. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
