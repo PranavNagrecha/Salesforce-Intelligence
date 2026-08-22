@@ -261,7 +261,23 @@ if (conceptCount != null && conceptRuleCount != null) {
 patch("llms.txt", llmsRules);
 
 const llms = fs.readFileSync(path.join(pub, "llms.txt"), "utf8").trimEnd();
-let cat = `\n\n## All tools (${toolCount})\n\nEvery read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.\n`;
+// The listed count is DERIVED from the sections actually emitted below, never
+// assumed equal to `toolCount`. They differ: `toolCount` is what the registry
+// registers, while a few back-compat aliases fold into their canonical tool and
+// are not listed separately. tools.astro carries that disclaimer on the page;
+// llms-full.txt is the file published for verbatim machine citation, so it has
+// to carry it too -- announcing a total it then does not enumerate is the same
+// defect this product exists to eliminate, committed in its own marketing.
+const listedToolCount = sections.reduce((n, s) => n + s.tools.length, 0);
+const countPhrase =
+  listedToolCount === toolCount
+    ? `${toolCount}`
+    : `${listedToolCount} listed, ${toolCount} registered`;
+let cat = `\n\n## All tools (${countPhrase})\n\nEvery read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.${
+  listedToolCount === toolCount
+    ? ""
+    : ` ${toolCount} tools are registered in this build; ${toolCount - listedToolCount} back-compat alias${toolCount - listedToolCount === 1 ? "" : "es"} fold into their canonical tool and are not listed separately.`
+}\n`;
 for (const { label, tools: arr } of sections) {
   cat += `\n### ${label} (${arr.length})\n\n`;
   cat += arr.map((t) => `- \`${t.name}\`  -  ${t.description}`).join("\n") + "\n";

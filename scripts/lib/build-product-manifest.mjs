@@ -44,9 +44,17 @@ export const GRAPH_TABLES = Object.freeze([
  * Current-fact concept-count pin.
  * Matches Concept Model / Graph B prose with `/`, `,`, or `and` separators,
  * optional markdown bold around the integers, and optional "reasoning" adjective.
+ *
+ * The gap is `[\s\S]`, NOT `[^\n]`. It was `[^\n]` until a stale "142 concepts
+ * and 193 rules" survived in README.md beside three correct 143/195 statements:
+ * the subject and the count had been wrapped onto separate lines, so the pin
+ * could not see the fact at all and reported the file clean. A pin that cannot
+ * fire is worse than no pin, because it certifies. The bound stays at 160 and
+ * the quantifier stays lazy, so the span is still local to one sentence or a
+ * wrapped line-pair rather than reaching across a document.
  */
 export const CONCEPT_COUNT_FACT_RE =
-  /(?:Concept Model|Graph B)[^\n]{0,160}?\*{0,2}(\d+)\*{0,2}\s+(?:reasoning\s+)?concepts\s*(?:\/|,|and)\s*\*{0,2}(\d+)\*{0,2}\s+rules/gi;
+  /(?:Concept Model|Graph B)[\s\S]{0,160}?\*{0,2}(\d+)\*{0,2}\s+(?:reasoning\s+)?concepts\s*(?:\/|,|and)\s*\*{0,2}(\d+)\*{0,2}\s+rules/gi;
 
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
 

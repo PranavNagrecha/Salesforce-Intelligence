@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-22T09:37:16.899Z",
+  "generatedAt": "2026-08-22T09:47:19.012Z",
   "version": "0.3.1",
   "toolCount": 217,
   "skillCount": 26,
@@ -13,8 +13,8 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 300,
-        "cases": 6503
+        "files": 301,
+        "cases": 6507
       },
       {
         "name": "extractors",
@@ -28,8 +28,8 @@
       },
       {
         "name": "graph",
-        "files": 26,
-        "cases": 349
+        "files": 27,
+        "cases": 363
       },
       {
         "name": "parsers",
@@ -49,7 +49,7 @@
       {
         "name": "vault",
         "files": 11,
-        "cases": 143
+        "cases": 145
       },
       {
         "name": "tooling-api",
@@ -62,8 +62,8 @@
         "cases": 50
       }
     ],
-    "totalCases": 9362,
-    "totalFiles": 501,
+    "totalCases": 9382,
+    "totalFiles": 503,
     "packageCount": 10,
     "approx": 9300
   },
@@ -90,8 +90,8 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 300,
-      "cases": 6503,
+      "files": 301,
+      "cases": 6507,
       "description": "The 217 read-only tools + router + grounding layer"
     },
     {
@@ -108,8 +108,8 @@
     },
     {
       "name": "graph",
-      "files": 26,
-      "cases": 349,
+      "files": 27,
+      "cases": 363,
       "description": "The DuckDB dependency-graph engine"
     },
     {
@@ -133,7 +133,7 @@
     {
       "name": "vault",
       "files": 11,
-      "cases": 143,
+      "cases": 145,
       "description": "Vault layout, manifest, freshness"
     },
     {

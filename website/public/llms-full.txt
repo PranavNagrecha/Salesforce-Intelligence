@@ -59,9 +59,9 @@ Key facts for accurate citation:
 
 - [License - MIT + Commons Clause](https://sfi.auditforce.cloud/licensing)
 
-## All tools (217)
+## All tools (212 listed, 217 registered)
 
-Every read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.
+Every read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run. 217 tools are registered in this build; 5 back-compat aliases fold into their canonical tool and are not listed separately.
 
 ### Orientation & routing (6)
 
