@@ -36,6 +36,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { buildCoverageCaveat } from '../../src/tools/coverage-trust.js';
 import { findApexUsagesHandler } from '../../src/tools/find-apex-usages.js';
 import { findCodeUsagesHandler } from '../../src/tools/find-code-usages.js';
 import { findComponentUsagesHandler } from '../../src/tools/find-component-usages.js';
@@ -433,5 +434,123 @@ describe('I3b empty≠none — find_component_usages', () => {
     if (!r.ok) return;
     expect(r.value.data.summary.hasStaticEvidence).toBe(true);
     expect(r.value.data.coverageCaveat).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// COVERAGE-CAVEAT-SENTENCE-UNGRAMMATICAL — the RENDERED sentence, per caller.
+//
+// The caveat message is the product's central honesty sentence: it is what a
+// host reads aloud on every empty dependency answer. It was composed by
+// splicing a caller-supplied `purpose` in front of a fixed
+// `" cannot be confirmed because …"` tail, and the traversal caller supplied a
+// two-sentence blob ending in a VERB, so all four graph-traversal tools
+// rendered, verbatim:
+//
+//   … can only be asserted for the dependency families the vault actually
+//   retrieved cannot be confirmed because the vault has incomplete coverage
+//   for: …
+//
+// Broken English, on the one sentence the product's credibility rests on.
+// These tests pin the WHOLE rendered sentence for four callers (get_edges,
+// get_impact, get_subgraph, find_component_usages) — the family list is the
+// only part read from the payload, because that part is data. Any future
+// caller that hands a verb-final blob to the composer fails here.
+// ===========================================================================
+
+/** The exact sentence every empty-traversal caveat must render, in full. */
+const expectedEmptyTraversalMessage = (families: readonly string[]): string =>
+  'This is an EMPTY result. "Nothing references / uses this" cannot be' +
+  ' confirmed because the vault has incomplete coverage for: ' +
+  `${families.join(', ')}. Treat absence of dependencies in those families as` +
+  ' "not checked", not "none".';
+
+/**
+ * Grammar invariants that hold for EVERY caveat message, whoever composed it:
+ * the claim verb appears exactly once, and the words immediately before it are
+ * the noun-phrase subject — not the tail of a finished sentence.
+ */
+const assertReadsAsOneSentence = (message: string): void => {
+  const occurrences = message.split(' cannot be confirmed').length - 1;
+  expect(occurrences).toBe(1);
+  const subject = message.slice(0, message.indexOf(' cannot be confirmed'));
+  // A verb-final subject ("… the vault actually retrieved cannot be confirmed")
+  // is the exact defect; a noun-phrase subject never ends in a past participle.
+  expect(subject).not.toMatch(/\b(retrieved|asserted|found|checked|modeled)$/);
+  // The subject must not itself be a completed sentence spliced in front of the
+  // verb: a full stop is allowed ONLY as the preamble's terminator, i.e. never
+  // in the final clause that reaches the verb.
+  const finalClause = subject.slice(subject.lastIndexOf('. ') + 1).trim();
+  expect(finalClause).not.toMatch(/\.$/);
+};
+
+describe('COVERAGE-CAVEAT-SENTENCE — the rendered sentence reads as English', () => {
+  it('get_edges renders the whole sentence grammatically', async () => {
+    const r = await getEdgesHandler(ctxWith(PARTIAL_COVERAGE), { nodeId: ISOLATED_FIELD });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const caveat = r.value.data.coverageCaveat;
+    expect(caveat).toBeDefined();
+    if (caveat === undefined) return;
+    expect(caveat.message).toBe(expectedEmptyTraversalMessage(caveat.missingCoverage));
+    assertReadsAsOneSentence(caveat.message);
+  });
+
+  it('get_impact renders the whole sentence grammatically', async () => {
+    const r = await getImpactHandler(ctxWith(PARTIAL_COVERAGE), { componentId: ISOLATED_FIELD });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const caveat = r.value.data.coverageCaveat;
+    expect(caveat).toBeDefined();
+    if (caveat === undefined) return;
+    expect(caveat.message).toBe(expectedEmptyTraversalMessage(caveat.missingCoverage));
+    assertReadsAsOneSentence(caveat.message);
+  });
+
+  it('get_subgraph renders the whole sentence grammatically', async () => {
+    const r = await getSubgraphHandler(ctxWith(PARTIAL_COVERAGE), { rootId: ISOLATED_FIELD });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const caveat = r.value.data.coverageCaveat;
+    expect(caveat).toBeDefined();
+    if (caveat === undefined) return;
+    expect(caveat.message).toBe(expectedEmptyTraversalMessage(caveat.missingCoverage));
+    assertReadsAsOneSentence(caveat.message);
+  });
+
+  it('find_component_usages renders it in BOTH coverageCaveat and boundaries[]', async () => {
+    const r = await findComponentUsagesHandler(ctxWith(PARTIAL_COVERAGE), {
+      componentId: ISOLATED_FIELD,
+      includeGrep: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const caveat = r.value.data.coverageCaveat;
+    expect(caveat).toBeDefined();
+    if (caveat === undefined) return;
+    const expected = expectedEmptyTraversalMessage(caveat.missingCoverage);
+    expect(caveat.message).toBe(expected);
+    assertReadsAsOneSentence(caveat.message);
+    // The prose host reads `boundaries`, not `coverageCaveat` — the same
+    // sentence must be grammatical there too.
+    expect(r.value.data.boundaries).toContain(expected);
+  });
+
+  it('a NOUN-PHRASE purpose (the destructive suite) is unchanged by the split slots', async () => {
+    // Every non-traversal caller passes a bare noun phrase; the composed
+    // sentence must stay byte-identical to its pre-fix form.
+    const caveat = buildCoverageCaveat(
+      ctxWith(PARTIAL_COVERAGE),
+      ['ApexClass', 'Flow'],
+      'Deletion safety',
+    );
+    expect(caveat).toBeDefined();
+    if (caveat === undefined) return;
+    expect(caveat.message).toBe(
+      'Deletion safety cannot be confirmed because the vault has incomplete' +
+        ` coverage for: ${caveat.missingCoverage.join(', ')}. Treat absence of` +
+        ' dependencies in those families as "not checked", not "none".',
+    );
+    assertReadsAsOneSentence(caveat.message);
   });
 });

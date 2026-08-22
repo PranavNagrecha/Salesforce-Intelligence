@@ -86,11 +86,38 @@ export interface GetSubgraphOutput {
   readonly nodes: readonly Node[];
   readonly edges: readonly Edge[];
   /**
-   * True when the graph layer's node/edge caps clipped the slice (the root is
-   * a hub). The nodes/edges are then a deterministic prefix, not the full
-   * neighbourhood — see `disclosure`.
+   * True when the slice is NOT the complete neighbourhood: the graph layer's
+   * node/edge caps clipped it (the root is a hub), the byte budget trimmed it,
+   * OR ≥1 collected edge was dropped for a missing endpoint
+   * (`droppedEndpointEdges`). Any of the three means the nodes/edges here are a
+   * partial view — see `disclosure`.
    */
   readonly truncated: boolean;
+  /**
+   * SUBGRAPH-PHANTOM-ENDPOINT-EDGE-LOSS: present ONLY when ≥1 edge the walk
+   * COLLECTED is absent from `edges` because an endpoint has no row in `nodes`.
+   *
+   * The self-contained-slice contract drops those edges (a consumer must not
+   * deref a node the slice omitted), but the drop used to be invisible:
+   * `truncated` stayed false and the disclosure still said "Complete subgraph".
+   * Measured on a real vault: a walk rooted on a PHANTOM standard object
+   * returned 15 nodes / 0 edges, `truncated: false`, "Complete subgraph within
+   * 1 hop(s)" — every one of its 14 access-grant edges deleted in silence.
+   *
+   * `phantomEndpointCount` counts endpoints the walk VISITED that have no node
+   * row (referenced by edges, never retrieved — a phantom); this is the cause
+   * nothing else flags. `nodeCapExcludedCount` counts endpoints the node cap
+   * closed before the walk reached them (already implied by `truncated`).
+   * `endpointIds` names the distinct missing ids (sorted, capped at 25).
+   * `sfi.get_edges` on the same id enumerates the dropped edges.
+   */
+  readonly droppedEndpointEdges?: {
+    readonly count: number;
+    readonly phantomEndpointCount: number;
+    readonly nodeCapExcludedCount: number;
+    readonly endpointIds: readonly string[];
+    readonly note: string;
+  };
   /** Verbatim honesty note about the size caps and, when truncated, the clipping. */
   readonly disclosure: string;
   /**
@@ -148,7 +175,28 @@ export const getSubgraphHandler = async (
     slimmed,
     sub.edges,
   );
-  const truncated = sub.truncated || budgeted.trimmed;
+  // SUBGRAPH-PHANTOM-ENDPOINT-EDGE-LOSS: an edge silently deleted is a partial
+  // answer whatever the mechanism, so a slice that lost edges to a missing
+  // endpoint can never report `truncated: false` — nor call itself "complete".
+  const dropped = sub.droppedEndpointEdges;
+  const droppedEndpointEdges =
+    dropped === undefined
+      ? undefined
+      : {
+          ...dropped,
+          endpointIds: [...dropped.endpointIds],
+          note:
+            `${dropped.count.toString()} collected edge(s) are NOT in \`edges\`: an endpoint is absent from \`nodes\`, and an edge with a missing endpoint is filtered out of the returned slice. ` +
+            (dropped.phantomEndpointCount > 0
+              ? `${dropped.phantomEndpointCount.toString()} of them point at a PHANTOM — an id referenced by edges but never retrieved into this vault (typically a standard or managed-package component), so a phantom ROOT loses its whole neighbourhood here. `
+              : '') +
+            (dropped.nodeCapExcludedCount > 0
+              ? `${dropped.nodeCapExcludedCount.toString()} of them reference a component the ${SUBGRAPH_MAX_NODES.toString()}-node cap excluded — those components ARE in the vault, they just did not fit this slice. `
+              : '') +
+            `These are REAL relationships that were FOUND and then dropped — do not read their absence as "nothing connects to this". Missing endpoint id(s): ${dropped.endpointIds.join(', ')}. Use \`sfi.get_edges\` on the same id to enumerate them (it reads the edge table without a node join).`,
+        };
+  const truncated =
+    sub.truncated || budgeted.trimmed || droppedEndpointEdges !== undefined;
   const payloadBytes = estimateGraphPayloadBytes({
     nodes: budgeted.nodes,
     edges: budgeted.edges,
@@ -157,16 +205,32 @@ export const getSubgraphHandler = async (
     slimmedCount > 0
       ? ` ${slimmedCount} node(s) had an oversized property value (e.g. Profile/PermissionSet grant matrices) summarised to an \`{__omitted}\` marker — fetch the full node with \`sfi.get_component\`.`
       : '';
-  const disclosure = budgeted.trimmed
+  const droppedNote =
+    droppedEndpointEdges !== undefined ? ` ${droppedEndpointEdges.note}` : '';
+  // A PHANTOM root — visited by the walk, referenced by edges, but with no node
+  // row of its own — answers from those edges. Say so, mirroring
+  // `find_component_usages`, so a caller does not read the missing definition
+  // as a missing component.
+  const rootIsPhantom = !budgeted.nodes.some((n) => n.id === input.rootId);
+  const rootPhantomNote = rootIsPhantom
+    ? ` \`${input.rootId}\` is NOT in this slice: it is either a PHANTOM (referenced by edges but never retrieved into this vault — its own definition is unavailable) or absent from the graph entirely. Check with \`sfi.get_component\`.`
+    : '';
+  const baseDisclosure = budgeted.trimmed
     ? `Subgraph trimmed to fit the ~${Math.round(GRAPH_MAX_PAYLOAD_BYTES / 1000)} KB response budget and TRUNCATED: \`${input.rootId}\` is a hub (estimated JSON payload ~${Math.round(payloadBytes / 1000)} KB after slimming), so this is a partial, deterministic slice (lowest ids first), NOT its full neighbourhood.${slimNote} Re-query with a smaller \`hops\` or a more specific root for a complete view.`
     : sub.truncated
       ? `Subgraph capped at ${SUBGRAPH_MAX_NODES} nodes / ${SUBGRAPH_MAX_EDGES} edges and TRUNCATED: \`${input.rootId}\` is a hub, so this is a partial, deterministic slice (lowest ids first), NOT its full neighbourhood.${slimNote} Re-query with a smaller \`hops\` or a more specific root for a complete view.`
-      : `Complete subgraph within ${hops} hop(s); under the ${SUBGRAPH_MAX_NODES}-node / ${SUBGRAPH_MAX_EDGES}-edge cap.${slimNote}`;
+      : droppedEndpointEdges !== undefined
+        ? // NEVER "complete": edges were found and then dropped.
+          `PARTIAL subgraph within ${hops} hop(s): under the ${SUBGRAPH_MAX_NODES}-node / ${SUBGRAPH_MAX_EDGES}-edge cap, but edge(s) the walk collected are missing from this slice.${slimNote}`
+        : `Complete subgraph within ${hops} hop(s); under the ${SUBGRAPH_MAX_NODES}-node / ${SUBGRAPH_MAX_EDGES}-edge cap.${slimNote}`;
+  const disclosure = `${baseDisclosure}${rootPhantomNote}${droppedNote}`;
 
   // I3b (empty ≠ none): a subgraph with NO edges is an isolated root — exactly
   // where "nothing connects to this" is dangerous. Name the families the vault
   // did NOT fully retrieve so the host discloses the boundary. Keyed on the edge
-  // set (the root node is always present). Non-empty neighbourhoods untouched.
+  // set (the root node is NOT always present — a phantom root has no node row,
+  // which is precisely how an empty edge set arises there). Non-empty
+  // neighbourhoods untouched.
   const coverageCaveat =
     budgeted.edges.length === 0
       ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
@@ -177,6 +241,7 @@ export const getSubgraphHandler = async (
       nodes: budgeted.nodes,
       edges: budgeted.edges,
       truncated,
+      ...(droppedEndpointEdges !== undefined ? { droppedEndpointEdges } : {}),
       disclosure,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },

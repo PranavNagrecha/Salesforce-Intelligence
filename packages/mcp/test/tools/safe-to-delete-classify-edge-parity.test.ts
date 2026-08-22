@@ -106,6 +106,15 @@ const originalClassifyEdge = (edge: Edge, fromNode: Node): Classification => {
       if (fromType === 'QuickAction') {
         return { category: 'layout', verdict: 'risky' };
       }
+      // INTENTIONAL post-RM-1b(2) extension, not drift: a WebLink (custom
+      // button / link) whose URL or JavaScript body names the field had NO row
+      // at all, so 79 such edges over 32 fields on one real vault fell through
+      // to {unknown, risky} and `safe_to_delete_field` answered
+      // `verdict: "unknown"` for a dependency it can name exactly. It takes the
+      // QuickAction row — the same UI-placement shape, the same consequence.
+      if (fromType === 'WebLink') {
+        return { category: 'layout', verdict: 'risky' };
+      }
       if (
         fromType === 'Report' ||
         fromType === 'Dashboard' ||
@@ -199,6 +208,11 @@ const CASES: readonly Case[] = [
   { name: 'references VisualforcePage', edgeType: 'references', source: 'x', fromType: 'VisualforcePage', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'references VisualforceComponent', edgeType: 'references', source: 'x', fromType: 'VisualforceComponent', expected: { category: 'frontend', verdict: 'risky' } },
   { name: 'references QuickAction', edgeType: 'references', source: 'x', fromType: 'QuickAction', expected: { category: 'layout', verdict: 'risky' } },
+  // The gap this row closes: a custom button/link referencing a field used to
+  // reach the `references` default and report `unknown`/`risky`, so the tool's
+  // headline verdict on such a field was `unknown` — "I found an edge I do not
+  // recognise" — rather than a named UI dependency.
+  { name: 'references WebLink (custom button/link)', edgeType: 'references', source: 'x', fromType: 'WebLink', expected: { category: 'layout', verdict: 'risky' } },
   { name: 'references Report', edgeType: 'references', source: 'x', fromType: 'Report', expected: { category: 'analytics', verdict: 'blocking' } },
   { name: 'references Dashboard', edgeType: 'references', source: 'x', fromType: 'Dashboard', expected: { category: 'analytics', verdict: 'blocking' } },
   { name: 'references ListView', edgeType: 'references', source: 'x', fromType: 'ListView', expected: { category: 'analytics', verdict: 'blocking' } },

@@ -342,3 +342,110 @@ describe('getSubgraphInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+// ===========================================================================
+// SUBGRAPH-PHANTOM-ENDPOINT-EDGE-LOSS
+//
+// A PHANTOM root — an id other metadata references but the refresh never
+// retrieved — has inbound edges and NO node row. The self-contained-slice
+// contract drops every edge touching it (right: a consumer must not deref a
+// node the slice omitted), but the drop was invisible: `truncated: false` and
+// "Complete subgraph within 1 hop(s)". Measured on a real vault: 15 nodes,
+// 0 edges, "complete" — fifteen access-granting principals with nothing
+// connecting them to anything, and no way for a host to tell.
+//
+// The fixture below is that shape in miniature: three granters, three edges
+// into an id with no node row.
+// ===========================================================================
+
+const PHANTOM_ROOT = 'CustomObject:NeverRetrieved';
+const GRANTERS = [
+  'PermissionSet:Alpha',
+  'PermissionSet:Beta',
+  'Profile:Gamma',
+] as const;
+
+const phantomSeed: ExtractionResult = {
+  nodes: GRANTERS.map((id) =>
+    makeNode({
+      id,
+      type: id.startsWith('Profile:') ? 'Profile' : 'PermissionSet',
+      apiName: id.slice(id.indexOf(':') + 1),
+      label: id.slice(id.indexOf(':') + 1),
+      sourcePath: `permissionsets/${id.slice(id.indexOf(':') + 1)}.permissionset-meta.xml`,
+    }),
+  ),
+  // Every edge points at an id that has NO node row — exactly what an access
+  // grant onto a never-retrieved standard object looks like in a real vault.
+  edges: GRANTERS.map((id) =>
+    makeEdge({
+      fromId: id,
+      toId: PHANTOM_ROOT,
+      edgeType: 'grantedBy',
+      confidence: 'declared',
+      source: 'extractor:permission-set',
+    }),
+  ),
+};
+
+describe('getSubgraphHandler — phantom root loses every edge', () => {
+  let phantomDir: string;
+  let phantomStore: GraphStore;
+  let phantomCtx: Context;
+
+  beforeAll(async () => {
+    phantomDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-subgraph-phantom-'));
+    const opened = await openGraph(join(phantomDir, 'phantom.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    phantomStore = opened.value;
+    const imported = await importExtractionResults(phantomStore, [phantomSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    phantomCtx = {
+      vaultRoot: phantomDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: phantomStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(phantomStore);
+    rmSync(phantomDir, { recursive: true, force: true });
+  });
+
+  it('reports the dropped edges, flips truncated, and never says "complete"', async () => {
+    const result = await getSubgraphHandler(phantomCtx, { rootId: PHANTOM_ROOT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+
+    // The shape the bug produced: granter nodes, zero edges.
+    expect(data.nodes.map((n) => n.id).sort()).toEqual([...GRANTERS].sort());
+    expect(data.edges).toEqual([]);
+
+    // …which must now be disclosed, not narrated as a clean empty slice.
+    expect(data.truncated).toBe(true);
+    expect(data.droppedEndpointEdges).toBeDefined();
+    expect(data.droppedEndpointEdges?.count).toBe(GRANTERS.length);
+    expect(data.droppedEndpointEdges?.phantomEndpointCount).toBe(GRANTERS.length);
+    expect(data.droppedEndpointEdges?.nodeCapExcludedCount).toBe(0);
+    expect(data.droppedEndpointEdges?.endpointIds).toEqual([PHANTOM_ROOT]);
+
+    // The word the audit caught: never "complete" on a slice that lost edges.
+    expect(data.disclosure).not.toMatch(/[Cc]omplete/);
+    expect(data.disclosure).toContain('PARTIAL subgraph');
+    expect(data.disclosure).toContain('PHANTOM');
+    expect(data.disclosure).toContain(PHANTOM_ROOT);
+  });
+
+  it('an intact slice is unchanged: no droppedEndpointEdges, still "Complete"', async () => {
+    const result = await getSubgraphHandler(ctx, {
+      rootId: 'CustomObject:Account',
+      hops: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.droppedEndpointEdges).toBeUndefined();
+    expect(result.value.data.truncated).toBe(false);
+    expect(result.value.data.disclosure).toContain('Complete subgraph within 1 hop(s)');
+  });
+});

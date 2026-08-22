@@ -215,6 +215,7 @@ export const EDGE_SEMANTICS: EdgeSemantics = Object.freeze({
         VisualforcePage: { category: 'frontend', verdict: 'risky' },
         VisualforceComponent: { category: 'frontend', verdict: 'risky' },
         QuickAction: { category: 'layout', verdict: 'risky' },
+        WebLink: { category: 'layout', verdict: 'risky' },
         Report: { category: 'analytics', verdict: 'blocking' },
         Dashboard: { category: 'analytics', verdict: 'blocking' },
         ListView: { category: 'analytics', verdict: 'blocking' },

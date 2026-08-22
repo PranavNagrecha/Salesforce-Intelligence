@@ -8,9 +8,12 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ComponentId } from '@sf-intelligence/contracts';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType } from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
+
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES } from './scan-cap.js';
 
 export interface SupplementalFlowFieldWriter {
   readonly componentId: ComponentId;
@@ -18,6 +21,54 @@ export interface SupplementalFlowFieldWriter {
   readonly fieldApiName: string;
   readonly mechanism: 'inputAssignments' | 'assignToReference';
 }
+
+/**
+ * The outcome of a {@link scanSupplementalFlowFieldWriters} walk.
+ *
+ * FLOW-WRITER-SCAN-CAPS-AT-500: this scan used to return a BARE
+ * `readonly SupplementalFlowFieldWriter[]` produced from ONE
+ * `listNodesByType(ctx.graph, 'Flow', { limit: 500, offset: 0 })` page. On an
+ * org with more than 500 Flows, a supplemental field writer living past the cap
+ * was simply absent from the answer, and — because the return type carried no
+ * truncation signal at all — NEITHER caller (`field_360`, `why_field_changed`)
+ * could disclose that anything had been missed. A field whose only writer is
+ * Flow 501 read as "no supplemental writers", which is the exact silent
+ * under-reporting the supplemental scan exists to eliminate.
+ *
+ * The shape mirrors its sibling `FlowConditionReaderScanResult`
+ * (`flow-condition-field-readers-scan.ts`), which already pages everything and
+ * reports `truncated` / `scannedCount` / `totalCount`, so the two supplemental
+ * reconstructions disclose their boundaries identically.
+ */
+export interface SupplementalFlowWriterScanResult {
+  /** One row per (Flow, mechanism) hit, sorted by `componentId`. */
+  readonly writers: readonly SupplementalFlowFieldWriter[];
+  /**
+   * True when the Flow walk did NOT cover every Flow in the vault — it stopped
+   * at the residual ceiling with more Flows behind it, or the graph query
+   * failed outright. Either way a writer in the un-scanned tail is MISSED, so
+   * the caller must disclose the cap rather than imply a complete scan. An
+   * empty `writers` list under `truncated: true` is UNCHECKED, never "none".
+   */
+  readonly truncated: boolean;
+  /** Flow nodes actually scanned (N in the "N of M" disclosure). */
+  readonly scannedCount: number;
+  /** Total Flow nodes in the vault (M). Computed only when truncated. */
+  readonly totalCount: number;
+}
+
+/**
+ * The residual ceiling on the full `Flow` scan. Defaults to the shared
+ * {@link FULL_SCAN_MAX_NODES} (20 000 — far above any real org's Flow
+ * population). `SFI_FLOW_WRITER_SCAN_MAX` overrides it so a test can exercise
+ * the truncated path without seeding thousands of nodes, and an operator on a
+ * pathological vault can raise it. Read at CALL time so a test can set it
+ * per-case. Mirrors `SFI_CONDITION_SCAN_MAX` on the sibling scan.
+ */
+const flowWriterScanCeiling = (): number => {
+  const v = Number(process.env['SFI_FLOW_WRITER_SCAN_MAX']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
+};
 
 /** Parse `<variables>` blocks mapping var name → SObject objectType. */
 const parseSObjectVariables = (xml: string): ReadonlyMap<string, string> => {
@@ -110,16 +161,25 @@ export const scanFlowXml = (
 /**
  * Scan deployed Flow source files for writes to `{objectApiName}.{fieldApiName}`
  * that the graph may not have stamped as `writesTo` edges.
+ *
+ * Pages EVERY Flow node (not just the first ≤500) via the shared
+ * `scanAllNodesOfTypes` full-window walk, and REPORTS whether the walk was
+ * complete — see {@link SupplementalFlowWriterScanResult}. A graph query error
+ * yields an EMPTY, TRUNCATED result: nothing was scanned, so the empty writer
+ * list is "not checked", never a proven "no supplemental writers".
  */
 export const scanSupplementalFlowFieldWriters = async (
   ctx: Context,
   objectApiName: string,
   fieldApiName: string,
-): Promise<readonly SupplementalFlowFieldWriter[]> => {
-  const flows = await listNodesByType(ctx.graph, 'Flow', { limit: 500, offset: 0 });
-  if (!flows.ok) return [];
+): Promise<SupplementalFlowWriterScanResult> => {
+  const maxNodes = flowWriterScanCeiling();
+  const flows = await scanAllNodesOfTypes(ctx.graph, ['Flow'], maxNodes);
+  if (!flows.ok) {
+    return { writers: [], truncated: true, scannedCount: 0, totalCount: 0 };
+  }
   const out: SupplementalFlowFieldWriter[] = [];
-  for (const node of flows.value) {
+  for (const node of flows.value.nodes) {
     if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) continue;
     try {
       const xml = await readFile(join(ctx.vaultRoot, node.sourcePath), 'utf-8');
@@ -139,5 +199,13 @@ export const scanSupplementalFlowFieldWriters = async (
   out.sort((a, b) =>
     a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0,
   );
-  return out;
+  const truncated = flows.value.scanIncomplete;
+  const scannedCount = flows.value.nodes.length;
+  // Only pay for the true total (M) when we actually need to disclose "N of M".
+  let totalCount = scannedCount;
+  if (truncated) {
+    const total = await countNodesByType(ctx.graph, 'Flow');
+    if (total.ok) totalCount = total.value;
+  }
+  return { writers: out, truncated, scannedCount, totalCount };
 };

@@ -39,6 +39,7 @@
  *   | AuraDefinitionBundle         | readsFrom   | frontend    | risky            |
  *   | AuraDefinitionBundle         | writesTo    | frontend    | risky            |
  *   | QuickAction                  | references  | layout      | risky            |
+ *   | WebLink (custom button/link) | references  | layout      | risky            |
  *   | (any other edge)             | *           | unknown     | risky            |
  *
  * **Aggregate verdict**:
@@ -554,7 +555,7 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     validation:
       'A Validation Rule formula references this field. The Validation Rule will fail to compile if the field is removed, and Salesforce refuses the delete while the rule is live. The rule’s `errorConditionFormula` is BOTH a formula reference and a condition that evaluates this field; those are two edges from one tokenized string, so the rule is counted ONCE here and the folded row is disclosed on the example as `alsoVia: ["condition"]` rather than reported as a second referrer. As with any condition, it is listed but NOT evaluated: sfi does not know whether any record satisfies it.',
     layout:
-      'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field) or referenced by a QuickAction (whose create/edit form is affected). Review the UI impact before deleting.',
+      'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field), referenced by a QuickAction (whose create/edit form is affected), or named by a custom BUTTON or LINK (WebLink) whose URL / JavaScript body will break when the merge field it points at is gone. Review the UI impact before deleting.',
     formula:
       'Another formula field references this field — either directly (tokenized from the formula body) or through a cross-object relationship traversal (`Parent__r.Field__c`) resolved against the org\u2019s lookup fields. Each EXAMPLE carries the referring field id, and a traversal-derived one also carries the `traversalPath` it was resolved from. The referencing formula will fail to compile if this field is removed.',
     rollup:
