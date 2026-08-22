@@ -42,3 +42,17 @@
   **Behaviour change for callers:** `incomingReads` is larger for most fields.
   It is an EDGE count, not a referrer count, so it legitimately differs from
   `find_formula_references`'s `totalCount`.
+
+- **`sfi.value_change_audit` and `sfi.what_if_remove_picklist_value` answer the
+  same coverage question the same way.** They carried two hand-copied family
+  lists (9 vs 10 entries) and two near-duplicate private caveat formatters, so
+  the SAME field on the SAME vault produced `completeness: 'complete'` from one
+  and a five-family caveat from the other — a self-contradiction across one
+  pair of tools. Both now read the shared `VALUE_LITERAL_READER_COVERAGE`
+  through the shared `buildCoverageCaveat`, differing only in the subject noun
+  phrase. A set-equality test across the two tools is the guard against drifting
+  again.
+
+  **Behaviour change for callers:** the caveat message text changed for both
+  tools (private format → shared format), and `value_change_audit` now reports
+  `partial` on vaults where it used to claim `complete`.

@@ -65,12 +65,16 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
-import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { type CoverageCaveat, type Verdict } from './coverage-trust.js';
+import {
+  buildCoverageCaveat,
+  VALUE_LITERAL_READER_COVERAGE,
+  type CoverageCaveat,
+  type Verdict,
+} from './coverage-trust.js';
 import { readFieldDataType } from './field-properties.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
@@ -88,20 +92,6 @@ const PICKLIST_TYPES = new Set<string>([
 
 /** Compatibility verdicts the tool emits. */
 type Compatibility = 'breaking' | 'review';
-
-const PICKLIST_VALUE_COVERAGE = [
-  'CustomField',
-  'ValidationRule',
-  'Flow',
-  'ApexClass',
-  'ApexTrigger',
-  'WorkflowRule',
-  'ConditionalContext',
-  'Report',
-  'Dashboard',
-  'ListView',
-  'FlexiPage',
-] as const;
 
 /** `WhatIfImpactItem.category` per WhatIfSemantics.md. */
 type Category =
@@ -142,20 +132,6 @@ export interface WhatIfRemovePicklistValueOutput {
  */
 const DISCLOSURE =
   "Apex code referencing the picklist value as a string literal is recognized only for static literals. Variable-based picklist comparisons (`if (account.Industry__c == myVar)`), dynamic SOQL strings, and reflective field access via `obj.get('FieldName')` are invisible to the recognizer; review dynamic comparisons separately before removing the value. Flow record-create/update steps that assign this value to the field as a literal (e.g. `<stringValue>Completed</stringValue>`) ARE detected; Flow steps that assign the value indirectly via a variable, formula, or merge field (`<elementReference>`) are NOT statically resolvable and are not matched — review those flows manually.";
-
-const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
-  const coverage = summarizeCoverage(ctx.manifest, PICKLIST_VALUE_COVERAGE);
-  if (coverage.status === 'complete') return undefined;
-  const missingCoverage = coverage.missingCoverage.length > 0
-    ? coverage.missingCoverage
-    : [...PICKLIST_VALUE_COVERAGE];
-  return {
-    status: coverage.status === 'partial' ? 'partial' : 'unknown',
-    missingCoverage,
-    message:
-      `Picklist-value removal impact is incomplete because the vault lacks coverage for: ${missingCoverage.join(', ')}. Absence of references in those families means "not checked", not "safe".`,
-  };
-};
 
 /**
  * Zod schema for the `sfi.what_if_remove_picklist_value` tool input.
@@ -503,7 +479,14 @@ export const whatIfRemovePicklistValueHandler = async (
 
   const compatibility: Compatibility =
     sortedImpacts.length === 0 ? 'review' : 'breaking';
-  const coverageCaveat = coverageCaveatFor(ctx);
+  // Shares `VALUE_LITERAL_READER_COVERAGE` and `buildCoverageCaveat` with
+  // `value_change_audit` — the two answer the same coverage question about the
+  // same field and must not drift apart again.
+  const coverageCaveat = buildCoverageCaveat(
+    ctx,
+    VALUE_LITERAL_READER_COVERAGE,
+    'Picklist-value removal impact',
+  );
   const rawVerdict = aggregateVerdict(sortedImpacts);
   const verdict = rawVerdict === 'safe' && coverageCaveat !== undefined
     ? 'review'

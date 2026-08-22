@@ -28,11 +28,14 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
-import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildCoverageCaveat,
+  VALUE_LITERAL_READER_COVERAGE,
+} from './coverage-trust.js';
 import {
   firstNonEmpty,
   parseFieldParentObjectApiName,
@@ -52,11 +55,6 @@ import {
   type Severity,
 } from './value-change-classification.js';
 import { assessValueChange, type BucketHit } from './value-change-risk.js';
-
-const VALUE_CHANGE_REQUIRED_COVERAGE = [
-  'CustomField', 'ValidationRule', 'Flow', 'ApexClass', 'ApexTrigger',
-  'WorkflowRule', 'Layout', 'SharingRule', 'DuplicateRule',
-] as const;
 
 /** Max rows returned (response-size guard); excess is dropped with a note. */
 const MAX_ROWS = 200;
@@ -145,19 +143,6 @@ export const valueChangeAuditInputSchema = z.object({
 });
 
 export type ValueChangeAuditInput = z.infer<typeof valueChangeAuditInputSchema>;
-
-const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
-  const coverage = summarizeCoverage(ctx.manifest, VALUE_CHANGE_REQUIRED_COVERAGE);
-  if (coverage.status === 'complete') return undefined;
-  const missingCoverage = coverage.missingCoverage.length > 0
-    ? coverage.missingCoverage
-    : [...VALUE_CHANGE_REQUIRED_COVERAGE];
-  return {
-    status: coverage.status === 'partial' ? 'partial' : 'unknown',
-    missingCoverage,
-    message: `Value-change audit is incomplete because the vault lacks coverage for: ${missingCoverage.join(', ')}.`,
-  };
-};
 
 /** Page every CustomField node parented by `objectId`. */
 const listObjectFields = async (ctx: Context, objectId: ComponentId): Promise<Result<Node[], McpError>> => {
@@ -335,7 +320,16 @@ export const valueChangeAuditHandler = async (
   const summary: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   for (const r of rows) summary[r.overallSeverity] += 1;
 
-  const coverageCaveat = coverageCaveatFor(ctx);
+  // ONE shared helper, ONE shared family list. This tool and
+  // `what_if_remove_picklist_value` answer the same coverage question about the
+  // same field and used to disagree — two hand-copied lists and two near-duplicate
+  // private formatters. Both now call `buildCoverageCaveat` with
+  // `VALUE_LITERAL_READER_COVERAGE`, differing only in the subject noun phrase.
+  const coverageCaveat = buildCoverageCaveat(
+    ctx,
+    VALUE_LITERAL_READER_COVERAGE,
+    'Value-change audit completeness',
+  );
   const confidence: ConfidenceLevel = rows.some((r) => r.topReasons.some((t) => t.startsWith('automation')))
     ? 'heuristic'
     : 'declared';

@@ -41,6 +41,10 @@ const FIXTURE_MANIFEST: VaultManifest = {
   edges: { parentOf: 2, references: 2, firesWhen: 1 },
   sourceTreeHash: 'sha256:fixture',
   coverageComputedAt: '2026-05-29T12:00:00.000Z',
+  // FIX 9: the shared `VALUE_LITERAL_READER_COVERAGE` list — this tool and
+  // `value_change_audit` now name the SAME families for the same field, so a
+  // fully-covered fixture must cover all fourteen (`Layout`, `SharingRule` and
+  // `DuplicateRule` joined from the value-change side).
   coverage: completeCoverage([
     'CustomField',
     'ValidationRule',
@@ -48,6 +52,9 @@ const FIXTURE_MANIFEST: VaultManifest = {
     'ApexClass',
     'ApexTrigger',
     'WorkflowRule',
+    'Layout',
+    'SharingRule',
+    'DuplicateRule',
     'ConditionalContext',
     'Report',
     'Dashboard',
