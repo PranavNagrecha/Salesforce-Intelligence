@@ -73,13 +73,17 @@ const seed: ExtractionResult = {
       id: 'Profile:CampusAdmin',
       type: 'Profile',
       apiName: 'CampusAdmin',
-      properties: { userPermissions: ['ApiEnabled'] },
+      // The extractor writes `customPermissionGrantCount` on EVERY container it
+      // processes, so a container carrying custom-permission grants but no
+      // sentinel models a node shape that cannot exist. Without it the union
+      // correctly reports the family as NOT CHECKED.
+      properties: { userPermissions: ['ApiEnabled'], customPermissionGrantCount: 2 },
     }),
     node({
       id: 'PermissionSet:AdvisorAccess',
       type: 'PermissionSet',
       apiName: 'AdvisorAccess',
-      properties: {},
+      properties: { customPermissionGrantCount: 2 },
     }),
     // Two in-vault CustomPermission definition nodes (CR-CAP-15).
     node({

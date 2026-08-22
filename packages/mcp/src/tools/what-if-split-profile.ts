@@ -52,12 +52,27 @@
  *     `component-not-found`.
  *   - Grants walked: outgoing `grantedBy` edges from the profile
  *     (object permissions to CustomObject, field permissions to
- *     CustomField, apex class access to ApexClass), plus the user
- *     permissions string array on `properties.userPermissions`.
- *     Layout assignments / tab visibilities / record type
- *     visibilities are NOT included in the split — those settings are
- *     tied to the Profile container in the Salesforce metadata model
- *     and cannot move to a PermissionSet.
+ *     CustomField, apex class access to ApexClass), the user
+ *     permissions string array on `properties.userPermissions`, AND the
+ *     three visibility families a PermissionSet really does carry —
+ *     `<tabSettings>`, `<recordTypeVisibilities>` and
+ *     `<applicationVisibilities>`.
+ *
+ *     Those three used to be excluded on the stated grounds that they are
+ *     "Profile-only settings in the Salesforce metadata model". That is
+ *     FALSE about the platform, and this product already contradicted it:
+ *     `effective_permissions` unions record-type visibility FROM permission
+ *     sets, and both extractors normalise the permset forms onto the same
+ *     property keys as profiles. Excluding them also made
+ *     `summary.assignedCount` a denominator that silently omitted movable
+ *     settings, which is the number a caller reads as "the plan is
+ *     complete" — and the number the verdict is computed from.
+ *
+ *     What IS true is narrower and is now stated as such: a permission set
+ *     is ADDITIVE. It cannot hide a tab, un-see a record type, un-show an
+ *     app, or carry a layout assignment at all. Those states live in
+ *     `nonTransferableSettings` and MUST stay on the Profile, which
+ *     therefore still exists after the split.
  */
 
 import type {
@@ -75,11 +90,21 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+} from './absence-disclosure.js';
+import {
   attachCoverageToWhatIf,
   type CoverageCaveat,
   type Verdict,
 } from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+// Lane B imports the readers Lane C exported rather than writing a fourth pair.
+import {
+  readApplicationVisibilities,
+  readRecordTypeVisibilities,
+  readTabVisibilities,
+} from './what-if-merge-profiles.js';
 
 /** Canonical id prefix for the Profile node type. */
 const PROFILE_PREFIX = 'Profile:';
@@ -111,7 +136,30 @@ type SettingType =
   | 'user-permission'
   | 'object-permission'
   | 'field-permission'
-  | 'apex-class-access';
+  | 'apex-class-access'
+  | 'tab-visibility'
+  | 'record-type-visibility'
+  | 'application-visibility';
+
+/** Setting types that can only ever live on the Profile. */
+type NonTransferableSettingType = SettingType | 'layout-assignment';
+
+/**
+ * The Profile `<tabVisibilities>` enum → the PermissionSet `<tabSettings>`
+ * enum. ONE exported const with the mapping in it, so a correction is a
+ * one-line data change rather than a hunt through the walk.
+ *
+ * Asserted from measurement, not from a spec in this repo: the two enums are
+ * DISJOINT across 3,384 profile rows and 315 permset rows in a probed vault
+ * (profiles use DefaultOn / DefaultOff / Hidden; permsets use Visible /
+ * Available), and permsets show ZERO hide-states — which is why `Hidden` has no
+ * entry here and is non-transferable instead.
+ */
+export const PROFILE_TO_PERMSET_TAB_VISIBILITY: Readonly<Record<string, string>> =
+  Object.freeze({
+    DefaultOn: 'Visible',
+    DefaultOff: 'Available',
+  });
 
 /**
  * One proposed assignment in the response. `targetPermSetId` is the
@@ -124,6 +172,12 @@ export interface SplitAssignment {
   readonly currentValue: unknown;
   readonly targetPermSetId: ComponentId;
   readonly rationale: 'keyword-match' | 'domain-cluster' | 'default';
+  /**
+   * Present when part of the setting moves and part of it cannot — a record
+   * type or app whose VISIBILITY transfers while its DEFAULT designation is
+   * Profile-only.
+   */
+  readonly transferNote?: string;
 }
 
 /**
@@ -138,10 +192,74 @@ export interface UnassignedSetting {
   readonly reason: string;
 }
 
+/**
+ * Read `properties.layoutAssignments` at FULL FIDELITY — one row per declared
+ * assignment.
+ *
+ * Deliberately NOT the shared `readLayoutAssignments`: that one returns a Map
+ * keyed on RECORD TYPE, which is right for the merge comparison (two profiles
+ * disagreeing about which layout a record type gets) and lossy here. A real
+ * profile in a probed vault declares 324 layout assignments across 72 distinct
+ * record-type keys, so the shared reader would silently drop 252 of the rows
+ * this list exists to make visible. Measured on a real vault, not assumed.
+ */
+const readLayoutAssignmentRows = (
+  profile: Node,
+): readonly { readonly layout: string; readonly recordType: string | null }[] => {
+  const raw = profile.properties['layoutAssignments'];
+  if (!Array.isArray(raw)) return [];
+  const out: { layout: string; recordType: string | null }[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const layout = entry['layout'];
+    if (typeof layout !== 'string' || layout.length === 0) continue;
+    const rt = entry['recordType'];
+    out.push({ layout, recordType: typeof rt === 'string' && rt.length > 0 ? rt : null });
+  }
+  return out;
+};
+
+/**
+ * Byte bound for the emitted `nonTransferableSettings` rows.
+ *
+ * The list is bounded by the profile's own metadata, but "bounded" is not
+ * "small": the widest probed profile yields ~436 rows, which pushed the whole
+ * response past the GLOBAL response budget. The global guard then tail-trimmed
+ * the array while `summary.nonTransferableCount` still reported the full
+ * figure — a response contradicting itself, and the exact silent-clip failure
+ * this list was added to prevent. Bounding it HERE keeps the truncation
+ * explicit, and `summary.nonTransferableByType` stays complete regardless.
+ */
+const NON_TRANSFERABLE_BYTE_BUDGET = 14_000;
+const NON_TRANSFERABLE_MAX_ROWS = 400;
+
+/**
+ * One setting that cannot move to a permission set AT ALL.
+ *
+ * Not a failure of the heuristic and not a gap in this plan — a structural
+ * fact about every profile in every org, which is why it does NOT downgrade
+ * the verdict. It does have to be READ before anyone believes the plan, so it
+ * is surfaced in full and counted in the summary.
+ */
+export interface NonTransferableSetting {
+  readonly settingType: NonTransferableSettingType;
+  readonly settingId: string;
+  readonly currentValue: unknown;
+  /** Why a permission set cannot express this state. */
+  readonly reason: string;
+}
+
 /** Per-target grant rollup — always complete, never paginated. */
 export interface SplitTargetRollup {
   readonly targetPermSetId: ComponentId;
   readonly assignedCount: number;
+}
+
+/** Per-settingType count over the non-transferable rows — always complete. */
+export interface SplitTypeRollup {
+  readonly settingType: string;
+  readonly count: number;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -159,11 +277,35 @@ export interface WhatIfSplitProfileOutput {
   readonly trust: TrustSummary;
   readonly assignments: readonly SplitAssignment[];
   readonly unassignedSettings: readonly UnassignedSetting[];
+  /**
+   * Settings a PermissionSet is structurally incapable of carrying — layout
+   * assignments, Hidden tabs, an explicitly-not-visible record type or app, and
+   * the default-record-type / default-app designations.
+   *
+   * NOT cursor-paginated, but byte-BOUNDED: a wide profile yields hundreds of
+   * rows and the global response guard would otherwise tail-trim them behind a
+   * count that still claimed the full figure. When the bound bites, the
+   * disclosure says how many of how many are listed, and
+   * `summary.nonTransferableByType` stays complete.
+   */
+  readonly nonTransferableSettings: readonly NonTransferableSetting[];
   readonly summary: {
     readonly assignedCount: number;
     readonly unassignedCount: number;
+    readonly nonTransferableCount: number;
+    /**
+     * Complete per-settingType counts over ALL non-transferable rows, including
+     * any the byte bound kept out of the emitted list.
+     */
+    readonly nonTransferableByType: readonly SplitTypeRollup[];
     /** Complete per-target counts (NOT paginated) — the actionable headline. */
     readonly byTarget: readonly SplitTargetRollup[];
+    /**
+     * Families whose source property this profile does not carry, so they were
+     * NOT walked. A `safe` verdict must never mean "I did not look", so any
+     * entry here forces the raw verdict to `review`.
+     */
+    readonly notEvaluatedCategories: readonly string[];
   };
   /** The actual page size applied (the input value or `SPLIT_DEFAULT_LIMIT`). */
   readonly limit: number;
@@ -191,7 +333,15 @@ export interface WhatIfSplitProfileOutput {
  * profile partitioning not computed".
  */
 const DISCLOSURE =
-  'v2.3 split clustering is approximate; the greedy keyword-match heuristic is fail-conservative. Review every assignment before applying — grants the heuristic could not place are surfaced in unassignedSettings rather than forced into an inappropriate target. Layout assignments, tab visibilities, and record-type visibilities are not split (Profile-only settings in the Salesforce metadata model).';
+  'v2.3 split clustering is approximate; the greedy keyword-match heuristic is fail-conservative. Review every assignment before applying — grants the heuristic could not place are surfaced in unassignedSettings rather than forced into an inappropriate target. Tab visibilities, record-type visibilities and application visibilities ARE split: a PermissionSet carries <tabSettings>, <recordTypeVisibilities> and <applicationVisibilities>, and the tab enum is translated from the Profile spelling (DefaultOn -> Visible, DefaultOff -> Available). A permission set is ADDITIVE, so settings that only a Profile can express — layout assignments, Hidden tabs, an explicitly-not-visible record type or app, and the default-record-type / default-app designations — are listed in nonTransferableSettings and MUST stay on the Profile, which therefore still exists after this split.';
+
+/** Appended whenever anything landed in `nonTransferableSettings`. */
+const nonTransferableClause = (n: number): string =>
+  `${n} setting(s) cannot move to a permission set at all and are listed in nonTransferableSettings; the verdict above is about the settings that CAN move.`;
+
+/** Verbatim note on a row whose visibility moves but whose DEFAULT flag cannot. */
+const TRANSFER_NOTE_DEFAULT =
+  'The visibility moves; the DEFAULT designation does not — <default> is Profile-only for record types and applications and must stay on the Profile.';
 
 /**
  * Zod schema for the `sfi.what_if_split_profile` tool input.
@@ -367,7 +517,9 @@ const domainClusterMatch = (
   let parent: string | null = null;
   if (settingType === 'object-permission') {
     parent = settingId;
-  } else if (settingType === 'field-permission') {
+  } else if (settingType === 'field-permission' || settingType === 'record-type-visibility') {
+    // A record-type id has the same `Object.Name` shape as a field id, so it
+    // extends the existing branch rather than adding a parallel parser.
     const dot = settingId.indexOf('.');
     parent = dot === -1 ? null : settingId.slice(0, dot);
   }
@@ -461,12 +613,18 @@ const splitGrants = async (
     {
       assignments: SplitAssignment[];
       unassigned: UnassignedSetting[];
+      nonTransferable: NonTransferableSetting[];
+      notEvaluatedCategories: string[];
+      notExtractedSentences: string[];
     },
     string
   >
 > => {
   const assignments: SplitAssignment[] = [];
   const unassigned: UnassignedSetting[] = [];
+  const nonTransferable: NonTransferableSetting[] = [];
+  const notEvaluatedCategories: string[] = [];
+  const notExtractedSentences: string[] = [];
 
   const addResult = (
     result: SplitAssignment | UnassignedSetting,
@@ -476,6 +634,32 @@ const splitGrants = async (
     } else {
       unassigned.push(result);
     }
+  };
+
+  /**
+   * A family whose source property this profile does not carry was NOT walked.
+   * Emitting zero rows for it would read as "this profile has none", so it is
+   * named and disclosed instead — and it forces the verdict off `safe`,
+   * because `safe` must never mean "I did not look".
+   */
+  const familyEvaluated = (
+    category: string,
+    sentinelProperty: string,
+    subject: string,
+  ): boolean => {
+    if (familyWasExtracted(profile.properties, sentinelProperty)) return true;
+    notEvaluatedCategories.push(category);
+    notExtractedSentences.push(
+      notExtractedFamilyDisclosure({
+        subject,
+        verb: 'checked',
+        sentinelProperty,
+        containers: [profile.id],
+        surface: '`assignments` / `nonTransferableSettings`',
+        zeroReading: `"no ${subject.toLowerCase()}"`,
+      }),
+    );
+    return false;
   };
 
   // User permissions from properties.userPermissions.
@@ -525,7 +709,117 @@ const splitGrants = async (
     // disclosure.
   }
 
-  return ok({ assignments, unassigned });
+  // ── The three families a PermissionSet really does carry ────────────────
+  //
+  // Bucketing is the platform's ADDITIVE semantics, nothing cleverer: a state a
+  // permission set can express moves through the EXISTING heuristic; a state
+  // only a Profile can express is non-transferable.
+
+  if (familyEvaluated('tab-visibility', 'tabVisibilities', 'Tab visibility')) {
+    for (const [tab, visibility] of readTabVisibilities(profile)) {
+      const permSetSpelling = PROFILE_TO_PERMSET_TAB_VISIBILITY[visibility];
+      if (permSetSpelling === undefined) {
+        // `Hidden` (and anything else outside the permset enum). A permission
+        // set is additive — it cannot HIDE a tab.
+        nonTransferable.push({
+          settingType: 'tab-visibility',
+          settingId: tab,
+          currentValue: visibility,
+          reason:
+            'A permission set is ADDITIVE and cannot hide a tab; a Hidden tab visibility can only be expressed on the Profile.',
+        });
+        continue;
+      }
+      addResult(assignGrant('tab-visibility', tab, permSetSpelling, candidates));
+    }
+  }
+
+  if (
+    familyEvaluated(
+      'record-type-visibility',
+      'recordTypeVisibilities',
+      'Record-type visibility',
+    )
+  ) {
+    for (const [recordType, entry] of readRecordTypeVisibilities(profile)) {
+      if (entry['visible'] === false) {
+        nonTransferable.push({
+          settingType: 'record-type-visibility',
+          settingId: recordType,
+          currentValue: { visible: false },
+          reason:
+            'A permission set is ADDITIVE and cannot un-see a record type; an explicitly not-visible record type can only be expressed on the Profile.',
+        });
+        continue;
+      }
+      const placed = assignGrant(
+        'record-type-visibility',
+        recordType,
+        { visible: true, default: false },
+        candidates,
+      );
+      addResult(
+        entry['default'] === true && 'targetPermSetId' in placed
+          ? { ...placed, transferNote: TRANSFER_NOTE_DEFAULT }
+          : placed,
+      );
+    }
+  }
+
+  if (
+    familyEvaluated(
+      'application-visibility',
+      'applicationVisibilities',
+      'Application visibility',
+    )
+  ) {
+    for (const [application, entry] of readApplicationVisibilities(profile)) {
+      if (entry['visible'] !== true) {
+        nonTransferable.push({
+          settingType: 'application-visibility',
+          settingId: application,
+          currentValue: { visible: false },
+          reason:
+            'A permission set is ADDITIVE and cannot un-show an app; an explicitly not-visible application can only be expressed on the Profile.',
+        });
+        continue;
+      }
+      const placed = assignGrant(
+        'application-visibility',
+        application,
+        { visible: true, default: false },
+        candidates,
+      );
+      addResult(
+        entry['default'] === true && 'targetPermSetId' in placed
+          ? { ...placed, transferNote: TRANSFER_NOTE_DEFAULT }
+          : placed,
+      );
+    }
+  }
+
+  // Layout assignments: EVERY entry is non-transferable — a permission set has
+  // no layout-assignment element at all. They stay out of `assignments`, but
+  // they must not VANISH: the widest profile in a probed vault carries 334.
+  if (familyEvaluated('layout-assignment', 'layoutAssignments', 'Layout assignment')) {
+    for (const { layout, recordType } of readLayoutAssignmentRows(profile)) {
+      nonTransferable.push({
+        settingType: 'layout-assignment',
+        settingId: `${layout}|${recordType ?? 'default'}`,
+        currentValue: { layout, recordType },
+        reason:
+          'A permission set carries no layout-assignment element at all; page-layout assignment is Profile-only.',
+      });
+    }
+  }
+
+  return ok({
+    assignments,
+    unassigned,
+    nonTransferable,
+    notEvaluatedCategories,
+    notExtractedSentences,
+  });
 };
 
 /**
@@ -650,6 +944,44 @@ export const whatIfSplitProfileHandler = async (
 
   const assignments = sortAssignments(splitResult.value.assignments);
   const unassignedSettings = sortUnassigned(splitResult.value.unassigned);
+  const nonTransferableSettings = [...splitResult.value.nonTransferable].sort((a, b) =>
+    a.settingType < b.settingType
+      ? -1
+      : a.settingType > b.settingType
+        ? 1
+        : a.settingId < b.settingId
+          ? -1
+          : a.settingId > b.settingId
+            ? 1
+            : 0,
+  );
+  const { notEvaluatedCategories, notExtractedSentences } = splitResult.value;
+  // COMPLETE per-type rollup over ALL non-transferable rows — never bounded, so
+  // the categories the byte cap hides are still countable. Same pattern as
+  // `byTarget` / `byCategory`: the rollup is the actionable headline that
+  // survives truncation of the detail.
+  const nonTransferableByType: SplitTypeRollup[] = [
+    ...nonTransferableSettings
+      .reduce((m, n) => m.set(n.settingType, (m.get(n.settingType) ?? 0) + 1), new Map<string, number>())
+      .entries(),
+  ]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([settingType, count]) => ({ settingType, count }));
+  // Bound the EMITTED rows so the global response guard never tail-trims them
+  // behind a count that still claims the full figure.
+  const nonTransferablePage = paginateLegacy(nonTransferableSettings, {
+    offset: 0,
+    limit: NON_TRANSFERABLE_MAX_ROWS,
+    byteBudget: NON_TRANSFERABLE_BYTE_BUDGET,
+    binding: {
+      tool: 'sfi.what_if_split_profile',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: 'non-transferable',
+    },
+    keyOf: (n) => `${n.settingType} ${n.settingId}`,
+  }).items;
+  const nonTransferableTruncated =
+    nonTransferablePage.length < nonTransferableSettings.length;
 
   // Complete per-target rollup over ALL assignments — the actionable
   // headline that survives pagination. Seed every target at 0 so a
@@ -707,18 +1039,43 @@ export const whatIfSplitProfileHandler = async (
   const hasMore = paged.hasMore;
   const truncated = hasMore || offset > 0;
   const emitCursor = paged.nextCursor !== null;
-  const disclosure = truncated
-    ? `${DISCLOSURE} Returning assignments ${offset}–${offset + page.length} of ${assignments.length} (page size ${limit}); summary.byTarget holds the COMPLETE per-target counts. Page through the remaining grants with offset/limit.`
-    : DISCLOSURE;
+  const disclosure = [
+    truncated
+      ? `${DISCLOSURE} Returning assignments ${offset}–${offset + page.length} of ${assignments.length} (page size ${limit}); summary.byTarget holds the COMPLETE per-target counts. Page through the remaining grants with offset/limit.`
+      : DISCLOSURE,
+    ...(nonTransferableSettings.length > 0
+      ? [nonTransferableClause(nonTransferableSettings.length)]
+      : []),
+    ...(nonTransferableTruncated
+      ? [
+          `nonTransferableSettings lists ${nonTransferablePage.length} of ${nonTransferableSettings.length} row(s) — the rest were dropped to fit the response budget. summary.nonTransferableCount and summary.nonTransferableByType are COMPLETE; the omission is in the detail only.`,
+        ]
+      : []),
+    ...notExtractedSentences,
+  ].join(' ');
 
   // Unified what-if envelope (P8-what-if-suite): a clean split (nothing left
   // unassigned) → safe, otherwise review (unassigned settings are a coverage
   // gap to resolve). Partial Profile/PermissionSet coverage downgrades safe.
+  // `safe` must never mean "I did not look": a family whose source property this
+  // profile does not carry was NOT walked, so the plan cannot be called clean.
+  //
+  // `nonTransferableSettings.length` deliberately does NOT downgrade. A
+  // non-transferable setting is a STRUCTURAL fact about every profile in every
+  // org, not a gap in this plan; downgrading on it would make every call
+  // `review` and destroy the verdict's information content — which is its own
+  // kind of dishonesty. The disclosure states the count and the consequence in
+  // words instead.
+  const rawVerdict =
+    unassignedSettings.length === 0 && notEvaluatedCategories.length === 0
+      ? 'safe'
+      : 'review';
   const { verdict, coverageCaveat, trust } = attachCoverageToWhatIf(
     ctx,
     ['Profile', 'PermissionSet'],
     'Profile split coverage analysis',
-    unassignedSettings.length === 0 ? 'safe' : 'review',
+    rawVerdict,
+    notEvaluatedCategories,
   );
 
   return ok({
@@ -730,10 +1087,14 @@ export const whatIfSplitProfileHandler = async (
       trust,
       assignments: page,
       unassignedSettings,
+      nonTransferableSettings: nonTransferablePage,
       summary: {
         assignedCount: assignments.length,
         unassignedCount: unassignedSettings.length,
+        nonTransferableCount: nonTransferableSettings.length,
+        nonTransferableByType,
         byTarget,
+        notEvaluatedCategories,
       },
       limit,
       offset,

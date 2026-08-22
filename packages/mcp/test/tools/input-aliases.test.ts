@@ -6,6 +6,7 @@ import {
   mergeInputAliases,
   parseFieldParentObjectApiName,
   resolveApexClassAlias,
+  resolveContainerAlias,
   resolveFieldAlias,
   resolveObjectAlias,
   resolveObjectScopeParentId,
@@ -237,5 +238,123 @@ describe('formatSfCliFailure', () => {
   it('appends upgrade hint for update-available stderr', () => {
     const msg = formatSfCliFailure('Warning: update available from 2.103.7 to 2.137.7');
     expect(msg).toContain('sf update');
+  });
+});
+
+// =============================================================================
+// FIX 5 — the missing FOURTH resolver. CLAUDE.md states the required behaviour
+// verbatim ("When the selectors disagree, or none resolves, the tool refuses
+// with a named `invalid-query`"), and three container-scoped tools shipped the
+// opposite: a `z.preprocess` step that took the VALUE from one key and the
+// PREFIX from the mere PRESENCE of another.
+// =============================================================================
+describe('resolveContainerAlias', () => {
+  const idOf = (raw: unknown): string => {
+    const r = resolveContainerAlias(raw);
+    if (!r.ok) throw new Error(`unexpected refusal: ${r.error.message}`);
+    return (r.value as { componentId: string }).componentId;
+  };
+
+  it('coerces per key BY THE KEY OWN NAME, never by a sibling key presence', () => {
+    expect(idOf({ profileApiName: 'Alpha_Profile' })).toBe('Profile:Alpha_Profile');
+    expect(idOf({ profileId: 'Alpha_Profile' })).toBe('Profile:Alpha_Profile');
+    expect(idOf({ profileName: 'Alpha_Profile' })).toBe('Profile:Alpha_Profile');
+    expect(idOf({ permissionSetApiName: 'Beta_Set' })).toBe('PermissionSet:Beta_Set');
+    expect(idOf({ permissionSetId: 'Beta_Set' })).toBe('PermissionSet:Beta_Set');
+    expect(idOf({ permissionSetName: 'Beta_Set' })).toBe('PermissionSet:Beta_Set');
+    expect(idOf({ componentId: 'Alpha_Profile' })).toBe('Profile:Alpha_Profile');
+  });
+
+  it('reports containerType and apiName for both families', () => {
+    const prof = resolveContainerAlias({ profileApiName: 'Alpha_Profile' });
+    expect(prof.ok).toBe(true);
+    if (!prof.ok) return;
+    expect(prof.value).toEqual({
+      componentId: 'Profile:Alpha_Profile',
+      containerType: 'Profile',
+      apiName: 'Alpha_Profile',
+    });
+    const ps = resolveContainerAlias({ permissionSetApiName: 'Beta_Set' });
+    expect(ps.ok).toBe(true);
+    if (!ps.ok) return;
+    expect(ps.value).toEqual({
+      componentId: 'PermissionSet:Beta_Set',
+      containerType: 'PermissionSet',
+      apiName: 'Beta_Set',
+    });
+  });
+
+  it('SHAPE 1 — two selectors naming different targets refuse, naming BOTH ids', () => {
+    // Pre-fix: answered about Gamma_Profile and dropped Alpha_Profile silently.
+    const r = resolveContainerAlias({
+      profileApiName: 'Alpha_Profile',
+      profileId: 'Profile:Gamma_Profile',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('componentId');
+    expect(r.error.message).toContain('Profile:Alpha_Profile');
+    expect(r.error.message).toContain('Profile:Gamma_Profile');
+  });
+
+  it('SHAPE 2 — a profile key and a permission-set key naming different things refuse', () => {
+    // Pre-fix: the value came from profileApiName and the prefix from the mere
+    // PRESENCE of permissionSetApiName, producing `PermissionSet:Alpha_Profile`
+    // and a component-not-found for a component nobody named.
+    const r = resolveContainerAlias({
+      profileApiName: 'Alpha_Profile',
+      permissionSetApiName: 'Beta_Set',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Profile:Alpha_Profile');
+    expect(r.error.message).toContain('PermissionSet:Beta_Set');
+  });
+
+  it('SHAPE 3 — the same bare name under both keys is TWO components, so it refuses', () => {
+    // `Profile:Alpha_Profile` and `PermissionSet:Alpha_Profile` are different
+    // components. Answering about either would be a guess.
+    const r = resolveContainerAlias({
+      profileApiName: 'Alpha_Profile',
+      permissionSetApiName: 'Alpha_Profile',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Profile:Alpha_Profile');
+    expect(r.error.message).toContain('PermissionSet:Alpha_Profile');
+  });
+
+  it('AGREEING aliases still resolve — the common host shape must not regress', () => {
+    expect(idOf({ profileId: 'Profile:Alpha_Profile', profileApiName: 'Alpha_Profile' })).toBe(
+      'Profile:Alpha_Profile',
+    );
+    expect(
+      idOf({ componentId: 'PermissionSet:Beta_Set', permissionSetApiName: 'Beta_Set' }),
+    ).toBe('PermissionSet:Beta_Set');
+  });
+
+  it('a WRONG Type: prefix passes through unchanged for the caller to reject', () => {
+    // Never mangled into `Profile:CustomObject:…` — the phantom-Profile bug the
+    // two tools' comments describe stays fixed.
+    expect(idOf({ componentId: 'CustomObject:Widget__c' })).toBe('CustomObject:Widget__c');
+  });
+
+  it('none named → invalid-query with the natural-selector wording', () => {
+    const r = resolveContainerAlias({});
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/name the profile or permission set/);
+    expect(r.error.message).toContain('profileApiName');
+  });
+
+  it('none named with required:false → ok(null), for a legitimately unscoped axis', () => {
+    const r = resolveContainerAlias({}, { required: false });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toBeNull();
   });
 });

@@ -55,6 +55,10 @@ const seed: ExtractionResult = {
       apiName: 'Sales',
       properties: {
         userPermissions: ['ApiEnabled'],
+        // The extractor writes `customPermissionGrantCount` on EVERY container
+        // it processes, so a fixture container with a custom-permission grant
+        // and no sentinel models a node shape that cannot exist.
+        customPermissionGrantCount: 1,
         // RT parity: profile sees Standard_Deal, explicitly HIDES Archived_Deal.
         recordTypeVisibilities: [
           { recordType: 'Deal__c.Standard_Deal', visible: true, default: true },
@@ -68,6 +72,7 @@ const seed: ExtractionResult = {
       apiName: 'DealEditor',
       properties: {
         userPermissions: ['ViewAllData'],
+        customPermissionGrantCount: 1,
         // Adds Enterprise_Deal, re-grants Archived_Deal (visible=true must win),
         // and carries an older-metadata entry with visible:null (counts visible).
         recordTypeVisibilities: [
@@ -80,6 +85,13 @@ const seed: ExtractionResult = {
     // A permission set from a vault refreshed BEFORE record-type extraction —
     // no recordTypeVisibilities key at all (contributes nothing, disclosed).
     node({ id: 'PermissionSet:LegacyNoRt', type: 'PermissionSet', apiName: 'LegacyNoRt', properties: {} }),
+    // A container that WAS processed by the custom-permission extractor and
+    // grants none: sentinel present, value 0. The CHECKED zero.
+    node({ id: 'PermissionSet:Checked_Zero', type: 'PermissionSet', apiName: 'Checked_Zero', properties: { customPermissionGrantCount: 0, recordTypeVisibilities: [] } }),
+    // Grants object CRUD on an object that is NOT a node here (managed-package,
+    // or outside the retrieve scope). The importer stamps `targetMissing` on the
+    // edge automatically, against the FINAL node set.
+    node({ id: 'PermissionSet:PhantomObjGrant', type: 'PermissionSet', apiName: 'PhantomObjGrant', properties: { customPermissionGrantCount: 0, recordTypeVisibilities: [] } }),
     node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     node({ id: 'CustomField:Account.Amount__c', type: 'CustomField', apiName: 'Account.Amount__c' }),
     node({ id: 'ApexClass:DealService', type: 'ApexClass', apiName: 'DealService' }),
@@ -88,6 +100,8 @@ const seed: ExtractionResult = {
   ],
   edges: [
     edge({ fromId: 'Profile:Sales', toId: 'CustomObject:Account', edgeType: 'grantedBy', properties: { allowRead: true } }),
+    edge({ fromId: 'PermissionSet:PhantomObjGrant', toId: 'CustomObject:zeta__Packaged_Obj', edgeType: 'grantedBy', properties: { allowRead: true, allowEdit: true } }),
+    edge({ fromId: 'PermissionSet:PhantomObjGrant', toId: 'CustomObject:Account', edgeType: 'grantedBy', properties: { allowRead: true } }),
     edge({ fromId: 'PermissionSet:DealEditor', toId: 'CustomObject:Account', edgeType: 'grantedBy', properties: { allowRead: true, allowEdit: true } }),
     edge({ fromId: 'PermissionSet:DealEditor', toId: 'CustomField:Account.Amount__c', edgeType: 'grantedBy', properties: { readable: true, editable: true } }),
     edge({ fromId: 'PermissionSet:DealEditor', toId: 'ApexClass:DealService', edgeType: 'grantedBy', properties: {} }),
@@ -181,6 +195,7 @@ describe('effectivePermissionsHandler', () => {
       { name: 'SkipValidation', targetMissing: false, grantedBy: ['Profile:Sales'] },
     ]);
     expect(r.value.data.summary.customPermissions).toBe(2);
+    expect(r.value.data.summary.customPermissions).not.toBeNull();
     // Not double-counted into systemPermissions.
     const sys = r.value.data.systemPermissions.map((s) => s.permission);
     expect(sys).not.toContain('SkipValidation');
@@ -588,8 +603,29 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     if (!viaAlias.ok || !viaCanonical.ok) return;
     // The alias path is byte-identical to the canonical profileId path.
     expect(JSON.stringify(viaAlias.value.data)).toBe(JSON.stringify(viaCanonical.value.data));
-    // And no appliedScope on a no-object call.
-    expect('appliedScope' in viaAlias.value.data).toBe(false);
+    // And the OBJECT axis stays unscoped on a no-object call. The CONTAINER
+    // axis now echoes what the bare `profileApiName` actually resolved to,
+    // which is the point of the scope-honesty rule.
+    expect(viaAlias.value.data.appliedScope).toEqual({ container: 'Profile:Sales' });
+    expect(viaAlias.value.data.appliedScope?.object).toBeUndefined();
+  });
+
+  it('DISAGREEING profile selectors are REFUSED, not silently won by profileId', async () => {
+    // Pre-fix `mergeInputAliases` kept the canonical `profileId` and dropped the
+    // `profileApiName` on the floor, answering about a container the caller
+    // also named something else.
+    const r = await effectivePermissionsHandler(
+      ctx,
+      effectivePermissionsInputSchema.parse({
+        profileId: 'Profile:Sales',
+        profileApiName: 'Other',
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Profile:Sales');
+    expect(r.error.message).toContain('Profile:Other');
   });
 
   it('objectApiName narrows objectPermissions + FLS count + record types to it, echoes appliedScope', async () => {
@@ -604,7 +640,7 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     expect(scoped.ok).toBe(true);
     if (!scoped.ok) return;
     const d = scoped.value.data;
-    expect(d.appliedScope).toEqual({ object: 'Account' });
+    expect(d.appliedScope).toEqual({ container: 'Profile:Sales', object: 'Account' });
     // Only the Account object row — NOT a multi-object dump.
     expect(d.objectPermissions.map((o) => o.object)).toEqual(['Account']);
     expect(d.summary.objects).toBe(1);
@@ -631,7 +667,7 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     expect(scoped.ok).toBe(true);
     if (!scoped.ok) return;
     const d = scoped.value.data;
-    expect(d.appliedScope).toEqual({ object: 'Deal__c' });
+    expect(d.appliedScope).toEqual({ container: 'Profile:Sales', object: 'Deal__c' });
     // Object CRUD empty (no object grant on Deal__c) but record types present.
     expect(d.objectPermissions).toEqual([]);
     expect(d.recordTypeVisibilities.map((rt) => rt.recordType).sort()).toEqual([
@@ -657,14 +693,18 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     expect(scoped.error.message).toContain('Ghost__c');
   });
 
-  it('a bare (no-object) call is byte-identical to before — no appliedScope key', async () => {
+  it('a bare (no-object) call reports NO object scope — only the container echo', async () => {
+    // Written for the OBJECT axis: a call that named no object must not report
+    // one, and must not narrow anything. Both hold. Narrowed rather than
+    // deleted now that the container axis echoes.
     const bare = await effectivePermissionsHandler(ctx, {
       profileId: 'Profile:Sales',
       permissionSetIds: ['PermissionSet:DealEditor'],
     });
     expect(bare.ok).toBe(true);
     if (!bare.ok) return;
-    expect('appliedScope' in bare.value.data).toBe(false);
+    expect(bare.value.data.appliedScope).toEqual({ container: 'Profile:Sales' });
+    expect(bare.value.data.appliedScope?.object).toBeUndefined();
     // Unscoped union still shows both objects' worth of surfaces intact.
     expect(bare.value.data.summary.objects).toBe(1); // Account (the only granted object)
     expect(bare.value.data.recordTypeVisibilities.length).toBeGreaterThan(0);
@@ -686,3 +726,122 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
 function effectivePermissionsInputSchemaSafe(input: unknown): boolean {
   return effectivePermissionsInputSchema.safeParse(input).success;
 }
+
+// =============================================================================
+// FIX 2 — an unchecked zero for custom permissions on a pre-0.2 vault.
+//
+// The product's central promise failing in the direction that matters: a false
+// `0` in a security tool. On a 0.1.11 vault this reported
+// `summary.customPermissions: 0` for 230 of 230 containers, with 27 permission
+// sets declaring 100 real grants across 29 custom permissions — and five
+// disclosures on the response, none of which mentioned the family.
+// =============================================================================
+describe('effectivePermissionsHandler — custom permissions were NOT checked', () => {
+  it('reports null + a disclosure when NO loaded container carries the sentinel', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      permissionSetIds: ['PermissionSet:LegacyNoRt'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.customPermissions).toBeNull();
+    expect(d.summary.customPermissions).not.toBe(0);
+    expect(d.customPermissions).toEqual([]);
+    const sentence = d.disclosures.find((x) => /Custom permissions were NOT checked/.test(x));
+    expect(sentence).toBeDefined();
+    expect(sentence).toContain('customPermissionGrantCount');
+    expect(sentence).toContain('PermissionSet:LegacyNoRt');
+    expect(sentence).toContain('NEVER a verified "no custom permissions"');
+    // It is an UNDERSTATEMENT of access, so it belongs at the FRONT.
+    expect(d.disclosures[0]).toBe(sentence);
+  });
+
+  it('a CHECKED zero stays a zero, with no disclosure', async () => {
+    // The case the fix could most easily swallow: sentinel PRESENT, value 0,
+    // no grants. That is a container that WAS examined and grants none.
+    const r = await effectivePermissionsHandler(ctx, {
+      permissionSetIds: ['PermissionSet:Checked_Zero'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.customPermissions).toBe(0);
+    expect(d.summary.customPermissions).not.toBeNull();
+    expect(d.disclosures.some((x) => /Custom permissions were NOT checked/.test(x))).toBe(false);
+  });
+
+  it('a MIXED bundle keeps the true partial count and names the unchecked container', async () => {
+    // Suppressing a real partial answer to null because ONE container is stale
+    // throws away information the caller can act on.
+    const r = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      permissionSetIds: ['PermissionSet:LegacyNoRt'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.customPermissions).toBe(1);
+    const sentence = d.disclosures.find((x) => /Custom permissions were NOT checked/.test(x));
+    expect(sentence).toBeDefined();
+    expect(sentence).toContain('PermissionSet:LegacyNoRt');
+    expect(sentence).not.toContain('Profile:Sales');
+  });
+
+  it('the record-type sentence now uses the SAME template, so the two cannot drift', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      permissionSetIds: ['PermissionSet:LegacyNoRt'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const rt = r.value.data.disclosures.find((x) =>
+      /Record-type visibility was NOT checked/.test(x),
+    );
+    expect(rt).toBeDefined();
+    expect(rt).toContain('recordTypeVisibilities');
+    expect(rt).toContain('NEVER a verified "no record types"');
+  });
+});
+
+// =============================================================================
+// FIX 8 — an objectPermissions row whose target object is not in this vault.
+// =============================================================================
+describe('effectivePermissionsHandler — unresolvable object grant targets', () => {
+  it('marks the row, counts it, and discloses it', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      permissionSetIds: ['PermissionSet:PhantomObjGrant'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const phantom = d.objectPermissions.find((o) => o.object === 'zeta__Packaged_Obj');
+    expect(phantom).toBeDefined();
+    // The flags are REAL — only the target is unresolvable.
+    expect(phantom?.allowRead).toBe(true);
+    expect(phantom?.allowEdit).toBe(true);
+    expect(phantom?.targetMissing).toBe(true);
+    // A resolvable object in the same response carries NO key.
+    const account = d.objectPermissions.find((o) => o.object === 'Account');
+    expect(account).toBeDefined();
+    expect('targetMissing' in (account as object)).toBe(false);
+    expect(d.summary.objectsWithMissingTarget).toBe(1);
+    const sentence = d.disclosures.find((x) => /NOT in this vault/.test(x));
+    expect(sentence).toBeDefined();
+    expect(sentence).toContain('1 object grant(s) above');
+    expect(sentence).toContain('The GRANT is declared and real');
+    // PUSHED, not unshifted — it must never displace a muting warning.
+    expect(d.disclosures[0]).not.toBe(sentence);
+  });
+
+  it('a clean bundle emits neither the key nor the disclosure (byte-identical)', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      permissionSetIds: ['PermissionSet:DealEditor'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.objectPermissions.every((o) => !('targetMissing' in o))).toBe(true);
+    expect('objectsWithMissingTarget' in d.summary).toBe(false);
+    expect(d.disclosures.some((x) => /NOT in this vault/.test(x))).toBe(false);
+  });
+});

@@ -278,11 +278,16 @@ const liveConsentRequiredError = (
         `(fail-closed). Add it to LIVE_TOOL_REQUIRED_SCOPES before enabling.`,
     };
   }
+  // This fallback is rendered for EVERY `sfi.live_*` tool, so its noun phrase
+  // must be true for all of them. It used to name "record counts and live data
+  // values", which is wrong for e.g. `sfi.live_access_oracle` — that tool
+  // adjudicates a user's object access via UserEntityAccess and returns neither.
+  // Name the boundary (the live org) rather than one tool's payload class.
   return {
     kind: 'invalid-query',
     message:
-      `Live org plane is not enabled for '${org}' — record counts and live data values ` +
-      `require querying the live org and are not available offline. Grant read-only access with ` +
+      `Live org plane is not enabled for '${org}' — this tool reads from the live Salesforce org ` +
+      `and cannot be answered from the offline vault. Grant read-only access with ` +
       `sfi.live_consent { grant: true } (OrgId+principal-bound; default scope aggregate, 7-day expiry), ` +
       `or set SFI_LIVE_PLANE_ENABLED=1. Per-call liveEnabled: true is not a consent substitute.`,
   };

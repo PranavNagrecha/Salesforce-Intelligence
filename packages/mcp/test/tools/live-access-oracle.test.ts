@@ -302,6 +302,15 @@ describe('consent + scope registration (fail-closed by design)', () => {
     if (r.ok) return;
     expect(r.error.message).toMatch(/live org plane is not enabled/i);
     expect(soqls).toHaveLength(0);
+    // FIX 9: the shared offline refusal is rendered for EVERY sfi.live_* tool,
+    // so it must not name one tool's payload class. This oracle adjudicates a
+    // user's object access via UserEntityAccess — it returns neither a record
+    // count nor a live data value, so "record counts and live data values
+    // require querying the live org" described the wrong tool entirely.
+    expect(r.error.message).not.toContain('record counts');
+    expect(r.error.message).toContain('this tool reads from the live Salesforce org');
+    // The prefix two serve-http pins assert must survive verbatim.
+    expect(r.error.message).toContain('Live org plane is not enabled');
   });
 
   it('refuses an aggregate-only grant (the users step-up is required)', async () => {

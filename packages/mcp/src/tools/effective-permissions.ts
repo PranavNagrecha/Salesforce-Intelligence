@@ -103,8 +103,18 @@ import {
 } from '../knowledge/permission-closure.js';
 import type { Context } from '../server.js';
 
+import {
+  edgeTargetMissing,
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+  unresolvedTargetsDisclosure,
+} from './absence-disclosure.js';
 import { coercePrefix } from './coerce-id.js';
-import { mergeInputAliases, resolveObjectAlias } from './input-aliases.js';
+import {
+  mergeInputAliases,
+  resolveContainerAlias,
+  resolveObjectAlias,
+} from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -141,6 +151,14 @@ export type ObjectFlag = ObjectPermissionFlag;
 const effectivePermissionsInputBaseSchema = z
   .object({
     profileId: z.string().min(1).optional(),
+    // DECLARED (not merely merged) so `z.object` does not strip them before the
+    // handler sees them: `resolveContainerAlias` reconciles the profile-axis
+    // selectors there and REFUSES when two of them name different containers,
+    // rather than the preprocess silently keeping the canonical one. The
+    // `permissionSetIds` ARRAY is a separate axis — several containers are
+    // legitimate there — and is deliberately not folded into the resolver.
+    profileApiName: z.string().min(1).optional(),
+    profileName: z.string().min(1).optional(),
     permissionSetIds: z.array(z.string().min(1)).optional(),
     // EFFECTIVE-PERMISSIONS-IGNORES-OBJECT-AND-PROFILEAPINAME: optional OBJECT
     // scope — "effective permissions for {profile} ON {object}?". Any one of
@@ -199,6 +217,19 @@ export interface EffectiveObjectPerm {
    * `mutedBy` means another container re-granted it after the group's mute.
    */
   readonly mutedBy?: readonly string[];
+  /**
+   * TRUE when the `CustomObject:` this row names is NOT a node in this vault —
+   * a managed-package object, or one this refresh did not retrieve. The GRANT
+   * is declared and real and its flags are accurate; only the TARGET is
+   * unresolvable, so `resolve` / `get_component` on it dead-ends.
+   *
+   * CONDITIONALLY emitted, like `mutedBy` above, so a clean bundle's response
+   * stays byte-identical. Read off the importer's `targetMissing` marker, which
+   * `edgeRowParams()` stamps against the FINAL node set — never a per-row
+   * `getNodeById`, which would cost ~4,000 extra graph round-trips on a wide
+   * bundle.
+   */
+  readonly targetMissing?: true;
 }
 
 /**
@@ -336,7 +367,13 @@ export interface EffectivePermissionsOutput {
   readonly containers: readonly string[];
   readonly objectPermissions: readonly EffectiveObjectPerm[];
   readonly systemPermissions: readonly EffectiveSystemPerm[];
-  /** CR-CAP-10: custom permissions the union confers (sorted by name, full list). */
+  /**
+   * CR-CAP-10: custom permissions the union confers (sorted by name, full list).
+   *
+   * An EMPTY array is NOT self-describing. Read `summary.customPermissions`
+   * alongside it: `null` there means the family was never extracted and this
+   * `[]` is "not modeled"; a number means it was checked.
+   */
   readonly customPermissions: readonly EffectiveCustomPerm[];
   /**
    * Record-type visibilities the union confers (sorted by recordType, full
@@ -372,8 +409,24 @@ export interface EffectivePermissionsOutput {
     readonly systemPermissions: number;
     /** The dependency-implied half of `systemPermissions`. 0 when unavailable. */
     readonly impliedSystemPermissions: number;
-    readonly customPermissions: number;
+    /**
+     * Custom permissions the union confers, or `null` when NOT ONE loaded
+     * container carries the extracted `customPermissionGrantCount` sentinel —
+     * i.e. nothing was checked. `0` is reserved for a CHECKED zero: containers
+     * that were examined and grant none.
+     *
+     * A MIXED bundle keeps the real number over the checked containers and
+     * names the unchecked ones in `disclosures`; suppressing a true partial
+     * answer to `null` would throw away information the caller can use.
+     */
+    readonly customPermissions: number | null;
     readonly recordTypeVisibilities: number;
+    /**
+     * `objectPermissions` rows whose target object is not a node in this vault.
+     * Counted over the FULL list, not the page. Present ONLY when > 0, so a
+     * clean bundle's summary is byte-identical.
+     */
+    readonly objectsWithMissingTarget?: number;
   };
   readonly limit: number;
   readonly offset: number;
@@ -382,16 +435,25 @@ export interface EffectivePermissionsOutput {
   readonly confidence: 'declared';
   readonly disclosures: readonly string[];
   /**
-   * Echoes the OBJECT scope ACTUALLY applied. Present ONLY when the caller
-   * passed an `object` / `objectApiName` / `objectId` selector — a bare
-   * profile/permission-set call omits it so the response stays byte-identical to
-   * the pre-scope shape. When present, `objectPermissions`, `summary.objects` /
+   * Echoes the scope ACTUALLY applied, on either or both axes. Present when a
+   * profile selector resolved (`container`) or an object selector was passed
+   * (`object`); absent entirely on a `permissionSetIds`-only, object-less call.
+   *
+   * `object` narrows `objectPermissions`, `summary.objects` /
    * `summary.fieldsWithFls` / `summary.recordTypeVisibilities`, and
-   * `recordTypeVisibilities` are narrowed to `object`; `systemPermissions` /
-   * `customPermissions` / `apexClasses` are container-wide (not object-specific)
-   * and are unchanged.
+   * `recordTypeVisibilities`; `systemPermissions` / `customPermissions` /
+   * `apexClasses` are container-wide (not object-specific) and are unchanged.
    */
-  readonly appliedScope?: { readonly object: string };
+  readonly appliedScope?: {
+    /**
+     * The profile-axis container the answer is ACTUALLY about, echoed whenever
+     * a profile selector resolved — a caller who passed a bare `profileApiName`
+     * deserves to see which canonical id it became. Absent on a
+     * `permissionSetIds`-only call (that axis is the array, not this one).
+     */
+    readonly container?: string;
+    readonly object?: string;
+  };
   /**
    * CR-22 opaque continuation token, present ONLY on a truncated page (the
    * designated list overflowed `limit` or the byte budget). Echo it back as
@@ -486,6 +548,21 @@ export interface EffectiveGrantSet {
   readonly missingContainers: readonly string[];
   /** Present containers lacking an extracted `recordTypeVisibilities` property. */
   readonly containersWithoutRtData: readonly string[];
+  /**
+   * Present containers lacking an extracted `customPermissionGrantCount`
+   * property — i.e. built by a refresh that predates custom-permission
+   * extraction, so their empty custom-permission edge set is NOT evidence of
+   * anything. Sentinel, not array length: the extractor writes the count on
+   * EVERY container it processes, including the ones granting zero.
+   */
+  readonly containersWithoutCustomPermData: readonly string[];
+  /**
+   * Object api names whose `grantedBy` edge carries the importer's
+   * `targetMissing` marker — the grant is real, the target object is not a node
+   * here. A property of the TARGET, not of any one container, so a flat set is
+   * the right shape.
+   */
+  readonly objectsWithMissingTarget: ReadonlySet<string>;
   /** object -> net flags + contributors + muters (EVERY touched object). */
   readonly objectMap: ReadonlyMap<string, ObjectAccum>;
   /** field -> net read/edit AFTER muting (only fields with ≥1 surviving access). */
@@ -604,6 +681,8 @@ export const computeEffectiveGrants = async (
   const presentContainers: string[] = [];
   const missingContainers: string[] = [];
   const containersWithoutRtData: string[] = [];
+  const containersWithoutCustomPermData: string[] = [];
+  const objectsWithMissingTarget = new Set<string>();
   // Record-type visibility union: recordType -> OR'd visible + contributors.
   // NOT mutable — read from EVERY present container (members included).
   const rtVisMap = new Map<string, { visible: boolean; grantedBy: Set<string> }>();
@@ -658,6 +737,17 @@ export const computeEffectiveGrants = async (
       containersWithoutRtData.push(containerId);
     }
 
+    // CR-CAP-10 unchecked-zero: the SAME pattern for custom permissions. The
+    // extractor writes `customPermissionGrantCount` on every container it
+    // processes — including containers granting ZERO — so the key's ABSENCE
+    // means the family was never extracted, and the empty edge set below is
+    // "not checked", never a verified "no custom permissions". Measured: 0 of
+    // 230 containers carry it on a 0.1.11 vault whose XML declares 100 grants;
+    // 231 of 231 carry it on a current one. A perfect discriminator.
+    if (!familyWasExtracted(nodeResult.value.properties, 'customPermissionGrantCount')) {
+      containersWithoutCustomPermData.push(containerId);
+    }
+
     // Object / field / apex / custom grants from outgoing grantedBy edges.
     const edgesResult = await listEdges(ctx.graph, containerId as ComponentId, {
       direction: 'out',
@@ -669,6 +759,7 @@ export const computeEffectiveGrants = async (
     for (const edge of edgesResult.value as readonly Edge[]) {
       if (edge.toId.startsWith(PREFIX.object)) {
         const object = edge.toId.slice(PREFIX.object.length);
+        if (edgeTargetMissing(edge)) objectsWithMissingTarget.add(object);
         const flags = grant.objects.get(object) ?? noFlags();
         for (const flag of OBJECT_FLAGS) {
           if (edge.properties[flag] === true) flags[flag] = true;
@@ -864,6 +955,8 @@ export const computeEffectiveGrants = async (
     presentContainers,
     missingContainers,
     containersWithoutRtData,
+    containersWithoutCustomPermData,
+    objectsWithMissingTarget,
     objectMap,
     fieldMap,
     apexClasses,
@@ -888,8 +981,17 @@ export const effectivePermissionsHandler = async (
   // permission-set id is coerced to a `PermissionSet:` id, but the caller may
   // legitimately pass a `PermissionSetGroup:` id there — coercePrefix leaves a
   // typed prefix unchanged, so that flows through as a PSG.
+  //
+  // The profile axis goes through the ONE shared container normalizer first:
+  // `{profileApiName: 'A', profileId: 'Profile:B'}` used to answer about B and
+  // silently drop A. It is `required: false` here because a call naming only
+  // `permissionSetIds` is legitimate; the base schema's `.refine` already
+  // enforces "at least one container".
+  const containerResult = resolveContainerAlias(input, { required: false });
+  if (!containerResult.ok) return err(containerResult.error);
+  const profileContainer = containerResult.value;
   const rawContainers: string[] = [];
-  if (input.profileId !== undefined) rawContainers.push(coercePrefix(input.profileId, ['Profile:']));
+  if (profileContainer !== null) rawContainers.push(profileContainer.componentId);
   if (input.permissionSetIds !== undefined) {
     for (const id of input.permissionSetIds) rawContainers.push(coercePrefix(id, ['PermissionSet:']));
   }
@@ -927,6 +1029,7 @@ export const effectivePermissionsHandler = async (
       modifyAllRecords: a.flags.modifyAllRecords,
       grantedBy: [...a.grantedBy].sort(),
       ...(a.mutedBy.size > 0 ? { mutedBy: [...a.mutedBy].sort() } : {}),
+      ...(g.objectsWithMissingTarget.has(object) ? { targetMissing: true as const } : {}),
     }))
     .sort((x, y) => (x.object < y.object ? -1 : x.object > y.object ? 1 : 0));
 
@@ -1046,6 +1149,12 @@ export const effectivePermissionsHandler = async (
     });
   }
   const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
+  // At least ONE loaded container was built by a refresh that emitted the
+  // family, so the count below is a real answer for the checked containers.
+  // When none was, the count is `null` — the edge set is empty because nothing
+  // was extracted, not because nothing is granted.
+  const customPermissionsChecked =
+    g.containersWithoutCustomPermData.length < g.presentContainers.length;
 
   // Record-type visibility union (mirrors the customPermissions assembly):
   // sorted full list, per-container attribution, max-wins visible.
@@ -1105,6 +1214,11 @@ export const effectivePermissionsHandler = async (
   }
 
   const totalObjects = finalObjectPermissions.length;
+  // Counted over the FULL (post-scope, pre-page) list — the disclosure below
+  // describes the answer, not the page, matching how `summary` already behaves.
+  const objectsWithMissingTarget = finalObjectPermissions.filter(
+    (o) => o.targetMissing === true,
+  ).length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
   // CR-22 section cursor: page ONE designated list (object | system) and
@@ -1259,8 +1373,45 @@ export const effectivePermissionsHandler = async (
     );
   }
   if (g.containersWithoutRtData.length > 0) {
+    // Migrated onto the shared primitive so this sentence and the
+    // custom-permission one below cannot drift — same template, same id cap.
     disclosures.push(
-      `${g.containersWithoutRtData.length} container(s) carry no extracted \`recordTypeVisibilities\` property (${[...g.containersWithoutRtData].sort().join(', ')}) — the vault was refreshed before record-type extraction, so their record-type visibility is NOT in this union; re-run \`/sfi-refresh\`. The missing contribution is "not modeled", never a verified "no record types".`,
+      notExtractedFamilyDisclosure({
+        subject: 'Record-type visibility',
+        verb: 'checked',
+        sentinelProperty: 'recordTypeVisibilities',
+        containers: [...g.containersWithoutRtData].sort(),
+        surface: '`recordTypeVisibilities` / `summary.recordTypeVisibilities`',
+        zeroReading: '"no record types"',
+      }),
+    );
+  }
+  // FIX 8: PUSHED, never unshifted — this is a follow-the-id caveat, not an
+  // over- or under-statement of access, so it must not displace the muting
+  // warnings from the front.
+  if (objectsWithMissingTarget > 0) {
+    disclosures.push(
+      unresolvedTargetsDisclosure({
+        count: objectsWithMissingTarget,
+        targetKind: 'object',
+        surface: '`objectPermissions`',
+      }),
+    );
+  }
+  // CR-CAP-10 unchecked-zero. UNSHIFTED, not pushed: this is an UNDERSTATEMENT
+  // of access, so it belongs at the front beside the muting-overstatement
+  // warnings rather than buried under the pagination notes.
+  if (g.containersWithoutCustomPermData.length > 0) {
+    disclosures.unshift(
+      notExtractedFamilyDisclosure({
+        subject: 'Custom permissions',
+        verb: 'checked',
+        pluralSubject: true,
+        sentinelProperty: 'customPermissionGrantCount',
+        containers: [...g.containersWithoutCustomPermData].sort(),
+        surface: '`customPermissions` / `summary.customPermissions`',
+        zeroReading: '"no custom permissions"',
+      }),
     );
   }
 
@@ -1315,10 +1466,18 @@ export const effectivePermissionsHandler = async (
         apexClasses: g.apexClasses.size,
         systemPermissions: systemPermissions.length,
         impliedSystemPermissions: impliedSystemCount,
-        customPermissions: customPermissions.length,
+        customPermissions: customPermissionsChecked ? customPermissions.length : null,
         recordTypeVisibilities: finalRecordTypeVisibilities.length,
+        ...(objectsWithMissingTarget > 0 ? { objectsWithMissingTarget } : {}),
       },
-      ...(scopedObject !== null ? { appliedScope: { object: scopedObject.object } } : {}),
+      ...(scopedObject !== null || profileContainer !== null
+        ? {
+            appliedScope: {
+              ...(profileContainer !== null ? { container: profileContainer.componentId } : {}),
+              ...(scopedObject !== null ? { object: scopedObject.object } : {}),
+            },
+          }
+        : {}),
       limit,
       offset,
       hasMore,

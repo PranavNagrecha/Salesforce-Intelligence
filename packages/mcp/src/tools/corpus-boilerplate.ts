@@ -87,6 +87,24 @@ const RULES: readonly BoilerplateRule[] = [
     tail: 'because there is no gap to close).',
     endsAtDescriptionEnd: false,
   },
+  {
+    // CONTAINER-SELECTOR-CONTRACT. Carried verbatim by `user_ability`,
+    // `tab_availability` and `effective_permissions` — the three tools whose
+    // Profile / PermissionSet selectors route through `resolveContainerAlias`
+    // and therefore share one refusal contract a host must read on all three.
+    //
+    // Measured, not assumed: with the clause written out on all three
+    // descriptions and indexed, `sfi.interpret` was displaced from a top-5
+    // recall assertion for a muting / permission-set-group question — the
+    // sentence is dense in `profile` / `permission` / `container` / `selector`,
+    // the exact vocabulary the permissions family needs to discriminate on.
+    // The fourth instance of this pattern, and a data change here rather than
+    // a new mechanism, as the module header asks.
+    id: 'container-selector-contract',
+    marker: ' CONTAINER SELECTORS: a bare name is coerced BY THE KEY',
+    tail: 'echoed as `appliedScope.container`.',
+    endsAtDescriptionEnd: false,
+  },
 ];
 
 /** The markers, for the guard test that pins advertised-present / indexed-absent. */

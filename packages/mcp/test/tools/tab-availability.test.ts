@@ -13,6 +13,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { resolveContainerAlias } from '../../src/tools/input-aliases.js';
 import {
   tabAvailabilityHandler,
   tabAvailabilityInputSchema,
@@ -102,6 +103,12 @@ describe('tabAvailabilityInputSchema — non-Profile canonical id is NOT Profile
     });
     expect(parsed.componentId).toBe('CustomTab:standard-Case');
     expect(parsed.componentId).not.toBe('Profile:CustomTab:standard-Case');
+    // …and the container resolver passes it through unchanged too, so the
+    // handler's wrong-type check still produces its precise message.
+    const r = resolveContainerAlias(parsed);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect((r.value as { componentId: string }).componentId).toBe('CustomTab:standard-Case');
   });
 
   it('a CustomTab: id parsed through the schema then reaches invalid-query, not component-not-found', async () => {
@@ -115,21 +122,21 @@ describe('tabAvailabilityInputSchema — non-Profile canonical id is NOT Profile
   });
 
   it('still coerces a BARE granter name to a canonical Profile id (regression)', () => {
-    expect(tabAvailabilityInputSchema.parse({ componentId: 'Admin' }).componentId).toBe(
-      'Profile:Admin',
-    );
+    // The COERCION moved from the schema's z.preprocess to the handler's
+    // `resolveContainerAlias` — a preprocess step cannot emit a named
+    // invalid-query, which is why the reconciliation had to move. The
+    // invariant is unchanged and is asserted at its new site.
+    const idOf = (raw: Record<string, unknown>): string => {
+      const r = resolveContainerAlias(tabAvailabilityInputSchema.parse(raw));
+      if (!r.ok) throw new Error(`unexpected refusal: ${r.error.message}`);
+      return (r.value as { componentId: string }).componentId;
+    };
+    expect(idOf({ componentId: 'Admin' })).toBe('Profile:Admin');
     // An explicit permissionSetId alias still routes to PermissionSet.
-    expect(
-      tabAvailabilityInputSchema.parse({ permissionSetId: 'Sales_Ops' }).componentId,
-    ).toBe('PermissionSet:Sales_Ops');
+    expect(idOf({ permissionSetId: 'Sales_Ops' })).toBe('PermissionSet:Sales_Ops');
     // Already-canonical granter ids are unchanged.
-    expect(
-      tabAvailabilityInputSchema.parse({ componentId: 'Profile:Admin' }).componentId,
-    ).toBe('Profile:Admin');
-    expect(
-      tabAvailabilityInputSchema.parse({ componentId: 'PermissionSet:Sales_Ops' })
-        .componentId,
-    ).toBe('PermissionSet:Sales_Ops');
+    expect(idOf({ componentId: 'Profile:Admin' })).toBe('Profile:Admin');
+    expect(idOf({ componentId: 'PermissionSet:Sales_Ops' })).toBe('PermissionSet:Sales_Ops');
   });
 });
 
@@ -142,18 +149,56 @@ describe('tabAvailabilityInputSchema — non-Profile canonical id is NOT Profile
 // echoed; a bare call stays byte-identical.
 // =============================================================================
 describe('tabAvailabilityInputSchema — profileApiName / permissionSetApiName aliases', () => {
-  it('coerces profileApiName / permissionSetApiName to the container prefix', () => {
-    expect(tabAvailabilityInputSchema.parse({ profileApiName: 'Admin' }).componentId).toBe(
-      'Profile:Admin',
+  it('coerces profileApiName / permissionSetApiName to the container prefix', async () => {
+    // Resolution is pure and graph-free, so assert it directly at its new site;
+    // the seed carries no PermissionSet node and this is not an existence test.
+    const idOf = (raw: Record<string, unknown>): string => {
+      const r = resolveContainerAlias(tabAvailabilityInputSchema.parse(raw));
+      if (!r.ok) throw new Error(`unexpected refusal: ${r.error.message}`);
+      return (r.value as { componentId: string }).componentId;
+    };
+    expect(idOf({ profileApiName: 'Admin' })).toBe('Profile:Admin');
+    expect(idOf({ permissionSetApiName: 'Sales_Ops' })).toBe('PermissionSet:Sales_Ops');
+    // Agreeing selectors still resolve to the one container.
+    expect(idOf({ componentId: 'Profile:Admin', profileApiName: 'Admin' })).toBe('Profile:Admin');
+    // …and the handler echoes exactly that id back as appliedScope.container.
+    const r = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({ profileApiName: 'Admin' }),
     );
-    expect(
-      tabAvailabilityInputSchema.parse({ permissionSetApiName: 'Sales_Ops' }).componentId,
-    ).toBe('PermissionSet:Sales_Ops');
-    // Canonical componentId still wins when both are present.
-    expect(
-      tabAvailabilityInputSchema.parse({ componentId: 'Profile:Admin', profileApiName: 'Other' })
-        .componentId,
-    ).toBe('Profile:Admin');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.container).toBe('Profile:Admin');
+  });
+
+  it('DISAGREEING selectors refuse instead of letting componentId silently win', async () => {
+    // Pre-fix this answered about `Profile:Admin` and dropped `Other` on the
+    // floor. Two selectors naming different components is a caller mistake, and
+    // guessing which one they meant is exactly the silent-pick this family is
+    // being audited for.
+    const r = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({
+        componentId: 'Profile:Admin',
+        profileApiName: 'Other',
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Profile:Admin');
+    expect(r.error.message).toContain('Profile:Other');
+  });
+
+  it('a call naming NO container is a NAMED invalid-query, not a bare Zod error', async () => {
+    const r = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({ objectApiName: 'Deals__c' }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/name the profile or permission set/);
   });
 });
 
@@ -165,7 +210,11 @@ describe('tabAvailabilityHandler — object scope (guard)', () => {
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.appliedScope).toEqual({ componentId: 'Profile:Admin', object: 'Deals__c' });
+    expect(r.value.data.appliedScope).toEqual({
+      container: 'Profile:Admin',
+      componentId: 'Profile:Admin',
+      object: 'Deals__c',
+    });
     expect(r.value.data.tabs.map((t) => t.tab)).toEqual(['Deals__c']);
     expect(r.value.data.summary.total).toBe(1); // NOT the full 3-tab dump
   });
@@ -208,11 +257,17 @@ describe('tabAvailabilityHandler — object scope (guard)', () => {
     expect(natural.value.data.tabs.map((t) => t.tab)).toEqual(['Account']);
   });
 
-  it('a bare (no-object) call is byte-identical to before — no appliedScope key', async () => {
+  it('a bare (no-object) call carries NO object scope — only the container echo', async () => {
+    // This pin was written for the OBJECT axis: a call that named no object must
+    // not report one. That invariant is intact. What changed is that the
+    // CONTAINER axis now echoes unconditionally — a caller who passed a bare
+    // name deserves to see which canonical id it became — so the assertion is
+    // narrowed to the axis it is actually about rather than deleted.
     const r = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Admin' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect('appliedScope' in r.value.data).toBe(false);
+    expect(r.value.data.appliedScope).toEqual({ container: 'Profile:Admin' });
+    expect(r.value.data.appliedScope.object).toBeUndefined();
     expect(r.value.data.summary.total).toBe(3);
   });
 });
