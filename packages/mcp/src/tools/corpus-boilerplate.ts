@@ -26,6 +26,28 @@
  *      0.0010 of a score point. Neither parent branch failed alone; only the
  *      merge did.
  *
+ * A SECOND MECHANISM, added later and NOT the one described above. Four of the
+ * rules below are carried by exactly ONE tool. Shared text is not why they are
+ * stripped: a long contract block inflates its own document's token count, and
+ * the scorer normalises term frequency by document length (`f / toks.length`),
+ * so a 1KB caveat appended to a 1.4KB description halves the weight of every
+ * word that actually discriminates that tool. Measured: the advisory funnel
+ * probe fell 0.260 -> 0.258, below `FUNNEL_PRIMARY_MIN_SCORE`, and the tool it
+ * demoted was one the change never touched. Stripping the four blocks returned
+ * it to 0.261, above both the floor and the pre-change baseline.
+ *
+ * KNOWN COST of the single-carrier case, stated because it is real: a term that
+ * appears ONLY inside a stripped block leaves the corpus entirely, and the
+ * scorer treats an unseen term as `idf 0` — so a query built from that
+ * vocabulary scores zero against every tool, not just this one. Accepted here
+ * because the affected tokens are response-shape jargon (field names, flag
+ * names) that a user does not type; `TOOL_KEYWORDS` is the channel to use if
+ * any of them ever needs to be reachable. Do NOT strip a single-carrier block
+ * whose distinctive vocabulary a user would plausibly say out loud.
+ *
+ * RULE: every entry below states WHY it is stripped and which of the two
+ * mechanisms applies. An entry without that justification is unreviewable.
+ *
  * This is the THIRD exception to "index the description" — `CORPUS_EXCLUDED`
  * (whole-tool) was the first. Three exceptions is the design telling us the
  * description should not BE the corpus. The durable fix is a curated retrieval
@@ -126,18 +148,33 @@ const RULES: readonly BoilerplateRule[] = [
     endsAtDescriptionEnd: false,
   },
   {
+    // SECOND MECHANISM (length normalisation), single carrier: 733 B of scope
+    // and activation-status contract on one tool. Required reading for a host
+    // — the tool used to ignore an object scope silently — and pure ballast for
+    // retrieval, since it repeats `flow` / `status` / `scope` without
+    // distinguishing this tool from its sibling audits.
     id: 'flow-bulkification-scope-and-status',
     marker: ' OBJECT SCOPE is now honored rather than ignored,',
     tail: '`null` when the vault records no status.',
     endsAtDescriptionEnd: false,
   },
   {
+    // SECOND MECHANISM, single carrier: 1039 B — 45% of this tool's whole
+    // description. It explains that the structural verdict and the activation
+    // status are reported on separate axes, which a host must read and a
+    // retriever gains nothing from: `trigger` / `verdict` / `status` are the
+    // terms the what-if family already competes on.
     id: 'what-if-trigger-two-axis',
     marker: ' TWO AXES, REPORTED SEPARATELY.',
     tail: 'not a proof of harmlessness.',
     endsAtDescriptionEnd: false,
   },
   {
+    // SECOND MECHANISM, single carrier: 774 B — 44% of the description. The
+    // composition manifest names which sub-analyses ran and which did not; it
+    // is the honesty payload for a report that previously degenerated into one
+    // sub-analysis without saying so. Dense in `automation` / `report` /
+    // `composed`, i.e. exactly this tool's own name repeated back at it.
     id: 'automation-risk-report-composition-manifest',
     marker: ' WHAT IT COMPOSED, STATED OUTRIGHT:',
     tail: 'under another name should say so.',
