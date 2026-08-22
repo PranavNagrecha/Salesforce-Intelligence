@@ -46,10 +46,15 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEnumerationCoverageCaveatFor,
+  type CoverageCaveat,
+} from './coverage-trust.js';
 import {
   emptyQueuesAndGroupsHandler,
 } from './empty-queues-and-groups.js';
@@ -183,6 +188,59 @@ type TechDebtCategory =
   | 'apiVersions'
   | 'unassignedGrants';
 
+/**
+ * TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. The metadata families each axis's
+ * `rawCount` is summed OVER — the axis's evidence base.
+ *
+ * The bug this table closes: `legacyAutomation` read `WorkflowRule` straight
+ * off the graph and scored the resulting 0 as a measured, clean zero on its
+ * heaviest axis (weight 0.20) — on a vault whose OWN coverage row said
+ * `{requested: true, retrieved: 0}` with NO `retrieveConfirmed`, i.e. the
+ * family was never confirmed-retrieved. `coverage_report` listed it in
+ * `trust.completeness.missingCoverage` and `list_components` called it "not
+ * retrieved, not proof of absence" — while this composite called the same
+ * signal ZERO, contradicting its own printed Q115 boundary ("missing axes are
+ * EXCLUDED, not assumed zero"). Same defect on `deadWeight`'s
+ * `unusedEmailTemplatesCount`.
+ *
+ * The gate is COVERAGE (`retrieveConfirmed` / `missingCoverage` per
+ * {@link summarizeCoverage}), never the raw count — a count-based gate is the
+ * very confusion being fixed, and it would also mis-fire the other way (a
+ * confirmed-clean zero on a fully-retrieved vault is a REAL zero and must keep
+ * scoring). Arithmetic honesty: a sum with an UNCHECKED term is unchecked, not
+ * zero, so the axis is EXCLUDED (`extractor-not-run`) and `rawCount` is null.
+ * Per-family `details` still carry the real numbers for the families that WERE
+ * checked, and `null` only for the ones that were not — so the reader can see
+ * exactly which term went missing rather than losing the whole breakdown.
+ */
+const AXIS_FAMILIES: Readonly<
+  Record<TechDebtCategory, readonly ComponentType[]>
+> = Object.freeze({
+  // unused_components byType + unused_fields_deep
+  deadWeight: [
+    'CustomField',
+    'ApexClass',
+    'Flow',
+    'EmailTemplate',
+    'StaticResource',
+    'CustomLabel',
+  ],
+  // WorkflowRule + Process Builders (a Flow with processType Workflow)
+  legacyAutomation: ['WorkflowRule', 'Flow'],
+  codeQuality: ['ApexClass', 'ApexTrigger'],
+  freshness: [
+    'ApexClass',
+    'ApexTrigger',
+    'Flow',
+    'CustomField',
+    'Layout',
+    'ValidationRule',
+  ],
+  apiVersions: ['ApexClass'],
+  unassignedGrants: ['PermissionSet', 'Queue', 'Group'],
+});
+
+
 type ScoreBand =
   | 'low-debt'
   | 'moderate-debt'
@@ -315,6 +373,15 @@ export interface TechDebtScoreOutput {
    * otherwise take "code quality" to span every automation surface.
    */
   readonly notCheckedTypes?: typeof NOT_APEX_TYPES;
+  /**
+   * TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. Present when a metadata family an
+   * axis is computed FROM was not confirmed-retrieved into this vault, so at
+   * least one axis is excluded as UNCHECKED rather than scored as a clean zero.
+   * Same shape every other coverage-aware tool emits, so a host renders it the
+   * same way; absent on a vault whose axis families all retrieved clean (the
+   * response is then byte-identical to before this field existed).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   readonly boundaries: readonly string[];
 }
 
@@ -331,14 +398,43 @@ const contribFor = (
 ): number => Math.min(100, rawCount * SCALE_FACTORS[category]);
 
 /**
+ * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS, in the ROLL-UP's own voice.
+ *
+ * `code_quality_audit` discloses its unscanned nodes verbatim ("NOT SCANNED IN
+ * THIS VAULT: 22 of 22 ApexTrigger node(s)…"); the composite carried that
+ * sentence in `boundaries` and `qualityScanCoverage` but its
+ * `recommendedActions` still said, flatly, "357 critical or high severity
+ * issues detected" — a whole-surface claim over a partly-scanned surface, in
+ * the one field a host is most likely to quote back. The issue count is a
+ * FLOOR whenever any Apex node carries no `qualityIssues` scan; say so where
+ * the number is stated, not only three fields away.
+ *
+ * Empty string when every scanned node carries a scan, so a fully-scanned
+ * vault's recommendation text is byte-identical to before.
+ */
+const unscannedRecommendationQualifier = (
+  coverage: readonly QualityScanTypeCoverage[],
+): string => {
+  const gaps = coverage.filter((c) => c.scanned < c.nodes);
+  if (gaps.length === 0) return '';
+  const named = gaps
+    .map((c) => `${c.nodes - c.scanned} of ${c.nodes} ${c.type}`)
+    .join(', ');
+  return ` This is a FLOOR, not a total: ${named} node(s) carry no \`qualityIssues\` property, so the recognizers never ran over their source and their findings are NOT in this count — zero findings for them is "not checked", NOT "clean" (see \`qualityScanCoverage\`; re-run \`sfi refresh\` to close the gap).`;
+};
+
+/**
  * Recommendation text per category — surfaced verbatim in
- * `recommendedActions`.
+ * `recommendedActions`. `qualifier` is appended to the axes that need a
+ * partial-measurement caveat stated where the number is stated (today:
+ * `codeQuality`, see {@link unscannedRecommendationQualifier}).
  */
 const recommendationFor = (
   category: TechDebtCategory,
   rawCount: number,
   contribution: number,
   weight: number,
+  qualifier = '',
 ): string => {
   const wPct = (weight * 100).toFixed(0);
   switch (category) {
@@ -347,7 +443,7 @@ const recommendationFor = (
     case 'legacyAutomation':
       return `close legacy-automation backlog — ${rawCount} legacy automation entries (Process Builders + WorkflowRules) detected, contributing ${contribution.toFixed(1)}/100 at weight ${wPct}%.`;
     case 'codeQuality':
-      return `address code-quality findings — ${rawCount} critical or high severity issues detected, contributing ${contribution.toFixed(1)}/100 at weight ${wPct}%.`;
+      return `address code-quality findings — ${rawCount} critical or high severity issues detected, contributing ${contribution.toFixed(1)}/100 at weight ${wPct}%.${qualifier}`;
     case 'freshness':
       return `audit stale components — ${rawCount} components have not been modified in over 1 year, contributing ${contribution.toFixed(1)}/100 at weight ${wPct}%.`;
     case 'apiVersions':
@@ -763,12 +859,80 @@ export const techDebtScoreHandler = async (
     });
   }
 
+  // TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. Gate every axis on the COVERAGE
+  // of the families it is computed from (see {@link AXIS_FAMILIES}). A family
+  // the vault never confirmed-retrieved makes the axis's raw count a sum with
+  // an UNCHECKED term — which is not a zero, so the axis is EXCLUDED rather
+  // than scored. Guarded by `coverageKnown`: a pre-v4 / fixture manifest
+  // carries no coverage rows at all, and a vault whose completeness is unknown
+  // must never be false-flagged (same guard every other coverage-aware tool
+  // uses). On a vault whose rows carry `retrieveConfirmed`, a retrieved-zero
+  // family is COVERED and its zero keeps scoring — a confirmed-clean zero is a
+  // real measurement, and that is the case this gate must NOT disturb.
+  const uncheckedByAxis = new Map<TechDebtCategory, readonly string[]>();
+  const uncheckedFamilies = new Set<string>();
+  for (const cat of ALLOWED_WEIGHT_KEYS) {
+    const cov = summarizeCoverage(ctx.manifest, AXIS_FAMILIES[cat]);
+    const missing = cov.coverageKnown ? cov.missingCoverage : [];
+    uncheckedByAxis.set(cat, missing);
+    for (const family of missing) uncheckedFamilies.add(family);
+  }
+  // Categories excluded specifically BECAUSE of retrieve coverage. Kept apart
+  // from the other exclusion reasons because their `details` behave
+  // differently: an extractor that never ran measured NOTHING (every detail is
+  // null), whereas a coverage gap left the OTHER families measured — nulling
+  // those too would throw away real, actionable counts and would itself be a
+  // small dishonesty ("not measured" for something that was).
+  const coverageExcluded = new Set<TechDebtCategory>();
+  const alreadyExcluded = new Set<TechDebtCategory>(excluded.map((e) => e.category));
+  for (const cat of ALLOWED_WEIGHT_KEYS) {
+    if (alreadyExcluded.has(cat)) continue;
+    const missing = uncheckedByAxis.get(cat) ?? [];
+    if (missing.length === 0) continue;
+    coverageExcluded.add(cat);
+    const named = missing.join(', ');
+    excluded.push({
+      category: cat,
+      reason: 'extractor-not-run',
+      note:
+        `${named} was never confirmed-retrieved into this vault (\`sfi.coverage_report\` lists it in \`trust.completeness.missingCoverage\`; \`sfi.list_components\` calls it "not retrieved", not proof of absence), ` +
+        `so this axis's raw count would be a sum with an UNCHECKED term. A zero here would mean "not checked", NOT "none in the org", so the axis is EXCLUDED from the score rather than scored as a clean zero. ` +
+        `The families that WERE checked keep their real counts in \`details\`; the unchecked one(s) are null. Run \`sfi refresh\` (widen the retrieve to include ${named}) to score this axis.`,
+    });
+  }
+
   const excludedSet = new Set<TechDebtCategory>(excluded.map((e) => e.category));
 
-  const detailWhenIncluded = (
+  /**
+   * A per-axis raw count: null whenever the axis is excluded (including the
+   * coverage case — an unchecked term makes the whole sum unchecked).
+   */
+  const rawWhenIncluded = (
     category: TechDebtCategory,
     value: number,
   ): number | null => (excludedSet.has(category) ? null : value);
+
+  /**
+   * One `details` entry. `family` is the metadata family THIS number is
+   * counted over (null when the number spans the axis's whole family set, so
+   * no single family can be blamed for it):
+   *
+   *   - the family is unchecked        -> null (never a fabricated 0)
+   *   - the axis is excluded for a
+   *     non-coverage reason            -> null (nothing was measured at all)
+   *   - otherwise                      -> the measured value, even when the
+   *                                       axis is coverage-excluded, because
+   *                                       that family really was checked.
+   */
+  const detailWhenIncluded = (
+    category: TechDebtCategory,
+    value: number,
+    family: ComponentType | null = null,
+  ): number | null => {
+    if (family !== null && uncheckedFamilies.has(family)) return null;
+    if (excludedSet.has(category) && !coverageExcluded.has(category)) return null;
+    return value;
+  };
 
   const contributions: Record<TechDebtCategory, number> = {
     deadWeight: contribFor('deadWeight', deadWeightRaw),
@@ -789,38 +953,47 @@ export const techDebtScoreHandler = async (
   const categories: Record<TechDebtCategory, CategoryBreakdown> = {
     deadWeight: {
       weight: weightsApplied.deadWeight,
-      rawCount: detailWhenIncluded('deadWeight', deadWeightRaw),
+      rawCount: rawWhenIncluded('deadWeight', deadWeightRaw),
       contribution: excludedSet.has('deadWeight')
         ? 0
         : contributions.deadWeight,
       details: {
-        unusedFieldsCount: detailWhenIncluded('deadWeight', unusedFieldsCount),
+        unusedFieldsCount: detailWhenIncluded(
+          'deadWeight',
+          unusedFieldsCount,
+          'CustomField',
+        ),
         unusedFieldsDeepCount: detailWhenIncluded(
           'deadWeight',
           unusedFieldsDeepCount,
+          'CustomField',
         ),
         unusedApexClassesCount: detailWhenIncluded(
           'deadWeight',
           unusedApexClassesCount,
+          'ApexClass',
         ),
-        unusedFlowsCount: detailWhenIncluded('deadWeight', unusedFlowsCount),
+        unusedFlowsCount: detailWhenIncluded('deadWeight', unusedFlowsCount, 'Flow'),
         unusedEmailTemplatesCount: detailWhenIncluded(
           'deadWeight',
           unusedEmailTemplatesCount,
+          'EmailTemplate',
         ),
         unusedStaticResourcesCount: detailWhenIncluded(
           'deadWeight',
           unusedStaticResourcesCount,
+          'StaticResource',
         ),
         unusedCustomLabelsCount: detailWhenIncluded(
           'deadWeight',
           unusedCustomLabelsCount,
+          'CustomLabel',
         ),
       },
     },
     legacyAutomation: {
       weight: weightsApplied.legacyAutomation,
-      rawCount: detailWhenIncluded('legacyAutomation', legacyAutomationRaw),
+      rawCount: rawWhenIncluded('legacyAutomation', legacyAutomationRaw),
       contribution: excludedSet.has('legacyAutomation')
         ? 0
         : contributions.legacyAutomation,
@@ -828,16 +1001,18 @@ export const techDebtScoreHandler = async (
         activeWorkflowRulesCount: detailWhenIncluded(
           'legacyAutomation',
           activeWorkflowRulesCount,
+          'WorkflowRule',
         ),
         activeProcessBuildersCount: detailWhenIncluded(
           'legacyAutomation',
           activeProcessBuildersCount,
+          'Flow',
         ),
       },
     },
     codeQuality: {
       weight: weightsApplied.codeQuality,
-      rawCount: detailWhenIncluded('codeQuality', codeQualityRaw),
+      rawCount: rawWhenIncluded('codeQuality', codeQualityRaw),
       contribution: excludedSet.has('codeQuality')
         ? 0
         : contributions.codeQuality,
@@ -849,7 +1024,7 @@ export const techDebtScoreHandler = async (
     },
     freshness: {
       weight: weightsApplied.freshness,
-      rawCount: detailWhenIncluded('freshness', freshnessRaw),
+      rawCount: rawWhenIncluded('freshness', freshnessRaw),
       contribution: excludedSet.has('freshness')
         ? 0
         : contributions.freshness,
@@ -871,20 +1046,20 @@ export const techDebtScoreHandler = async (
     },
     apiVersions: {
       weight: weightsApplied.apiVersions,
-      rawCount: detailWhenIncluded('apiVersions', apiVersionsRaw),
+      rawCount: rawWhenIncluded('apiVersions', apiVersionsRaw),
       contribution: excludedSet.has('apiVersions')
         ? 0
         : contributions.apiVersions,
       details: {
-        apexBelowApiVersion30Count: detailWhenIncluded('apiVersions', av.below30),
-        apexBelowApiVersion40Count: detailWhenIncluded('apiVersions', av.below40),
-        apexBelowApiVersion50Count: detailWhenIncluded('apiVersions', av.below50),
-        oldestApiVersionInOrg: detailWhenIncluded('apiVersions', av.oldest ?? 0),
+        apexBelowApiVersion30Count: detailWhenIncluded('apiVersions', av.below30, 'ApexClass'),
+        apexBelowApiVersion40Count: detailWhenIncluded('apiVersions', av.below40, 'ApexClass'),
+        apexBelowApiVersion50Count: detailWhenIncluded('apiVersions', av.below50, 'ApexClass'),
+        oldestApiVersionInOrg: detailWhenIncluded('apiVersions', av.oldest ?? 0, 'ApexClass'),
       },
     },
     unassignedGrants: {
       weight: weightsApplied.unassignedGrants,
-      rawCount: detailWhenIncluded('unassignedGrants', unassignedGrantsRaw),
+      rawCount: rawWhenIncluded('unassignedGrants', unassignedGrantsRaw),
       contribution: unassignedGrantsExcluded
         ? 0
         : contributions.unassignedGrants,
@@ -901,7 +1076,25 @@ export const techDebtScoreHandler = async (
     },
   };
 
-  // Build recommended actions ordered by contribution desc.
+  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. The `extractor-not-run` exclusion
+  // above only fires when NO node anywhere carries the property, so a vault
+  // with 192-of-192 ApexClasses scanned and 0-of-22 ApexTriggers scanned scored
+  // the codeQuality axis off two-thirds of the Apex surface and said nothing.
+  // These notes fire only when the axis actually contributes — an excluded
+  // axis is already disclosed as excluded, and re-disclosing it would mislead.
+  const codeQualityAxisContributes =
+    codeQualityExtractorRan && !excludedSet.has('codeQuality');
+  const qualityScanCoverage = cq?.coverage ?? [];
+  const unscannedNote = codeQualityAxisContributes
+    ? buildUnscannedNodesNote(qualityScanCoverage)
+    : undefined;
+
+  // Build recommended actions ordered by contribution desc. The codeQuality
+  // recommendation carries the unscanned-nodes qualifier so the issue count is
+  // never stated as a whole-surface total in the one field a host quotes back.
+  const codeQualityQualifier = codeQualityAxisContributes
+    ? unscannedRecommendationQualifier(qualityScanCoverage)
+    : '';
   const orderedRecs = (Object.entries(categories) as [
     TechDebtCategory,
     CategoryBreakdown,
@@ -910,7 +1103,13 @@ export const techDebtScoreHandler = async (
     .sort((a, b) => b[1].contribution - a[1].contribution)
     .slice(0, 5)
     .map(([cat, br]) =>
-      recommendationFor(cat, br.rawCount ?? 0, br.contribution, br.weight),
+      recommendationFor(
+        cat,
+        br.rawCount ?? 0,
+        br.contribution,
+        br.weight,
+        cat === 'codeQuality' ? codeQualityQualifier : '',
+      ),
     );
 
   // Compose boundaries: always include direction + weight scheme +
@@ -928,18 +1127,6 @@ export const techDebtScoreHandler = async (
   if (codeQualityExtractorRan && !excludedSet.has('codeQuality')) {
     boundaries.push(CODE_QUALITY_HEURISTIC_DISCLOSURE);
   }
-  // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. The `extractor-not-run` exclusion
-  // above only fires when NO node anywhere carries the property, so a vault
-  // with 192-of-192 ApexClasses scanned and 0-of-22 ApexTriggers scanned scored
-  // the codeQuality axis off two-thirds of the Apex surface and said nothing.
-  // These two notes fire only when the axis actually contributes — an excluded
-  // axis is already disclosed as excluded, and re-disclosing it would mislead.
-  const codeQualityAxisContributes =
-    codeQualityExtractorRan && !excludedSet.has('codeQuality');
-  const qualityScanCoverage = cq?.coverage ?? [];
-  const unscannedNote = codeQualityAxisContributes
-    ? buildUnscannedNodesNote(qualityScanCoverage)
-    : undefined;
   if (unscannedNote !== undefined) boundaries.push(unscannedNote);
   // The permanent, refresh-proof half: `Flow` can never carry a finding.
   const notCheckedNote = codeQualityAxisContributes
@@ -951,6 +1138,35 @@ export const techDebtScoreHandler = async (
   // When freshness is excluded the extractor-not-run note already covers it.
   if (freshnessExtractorRan && !excludedSet.has('freshness')) {
     boundaries.push(NEVER_MODIFIED_UNAVAILABLE_DISCLOSURE);
+  }
+  // TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. The composite used to print the
+  // Q115 "missing axes are EXCLUDED, not assumed zero" boundary while scoring
+  // a never-retrieved family as a clean zero, and carried no `coverageCaveat`
+  // anywhere for a host to render. Emit the standard caveat naming exactly
+  // which families were never confirmed-retrieved, plus a boundary that says
+  // in which direction the score is wrong (an excluded ZERO-contribution axis
+  // no longer drags the weighted mean down, so the score RISES).
+  const coverageCaveat = buildEnumerationCoverageCaveatFor(
+    ctx,
+    [...uncheckedFamilies].sort(),
+    {
+      preamble:
+        coverageExcluded.size > 0
+          ? `${[...coverageExcluded].sort().join(', ')} ${coverageExcluded.size === 1 ? 'is' : 'are'} EXCLUDED from the score: a metadata family the axis is computed from was never confirmed-retrieved, so its count would be a sum with an UNCHECKED term.`
+          : 'A metadata family one of the score axes reads was never confirmed-retrieved.',
+      subject: 'A complete tech-debt score',
+    },
+  );
+  if (coverageExcluded.size > 0) {
+    boundaries.push(
+      `UNCHECKED, NOT ZERO — ${[...coverageExcluded].sort().join(', ')} ` +
+        `${coverageExcluded.size === 1 ? 'is' : 'are'} excluded from this score because ` +
+        `${[...uncheckedFamilies].sort().join(', ')} ` +
+        `${uncheckedFamilies.size === 1 ? 'was' : 'were'} never confirmed-retrieved into this vault. ` +
+        `A zero on those axes would be "not checked", not "none in the org" — cross-check with ` +
+        `\`sfi.coverage_report\` (\`trust.completeness.missingCoverage\`). ` +
+        `The score is computed over the REMAINING axes only, so it is not comparable to a score from a fully-retrieved vault.`,
+    );
   }
 
   // Hardcoded-Salesforce-ID debt, sourced from the dedicated recognizer so the
@@ -1006,6 +1222,7 @@ export const techDebtScoreHandler = async (
       hardcodedIdCount,
       ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
       ...(codeQualityAxisContributes ? { notCheckedTypes: NOT_APEX_TYPES } : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       boundaries,
     },
     vaultState: {

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
+  CoverageEntry,
   Edge,
   ExtractionResult,
   Node,
@@ -905,5 +906,288 @@ describe('techDebtScoreHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', () =>
     const joined = r.value.data.boundaries.join(' ');
     expect(joined).not.toContain('NOT SCANNED IN THIS VAULT');
     expect(joined).not.toContain('NOT CHECKED BY DESIGN');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN
+//
+// The composite printed "missing axes are EXCLUDED, not assumed zero" as a
+// boundary while doing the opposite on its heaviest axis: a `WorkflowRule`
+// family the vault never confirmed-retrieved scored as `rawCount: 0,
+// contribution: 0` — a CLEAN zero at weight 0.20 — on the same vault where
+// `coverage_report` listed WorkflowRule in `missingCoverage` and
+// `list_components` called it "not retrieved, not proof of absence".
+//
+// The pair of fixtures below is the whole point: the SAME zero, once with a
+// coverage row that never confirmed the retrieve (UNCHECKED — must be excluded)
+// and once with `retrieveConfirmed: true` (CHECKED — must keep scoring). A fix
+// that only silences the stale case would break the fresh one.
+// ---------------------------------------------------------------------------
+
+/** Every metadata family the six axes are computed from. */
+const AXIS_COVERAGE_FAMILIES = [
+  'CustomField',
+  'ApexClass',
+  'ApexTrigger',
+  'Flow',
+  'EmailTemplate',
+  'StaticResource',
+  'CustomLabel',
+  'WorkflowRule',
+  'Layout',
+  'ValidationRule',
+  'PermissionSet',
+  'Queue',
+  'Group',
+] as const;
+
+/** A clean, confirmed-retrieved coverage row. */
+const confirmedRow = (type: string, retrieved = 5): CoverageEntry => ({
+  type,
+  requested: true,
+  retrieved,
+  errored: false,
+  neverModeled: false,
+  retrieveConfirmed: true,
+});
+
+/**
+ * The stale-vault row shape: requested, retrieved ZERO, and NO
+ * `retrieveConfirmed` — byte-identical to "the org genuinely has none", which
+ * is exactly why it must read as "not checked".
+ */
+const unconfirmedZeroRow = (type: string): CoverageEntry => ({
+  type,
+  requested: true,
+  retrieved: 0,
+  errored: false,
+  neverModeled: false,
+});
+
+const manifestWithCoverage = (
+  unconfirmed: readonly string[],
+): VaultManifest => ({
+  ...FIXTURE_MANIFEST,
+  coverage: AXIS_COVERAGE_FAMILIES.map((t) =>
+    unconfirmed.includes(t) ? unconfirmedZeroRow(t) : confirmedRow(t),
+  ),
+});
+
+// Zero WorkflowRule nodes and zero EmailTemplate nodes — so both raw counts are
+// 0 and ONLY the coverage row decides whether that 0 is a measurement. Two Apex
+// classes carry a quality scan; the trigger carries none (the roll-up's
+// partly-scanned-surface case).
+const coverageSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: 'ApexClass:OldOne',
+      apiName: 'OldOne',
+      apiVersion: 30,
+      properties: { qualityIssues: [{ severity: 'critical' }] },
+    }),
+    makeNode({
+      id: 'ApexClass:OldTwo',
+      apiName: 'OldTwo',
+      apiVersion: 30,
+      properties: { qualityIssues: [{ severity: 'high' }] },
+    }),
+    makeNode({
+      id: 'ApexTrigger:NeverScanned',
+      type: 'ApexTrigger',
+      apiName: 'NeverScanned',
+      properties: {},
+    }),
+    makeNode({
+      id: 'CustomField:Thing.Unused__c',
+      type: 'CustomField',
+      apiName: 'Unused__c',
+      properties: {},
+    }),
+  ],
+  edges: [],
+};
+
+describe('techDebtScoreHandler — unchecked zero vs checked zero', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let baseCtx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-cov-'));
+    const opened = await openGraph(join(tempDir, 'tds-cov.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [coverageSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    baseCtx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const staleCtx = (): Context => ({
+    ...baseCtx,
+    manifest: manifestWithCoverage(['WorkflowRule', 'EmailTemplate']),
+  });
+  const freshCtx = (): Context => ({
+    ...baseCtx,
+    manifest: manifestWithCoverage([]),
+  });
+
+  it('EXCLUDES legacyAutomation when WorkflowRule was never confirmed-retrieved (was: scored as a clean 0 at weight 0.20)', async () => {
+    const r = await techDebtScoreHandler(staleCtx(), {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const excluded = r.value.data.excludedCategories.find(
+      (e) => e.category === 'legacyAutomation',
+    );
+    expect(excluded).toBeDefined();
+    expect(excluded?.reason).toBe('extractor-not-run');
+    expect(excluded?.note).toContain('WorkflowRule');
+    expect(excluded?.note).toContain('UNCHECKED');
+    // rawCount is null, NOT 0: a sum with an unchecked term is unchecked.
+    expect(r.value.data.categories.legacyAutomation.rawCount).toBeNull();
+    expect(r.value.data.categories.legacyAutomation.contribution).toBe(0);
+    // The unchecked family reads null; the CHECKED family keeps its real 0.
+    expect(
+      r.value.data.categories.legacyAutomation.details.activeWorkflowRulesCount,
+    ).toBeNull();
+    expect(
+      r.value.data.categories.legacyAutomation.details.activeProcessBuildersCount,
+    ).toBe(0);
+    // and the false recommendation is gone.
+    expect(r.value.data.recommendedActions.join(' ')).not.toContain(
+      'legacy automation entries',
+    );
+  });
+
+  it('KEEPS legacyAutomation as a scored zero when the same 0 carries retrieveConfirmed', async () => {
+    const r = await techDebtScoreHandler(freshCtx(), {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.excludedCategories.map((e) => e.category),
+    ).not.toContain('legacyAutomation');
+    expect(r.value.data.categories.legacyAutomation.rawCount).toBe(0);
+    expect(
+      r.value.data.categories.legacyAutomation.details.activeWorkflowRulesCount,
+    ).toBe(0);
+    expect(
+      r.value.data.categories.legacyAutomation.details.activeProcessBuildersCount,
+    ).toBe(0);
+    expect(r.value.data.coverageCaveat).toBeUndefined();
+    expect(r.value.data.boundaries.join(' ')).not.toContain(
+      'UNCHECKED, NOT ZERO',
+    );
+  });
+
+  it('reports unusedEmailTemplatesCount as null when EmailTemplate was never retrieved, while the CHECKED families keep real counts', async () => {
+    const r = await techDebtScoreHandler(staleCtx(), {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dw = r.value.data.categories.deadWeight;
+    expect(dw.details.unusedEmailTemplatesCount).toBeNull();
+    // Coverage exclusion must NOT blank the families that WERE checked.
+    expect(typeof dw.details.unusedFieldsCount).toBe('number');
+    expect(typeof dw.details.unusedApexClassesCount).toBe('number');
+    expect(dw.rawCount).toBeNull();
+  });
+
+  it('reports unusedEmailTemplatesCount as a real 0 on a confirmed-retrieved vault', async () => {
+    const r = await techDebtScoreHandler(freshCtx(), {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.categories.deadWeight.details.unusedEmailTemplatesCount,
+    ).toBe(0);
+    expect(r.value.data.categories.deadWeight.rawCount).not.toBeNull();
+  });
+
+  it('emits a coverageCaveat naming the unchecked families, and a boundary saying which axes it cost', async () => {
+    const r = await techDebtScoreHandler(staleCtx(), {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.coverageCaveat).toBeDefined();
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain(
+      'WorkflowRule',
+    );
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain(
+      'EmailTemplate',
+    );
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('UNCHECKED, NOT ZERO');
+    expect(joined).toContain('legacyAutomation');
+    // The Q115 anchor must still be there — it is now actually true.
+    expect(joined).toContain('missing axes are EXCLUDED, not assumed zero');
+  });
+
+  it('leaves a coverage-known-nothing (pre-v4) manifest completely alone', async () => {
+    // FIXTURE_MANIFEST carries no `coverage` rows at all. A vault whose
+    // completeness is UNKNOWN must never be false-flagged as incomplete.
+    const r = await techDebtScoreHandler(baseCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.coverageCaveat).toBeUndefined();
+    expect(
+      r.value.data.excludedCategories.map((e) => e.category),
+    ).not.toContain('legacyAutomation');
+    expect(r.value.data.categories.legacyAutomation.rawCount).toBe(0);
+  });
+
+  it('qualifies the codeQuality recommendation as a FLOOR when some Apex node carries no scan', async () => {
+    // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS in the roll-up: the boundary and
+    // `qualityScanCoverage` already disclosed the unscanned trigger, but
+    // `recommendedActions` — the field a host quotes — still stated the issue
+    // count as a whole-surface total.
+    const r = await techDebtScoreHandler(freshCtx(), {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage).toEqual(
+      expect.arrayContaining([{ type: 'ApexTrigger', nodes: 1, scanned: 0 }]),
+    );
+    const codeQualityRec = r.value.data.recommendedActions.find((a) =>
+      a.startsWith('address code-quality findings'),
+    );
+    expect(codeQualityRec).toBeDefined();
+    expect(codeQualityRec).toContain('FLOOR');
+    expect(codeQualityRec).toContain('ApexTrigger');
+    expect(codeQualityRec).toContain('not checked');
+  });
+
+  it('leaves the codeQuality recommendation unqualified when every Apex node was scanned', async () => {
+    const cleanDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-scan-'));
+    const opened = await openGraph(join(cleanDir, 'tds-scan.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const imp = await importExtractionResults(opened.value, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:Scanned',
+            apiName: 'Scanned',
+            apiVersion: 30,
+            properties: { qualityIssues: [{ severity: 'critical' }] },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    const r = await techDebtScoreHandler(
+      { vaultRoot: cleanDir, manifest: manifestWithCoverage([]), graph: opened.value },
+      {},
+    );
+    await closeGraph(opened.value);
+    rmSync(cleanDir, { recursive: true, force: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage).toBeUndefined();
+    const codeQualityRec = r.value.data.recommendedActions.find((a) =>
+      a.startsWith('address code-quality findings'),
+    );
+    expect(codeQualityRec).toBeDefined();
+    expect(codeQualityRec).not.toContain('FLOOR');
   });
 });
