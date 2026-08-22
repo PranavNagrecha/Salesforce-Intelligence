@@ -4680,7 +4680,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.get_naming_convention_report',
     description:
-      'Return the naming-convention pattern observations, optionally scoped to a glob.',
+      "Return the naming-convention pattern observations, optionally scoped to one object (`scope: 'CustomField:{Object}'` or `'CustomField:{Object}.*'`; omit or pass `'all'` for org-wide). Observations describe CUSTOM fields only — standard field names are chosen by Salesforce, not by this org, so they cannot evidence an org convention and are excluded before grouping (`analyzed.standardFieldsExcluded` reports how many were dropped). An object needs at least `analyzed.minimumGroupSize` custom fields before any pattern is reported, and `analyzed.objectsWithCustomFields` / `analyzed.objectsBelowMinimumGroupSize` publish the denominators so an EMPTY observation list is readable as NOT ENOUGH EVIDENCE rather than 'this object has no convention' — a scoped call that finds nothing says exactly that in a verbatim `note`. Every observation is `confidence: 'heuristic'`: an observed pattern, not an enforced rule.",
     inputSchema: NAMING_CONVENTION_REPORT_INPUT_SCHEMA,
   },
   {

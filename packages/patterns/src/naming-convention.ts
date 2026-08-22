@@ -1,5 +1,5 @@
 import type { Node, PatternObservation, Result } from '@sf-intelligence/contracts';
-import { err, ok } from '@sf-intelligence/core';
+import { err, isCustomFieldApiName, ok } from '@sf-intelligence/core';
 import {
   type GraphError,
   type GraphStore,
@@ -61,6 +61,28 @@ type Casing = 'PascalCase' | 'snake_case' | 'camelCase' | 'ALL_CAPS' | 'mixed';
 interface FieldGroup {
   readonly parentApiName: string;
   readonly fields: readonly Node[];
+}
+
+/**
+ * What the recognizer LOOKED at, alongside what it found.
+ *
+ * An empty observation list has to be readable as NOT ENOUGH EVIDENCE rather
+ * than "this org has no convention", and that is only possible if the reader
+ * can see the denominators.
+ */
+export interface NamingConventionAnalysis {
+  readonly observations: readonly PatternObservation[];
+  readonly analyzed: {
+    /** Objects in scope that hold at least one CUSTOM field. */
+    readonly objectsWithCustomFields: number;
+    /** Of those, how many fall under {@link MIN_GROUP_SIZE} and emit nothing. */
+    readonly objectsBelowMinimumGroupSize: number;
+    readonly minimumGroupSize: number;
+    /** Standard fields dropped org-wide before grouping. */
+    readonly standardFieldsExcluded: number;
+    /** Custom-field count for a SCOPED call; `null` for `scope: 'all'`. */
+    readonly scopedObjectCustomFieldCount: number | null;
+  };
 }
 
 interface DominantValue<T> {
@@ -214,22 +236,45 @@ const fetchAllCustomFields = async (
   return ok(all);
 };
 
+/**
+ * Group a field corpus by parent object, keeping ONLY the custom fields.
+ *
+ * A naming convention is a statement about names THIS ORG chose. Standard
+ * field names (`Name`, `AccountId`, `BillingCity`) are chosen by Salesforce, so
+ * including them does not merely add noise — it produces false statements:
+ * on the reference vault 21 objects have five or more field nodes and ZERO
+ * custom fields, and three objects had the reported convention INVERTED by the
+ * standard-field majority.
+ *
+ * Filtering happens at GROUPING time rather than at fetch time so the "how many
+ * did we drop" number stays available per object for the disclosure.
+ *
+ * Namespaced managed-package fields (`ns__Thing__c`) end in `__c` and stay IN.
+ * Their convention is the package vendor's rather than this org's, but
+ * excluding them is a separate product decision and is not made here.
+ */
 const groupFieldsByParent = (
   fields: readonly Node[],
-): readonly FieldGroup[] => {
+): { groups: readonly FieldGroup[]; standardFieldsExcluded: number } => {
   const byParent = new Map<string, Node[]>();
+  let standardFieldsExcluded = 0;
   for (const field of fields) {
     if (field.parentId === null) continue;
+    if (!isCustomFieldApiName(field.apiName)) {
+      standardFieldsExcluded += 1;
+      continue;
+    }
     const existing = byParent.get(field.parentId) ?? [];
     existing.push(field);
     byParent.set(field.parentId, existing);
   }
   // Parent id format is `CustomObject:{ApiName}` — strip the prefix for the
   // observation scope. Sort by id ascending so output is deterministic.
-  return [...byParent.keys()].sort().map((parentId) => ({
+  const groups = [...byParent.keys()].sort().map((parentId) => ({
     parentApiName: parentId.slice(parentId.indexOf(':') + 1),
     fields: byParent.get(parentId) ?? [],
   }));
+  return { groups, standardFieldsExcluded };
 };
 
 // Parse a scope string into a parent api name (`'CustomField:X.*'` -> `'X'`)
@@ -270,10 +315,10 @@ const parseScope = (
  *     console.log(obs.statement, obs.evidence.matching, '/', obs.evidence.total);
  *   }
  */
-export const recognizeNamingConventions = async (
+export const analyzeNamingConventions = async (
   store: GraphStore,
   options?: RecognizeOptions,
-): Promise<Result<readonly PatternObservation[], PatternError>> => {
+): Promise<Result<NamingConventionAnalysis, PatternError>> => {
   const scopeResult = parseScope(options?.scope);
   if (!scopeResult.ok) return scopeResult;
   const scopedParentApiName = scopeResult.value;
@@ -286,7 +331,9 @@ export const recognizeNamingConventions = async (
     });
   }
 
-  const groups = groupFieldsByParent(fieldsResult.value);
+  const { groups, standardFieldsExcluded } = groupFieldsByParent(
+    fieldsResult.value,
+  );
   const filtered =
     scopedParentApiName === null
       ? groups
@@ -304,5 +351,32 @@ export const recognizeNamingConventions = async (
     return 0;
   });
 
-  return ok(observations);
+  return ok({
+    observations,
+    analyzed: {
+      objectsWithCustomFields: filtered.length,
+      objectsBelowMinimumGroupSize: filtered.filter(
+        (g) => g.fields.length < MIN_GROUP_SIZE,
+      ).length,
+      minimumGroupSize: MIN_GROUP_SIZE,
+      standardFieldsExcluded,
+      scopedObjectCustomFieldCount:
+        scopedParentApiName === null
+          ? null
+          : (filtered[0]?.fields.length ?? 0),
+    },
+  });
+};
+
+/**
+ * Back-compat adapter: the observation list alone, for the callers that only
+ * ever wanted it (`org_card`, `org_overview`, `refresh`). ONE implementation,
+ * one thin projection — not a second recognizer.
+ */
+export const recognizeNamingConventions = async (
+  store: GraphStore,
+  options?: RecognizeOptions,
+): Promise<Result<readonly PatternObservation[], PatternError>> => {
+  const result = await analyzeNamingConventions(store, options);
+  return result.ok ? ok(result.value.observations) : result;
 };

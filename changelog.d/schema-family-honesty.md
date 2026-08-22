@@ -74,3 +74,24 @@
   exist while refusing to say what any of them were. The tokenizer already held
   the text and threw it away. `stringLiteralCount` / `numericLiteralCount` are
   unchanged.
+
+- **`sfi.get_naming_convention_report` stops calling standard fields "custom
+  fields".** The recognizer grouped every `CustomField` node, so it reported
+  conventions about names Salesforce chose. On the reference vault 22 of 101
+  observations described objects with ZERO custom fields, and three objects had
+  the reported convention INVERTED by a standard-field majority. Standard fields
+  are now excluded before grouping (`isCustomFieldApiName`, new in
+  `@sf-intelligence/core`), and the response publishes the denominators —
+  `analyzed.objectsWithCustomFields`, `objectsBelowMinimumGroupSize`,
+  `minimumGroupSize`, `standardFieldsExcluded` — so an EMPTY observation list
+  reads as NOT ENOUGH EVIDENCE rather than "no convention here". A scoped call
+  that finds nothing says exactly that in a verbatim `note`.
+
+  **Behaviour change for callers:** `evidence.total` on every existing
+  observation is a custom-field-only denominator now, so the ratios move. That
+  is a CORRECTION, not a regression.
+
+  Same false label, same trip: `resolve_field_or_suggest`'s object-id
+  suggestion said "Here are the N custom field(s) on X" while listing standard
+  fields too. The list is deliberately left unfiltered — a caller may want a
+  standard field — and the sentence now says what it actually is.

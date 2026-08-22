@@ -9,7 +9,11 @@
  * MCP composer and the `developer-code-quality` skill.
  */
 
-export { recognizeNamingConventions } from './naming-convention.js';
+export {
+  analyzeNamingConventions,
+  recognizeNamingConventions,
+  type NamingConventionAnalysis,
+} from './naming-convention.js';
 export type { PatternError, RecognizeOptions } from './naming-convention.js';
 export {
   detectPiiClassification,
