@@ -297,6 +297,8 @@ describe('dispatchTool', () => {
     'sfi.flow_trace',
     'sfi.flow_fault_audit',
     'sfi.explain_apex_method',
+    // Apex STRUCTURE + review lane — the per-method anatomy of one class.
+    'sfi.apex_structure',
     'sfi.explain_formula',
     'sfi.unused_fields_deep',
     'sfi.process_builder_migration_candidates',
@@ -689,6 +691,7 @@ describe('V01_TOOLS', () => {
       'sfi.flow_trace',
       'sfi.flow_fault_audit',
       'sfi.explain_apex_method',
+      'sfi.apex_structure',
       'sfi.explain_formula',
       'sfi.unused_fields_deep',
       'sfi.process_builder_migration_candidates',

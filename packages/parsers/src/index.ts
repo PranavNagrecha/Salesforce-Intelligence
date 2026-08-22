@@ -41,6 +41,26 @@ export type {
   ParseApexDebugLogOptions,
   ParsedApexDebugLog,
 } from './apex-debug-log.js';
+// The AST STRUCTURE projection. Safe to export from the barrel even though it
+// runs on the ~5 MB ANTLR grammar: `parseApexStructure` imports the grammar
+// DYNAMICALLY on first call, so importing this module costs nothing at load
+// time (`apex-ast-edges` stays subpath-only because it imports it statically).
+export { parseApexStructure } from './apex-structure.js';
+export type {
+  ApexCallSite,
+  ApexCatchClause,
+  ApexDmlOperation,
+  ApexDmlSite,
+  ApexInnerType,
+  ApexMemberNode,
+  ApexMethodNode,
+  ApexParam,
+  ApexQuerySite,
+  ApexStructureParse,
+  ApexTypeStructure,
+  ApexVisibility,
+  ParseApexStructureOptions,
+} from './apex-structure.js';
 export { scanApexSource } from './apex-scanner.js';
 export type {
   ApexScannerError,

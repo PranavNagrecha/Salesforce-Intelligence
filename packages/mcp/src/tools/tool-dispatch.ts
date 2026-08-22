@@ -53,6 +53,10 @@ import {
   apexBuildAdvisorInputSchema,
 } from './apex-build-advisor.js';
 import {
+  apexStructureHandler,
+  apexStructureInputSchema,
+} from './apex-structure.js';
+import {
   apexTestCoverageHandler,
   apexTestCoverageInputSchema,
 } from './apex-test-coverage.js';
@@ -1494,6 +1498,8 @@ export const dispatchTool = async (
         explainApexMethodInputSchema,
         explainApexMethodHandler,
       );
+    case 'sfi.apex_structure':
+      return runTool(ctx, args, apexStructureInputSchema, apexStructureHandler);
     case 'sfi.explain_formula':
       return runTool(
         ctx,

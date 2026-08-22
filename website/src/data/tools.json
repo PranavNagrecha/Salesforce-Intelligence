@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-21T23:29:24.391Z",
-  "toolCount": 216,
+  "generatedAt": "2026-08-22T00:28:24.270Z",
+  "toolCount": 217,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -852,6 +852,10 @@
         {
           "name": "sfi.flow_fault_audit",
           "description": "Which Flows have a DML/action element with NO fault path - the flow error-handling hygiene sweep."
+        },
+        {
+          "name": "sfi.apex_structure",
+          "description": "The PARSED anatomy of ONE Apex class or trigger, plus the review a senior reviewer would give it - the Apex counterpart of `sfi.flow_graph(walkthrough)`."
         },
         {
           "name": "sfi.picklist_integrity_scan",

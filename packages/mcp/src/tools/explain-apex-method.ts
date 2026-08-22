@@ -424,7 +424,13 @@ const readDeclaredSharing = (
  * reads. Encodes the platform rules so a sharing question is never answered
  * with the "no keyword = without sharing" myth.
  */
-const buildSharingSemantics = (
+/**
+ * Exported so `sfi.apex_structure` composes THIS sharing reasoning rather than
+ * restating it. The "no keyword ≠ without sharing" platform truth must have
+ * exactly one implementation — two copies would drift, and a drifted security
+ * answer is worse than no answer.
+ */
+export const buildSharingSemantics = (
   declared: 'with sharing' | 'without sharing' | 'inherited sharing' | null,
   classifiers: ExplainApexClassifiers,
 ): ExplainApexSharingSemantics => {

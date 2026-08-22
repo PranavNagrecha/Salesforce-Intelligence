@@ -3605,3 +3605,115 @@ describe('cdc-enablement must not steal the field-history neighbours', () => {
     });
   }
 });
+
+/**
+ * `apex-structure` (sfi.apex_structure) — the per-method anatomy + review lane.
+ *
+ * The rule sits LATE, immediately before `explain-apex`, so the neighbour half
+ * of this block is the load-bearing half: an Apex sibling that already owns a
+ * phrasing must keep it. The two `what-if-method-signature` gold rows are named
+ * individually because the first version of this rule DID steal them — the bare
+ * `method … signature` pair matched "what breaks if I change the signature of a
+ * method in X", and `what-if-method-signature` sits later in the list, so
+ * first-match handed them to the new rule. Every question here uses SYNTHETIC
+ * component names.
+ */
+describe('apex-structure must not steal its Apex neighbours', () => {
+  const routesTo = (q: string, intent: string, primaryTool: string): void => {
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe(intent);
+    expect(r.plane).toBe('vault');
+    expect(r.tools).toContain(primaryTool);
+  };
+
+  describe('claims the questions no Apex tool could answer before', () => {
+    it.each([
+      'what methods does WidgetService have and what are their signatures',
+      'list every method in WidgetService with its visibility and return type',
+      'walk me through the WidgetService class method by method',
+      'what are the inner classes in WidgetService',
+      'code review this apex class WidgetService',
+      'review the WidgetService class like a senior developer would',
+      'what would a reviewer flag in WidgetService',
+      'give me the anatomy of the WidgetService class',
+      'where does WidgetService run SOQL and DML',
+    ])('routes "%s"', (q) => {
+      routesTo(q, 'apex-structure', 'sfi.apex_structure');
+    });
+  });
+
+  describe('binds classRef from the question, and fabricates nothing', () => {
+    it('suggests the api-name token the question actually names', () => {
+      const r = classifyQuestion(
+        'walk me through the WidgetLookupController class method by method',
+      );
+      expect(r.suggestedArgs).toEqual({ classRef: 'WidgetLookupController' });
+    });
+    it('suggests NOTHING when the question names no api-name-shaped token', () => {
+      const r = classifyQuestion('walk me through this class method by method');
+      expect(r.intent).toBe('apex-structure');
+      expect(r.suggestedArgs).toEqual({});
+      // sfi.resolve still leads the route so a host binds the class itself.
+      expect(r.tools[0]).toBe('sfi.resolve');
+    });
+    it('never suggests an ANNOTATION name as the class', () => {
+      const r = classifyQuestion(
+        'list every method in AuraEnabled order with its visibility',
+      );
+      expect(r.suggestedArgs?.['classRef']).not.toBe('AuraEnabled');
+    });
+  });
+
+  describe('leaves every neighbour its own questions', () => {
+    // FAIL-BEFORE: these two routed to apex-structure on the first version.
+    it.each([
+      'What breaks if I change the signature of a method in OpportunityService?',
+      'What if I change the method signature of calculateTotal in PaymentService?',
+    ])('leaves the what-if signature ask alone: "%s"', (q) => {
+      expect(classifyQuestion(q).intent).toBe('what-if-method-signature');
+    });
+
+    it.each([
+      'what does the AccountController class do',
+      'explain the WidgetService class',
+    ])('leaves plain narration on explain_apex_method: "%s"', (q) => {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('explain-apex');
+      expect(r.tools).toContain('sfi.explain_apex_method');
+    });
+
+    it.each([
+      'are there any SOQL queries inside loops in our Apex code?',
+      'which parts of our Apex are at risk of hitting governor limits?',
+      'find SOQL queries inside loops',
+    ])('leaves the org-wide governor sweep alone: "%s"', (q) => {
+      expect(classifyQuestion(q).intent).toBe('governor-risks');
+    });
+
+    it('leaves the org-wide code-quality sweep alone', () => {
+      expect(classifyQuestion('how good is our Apex code quality?').intent).toBe(
+        'code-quality',
+      );
+    });
+
+    it('leaves the deploy-gate change review alone', () => {
+      expect(
+        classifyQuestion('review this PR before we deploy it').intent,
+      ).toBe('review-change');
+    });
+
+    it('leaves the flow walkthrough on flow_graph', () => {
+      const r = classifyQuestion(
+        'explain what each element of the Foo_Bar_Flow flow does, step by step, in the order it runs',
+      );
+      expect(r.intent).toBe('flow-structure');
+      expect(r.tools).toContain('sfi.flow_graph');
+    });
+
+    it('leaves the org-wide hardcoded-value sweep alone', () => {
+      expect(classifyQuestion('find hardcoded IDs in the Apex code').intent).toBe(
+        'hardcoded-values',
+      );
+    });
+  });
+});

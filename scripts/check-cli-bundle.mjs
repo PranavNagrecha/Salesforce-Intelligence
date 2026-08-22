@@ -51,6 +51,15 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * this number tracks feature growth, and the antlr-ref guard is what actually
  * catches a grammar re-inline. Headroom is deliberate so the next lane does not
  * restart the ratchet, and 6.8 MB is still ~3.6 MB below a re-inlined bundle.
+ *
+ * BOTH lanes of this integration independently raised this in the same hour
+ * (6_400_000 from the apex lane, 6_800_000 here) — the exact per-branch
+ * ratchet the paragraph above calls the anti-pattern, arriving again. Kept the
+ * higher grant: the merged bundle carries the object brief, the debug-log
+ * event stream, the flow walkthrough, the event plane and now the Apex
+ * structure reader, and the precise re-inline guard (antlr refs) stayed green
+ * through all of it. Re-set this ONCE against a measured merged bundle rather
+ * than granting it again per lane.
  */
 const MAX_BYTES = 6_800_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
