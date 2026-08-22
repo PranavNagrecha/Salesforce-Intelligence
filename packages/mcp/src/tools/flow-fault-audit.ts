@@ -46,11 +46,66 @@ const MAX_PAGES = 40;
 const FLOW_FAULT_AUDIT_TOOL = 'sfi.flow_fault_audit';
 
 /**
- * Per-response byte budget for the `flows` page. The HANDLER makes the cut and
- * reports it, so the global envelope reducer never sees an over-budget payload
- * and can never silently drop rows the response claimed were complete.
+ * Per-response byte budget for the `flows` ARRAY alone — the inner bound the
+ * CR-22 pager applies while slicing rows. It is NOT the binding constraint:
+ * see {@link flowFaultResponseBudgetBytes} for the WHOLE-response budget that
+ * actually decides where the page ends.
  */
 const FLOW_FAULT_PAYLOAD_BUDGET_BYTES = 30_000;
+
+/**
+ * Room left for what the ENVELOPE adds after this handler returns: the
+ * `contentPolicy` stamp, `estimatedPayloadBytes`, the disclosed `vaultState`
+ * (targetOrg / vaultPath / builderVersion) and a possible `orgDrift` badge.
+ * Measured at well under 1 KB today; 2 KB is the headroom so a badge or a long
+ * vault path can never be what pushes the envelope over the cap.
+ */
+const FLOW_FAULT_ENVELOPE_RESERVE_BYTES = 2_048;
+
+/** Floor for the whole-response budget under an absurdly small operator cap. */
+const FLOW_FAULT_BUDGET_FLOOR_BYTES = 2_000;
+
+/**
+ * Resolve the active global response budget the SAME way `tool-dispatch.ts`'s
+ * `responseBudgetBytes` does. DUPLICATED here (rather than imported) on
+ * purpose, exactly as `generate-data-dictionary.ts` does: `tool-dispatch.ts`
+ * imports this module, so importing back from it would create a module cycle.
+ * Must track that resolver's clamp.
+ */
+const FLOW_FAULT_MAX_RESPONSE_BYTES = 45_000;
+const FLOW_FAULT_RESPONSE_BUDGET_DEFAULT_BYTES = 40_000;
+
+/**
+ * The byte budget this handler fits its ENTIRE `data` payload to, before the
+ * global `jsonResult` guard ever sees it.
+ *
+ * FLOW-FAULT-AUDIT-RESUME-POINTER-OVERSHOOT — why the whole payload and not
+ * just `flows`: the pager was budgeting the `flows` ARRAY at 30 KB, but the
+ * response also carries `rendered`, whose markdown table is built from the SAME
+ * page and costs roughly as much again. A `limit: 500` call over 234 flagged
+ * flows therefore produced a ~65 KB envelope: the pager kept 140 rows and
+ * stamped `nextOffset: 140`, then the global guard tail-trimmed `flows` to 70
+ * and left the pointer alone. Rows 70–139 were unreachable by ANY call, and the
+ * envelope's own note ("the handler's pagination is authoritative") pointed the
+ * caller straight at the broken pointer. Budgeting the whole payload means the
+ * guard's array trim never engages here, so the pointer can only ever describe
+ * rows that were actually delivered.
+ */
+const flowFaultResponseBudgetBytes = (): number => {
+  const raw = process.env['SFI_MAX_RESPONSE_BYTES'];
+  const parsed = raw === undefined || raw === '' ? NaN : Number(raw);
+  const cap =
+    Number.isFinite(parsed) && parsed >= 2_000
+      ? Math.min(Math.floor(parsed), FLOW_FAULT_MAX_RESPONSE_BYTES)
+      : FLOW_FAULT_RESPONSE_BUDGET_DEFAULT_BYTES;
+  return Math.max(
+    FLOW_FAULT_BUDGET_FLOOR_BYTES,
+    cap - FLOW_FAULT_ENVELOPE_RESERVE_BYTES,
+  );
+};
+
+const utf8Bytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
 
 export const flowFaultAuditInputSchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
@@ -165,13 +220,21 @@ export interface FlowFaultAuditOutput {
    */
   readonly scanTruncated: boolean;
   /**
-   * Page size applied. Present only on a PAGED response (`truncated` or a
-   * resumed `offset > 0`), so a whole-fits call stays byte-identical.
+   * Page size ACTUALLY applied — which is the requested `limit` only when the
+   * whole response fitted the byte budget at that size. When fitting shrank the
+   * page, this is the shrunken size, not the request. Present only on a PAGED
+   * response (`truncated` or a resumed `offset > 0`), so a whole-fits call stays
+   * byte-identical.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned flow. Present only when paged. */
   readonly offset?: number;
-  /** Offset to pass on the next call. Present only when `truncated`. */
+  /**
+   * Offset to pass on the next call. Present only when `truncated`, and always
+   * `offset + flows.length` — the pointer is derived from the rows this response
+   * actually DELIVERS, never from a page the handler intended before something
+   * downstream trimmed it (FLOW-FAULT-AUDIT-RESUME-POINTER-OVERSHOOT).
+   */
   readonly nextOffset?: number;
   /**
    * CR-22 opaque continuation token, present ONLY when this page is truncated.
@@ -372,51 +435,12 @@ export const flowFaultAuditHandler = async (
     if (!decoded.ok) return err(decoded.error);
     pageOffset = decoded.value.o;
   }
-  const paged = paginateLegacy(entries, {
-    offset: pageOffset,
-    limit,
-    byteBudget: FLOW_FAULT_PAYLOAD_BUDGET_BYTES,
-    keyOf: (e) => e.id,
-    binding: {
-      tool: FLOW_FAULT_AUDIT_TOOL,
-      vaultHash: ctx.manifest.sourceTreeHash,
-      argsFingerprint: fingerprint,
-    },
-  });
-  const page = paged.items;
-  // `truncated` is the PAGE boundary and comes from the pager, not from
-  // `entries.length > limit`: the byte budget can cut below `limit`, and the
-  // old expression reported `truncated: false` while rows were dropped
-  // downstream by the envelope reducer.
-  const truncated = paged.hasMore;
-  const emitCursor = paged.nextCursor !== null;
-  const isPaged = truncated || pageOffset > 0;
-  const returnedUnhandledElements = page.reduce(
-    (sum, e) => sum + e.elementsWithoutFault,
-    0,
-  );
-
+  // ── Page + FIT ─────────────────────────────────────────────────────────
+  // Everything below the page boundary is derived from ONE page length, so the
+  // pointer, the `flows` array, the markdown table and the prose can never
+  // disagree. The page-INDEPENDENT parts are computed once, up front.
   const trust = offlineTrust(ctx, { status: summarizeCoverage(ctx.manifest).status });
-  // The table is built from the PAGE, so the markdown and the `flows` array are
-  // the same list BY CONSTRUCTION — the table can no longer end mid-row.
-  const table = mdTable(
-    ['Flow', 'Status', 'Unhandled', 'Faultable'],
-    page.map((e) => [
-      e.name,
-      e.status ?? 'unknown',
-      e.elementsWithoutFault,
-      e.faultableElements,
-    ]),
-  );
-  const pageNote = truncated
-    ? `\n_Showing the worst ${page.length} of ${entries.length} flagged flows (${returnedUnhandledElements} of ${totalUnhandledElements} unhandled elements). ` +
-      `The remaining ${entries.length - pageOffset - page.length} are reachable — pass the returned nextCursor. ` +
-      `Totals above are for the FULL set, not this page._\n`
-    : pageOffset > 0
-      ? `\n_Showing flagged flows ${pageOffset + 1}–${pageOffset + page.length} of ${entries.length} (final page). ` +
-        `Totals above are for the FULL set, not this page._\n`
-      : '';
-  // A DIFFERENT truncation from the page boundary above: this one says the SCAN
+  // A DIFFERENT truncation from the page boundary: this one says the SCAN
   // never reached some flows, so the totals themselves may undercount. Two
   // flags, two sentences — never merged.
   const scanNote = scanTruncated
@@ -436,19 +460,63 @@ export const flowFaultAuditHandler = async (
       ? ` A further **${flowsWithUnhandledFaultsStatusUnknown}** flagged flows have NO recorded status in this vault — ` +
         'that is UNKNOWN, not Active; they are listed below, marked `unknown`, and sorted with the Actives.'
       : '';
-  const rendered = !propertyAvailable
-    ? `Fault coverage is not in this vault yet — run \`/sfi-refresh\` to populate it (the Flow extractor now records it).\n\n${renderFooter(trust)}`
-    : `**${flowsWithUnhandledFaultsActive}** of ${activeFlowCount} ACTIVE flows have at least one DML/action element with no fault path ` +
-      `(${totalUnhandledElementsActive} of ${totalFaultableElements} faultable elements unhandled).` +
-      `${notRunnableSentence}${statusUnknownSentence}\n\n${table}\n${pageNote}${scanNote}\n` +
-      `_Offline — an unhandled fault is **surfaced, not silent**: screen flows show the running user an error screen, ` +
-      `and autolaunched/record-triggered flows (including before-save and after-save) raise an unhandled-fault runtime ` +
-      `error that rolls back the whole transaction so the triggering save fails with a visible error. Add a fault path ` +
-      `to replace that default error with a graceful, retryable message._\n\n` +
-      `_${FLOW_ACTIVATION_STATUS_DISCLOSURE}_\n\n${renderFooter(trust)}`;
 
-  return ok({
-    data: {
+  const buildOutput = (pageLimit: number): FlowFaultAuditOutput => {
+    const paged = paginateLegacy(entries, {
+      offset: pageOffset,
+      limit: pageLimit,
+      byteBudget: FLOW_FAULT_PAYLOAD_BUDGET_BYTES,
+      keyOf: (e) => e.id,
+      binding: {
+        tool: FLOW_FAULT_AUDIT_TOOL,
+        vaultHash: ctx.manifest.sourceTreeHash,
+        argsFingerprint: fingerprint,
+      },
+    });
+    const page = paged.items;
+    // `truncated` is the PAGE boundary and comes from the pager, not from
+    // `entries.length > limit`: the byte budget can cut below `limit`, and the
+    // old expression reported `truncated: false` while rows were dropped
+    // downstream by the envelope reducer.
+    const truncated = paged.hasMore;
+    const emitCursor = paged.nextCursor !== null;
+    const isPaged = truncated || pageOffset > 0;
+    const returnedUnhandledElements = page.reduce(
+      (sum, e) => sum + e.elementsWithoutFault,
+      0,
+    );
+
+    // The table is built from the PAGE, so the markdown and the `flows` array are
+    // the same list BY CONSTRUCTION — the table can no longer end mid-row.
+    const table = mdTable(
+      ['Flow', 'Status', 'Unhandled', 'Faultable'],
+      page.map((e) => [
+        e.name,
+        e.status ?? 'unknown',
+        e.elementsWithoutFault,
+        e.faultableElements,
+      ]),
+    );
+    const pageNote = truncated
+      ? `\n_Showing the worst ${page.length} of ${entries.length} flagged flows (${returnedUnhandledElements} of ${totalUnhandledElements} unhandled elements). ` +
+        `The remaining ${entries.length - pageOffset - page.length} are reachable — pass the returned nextCursor. ` +
+        `Totals above are for the FULL set, not this page._\n`
+      : pageOffset > 0
+        ? `\n_Showing flagged flows ${pageOffset + 1}–${pageOffset + page.length} of ${entries.length} (final page). ` +
+          `Totals above are for the FULL set, not this page._\n`
+        : '';
+    const rendered = !propertyAvailable
+      ? `Fault coverage is not in this vault yet — run \`/sfi-refresh\` to populate it (the Flow extractor now records it).\n\n${renderFooter(trust)}`
+      : `**${flowsWithUnhandledFaultsActive}** of ${activeFlowCount} ACTIVE flows have at least one DML/action element with no fault path ` +
+        `(${totalUnhandledElementsActive} of ${totalFaultableElements} faultable elements unhandled).` +
+        `${notRunnableSentence}${statusUnknownSentence}\n\n${table}\n${pageNote}${scanNote}\n` +
+        `_Offline — an unhandled fault is **surfaced, not silent**: screen flows show the running user an error screen, ` +
+        `and autolaunched/record-triggered flows (including before-save and after-save) raise an unhandled-fault runtime ` +
+        `error that rolls back the whole transaction so the triggering save fails with a visible error. Add a fault path ` +
+        `to replace that default error with a graceful, retryable message._\n\n` +
+        `_${FLOW_ACTIVATION_STATUS_DISCLOSURE}_\n\n${renderFooter(trust)}`;
+
+    return {
       // appliedScope FIRST + only when scoped, so a bare call omits the whole
       // block and its serialized response stays byte-identical to pre-fix.
       ...(scope !== null
@@ -467,14 +535,48 @@ export const flowFaultAuditHandler = async (
       totalCount: entries.length,
       truncated,
       scanTruncated,
-      ...(isPaged ? { limit, offset: pageOffset } : {}),
+      // `limit` echoes the page size ACTUALLY applied, which is what the field
+      // claims to be. When the whole-response fit shrank it below the caller's
+      // request, saying 500 would misdescribe a 65-row page.
+      ...(isPaged ? { limit: pageLimit, offset: pageOffset } : {}),
       ...(truncated ? { nextOffset: pageOffset + page.length } : {}),
       ...(emitCursor
         ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),
       trust,
       rendered,
-    },
+    };
+  };
+
+  // Largest page that fits the WHOLE-response budget. Binary search rather than
+  // a shrink-until-it-fits loop so the answer is the MAXIMUM fitting page (an
+  // under-filled page is not wrong, but it costs the caller round-trips), and
+  // so the number of `buildOutput` calls is bounded by log2(limit) ≈ 9.
+  //
+  // A page of 10 rows or fewer is safe unconditionally: the global guard's
+  // array trim never cuts an array below TRUNCATE_KEEP_MIN (10), so the floor
+  // of this search can never be trimmed underneath the pointer either.
+  const budget = flowFaultResponseBudgetBytes();
+  let output = buildOutput(limit);
+  if (utf8Bytes(output) > budget && output.flows.length > 1) {
+    let lo = 1;
+    let hi = output.flows.length - 1;
+    let best = buildOutput(1);
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const candidate = buildOutput(mid);
+      if (utf8Bytes(candidate) <= budget) {
+        best = candidate;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    output = best;
+  }
+
+  return ok({
+    data: output,
     vaultState: { sourceTreeHash: ctx.manifest.sourceTreeHash, refreshedAt: ctx.manifest.refreshedAt },
   });
 };

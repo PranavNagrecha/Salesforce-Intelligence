@@ -339,6 +339,73 @@ describe('searchComponentsHandler — disclosure (FIX 4)', () => {
     expect(r.value.data.hasMore).toBe(false);
     expect(r.value.data.matches).toEqual([]);
   });
+
+  // An over-run page and a genuine miss were BYTE-IDENTICAL: both
+  // `{matches: [], totalCount: 0, hasMore: false}` with no note. The tool's
+  // description promises `totalCount` is "the TRUE post-filter match count",
+  // and a code comment conceded the gap ("callers that need the total on an
+  // over-run page re-query at offset 0") while the payload said nothing.
+  it('FAIL-BEFORE/PASS-AFTER: an offset PAST THE END reports the true total and says so', async () => {
+    const r = await searchComponentsHandler(discCtx, {
+      query: 'Age',
+      offset: 100_000,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.matches).toEqual([]);
+    // Pre-fix: 0.
+    expect(d.totalCount).toBe(30);
+    expect(d.hasMore).toBe(false);
+    expect(d.nextOffset).toBeNull();
+    // Pre-fix: undefined — nothing in the payload distinguished the two zeros.
+    expect(d.note).toBe(
+      "offset=100000 is PAST THE END of this query's 30 match(es), so this page is empty. That is the end of the walk, NOT a query that matched nothing — re-query with an offset below 30 to see rows.",
+    );
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: an over-run page does NOT fire the "no matches" self-heal', async () => {
+    const r = await searchComponentsHandler(discCtx, {
+      query: 'Age',
+      offset: 100_000,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix the empty page tripped the resolver fallback, publishing
+    // SUGGESTIONS_NOTE ("No exact substring matches.") over a query with 30.
+    expect(r.value.data.suggestions).toBeUndefined();
+  });
+
+  it('a GENUINE miss keeps its CHECKED zero and its suggestions', async () => {
+    const r = await searchComponentsHandler(discCtx, {
+      query: 'Aeg_Bcuket',
+      offset: 50,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(0);
+    expect(r.value.data.note).toBeUndefined();
+    expect(r.value.data.suggestions).toBeDefined();
+  });
+
+  it('the union of an exhaustive walk is exactly totalCount, distinct', async () => {
+    for (const limit of [4, 7, 30]) {
+      const seen: string[] = [];
+      let offset = 0;
+      let total = -1;
+      for (;;) {
+        const r = await searchComponentsHandler(discCtx, { query: 'Age', limit, offset });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        total = r.value.data.totalCount;
+        for (const m of r.value.data.matches) seen.push(m.id);
+        if (r.value.data.nextOffset === null) break;
+        offset = r.value.data.nextOffset;
+      }
+      expect(seen, `limit ${limit}`).toHaveLength(total);
+      expect(new Set(seen).size, `limit ${limit}`).toBe(total);
+    }
+  });
 });
 
 /**

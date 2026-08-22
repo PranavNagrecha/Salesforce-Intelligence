@@ -88,7 +88,11 @@ export interface SearchComponentsSuggestions {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface SearchComponentsOutput {
   readonly matches: readonly SearchComponentsMatch[];
-  /** TRUE total matching the query (post-`types` filter), before limit/offset. */
+  /**
+   * TRUE total matching the query (post-`types` filter), before limit/offset —
+   * on EVERY page, an over-run `offset` included. A `0` here therefore always
+   * means "nothing matched", never "you paged past the end".
+   */
   readonly totalCount: number;
   readonly limit: number;
   readonly offset: number;
@@ -96,7 +100,11 @@ export interface SearchComponentsOutput {
   readonly nextOffset: number | null;
   /** Verbatim; on EVERY response. */
   readonly boundaries: readonly string[];
-  /** Verbatim; present only when `hasMore`. */
+  /**
+   * Verbatim. Present when `hasMore` (the page is a prefix) OR when `offset`
+   * ran past the end of the match set (empty page, non-zero `totalCount`) —
+   * the two empty-ish outcomes a reader must never confuse.
+   */
   readonly note?: string;
   /**
    * Present ONLY when `matches` is empty AND the typo-tolerant resolver found
@@ -185,8 +193,13 @@ export const searchComponentsHandler = async (
   // typo/filler query ("paymnet", "payment stuff") would dead-end at 0 results
   // and read as "broken". Fall through to the typo-tolerant resolver and
   // surface ranked candidates as `suggestions` — heuristic, clearly labelled.
+  //
+  // Gated on `totalCount === 0`, NOT on an empty page: an over-run offset also
+  // returns zero rows, and firing the self-heal there published SUGGESTIONS_NOTE
+  // ("No exact substring matches") over a query that had 646 of them. A page
+  // past the end is the END of a walk, not a miss.
   let suggestions: SearchComponentsSuggestions | undefined;
-  if (matches.length === 0) {
+  if (matches.length === 0 && totalCount === 0) {
     const resolved = await resolveComponents(ctx.graph, input.query, {
       limit: 5,
       ...(input.types !== undefined
@@ -211,6 +224,11 @@ export const searchComponentsHandler = async (
   // Simple arithmetic beats `paginateLegacy` here: the slice already happened
   // in SQL, so there is no in-memory list for that pager to page.
   const hasMore = offset + matches.length < totalCount;
+  // An offset PAST the end of the match set: empty page, real total. Before the
+  // graph layer counted on an over-run page this response was `totalCount: 0,
+  // matches: [], hasMore: false` — byte-identical to "nothing matched this
+  // query". It now says which of the two it is, in the payload, unprompted.
+  const pastEnd = matches.length === 0 && totalCount > 0 && offset >= totalCount;
 
   return ok({
     data: {
@@ -227,7 +245,11 @@ export const searchComponentsHandler = async (
               offset + matches.length
             }. This list is INCOMPLETE; do not treat it as every component matching this query.`,
           }
-        : {}),
+        : pastEnd
+          ? {
+              note: `offset=${offset} is PAST THE END of this query's ${totalCount} match(es), so this page is empty. That is the end of the walk, NOT a query that matched nothing — re-query with an offset below ${totalCount} to see rows.`,
+            }
+          : {}),
       ...(suggestions !== undefined ? { suggestions } : {}),
     },
     vaultState: {

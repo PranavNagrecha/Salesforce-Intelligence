@@ -57,6 +57,7 @@ import { renderInterpretationsMarkdown } from '../answer-render.js';
 import {
   CHAINED_RULES,
   COMPOUND_RULES,
+  CONCEPT_RULES,
   CONCEPTS,
   reasonAboutComponent,
   SUPERSEDES_RULES,
@@ -137,7 +138,45 @@ export interface InterpretOutput {
   readonly interpretations: readonly Interpretation[];
   /** EPIC-5: top proactive risks ranked by severity × confidence (max 5). */
   readonly proactiveRisks?: readonly ProactiveRiskRow[];
+  /**
+   * THE rule counter. Identical to `completeness.rulesConsidered` on EVERY
+   * response, by construction — it is read from the same coverage report.
+   *
+   * It used to be `selectedRules + CHAINED + COMPOUND + SUPERSEDES`, which
+   * published a second, larger number beside the digest's (195 vs 200 on a bare
+   * call; 0 vs 5 under a filter) and left a reader to guess which one the
+   * "nothing was checked" verdict was about. The second-pass rules are counted
+   * separately in {@link InterpretOutput.secondPassRules} — they are not
+   * candidates evaluated against this component, so folding them in here made
+   * the number describe nothing at all.
+   */
   readonly rulesConsidered: number;
+  /**
+   * Chain / compound / supersedes rules. These run over the claims the selected
+   * rules already emitted, NOT against the component, so they are never part of
+   * the `rulesConsidered` partition — but they can add to `rulesFired`, which is
+   * why `rulesFired` may exceed `rulesConsidered` by at most this many.
+   * Constant for a given build; a caller filter does not narrow them.
+   */
+  readonly secondPassRules: number;
+  /**
+   * Present ONLY when the CALLER passed `concepts` / `ruleIds`. Names the
+   * filter and how much of the model it kept, so an empty or thin answer under
+   * a filter can be attributed to the caller's own narrowing rather than read
+   * as a coverage gap. Absent on an unfiltered call, which stays byte-identical.
+   */
+  readonly ruleSelection?: {
+    readonly concepts?: readonly string[];
+    readonly ruleIds?: readonly string[];
+    /** Concept rules the filter kept — equals `rulesConsidered`. */
+    readonly rulesSelected: number;
+    /** Concept rules in the model before the filter. */
+    readonly rulesInModel: number;
+  };
+  /**
+   * Distinct rule ids that emitted a claim — selected rules PLUS any second-pass
+   * (chain / compound / supersedes) rule that fired over them.
+   */
   readonly rulesFired: number;
   readonly sliceTruncated: boolean;
   readonly trust: TrustSummary;
@@ -158,6 +197,51 @@ const BASE_DISCLOSURE =
   'Each interpretation is a curated structural rule fired against the graph slice assembled for this component; it cites ' +
   'the exact component ids it is grounded in, and its confidence is the weakest of the rule ceiling and its matched edges — ' +
   'never asserted above its ground. An absence-based conclusion is only as strong as the coverage of the families it depends on.';
+
+/**
+ * Chain / compound / supersedes rules — the SECOND pass, which runs over claims
+ * the selected rules already emitted rather than against the component. A
+ * build constant, and deliberately NOT added into `rulesConsidered`.
+ */
+const SECOND_PASS_RULE_COUNT =
+  CHAINED_RULES.length + COMPOUND_RULES.length + SUPERSEDES_RULES.length;
+
+/**
+ * The `noRuleCoversComponentType` summary, REWRITTEN for a call whose own
+ * `concepts` / `ruleIds` filter is what emptied the rule set.
+ *
+ * The engine's sentence — "NOTHING was checked for this CustomObject: of 0
+ * concept rules, 0 are provably inapplicable to this component type and 0 could
+ * not be evaluated at all" — is a statement about how well the MODEL covers this
+ * component type. Under a caller filter it is not one: the rules were removed by
+ * the request, not missing from the model, and the arithmetic degenerates to
+ * "of 0 rules, 0 and 0". The tool's description tells readers to consult
+ * `completeness.noRuleCoversComponentType` FIRST, so that is the last field
+ * allowed to blame the vault for the caller's own narrowing.
+ *
+ * The flag itself stays `true`: nothing WAS analysed, and an empty
+ * `interpretations` list here is still silence, never a clean bill of health.
+ * Only the stated REASON changes — to the true one.
+ */
+const filteredSelectionSummary = (
+  rootType: string,
+  rulesSelected: number,
+  rulesNotApplicable: number,
+  rulesNotEvaluable: number,
+): string =>
+  rulesSelected === 0
+    ? `NOTHING was checked for this ${rootType}, because THIS CALL'S OWN concepts/ruleIds filter ` +
+      `selected 0 of the ${CONCEPT_RULES.length} concept rules. That is a caller-applied narrowing, ` +
+      `NOT a coverage gap in the concept model or in this vault — re-run without the filter (or with ` +
+      `ids that exist) for the model's verdict on this ${rootType}. An empty interpretations list ` +
+      'here is silence about the filtered set only.'
+    : `NOTHING was checked for this ${rootType} among the ${rulesSelected} of ` +
+      `${CONCEPT_RULES.length} concept rules THIS CALL'S OWN concepts/ruleIds filter selected: ` +
+      `${rulesNotApplicable} are provably inapplicable to this component type and ` +
+      `${rulesNotEvaluable} could not be evaluated at all. The other ` +
+      `${CONCEPT_RULES.length - rulesSelected} rules were excluded by the filter, not by the ` +
+      `vault — re-run without it for the model's full verdict. This is silence, NOT a finding of ` +
+      '"no issues".';
 
 /** Appended when NO rule fired — the honest non-absence framing. */
 const EMPTY_DISCLOSURE_NOTE =
@@ -294,6 +378,29 @@ export const interpretHandler = async (
 
   const proactiveRisks = rankProactiveRisks(interpretationsReconciled);
 
+  // A caller-applied filter is not a coverage gap. When `concepts`/`ruleIds`
+  // narrowed (or emptied) the rule set, the digest's "nothing was checked"
+  // sentence must say the FILTER did it — see `filteredSelectionSummary`.
+  const ruleFilterApplied =
+    input.concepts !== undefined || input.ruleIds !== undefined;
+  // R5 — `sfi.interpret` is UNCAPPED, so the digest keeps every enumeration.
+  const baseCompleteness = toCompletenessDigest(
+    coverageReport,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const completeness: ConceptCompletenessDigest =
+    ruleFilterApplied && baseCompleteness.noRuleCoversComponentType
+      ? {
+          ...baseCompleteness,
+          summary: filteredSelectionSummary(
+            componentType,
+            baseCompleteness.rulesConsidered,
+            baseCompleteness.rulesNotApplicable,
+            baseCompleteness.rulesNotEvaluable,
+          ),
+        }
+      : baseCompleteness;
+
   // Overall confidence: the WEAKEST across fired interpretations. Any `unknown`
   // (an absence rule under non-complete coverage) makes the whole `unknown`; no
   // interpretation at all is `unknown` by construction.
@@ -334,8 +441,8 @@ export const interpretHandler = async (
   // exact bucket split either way.
   const emptyNote =
     interpretationsReconciled.length === 0
-      ? coverageReport.noRuleCoversComponentType
-        ? ` ${coverageReport.summary}`
+      ? completeness.noRuleCoversComponentType
+        ? ` ${completeness.summary}`
         : EMPTY_DISCLOSURE_NOTE
       : '';
 
@@ -353,16 +460,26 @@ export const interpretHandler = async (
   const data: InterpretOutput = {
     componentId: anchorId,
     ...(resolvedFrom !== undefined ? { resolvedFrom } : {}),
-    // R5 — `sfi.interpret` is UNCAPPED, so the digest keeps every enumeration.
-    completeness: toCompletenessDigest(coverageReport, Number.MAX_SAFE_INTEGER),
+    completeness,
     componentType,
     interpretations: interpretationsReconciled,
     ...(proactiveRisks.length > 0 ? { proactiveRisks } : {}),
-    rulesConsidered:
-      selectedRules.length +
-      CHAINED_RULES.length +
-      COMPOUND_RULES.length +
-      SUPERSEDES_RULES.length,
+    ...(ruleFilterApplied
+      ? {
+          ruleSelection: {
+            ...(input.concepts !== undefined ? { concepts: input.concepts } : {}),
+            ...(input.ruleIds !== undefined ? { ruleIds: input.ruleIds } : {}),
+            rulesSelected: selectedRules.length,
+            rulesInModel: CONCEPT_RULES.length,
+          },
+        }
+      : {}),
+    // ONE authoritative counter — the same number `completeness.rulesConsidered`
+    // publishes, read from the same report. `selectedRules.length` is that
+    // number; the second-pass rules get their own field rather than inflating
+    // this one into a count of nothing in particular.
+    rulesConsidered: completeness.rulesConsidered,
+    secondPassRules: SECOND_PASS_RULE_COUNT,
     rulesFired,
     sliceTruncated,
     trust,

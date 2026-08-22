@@ -273,7 +273,11 @@ export interface SearchNodesOptions {
  */
 export interface SearchNodesPage {
   readonly hits: readonly SearchHit[];
-  /** TRUE total matching the query (post-`types` filter), before paging. */
+  /**
+   * TRUE total matching the query (post-`types` filter), before paging — on
+   * EVERY page, including one whose `offset` has already run past the end (that
+   * page costs one extra `COUNT(*)` rather than reporting a misleading `0`).
+   */
   readonly totalCount: number;
 }
 
@@ -981,8 +985,12 @@ const buildSnippet = (
  * LIKE-based search (DuckDB ILIKE, case-insensitive) across `api_name`,
  * `label`, and `properties_json`. Score: 3.0 exact api_name, 2.8 api_name
  * prefix, 2.5 contains, 2.0 label, 1.0 properties. Sort: `score DESC,
- * api_name ASC`. Limit
- * defaults to 25 (max 100). Empty query returns `ok([])`.
+ * length(api_name) ASC, api_name ASC, id ASC` — see PAGING TOTAL ORDER at the
+ * SQL below for why the `id` key is load-bearing. Limit defaults to 25
+ * (max 100). Empty query returns `ok([])`.
+ *
+ * `totalCount` is the TRUE post-filter match count on EVERY page, including a
+ * page whose `offset` has already run past the end of the result set.
  *
  * @example
  *   const r = await searchNodes(store, 'Industry', { limit: 10 });
@@ -1010,7 +1018,20 @@ export const searchNodesPage = async (
   // whole-token tier is the only place caller input reaches a REGEX engine, and
   // it is escaped for that engine specifically.
   const tokenPattern = `(^|[^A-Za-z0-9])${regexEscape(query)}([^A-Za-z0-9]|$)`;
-  // 1 exact + 1 prefix + 1 token-regex + 3 score ILIKEs + 3 WHERE ILIKEs.
+  // The WHERE clause and ITS parameters are built ONCE and shared by the page
+  // query and the over-run total below, so the two can never describe different
+  // row sets. (A hand-copied second predicate is exactly how a total drifts from
+  // the rows it claims to count.)
+  let typesClause = '';
+  const whereParams: DuckDBValue[] = [pattern, pattern, pattern];
+  if (options?.types !== undefined && options.types.length > 0) {
+    typesClause = ` AND type IN (${options.types.map(() => '?').join(', ')})`;
+    whereParams.push(...options.types);
+  }
+  const whereSql =
+    `WHERE (api_name ILIKE ? OR label ILIKE ? OR properties_json ILIKE ?)` +
+    typesClause;
+  // 1 exact + 1 prefix + 1 token-regex + 3 score ILIKEs, then the WHERE params.
   const params: DuckDBValue[] = [
     query,
     prefixPattern,
@@ -1018,20 +1039,24 @@ export const searchNodesPage = async (
     pattern,
     pattern,
     pattern,
-    pattern,
-    pattern,
-    pattern,
+    ...whereParams,
+    limit,
+    offset,
   ];
-  let typesClause = '';
-  if (options?.types !== undefined && options.types.length > 0) {
-    typesClause = ` AND type IN (${options.types.map(() => '?').join(', ')})`;
-    params.push(...options.types);
-  }
-  params.push(limit, offset);
 
   // `COUNT(*) OVER ()` gives the TRUE post-filter match count in the SAME
   // round-trip and against the SAME WHERE clause — no second query, and no way
   // for the total to drift from the rows it describes.
+  //
+  // PAGING TOTAL ORDER — the rule for EVERY `LIMIT ? OFFSET ?` query in this
+  // file: the last `ORDER BY` key must be UNIQUE across the rows being paged.
+  // `score` / `length(api_name)` / `api_name` are all non-unique (a vault can
+  // hold ten `Name` fields on ten objects), so a tie left DuckDB free to order
+  // those rows differently for each OFFSET window: a row could land in two
+  // windows while a tied sibling landed in none. `id` is the `nodes` primary
+  // key, so appending it makes the order TOTAL and the walk exhaustive.
+  // The only other paged query here (`listNodesByType`) already ends on
+  // `id ASC`; nothing else in this file takes an OFFSET.
   const sql = `SELECT id, api_name, label, properties_json,
       COUNT(*) OVER () AS total_matches,
       CASE
@@ -1044,8 +1069,8 @@ export const searchNodesPage = async (
         ELSE 0.0
       END AS score
     FROM nodes
-    WHERE (api_name ILIKE ? OR label ILIKE ? OR properties_json ILIKE ?)${typesClause}
-    ORDER BY score DESC, length(api_name) ASC, api_name ASC
+    ${whereSql}
+    ORDER BY score DESC, length(api_name) ASC, api_name ASC, id ASC
     LIMIT ? OFFSET ?`;
 
   try {
@@ -1060,11 +1085,22 @@ export const searchNodesPage = async (
         (r['properties_json'] as string | null) ?? '{}',
       ),
     }));
-    // `total_matches` is constant across the window; an empty page past the
-    // end yields no rows, and a zero total is then correct for THIS page —
-    // callers that need the total on an over-run page re-query at offset 0.
-    const totalCount =
+    // `total_matches` is constant across the window, so the page carries its own
+    // total for free. An OVER-RUN page (offset already past the end) returns no
+    // rows and therefore no window value — and a `0` there would be an UNCHECKED
+    // zero wearing a CHECKED zero's clothes: indistinguishable from "nothing
+    // matched". One extra COUNT, on the SAME `whereSql`/`whereParams`, is paid
+    // only on that page and makes `totalCount` TRUE on every response.
+    let totalCount =
       rows.length > 0 ? Number(rows[0]?.['total_matches'] ?? 0) : 0;
+    if (rows.length === 0 && offset > 0) {
+      const countRows = await fetchRows(
+        store,
+        `SELECT COUNT(*) AS total_matches FROM nodes ${whereSql}`,
+        whereParams,
+      );
+      totalCount = Number(countRows[0]?.['total_matches'] ?? 0);
+    }
     return ok({ hits, totalCount });
   } catch (e) {
     return err(queryFailed('searchNodes', e));
