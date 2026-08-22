@@ -199,8 +199,9 @@ export interface ExplainApexClassifiers {
  *
  *   - `declared` — the source sharing keyword (`with sharing` /
  *     `without sharing` / `inherited sharing`) or `null` when none is
- *     declared. Read from `modifiers` (the sharing keyword is a class-decl
- *     modifier), not from the `.cls-meta.xml`.
+ *     declared. Read from the class node's `properties.sharingModel` (the
+ *     extractor's own read of the class DECLARATION — see
+ *     {@link readDeclaredSharingFromNode}), never from the `.cls-meta.xml`.
  *   - `effectiveModel` — what enforcement actually applies:
  *       • a declared keyword maps to itself;
  *       • NO keyword on a SYNCHRONOUS entry inherits the caller's context
@@ -229,6 +230,54 @@ export interface ExplainApexSharingSemantics {
   readonly runsAsSystem: boolean;
   readonly note: string;
 }
+
+/**
+ * The sharing keyword was NOT READ — a third state, distinct from both "a
+ * keyword is declared" and "no keyword is declared".
+ *
+ * Same vocabulary as `sfi.apex_structure`'s `ApexSharingNotRead`
+ * (`effectiveModel: 'not-read'`), so the two tools cannot answer the same
+ * question in two different languages. It arises when the vault node carries
+ * NEITHER `properties.sharingModel` NOR a sharing keyword inside
+ * `properties.modifiers`: nothing in this answer looked at the class
+ * declaration. Reporting `inherits-caller` there would be a WRONG SECURITY
+ * ANSWER — a `without sharing` class on such a node presents identically — so
+ * no enforcement model is asserted at all.
+ */
+export interface ExplainApexSharingNotRead {
+  readonly declared: null;
+  readonly effectiveModel: 'not-read';
+  /**
+   * Derived from the vault's async classifiers, which are independent of the
+   * class declaration — `null` when the node carries none of them either, so
+   * the `false` a bare boolean would show is never an unchecked zero.
+   */
+  readonly runsAsSystem: boolean | null;
+  readonly note: string;
+}
+
+/** The sharing block: the composed semantics, or the NOT-READ state. */
+export type ExplainApexSharing = ExplainApexSharingSemantics | ExplainApexSharingNotRead;
+
+/**
+ * Where the sharing keyword was read from — the same axis
+ * `sfi.apex_structure` exposes as `meta.sharingSource`, with one extra member
+ * for the property this tool reads (`apex_structure` reaches the same fact
+ * through its own source parse).
+ *
+ *   - `node-sharing-model`      — `properties.sharingModel`, the extractor's
+ *     structured read of the class declaration. The normal path.
+ *   - `node-modifiers`          — legacy layout: the keyword was joined into
+ *     `properties.modifiers` (e.g. `['global', 'with sharing']`).
+ *   - `trigger-system-context`  — an ApexTrigger, which CANNOT declare one.
+ *   - `not-read`                — nothing carried it; see
+ *     {@link ExplainApexSharingNotRead}.
+ */
+export type ExplainApexSharingSource =
+  | 'node-sharing-model'
+  | 'node-modifiers'
+  | 'trigger-system-context'
+  | 'not-read';
 
 /**
  * One outgoing `callsApex` target. `targetId` is the canonical id of
@@ -289,9 +338,17 @@ export interface ExplainApexMethodOutput {
    * Deterministic sharing-enforcement semantics (see
    * {@link ExplainApexSharingSemantics}). Always present so a "does this run
    * with sharing?" question is answered from platform rules, not the
-   * "no keyword = without sharing" misconception.
+   * "no keyword = without sharing" misconception. When NOTHING carried the
+   * keyword the block is {@link ExplainApexSharingNotRead} — a third state, not
+   * a guessed `inherits-caller`.
    */
-  readonly sharingSemantics: ExplainApexSharingSemantics;
+  readonly sharingSemantics: ExplainApexSharing;
+  /**
+   * Which input the sharing keyword was read from (or that nothing read it).
+   * Matches `sfi.apex_structure`'s `meta.sharingSource` vocabulary so a caller
+   * comparing the two tools sees one axis, not two.
+   */
+  readonly sharingSource: ExplainApexSharingSource;
   readonly calls: readonly ExplainApexCall[];
   /** Heuristic `callsApex` edges with no matching graph node (scanner-only). */
   readonly unresolvedCallTargets: readonly string[];
@@ -448,25 +505,142 @@ const buildClassifiers = (node: Node): ExplainApexClassifiers => ({
   isRestResource: readBool(node, 'isRestResource'),
 });
 
+/** The three sharing keywords a top-level Apex class may declare. */
+type DeclaredSharing = 'with sharing' | 'without sharing' | 'inherited sharing';
+
+/** Recognise a sharing keyword in whatever casing/whitespace a vault stored. */
+const asDeclaredSharing = (raw: unknown): DeclaredSharing | null => {
+  if (typeof raw !== 'string') return null;
+  const norm = raw.trim().toLowerCase();
+  if (norm === 'with sharing') return 'with sharing';
+  if (norm === 'without sharing') return 'without sharing';
+  if (norm === 'inherited sharing') return 'inherited sharing';
+  return null;
+};
+
 /**
- * Read the declared sharing keyword out of the class's `modifiers`. The
- * sharing keyword is a class-declaration modifier (`with sharing` /
- * `without sharing` / `inherited sharing`), surfaced as a single joined token
- * by the extractor (e.g. `['global', 'with sharing']`). Returns `null` when no
- * sharing keyword is declared. Read from source modifiers, NOT the
- * `.cls-meta.xml` (which does not carry the sharing keyword).
+ * Read the declared sharing keyword out of the class's `modifiers`. Kept for
+ * the LEGACY vault layout, where the extractor joined the keyword into the
+ * modifier list (e.g. `['global', 'with sharing']`). The current extractor
+ * does NOT: it splits the class header into `modifiers` (access/abstract/
+ * virtual only) and `sharingModel` (the keyword), so a keyword-carrying
+ * `modifiers` array is now the exception, not the rule.
  */
-const readDeclaredSharing = (
-  modifiers: readonly string[],
-): 'with sharing' | 'without sharing' | 'inherited sharing' | null => {
+const readDeclaredSharing = (modifiers: readonly string[]): DeclaredSharing | null => {
   for (const m of modifiers) {
-    const norm = m.trim().toLowerCase();
-    if (norm === 'with sharing') return 'with sharing';
-    if (norm === 'without sharing') return 'without sharing';
-    if (norm === 'inherited sharing') return 'inherited sharing';
+    const found = asDeclaredSharing(m);
+    if (found !== null) return found;
   }
   return null;
 };
+
+/** What a sharing read found, and where it found it. */
+interface SharingRead {
+  readonly declared: DeclaredSharing | null;
+  readonly source: ExplainApexSharingSource;
+  /**
+   * A `sharingModel` value present on the node that is not one of the three
+   * platform keywords. Named verbatim in the NOT-READ note rather than
+   * silently coerced to "no keyword declared".
+   */
+  readonly unrecognizedValue: string | null;
+}
+
+/**
+ * Read the class's DECLARED sharing keyword off the vault node.
+ *
+ * SHARING-KEYWORD-LIVES-IN-SHARINGMODEL. The extractor writes the keyword to
+ * `properties.sharingModel` and leaves it OUT of `properties.modifiers`
+ * (`apex-header-parser` collects the two separately). Reading only `modifiers`
+ * therefore answered `declared: null` for EVERY class that declares a keyword —
+ * including every `without sharing` class, the security-relevant direction,
+ * which was reported as inheriting the caller's context when it does not.
+ *
+ * Cascade, keyword-first so a keyword found ANYWHERE wins:
+ *   1. `properties.sharingModel` holds a keyword → that, `node-sharing-model`.
+ *   2. `properties.modifiers` holds one (legacy layout) → that, `node-modifiers`.
+ *   3. `properties.sharingModel` is present and explicitly `null` → the
+ *      extractor READ the declaration and found no keyword: `declared: null`,
+ *      `node-sharing-model`. This is the real "no keyword" case.
+ *   4. otherwise → `not-read`. NEITHER property carried the keyword, so the
+ *      declaration was never looked at and no model is asserted.
+ */
+const readDeclaredSharingFromNode = (node: Node): SharingRead => {
+  const raw = node.properties['sharingModel'];
+  const fromProperty = asDeclaredSharing(raw);
+  if (fromProperty !== null) {
+    return { declared: fromProperty, source: 'node-sharing-model', unrecognizedValue: null };
+  }
+  const fromModifiers = readDeclaredSharing(readStringArray(node, 'modifiers'));
+  if (fromModifiers !== null) {
+    return { declared: fromModifiers, source: 'node-modifiers', unrecognizedValue: null };
+  }
+  if (raw === null) {
+    return { declared: null, source: 'node-sharing-model', unrecognizedValue: null };
+  }
+  return {
+    declared: null,
+    source: 'not-read',
+    unrecognizedValue: raw === undefined ? null : JSON.stringify(raw),
+  };
+};
+
+/**
+ * Sharing semantics for an ApexTrigger. A trigger CANNOT declare a sharing
+ * keyword, so `declared: null` here means "the keyword does not exist for this
+ * component type", not "one was omitted" — and `inherits-caller` would be a
+ * wrong security answer, because the platform's DML invokes a trigger with no
+ * Apex caller to inherit from. Byte-identical to `sfi.apex_structure`'s
+ * `TRIGGER_SHARING`, so the two tools answer this with one voice.
+ */
+const TRIGGER_SHARING: ExplainApexSharingSemantics = {
+  declared: null,
+  effectiveModel: 'system-context',
+  runsAsSystem: true,
+  note: 'An Apex trigger CANNOT declare a sharing keyword — `declared: null` here means the keyword does not exist for this component type, not that one was omitted. Triggers execute in SYSTEM CONTEXT: record sharing, object CRUD, and field-level security are NOT enforced for the running user, and any class the trigger calls that declares no sharing keyword inherits that system context. To enforce sharing for the work a trigger does, move the logic into a `with sharing` handler class and call that.',
+};
+
+/** The v1.5 classifier property keys, in one place for the presence check. */
+const CLASSIFIER_KEYS = [
+  'isQueueable',
+  'isSchedulable',
+  'isBatchable',
+  'hasFutureMethod',
+  'hasInvocableMethod',
+  'hasAuraEnabledMethod',
+  'isRestResource',
+] as const;
+
+/** True when the vault node carries the classifier family at all. */
+const classifiersAvailable = (node: Node): boolean =>
+  CLASSIFIER_KEYS.some((key) => Object.hasOwn(node.properties, key));
+
+/**
+ * The sharing block for a CLASS whose keyword NOBODY READ. Mirrors
+ * `sfi.apex_structure`'s `sharingNotRead` state and vocabulary.
+ */
+const sharingNotRead = (
+  runsAsSystem: boolean | null,
+  unrecognizedValue: string | null,
+): ExplainApexSharingNotRead => ({
+  declared: null,
+  effectiveModel: 'not-read',
+  runsAsSystem,
+  note:
+    `NOT READ — the sharing keyword was not read from ANYWHERE for this class: this vault node carries no \`sharingModel\` property and no sharing keyword inside \`modifiers\`.${
+      unrecognizedValue === null
+        ? ''
+        : ` The node's \`sharingModel\` value ${unrecognizedValue} is not one of the three platform keywords, so it was NOT interpreted.`
+    } This is NOT "no keyword is declared" and NOT \`inherits-caller\`: a \`without sharing\` class on such a node presents exactly like this, so no enforcement model is asserted here. Read the \`.cls\` directly, or re-run /sfi-refresh so the node carries \`sharingModel\`.${
+      runsAsSystem === null
+        ? ' `runsAsSystem` is null for the same reason class of absence: this node carries none of the async classifier properties either, so whether the platform runs this as the system was NOT CHECKED.'
+        : ' `runsAsSystem` IS known — it comes from the vault\'s async classifiers, which do not depend on the class declaration.'
+    }`,
+});
+
+/** Verbatim disclosure suffix appended when the sharing keyword was NOT READ. */
+const SHARING_NOT_READ_SUFFIX =
+  ' The sharing keyword was NOT READ for this component (see `sharingSemantics.effectiveModel: "not-read"` and `sharingSource`): the vault node carries neither `sharingModel` nor a keyword-bearing `modifiers` array, so no enforcement model is asserted — this is NOT "no keyword is declared".';
 
 /**
  * Compose the authoritative {@link ExplainApexSharingSemantics} block from the
@@ -740,6 +914,32 @@ export const explainApexMethodHandler = async (
 
   const modifiers = readStringArray(node, 'modifiers');
   const classifiers = buildClassifiers(node);
+  // SHARING-KEYWORD-LIVES-IN-SHARINGMODEL — the keyword comes off the node's
+  // `sharingModel` property (legacy vaults: `modifiers`), and an ApexTrigger
+  // cannot declare one at all. A node carrying neither is NOT-READ, never a
+  // guessed `inherits-caller`.
+  const sharingRead =
+    node.type === 'ApexTrigger'
+      ? ({
+          declared: null,
+          source: 'trigger-system-context',
+          unrecognizedValue: null,
+        } as const satisfies SharingRead)
+      : readDeclaredSharingFromNode(node);
+  const sharingSemantics: ExplainApexSharing =
+    sharingRead.source === 'trigger-system-context'
+      ? TRIGGER_SHARING
+      : sharingRead.source === 'not-read'
+        ? sharingNotRead(
+            classifiersAvailable(node)
+              ? classifiers.isBatchable ||
+                classifiers.isSchedulable ||
+                classifiers.isQueueable ||
+                classifiers.hasFutureMethod
+              : null,
+            sharingRead.unrecognizedValue,
+          )
+        : buildSharingSemantics(sharingRead.declared, classifiers);
   const data: ExplainApexMethodOutput = {
     classApiName: classId,
     apiName: node.apiName,
@@ -754,10 +954,8 @@ export const explainApexMethodHandler = async (
     sourceBytes: readNumber(node, 'sourceBytes'),
     isTest: readBool(node, 'isTest'),
     classifiers,
-    sharingSemantics: buildSharingSemantics(
-      readDeclaredSharing(modifiers),
-      classifiers,
-    ),
+    sharingSemantics,
+    sharingSource: sharingRead.source,
     calls: callsResult.value.calls,
     unresolvedCallTargets: callsResult.value.unresolvedCallTargets,
     fieldAccess: fieldAccessResult.value.resolved,
@@ -796,7 +994,8 @@ export const explainApexMethodHandler = async (
           )) +
       (Object.hasOwn(node.properties, 'qualityIssues')
         ? ''
-        : QUALITY_NOT_SCANNED_SUFFIX),
+        : QUALITY_NOT_SCANNED_SUFFIX) +
+      (sharingRead.source === 'not-read' ? SHARING_NOT_READ_SUFFIX : ''),
   };
 
   const annotations = await annotationsBlockFor(ctx, classId);

@@ -112,6 +112,7 @@ import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { coercePrefix } from './coerce-id.js';
+import type { CoverageCaveat } from './coverage-trust.js';
 import { firstNonEmpty } from './input-aliases.js';
 
 /** Canonical id prefix for the Flow node type. */
@@ -214,21 +215,76 @@ export interface ExplainFlowTriggerCondition {
    * (`ExplainFlowDecision.fieldReferences`).
    */
   readonly fieldReferences: readonly ComponentId[];
+  /**
+   * The ConditionalContext's `properties.kind` verbatim — `flow-recordtrigger`
+   * for a `<start><filters>` / `<start><filterFormula>` ENTRY criterion,
+   * `flow-decision` for a `<decisions><rules>` branch. `null` when the node
+   * carries no `kind` (a vault built before the classifier), in which case the
+   * row is UNCLASSIFIED and appears in
+   * {@link ExplainFlowTriggerInfo.unclassifiedConditions} — never guessed into
+   * one bucket or the other. Same vocabulary as
+   * `sfi.field_360`'s `conditionKind`.
+   */
+  readonly conditionKind: string | null;
 }
+
+/**
+ * How to read {@link ExplainFlowTriggerInfo.conditions}.
+ *
+ *   - `entry-criteria`  — at least one `flow-recordtrigger` context was found;
+ *     `conditions` IS the flow's entry criteria.
+ *   - `not-applicable`  — the flow is not record-triggered, so there is no
+ *     `<start>` filter surface for entry criteria to live on. An empty
+ *     `conditions` here is a CHECKED zero.
+ *   - `not-determined`  — the flow IS record-triggered but the vault holds no
+ *     `flow-recordtrigger` context for it. "Declares no entry filters" and
+ *     "the builder never recorded them" are indistinguishable from the graph,
+ *     so the empty list is UNCHECKED — it must NOT be read as "runs on every
+ *     save".
+ *   - `unclassified`    — at least one `firesWhen` context carries no `kind`,
+ *     so entry criteria could not be separated from decision rules at all.
+ */
+export type ExplainFlowTriggerConditionsState =
+  | 'entry-criteria'
+  | 'not-applicable'
+  | 'not-determined'
+  | 'unclassified';
 
 /**
  * The Flow's start-info block. `triggerType` mirrors the Flow node's
  * `properties.triggerType` (e.g., `RecordAfterSave`, `Scheduled`,
  * `PlatformEvent`); `triggerObject` is the resolved
  * `CustomObject:{ApiName}` id from the Flow's outgoing `triggersOn`
- * edge (when one exists). `conditions` is the list of every
- * `firesWhen` ConditionalContext the Flow points at — the gating
- * conditions for the trigger phase.
+ * edge (when one exists).
+ *
+ * ENTRY-CRITERIA-ARE-NOT-DECISION-RULES. `conditions` is the flow's ENTRY
+ * CRITERIA — the `<start>` filters that decide whether the flow RUNS AT ALL —
+ * and nothing else. It used to be every `firesWhen` ConditionalContext the Flow
+ * pointed at, which folded the flow's internal `<decisions>` rules into the
+ * answer to "when does this flow run?" and named fields the `<start>` block
+ * never mentions. The graph already separates the two on
+ * `ConditionalContext.properties.kind`; this axis reads it.
  */
 export interface ExplainFlowTriggerInfo {
   readonly triggerType: string;
   readonly triggerObject: ComponentId | null;
+  /** ENTRY criteria only (`kind: 'flow-recordtrigger'`). Read with `conditionsState`. */
   readonly conditions: readonly ExplainFlowTriggerCondition[];
+  /** What an empty (or non-empty) `conditions` means. See the union's doc. */
+  readonly conditionsState: ExplainFlowTriggerConditionsState;
+  /**
+   * Verbatim reason for every state except `entry-criteria` — so a caller
+   * never has to infer why the list is empty. `null` when the criteria WERE
+   * read.
+   */
+  readonly conditionsNote: string | null;
+  /**
+   * Every `firesWhen` context whose `kind` was absent. Neither entry criterion
+   * nor decision could be asserted for these, so they are surfaced HERE rather
+   * than guessed into either list. Empty on any vault whose builder classified
+   * conditions.
+   */
+  readonly unclassifiedConditions: readonly ExplainFlowTriggerCondition[];
 }
 
 /**
@@ -309,20 +365,28 @@ export interface ExplainFlowRecordWrite {
 }
 
 /**
- * One decision in the Flow body. The `decisionName` is the firer's REAL
- * element name when the extractor captured one — for a Flow decision, the
- * `<decisions><name>` + matched `<rules><name>` (e.g.
- * `My_Decision (My_Outcome)`), surfaced verbatim from the mirror
- * entry's `sourceName`. It falls back to the synthetic ConditionalContext
- * apiName (e.g., `Flow:Account_Notify.condition-2`) only when no name was
- * captured (an older vault, or a nameless firer surface). `conditions`
- * carries the rendered expression text from the mirror entry.
+ * One decision in the Flow body — a `<decisions><rules>` branch, and ONLY
+ * that: the mirror also carries the flow's `<start>` entry criteria, and those
+ * belong to {@link ExplainFlowTriggerInfo}, not here.
+ *
+ * `decisionName` is the firer's REAL element name — the `<decisions><name>` +
+ * matched `<rules><name>` (e.g. `My_Decision (My_Outcome)`), surfaced verbatim
+ * from the mirror entry's `sourceName`. It is `null` when the vault never
+ * recorded one; the synthetic `condition-N` handle it used to fall back to is a
+ * GRAPH id, not a name the flow author would recognise, and rendering it in the
+ * `decisionName` slot made an absent name look like a present one. The handle
+ * is still available, unambiguously, as `conditionContextId`.
+ *
+ * `conditions` carries the rendered expression text from the mirror entry.
  * Multi-condition decisions surface every expression in the array.
  * `fieldReferences` carries the fields the decision actually evaluates —
  * without them the row would say nothing about WHAT the flow branches on.
  */
 export interface ExplainFlowDecision {
-  readonly decisionName: string;
+  /** The flow element's own name, or `null` when the vault did not record it. */
+  readonly decisionName: string | null;
+  /** The synthetic ConditionalContext id — always present, always a handle. */
+  readonly conditionContextId: ComponentId;
   readonly conditions: readonly string[];
   /**
    * Raw flow-context field paths the decision evaluates (e.g.
@@ -450,6 +514,15 @@ export interface ExplainFlowOutput {
    * `walkthrough: true` mode).
    */
   readonly seeAlso: string;
+  /**
+   * ENTRY-CRITERIA-ARE-NOT-DECISION-RULES. Present when the condition axis
+   * could not be answered completely — the flow is record-triggered but the
+   * vault holds no entry criteria for it, at least one firing condition is
+   * unclassified, or a decision's element name was never recorded. Absent when
+   * every condition fact was read. Same `coverageCaveat` shape the rest of the
+   * roster uses, so a host renders it the same way.
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
 }
@@ -779,12 +852,46 @@ const findTriggerObject = async (
   return ok(firstEdge.toId);
 };
 
+/** The `kind` a ConditionalContext carries for a Flow ENTRY criterion. */
+const RECORD_TRIGGER_KIND = 'flow-recordtrigger';
+/** The `kind` a ConditionalContext carries for a Flow `<decisions>` rule. */
+const FLOW_DECISION_KIND = 'flow-decision';
+
+/** Read `properties.kind` off a ConditionalContext; `null` when it carries none. */
+const readConditionKind = (properties: Record<string, unknown>): string | null => {
+  const raw = properties['kind'];
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+};
+
+/** The partition of a Flow's `firesWhen` contexts, split on `properties.kind`. */
+interface TriggerConditionPartition {
+  /** `kind: 'flow-recordtrigger'` — the flow's ENTRY criteria. */
+  readonly entryCriteria: readonly ExplainFlowTriggerCondition[];
+  /** Contexts carrying NO `kind` — neither bucket can be asserted for them. */
+  readonly unclassified: readonly ExplainFlowTriggerCondition[];
+  /**
+   * `conditionContextId` → the `kind` the NODE carried, for every context
+   * reached. Lets the decision axis (which reads the Flow node's `conditions`
+   * mirror) partition on exactly the same evidence, so the two lists cannot
+   * disagree about which context is which.
+   */
+  readonly kindByContextId: ReadonlyMap<string, string | null>;
+}
+
 /**
- * Surface every `firesWhen` ConditionalContext the Flow points at.
- * Each entry carries the synthetic conditionContextId, the parsed
- * expression text, and the `fieldRefs` the condition evaluates — the
- * scalar fast-path that lets the renderer inline the predicate (and the
- * fields it gates on) without an extra graph traversal.
+ * Walk every `firesWhen` ConditionalContext the Flow points at and PARTITION
+ * them on `properties.kind`.
+ *
+ * ENTRY-CRITERIA-ARE-NOT-DECISION-RULES. This used to return every context as
+ * "the gating conditions for the trigger phase", which answered "when does
+ * this flow run?" with the flow's internal `<decisions>` rules mixed in — on a
+ * real flow whose `<start>` names ONE field, six conditions came back, five of
+ * them decision branches, and the record-trigger criterion appeared in the
+ * decision list too. The extractor has always tagged the two apart
+ * (`flow-recordtrigger` vs `flow-decision`); nothing read the tag.
+ *
+ * A context with NO `kind` is NOT guessed into a bucket — it goes to
+ * `unclassified` and the caller is told the two could not be separated.
  *
  * Sparse-graph misses (an edge whose target ConditionalContext was
  * dropped) are silently skipped.
@@ -792,7 +899,7 @@ const findTriggerObject = async (
 const collectTriggerConditions = async (
   ctx: Context,
   flowId: ComponentId,
-): Promise<Result<readonly ExplainFlowTriggerCondition[], string>> => {
+): Promise<Result<TriggerConditionPartition, string>> => {
   const edgesResult = await listEdges(ctx.graph, flowId, {
     direction: 'out',
     edgeType: 'firesWhen',
@@ -807,7 +914,9 @@ const collectTriggerConditions = async (
   );
   if (!nodesResult.ok) return err(nodesResult.error.message);
   const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
-  const out: ExplainFlowTriggerCondition[] = [];
+  const entryCriteria: ExplainFlowTriggerCondition[] = [];
+  const unclassified: ExplainFlowTriggerCondition[] = [];
+  const kindByContextId = new Map<string, string | null>();
   for (const edge of edgesResult.value) {
     const conditionNode = byId.get(edge.toId);
     if (conditionNode === undefined) continue;
@@ -820,14 +929,116 @@ const collectTriggerConditions = async (
     const fieldReferences: readonly ComponentId[] = Array.isArray(rawFieldRefs)
       ? rawFieldRefs.filter((v): v is ComponentId => typeof v === 'string')
       : [];
-    out.push({
+    const conditionKind = readConditionKind(conditionNode.properties);
+    kindByContextId.set(conditionNode.id, conditionKind);
+    const row: ExplainFlowTriggerCondition = {
       conditionContextId: conditionNode.id,
       expression: typeof expressionRaw === 'string' ? expressionRaw : '',
       fieldReferences,
-    });
+      conditionKind,
+    };
+    if (conditionKind === RECORD_TRIGGER_KIND) entryCriteria.push(row);
+    else if (conditionKind === null) unclassified.push(row);
+    // A classified non-record-trigger kind (`flow-decision`) belongs to the
+    // decision axis, not here — deliberately dropped from BOTH trigger lists.
   }
-  return ok(out);
+  return ok({ entryCriteria, unclassified, kindByContextId });
 };
+
+/** True for a `triggerType` that gives the flow a `<start>` filter surface. */
+const isRecordTriggered = (triggerType: string): boolean =>
+  triggerType.startsWith('Record');
+
+/**
+ * Compose the ENTRY-CRITERIA honesty state + its verbatim reason.
+ *
+ * The load-bearing case is `not-determined`: a record-triggered flow with no
+ * `flow-recordtrigger` context. "This flow declares no entry filters" and "the
+ * builder that wrote this vault did not record them" produce an identical
+ * empty list, and the difference is the whole answer to "when does this flow
+ * run?" — so the zero is reported UNCHECKED rather than as "runs on every
+ * save".
+ */
+const buildConditionsState = (
+  triggerType: string,
+  entryCriteria: readonly ExplainFlowTriggerCondition[],
+  unclassified: readonly ExplainFlowTriggerCondition[],
+): {
+  readonly state: ExplainFlowTriggerConditionsState;
+  readonly note: string | null;
+} => {
+  if (unclassified.length > 0) {
+    return {
+      state: 'unclassified',
+      note: `${unclassified.length} of this flow's firing conditions carry no \`kind\` on their ConditionalContext node, so ENTRY CRITERIA COULD NOT BE SEPARATED from decision rules: they are listed verbatim in \`triggerInfo.unclassifiedConditions\` rather than guessed into either list. Re-run /sfi-refresh so the builder classifies them; until then treat \`conditions\` as incomplete, not as the whole entry criteria.`,
+    };
+  }
+  if (entryCriteria.length > 0) return { state: 'entry-criteria', note: null };
+  if (!isRecordTriggered(triggerType)) {
+    return {
+      state: 'not-applicable',
+      note: `\`triggerType\` is ${triggerType === '' ? 'absent' : `\`${triggerType}\``}, not a record trigger, so this flow has no \`<start>\` record-entry filter surface — the empty \`conditions\` list is CHECKED, not unknown. What starts this flow is its invocation (subflow call, action, schedule, or platform event), not record criteria.`,
+    };
+  }
+  return {
+    state: 'not-determined',
+    note: 'ENTRY CRITERIA NOT DETERMINED — this flow IS record-triggered, but the vault holds no `flow-recordtrigger` ConditionalContext for it. From the graph alone, "the flow declares no `<start>` filters (so it runs on every qualifying save)" and "the builder that wrote this vault did not record its entry filters" are INDISTINGUISHABLE, so the empty list is NOT CHECKED — do not read it as "runs unconditionally". Re-run /sfi-refresh, or read the flow\'s `<start>` block via `sfi.flow_graph`.',
+  };
+};
+
+/** Verbatim coverage-gap text for the `not-determined` entry-criteria state. */
+const ENTRY_CRITERIA_NOT_RECORDED_GAP = {
+  family: 'Flow `<start>` entry criteria (ConditionalContext kind=flow-recordtrigger)',
+  message:
+    'The entry criteria for this record-triggered flow cannot be confirmed because the vault carries no `flow-recordtrigger` ConditionalContext for it. Treat the empty `triggerInfo.conditions` as "not checked", not "this flow runs on every save". Re-run /sfi-refresh, or read the `<start>` block with `sfi.flow_graph`.',
+} as const;
+
+/** Verbatim coverage-gap text for the `unclassified` entry-criteria state. */
+const CONDITION_KIND_NOT_RECORDED_GAP = {
+  family: 'ConditionalContext `kind` classification',
+  message:
+    'The split between entry criteria and decision rules cannot be confirmed because at least one of this flow\'s firing conditions carries no `kind`. The unclassified rows are in `triggerInfo.unclassifiedConditions`; treat both `triggerInfo.conditions` and `decisions` as incomplete. Re-run /sfi-refresh.',
+} as const;
+
+/** One named condition-axis gap: the family that is missing, and why it matters. */
+interface ConditionCoverageGap {
+  readonly family: string;
+  readonly message: string;
+}
+
+/**
+ * Verbatim coverage-gap text for decision rows whose element NAME the vault
+ * never recorded. Composed per response because it names the count.
+ */
+const decisionNamesNotRecordedGap = (
+  unnamed: number,
+  total: number,
+): ConditionCoverageGap => ({
+  family: 'Flow `<decisions>` element names (ConditionalContext `sourceName`)',
+  message: `Decision NAMES cannot be confirmed for ${unnamed} of ${total} decision(s) because this vault's ConditionalContext entries carry no \`sourceName\`. Those rows report \`decisionName: null\` — the flow's real element name (e.g. the \`<decisions><name>\`) is NOT recoverable from this graph; use \`conditionContextId\` as the handle, or re-run /sfi-refresh so the builder records the names.`,
+});
+
+/**
+ * Fold EVERY condition-axis gap into one `coverageCaveat`.
+ *
+ * A single-slot "first gap wins" would have HIDDEN the decision-name gap
+ * behind the entry-criteria gap on exactly the vaults that have both — the
+ * same class of silent omission this fix exists to remove. `status` is
+ * `unknown` when a whole axis could not be answered (entry criteria absent, or
+ * conditions unclassified) and `partial` when only detail inside an answered
+ * axis is missing (unnamed decisions).
+ */
+const buildConditionsCoverageCaveat = (
+  gaps: readonly ConditionCoverageGap[],
+  status: CoverageCaveat['status'],
+): CoverageCaveat | undefined =>
+  gaps.length === 0
+    ? undefined
+    : {
+        status,
+        missingCoverage: gaps.map((g) => g.family),
+        message: gaps.map((g) => g.message).join(' '),
+      };
 
 /**
  * Strip the `CustomObject:` prefix from a canonical id to surface the
@@ -1134,31 +1345,33 @@ const collectRecordWrites = async (
 };
 
 /**
- * Pull the synthetic ConditionalContext apiName from a mirror entry's
- * conditionContextId. The id shape is
- * `ConditionalContext:{ParentId}.condition-{N}`; the apiName is
- * everything after the first colon. Returns the verbatim id for
- * malformed inputs so the renderer always has SOME handle.
- */
-const decisionNameOf = (conditionContextId: string): string => {
-  const colonIdx = conditionContextId.indexOf(':');
-  if (colonIdx < 0) return conditionContextId;
-  return conditionContextId.slice(colonIdx + 1);
-};
-
-/**
  * Read the v2.0a `properties.conditions[]` mirror from the Flow node
- * and surface each entry as an `ExplainFlowDecision`. The mirror is
- * the source of truth for the decision-narrative axis — walking the
+ * and surface each `<decisions>` entry as an `ExplainFlowDecision`. The mirror
+ * is the source of truth for the decision-narrative axis — walking the
  * `firesWhen` edges would require a separate roundtrip per decision,
  * and the mirror was designed exactly for this read pattern.
+ *
+ * ENTRY-CRITERIA-ARE-NOT-DECISION-RULES. The mirror carries the flow's
+ * `<start>` ENTRY criteria alongside its `<decisions>` rules, and this used to
+ * emit ALL of them — so a flow's record-trigger criterion appeared in the
+ * decision list under a synthetic `condition-N` name. Only `flow-decision`
+ * contexts are decisions. `kindByContextId` (the `kind` read off the
+ * ConditionalContext NODES for the same flow) wins over the mirror entry's own
+ * `kind`, so the trigger and decision axes partition on identical evidence;
+ * the mirror's copy is the fallback when a node was not reached.
+ *
+ * An entry with NO `kind` from either source is UNCLASSIFIED — it is left out
+ * rather than guessed in, and `triggerInfo.conditionsState` says so.
  *
  * Each mirror entry carries `expression` (the rendered predicate);
  * the `conditions` array is `[expression]` since the mirror is one-
  * entry-per-condition. Multi-condition decisions appear as multiple
  * mirror entries — each surfaces as its own decision row.
  */
-const collectDecisions = (node: Node): readonly ExplainFlowDecision[] => {
+const collectDecisions = (
+  node: Node,
+  kindByContextId: ReadonlyMap<string, string | null>,
+): readonly ExplainFlowDecision[] => {
   const mirror = node.properties['conditions'];
   if (!Array.isArray(mirror)) return [];
   const out: ExplainFlowDecision[] = [];
@@ -1168,16 +1381,16 @@ const collectDecisions = (node: Node): readonly ExplainFlowDecision[] => {
     const conditionContextId = obj['conditionContextId'];
     const expression = obj['expression'];
     if (typeof conditionContextId !== 'string') continue;
-    // Prefer the firer's REAL element name (a Flow decision's `<name>` + rule
-    // `<name>`, captured into the mirror as `sourceName`) over the synthetic
-    // `condition-N` handle. Fall back to the synthetic apiName when the source
-    // never captured a name (a criteria / formula / record-trigger firer, or
-    // an older vault built before this fix).
+    const kind = kindByContextId.get(conditionContextId) ?? readConditionKind(obj);
+    if (kind !== FLOW_DECISION_KIND) continue;
+    // The firer's REAL element name (a Flow decision's `<name>` + rule
+    // `<name>`, captured into the mirror as `sourceName`). NULL when the vault
+    // never captured one: the synthetic `condition-N` handle this used to fall
+    // back to is a graph id, not a name, and putting it in the `decisionName`
+    // slot made an unrecorded name indistinguishable from a recorded one.
     const sourceName = obj['sourceName'];
     const decisionName =
-      typeof sourceName === 'string' && sourceName.length > 0
-        ? sourceName
-        : decisionNameOf(conditionContextId);
+      typeof sourceName === 'string' && sourceName.length > 0 ? sourceName : null;
     const expressionText = typeof expression === 'string' ? expression : '';
     // Surface the fields the decision evaluates (mirror entry `fieldRefs`).
     // Dropping them left every decision row as a bare connector ("and").
@@ -1187,6 +1400,7 @@ const collectDecisions = (node: Node): readonly ExplainFlowDecision[] => {
       : [];
     out.push({
       decisionName,
+      conditionContextId: conditionContextId as ComponentId,
       conditions: [expressionText],
       fieldReferences,
     });
@@ -1316,6 +1530,36 @@ export const explainFlowHandler = async (
     return err({ kind: 'internal', message: recordWritesResult.error });
   }
 
+  // ENTRY-CRITERIA-ARE-NOT-DECISION-RULES — the `firesWhen` contexts are
+  // partitioned on `properties.kind`: entry criteria come ONLY from
+  // `flow-recordtrigger`, decisions ONLY from `flow-decision`, and an
+  // unclassified context is named rather than assigned.
+  const { entryCriteria, unclassified, kindByContextId } = conditionsResult.value;
+  const triggerType = readFlowTriggerType(node);
+  const { state: conditionsState, note: conditionsNote } = buildConditionsState(
+    triggerType,
+    entryCriteria,
+    unclassified,
+  );
+  const decisions = collectDecisions(node, kindByContextId);
+  const unnamedDecisions = decisions.filter((d) => d.decisionName === null).length;
+  const conditionGaps: ConditionCoverageGap[] = [];
+  if (conditionsState === 'unclassified') conditionGaps.push(CONDITION_KIND_NOT_RECORDED_GAP);
+  if (conditionsState === 'not-determined') {
+    conditionGaps.push(ENTRY_CRITERIA_NOT_RECORDED_GAP);
+  }
+  if (unnamedDecisions > 0) {
+    conditionGaps.push(decisionNamesNotRecordedGap(unnamedDecisions, decisions.length));
+  }
+  const coverageCaveat = buildConditionsCoverageCaveat(
+    conditionGaps,
+    // An unanswerable AXIS is `unknown`; missing detail inside an answered axis
+    // (only the decision names) is `partial`.
+    conditionsState === 'unclassified' || conditionsState === 'not-determined'
+      ? 'unknown'
+      : 'partial',
+  );
+
   const data: ExplainFlowOutput = {
     flowId,
     apiName: node.apiName,
@@ -1324,18 +1568,22 @@ export const explainFlowHandler = async (
     processType: readFlowProcessType(node),
     executionContext: await buildExecutionContext(node, ctx.vaultRoot),
     triggerInfo: {
-      triggerType: readFlowTriggerType(node),
+      triggerType,
       triggerObject: triggerObjectResult.value,
-      conditions: conditionsResult.value,
+      conditions: entryCriteria,
+      conditionsState,
+      conditionsNote,
+      unclassifiedConditions: unclassified,
     },
     actionCalls: actionCallsResult.value,
     subflowCalls: subflowCallsResult.value,
     recordLookups: recordLookupsResult.value,
     recordWrites: recordWritesResult.value,
-    decisions: collectDecisions(node),
+    decisions,
     disclosure: DISCLOSURE,
     conditionsRuntimeNote: CONDITIONS_RUNTIME_NOTE,
     seeAlso: SEE_ALSO_FLOW_GRAPH,
+    ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
   };
   const annotations = await annotationsBlockFor(ctx, node.id);
 
