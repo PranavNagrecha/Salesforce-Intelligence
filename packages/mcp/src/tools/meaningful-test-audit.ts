@@ -54,6 +54,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
@@ -68,6 +69,7 @@ import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
 import { mergeInputAliases } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit } from './scan-cap.js';
 
 /**
@@ -119,6 +121,29 @@ const MEANINGFUL_TEST_DISCLOSURE =
 /** Canonical id prefix used to coerce a bare production-class name. */
 const TARGET_CLASS_PREFIX = 'ApexClass:';
 
+/** Tool name the CR-22 continuation cursor is bound to. */
+const MEANINGFUL_TEST_AUDIT_TOOL = 'sfi.meaningful_test_audit';
+
+/** Inclusive upper bound on `limit`. Mirrors the enumeration-style tools. */
+const MEANINGFUL_TEST_MAX_LIMIT = 500;
+
+/**
+ * Default `limit`. Deliberately at the max: this is a PRE-EMPTIVE resume knob,
+ * so an org under the cap must page exactly as it did before the knob existed
+ * (one whole page, no paging fields emitted, byte-identical response).
+ */
+const MEANINGFUL_TEST_DEFAULT_LIMIT = MEANINGFUL_TEST_MAX_LIMIT;
+
+/** Per-response byte budget for the `tests` page. Mirrors `test_coverage_gaps`. */
+const MEANINGFUL_TEST_PAYLOAD_BUDGET_BYTES = 34_000;
+
+/**
+ * The verbatim paging disclosure, appended to `disclosure` ONLY on a paged
+ * response. Product copy; do not reword.
+ */
+const pagingNote = (shown: number, total: number): string =>
+  ` Showing ${shown} of ${total} test classes. totalTestClassCount is the FULL count; advance with the returned nextCursor.`;
+
 /**
  * Zod schema for the `sfi.meaningful_test_audit` tool input.
  *
@@ -149,6 +174,13 @@ const meaningfulTestAuditInputBaseSchema = z.object({
   classFilter: z.array(z.string().min(1)).max(CLASS_FILTER_MAX).optional(),
   targetClass: z.string().min(1).optional(),
   nameContains: z.string().min(1).optional(),
+  // CR-22 paging. Pre-emptive: today's corpus fits in one page, so a call that
+  // omits all three is byte-identical to the pre-paging response. The knob
+  // exists so the tail is reachable BEFORE an org needs it, rather than after
+  // a silent drop is discovered in production.
+  limit: z.number().int().min(1).max(MEANINGFUL_TEST_MAX_LIMIT).optional(),
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export const meaningfulTestAuditInputSchema = z.preprocess(
@@ -210,12 +242,104 @@ export type MeaningfulTestAuditScope =
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface MeaningfulTestAuditOutput {
+  /** FULL count of scored test classes, ALWAYS the whole set — never the page. */
   readonly totalTestClassCount: number;
+  /** The PAGE of scored test classes (the whole set unless `truncated`). */
   readonly tests: readonly MeaningfulTestEntry[];
   /** The scope actually applied — always present so the target is never silently ignored. */
   readonly appliedScope: MeaningfulTestAuditScope;
   readonly disclosure: string;
+  /**
+   * True when this page does not reach the end of the ranking (cut by `limit`
+   * OR by the byte budget). Emitted ONLY on a paged response, so an org whose
+   * whole corpus fits stays byte-identical to the pre-paging shape.
+   */
+  readonly truncated?: boolean;
+  /** Page size applied. Present only when paged. */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned test class. Present only when paged. */
+  readonly offset?: number;
+  /** Offset to pass on the next call. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /** CR-22 opaque continuation token, present ONLY when this page is truncated. */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
+
+/**
+ * Slice one already-ranked list into a page and build the paging half of the
+ * payload. Shared by the org-wide / filtered path and covering-tests mode so
+ * the two can never drift. Emits NOTHING when the whole list fits and no
+ * offset was requested — that is the byte-identity guarantee.
+ *
+ * The list MUST already be sorted to a TOTAL order (`compareEntries` ends on a
+ * unique `testClassId` tiebreak), or an offset resume would skip / duplicate.
+ */
+const pageEntries = (
+  ctx: Context,
+  entries: readonly MeaningfulTestEntry[],
+  input: Pick<
+    MeaningfulTestAuditInput,
+    'classFilter' | 'targetClass' | 'nameContains' | 'limit' | 'offset' | 'cursor'
+  >,
+): Result<
+  {
+    readonly page: readonly MeaningfulTestEntry[];
+    readonly disclosure: string;
+    readonly pagingFields: Readonly<Record<string, unknown>>;
+  },
+  McpError
+> => {
+  const limit = input.limit ?? MEANINGFUL_TEST_DEFAULT_LIMIT;
+  // All three narrowing args are in the fingerprint, so a cursor minted in
+  // org-wide / class-filter / name-filter / covering-tests mode cannot be
+  // replayed in another. `limit`/`offset`/`cursor` are excluded by
+  // `argsFingerprint` — a different PAGE of the same query is the point.
+  const fingerprintArgs: Record<string, unknown> = {};
+  if (input.classFilter !== undefined) fingerprintArgs['classFilter'] = input.classFilter;
+  if (input.targetClass !== undefined) fingerprintArgs['targetClass'] = input.targetClass;
+  if (input.nameContains !== undefined) fingerprintArgs['nameContains'] = input.nameContains;
+  const fingerprint = argsFingerprint(fingerprintArgs);
+
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: MEANINGFUL_TEST_AUDIT_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(entries, {
+    offset,
+    limit,
+    byteBudget: MEANINGFUL_TEST_PAYLOAD_BUDGET_BYTES,
+    keyOf: (e) => e.testClassId,
+    binding: {
+      tool: MEANINGFUL_TEST_AUDIT_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const truncated = paged.hasMore;
+  const isPaged = truncated || offset > 0;
+  return ok({
+    page: paged.items,
+    disclosure: isPaged
+      ? `${MEANINGFUL_TEST_DISCLOSURE}${pagingNote(paged.items.length, entries.length)}`
+      : MEANINGFUL_TEST_DISCLOSURE,
+    pagingFields: {
+      ...(isPaged ? { truncated, limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + paged.items.length } : {}),
+      ...(paged.nextCursor !== null
+        ? { nextCursor: paged.nextCursor, pageInfo: paged.pageInfo }
+        : {}),
+    },
+  });
+};
 
 const isTestClass = (node: Node): boolean =>
   node.properties['isTest'] === true;
@@ -386,7 +510,7 @@ export const meaningfulTestAuditHandler = async (
   // production-class id passed as componentId/classApiName/targetId now scopes
   // the audit instead of being dropped.
   if (input.targetClass !== undefined) {
-    return coveringTestsMode(ctx, input.targetClass);
+    return coveringTestsMode(ctx, input.targetClass, input);
   }
 
   const classesRes = await loadAllNodes(ctx, 'ApexClass');
@@ -427,12 +551,17 @@ export const meaningfulTestAuditHandler = async (
         ? { mode: 'name-filter', nameContains: input.nameContains as string }
         : { mode: 'org-wide' };
 
+  const paged = pageEntries(ctx, entries, input);
+  if (!paged.ok) return err(paged.error);
+
   return ok({
     data: {
+      // The FULL count, never the page — the paging note points back at it.
       totalTestClassCount: entries.length,
-      tests: entries,
+      tests: paged.value.page,
       appliedScope,
-      disclosure: MEANINGFUL_TEST_DISCLOSURE,
+      disclosure: paged.value.disclosure,
+      ...paged.value.pagingFields,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -451,6 +580,7 @@ export const meaningfulTestAuditHandler = async (
 const coveringTestsMode = async (
   ctx: Context,
   rawTarget: string,
+  input: MeaningfulTestAuditInput,
 ): Promise<Result<McpResponse<MeaningfulTestAuditOutput>, McpError>> => {
   const targetId = coercePrefix(rawTarget, [TARGET_CLASS_PREFIX]);
   if (!targetId.startsWith(TARGET_CLASS_PREFIX)) {
@@ -510,16 +640,21 @@ const coveringTestsMode = async (
   const entries = coveringNodes.map(buildEntry);
   entries.sort(compareEntries);
 
+  const paged = pageEntries(ctx, entries, input);
+  if (!paged.ok) return err(paged.error);
+
   return ok({
     data: {
       totalTestClassCount: entries.length,
-      tests: entries,
+      tests: paged.value.page,
       appliedScope: {
         mode: 'covering-tests',
         targetClassId: targetId as ComponentId,
+        // The FULL covering-test count, not the page length.
         coveringTestCount: entries.length,
       },
-      disclosure: MEANINGFUL_TEST_DISCLOSURE,
+      disclosure: paged.value.disclosure,
+      ...paged.value.pagingFields,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

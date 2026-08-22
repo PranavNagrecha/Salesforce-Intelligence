@@ -16,11 +16,28 @@
  * inside the loop and performs a single bulk DML AFTER the loop (zero findings).
  */
 
-import { parseFlowGraphSource } from '@sf-intelligence/extractors';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+import type {
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import { parseFlowGraphSource } from '@sf-intelligence/extractors';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../src/server.js';
 import {
   detectFlowBulkification,
   detectFlowBulkificationRisks,
+  flowBulkificationAuditHandler,
   type FlowBulkRisk,
 } from '../src/tools/flow-bulkification-audit.js';
 
@@ -435,5 +452,260 @@ describe('loop-body coverage census', () => {
     const census = audit(xml).loopBody;
     expect(census.loopsWithUnmodeledElement).toBe(1);
     expect(census.unmodeledElementsInLoops).toContain('Filter_Them');
+  });
+});
+
+// =============================================================================
+// HANDLER tests — FIX 8(b) object scope + FIX 7 activation status.
+//
+// Everything above this line exercises the PURE detector. These need a real
+// graph + real Flow source on disk because both fixes live in the handler: the
+// scope filter reads `properties.triggerObject` off the node, and the status
+// split reads `properties.status`.
+//
+// Every component name below is INVENTED (Widget__c / Ledger__c / …).
+// =============================================================================
+
+const HANDLER_MANIFEST: VaultManifest = {
+  version: '0.1.0',
+  refreshedAt: '2026-06-29T00:00:00Z',
+  sourceOrg: 'me@example.com',
+  components: {},
+  edges: {},
+  sourceTreeHash: 'sha256:fixture-fba',
+};
+
+const makeObject = (apiName: string): Node => ({
+  id: `CustomObject:${apiName}`,
+  type: 'CustomObject',
+  apiName,
+  label: null,
+  parentId: null,
+  sourcePath: `${apiName}.object-meta.xml`,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+});
+
+const makeFlowNode = (
+  id: string,
+  sourceFile: string,
+  properties: Readonly<Record<string, unknown>>,
+): Node => ({
+  id,
+  type: 'Flow',
+  apiName: id.slice('Flow:'.length),
+  label: null,
+  parentId: null,
+  sourcePath: sourceFile,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties,
+});
+
+const handlerSeed: ExtractionResult = {
+  nodes: [
+    makeObject('Widget__c'),
+    makeObject('Ledger__c'),
+    // An object that exists but has ZERO record-triggered flows — the
+    // "empty scoped result must not look like an empty org-wide one" case.
+    makeObject('Invoice__c'),
+    makeFlowNode('Flow:Widget_Sync_Flow', 'widget-sync.flow-meta.xml', {
+      triggerObject: 'Widget__c',
+      status: 'Active',
+    }),
+    makeFlowNode('Flow:Ledger_Sync_Flow', 'ledger-sync.flow-meta.xml', {
+      triggerObject: 'Ledger__c',
+      status: 'Obsolete',
+    }),
+    // No `triggerObject` (a screen flow) — excluded under ANY object scope.
+    makeFlowNode('Flow:Intake_Screen_Flow', 'intake-screen.flow-meta.xml', {
+      status: 'Draft',
+    }),
+    // No `status` recorded at all — UNKNOWN, and it must not become `false`.
+    makeFlowNode('Flow:Widget_Legacy_Flow', 'widget-legacy.flow-meta.xml', {
+      triggerObject: 'Widget__c',
+    }),
+  ],
+  edges: [],
+};
+
+describe('flowBulkificationAuditHandler — FIX 8(b) object scope + FIX 7 status', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fba-'));
+    for (const file of [
+      'widget-sync.flow-meta.xml',
+      'ledger-sync.flow-meta.xml',
+      'intake-screen.flow-meta.xml',
+      'widget-legacy.flow-meta.xml',
+    ]) {
+      // Every fixture flow carries the SAME dml-in-loop shape, so any
+      // difference between responses comes from scope / status, not content.
+      writeFileSync(join(dir, file), DML_IN_LOOP, 'utf-8');
+    }
+    const opened = await openGraph(join(dir, 'fba.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [handlerSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: dir, manifest: HANDLER_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: objectApiName narrows the sweep and echoes appliedScope', async () => {
+    const scoped = await flowBulkificationAuditHandler(ctx, {
+      objectApiName: 'Widget__c',
+    });
+    const bare = await flowBulkificationAuditHandler(ctx, {});
+    expect(scoped.ok && bare.ok).toBe(true);
+    if (!scoped.ok || !bare.ok) return;
+    // Pre-fix the schema had NO object keys, so `objectApiName` was
+    // Zod-stripped and this response was BYTE-IDENTICAL to the bare org-wide
+    // one — the caller silently got every flow in the org.
+    expect(scoped.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Widget__c',
+      mode: 'component',
+    });
+    expect(scoped.value.data.flows.map((f) => f.componentId)).toEqual([
+      'Flow:Widget_Legacy_Flow',
+      'Flow:Widget_Sync_Flow',
+    ]);
+    expect(scoped.value.data.scannedFlowCount).toBe(2);
+    expect(bare.value.data.scannedFlowCount).toBe(4);
+    expect(JSON.stringify(scoped.value.data.flows)).not.toBe(
+      JSON.stringify(bare.value.data.flows),
+    );
+  });
+
+  it('narrows DIFFERENTLY per object — Widget__c ≠ Ledger__c', async () => {
+    const [widget, ledger] = await Promise.all([
+      flowBulkificationAuditHandler(ctx, { objectApiName: 'Widget__c' }),
+      flowBulkificationAuditHandler(ctx, { objectApiName: 'Ledger__c' }),
+    ]);
+    expect(widget.ok && ledger.ok).toBe(true);
+    if (!widget.ok || !ledger.ok) return;
+    expect(ledger.value.data.flows.map((f) => f.componentId)).toEqual([
+      'Flow:Ledger_Sync_Flow',
+    ]);
+    expect(widget.value.data.flows.map((f) => f.componentId)).not.toEqual(
+      ledger.value.data.flows.map((f) => f.componentId),
+    );
+  });
+
+  it('accepts a CustomObject: componentId alias equivalently to objectApiName', async () => {
+    const [byApi, byComponent] = await Promise.all([
+      flowBulkificationAuditHandler(ctx, { objectApiName: 'Ledger__c' }),
+      flowBulkificationAuditHandler(ctx, { componentId: 'CustomObject:Ledger__c' }),
+    ]);
+    expect(byApi.ok && byComponent.ok).toBe(true);
+    if (!byApi.ok || !byComponent.ok) return;
+    expect(byComponent.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Ledger__c',
+      mode: 'component',
+    });
+    expect(byComponent.value.data.flows.map((f) => f.componentId)).toEqual(
+      byApi.value.data.flows.map((f) => f.componentId),
+    );
+  });
+
+  it('an EMPTY scoped result is distinguishable from an empty org-wide one', async () => {
+    const r = await flowBulkificationAuditHandler(ctx, {
+      objectApiName: 'Invoice__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.flows).toEqual([]);
+    expect(r.value.data.totalFlowCount).toBe(0);
+    expect(r.value.data.scannedFlowCount).toBe(0);
+    // The scope is echoed AND the boundary names what the scope excluded, so
+    // this zero reads as CHECKED-under-a-scope, never as "the org is clean".
+    expect(r.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Invoice__c',
+      mode: 'component',
+    });
+    expect(r.value.data.boundaries).toContain(
+      'Scoped to record-triggered flows whose triggerObject is Invoice__c. Screen, autolaunched, scheduled, and platform-event flows have no single object and are EXCLUDED from this scoped view — run the bare audit for them.',
+    );
+  });
+
+  it('REFUSE: a non-object componentId prefix → invalid-query, never org-wide', async () => {
+    const r = await flowBulkificationAuditHandler(ctx, {
+      componentId: 'Flow:Widget_Sync_Flow',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('componentId');
+    expect(r.error.message).toContain('this tool scopes only by OBJECT');
+  });
+
+  it('REFUSE: an object absent from the vault → named invalid-query', async () => {
+    const r = await flowBulkificationAuditHandler(ctx, {
+      objectApiName: 'NoSuchThing__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/no object named 'NoSuchThing__c'/i);
+  });
+
+  it('BARE CALL: no appliedScope and no scope boundary', async () => {
+    const r = await flowBulkificationAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+    expect(
+      r.value.data.boundaries.some((b) => b.startsWith('Scoped to record-triggered flows')),
+    ).toBe(false);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: every row carries status + a tri-state isRunnable', async () => {
+    const r = await flowBulkificationAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const byId = new Map(r.value.data.flows.map((f) => [f.componentId, f]));
+    expect(byId.get('Flow:Widget_Sync_Flow')?.status).toBe('Active');
+    expect(byId.get('Flow:Widget_Sync_Flow')?.isRunnable).toBe(true);
+    expect(byId.get('Flow:Ledger_Sync_Flow')?.status).toBe('Obsolete');
+    expect(byId.get('Flow:Ledger_Sync_Flow')?.isRunnable).toBe(false);
+    expect(byId.get('Flow:Intake_Screen_Flow')?.status).toBe('Draft');
+    expect(byId.get('Flow:Intake_Screen_Flow')?.isRunnable).toBe(false);
+  });
+
+  it('an absent status is null / null — NEVER false and NEVER "Active"', async () => {
+    const r = await flowBulkificationAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const legacy = r.value.data.flows.find(
+      (f) => f.componentId === 'Flow:Widget_Legacy_Flow',
+    );
+    expect(legacy?.status).toBeNull();
+    expect(legacy?.isRunnable).toBeNull();
+    expect(legacy?.isRunnable).not.toBe(false);
+  });
+
+  it('the activation-status boundary is UNCONDITIONAL and verbatim', async () => {
+    const expected =
+      'Activation status is reported per row. A flow whose status is Obsolete, Draft, or InvalidDraft does not run in the org today, so its findings are latent, not live. A null status means this vault does not record it — that is UNKNOWN, not Active.';
+    const withFindings = await flowBulkificationAuditHandler(ctx, {});
+    // Zero-finding scoped call: the boundary must fire there too — that is the
+    // response that most needs to say how status is reported.
+    const withoutFindings = await flowBulkificationAuditHandler(ctx, {
+      objectApiName: 'Invoice__c',
+    });
+    expect(withFindings.ok && withoutFindings.ok).toBe(true);
+    if (!withFindings.ok || !withoutFindings.ok) return;
+    expect(withFindings.value.data.boundaries).toContain(expected);
+    expect(withoutFindings.value.data.boundaries).toContain(expected);
   });
 });
