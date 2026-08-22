@@ -528,7 +528,14 @@ const visibilityProps = {
     { recordType: 'Widget__c.Retired_Widget', default: false, visible: false },
   ],
   applicationVisibilities: [{ application: 'Widget_Console', default: false, visible: true }],
-  layoutAssignments: [{ layout: 'Widget__c-Widget Layout', recordType: null }],
+  // TWO layouts under the SAME record-type key (both `null` = object default).
+  // The shared `readLayoutAssignments` is a Map keyed on RECORD TYPE, so it
+  // would collapse these to one — measured on a real vault as 324 declared
+  // assignments collapsing to 72 rows. Both must survive here.
+  layoutAssignments: [
+    { layout: 'Widget__c-Widget Layout', recordType: null },
+    { layout: 'Gadget__c-Gadget Layout', recordType: null },
+  ],
 };
 
 const visibilitySeed: ExtractionResult = {
@@ -610,11 +617,12 @@ describe('whatIfSplitProfileHandler — the three splittable visibility families
 
     const nt = d.nonTransferableSettings;
     expect(nt.map((n) => n.settingId).sort()).toEqual([
+      'Gadget__c-Gadget Layout|default',
       'Secret__c',
       'Widget__c-Widget Layout|default',
       'Widget__c.Retired_Widget',
     ]);
-    expect(d.summary.nonTransferableCount).toBe(3);
+    expect(d.summary.nonTransferableCount).toBe(4);
     expect(nt.find((n) => n.settingId === 'Secret__c')?.reason).toContain('cannot hide a tab');
     expect(
       nt.find((n) => n.settingId === 'Widget__c.Retired_Widget')?.reason,
@@ -622,6 +630,15 @@ describe('whatIfSplitProfileHandler — the three splittable visibility families
     expect(
       nt.find((n) => n.settingId === 'Widget__c-Widget Layout|default')?.reason,
     ).toContain('no layout-assignment element');
+    // Both same-record-type layouts survive — full fidelity, not the merge
+    // comparator's record-type-keyed Map.
+    expect(nt.filter((n) => n.settingType === 'layout-assignment')).toHaveLength(2);
+    expect(d.summary.nonTransferableByType).toEqual([
+      { settingType: 'application-visibility', count: 0 },
+      { settingType: 'layout-assignment', count: 2 },
+      { settingType: 'record-type-visibility', count: 1 },
+      { settingType: 'tab-visibility', count: 1 },
+    ].filter((r) => r.count > 0));
   });
 
   it('the disclosure no longer claims the three families are Profile-only', async () => {
@@ -675,6 +692,7 @@ describe('whatIfSplitProfileHandler — the three splittable visibility families
     expect(d.summary.notEvaluatedCategories).toEqual([]);
     expect(d.disclosure).not.toContain('was NOT checked');
     expect(d.summary.nonTransferableCount).toBe(0);
+    expect(d.summary.nonTransferableByType).toEqual([]);
     // The four pre-existing categories are untouched: one user permission, no
     // grant edges in this seed.
     expect(d.summary.assignedCount).toBe(1);

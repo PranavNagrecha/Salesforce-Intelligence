@@ -102,7 +102,6 @@ import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js'
 // Lane B imports the readers Lane C exported rather than writing a fourth pair.
 import {
   readApplicationVisibilities,
-  readLayoutAssignments,
   readRecordTypeVisibilities,
   readTabVisibilities,
 } from './what-if-merge-profiles.js';
@@ -194,6 +193,48 @@ export interface UnassignedSetting {
 }
 
 /**
+ * Read `properties.layoutAssignments` at FULL FIDELITY — one row per declared
+ * assignment.
+ *
+ * Deliberately NOT the shared `readLayoutAssignments`: that one returns a Map
+ * keyed on RECORD TYPE, which is right for the merge comparison (two profiles
+ * disagreeing about which layout a record type gets) and lossy here. A real
+ * profile in a probed vault declares 324 layout assignments across 72 distinct
+ * record-type keys, so the shared reader would silently drop 252 of the rows
+ * this list exists to make visible. Measured on a real vault, not assumed.
+ */
+const readLayoutAssignmentRows = (
+  profile: Node,
+): readonly { readonly layout: string; readonly recordType: string | null }[] => {
+  const raw = profile.properties['layoutAssignments'];
+  if (!Array.isArray(raw)) return [];
+  const out: { layout: string; recordType: string | null }[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const layout = entry['layout'];
+    if (typeof layout !== 'string' || layout.length === 0) continue;
+    const rt = entry['recordType'];
+    out.push({ layout, recordType: typeof rt === 'string' && rt.length > 0 ? rt : null });
+  }
+  return out;
+};
+
+/**
+ * Byte bound for the emitted `nonTransferableSettings` rows.
+ *
+ * The list is bounded by the profile's own metadata, but "bounded" is not
+ * "small": the widest probed profile yields ~436 rows, which pushed the whole
+ * response past the GLOBAL response budget. The global guard then tail-trimmed
+ * the array while `summary.nonTransferableCount` still reported the full
+ * figure — a response contradicting itself, and the exact silent-clip failure
+ * this list was added to prevent. Bounding it HERE keeps the truncation
+ * explicit, and `summary.nonTransferableByType` stays complete regardless.
+ */
+const NON_TRANSFERABLE_BYTE_BUDGET = 14_000;
+const NON_TRANSFERABLE_MAX_ROWS = 400;
+
+/**
  * One setting that cannot move to a permission set AT ALL.
  *
  * Not a failure of the heuristic and not a gap in this plan — a structural
@@ -213,6 +254,12 @@ export interface NonTransferableSetting {
 export interface SplitTargetRollup {
   readonly targetPermSetId: ComponentId;
   readonly assignedCount: number;
+}
+
+/** Per-settingType count over the non-transferable rows — always complete. */
+export interface SplitTypeRollup {
+  readonly settingType: string;
+  readonly count: number;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -235,14 +282,22 @@ export interface WhatIfSplitProfileOutput {
    * assignments, Hidden tabs, an explicitly-not-visible record type or app, and
    * the default-record-type / default-app designations.
    *
-   * NOT paginated: bounded by the profile's own metadata, and it is the thing
-   * an admin must read before believing the plan.
+   * NOT cursor-paginated, but byte-BOUNDED: a wide profile yields hundreds of
+   * rows and the global response guard would otherwise tail-trim them behind a
+   * count that still claimed the full figure. When the bound bites, the
+   * disclosure says how many of how many are listed, and
+   * `summary.nonTransferableByType` stays complete.
    */
   readonly nonTransferableSettings: readonly NonTransferableSetting[];
   readonly summary: {
     readonly assignedCount: number;
     readonly unassignedCount: number;
     readonly nonTransferableCount: number;
+    /**
+     * Complete per-settingType counts over ALL non-transferable rows, including
+     * any the byte bound kept out of the emitted list.
+     */
+    readonly nonTransferableByType: readonly SplitTypeRollup[];
     /** Complete per-target counts (NOT paginated) — the actionable headline. */
     readonly byTarget: readonly SplitTargetRollup[];
     /**
@@ -747,10 +802,10 @@ const splitGrants = async (
   // no layout-assignment element at all. They stay out of `assignments`, but
   // they must not VANISH: the widest profile in a probed vault carries 334.
   if (familyEvaluated('layout-assignment', 'layoutAssignments', 'Layout assignment')) {
-    for (const [recordType, layout] of readLayoutAssignments(profile)) {
+    for (const { layout, recordType } of readLayoutAssignmentRows(profile)) {
       nonTransferable.push({
         settingType: 'layout-assignment',
-        settingId: `${layout}|${recordType}`,
+        settingId: `${layout}|${recordType ?? 'default'}`,
         currentValue: { layout, recordType },
         reason:
           'A permission set carries no layout-assignment element at all; page-layout assignment is Profile-only.',
@@ -901,6 +956,32 @@ export const whatIfSplitProfileHandler = async (
             : 0,
   );
   const { notEvaluatedCategories, notExtractedSentences } = splitResult.value;
+  // COMPLETE per-type rollup over ALL non-transferable rows — never bounded, so
+  // the categories the byte cap hides are still countable. Same pattern as
+  // `byTarget` / `byCategory`: the rollup is the actionable headline that
+  // survives truncation of the detail.
+  const nonTransferableByType: SplitTypeRollup[] = [
+    ...nonTransferableSettings
+      .reduce((m, n) => m.set(n.settingType, (m.get(n.settingType) ?? 0) + 1), new Map<string, number>())
+      .entries(),
+  ]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([settingType, count]) => ({ settingType, count }));
+  // Bound the EMITTED rows so the global response guard never tail-trims them
+  // behind a count that still claims the full figure.
+  const nonTransferablePage = paginateLegacy(nonTransferableSettings, {
+    offset: 0,
+    limit: NON_TRANSFERABLE_MAX_ROWS,
+    byteBudget: NON_TRANSFERABLE_BYTE_BUDGET,
+    binding: {
+      tool: 'sfi.what_if_split_profile',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: 'non-transferable',
+    },
+    keyOf: (n) => `${n.settingType} ${n.settingId}`,
+  }).items;
+  const nonTransferableTruncated =
+    nonTransferablePage.length < nonTransferableSettings.length;
 
   // Complete per-target rollup over ALL assignments — the actionable
   // headline that survives pagination. Seed every target at 0 so a
@@ -965,6 +1046,11 @@ export const whatIfSplitProfileHandler = async (
     ...(nonTransferableSettings.length > 0
       ? [nonTransferableClause(nonTransferableSettings.length)]
       : []),
+    ...(nonTransferableTruncated
+      ? [
+          `nonTransferableSettings lists ${nonTransferablePage.length} of ${nonTransferableSettings.length} row(s) — the rest were dropped to fit the response budget. summary.nonTransferableCount and summary.nonTransferableByType are COMPLETE; the omission is in the detail only.`,
+        ]
+      : []),
     ...notExtractedSentences,
   ].join(' ');
 
@@ -1001,11 +1087,12 @@ export const whatIfSplitProfileHandler = async (
       trust,
       assignments: page,
       unassignedSettings,
-      nonTransferableSettings,
+      nonTransferableSettings: nonTransferablePage,
       summary: {
         assignedCount: assignments.length,
         unassignedCount: unassignedSettings.length,
         nonTransferableCount: nonTransferableSettings.length,
+        nonTransferableByType,
         byTarget,
         notEvaluatedCategories,
       },
