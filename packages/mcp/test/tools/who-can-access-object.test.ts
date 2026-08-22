@@ -170,6 +170,53 @@ const cycleSeed: ExtractionResult = {
   ],
 };
 
+// WHO-CAN-ACCESS-DEFAULT-PAGE-UNREPRESENTATIVE: a SKEWED object — many
+// PermissionSet granters, a few Profile granters. `granterId` ASC sorts by type
+// PREFIX, so `PermissionSet:` rows all come before `Profile:` rows and a page
+// smaller than the permission-set count showed ZERO profiles: the tool answered
+// "which profiles will be affected?" with none of them, while `hasMore` said
+// only that there was more of something.
+const SKEW_OBJ = 'CustomObject:Skew__c';
+const SKEW_PERMSETS = 12;
+const SKEW_PROFILES = 3;
+const skewSeed: ExtractionResult = {
+  nodes: [
+    node({ id: SKEW_OBJ, type: 'CustomObject', apiName: 'Skew__c', properties: { sharingModel: 'Private' } }),
+    ...Array.from({ length: SKEW_PERMSETS }, (_, i) =>
+      node({
+        id: `PermissionSet:Skew_PS_${String(i).padStart(2, '0')}`,
+        type: 'PermissionSet',
+        apiName: `Skew_PS_${String(i).padStart(2, '0')}`,
+      }),
+    ),
+    ...Array.from({ length: SKEW_PROFILES }, (_, i) =>
+      node({
+        id: `Profile:Skew_Prof_${String(i).padStart(2, '0')}`,
+        type: 'Profile',
+        apiName: `Skew_Prof_${String(i).padStart(2, '0')}`,
+      }),
+    ),
+  ],
+  edges: [
+    ...Array.from({ length: SKEW_PERMSETS }, (_, i) =>
+      edge({
+        fromId: `PermissionSet:Skew_PS_${String(i).padStart(2, '0')}`,
+        toId: SKEW_OBJ,
+        edgeType: 'grantedBy',
+        properties: { allowRead: true },
+      }),
+    ),
+    ...Array.from({ length: SKEW_PROFILES }, (_, i) =>
+      edge({
+        fromId: `Profile:Skew_Prof_${String(i).padStart(2, '0')}`,
+        toId: SKEW_OBJ,
+        edgeType: 'grantedBy',
+        properties: { allowRead: true },
+      }),
+    ),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -186,6 +233,7 @@ beforeAll(async () => {
     incompleteSeed,
     internalSeed,
     cycleSeed,
+    skewSeed,
   ]);
   if (!imported.ok) throw new Error(imported.error.message);
   ctx = { vaultRoot: tempDir, manifest: MANIFEST, graph: store };
@@ -470,5 +518,95 @@ describe('whoCanAccessObjectHandler', () => {
     expect(ids.has('Role:CycB')).toBe(true);
     const cycARows = r.value.data.granters.filter((g) => g.granterId === 'Role:CycA');
     expect(cycARows.length).toBe(1);
+  });
+});
+
+// ===========================================================================
+// WHO-CAN-ACCESS-DEFAULT-PAGE-UNREPRESENTATIVE
+//
+// The owner's literal question is "which profiles will be affected?". The
+// granter list was sorted by `granterId` alone, which sorts by TYPE PREFIX
+// first, so the default page was one contiguous alphabetical block. Measured on
+// a real vault: 218 rows, default page 120 = 98 PermissionSet + 18 Profile +
+// 4 Group, cut mid-alphabet through the profiles, and ZERO of the 3 Role rows.
+// The page is now interleaved across kinds, and `summary.byGranterType` carries
+// each kind's TRUE totals plus a named sample.
+// ===========================================================================
+
+describe('whoCanAccessObjectHandler — the default page represents every kind', () => {
+  const PAGE = 5;
+
+  it('a page smaller than the largest kind still carries every kind', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: PAGE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const kinds = new Set(r.value.data.granters.map((g) => g.granterType));
+    expect(r.value.data.granters.length).toBe(PAGE);
+    // The question the tool exists to answer must be answerable from page one.
+    expect(kinds.has('Profile')).toBe(true);
+    expect(kinds.has('PermissionSet')).toBe(true);
+  });
+
+  it('the id-ASC order this replaced would have shown ZERO profiles on that page', async () => {
+    // Documents the defect: re-derive the OLD page from the complete set.
+    const all = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: 250 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const idSorted = [...all.value.data.granters].sort((a, b) =>
+      a.granterId < b.granterId ? -1 : a.granterId > b.granterId ? 1 : 0,
+    );
+    const oldPage = idSorted.slice(0, PAGE);
+    expect(oldPage.every((g) => g.granterType === 'PermissionSet')).toBe(true);
+  });
+
+  it('summary.byGranterType reports TRUE per-kind totals and names a sample of each', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: PAGE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { summary } = r.value.data;
+    const byKind = new Map(summary.byGranterType.map((k) => [k.granterType, k]));
+
+    // Complete counts, independent of what fitted on the page.
+    expect(byKind.get('PermissionSet')?.rows).toBe(SKEW_PERMSETS);
+    expect(byKind.get('PermissionSet')?.distinctGranters).toBe(SKEW_PERMSETS);
+    // Profiles = this object's own grants plus the org-wide god-mode profiles.
+    expect(byKind.get('Profile')?.rows).toBeGreaterThanOrEqual(SKEW_PROFILES);
+
+    // Every kind is NAMED, even the ones the page could not hold in full.
+    for (const kind of summary.byGranterType) {
+      expect(kind.sample.length).toBeGreaterThan(0);
+      expect(kind.sample.length).toBeLessThanOrEqual(kind.distinctGranters);
+      expect(kind.rowsOnThisPage).toBeLessThanOrEqual(kind.rows);
+      for (const id of kind.sample) expect(id.startsWith(`${kind.granterType}:`)).toBe(true);
+    }
+    // The per-kind rows must account for EVERY row — no kind unlisted.
+    const summed = summary.byGranterType.reduce((n, k) => n + k.rows, 0);
+    expect(summed).toBe(summary.total);
+    const onPage = summary.byGranterType.reduce((n, k) => n + k.rowsOnThisPage, 0);
+    expect(onPage).toBe(r.value.data.granters.length);
+    // …and the boundaryNote must say the page is a cross-kind sample.
+    expect(r.value.data.boundaryNote).toContain('INTERLEAVED');
+  });
+
+  it('paging still enumerates every row exactly once', async () => {
+    const all = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: 250 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const total = all.value.data.summary.total;
+
+    const seen: string[] = [];
+    for (let offset = 0; offset < total; offset += PAGE) {
+      const page = await whoCanAccessObjectHandler(ctx, {
+        componentId: SKEW_OBJ,
+        limit: PAGE,
+        offset,
+      });
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const g of page.value.data.granters) seen.push(`${g.granterId}|${g.via}`);
+      expect(page.value.data.hasMore).toBe(offset + page.value.data.granters.length < total);
+    }
+    expect(seen.length).toBe(total);
+    expect(new Set(seen).size).toBe(total);
   });
 });

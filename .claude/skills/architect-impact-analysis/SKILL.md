@@ -151,12 +151,27 @@ field" — which object?), **don't guess**. Either ask the user, or run
 `sfi.search_components` with the user's exact phrasing and surface the
 top matches for them to disambiguate.
 
-### Step 2 — Confirm the target exists (only when ambiguous)
+### Step 2 — Confirm the target exists (ALWAYS)
 
-If you derived the ID by translation in Step 1, skip this step —
-`sfi.get_impact` will return an empty impact set for unknown ids,
-which is the same response as a known id with no dependents. The
-ambiguity matters only when the **user** is uncertain.
+Do not skip this step, even when you derived the ID by translation in
+Step 1. `sfi.get_impact` returns an empty impact set for an id that is
+not in the vault at all, and that is **byte-identical** to a real
+"nothing depends on this" — the disclosure says "Complete impact slice
+… 0 node(s) / 0 edge(s)" either way. A typo in the api name therefore
+reads as a clean bill of health, which is the single most dangerous way
+this tool can be wrong.
+
+Confirm the id resolves first — `sfi.resolve`, or
+`sfi.get_component` with `maxBodyBytes: 0` (the cheap existence probe).
+Only report "no dependents" for an id that came back as a real
+component.
+
+The same ambiguity has a second face: an id that IS referenced by other
+metadata but was never retrieved itself (a **phantom** — typically a
+standard or managed-package component). There, `impact.nodes` comes
+back non-empty while `impact.edges` is empty, and the root is missing
+from its own node list. Check for the root in `impact.nodes` before
+narrating the slice.
 
 If you ran `sfi.search_components` in Step 1, the top match (highest
 `score`) is usually right. Cite it explicitly to the user before
@@ -193,7 +208,7 @@ The response shape:
 {
   "data": {
     "impact": {
-      "nodes": [ /* sorted by id ASC, includes the root */ ],
+      "nodes": [ /* sorted by id ASC; includes the root unless it is a phantom */ ],
       "edges": [ /* incoming edges visited during BFS */ ]
     },
     "traversedEdgeTypes": [ /* edge types that appeared */ ],
@@ -204,10 +219,20 @@ The response shape:
 }
 ```
 
-`impact.nodes` always includes the root component (even when it has
-zero dependents). An impact set of size 1 (just the root) means
-**"nothing in the emitted edge graph references this"** — see
-the *Honest-incomplete script* section below.
+`impact.nodes` includes the root component **when the vault holds a node
+row for it** — which is the normal case, and an impact set of size 1
+(just the root) then means **"nothing in the emitted edge graph
+references this"** (see the *Honest-incomplete script* section below).
+
+It is NOT a guarantee. A **phantom** root — an id other metadata
+references but the refresh never retrieved — has no node row, so it is
+absent from its own `impact.nodes`. Measured on a real vault: an impact
+walk on a phantom standard object returned 14 nodes and 0 edges, none of
+the 14 being the root, under the words "Complete impact slice". Those 14
+were its access-granting containers, connected to nothing. Before you
+narrate a slice, check that `impact.nodes` actually contains the id you
+asked about; if it does not, say the component itself is not in the
+vault rather than describing the leftovers as its dependents.
 
 **R6-19 — `diagram`.** When the (already-capped) impact slice has
 30 or fewer nodes, the response ALSO carries `diagram`: a

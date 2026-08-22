@@ -77,6 +77,12 @@ const GROUP_MEMBER_PREFIX = 'Group:';
 /** Page size for the granter list (a public object can have hundreds). */
 const DEFAULT_LIMIT = 120;
 const MAX_LIMIT = 250;
+/**
+ * How many distinct `granterId`s `summary.byGranterType[].sample` names per
+ * kind. Enough to make a kind CONCRETE ("which profiles?" gets profile names,
+ * not just a count) without turning the summary into a second copy of the list.
+ */
+const GRANTER_KIND_SAMPLE_LIMIT = 5;
 
 /** Public org-wide defaults — every internal user can read (or read/write). */
 const PUBLIC_OWD_READ = new Set(['Read', 'ReadWrite', 'ReadWriteTransfer', 'FullAccess']);
@@ -172,6 +178,36 @@ export interface WhoCanAccessObjectOutput {
     readonly distinctGranters: number;
     readonly allRecordsAccess: number;
     readonly sharedRecordsAccess: number;
+    /**
+     * WHO-CAN-ACCESS-DEFAULT-PAGE-UNREPRESENTATIVE: the COMPLETE per-kind
+     * breakdown, independent of paging.
+     *
+     * The granter list used to be sorted by `granterId` alone, which sorts by
+     * TYPE PREFIX first — `Group:` < `PermissionSet:` < `Profile:` < `Role:` —
+     * so the default page was a contiguous alphabetical block, not a sample.
+     * Measured on a real vault: 218 rows, default page 120 = 98 PermissionSet +
+     * 18 Profile + 4 Group, cutting mid-alphabet through the profiles and
+     * showing ZERO of the 3 Role rows. The literal question this tool exists to
+     * answer — "which profiles will be affected?" — came back with 18 of 113
+     * profile rows and no signal that the rest existed.
+     *
+     * Two things fix that together: the page is now INTERLEAVED across kinds
+     * (see the round-robin below), and this block reports each kind's TRUE
+     * totals plus a named `sample` drawn from the complete set — so every kind
+     * is both counted and named even when the page cannot hold it. Rows are
+     * ordered by `granterType` ascending.
+     */
+    readonly byGranterType: readonly {
+      readonly granterType: string;
+      /** TRUE row count for this kind across ALL pages. */
+      readonly rows: number;
+      /** TRUE distinct principal count for this kind across ALL pages. */
+      readonly distinctGranters: number;
+      /** How many of this kind's rows are on the page in `granters`. */
+      readonly rowsOnThisPage: number;
+      /** Up to 5 distinct `granterId`s of this kind, from the COMPLETE set. */
+      readonly sample: readonly string[];
+    }[];
   };
   readonly limit: number;
   readonly offset: number;
@@ -537,9 +573,57 @@ export const whoCanAccessObjectHandler = async (
   const allRecordsAccess = granters.filter((g) => g.scope === 'all-records').length;
   const limit = input.limit ?? DEFAULT_LIMIT;
   const offset = input.offset ?? 0;
-  const page = granters.slice(offset, offset + limit);
+
+  // WHO-CAN-ACCESS-DEFAULT-PAGE-UNREPRESENTATIVE: `granterId` ASC sorts by TYPE
+  // PREFIX first, so a straight `slice(offset, offset + limit)` returned one
+  // contiguous alphabetical block — every PermissionSet, then a partial run of
+  // Profiles, then nothing. On a real vault the default page answered "which
+  // profiles?" with 18 of 113 profile rows and showed no Role at all.
+  //
+  // Interleave the kinds ROUND-ROBIN instead: take the 1st row of each kind,
+  // then the 2nd of each, and so on, kinds in `granterType` order and each
+  // kind's rows in the existing `(granterId, via)` order. The result is a
+  // deterministic PERMUTATION of the same list — every row appears exactly
+  // once — so `offset`/`limit` still page the whole set exactly as before; only
+  // WHICH rows land on page one changes, and page one now carries every kind
+  // that exists (small kinds in full, large kinds evenly).
+  const byKind = new Map<string, AccessGranter[]>();
+  for (const g of granters) {
+    const bucket = byKind.get(g.granterType);
+    if (bucket === undefined) byKind.set(g.granterType, [g]);
+    else bucket.push(g);
+  }
+  const kindOrder = [...byKind.keys()].sort();
+  const interleaved: AccessGranter[] = [];
+  const deepestKind = Math.max(0, ...[...byKind.values()].map((v) => v.length));
+  for (let i = 0; i < deepestKind; i += 1) {
+    for (const kind of kindOrder) {
+      const row = byKind.get(kind)?.[i];
+      if (row !== undefined) interleaved.push(row);
+    }
+  }
+
+  const page = interleaved.slice(offset, offset + limit);
   const hasMore = offset + page.length < total;
   const truncated = hasMore || offset > 0;
+
+  // Per-kind TRUE totals + a named sample of EACH kind, so a kind the page
+  // cannot hold is still counted and named rather than silently absent.
+  const pageRowsByKind = new Map<string, number>();
+  for (const g of page) {
+    pageRowsByKind.set(g.granterType, (pageRowsByKind.get(g.granterType) ?? 0) + 1);
+  }
+  const byGranterType = kindOrder.map((granterType) => {
+    const rows = byKind.get(granterType) ?? [];
+    const distinctIds = [...new Set(rows.map((g) => g.granterId))].sort();
+    return {
+      granterType,
+      rows: rows.length,
+      distinctGranters: distinctIds.length,
+      rowsOnThisPage: pageRowsByKind.get(granterType) ?? 0,
+      sample: distinctIds.slice(0, GRANTER_KIND_SAMPLE_LIMIT),
+    };
+  });
 
   const externalOwdNote =
     externalOwd !== null
@@ -551,6 +635,15 @@ export const whoCanAccessObjectHandler = async (
   const multiRowNote =
     total > distinctGranters
       ? ` ${total} granter rows come from ${distinctGranters} distinct Profile/PermissionSet/role/group(s) — each independent capability (read/create/edit/delete + View/Modify-All) is its own row, so a principal can appear in several. Count ACTORS by \`summary.distinctGranters\`, not row count.`
+      : '';
+  const kindNote =
+    byGranterType.length > 0
+      ? ` Rows are INTERLEAVED across granter kinds (round-robin), so this page samples every kind rather than one alphabetical block: ${byGranterType
+          .map(
+            (k) =>
+              `${k.granterType} ${k.rowsOnThisPage.toString()} of ${k.rows.toString()} row(s) / ${k.distinctGranters.toString()} principal(s)`,
+          )
+          .join('; ')}. \`summary.byGranterType\` carries the complete per-kind counts and a named sample of each kind.`
       : '';
   const pageNote = truncated ? ` Showing granters ${offset}–${offset + page.length} of ${total}; summary holds the complete counts. Page with offset/limit.` : '';
   const scanTruncated = truncatedTypes.length > 0;
@@ -613,6 +706,7 @@ export const whoCanAccessObjectHandler = async (
         distinctGranters,
         allRecordsAccess,
         sharedRecordsAccess: total - allRecordsAccess,
+        byGranterType,
       },
       limit,
       offset,
@@ -622,7 +716,7 @@ export const whoCanAccessObjectHandler = async (
       confidence: 'declared',
       ...(dataShape !== undefined ? { dataShape } : {}),
       blindSpots,
-      boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${multiRowNote}${pageNote}${scanNote}`,
+      boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${multiRowNote}${kindNote}${pageNote}${scanNote}`,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

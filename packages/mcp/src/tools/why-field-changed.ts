@@ -95,7 +95,7 @@ const CUSTOM_FIELD_PREFIX = 'CustomField:';
  * not a silent drift.
  */
 const DISCLOSURE =
-  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Each writer carries a runnable flag and its declared status: a non-Active Flow (Obsolete/Draft/Inactive/InvalidDraft), an Inactive trigger, an inactive rule, or a TEST class (isTest, status:test-only) is listed with runnable:false and could NOT have written the field in the org's current production state — it is never the sole live suspect. Active-Flow field writes made via an SObject-variable assignment (assignToReference) that the graph did not stamp as a primary writesTo edge are folded in from a supplemental source scan at heuristic confidence (source: flow-field-writers-scan:*). Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
+  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Each writer carries a runnable flag and its declared status: a non-Active Flow (Obsolete/Draft/Inactive/InvalidDraft), an Inactive trigger, an inactive rule, or a TEST class (isTest, status:test-only) is listed with runnable:false and could NOT have written the field in the org's current production state — it is never the sole live suspect. Active-Flow field writes made via an SObject-variable assignment (assignToReference) that the graph did not stamp as a primary writesTo edge are folded in from a supplemental source scan at heuristic confidence (source: flow-field-writers-scan:*); that scan pages EVERY Flow in the vault, and when it stops short (residual ceiling SFI_FLOW_WRITER_SCAN_MAX, or a graph error) supplementalScanTruncation names how many Flows were scanned of how many exist, so an un-scanned writer reads as not checked rather than absent. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
 
 /**
  * Zod schema for the `sfi.why_field_changed` tool input. The tool traces ONE
@@ -218,6 +218,23 @@ export interface WhyFieldChangedOutput {
    * dead automation as the live cause of a change.
    */
   readonly note?: string;
+  /**
+   * FLOW-WRITER-SCAN-CAPS-AT-500: present ONLY when the supplemental Flow
+   * writer scan did NOT reach every Flow in the vault (it stopped at its
+   * residual ceiling, or the graph query failed). While the scan read one
+   * fixed 500-node page its return type carried no truncation signal at all,
+   * so a writer living past Flow 500 was silently absent and this tool could
+   * not say so. When present, `writers` is possibly INCOMPLETE on the
+   * supplemental axis — absence of an assignment-writer is "not checked",
+   * never proven "none".
+   */
+  readonly supplementalScanTruncation?: {
+    /** Flow nodes actually scanned (N). */
+    readonly scannedFlows: number;
+    /** Total Flow nodes in the vault (M). */
+    readonly totalFlows: number;
+    readonly note: string;
+  };
   readonly disclosure: string;
 }
 
@@ -630,13 +647,21 @@ export const whyFieldChangedHandler = async (
       ? node.parentId.slice('CustomObject:'.length)
       : fieldId.slice(CUSTOM_FIELD_PREFIX.length).split('.')[0] ?? '';
   let supplementalCount = 0;
+  let supplementalScanTruncation: WhyFieldChangedOutput['supplementalScanTruncation'];
   if (parentObjectApi.length > 0) {
     const supplemental = await scanSupplementalFlowFieldWriters(
       ctx,
       parentObjectApi,
       node.apiName,
     );
-    for (const w of supplemental) {
+    if (supplemental.truncated) {
+      supplementalScanTruncation = {
+        scannedFlows: supplemental.scannedCount,
+        totalFlows: supplemental.totalCount,
+        note: `The supplemental Flow writer scan covered ${supplemental.scannedCount.toString()} of ${supplemental.totalCount.toString()} Flow node(s) (full-scan ceiling, SFI_FLOW_WRITER_SCAN_MAX) — an SObject-variable / recordUpdates writer in the un-scanned tail is NOT in \`writers\`. Treat the supplemental axis as NOT CHECKED past that point, never as "no such writer".`,
+      };
+    }
+    for (const w of supplemental.writers) {
       if (writerIds.has(w.componentId)) continue;
       const built = await buildSupplementalWriter(ctx, w);
       if (!built.ok) return err({ kind: 'internal', message: built.error });
@@ -699,6 +724,9 @@ export const whyFieldChangedHandler = async (
         supplementalCount,
       },
       ...(note !== undefined ? { note } : {}),
+      ...(supplementalScanTruncation !== undefined
+        ? { supplementalScanTruncation }
+        : {}),
       disclosure: DISCLOSURE,
     },
     vaultState: {

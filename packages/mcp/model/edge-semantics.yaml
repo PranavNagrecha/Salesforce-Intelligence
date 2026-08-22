@@ -149,6 +149,18 @@ edgeSemantics:
         QuickAction:
           category: layout
           verdict: risky
+        # A custom BUTTON or LINK whose URL / JavaScript body names this field.
+        # Measured on a real vault: 79 such edges over 32 distinct fields all
+        # fell through to the top-level `{unknown, risky}` default, so
+        # `safe_to_delete_field` answered `verdict: "unknown"` — "an edge I do
+        # not recognise" — for a dependency it recognises perfectly well.
+        # QuickAction, the equivalent UI-placement surface, has always mapped
+        # here; a WebLink is the same shape of dependency (a UI entry point that
+        # breaks when the merge field it names disappears), so it takes the same
+        # row rather than a stricter one.
+        WebLink:
+          category: layout
+          verdict: risky
         Report:
           category: analytics
           verdict: blocking

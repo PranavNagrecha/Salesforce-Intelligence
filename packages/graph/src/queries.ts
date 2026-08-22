@@ -53,7 +53,80 @@ export interface Subgraph {
    * results — so consumers can rely on the field.
    */
   readonly truncated: boolean;
+  /**
+   * SUBGRAPH-PHANTOM-ENDPOINT-EDGE-LOSS: present ONLY when ≥1 collected edge
+   * was removed from `edges` because an ENDPOINT has no row in `nodes`.
+   *
+   * The self-contained-slice contract (CR-13) rightly filters those edges — a
+   * consumer must never deref a node the slice omitted — but the removal used
+   * to be INVISIBLE: `truncated` stayed false and the handler still opened
+   * "Complete subgraph within N hop(s)". Measured on a real vault: a subgraph
+   * walk rooted on a PHANTOM standard object (referenced by 14 access grants,
+   * never itself retrieved) returned 15 nodes / 0 edges, `truncated: false`,
+   * "Complete subgraph" — fifteen principals with nothing connecting them to
+   * anything. Two causes, kept apart because the remedies differ:
+   *
+   *   - `phantomEndpointCount` — the id WAS visited by the walk but has no
+   *     `nodes` row: a phantom (referenced by edges, never retrieved —
+   *     typically a standard or managed-package component). A phantom ROOT
+   *     loses its WHOLE neighbourhood this way, and nothing else flags it.
+   *   - `nodeCapExcludedCount` — the edge was admitted and only then did the
+   *     node cap close, so the endpoint was never visited. Those components
+   *     ARE in the vault; `truncated` is already true in this case.
+   *
+   * Either way the dropped edges are REAL relationships. `sfi.get_edges` /
+   * `sfi.find_component_usages` enumerate them (no node join).
+   */
+  readonly droppedEndpointEdges?: {
+    readonly count: number;
+    /** Endpoint visited by the walk but with no node row — a true phantom. */
+    readonly phantomEndpointCount: number;
+    /** Endpoint never visited because the node cap closed first. */
+    readonly nodeCapExcludedCount: number;
+    /** Distinct missing endpoint ids, sorted ascending, capped at 25. */
+    readonly endpointIds: readonly ComponentId[];
+  };
 }
+
+/**
+ * How many missing-endpoint ids `Subgraph.droppedEndpointEdges` names before it
+ * stops. Enough to act on, bounded so a hub cannot blow the response budget.
+ */
+const DROPPED_ENDPOINT_ID_CAP = 25;
+
+/**
+ * Summarise the edges the self-contained-slice filter is about to delete, so
+ * the loss is reported instead of silent. See `Subgraph.droppedEndpointEdges`.
+ * Returns `undefined` when nothing is dropped, so an unaffected slice keeps its
+ * exact prior shape.
+ */
+const summarizeDroppedEndpointEdges = (
+  collectedEdges: readonly Edge[],
+  returnedIds: ReadonlySet<ComponentId>,
+  visitedNodes: ReadonlySet<ComponentId>,
+): Subgraph['droppedEndpointEdges'] => {
+  const missingEndpointIds = new Set<ComponentId>();
+  let count = 0;
+  let phantomEndpointCount = 0;
+  let nodeCapExcludedCount = 0;
+  for (const edge of collectedEdges) {
+    const missing = [edge.fromId, edge.toId].filter((id) => !returnedIds.has(id));
+    if (missing.length === 0) continue;
+    count += 1;
+    for (const id of missing) missingEndpointIds.add(id);
+    // Classify by the WORSE cause on this edge: a true phantom is the more
+    // serious signal (nothing else discloses it), so it wins when both apply.
+    if (missing.some((id) => visitedNodes.has(id))) phantomEndpointCount += 1;
+    else nodeCapExcludedCount += 1;
+  }
+  if (count === 0) return undefined;
+  return {
+    count,
+    phantomEndpointCount,
+    nodeCapExcludedCount,
+    endpointIds: [...missingEndpointIds].sort().slice(0, DROPPED_ENDPOINT_ID_CAP),
+  };
+};
 
 /** Options for `listNodesByType`. */
 export interface ListNodesOptions {
@@ -1162,10 +1235,22 @@ export const getSubgraph = async (
     // node-capped result never carries a dangling edge to a node it omitted.
     // When un-truncated (and, under includeUnresolved, after stub synthesis)
     // every endpoint is a returned node, so this is a no-op.
+    // SUBGRAPH-PHANTOM-ENDPOINT-EDGE-LOSS: measure the loss BEFORE the filter
+    // runs, at the only place that knows what is about to disappear.
+    const droppedEndpointEdges = summarizeDroppedEndpointEdges(
+      collectedEdges,
+      returnedIds,
+      visitedNodes,
+    );
     const edges = collectedEdges
       .filter((e) => returnedIds.has(e.fromId) && returnedIds.has(e.toId))
       .sort(compareEdges);
-    return ok({ nodes: sortedNodes, edges, truncated: state.truncated });
+    return ok({
+      nodes: sortedNodes,
+      edges,
+      truncated: state.truncated,
+      ...(droppedEndpointEdges !== undefined ? { droppedEndpointEdges } : {}),
+    });
   } catch (e) {
     return err(queryFailed('getSubgraph', e));
   }

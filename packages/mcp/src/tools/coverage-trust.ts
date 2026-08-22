@@ -99,10 +99,72 @@ export const offlineTrust = (
   limitations: [],
 });
 
+/**
+ * COVERAGE-CAVEAT-SENTENCE-UNGRAMMATICAL: the two grammatical slots every
+ * coverage-caveat message is composed from.
+ *
+ * Every caveat message is built as `"<subject> cannot be confirmed …"`, so
+ * `subject` MUST be a NOUN PHRASE ("Deletion safety", "The `Flow` inventory"),
+ * never a finished sentence. That contract was implicit while every caller
+ * happened to honour it, and it broke silently the moment one did not:
+ * `buildEmptyTraversalCoverageCaveat` passed a two-sentence blob ending in a
+ * VERB ("…the dependency families the vault actually retrieved"), so the four
+ * graph-traversal tools rendered, verbatim, on EVERY empty result:
+ *
+ *   This is an EMPTY result. "Nothing references / uses this" can only be
+ *   asserted for the dependency families the vault actually retrieved CANNOT
+ *   BE CONFIRMED because the vault has incomplete coverage for: …
+ *
+ * — the product's central honesty sentence, in broken English. Splitting the
+ * slots makes the contract explicit and checkable: prose that must precede the
+ * claim goes in `preamble` (emitted verbatim, terminator and all), and only the
+ * noun phrase reaches the verb. The rendered sentence for the traversal callers
+ * is pinned in `test/tools/empty-traversal-coverage-caveat.test.ts`.
+ */
+export interface CoverageCaveatPurpose {
+  /**
+   * Optional lead-in emitted VERBATIM before the claim, including its own
+   * terminating punctuation (e.g. `'This is an EMPTY result.'`). Use it for
+   * context that is a sentence in its own right.
+   */
+  readonly preamble?: string;
+  /**
+   * The NOUN PHRASE that becomes the grammatical SUBJECT of
+   * `"<subject> cannot be confirmed …"`. Never a full sentence, never
+   * verb-final.
+   */
+  readonly subject: string;
+}
+
+/**
+ * What a caller may pass as a caveat purpose. A bare string is the subject
+ * (the shape every pre-existing caller uses, byte-identical), or the explicit
+ * {@link CoverageCaveatPurpose} slots when a preamble is needed.
+ */
+export type CaveatPurpose = string | CoverageCaveatPurpose;
+
+/**
+ * Render `"<preamble> <subject> cannot be confirmed"` — the shared opening of
+ * BOTH caveat messages (`buildCoverageCaveat`'s retrieve-coverage message and
+ * `assertUsageCompleteness`'s merged blind-plane message), so the two cannot
+ * drift into different grammar. Each caller appends its own continuation
+ * (`" because …"` / `": …"`).
+ *
+ * Trailing sentence punctuation on the subject is stripped: a subject is a noun
+ * phrase, and a stray full stop there would produce "X. cannot be confirmed".
+ */
+const coverageCaveatClaim = (purpose: CaveatPurpose): string => {
+  const slots: CoverageCaveatPurpose =
+    typeof purpose === 'string' ? { subject: purpose } : purpose;
+  const preamble = (slots.preamble ?? '').trim();
+  const subject = slots.subject.trim().replace(/[.,;:]+$/, '');
+  return `${preamble === '' ? '' : `${preamble} `}${subject} cannot be confirmed`;
+};
+
 export const buildCoverageCaveat = (
   ctx: Context,
   requiredTypes: readonly string[],
-  purpose: string,
+  purpose: CaveatPurpose,
 ): CoverageCaveat | undefined => {
   const coverage = summarizeCoverage(ctx.manifest, requiredTypes);
   if (coverage.status === 'complete') return undefined;
@@ -113,7 +175,7 @@ export const buildCoverageCaveat = (
     status: coverage.status === 'partial' ? 'partial' : 'unknown',
     missingCoverage,
     message:
-      `${purpose} cannot be confirmed because the vault has incomplete coverage for: ${missingCoverage.join(', ')}. Treat absence of dependencies in those families as "not checked", not "none".`,
+      `${coverageCaveatClaim(purpose)} because the vault has incomplete coverage for: ${missingCoverage.join(', ')}. Treat absence of dependencies in those families as "not checked", not "none".`,
   };
 };
 
@@ -150,7 +212,7 @@ export const buildEnumerationCoverageCaveat = (
 export const buildEnumerationCoverageCaveatFor = (
   ctx: Context,
   types: readonly string[],
-  purpose: string,
+  purpose: CaveatPurpose,
 ): CoverageCaveat | undefined => {
   if (types.length === 0) return undefined;
   const coverage = summarizeCoverage(ctx.manifest, types);
@@ -491,8 +553,11 @@ export interface AssertUsageCompletenessArgs {
    * (`unused_components`) it is every scanned type.
    */
   readonly blindPlaneTypes: readonly string[];
-  /** Purpose phrase used in the caveat message. */
-  readonly purpose: string;
+  /**
+   * Purpose phrase used in the caveat message — a NOUN PHRASE, or the explicit
+   * {@link CoverageCaveatPurpose} slots. See {@link CaveatPurpose}.
+   */
+  readonly purpose: CaveatPurpose;
   /**
    * Legacy-vault calibration for the RETRIEVE axis (unchanged from the prior
    * gate): `false` (default) does not caveat a pre-coverage vault; `true` treats
@@ -577,7 +642,7 @@ export const assertUsageCompleteness = (
     .map((s) => `${s.plane} (${s.detail})`)
     .join('; ');
   const message =
-    `${purpose} cannot be confirmed: "0 inbound edges" is "not checked", not proven "none". ` +
+    `${coverageCaveatClaim(purpose)}: "0 inbound edges" is "not checked", not proven "none". ` +
     `The extractor is KNOWN not to emit edges for these covered-but-blind planes — ${blindClause}.${retrieveClause}`;
   return {
     complete: false,
@@ -653,21 +718,26 @@ export const buildUsageSourceCoverageCaveat = (
  * never false-flag those, per the vault-coverage-honesty rule). No new caveat
  * vocabulary is introduced.
  *
- * The `purpose` phrasing is uniform across the traversal tools: "No dependency
- * / usage edges were found" — so the message reads as a boundary on the empty
- * answer, not a boundary on a non-empty one (callers only invoke this on an
- * empty set).
+ * The phrasing is uniform across the traversal tools and is composed from the
+ * two {@link CoverageCaveatPurpose} slots — a `preamble` that states the answer
+ * IS empty, and the quoted claim as the SUBJECT of "cannot be confirmed" — so
+ * the message reads as a boundary on the empty answer, not a boundary on a
+ * non-empty one (callers only invoke this on an empty set). The exact rendered
+ * sentence is pinned per caller in
+ * `test/tools/empty-traversal-coverage-caveat.test.ts`.
  */
 export const buildEmptyTraversalCoverageCaveat = (
   ctx: Context,
   requiredTypes: readonly string[],
 ): CoverageCaveat | undefined =>
-  buildEnumerationCoverageCaveatFor(
-    ctx,
-    requiredTypes,
-    'This is an EMPTY result. "Nothing references / uses this" can only be' +
-      ' asserted for the dependency families the vault actually retrieved',
-  );
+  buildEnumerationCoverageCaveatFor(ctx, requiredTypes, {
+    // COVERAGE-CAVEAT-SENTENCE-UNGRAMMATICAL: these two slots used to be ONE
+    // string, and the composed sentence read "…the vault actually retrieved
+    // cannot be confirmed because…". The lead-in is a sentence of its own; only
+    // the quoted NOUN PHRASE is the subject of "cannot be confirmed".
+    preamble: 'This is an EMPTY result.',
+    subject: '"Nothing references / uses this"',
+  });
 
 /**
  * Coverage families whose incoming edges a general graph-traversal

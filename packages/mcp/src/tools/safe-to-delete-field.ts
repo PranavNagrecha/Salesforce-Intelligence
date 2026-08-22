@@ -39,6 +39,7 @@
  *   | AuraDefinitionBundle         | readsFrom   | frontend    | risky            |
  *   | AuraDefinitionBundle         | writesTo    | frontend    | risky            |
  *   | QuickAction                  | references  | layout      | risky            |
+ *   | WebLink (custom button/link) | references  | layout      | risky            |
  *   | (any other edge)             | *           | unknown     | risky            |
  *
  * **Aggregate verdict**:
@@ -548,7 +549,7 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     validation:
       'A Validation Rule formula references this field. The Validation Rule will fail to compile if the field is removed, and Salesforce refuses the delete while the rule is live. The rule’s `errorConditionFormula` is BOTH a formula reference and a condition that evaluates this field; those are two edges from one tokenized string, so the rule is counted ONCE here and the folded row is disclosed on the example as `alsoVia: ["condition"]` rather than reported as a second referrer. As with any condition, it is listed but NOT evaluated: sfi does not know whether any record satisfies it.',
     layout:
-      'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field) or referenced by a QuickAction (whose create/edit form is affected). Review the UI impact before deleting.',
+      'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field), referenced by a QuickAction (whose create/edit form is affected), or named by a custom BUTTON or LINK (WebLink) whose URL / JavaScript body will break when the merge field it points at is gone. Review the UI impact before deleting.',
     formula:
       'Another formula field references this field — either directly (tokenized from the formula body) or through a cross-object relationship traversal (`Parent__r.Field__c`) resolved against the org\u2019s lookup fields. Each EXAMPLE carries the referring field id, and a traversal-derived one also carries the `traversalPath` it was resolved from. The referencing formula will fail to compile if this field is removed.',
     rollup:
@@ -1310,13 +1311,23 @@ const coreSafeToDeleteFieldHandler = async (
   }
 
   let supplementalFlowWriters = 0;
+  let supplementalWriterScanCapped: { readonly scanned: number; readonly total: number } | null = null;
   if (objectApi !== null) {
-    const writers = await scanSupplementalFlowFieldWriters(
+    // MERGE NOTE: this scan used to return a bare array. It now returns
+    // `{writers, truncated, scannedCount, totalCount}` because a >500-Flow org
+    // silently lost writers past the cap with no way for any caller to say so.
+    // Neither branch failed alone — one added this call site, the other fixed
+    // the scan — so the truncation is surfaced here rather than dropped on the
+    // floor, which is exactly the loss the scan fix exists to prevent.
+    const scan = await scanSupplementalFlowFieldWriters(
       ctx,
       objectApi,
       node.apiName,
     );
-    for (const writer of writers) {
+    if (scan.truncated) {
+      supplementalWriterScanCapped = { scanned: scan.scannedCount, total: scan.totalCount };
+    }
+    for (const writer of scan.writers) {
       if (knownReferrerIds.has(writer.componentId as string)) continue;
       knownReferrerIds.add(writer.componentId as string);
       supplementalFlowWriters += 1;
@@ -1460,6 +1471,14 @@ const coreSafeToDeleteFieldHandler = async (
             `${supplementalConditionReaders > 0 ? ` — ${supplementalConditionReaders} by \`flow-condition-reads-scan\` from Flow decision / record-trigger filter conditions (stored as a firesWhen edge to a synthetic ConditionalContext, never as an edge onto the field)` : ''}` +
             `${supplementalFlowWriters > 0 ? `${supplementalConditionReaders > 0 ? ',' : ' —'} ${supplementalFlowWriters} by \`flow-field-writers-scan\` from a Flow \`<inputAssignments>\` write routed through an SObject variable rather than $Record (mints no writesTo edge)` : ''}` +
             `. Each such example carries \`via\`. The Flow XML names the field literally, so these are real dependencies and are classified \`blocking\` like any other Flow read/write — but the ATTRIBUTION is a source/property scan, so this response's confidence is reported as \`heuristic\`; confirm the Flow before deleting.`,
+        ]
+      : []),
+    // Residual, writer side: the supplemental WRITER scan has the same ceiling
+    // as its reader sibling. A Flow that writes this field from past the cap is
+    // MISSED, and this tool's whole job is to be trustworthy about absence.
+    ...(supplementalWriterScanCapped !== null
+      ? [
+          `Flow field-writer reconstruction was CAPPED at ${supplementalWriterScanCapped.scanned} of ${supplementalWriterScanCapped.total} Flow nodes (SFI_FLOW_WRITER_SCAN_MAX). A Flow writing this field from beyond the cap is NOT counted above — absence of a \`flow\` writer row is "not scanned", never "no such writer".`,
         ]
       : []),
     // Residual: the ConditionalContext walk has a ceiling. A flow-condition

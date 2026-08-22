@@ -1112,13 +1112,13 @@ export const field360Handler = async (
     fieldNode.parentId !== null && fieldNode.parentId.startsWith('CustomObject:')
       ? fieldNode.parentId.slice('CustomObject:'.length)
       : fieldId.slice('CustomField:'.length).split('.')[0] ?? '';
-  const supplementalWriters = await scanSupplementalFlowFieldWriters(
+  const supplementalWriterScan = await scanSupplementalFlowFieldWriters(
     ctx,
     parentObjectApi,
     fieldNode.apiName,
   );
   const writerIds = new Set(buckets.writers.map((r) => r.componentId));
-  for (const w of supplementalWriters) {
+  for (const w of supplementalWriterScan.writers) {
     if (writerIds.has(w.componentId)) continue;
     writerIds.add(w.componentId);
     buckets.writers.push({
@@ -1589,6 +1589,15 @@ export const field360Handler = async (
   // D3-soundness-overclaim (residual): when the ConditionalContext scan hit its
   // full-scan ceiling, a flow-condition reader in the un-scanned tail may be
   // MISSED — disclose the cap so the reconstruction is never implied complete.
+  // FLOW-WRITER-SCAN-CAPS-AT-500: the supplemental Flow WRITER scan used to read
+  // ONE 500-node page and had nowhere to say so; it now pages every Flow and
+  // reports its own ceiling. Disclose it exactly as the condition-reader scan
+  // above does — an un-scanned tail means `writers` is possibly INCOMPLETE.
+  if (supplementalWriterScan.truncated) {
+    boundaries.push(
+      `Supplemental Flow field-writer reconstruction was CAPPED at ${supplementalWriterScan.scannedCount} of ${supplementalWriterScan.totalCount} Flow nodes (full-scan ceiling, SFI_FLOW_WRITER_SCAN_MAX) — an SObject-variable / recordUpdates writer in the un-scanned tail is NOT reflected in \`writers\`; treat the writer set as possibly INCOMPLETE, and narrow the vault or raise the ceiling to fully enumerate.`,
+    );
+  }
   if (flowConditionScan.truncated) {
     boundaries.push(
       `Flow decision/filter reader reconstruction was CAPPED at ${flowConditionScan.scannedCount} of ${flowConditionScan.totalCount} ConditionalContext nodes (full-scan ceiling, SFI_CONDITION_SCAN_MAX) — a flow-condition reader in the un-scanned tail is NOT reflected in \`readers\`; treat the reader set as possibly INCOMPLETE, and narrow the vault or raise the ceiling to fully enumerate.`,
