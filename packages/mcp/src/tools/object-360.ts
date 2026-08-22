@@ -303,9 +303,14 @@ export const object360InputSchema = z
   .object({
     /** Bare object api name (`Contact`) — the alias the router binds. */
     objectApiName: z.string().min(1).optional(),
-    /** Canonical object id (`CustomObject:Contact`) — equivalent to `objectApiName`. */
-    objectId: z.string().min(1).optional(),
-    /** Canonical id alias a host reaches for. */
+    /**
+     * The canonical object id (`CustomObject:Contact`) — ADR-007's one input
+     * key for "the component this tool targets". A bare api name is coerced,
+     * so this is equivalent to `objectApiName`. There is deliberately no
+     * `objectId` synonym: unlike `recordtype_availability` (where
+     * `componentId` is the Profile and `objectId` narrows to an object), this
+     * tool's target IS the object, so a second spelling would be pure drift.
+     */
     componentId: z.string().min(1).optional(),
     /** Short alias the router's object family standardises on. */
     object: z.string().min(1).optional(),
@@ -517,7 +522,7 @@ const activationOf = (node: Node | undefined): 'active' | 'inactive' | 'unknown'
  * which is how a caller ends up reading an answer about a different object.
  */
 const resolveObjectId = (input: Object360Input): Result<ComponentId, McpError> => {
-  const raw = [input.componentId, input.objectId, input.objectApiName, input.object]
+  const raw = [input.componentId, input.objectApiName, input.object]
     .filter((v): v is string => v !== undefined && v.trim() !== '')
     .map((v) => coercePrefix(v.trim(), [CUSTOM_OBJECT_PREFIX]));
   if (raw.length === 0) {
@@ -525,7 +530,7 @@ const resolveObjectId = (input: Object360Input): Result<ComponentId, McpError> =
       kind: 'invalid-query',
       message:
         'object_360 needs ONE object to profile. Pass `objectApiName` (e.g. "Contact") ' +
-        'or the canonical `objectId` / `componentId` (e.g. "CustomObject:Contact"). ' +
+        'or the canonical `componentId` (e.g. "CustomObject:Contact"). ' +
         'No object was named, so nothing was checked — this is not a report that the org has no objects.',
     });
   }
@@ -905,7 +910,7 @@ export const object360Handler = async (
         message:
           `\`${requestedApiName}\` matches ${others.length} objects in this vault that differ only by CASE ` +
           `(${others.join(', ')}). Salesforce api names are case-insensitive, so nothing here can pick between ` +
-          `them — pass the exact \`objectId\` you mean. Nothing was profiled.`,
+          `them — pass the exact \`componentId\` you mean. Nothing was profiled.`,
       });
     }
     const only = others[0];

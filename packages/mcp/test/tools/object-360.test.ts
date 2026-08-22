@@ -1016,7 +1016,10 @@ describe('object360Handler — input contract', () => {
   });
 
   it('refuses disagreeing object selectors rather than picking a winner', async () => {
-    const r = await object360Handler(ctx, { objectApiName: 'Widget__c', objectId: 'CustomObject:Contact' });
+    const r = await object360Handler(ctx, {
+      objectApiName: 'Widget__c',
+      componentId: 'CustomObject:Contact',
+    });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
