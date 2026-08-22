@@ -183,3 +183,94 @@ describe('buildRetrievalLedger + tombstones', () => {
     }
   });
 });
+
+// =============================================================================
+// FRESHNESS-UNIFORM-MAP-COLLAPSE. On a uniform vault the `families` map is ONE
+// timestamp repeated once per family, and `oldestEvidenceAt` already holds it —
+// so the map carries no information the two scalars do not. Measured on a
+// 93-family vault it was 4.2 KB: 10% of a coverage_report payload and 32% of an
+// automation_risk_report one, in a budget that was dropping real rows elsewhere.
+//
+// It is NOT a silent drop. `familyCount` reports the TRUE total that was read
+// and `familiesOmitted` names the reason, so a collapsed map is distinguishable
+// from a map that was never built.
+// =============================================================================
+describe('buildMixedFreshness — uniform collapse', () => {
+  const uniformManifest = (families: readonly string[]): VaultManifest => ({
+    version: '0.1.0',
+    refreshedAt: '2026-08-07T12:00:00.000Z',
+    sourceOrg: 'me@example.com',
+    components: {},
+    edges: {},
+    sourceTreeHash: 'sha256:x',
+    coverage: families.map((t) =>
+      row(t, { retrievedAt: '2026-08-07T12:00:00.000Z', epoch: 1 }),
+    ),
+  });
+
+  it('collapses the repeated map and DISCLOSES the collapse', () => {
+    const f = buildMixedFreshness(uniformManifest(['ApexClass', 'Flow', 'Layout']));
+    expect(f.overall).toBe('uniform');
+    expect(f.families).toBeUndefined();
+    expect(f.familyCount).toBe(3);
+    expect(f.familiesOmitted).toBe('uniform');
+    // The one timestamp the map would have repeated is still right here.
+    expect(f.oldestEvidenceAt).toBe('2026-08-07T12:00:00.000Z');
+  });
+
+  it('mixed is UNCHANGED — there the per-family map is the whole point', () => {
+    const manifest: VaultManifest = {
+      version: '0.1.0',
+      refreshedAt: '2026-08-07T12:00:00.000Z',
+      sourceOrg: 'me@example.com',
+      components: {},
+      edges: {},
+      sourceTreeHash: 'sha256:x',
+      coverage: [
+        row('ApexClass', { retrievedAt: '2026-01-01T00:00:00.000Z', epoch: 1 }),
+        row('Flow', { retrievedAt: '2026-08-07T12:00:00.000Z', epoch: 2 }),
+      ],
+    };
+    const f = buildMixedFreshness(manifest);
+    expect(f.overall).toBe('mixed');
+    expect(f.families).toEqual({
+      ApexClass: '2026-01-01T00:00:00.000Z',
+      Flow: '2026-08-07T12:00:00.000Z',
+    });
+    expect(f.familiesOmitted).toBeUndefined();
+    expect(f.familyCount).toBe(2);
+  });
+
+  it('the collapse is a RATIO win, not a constant — assert the shrink, not the bytes', () => {
+    const big = uniformManifest(
+      Array.from({ length: 90 }, (_u, i) => `Family${i}`),
+    );
+    const collapsed = Buffer.byteLength(JSON.stringify(buildMixedFreshness(big)), 'utf8');
+    // What the payload would have been with the map inlined.
+    const withMap = Buffer.byteLength(
+      JSON.stringify({
+        ...buildMixedFreshness(big),
+        families: Object.fromEntries(
+          (big.coverage ?? []).map((r) => [r.type, r.retrievedAt]),
+        ),
+      }),
+      'utf8',
+    );
+    expect(collapsed / withMap).toBeLessThan(0.2);
+  });
+
+  it('a pre-F5 manifest with NO per-family clocks is byte-identical to before', () => {
+    const manifest: VaultManifest = {
+      version: '0.1.0',
+      refreshedAt: '2026-08-07T12:00:00.000Z',
+      sourceOrg: 'me@example.com',
+      components: {},
+      edges: {},
+      sourceTreeHash: 'sha256:x',
+      coverage: [row('ApexClass')],
+    };
+    expect(buildMixedFreshness(manifest)).toEqual({
+      snapshotRefreshedAt: '2026-08-07T12:00:00.000Z',
+    });
+  });
+});

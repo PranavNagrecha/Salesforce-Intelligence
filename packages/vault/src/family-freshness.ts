@@ -81,11 +81,32 @@ export const buildMixedFreshness = (
     if (t > newest) newest = t;
   }
   const overall = oldest !== newest ? 'mixed' : 'uniform';
+  if (overall === 'uniform') {
+    // The map is ONE timestamp repeated `familyCount` times, and
+    // `oldestEvidenceAt` IS that timestamp — the map carries no information the
+    // two scalars do not. Measured on a 93-family vault it was 4.2 KB, 10% of a
+    // coverage_report payload and 32% of an automation_risk_report one, in a
+    // budget that was dropping real rows elsewhere.
+    //
+    // This is NOT a silent drop: `familyCount` reports the TRUE total that was
+    // read and `familiesOmitted` names the reason, so a caller can tell a
+    // collapsed map from a map that was never built. The NAMES, when a caller
+    // needs them, are sfi.coverage_report's job.
+    return {
+      ...base,
+      overall,
+      oldestEvidenceAt: oldest,
+      familyCount: times.length,
+      familiesOmitted: 'uniform',
+    };
+  }
+  // `mixed` is UNCHANGED — there the per-family map is the entire point.
   return {
     ...base,
     overall,
     families,
     oldestEvidenceAt: oldest,
+    familyCount: times.length,
   };
 };
 
