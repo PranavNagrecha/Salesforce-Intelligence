@@ -4,8 +4,10 @@ import type { ComponentId, ComponentType, Node } from '@sf-intelligence/contract
 
 import {
   soundnessForImpactWalk,
+  soundnessForReachabilityWalk,
   soundnessFromNodes,
   soundnessFromDynamicApexIds,
+  UNWALKED_EDGE_TYPE_NOTE,
   UNWALKED_REFERRER_CLASSES,
 } from '../../src/tools/soundness.js';
 
@@ -134,5 +136,37 @@ describe('soundnessForImpactWalk', () => {
     expect(s.complete).toBe(false);
     expect(s.blindSpots.some((b) => b.kind === 'dynamic-apex')).toBe(true);
     expect(s.blindSpots.some((b) => b.kind === 'unwalked-referrer-class')).toBe(true);
+  });
+});
+
+describe('soundnessForReachabilityWalk', () => {
+  const USAGE = ['callsApex', 'references', 'dispatchesAsync'] as const;
+
+  it('NO-OP GUARANTEE: walking the FULL usage set is deep-equal to soundnessFromNodes', () => {
+    const nodes = [apexNode('ApexClass:Clean', [SOQL_LOOP_ISSUE]), apexNode('ApexClass:Bare', [])];
+    expect(soundnessForReachabilityWalk(nodes, USAGE, USAGE)).toEqual(soundnessFromNodes(nodes));
+  });
+
+  it('NO-OP GUARANTEE holds when a dynamic-apex blind spot is present', () => {
+    const nodes = [apexNode('ApexClass:Dyn', [DYNAMIC_ISSUE])];
+    expect(soundnessForReachabilityWalk(nodes, USAGE, USAGE)).toEqual(soundnessFromNodes(nodes));
+  });
+
+  it('a STRICT SUBSET walk is NOT complete and names both the walked and un-walked types', () => {
+    const s = soundnessForReachabilityWalk([apexNode('ApexClass:Clean', [])], ['callsApex'], USAGE);
+    expect(s.complete).toBe(false);
+    expect(s.staticCoverage).toBe('partial');
+    const spot = s.blindSpots.find((b) => b.kind === 'unwalked-edge-type');
+    expect(spot).toBeDefined();
+    expect(spot?.walkedEdgeTypes).toEqual(['callsApex']);
+    expect(spot?.unwalkedEdgeTypes).toEqual(['references', 'dispatchesAsync']);
+    expect(spot?.componentIds).toEqual([]);
+    expect(spot?.note).toBe(UNWALKED_EDGE_TYPE_NOTE);
+  });
+
+  it('PRESERVES a dynamic-apex blind spot and ADDS the edge-type one (never substitutes)', () => {
+    const s = soundnessForReachabilityWalk([apexNode('ApexClass:Dyn', [DYNAMIC_ISSUE])], ['callsApex'], USAGE);
+    expect(s.blindSpots.some((b) => b.kind === 'dynamic-apex')).toBe(true);
+    expect(s.blindSpots.some((b) => b.kind === 'unwalked-edge-type')).toBe(true);
   });
 });
