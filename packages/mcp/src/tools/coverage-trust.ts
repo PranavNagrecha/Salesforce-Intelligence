@@ -861,6 +861,24 @@ export const FORMULA_REFERENCE_REQUIRED_COVERAGE = [
  * picklist tool slightly MORE conservative, which is the right direction for a
  * destructive verdict; dropping it to match would trade honesty for a shorter
  * list.
+ *
+ * FIX-3 (coverage-spine): `ConditionalContext` does NOT belong here and was
+ * removed. It is a SYNTHETIC node the extractor MINTS while parsing a
+ * declarative firer's condition — never a Salesforce metadata family
+ * `sf project retrieve` pulls, so `buildCoverageEntries` never writes it a
+ * coverage row (measured: 0-of-96 rows on a real vault, always). Naming it
+ * here made this list UNSATISFIABLE: no refresh, however complete, could ever
+ * clear it, so every caller read "coverage unknown" for a family that was, in
+ * truth, fully present. `ConditionalContext`'s only real coverage signal is
+ * its PARENT FIRER's retrieval — a condition hidden inside one is invisible
+ * only if the firer that carries it was never retrieved — so the seven
+ * `firesWhen`-producing firer types (the same set the `firesWhen` EdgeType doc
+ * and the concept model's `ConditionalContext` binds already name) are listed
+ * directly instead: `WorkflowRule` / `ValidationRule` / `Flow` were already
+ * here; `ApprovalProcess` / `AutoResponseRule` / `AssignmentRule` /
+ * `EscalationRule` are the four this fix adds. This preserves the real
+ * signal (an uncovered firer family still fires the caveat) and drops only
+ * the phantom one.
  */
 export const VALUE_LITERAL_READER_COVERAGE = [
   'CustomField',
@@ -869,10 +887,13 @@ export const VALUE_LITERAL_READER_COVERAGE = [
   'ApexClass',
   'ApexTrigger',
   'WorkflowRule',
+  'ApprovalProcess',
+  'AutoResponseRule',
+  'AssignmentRule',
+  'EscalationRule',
   'Layout',
   'SharingRule',
   'DuplicateRule',
-  'ConditionalContext',
   'Report',
   'Dashboard',
   'ListView',

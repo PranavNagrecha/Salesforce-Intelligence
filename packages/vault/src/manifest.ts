@@ -544,6 +544,9 @@ export const summarizeCoverage = (
         !entry.errored &&
         !entry.neverModeled &&
         entry.pending !== true &&
+        // FIX-2: a `capped` row is real, attempted, ATTEMPTED-BUT-PARTIAL
+        // evidence — never `covered`, same as `pending`. See CoverageEntry.capped.
+        entry.capped !== true &&
         !retrievedNotParsedSet.has(entry.type),
     )
     .map((entry) => entry.type);
@@ -575,11 +578,16 @@ export const summarizeCoverage = (
   // health_check report the same type as both partial AND not-modeled (and
   // triple-counted it into missingCoverage). A "partial" type is one that was
   // requested and errored during retrieve — is still queued by a staged
-  // build — or was requested but retrieved nothing (`emptyTypes`) — but is a
-  // modeled type in every case.
+  // build — was intentionally capped (FIX-2: attempted, real partial evidence,
+  // known shortfall) — or was requested but retrieved nothing (`emptyTypes`) —
+  // but is a modeled type in every case.
   const partialTypes = [
     ...filtered
-      .filter((entry) => (entry.errored || entry.pending === true) && !entry.neverModeled)
+      .filter(
+        (entry) =>
+          (entry.errored || entry.pending === true || entry.capped === true) &&
+          !entry.neverModeled,
+      )
       .map((entry) => entry.type),
     ...emptyTypes,
   ];

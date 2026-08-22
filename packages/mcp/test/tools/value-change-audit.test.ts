@@ -19,6 +19,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { VALUE_LITERAL_READER_COVERAGE } from '../../src/tools/coverage-trust.js';
 import { valueChangeAuditHandler } from '../../src/tools/value-change-audit.js';
 import { whatIfRemovePicklistValueHandler } from '../../src/tools/what-if-remove-picklist-value.js';
 
@@ -26,11 +27,11 @@ import { whatIfRemovePicklistValueHandler } from '../../src/tools/what-if-remove
 // value-literal reader. `value_change_audit` and `what_if_remove_picklist_value`
 // answered the same coverage question with two hand-copied lists that
 // disagreed; this is their union.
-const REQUIRED = [
-  'CustomField', 'ValidationRule', 'Flow', 'ApexClass', 'ApexTrigger',
-  'WorkflowRule', 'Layout', 'SharingRule', 'DuplicateRule',
-  'ConditionalContext', 'Report', 'Dashboard', 'ListView', 'FlexiPage',
-];
+// FIX-3 (coverage-spine): imported directly (not hand-copied) so this fixture
+// can never silently drift from the real list again — the earlier hand-copy
+// is exactly how a fabricated `ConditionalContext` coverage row (a row NO
+// real vault ever has — see coverage-trust.ts) went undetected here.
+const REQUIRED: readonly string[] = VALUE_LITERAL_READER_COVERAGE;
 const completeCoverage = (types: readonly string[]): readonly CoverageEntry[] =>
   types.map((type) => ({ type, requested: true, retrieved: 1, errored: false, neverModeled: false }));
 

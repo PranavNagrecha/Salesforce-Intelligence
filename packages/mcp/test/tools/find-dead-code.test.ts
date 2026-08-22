@@ -1569,6 +1569,14 @@ describe('find_dead_code — unproven dynamic registration is uncertain, never d
         apiName: 'PlainOrphanHelper',
         properties: { isTest: false },
       }),
+      // FIX 3 (APEX-REACHABILITY-DOTTED-INTERFACE): registered via `implements`
+      // ONLY — no `superclass` at all — the shape a superclass-only check misses.
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:CustomSsoRegistrationHandler',
+        apiName: 'CustomSsoRegistrationHandler',
+        properties: { isTest: false, implements: ['Auth.RegistrationHandler'] },
+      }),
     ],
     edges: [],
   };
@@ -1587,6 +1595,17 @@ describe('find_dead_code — unproven dynamic registration is uncertain, never d
 
   it('a Callable implementor is uncertain, not definitely_dead', async () => {
     expect((await verdictsFor()).get('ApexClass:WidgetAddressHelper')).toBe('uncertain');
+  });
+
+  it('a class implementing a NAMESPACED interface (Auth.RegistrationHandler) is uncertain, not definitely_dead', async () => {
+    // The exact shape FIX 3 closes: an AuthProvider record registers the
+    // implementing class by type — outside the metadata graph exactly like a
+    // dotted superclass, but declared via `implements`, not `superclass`, so
+    // the pre-fix `isFrameworkSubclass` (superclass-only) never saw it and this
+    // class fell through to `definitely_dead`.
+    expect((await verdictsFor()).get('ApexClass:CustomSsoRegistrationHandler')).toBe(
+      'uncertain',
+    );
   });
 
   it('CONTROL: a plain class with zero in-edges is STILL definitely_dead', async () => {
@@ -1614,6 +1633,14 @@ describe('find_dead_code — unproven dynamic registration is uncertain, never d
       { id: 'ApexClass:PlainOrphanHelper', props: { isTest: false } },
       { id: 'ApexClass:LocalBaseSubclass', props: { isTest: false, superclass: 'LocalBase' } },
       { id: 'ApexClass:ComparableImpl', props: { isTest: false, implements: ['Comparable'] } },
+      // FIX 3 (APEX-REACHABILITY-DOTTED-INTERFACE): an AuthProvider-registered
+      // handler implementing a NAMESPACED interface — registered outside the
+      // metadata graph exactly like the framework-subclass case, but only via
+      // `implements`, never `superclass`.
+      {
+        id: 'ApexClass:CustomSsoRegistrationHandler',
+        props: { isTest: false, implements: ['Auth.RegistrationHandler'] },
+      },
       // The three async-dispatch shapes now carried by the SAME rule.
       { id: 'ApexClass:NightlyRollupSchedule', props: { isTest: false, isSchedulable: true, implements: ['Schedulable'] } },
       { id: 'ApexClass:ArchiveSweepBatch', props: { isTest: false, isBatchable: true, implements: ['Database.Batchable<SObject>'] } },

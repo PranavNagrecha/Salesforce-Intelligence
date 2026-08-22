@@ -1895,8 +1895,15 @@ export const dispatchTool = async (
         fieldProvenanceHandler,
       );
     // RM-wire — deterministic reasoning-engine surface (offline, cited).
+    // INTERPRET-OVERSIZE-KNOBLESS-REMEDY: `concepts` / `ruleIds` are this
+    // tool's ONLY narrowing params (no limit/offset/hops — its schema does
+    // not match the shared knob regex), so an oversize error must name THEM
+    // explicitly or the remedy prescribes parameters the tool does not have.
     case 'sfi.interpret':
-      return runTool(ctx, args, interpretInputSchema, interpretHandler);
+      return runTool(ctx, args, interpretInputSchema, interpretHandler, {
+        extraKnobs: ['ruleIds', 'concepts'],
+        exampleCall: "sfi.interpret({ componentId, ruleIds: ['SOME_RULE_ID'] })",
+      });
     // v2.2 R2 — universal find-anywhere + discovery surface.
     case 'sfi.find_field_anywhere':
       return runTool(
@@ -2141,6 +2148,25 @@ const stampVaultDisclosure = <T>(
  * `runTool` is exported only so the response-size/leak unit tests can drive
  * it directly with a synthetic throwing handler.
  */
+/**
+ * Oversize-remedy narrowing a tool supplies EXPLICITLY, beyond what
+ * {@link narrowingKnobs} can infer from its schema's field NAMES
+ * (INTERPRET-OVERSIZE-KNOBLESS-REMEDY). `sfi.interpret`'s real narrowing
+ * params — `concepts`, `ruleIds` — do not match the shared regex (they name
+ * WHAT to select, not a `limit`/`offset`/`filter`-shaped knob), so its
+ * oversize error fell back to the generic "(filter, pagination, fewer hops)"
+ * remedy — none of which the tool's schema actually has. Threading the
+ * tool's OWN real knobs through here keeps the fix local to the one tool
+ * instead of adding its field names to the shared regex, which would bias
+ * every OTHER tool's oversize guidance toward names that happen to coincide.
+ */
+interface RunToolOversizeExtras {
+  /** Additional real knob names, merged with (never replacing) the schema-derived ones. */
+  readonly extraKnobs?: readonly string[];
+  /** A concrete example call — see {@link ResponseNarrowing.exampleCall}. */
+  readonly exampleCall?: string;
+}
+
 export const runTool = async <S extends z.ZodTypeAny, T>(
   ctx: Context,
   args: Readonly<Record<string, unknown>>,
@@ -2149,6 +2175,7 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
     ctx: Context,
     input: z.infer<S>,
   ) => Promise<Result<McpResponse<T>, McpError>>,
+  oversizeExtras?: RunToolOversizeExtras,
 ): Promise<CallToolResult> => {
   const parsed = schema.safeParse(args);
   if (!parsed.success) {
@@ -2165,6 +2192,11 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
       error: { kind: 'invalid-query', message },
     });
   }
+  // The tool's own declared knobs FIRST (most specific / author-confirmed),
+  // then the schema-derived ones, deduplicated — see RunToolOversizeExtras.
+  const knobs = [
+    ...new Set([...(oversizeExtras?.extraKnobs ?? []), ...narrowingKnobs(schema)]),
+  ];
   try {
     const result = await handler(ctx, parsed.data);
     return jsonResult(
@@ -2173,8 +2205,11 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
         : { error: result.error },
       {
         args: parsed.data as unknown as Readonly<Record<string, unknown>>,
-        knobs: narrowingKnobs(schema),
+        knobs,
         vaultRoot: ctx.vaultRoot,
+        ...(oversizeExtras?.exampleCall !== undefined
+          ? { exampleCall: oversizeExtras.exampleCall }
+          : {}),
       },
     );
   } catch (error) {
@@ -2194,7 +2229,12 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
             'An internal error occurred while handling this tool. The server logged the details.',
         },
       },
-      { knobs: narrowingKnobs(schema) },
+      {
+        knobs,
+        ...(oversizeExtras?.exampleCall !== undefined
+          ? { exampleCall: oversizeExtras.exampleCall }
+          : {}),
+      },
     );
   }
 };
@@ -2232,6 +2272,15 @@ interface ResponseNarrowing {
   readonly knobs?: readonly string[];
   /** Vault root for the org-drift badge lookup (P13-WATCH-badges). */
   readonly vaultRoot?: string;
+  /**
+   * A concrete, tool-specific example call appended to the oversize remedy
+   * (INTERPRET-OVERSIZE-KNOBLESS-REMEDY) — e.g.
+   * `sfi.interpret({ componentId, ruleIds: [...] })`. Optional: most tools'
+   * `knobs` list alone (limit/offset/filter/…) is self-explanatory; this is
+   * for the ones where naming the parameter is not enough to show HOW it
+   * narrows the query.
+   */
+  readonly exampleCall?: string;
 }
 
 /** Pass 2 trims strings longer than this… */
@@ -2518,6 +2567,9 @@ export const jsonResult = (
     const knobs = (narrowing?.knobs ?? [])
       .slice(0, 8)
       .map((knob) => knob.slice(0, 64));
+    // INTERPRET-OVERSIZE-KNOBLESS-REMEDY: bounded the same way `knobs` is —
+    // a tool-supplied string, never free text derived from the request.
+    const exampleCall = narrowing?.exampleCall?.slice(0, 200);
     const error: McpError = {
       kind: 'oversize',
       message:
@@ -2527,7 +2579,7 @@ export const jsonResult = (
           knobs.length > 0
             ? ` — this tool supports: ${knobs.join(', ')}`
             : ' (filter, pagination, fewer hops)'
-        }.`,
+        }${exampleCall !== undefined ? `, e.g. ${exampleCall}` : ''}.`,
     };
     return result({ error, estimatedPayloadBytes });
   };

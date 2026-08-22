@@ -51,8 +51,9 @@
  * and reflective invocation are invisible to the heuristic; a class
  * genuinely invoked at runtime via reflection will surface as
  * `likely-dead-code` UNLESS it matches a dynamic-registration classifier
- * (framework-subclass or callable-dispatch). A class that extends a
- * base-class from another namespace is presumed live, not dead. The
+ * (framework-subclass, namespaced-interface, or callable-dispatch). A class
+ * that extends a base-class from another namespace is presumed live, not
+ * dead. The
  * disclosure surfaces the blind spot for everything else verbatim.
  *
  * Implementation notes:

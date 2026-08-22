@@ -194,7 +194,13 @@ describe('decorateReportsCapCoverage — `retrieved` is what LANDED, not the pos
     { type: 'Dashboard', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true },
   ];
 
-  it('reports the files the retrieve delivered, and keeps the capped tail pending', () => {
+  // FIX-2 (coverage-spine): a genuinely-capped, non-zero pull is ATTEMPTED
+  // evidence, not "never attempted" — it must read `capped: true`, never
+  // `pending: true`. `pending` is reserved for a family this refresh never
+  // touched (a staged tier that has not run). Measured regression: this used
+  // to assert `pending: true` here, making a 500/4,296 capped-but-landed pull
+  // byte-identical to a family nothing had been attempted for yet.
+  it('reports the files the retrieve delivered, and marks the capped tail `capped`, not `pending`', () => {
     const byType = rows(
       decorateReportsCapCoverage(foldErasedRows, {
         reports: { total: 4296, requested: 500, retrieved: 500 },
@@ -204,12 +210,17 @@ describe('decorateReportsCapCoverage — `retrieved` is what LANDED, not the pos
     // The whole point: 500 landed report files, NOT the 0 nodes the fold left.
     expect(byType.get('Report')?.retrieved).toBe(500);
     expect(byType.get('Dashboard')?.retrieved).toBe(78);
-    // 4,296 > 500 and 183 > 78 — the unchecked remainder keeps absence hedged.
-    expect(byType.get('Report')?.pending).toBe(true);
-    expect(byType.get('Dashboard')?.pending).toBe(true);
+    // 4,296 > 500 and 183 > 78 — the unchecked remainder keeps absence hedged
+    // via `capped`, not `pending`: this WAS attempted.
+    expect(byType.get('Report')?.capped).toBe(true);
+    expect(byType.get('Report')?.pending).toBeUndefined();
+    expect(byType.get('Dashboard')?.capped).toBe(true);
+    expect(byType.get('Dashboard')?.pending).toBeUndefined();
+    // Never confirmed — a capped pull is not a proven-complete one.
+    expect(byType.get('Report')?.retrieveConfirmed).toBeUndefined();
   });
 
-  it('a fully-delivered non-zero pull clears pending and IS confirmed coverage', () => {
+  it('a fully-delivered non-zero pull clears pending/capped and IS confirmed coverage', () => {
     const byType = rows(
       decorateReportsCapCoverage(foldErasedRows, {
         reports: { total: 12, requested: 12, retrieved: 12 },
@@ -218,11 +229,44 @@ describe('decorateReportsCapCoverage — `retrieved` is what LANDED, not the pos
     );
     expect(byType.get('Report')?.retrieved).toBe(12);
     expect(byType.get('Report')?.pending).toBeUndefined();
+    expect(byType.get('Report')?.capped).toBeUndefined();
     expect(byType.get('Report')?.retrieveConfirmed).toBe(true);
-    // A 0/0 dashboard row stays PENDING: the org total comes from a `count()`
-    // that returns 0 on a failed query, so a zero there proves nothing.
+    // A 0/0 dashboard row stays PENDING (unproven zero — never "capped": we
+    // have no real evidence anything landed at all): the org total comes from
+    // a `count()` that returns 0 on a failed query, so a zero there proves
+    // nothing.
     expect(byType.get('Dashboard')?.pending).toBe(true);
+    expect(byType.get('Dashboard')?.capped).toBeUndefined();
     expect(byType.get('Dashboard')?.retrieveConfirmed).toBeUndefined();
+  });
+
+  // FIX-2: the real-vault regression this whole fix exists for. A `--no-pull`
+  // rebuild (or any run outside the smart-cap branch) has no fresh
+  // `reportsCapStats` of its own — `stats` is `undefined`. Without a fallback
+  // the row falls all the way back to the FOLD_ERASED default (`pending: true`
+  // over the raw, untrustworthy node count), even though the LAST real pull
+  // proved a genuine capped-partial result. Falling back to that preserved
+  // evidence (mirroring AUDIT-F5's retrievedAt/epoch preservation) keeps the
+  // row honest across the rebuild instead of regressing it to "unknown".
+  it('falls back to the PREVIOUS manifest\'s reportsCap evidence when this run has none', () => {
+    const byType = rows(
+      decorateReportsCapCoverage(foldErasedRows, undefined, {
+        // Deliberately no `requested` — mirrors a pre-0.1.10 manifest's
+        // `reportsCap` block, and proves the fallback needs only total/retrieved.
+        reports: { total: 4277, retrieved: 285 },
+        dashboards: { total: 81, retrieved: 73 },
+      }),
+    );
+    expect(byType.get('Report')?.retrieved).toBe(285);
+    expect(byType.get('Report')?.capped).toBe(true);
+    expect(byType.get('Report')?.pending).toBeUndefined();
+    expect(byType.get('Dashboard')?.retrieved).toBe(73);
+    expect(byType.get('Dashboard')?.capped).toBe(true);
+    expect(byType.get('Dashboard')?.pending).toBeUndefined();
+  });
+
+  it('is a no-op when NEITHER this run nor the previous manifest has reportsCap evidence', () => {
+    expect(decorateReportsCapCoverage(foldErasedRows, undefined, undefined)).toBe(foldErasedRows);
   });
 });
 
@@ -244,7 +288,11 @@ describe('decorateReportNodeCapCoverage — a CAPPED node set can never read as 
     { type: 'Dashboard', requested: true, retrieved: 81, errored: false, neverModeled: false, retrieveConfirmed: true },
   ];
 
-  it('forces pending + strips retrieveConfirmed on the capped type only', () => {
+  // FIX-2: node-persistence capping is ALSO an attempted-and-bounded outcome,
+  // not "never attempted" — it must read `capped: true`, never `pending: true`
+  // (which the staged-build / coverage_report contract reserves for a family
+  // this refresh has not touched yet).
+  it('forces capped (not pending) + strips retrieveConfirmed on the capped type only', () => {
     const byType = rows(
       decorateReportNodeCapCoverage(landedClean, {
         reports: { extracted: 4277, persisted: 1000, cap: 1000 },
@@ -252,9 +300,11 @@ describe('decorateReportNodeCapCoverage — a CAPPED node set can never read as 
       }),
     );
     // Reports were capped: the row can no longer claim confirmed coverage.
-    expect(byType.get('Report')?.pending).toBe(true);
+    expect(byType.get('Report')?.capped).toBe(true);
+    expect(byType.get('Report')?.pending).toBeUndefined();
     expect(byType.get('Report')?.retrieveConfirmed).toBeUndefined();
     // Dashboards were NOT capped — that row is untouched.
+    expect(byType.get('Dashboard')?.capped).toBeUndefined();
     expect(byType.get('Dashboard')?.pending).toBeUndefined();
     expect(byType.get('Dashboard')?.retrieveConfirmed).toBe(true);
   });

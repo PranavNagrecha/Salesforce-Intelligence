@@ -610,8 +610,21 @@ export const buildReservedConceptReasoning = async (
     return { envelope, reservedBytes: bytes, reservationCapped: true };
   }
 
+  // CONCEPT-BLOCK-HARD-MAX-NOT-HARD: the halving loop used to stop at
+  // `claimCap > 1`, so a SINGLE claim larger than `hardMax` on its own (measured
+  // 7,819 B against the 6,000 B stop, on a real object) fell straight through
+  // the loop body untouched and was returned oversized — the "hard" max was not
+  // hard. `claimCap > 0` lets the halving reach zero: `maxClaims: 0` reuses the
+  // SAME `claimsTruncated` honesty machinery {@link projectConceptReasoning}
+  // already emits for every smaller cap ("Showing the 0 highest-confidence of N
+  // claims to fit the response budget; call `sfi.interpret` … for the complete,
+  // uncapped list") — never a silently oversized block, and never a claim cut
+  // without saying so. Zero claims is provably within `hardMax`: the
+  // zero-claims/zero-row floor is ~2.5 KB (see the module doc), well under
+  // `CONCEPT_BLOCK_HARD_MAX_BYTES` (6,000), so this loop is guaranteed to
+  // terminate with `bytes <= hardMax` — no oversized return is possible.
   let claimCap = envelope.claims.length;
-  while (bytes > hardMax && claimCap > 1) {
+  while (bytes > hardMax && claimCap > 0) {
     claimCap = Math.floor(claimCap / 2);
     envelope = projectConceptReasoning(ctx, reasoned.value, { listCap: 0, maxClaims: claimCap });
     bytes = sizeOf(envelope);

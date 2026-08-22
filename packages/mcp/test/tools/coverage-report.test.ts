@@ -116,6 +116,50 @@ describe('coverageReportHandler', () => {
     expect(result.value.data.stagedBuild).toBeUndefined();
   });
 
+  // FIX-2 (coverage-spine): a family that WAS attempted and landed a real,
+  // non-zero, intentionally-capped result (the real-vault regression: Report
+  // retrieved=388, Dashboard retrieved=76, both `pending: true`) must read
+  // `capped`, not `pending` — `pending` is reserved for a family this refresh
+  // never touched at all (P13-STAGED-tiers). The caveat must keep firing
+  // (missingCoverage still names it) — only the REASON is now legible.
+  it('surfaces capped-but-retrieved rows in their own bucket, distinct from pending/partial', async () => {
+    const cappedCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...manifest,
+        coverage: [
+          ...(manifest.coverage ?? []),
+          {
+            type: 'Report',
+            requested: true,
+            retrieved: 388,
+            errored: false,
+            neverModeled: false,
+            capped: true,
+          },
+        ],
+      },
+    };
+    const result = await coverageReportHandler(cappedCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.value.data.capped.map((entry) => entry.type)).toEqual(['Report']);
+    expect(result.value.data.pending.map((entry) => entry.type)).not.toContain('Report');
+    expect(result.value.data.partial.map((entry) => entry.type)).not.toContain('Report');
+    expect(result.value.data.covered.map((entry) => entry.type)).not.toContain('Report');
+    // A capped family is genuinely incomplete coverage: the caveat is NOT
+    // wrong, only the "never attempted" reading it used to imply was.
+    expect(result.value.data.summary.missingCoverage).toContain('Report');
+  });
+
+  it('reports an empty capped bucket when nothing in the vault is capped', async () => {
+    const result = await coverageReportHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.capped).toEqual([]);
+  });
+
   // C2 / Systemic #1: coverage_report used to self-contradict — its `partial[]`
   // partition listed every requested-but-empty (retrieved:0) type while its
   // `summary` (from summarizeCoverage) reported the vault "complete" and counted

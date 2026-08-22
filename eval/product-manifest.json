@@ -461,6 +461,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:0ed799f2eccc46bb2dfdd2259ce5dca906733e8c776018594fab7d1e99ab2df3",
-  "identityHash": "sha256:663bd13b4ca517f8493c7e8485d06375cb630fd2dd34d8639a841ed01c316449"
+  "catalogHash": "sha256:eaac518450eec65a0ec82fcd27cfb766322da81dc2be85ea17f60676d9285b50",
+  "identityHash": "sha256:cf34592231bdf74b1f941609d97d0baf3676607f34f9037804be262d211dd4a3"
 }

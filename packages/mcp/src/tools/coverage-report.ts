@@ -112,9 +112,21 @@ export interface CoverageReportOutput {
   /**
    * P13-STAGED-tiers: types queued by an in-progress staged refresh — "not
    * retrieved YET (build in progress)", distinct from `partial` ("requested
-   * but came back empty/errored"). Empty outside a staged build.
+   * but came back empty/errored") and from `capped` ("was retrieved, just
+   * not completely"). Empty outside a staged build.
    */
   readonly pending: readonly CoverageEntry[];
+  /**
+   * FIX-2 (coverage-spine): types whose retrieval was intentionally bounded
+   * (the usage-ranked report/dashboard pull, or the report/dashboard
+   * node-persistence ceiling) and DID land a real, non-zero, partial result —
+   * "attempted, known cap, more exists beyond it", distinct from `pending`
+   * ("not yet attempted at all"). Still folded into `summary.missingCoverage`
+   * (the beyond-cap tail genuinely was not checked), so absence caveats keep
+   * firing exactly as before — this bucket only makes the REASON legible.
+   * Empty `[]` when nothing in the vault is capped.
+   */
+  readonly capped: readonly CoverageEntry[];
   /**
    * Types dispatched by exact filename out of a SHARED retrieve container whose
    * OWN member file did not come back in it — the third honesty state between
@@ -244,7 +256,7 @@ export const buildAssignmentDataCoverage = async (
 const partitionCoverage = (
   entries: readonly CoverageEntry[],
   unparsed: ReadonlySet<string>,
-): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending'> & {
+): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending' | 'capped'> & {
   // Always an array HERE (the handler decides whether to emit the key), unlike
   // the optional output field.
   readonly retrievedNotParsed: readonly CoverageEntry[];
@@ -265,6 +277,7 @@ const partitionCoverage = (
         !entry.errored &&
         !entry.neverModeled &&
         entry.pending !== true &&
+        entry.capped !== true &&
         !isRetrievedNotParsed(entry),
     ),
     partial: entries.filter(
@@ -273,10 +286,17 @@ const partitionCoverage = (
         ((entry.retrieved === 0 && entry.retrieveConfirmed !== true) ||
           entry.errored) &&
         !entry.neverModeled &&
-        entry.pending !== true,
+        entry.pending !== true &&
+        entry.capped !== true,
     ),
     notModeled: entries.filter((entry) => entry.neverModeled),
     pending: entries.filter((entry) => entry.pending === true && !entry.neverModeled),
+    // FIX-2: `pending` wins when a row somehow carries both (mirrors the
+    // existing pending-over-retrieveConfirmed precedent) — "not yet attempted
+    // at all" is the stronger, more conservative claim.
+    capped: entries.filter(
+      (entry) => entry.capped === true && entry.pending !== true && !entry.neverModeled,
+    ),
     retrievedNotParsed: entries.filter(isRetrievedNotParsed),
   };
 };

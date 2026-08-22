@@ -19,6 +19,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { VALUE_LITERAL_READER_COVERAGE } from '../../src/tools/coverage-trust.js';
 import {
   whatIfRemovePicklistValueHandler,
   whatIfRemovePicklistValueInputSchema,
@@ -42,25 +43,12 @@ const FIXTURE_MANIFEST: VaultManifest = {
   sourceTreeHash: 'sha256:fixture',
   coverageComputedAt: '2026-05-29T12:00:00.000Z',
   // FIX 9: the shared `VALUE_LITERAL_READER_COVERAGE` list — this tool and
-  // `value_change_audit` now name the SAME families for the same field, so a
-  // fully-covered fixture must cover all fourteen (`Layout`, `SharingRule` and
-  // `DuplicateRule` joined from the value-change side).
-  coverage: completeCoverage([
-    'CustomField',
-    'ValidationRule',
-    'Flow',
-    'ApexClass',
-    'ApexTrigger',
-    'WorkflowRule',
-    'Layout',
-    'SharingRule',
-    'DuplicateRule',
-    'ConditionalContext',
-    'Report',
-    'Dashboard',
-    'ListView',
-    'FlexiPage',
-  ]),
+  // `value_change_audit` now name the SAME families for the same field.
+  // FIX-3 (coverage-spine): imported directly (not hand-copied) so this
+  // fixture can never silently drift from the real list again — the earlier
+  // hand-copy is exactly how a fabricated `ConditionalContext` coverage row
+  // (a row NO real vault ever has — see coverage-trust.ts) went undetected.
+  coverage: completeCoverage([...VALUE_LITERAL_READER_COVERAGE]),
 };
 
 const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({

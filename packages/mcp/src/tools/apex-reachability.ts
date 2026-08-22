@@ -83,7 +83,8 @@ export type EntryPointKind =
   | 'test-class'
   | 'ui-controller'
   | 'framework-subclass'
-  | 'callable-dispatch';
+  | 'callable-dispatch'
+  | 'namespaced-interface';
 
 /**
  * DYNAMIC-REGISTRATION ENTRY POINTS — the blind spot that unifying the walk
@@ -127,6 +128,7 @@ export type EntryPointKind =
 export const UNPROVEN_REGISTRATION_KINDS: readonly EntryPointKind[] = [
   'framework-subclass',
   'callable-dispatch',
+  'namespaced-interface',
   // ASYNC-DISPATCH REGISTRATION IS ALSO UNPROVABLE OFFLINE. Added after 16 of
   // 18 org-wide `likely_dead` classes turned out to be Schedulable or Batchable
   // — see `isAsyncDispatchRegistration` for the platform reason.
@@ -162,6 +164,35 @@ export const isFrameworkSubclass = (node: Node): boolean => {
 export const isCallableDispatch = (node: Node): boolean => {
   const impl = node.properties['implements'];
   return Array.isArray(impl) && impl.includes(CALLABLE_INTERFACE);
+};
+
+/**
+ * True when the class implements an interface QUALIFIED by another namespace
+ * — `Auth.RegistrationHandler` (an AuthProvider record names the implementing
+ * class by type; the platform instantiates it), `hed.TDTM_Runnable`, a managed
+ * package's own plugin interface. Registered outside the metadata graph in
+ * exactly the same shape as {@link isFrameworkSubclass}: the namespace owner
+ * (a platform feature or a managed package) dispatches the class, so no local
+ * `callsApex` edge can exist. Same signal, different declaration site
+ * (`implements` array vs. `superclass`) — kept as its own predicate so each
+ * stays a clean single-purpose check; {@link isUnprovenRegistration} composes
+ * both rather than merging them.
+ *
+ * SAME CAUTION AS THE SUPERCLASS CHECK, deliberately left unguarded: a dotted
+ * name alone is not proof of an external namespace. Apex inner types are also
+ * written `Outer.Inner`, so a class implementing another class's own
+ * LOCALLY-DECLARED inner interface (`implements Outer.InnerInterface`, both
+ * in this vault) would match this same substring test — and, unlike the
+ * superclass case (a subclass relationship a `callsApex`-style edge could
+ * never carry anyway), that shape is real Apex some orgs write. Measured on
+ * both reference vaults before shipping: if `definitely_dead` collapses,
+ * this predicate is too wide and needs narrowing (e.g. excluding a dotted
+ * prefix that names an ApexClass declared in this vault) rather than being
+ * accepted as-is.
+ */
+export const isNamespacedInterfaceImplementation = (node: Node): boolean => {
+  const impl = node.properties['implements'];
+  return Array.isArray(impl) && impl.some((i) => typeof i === 'string' && i.includes('.'));
 };
 
 /**
@@ -203,12 +234,14 @@ export const isAsyncDispatchRegistration = (node: Node): boolean =>
 
 /**
  * True when the class is registered somewhere no metadata edge can reach — a
- * framework subclass, a `Callable` dispatch target, or an async-dispatch class.
- * The ONE predicate `find_dead_code`'s SQL is pinned against.
+ * framework subclass, a `Callable` dispatch target, a namespaced-interface
+ * implementation, or an async-dispatch class. The ONE predicate
+ * `find_dead_code`'s SQL is pinned against.
  */
 export const isUnprovenRegistration = (node: Node): boolean =>
   isFrameworkSubclass(node) ||
   isCallableDispatch(node) ||
+  isNamespacedInterfaceImplementation(node) ||
   isAsyncDispatchRegistration(node);
 
 /** Node types whose incoming `references` edge is a `controller=` binding. */
@@ -255,11 +288,12 @@ export const entryKindsFor = (
   // The single change that stops 75 of this org's 85 `likely-dead-code`
   // verdicts being wrong: nothing CALLS a test class, the test runner does.
   if (opts.isRoot && isTestClassNode(node)) kinds.push('test-class');
-  // The two UNPROVEN registration kinds. Unlike `test-class` these fire at ANY
-  // depth: a framework-dispatched class that calls X really does make X
+  // The three UNPROVEN registration kinds. Unlike `test-class` these fire at
+  // ANY depth: a framework-dispatched class that calls X really does make X
   // reachable, exactly as a trigger or a REST resource would.
   if (isFrameworkSubclass(node)) kinds.push('framework-subclass');
   if (isCallableDispatch(node)) kinds.push('callable-dispatch');
+  if (isNamespacedInterfaceImplementation(node)) kinds.push('namespaced-interface');
   return kinds;
 };
 
@@ -286,15 +320,17 @@ export const isUnprovenRegistrationKind = (kind: EntryPointKind): boolean =>
 export const UNPROVEN_REGISTRATION_DISCLOSURE =
   'A class that extends a base class from ANOTHER namespace (a managed package or platform ' +
   'framework instantiates its own subclasses), declares the Callable dynamic-invocation ' +
-  'interface, or implements Queueable / Database.Batchable / Schedulable is registered OUTSIDE ' +
-  'the metadata a vault holds: in a string literal, a Custom Metadata record, managed-package ' +
-  'code, anonymous Apex run from the Developer Console or a deployment script, or a CronTrigger ' +
-  'record written by Setup > Schedule Apex. CronTrigger is DATA, not metadata — it is never ' +
-  'retrieved, so no refresh can close that gap. None of those registrations mints an edge, so ' +
-  'such a class has zero incoming edges by construction. Every one of these signals says the ' +
-  'class is BUILT to be invoked from outside this vault; NONE of them proves the registration ' +
-  'is live. Treat it as "not dead", never as "proven reachable" — confirm the registration in ' +
-  'the org before relying on it.';
+  'interface, implements an interface QUALIFIED by another namespace (an AuthProvider record ' +
+  'names an Auth.RegistrationHandler implementation by type; a managed package registers its ' +
+  'own plugin interface the same way), or implements Queueable / Database.Batchable / ' +
+  'Schedulable is registered OUTSIDE the metadata a vault holds: in a string literal, a Custom ' +
+  'Metadata record, managed-package code, anonymous Apex run from the Developer Console or a ' +
+  'deployment script, or a CronTrigger record written by Setup > Schedule Apex. CronTrigger is ' +
+  'DATA, not metadata — it is never retrieved, so no refresh can close that gap. None of those ' +
+  'registrations mints an edge, so such a class has zero incoming edges by construction. Every ' +
+  'one of these signals says the class is BUILT to be invoked from outside this vault; NONE of ' +
+  'them proves the registration is live. Treat it as "not dead", never as "proven reachable" — ' +
+  'confirm the registration in the org before relying on it.';
 
 /**
  * True when this incoming edge is a UI `controller=` binding — a

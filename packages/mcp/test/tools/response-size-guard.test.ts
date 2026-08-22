@@ -226,6 +226,60 @@ describe('jsonResult global response budget', () => {
     expect(parsed.estimatedPayloadBytes).toBeGreaterThan(2000);
   });
 
+  // INTERPRET-OVERSIZE-KNOBLESS-REMEDY: a tool whose real narrowing params
+  // don't match the shared `NARROWING_KNOB_RE` heuristic (e.g. `sfi.interpret`'s
+  // `concepts` / `ruleIds`) can supply a concrete example call so the oversize
+  // remedy stays actionable instead of falling back to knobs the tool doesn't
+  // have. See `runTool`'s `oversizeExtras` (tool-dispatch.ts) for the caller side.
+  it('pass 3: appends a tool-supplied example call to the oversize remedy when given one', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '2000';
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < 3000; i += 1) wide[`k${i}`] = i;
+    const body = { data: wide, vaultState: VAULT_STATE };
+    const text = envelopeText(
+      jsonResult(body, {
+        knobs: ['ruleIds', 'concepts'],
+        exampleCall: "sfi.interpret({ componentId, ruleIds: ['SOME_RULE_ID'] })",
+      }),
+    );
+    const parsed = JSON.parse(text) as {
+      readonly error: { readonly kind: string; readonly message: string };
+    };
+    expect(parsed.error.kind).toBe('oversize');
+    expect(parsed.error.message).toContain('this tool supports: ruleIds, concepts');
+    expect(parsed.error.message).toContain(
+      "e.g. sfi.interpret({ componentId, ruleIds: ['SOME_RULE_ID'] })",
+    );
+  });
+
+  it('pass 3: bounds an adversarially long exampleCall the same way knobs are bounded', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '2000';
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < 3000; i += 1) wide[`k${i}`] = i;
+    const body = { data: wide, vaultState: VAULT_STATE };
+    const text = envelopeText(
+      jsonResult(body, { knobs: ['limit'], exampleCall: 'x'.repeat(5000) }),
+    );
+    expect(bytesOf(text)).toBeLessThan(2000);
+    const parsed = JSON.parse(text) as {
+      readonly error: { readonly kind: string; readonly message: string };
+    };
+    expect(parsed.error.kind).toBe('oversize');
+  });
+
+  it('pass 3: omits the example clause entirely when no exampleCall is supplied (byte-identical to before)', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '2000';
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < 3000; i += 1) wide[`k${i}`] = i;
+    const body = { data: wide, vaultState: VAULT_STATE };
+    const text = envelopeText(jsonResult(body, { knobs: ['limit', 'typeFilter'] }));
+    const parsed = JSON.parse(text) as {
+      readonly error: { readonly kind: string; readonly message: string };
+    };
+    expect(parsed.error.message).not.toContain('e.g.');
+    expect(parsed.error.message.endsWith('limit, typeFilter.')).toBe(true);
+  });
+
   it("never mutates the handler's returned object (escalation works on a clone)", () => {
     process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
     const rows = Array.from({ length: 400 }, (_, i) => ({

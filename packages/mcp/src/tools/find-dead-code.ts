@@ -406,14 +406,17 @@ interface DeadCodeRow {
   /**
    * UNPROVEN dynamic registration: the class extends a base class from another
    * namespace (a managed package / platform framework instantiates its own
-   * subclasses) or declares the `Callable` dynamic-invocation interface. Both
-   * are DECLARED properties of the class; neither proves the registration is
-   * live, because the registration lives in a string literal, a Custom Metadata
-   * record, or managed-package code that mints no edge. Maps to `uncertain` —
-   * never `definitely_dead`, and never a live verdict either.
+   * subclasses), implements an interface qualified by another namespace (e.g.
+   * an AuthProvider's `Auth.RegistrationHandler`), or declares the `Callable`
+   * dynamic-invocation interface. All are DECLARED properties of the class;
+   * none proves the registration is live, because the registration lives in a
+   * string literal, a Custom Metadata record, or managed-package code that
+   * mints no edge. Maps to `uncertain` — never `definitely_dead`, and never a
+   * live verdict either.
    *
-   * Kept behaviourally identical to `isFrameworkSubclass` / `isCallableDispatch`
-   * in `apex-reachability.ts` by a drift test.
+   * Kept behaviourally identical to `isFrameworkSubclass` /
+   * `isNamespacedInterfaceImplementation` / `isCallableDispatch` in
+   * `apex-reachability.ts` by a drift test.
    */
   readonly is_unproven_registration: boolean;
   /**
@@ -488,11 +491,19 @@ export const NON_USAGE_EDGE_EXCLUSION_SQL = NOT_USAGE_EDGE_TYPES.map(
  * The `is_unproven_registration` CTE predicate. `CALLABLE_INTERFACE` is imported
  * from `apex-reachability.ts` rather than spelled again here, so the interface
  * name cannot drift between the TS predicate and the SQL one.
+ *
+ * The `implements` LIKE '%.%' clause is the SQL face of
+ * `isNamespacedInterfaceImplementation`: `json_extract_string` on an ARRAY
+ * path serializes it as text (`["Callable","Auth.RegistrationHandler"]`), so a
+ * bare `LIKE '%.%'` over JUST that value is true iff some interface name in
+ * the array is dotted — brackets/quotes/commas carry no `.` of their own,
+ * same reasoning as the `superclass` clause above it.
  */
 export const UNPROVEN_REGISTRATION_SQL = `             COALESCE(
                type = 'ApexClass' AND (
                  COALESCE(json_extract_string(properties_json, '$.superclass') LIKE '%.%', FALSE)
                  OR COALESCE(json_extract_string(properties_json, '$.implements') LIKE '%"${CALLABLE_INTERFACE}"%', FALSE)
+                 OR COALESCE(json_extract_string(properties_json, '$.implements') LIKE '%.%', FALSE)
 ${ASYNC_DISPATCH_PROPERTY_KEYS.map(
   (k) =>
     `                 OR COALESCE(json_extract_string(properties_json, '$.${k}') = 'true', FALSE)`,
@@ -536,14 +547,16 @@ const fetchDeadCodeRows = async (
                      OR COALESCE(json_extract_string(properties_json, '$.hasInvocableMethod') = 'true', FALSE)
                    )),
                FALSE) AS is_own_entry_point,
-             -- UNPROVEN dynamic registration. Same two predicates as
-             -- isFrameworkSubclass / isCallableDispatch in apex-reachability.ts,
-             -- expressed in SQL because this tool's cascade is a single CTE (a
-             -- measured ~7x speedup that is not worth losing). A behavioural
-             -- drift test runs both over the same fixture and asserts they agree.
-             -- A dotted superclass means the base class lives in ANOTHER
-             -- namespace, so its owner instantiates the subclass and no local
-             -- callsApex edge can exist.
+             -- UNPROVEN dynamic registration. Same predicates as
+             -- isFrameworkSubclass / isNamespacedInterfaceImplementation /
+             -- isCallableDispatch in apex-reachability.ts, expressed in SQL
+             -- because this tool's cascade is a single CTE (a measured ~7x
+             -- speedup that is not worth losing). A behavioural drift test
+             -- runs both over the same fixture and asserts they agree.
+             -- A dotted superclass OR a dotted implemented-interface name
+             -- means the base type lives in ANOTHER namespace, so its owner
+             -- instantiates/dispatches the class and no local callsApex edge
+             -- can exist.
 ${UNPROVEN_REGISTRATION_SQL} AS is_unproven_registration,
              -- Async-dispatch entry point: Queueable / Batchable / Schedulable.
              -- Dispatched by user Apex (enqueueJob / executeBatch / schedule), so
@@ -916,11 +929,13 @@ export const findDeadCodeHandler = async (
       verdict = 'uncertain';
       reasoning =
         'class is BUILT for dynamic registration — it extends a base class from another ' +
-        'namespace (a managed package or platform framework instantiates its own subclasses) ' +
-        'or declares the Callable dynamic-invocation interface. The registration itself lives ' +
-        'in a string literal, a Custom Metadata record, or managed-package code and mints no ' +
-        'edge, so zero incoming edges is EXPECTED here and is not evidence of death. Not ' +
-        'proven live either — confirm the registration in the org before deleting.';
+        'namespace (a managed package or platform framework instantiates its own subclasses), ' +
+        'implements an interface qualified by another namespace (e.g. an AuthProvider\'s ' +
+        'Auth.RegistrationHandler), or declares the Callable dynamic-invocation interface. The ' +
+        'registration itself lives in a string literal, a Custom Metadata record, or ' +
+        'managed-package code and mints no edge, so zero incoming edges is EXPECTED here and is ' +
+        'not evidence of death. Not proven live either — confirm the registration in the org ' +
+        'before deleting.';
     } else if (incomingCount === 0) {
       verdict = 'definitely_dead';
       reasoning =

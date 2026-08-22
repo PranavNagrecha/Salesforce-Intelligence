@@ -526,6 +526,28 @@ describe('coverage fields (enterprise trust contract)', () => {
     expect(summary.partialTypes).toContain('Report');
     expect(summary.missingCoverage).toContain('Report');
   });
+
+  // FIX-2 (coverage-spine): a `capped` row (attempted, real non-zero evidence,
+  // known volume cap) must behave like `pending` for CLASSIFICATION purposes —
+  // excluded from `covered`, folded into `partialTypes`/`missingCoverage` so
+  // the absence caveat keeps firing — even though it is NOT the same honesty
+  // state as `pending` (see the coverage_report bucket split, which is where
+  // the two stay visibly distinct).
+  it('FIX-2: a capped row (real, non-zero, bounded evidence) stays partial, never covered', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Report', requested: true, retrieved: 388, errored: false, neverModeled: false, capped: true },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, ['CustomObject', 'Report']);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toContain('Report');
+    expect(summary.missingCoverage).toContain('Report');
+  });
 });
 
 describe('backfillCoverageInMemory', () => {

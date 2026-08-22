@@ -153,10 +153,12 @@ export const runWatchLoop = async (options: {
   readonly log?: (line: string) => void;
   /**
    * P13-WATCH-auto-refresh: when a tick's sweep reports drift, trigger a
-   * refresh — at most once per `minIntervalMs` (default 1h). The refresh
-   * itself is lock-safe by construction (epoch side-build + atomic rename),
-   * and a failure logs and continues — the watcher never corrupts and never
-   * dies on a refresh error.
+   * refresh — at most once per `minIntervalMs` (default 1h). This CONTACTS
+   * THE ORG (`sf project retrieve`) from the background daemon, unprompted —
+   * real network traffic, not just local extraction/graph caching. The
+   * refresh itself is lock-safe by construction (epoch side-build + atomic
+   * rename), and a failure logs and continues — the watcher never corrupts
+   * and never dies on a refresh error.
    */
   readonly autoRefresh?: {
     readonly refresh: (cwd: string) => Promise<unknown>;
@@ -285,7 +287,7 @@ export const registerWatchCommand = (program: Command): void => {
     .option('--interval <duration>', 'Tick interval, e.g. 15m or 1h (floor 5m)', '15m')
     .option(
       '--auto-refresh <mode>',
-      "When a tick detects drift, run `sfi refresh --incremental` automatically — at most once per hour; lock-safe (epoch side-build); a failure logs and the watcher continues. Mode: 'incremental'.",
+      "When a tick detects drift, run `sfi refresh --incremental --incremental-graph` automatically — this CONTACTS THE ORG (`sf project retrieve`), at most once per hour; lock-safe (epoch side-build); a failure logs and the watcher continues. Mode: 'incremental'.",
     )
     .option('--foreground', 'Run the loop in THIS process (used by the detached child)')
     .option(

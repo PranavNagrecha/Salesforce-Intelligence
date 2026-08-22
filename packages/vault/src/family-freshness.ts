@@ -38,10 +38,31 @@ export const stampFamilyEpochs = (
       };
     }
     if (prev === undefined) return entry;
+    // FIX-1 (coverage-spine): this family was not (re-)pulled this run — a
+    // scoped `--types` refresh that excluded it, a `--no-pull` rebuild, or a
+    // row a decorator already forced `pending` (report caps, staged tiers,
+    // profile co-batch). Its RETRIEVE evidence has not changed, so the epoch
+    // clock carries forward (above) — and `retrieveConfirmed` IS part of that
+    // same evidence (CR-P3-3: describe-confirmed + a clean landed pull), not
+    // something re-extraction can invalidate. Measured regression: a real
+    // `--no-pull` rebuild preserved `retrievedAt`/`epoch` from the prior row
+    // but silently dropped `retrieveConfirmed`, making every family it
+    // touched read as "never attempted" instead of "confirmed empty" —
+    // 96-of-96 rows on one real vault. Carry it forward too, but only when
+    // this pass gives no reason not to: never resurrect over a `retrieveConfirmed`
+    // this pass already set itself, an error this pass found, or a `pending`
+    // a decorator forced this pass — each of those is a fresher, stronger
+    // signal than the prior epoch's.
+    const carryConfirmed =
+      entry.retrieveConfirmed !== true &&
+      entry.errored !== true &&
+      entry.pending !== true &&
+      prev.retrieveConfirmed === true;
     return {
       ...entry,
       ...(prev.retrievedAt !== undefined ? { retrievedAt: prev.retrievedAt } : {}),
       ...(prev.epoch !== undefined ? { epoch: prev.epoch } : {}),
+      ...(carryConfirmed ? { retrieveConfirmed: true } : {}),
     };
   });
 };

@@ -45,6 +45,7 @@ import {
   adaptCoverage,
   interpretHandler,
 } from '../../src/tools/interpret.js';
+import { dispatchTool } from '../../src/tools/tool-dispatch.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -1782,5 +1783,95 @@ describe('interpretHandler — a shared-container plane that never parsed hedges
     // coverage, not by the rules being unable to match this node.
     expect(d.rulesFired).toBe(2);
     expect(d.trust.completeness.missingCoverage).toBeUndefined();
+  });
+});
+
+// INTERPRET-OVERSIZE-KNOBLESS-REMEDY: `sfi.interpret`'s only narrowing
+// params are `ruleIds` / `concepts` — no `limit`/`offset`/`filter`-shaped
+// field, so the shared oversize guard's schema-derived `narrowingKnobs`
+// found nothing and fell back to the generic "(filter, pagination, fewer
+// hops)" remedy — parameters this tool does not have. Measured on a real
+// vault: `sfi.interpret({ componentId: 'CustomObject:Contact' })` at ~183 KB
+// vs the ~40 KB budget returned exactly that unactionable remedy. These
+// tests drive the handler THROUGH `dispatchTool` (the wiring in
+// `tool-dispatch.ts`'s `sfi.interpret` case), because the generic knob
+// mechanism alone never sees the tool-specific fix.
+describe('sfi.interpret — oversize remedy names the real narrowing params', () => {
+  interface DispatchEnvelope {
+    readonly error?: { readonly kind: string; readonly message: string };
+    readonly estimatedPayloadBytes?: number;
+  }
+
+  const envelopeOf = async (
+    args: Readonly<Record<string, unknown>>,
+  ): Promise<DispatchEnvelope> => {
+    const result = await dispatchTool(ctx, 'sfi.interpret', args);
+    const block = result.content[0];
+    const text = block !== undefined && block.type === 'text' ? block.text : '{}';
+    return JSON.parse(text) as DispatchEnvelope;
+  };
+
+  it("FAIL-BEFORE/PASS-AFTER: names ruleIds/concepts and a concrete example call, never the generic 'filter, pagination, fewer hops'", async () => {
+    const previous = process.env['SFI_MAX_RESPONSE_BYTES'];
+    // Low enough that ANY successful interpret payload is oversize — this
+    // isolates the REMEDY TEXT from needing a fixture large enough to
+    // organically exceed the real 40 KB budget.
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '2000';
+    try {
+      const parsed = await envelopeOf({ componentId: MD_FIELD });
+      expect(parsed.error?.kind).toBe('oversize');
+      const message = parsed.error?.message ?? '';
+      // Pre-fix: "Re-query with a narrower scope (filter, pagination, fewer
+      // hops)." — none of which `interpretInputSchema` has.
+      expect(message).not.toContain('(filter, pagination, fewer hops)');
+      expect(message).toContain('this tool supports: ruleIds, concepts');
+      expect(message).toContain("sfi.interpret({ componentId, ruleIds: ['SOME_RULE_ID'] })");
+    } finally {
+      if (previous === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = previous;
+    }
+  });
+
+  it('the named ruleIds param genuinely narrows the payload — not a fictitious knob', async () => {
+    const previous = process.env['SFI_MAX_RESPONSE_BYTES'];
+    // Generous budget so BOTH calls succeed — this test is about whether
+    // `ruleIds` genuinely shrinks the payload, not about crossing a
+    // particular byte line (that is covered by the oversize test above).
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '40000';
+    try {
+      const unfiltered = await envelopeOf({ componentId: MD_FIELD });
+      expect(unfiltered.error).toBeUndefined();
+
+      // The SAME call the remedy tells the caller to make, using a REAL rule
+      // id this fixture's `MD_FIELD` is proven (above) to fire.
+      const filtered = await envelopeOf({
+        componentId: MD_FIELD,
+        ruleIds: ['rule:relationship/master-detail-cascade'],
+      });
+      expect(filtered.error).toBeUndefined();
+      // Pre-fix concern this test guards against: `ruleIds` being a
+      // no-op / unreal knob. It is real — the filtered call is smaller.
+      expect(filtered.estimatedPayloadBytes ?? 0).toBeLessThan(
+        unfiltered.estimatedPayloadBytes ?? 0,
+      );
+    } finally {
+      if (previous === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = previous;
+    }
+  });
+
+  it('a DIFFERENT tool (no oversizeExtras passed) is unaffected — never interpret-specific text', async () => {
+    // `runTool`'s new 5th parameter is optional; every OTHER dispatch case
+    // (get_edges included) still calls it with exactly 4 arguments, so this
+    // is also a regression check that the new parameter did not disturb an
+    // existing call site.
+    const result = await dispatchTool(ctx, 'sfi.get_edges', { nodeId: MD_FIELD });
+    const block = result.content[0];
+    const text = block !== undefined && block.type === 'text' ? block.text : '{}';
+    expect(text).not.toContain('ruleIds');
+    expect(text).not.toContain('sfi.interpret(');
+    const parsed = JSON.parse(text) as { readonly error?: unknown; readonly data?: unknown };
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.data).toBeDefined();
   });
 });

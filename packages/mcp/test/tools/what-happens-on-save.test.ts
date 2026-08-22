@@ -21,7 +21,6 @@ import type { Context } from '../../src/server.js';
 import { jsonResult, runTool } from '../../src/tools/index.js';
 import { SOE_UNGROUNDED_REFS_NOTE } from '../../src/tools/order-of-execution.js';
 import {
-  computeFilteredPhaseOmission,
   computePhasesOmitted,
   tallyPhaseCounts,
   whatHappensOnSaveHandler,
@@ -2997,6 +2996,12 @@ describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer
 
   it('FIX 3 (4): the phase-filtered shortfall check RUNS and compares only the requested phase', async () => {
     // The pure comparison, which the handler no longer skips under a filter.
+    // `computeFilteredPhaseOmission` used to be a second, hand-rolled copy of
+    // this exact check; it is gone (folded into `computePhasesOmitted`'s
+    // `onlyPhase` parameter — WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES)
+    // so these now exercise the shared helper directly, passing a
+    // phase-filtered `soe` slice the same shape the handler hands it
+    // (`visibleSoe`: every step already carries the requested phase).
     const counts = tallyPhaseCounts([
       { phase: 'pre-save-validation' },
       { phase: 'pre-save-validation' },
@@ -3004,16 +3009,30 @@ describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer
       { phase: 'after-triggers' },
     ]);
     // Short → named, with the phase's TRUE declared population.
-    expect(computeFilteredPhaseOmission(counts, 'pre-save-validation', 2)).toEqual({
-      phase: 'pre-save-validation',
-      declared: 3,
-      present: 2,
-    });
+    expect(
+      computePhasesOmitted(
+        counts,
+        [{ phase: 'pre-save-validation' }, { phase: 'pre-save-validation' }],
+        'pre-save-validation',
+      ),
+    ).toEqual([{ phase: 'pre-save-validation', declared: 3, present: 2 }]);
     // Whole → nothing claimed.
-    expect(computeFilteredPhaseOmission(counts, 'pre-save-validation', 3)).toBeNull();
+    expect(
+      computePhasesOmitted(
+        counts,
+        [
+          { phase: 'pre-save-validation' },
+          { phase: 'pre-save-validation' },
+          { phase: 'pre-save-validation' },
+        ],
+        'pre-save-validation',
+      ),
+    ).toEqual([]);
     // A phase the filter deliberately excluded is NOT an omission — that is
     // the trap a naive un-suppression falls into.
-    expect(computeFilteredPhaseOmission(counts, 'after-triggers', 1)).toBeNull();
+    expect(
+      computePhasesOmitted(counts, [{ phase: 'after-triggers' }], 'after-triggers'),
+    ).toEqual([]);
 
     // ...and end-to-end: a whole phase-filtered slice claims no omission, and
     // never reports the phases the filter left out.

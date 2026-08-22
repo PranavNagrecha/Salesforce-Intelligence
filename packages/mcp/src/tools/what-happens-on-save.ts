@@ -693,22 +693,6 @@ const CONCEPT_REASONING_NO_HEADROOM_NOTE = (headroom: number): string =>
   'for a narrower response with room for it.';
 
 /**
- * FIX 3 (4). The declared-vs-present check for a PHASE-FILTERED view.
- * `computePhasesOmitted` compares every phase, which under a filter would
- * report the deliberately-absent phases as omissions; here only the requested
- * phase is compared. Returns `null` when the phase is whole.
- */
-export const computeFilteredPhaseOmission = (
-  phaseCounts: SoePhaseCounts,
-  phase: Exclude<SoePhase, 'save'>,
-  presentCount: number,
-): SoePhaseOmission | null => {
-  const declared = phaseCounts[phase];
-  if (presentCount >= declared) return null;
-  return { phase, declared, present: presentCount };
-};
-
-/**
  * The inactive-roster census is defined ONCE in `soe-active.ts`, beside
  * `InactiveConfiguredFirer` and the active/inactive predicate it counts over.
  * Re-exported here so this module's public type surface is unchanged. Both
@@ -1868,12 +1852,13 @@ export const whatHappensOnSaveHandler = async (
       data.disclosure = `${data.disclosure} ${crossPhaseShortfallNote(phasesOmitted)}`;
     }
   } else {
-    const omission = computeFilteredPhaseOmission(
-      phaseCounts,
-      input.phase,
-      data.soe.length,
-    );
-    if (omission !== null) {
+    // `data.soe` is `visibleSoe` here — every step already carries
+    // `phase === input.phase` — so `computePhasesOmitted`'s own tally against
+    // ONLY that phase is exactly the single-phase comparison this used to do
+    // with a second, hand-rolled copy of the same rule
+    // (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES).
+    const [omission] = computePhasesOmitted(phaseCounts, data.soe, input.phase);
+    if (omission !== undefined) {
       data.phasesOmitted = [omission];
       data.truncated = true;
       data.disclosure = `${data.disclosure} ${filteredPhaseShortfallNote(omission)}`;

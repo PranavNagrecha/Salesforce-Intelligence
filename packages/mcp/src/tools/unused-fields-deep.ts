@@ -112,8 +112,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { coercePrefix } from './coerce-id.js';
 import { offlineTrust } from './coverage-trust.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import { probeLiveAccess } from './live-plane.js';
 import {
   computeLivePopulation,
@@ -262,8 +262,11 @@ export const unusedFieldsDeepInputSchema = z.object({
   /**
    * Optional filter: restrict the scan to fields on a single object.
    * Accepts either the canonical CustomObject id (`CustomObject:Account`) or
-   * a bare object api name (`Account`). When supplied the scan returns only
-   * fields whose parent object matches; without it the scan is org-wide.
+   * a bare object api name (`Account`), matched case-insensitively against
+   * the vault. When supplied the scan returns only fields whose parent
+   * object matches (echoed back as `appliedScope`); without it the scan is
+   * org-wide. An object name that matches nothing in the vault is refused
+   * with `invalid-query` rather than silently returning an empty result.
    * `objectId` is the primary parameter; `objectApiName` and the legacy
    * `parentObjectFilter` (bare-name) are accepted as synonyms.
    */
@@ -388,6 +391,17 @@ export interface UnusedFieldCleanupFinding {
 }
 
 export interface UnusedFieldsDeepOutput {
+  /**
+   * Present ONLY on an object-scoped call (UNUSED-FIELDS-DEEP-SILENT-UNKNOWN-
+   * OBJECT) — echoes the object the scan was narrowed to, so a host never
+   * reads a scoped answer as org-wide. Absent on the bare org-wide call,
+   * keeping that response byte-identical. `componentId` is the VAULT's exact
+   * casing (never the caller's — case-insensitive resolution is not identity).
+   */
+  readonly appliedScope?: {
+    readonly componentId: string;
+    readonly object: string;
+  };
   /**
    * The matched fields. Empty (`[]`) when `format: 'csv'` was requested —
    * the same rows are then carried in `csv` instead, so the response does
@@ -1047,33 +1061,6 @@ const csvRowForUnusedField = (entry: UnusedFieldDeepEntry): readonly CsvCell[] =
   entry.checks.noIntegrationExposure,
 ];
 
-/**
- * Resolve the caller-supplied object scope to a bare API name used by
- * `parseParentApiName`. Accepts either `CustomObject:{ApiName}` (the
- * canonical id) or a bare api name (`Account`). When none of the object
- * scope parameters is supplied the scan is org-wide and this returns
- * `undefined`.
- *
- * Parameter precedence (first wins): `objectId` → `objectApiName` →
- * `parentObjectFilter` (legacy bare-name alias).
- */
-const resolveParentObjectFilter = (
-  input: UnusedFieldsDeepInput,
-): string | undefined => {
-  const PREFIX = 'CustomObject:';
-  // objectId accepts the canonical id OR a bare api name.
-  if (input.objectId !== undefined) {
-    const coerced = coercePrefix(input.objectId, [PREFIX]);
-    if (coerced.startsWith(PREFIX)) return coerced.slice(PREFIX.length);
-    // Non-CustomObject prefix supplied — treat as bare api name (coercePrefix
-    // already returns it unchanged when it has a different type: colon).
-    return input.objectId;
-  }
-  // objectApiName is a bare api name synonym.
-  if (input.objectApiName !== undefined) return input.objectApiName;
-  return input.parentObjectFilter;
-};
-
 // ---------------------------------------------------------------------------
 // STEP-2 `format: 'cleanup'` projection (folded-in field_cleanup_candidates).
 // Kept self-contained here (no synthesis-reports import → no module cycle):
@@ -1242,7 +1229,37 @@ export const unusedFieldsDeepHandler = async (
   const limit = input.limit ?? UNUSED_FIELDS_DEEP_DEFAULT_LIMIT;
   const excludeManaged = input.excludeManagedPackage ?? true;
   const excludeStandard = input.excludeStandardFields ?? true;
-  const parentObjectFilter = resolveParentObjectFilter(input);
+
+  // UNUSED-FIELDS-DEEP-SILENT-UNKNOWN-OBJECT: resolve + VERIFY the optional
+  // object scope BEFORE scanning, the same `resolveExistingObjectScope` every
+  // other optionally-object-scoped tool (flow_bulkification_audit,
+  // flow_fault_audit, synthesis-reports) routes through. `null` = a bare
+  // org-wide call, byte-identical to before. A resolved scope is rewritten to
+  // the VAULT's exact casing, so a real object typed in the wrong case still
+  // answers (case-insensitive RESOLUTION, never case-insensitive IDENTITY —
+  // two objects differing only by case are refused, not silently picked). An
+  // UNRESOLVABLE name is now a named `invalid-query` refusal instead of the
+  // false `{fields: [], totalCount: 0}` this fix closes: that shape is an
+  // UNCHECKED zero wearing a CHECKED zero's clothes — a caller could not tell
+  // "this object has no unused fields" from "there is no such object".
+  //
+  // `parentObjectFilter` is the legacy bare-name synonym; it is folded into
+  // `objectApiName` only when NEITHER `objectId` NOR `objectApiName` is
+  // present, preserving the pre-fix `objectId` -> `objectApiName` ->
+  // `parentObjectFilter` precedence (first-wins) rather than turning a
+  // three-alias disagreement into a NEW `invalid-query` shape.
+  const legacyParentObjectFilter =
+    input.objectId === undefined && input.objectApiName === undefined
+      ? input.parentObjectFilter
+      : undefined;
+  const scopeResult = await resolveExistingObjectScope(
+    ctx.graph,
+    { ...input, objectApiName: input.objectApiName ?? legacyParentObjectFilter },
+    { unhandledPrefix: 'refuse' },
+  );
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
+  const parentObjectFilter = scope?.object;
 
   const corporaResult = await buildCorpora(ctx);
   if (!corporaResult.ok) {
@@ -1571,6 +1588,13 @@ export const unusedFieldsDeepHandler = async (
     refreshedAt: ctx.manifest.refreshedAt,
   };
   const dataWithoutCsv = {
+    // appliedScope FIRST + only when scoped, matching the sibling optionally-
+    // object-scoped tools (flow_bulkification_audit): a bare call omits the
+    // whole block (the pre-scope shape); a scoped one can never be misread as
+    // org-wide.
+    ...(scope !== null
+      ? { appliedScope: { componentId: scope.componentId, object: scope.object } }
+      : {}),
     fields: input.format === 'csv' ? [] : liveFields,
     totalCount: sorted.length,
     byParentObject,
@@ -1610,6 +1634,9 @@ export const unusedFieldsDeepHandler = async (
     const buildCleanup = (n: number): UnusedFieldsDeepOutput => {
       const slice = liveFields.slice(0, n);
       return {
+        ...(scope !== null
+          ? { appliedScope: { componentId: scope.componentId, object: scope.object } }
+          : {}),
         fields: slice,
         findings: sortCleanupFindings(slice.map(toCleanupFinding)),
         totalCount: sorted.length,

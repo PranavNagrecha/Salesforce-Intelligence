@@ -159,9 +159,25 @@ export interface FindComponentUsagesOutput {
     readonly tier: 'text-match';
     readonly ran: boolean;
     readonly query: string | null;
+    /**
+     * Count AFTER excluding the component's own definition (its declaring
+     * file, or — for a bundle component — any file in its own bundle
+     * directory). A match on a class's own `class Foo {` line is not
+     * evidence anything ELSE uses it; see {@link selfMatchesExcluded}.
+     */
     readonly matchCount: number;
     readonly matches: readonly { readonly path: string; readonly line: number; readonly snippet: string }[];
     readonly truncated: boolean;
+    /**
+     * How many raw grep hits were the component's OWN definition and were
+     * removed before `matchCount` / `matches` were computed — 0 when grep
+     * did not run, found nothing, or found only genuine external matches.
+     * Present so a caller can tell "grep ran and found only its own
+     * declaration" (this field > 0, `matchCount: 0`) apart from "grep ran
+     * and found nothing at all" (this field 0, `matchCount: 0`) rather than
+     * reading both as an identical bare zero.
+     */
+    readonly selfMatchesExcluded: number;
   };
   /**
    * Grants listed SEPARATELY from usages (`graphReferrers` still excludes
@@ -206,6 +222,33 @@ const typeOf = (id: string): string => {
 const apiNameOf = (id: string): string => {
   const i = id.indexOf(':');
   return i > 0 ? id.slice(i + 1) : id;
+};
+
+/**
+ * True when a grep match is the component's OWN definition rather than
+ * evidence that something ELSE uses it (FIND-COMPONENT-USAGES-SELF-MATCH): a
+ * class's `class Foo {` declaration line matches a grep for `Foo` just like a
+ * real caller would, so an otherwise-unreferenced component reported
+ * `hasStaticEvidence: true` off nothing but its own declaration — measured on
+ * a real vault, an ApexClass with ZERO graph referrers and `grepMatchCount: 1`
+ * where the one match WAS its own `public class …` line.
+ *
+ * Two shapes of "own definition":
+ *   1. A single-file component (ApexClass `.cls`, ApexTrigger `.trigger`) —
+ *      the match's path is EXACTLY the node's own `sourcePath`.
+ *   2. A bundle component (LWC / Aura / Visualforce) whose `sourcePath` sits
+ *      inside a bundle directory — ANY file in that SAME bundle directory is
+ *      still the component's own definition (a `.js` controller matching its
+ *      own `.html` template's tag name is not a caller either), so the whole
+ *      directory is excluded, gated to bundle directories only via
+ *      {@link FRONTEND_DIR_RE} so this never over-reaches for a plain
+ *      single-file component.
+ */
+const isSelfMatch = (matchPath: string, ownSourcePath: string): boolean => {
+  if (matchPath === ownSourcePath) return true;
+  if (!FRONTEND_DIR_RE.test(ownSourcePath)) return false;
+  const ownDir = ownSourcePath.slice(0, ownSourcePath.lastIndexOf('/') + 1);
+  return ownDir.length > 0 && matchPath.startsWith(ownDir);
 };
 
 export const findComponentUsagesHandler = async (
@@ -307,6 +350,17 @@ export const findComponentUsagesHandler = async (
     }
   }
 
+  // FIND-COMPONENT-USAGES-SELF-MATCH: a component's own declaration/bundle
+  // matches its own name just like a real caller's reference would — exclude
+  // it BEFORE grepMatchCount / hasStaticEvidence are computed, so a component
+  // with zero real referrers cannot report static evidence of its own usage.
+  let selfMatchesExcluded = 0;
+  if (node !== null) {
+    const before = grepMatches.length;
+    grepMatches = grepMatches.filter((m) => !isSelfMatch(m.path, node.sourcePath));
+    selfMatchesExcluded = before - grepMatches.length;
+  }
+
   const hasStaticEvidence = graphReferrerCount > 0 || grepMatches.length > 0;
 
   // Access-grant section (grants are NOT usage, so they never count as static
@@ -342,6 +396,22 @@ export const findComponentUsagesHandler = async (
     `\`graphReferrerCount\` and each group's \`count\` are EDGE counts, not component counts: one referrer contributes one edge per relationship it has to the target (a Flow that reads, writes AND triggers on an object counts 3). ${graphReferrerCount} edge(s) here come from ${distinctReferrerCount} distinct component(s) — quote \`distinctReferrerCount\` / \`distinctReferrers\` to a human, and note the 25-row \`sample\` cap is on ROWS, so a group with multi-edge referrers shows fewer than 25 distinct components.`,
     'The grep supplement is a literal text match on the api name across Apex AND frontend bundle source — LWC, Aura, Visualforce ($Label / $Resource / @salesforce module references) — (`text-match` tier): it can OVER-match (a substring / a different component sharing the name) and UNDER-match (dynamically built references). Treat it as leads, not proof.',
   ];
+  // FIND-COMPONENT-USAGES-SELF-MATCH: say plainly WHY a raw grep count and
+  // the reported `grepMatchCount` differ, so "grep ran and found only its own
+  // declaration" (selfMatchesExcluded > 0, matchCount possibly 0) is never
+  // read as identical to "grep did not run" (`ran: false`) or an unqualified
+  // zero.
+  if (selfMatchesExcluded > 0) {
+    boundaries.push(
+      `${selfMatchesExcluded} grep match(es) were this component's OWN definition (its declaring file${
+        FRONTEND_DIR_RE.test(node?.sourcePath ?? '') ? ' / bundle directory' : ''
+      }) and were EXCLUDED before \`grepMatchCount\` — a component's own declaration matching its own name is not evidence anything ELSE uses it. ${
+        grepMatches.length === 0
+          ? 'After exclusion, grep found NO other reference.'
+          : `After exclusion, ${grepMatches.length} genuine external match(es) remain.`
+      }`,
+    );
+  }
   // I3b (empty ≠ none): only when there is NO static evidence anywhere do we
   // risk narrating absence as fact — name the dependency families the vault did
   // NOT fully retrieve so "nothing uses this" carries "…among the families the
@@ -385,6 +455,7 @@ export const findComponentUsagesHandler = async (
         matchCount: grepMatches.length,
         matches: grepMatches,
         truncated: grepTruncated,
+        selfMatchesExcluded,
       },
       summary: {
         graphReferrerCount,

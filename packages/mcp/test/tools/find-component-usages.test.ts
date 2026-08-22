@@ -160,6 +160,113 @@ describe('findComponentUsagesHandler', () => {
       expect(paths.some((p) => p.includes('staticresources/'))).toBe(false);
     });
   });
+
+  // FIND-COMPONENT-USAGES-SELF-MATCH: a component's own declaration/bundle
+  // matches its own name just like a real caller would — measured on a real
+  // vault, an ApexClass with ZERO graph referrers reported `grepMatchCount: 1`
+  // and `hasStaticEvidence: true` off nothing but its own `public class …`
+  // declaration line. Reproduced here with real files on disk (not a fixture
+  // string) so the grep tier genuinely runs.
+  describe('self-match exclusion (FIND-COMPONENT-USAGES-SELF-MATCH)', () => {
+    beforeAll(async () => {
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      const src = join(dir, 'source', 'main', 'default');
+
+      // A class with ZERO real referrers — its only grep hit is its own
+      // declaration line, exactly the real-vault repro.
+      mkdirSync(join(src, 'classes'), { recursive: true });
+      writeFileSync(
+        join(src, 'classes', 'Orphaned.cls'),
+        'public class Orphaned {\n  public Orphaned() {}\n}\n',
+      );
+
+      // A class with a GENUINE external caller in a DIFFERENT file, plus a
+      // self-instantiation inside its OWN file — the self-match must be
+      // excluded while the real external reference survives.
+      writeFileSync(
+        join(src, 'classes', 'Used.cls'),
+        'public class Used {\n  public Used() {}\n  public static Used self() { return new Used(); }\n}\n',
+      );
+      writeFileSync(
+        join(src, 'classes', 'Caller.cls'),
+        'public class Caller {\n  public void run() { Used u = new Used(); }\n}\n',
+      );
+
+      // An LWC bundle that references its OWN tag name inside its OWN
+      // template (a different FILE, same bundle directory) — still its own
+      // definition, not a caller.
+      mkdirSync(join(src, 'lwc', 'selfWidget'), { recursive: true });
+      writeFileSync(
+        join(src, 'lwc', 'selfWidget', 'selfWidget.js'),
+        'export default class SelfWidget {}\n',
+      );
+      writeFileSync(
+        join(src, 'lwc', 'selfWidget', 'selfWidget.html'),
+        '<template><!-- selfWidget renders selfWidget in dev tooling --></template>\n',
+      );
+      // A SEPARATE bundle that genuinely embeds selfWidget — a real caller.
+      // (The grep tier is a literal api-name text match, not tag-name-aware,
+      // so the reference has to spell the api name — an `import … from
+      // 'c/selfWidget'` is exactly what a real LWC bundle contains.)
+      mkdirSync(join(src, 'lwc', 'hostWidget'), { recursive: true });
+      writeFileSync(
+        join(src, 'lwc', 'hostWidget', 'hostWidget.html'),
+        "<!-- import selfWidget from 'c/selfWidget' -->\n",
+      );
+
+      await importExtractionResults(store, [{
+        nodes: [
+          node({ id: 'ApexClass:Orphaned', type: 'ApexClass', apiName: 'Orphaned', sourcePath: 'source/main/default/classes/Orphaned.cls' }),
+          node({ id: 'ApexClass:Used', type: 'ApexClass', apiName: 'Used', sourcePath: 'source/main/default/classes/Used.cls' }),
+          node({ id: 'ApexClass:Caller', type: 'ApexClass', apiName: 'Caller', sourcePath: 'source/main/default/classes/Caller.cls' }),
+          node({ id: 'LightningComponentBundle:selfWidget', type: 'LightningComponentBundle', apiName: 'selfWidget', sourcePath: 'source/main/default/lwc/selfWidget/selfWidget.js' }),
+          node({ id: 'LightningComponentBundle:hostWidget', type: 'LightningComponentBundle', apiName: 'hostWidget', sourcePath: 'source/main/default/lwc/hostWidget/hostWidget.html' }),
+        ],
+        edges: [],
+      }]);
+    });
+
+    it('FAIL-BEFORE/PASS-AFTER: a component with ZERO referrers does not report static evidence off its own declaration', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'ApexClass:Orphaned' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const d = r.value.data;
+      // Pre-fix: matchCount 1 (its own `public class Orphaned {` line) and
+      // hasStaticEvidence TRUE off nothing but that declaration.
+      expect(d.grepSupplement.matchCount).toBe(0);
+      expect(d.grepSupplement.selfMatchesExcluded).toBeGreaterThanOrEqual(1);
+      expect(d.summary.grepMatchCount).toBe(0);
+      expect(d.summary.hasStaticEvidence).toBe(false);
+      // Distinguishes "grep ran and found only its own declaration" from
+      // "grep did not run" — never a bare, unexplained false/zero.
+      expect(d.grepSupplement.ran).toBe(true);
+      expect(d.boundaries.join(' ')).toMatch(/OWN definition/i);
+      expect(d.boundaries.join(' ')).toMatch(/no static evidence/i);
+    });
+
+    it('keeps a GENUINE external reference while excluding the self-instantiation in the same file', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'ApexClass:Used' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.grepSupplement.selfMatchesExcluded).toBeGreaterThanOrEqual(1);
+      const paths = d.grepSupplement.matches.map((m) => m.path);
+      expect(paths.every((p) => !p.includes('Used.cls'))).toBe(true);
+      expect(paths.some((p) => p.includes('Caller.cls'))).toBe(true);
+      expect(d.summary.hasStaticEvidence).toBe(true);
+    });
+
+    it('excludes a bundle self-reference from a DIFFERENT file in its OWN bundle directory', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'LightningComponentBundle:selfWidget' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const d = r.value.data;
+      const paths = d.grepSupplement.matches.map((m) => m.path);
+      // The mention inside selfWidget's OWN html (a different file, same
+      // bundle dir) is excluded…
+      expect(paths.some((p) => p.includes('lwc/selfWidget/'))).toBe(false);
+      // …but the genuine embed from hostWidget survives.
+      expect(paths.some((p) => p.includes('lwc/hostWidget/hostWidget.html'))).toBe(true);
+      expect(d.summary.hasStaticEvidence).toBe(true);
+    });
+  });
 });
 
 // P14-USAGE-flow-object-boundaries: the four families the §C3 audit flagged

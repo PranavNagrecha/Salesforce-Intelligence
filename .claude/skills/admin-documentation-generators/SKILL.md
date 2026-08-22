@@ -490,8 +490,10 @@ Claude's flow:
 > Every section above is sourced from declared metadata (XML); the
 > `confidence` per section is uniformly `declared`. The doc names
 > 47 fields + 1 validation rule + 2 layouts + 1 ApexTrigger + 1
-> Flow (component count: 53), and the frontmatter `componentIds`
-> array lists every canonical ID for cross-reference.
+> Flow, plus the object itself (component count: 53), and the
+> frontmatter `componentIds` array lists every canonical ID for
+> cross-reference — `componentIds` leads with `objectId`, so the
+> object is always the +1 beyond the section counts.
 >
 > If you want narrower or wider versions:
 >

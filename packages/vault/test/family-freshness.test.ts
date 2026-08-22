@@ -78,6 +78,59 @@ describe('stampFamilyEpochs (AUDIT-F5)', () => {
     expect(stamped[0]?.retrievedAt).toBeUndefined();
     expect(stamped[0]?.epoch).toBeUndefined();
   });
+
+  // FIX-1 (coverage-spine): reproduces the real-vault regression measured on
+  // a real vault — a 0.3.0 refresh set `retrieveConfirmed: true` on
+  // SessionSettings via a real pull; a later `--no-pull` rebuild (0.3.1, same
+  // source, extractor fix only) preserved `retrievedAt`/`epoch` from the prior
+  // row but SILENTLY DROPPED `retrieveConfirmed`, even though the retrieve
+  // evidence it stands for never changed. Confirmed-empty and never-attempted
+  // became indistinguishable on every family a `--no-pull` rebuild touches.
+  it('preserves retrieveConfirmed on --no-pull when this pass did not error/pend it', () => {
+    const previous = [
+      row('SessionSettings', {
+        retrievedAt: '2026-08-21T23:40:31.356Z',
+        epoch: 2,
+        retrieveConfirmed: true,
+      }),
+    ];
+    const stamped = stampFamilyEpochs(
+      // A fresh --no-pull build re-extracts from the same already-downloaded
+      // source; buildCoverageEntries cannot set retrieveConfirmed itself
+      // because confirmedTypes is null (no retrieve ran this pass).
+      [row('SessionSettings', { retrieved: 1 })],
+      previous,
+      '2026-08-22T00:00:00.000Z',
+      false,
+    );
+    expect(stamped[0]).toMatchObject({
+      retrievedAt: '2026-08-21T23:40:31.356Z',
+      epoch: 2,
+      retrieveConfirmed: true,
+    });
+  });
+
+  it('does NOT resurrect retrieveConfirmed when this pass errored the family', () => {
+    const previous = [row('Profile', { retrieveConfirmed: true, epoch: 1 })];
+    const stamped = stampFamilyEpochs(
+      [row('Profile', { errored: true, errorReason: 'boom', retrieved: 3 })],
+      previous,
+      '2026-08-22T00:00:00.000Z',
+      false,
+    );
+    expect(stamped[0]?.retrieveConfirmed).toBeUndefined();
+  });
+
+  it('does NOT resurrect retrieveConfirmed when a decorator forced this pass pending', () => {
+    const previous = [row('Report', { retrieveConfirmed: true, epoch: 1 })];
+    const stamped = stampFamilyEpochs(
+      [row('Report', { pending: true, retrieved: 388 })],
+      previous,
+      '2026-08-22T00:00:00.000Z',
+      false,
+    );
+    expect(stamped[0]?.retrieveConfirmed).toBeUndefined();
+  });
 });
 
 describe('buildMixedFreshness (AUDIT-F5)', () => {

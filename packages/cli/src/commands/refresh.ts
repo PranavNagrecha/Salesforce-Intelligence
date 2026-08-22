@@ -1038,17 +1038,13 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   //   --with-reports  → FULL folder pull (uncapped; slow on big orgs)
   //   default         → SMART pull: top SFI_REPORTS_CAP (500) by USAGE
   //                     (Report.LastRunDate / Dashboard.LastViewedDate,
-  //                     fallback LastModifiedDate); coverage goes `pending`
-  //                     for the beyond-cap remainder
+  //                     fallback LastModifiedDate); coverage goes `capped`
+  //                     for the beyond-cap remainder (FIX-2: attempted, not
+  //                     "never attempted" — see CoverageEntry.capped)
   //   --no-reports    → skip entirely
   // Best-effort + never aborts the refresh; full refreshes only (a scoped
   // --types run should not surprise-pull reports).
-  let reportsCapStats:
-    | {
-        readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
-        readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
-      }
-    | undefined;
+  let reportsCapStats: ReportsCapStats | undefined;
   // Set when the pull errored or lost batches. Recorded on the manifest and
   // reflected in the Report/Dashboard coverage rows — never swallowed.
   let reportPull: ReportPullDisclosure | undefined;
@@ -1349,10 +1345,7 @@ interface RunWithOpenGraphArgs {
   /** Types whose source was reconciled against the org retrieve this run. */
   readonly reconciledTypes?: ReadonlySet<ComponentType>;
   readonly apexAstStats?: { readonly filesParsed: number; readonly parseErrors: number };
-  readonly reportsCapStats?: {
-    readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
-    readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
-  };
+  readonly reportsCapStats?: ReportsCapStats;
   /**
    * REPORT-DASHBOARD-GRAPH-PERSISTENCE: what the persistence pass actually
    * wrote per type. Drives {@link decorateReportNodeCapCoverage} and the
@@ -1646,28 +1639,71 @@ const decoratePendingCoverage = (
 };
 
 /**
+ * The shape `decorateReportsCapCoverage` needs per family: org total vs what
+ * landed. `requested` is optional (never read by the decorator itself, which
+ * only compares `total` to `retrieved`) so this type also accepts the
+ * landed. Always carries `requested` — the only producer is a live smart/full
+ * pull, which always knows its own manifest member count.
+ */
+export interface ReportsCapStats {
+  readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
+  readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
+}
+
+/**
+ * The minimal shape `decorateReportsCapCoverage`'s historical fallback needs:
+ * just `total`/`retrieved` per family — never `requested`, so a PRESERVED
+ * `reportsCap` block off a previous manifest is accepted even when it predates
+ * 0.1.10 (which lacks `requested` entirely; see `ExtendedVaultManifest.reportsCap`
+ * in `@sf-intelligence/vault`). A live {@link ReportsCapStats} satisfies this
+ * structurally (it carries a superset of fields), so no conversion is needed
+ * at either call site.
+ */
+export interface ReportsCapEvidence {
+  readonly reports: { readonly total: number; readonly retrieved: number };
+  readonly dashboards: { readonly total: number; readonly retrieved: number };
+}
+
+/**
  * P13-REPORTS-default: when the usage-ranked pull was CAPPED (org holds more
  * reports/dashboards than the cap), the Report/Dashboard coverage rows go
- * `pending` — the un-pulled tail was NOT checked, so absence claims about
- * report usage must stay qualified (same machinery as staged pending rows).
- * Fully-pulled orgs (total ≤ cap) read as plainly covered.
+ * `capped` — the un-pulled tail was NOT checked, so absence claims about
+ * report usage must stay qualified (same downstream effect as staged pending
+ * rows: excluded from `covered`, folded into `missingCoverage`). Fully-pulled
+ * orgs (total ≤ cap) read as plainly covered.
  * P14-USAGE-reports-retrieve-fidelity: `retrieved` is what actually LANDED
- * on disk, so the same `total > retrieved` test now also keeps rows pending
+ * on disk, so the same `total > retrieved` test now also keeps rows capped
  * when the retrieve silently dropped requested members.
+ *
+ * FIX-2 (coverage-spine): a capped-but-non-zero pull is ATTEMPTED evidence —
+ * `capped: true`, never `pending: true`. `pending` is reserved for a family
+ * this refresh never touched (see `CoverageEntry.pending`); reusing it here
+ * made a 500/4,296 capped pull byte-identical to a staged tier that had not
+ * started (measured on a real vault: 388-of-however-many Report rows read
+ * `pending: true`, indistinguishable from "never attempted"). Only the
+ * genuinely UNPROVEN zero case (`retrieved === 0`, see `proven` below) stays
+ * `pending` — there we have no real evidence anything landed at all.
+ *
+ * `previousReportsCap` (optional): when THIS run has no fresh `stats` of its
+ * own — a `--no-pull` rebuild, a scoped `--types` refresh that excluded
+ * Report/Dashboard — fall back to the last manifest's `reportsCap` block
+ * (mirrors AUDIT-F5's `retrievedAt`/`epoch` preservation in
+ * `stampFamilyEpochs`). Without it, a rebuild regresses a genuinely-capped,
+ * evidence-backed row all the way back to the FOLD_ERASED default
+ * (`pending: true` over the raw, untrustworthy node count) — exactly the
+ * real-vault regression this fix closes. The fallback is still REAL evidence
+ * (the last actual retrieve), never fabricated.
  */
 export const decorateReportsCapCoverage = (
   entries: readonly CoverageEntry[],
-  stats:
-    | {
-        readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
-        readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
-      }
-    | undefined,
+  stats: ReportsCapStats | undefined,
+  previousReportsCap?: ReportsCapEvidence,
 ): readonly CoverageEntry[] => {
-  if (stats === undefined) return entries;
+  const effective = stats ?? previousReportsCap;
+  if (effective === undefined) return entries;
   const landed = new Map<string, { readonly total: number; readonly retrieved: number }>([
-    ['Report', stats.reports],
-    ['Dashboard', stats.dashboards],
+    ['Report', effective.reports],
+    ['Dashboard', effective.dashboards],
   ]);
   // A fold-erased row is PROVEN only when the pull delivered every one of a
   // NON-ZERO org total. `total === 0` is not proof: `runSfRetrieveSmartReports`
@@ -1679,18 +1715,28 @@ export const decorateReportsCapCoverage = (
     c.retrieved > 0 && c.total <= c.retrieved;
   const decorated = (
     c: { readonly total: number; readonly retrieved: number },
-  ): Pick<CoverageEntry, 'requested' | 'retrieved' | 'pending' | 'retrieveConfirmed'> => ({
+  ): Pick<CoverageEntry, 'requested' | 'retrieved' | 'pending' | 'capped' | 'retrieveConfirmed'> => ({
     requested: true,
     // This is the ONLY place a fold-erased row gets a truthful `retrieved`:
-    // the files the retrieve actually landed on disk. Overwriting the
-    // structurally-zero node count is the point (FOLD_ERASED_COVERAGE_TYPES).
+    // the files the retrieve actually landed on disk (or, via the fallback,
+    // the last time a retrieve actually landed them). Overwriting the
+    // structurally-unreliable node count is the point (FOLD_ERASED_COVERAGE_TYPES).
     retrieved: c.retrieved,
-    ...(proven(c) ? { retrieveConfirmed: true } : { pending: true }),
+    ...(proven(c)
+      ? { retrieveConfirmed: true }
+      : c.retrieved > 0
+        ? { capped: true }
+        : { pending: true }),
   });
   const out = entries.map((entry) => {
     const c = landed.get(entry.type);
     if (c === undefined || entry.neverModeled) return entry;
-    const { pending: _wasPending, retrieveConfirmed: _wasConfirmed, ...rest } = entry;
+    const {
+      pending: _wasPending,
+      capped: _wasCapped,
+      retrieveConfirmed: _wasConfirmed,
+      ...rest
+    } = entry;
     return { ...rest, ...decorated(c) };
   });
   for (const [type, c] of landed) {
@@ -1703,7 +1749,7 @@ export const decorateReportsCapCoverage = (
 
 /**
  * REPORT-DASHBOARD-GRAPH-PERSISTENCE: when the node persistence cap DROPPED
- * report/dashboard nodes, force that type's coverage row `pending` and strip
+ * report/dashboard nodes, force that type's coverage row `capped` and strip
  * `retrieveConfirmed`.
  *
  * This is the disclosure that keeps a capped capture from reading as a
@@ -1711,18 +1757,25 @@ export const decorateReportsCapCoverage = (
  * `retrieveConfirmed: true` on the Report row while the graph held only the
  * first N nodes — the exact unfalsifiable-completeness shape the 2026-07-28
  * report-coverage incident was about, just relocated from the retrieve to the
- * persistence step. `pending` routes through the SAME machinery
- * (`summarizeCoverage` -> `partial`), so every field tool that asks
- * "were reports fully covered?" (`field_360`, `field_lineage`,
- * `unused_fields_deep`, …) keeps hedging its report absence claims.
+ * persistence step. `capped` routes through the SAME downstream machinery
+ * `pending` used to (`summarizeCoverage` -> `partial`), so every field tool
+ * that asks "were reports fully covered?" (`field_360`, `field_lineage`,
+ * `unused_fields_deep`, …) keeps hedging its report absence claims — but see
+ * FIX-2 below for why the FLAG itself changed.
+ *
+ * FIX-2 (coverage-spine): this node-persistence cap is ATTEMPTED, bounded
+ * evidence (the pull landed everything; the graph kept the first N) — never
+ * "not yet attempted". Reusing `pending` here made it indistinguishable from
+ * a staged tier that has not started; `capped` keeps the same absence-caveat
+ * behavior while naming the real reason.
  *
  * Deliberately does NOT set `errored`: nothing errored. The reason is carried
  * on the manifest's `reportNodeCap` block and in the refresh summary.
  *
- * Runs AFTER `decorateReportsCapCoverage` (which clears `pending` on a fully
- * landed pull) so the cap always wins over a "fully landed" reading, and
- * BEFORE `decorateReportPullCoverage` so a real pull failure still wins over
- * the cap. No-op when nothing was dropped.
+ * Runs AFTER `decorateReportsCapCoverage` (which clears `pending`/`capped` on
+ * a fully landed pull) so the cap always wins over a "fully landed" reading,
+ * and BEFORE `decorateReportPullCoverage` so a real pull failure still wins
+ * over the cap. No-op when nothing was dropped.
  */
 export const decorateReportNodeCapCoverage = (
   entries: readonly CoverageEntry[],
@@ -1737,8 +1790,8 @@ export const decorateReportNodeCapCoverage = (
   if (capped.size === 0) return entries;
   return entries.map((entry) => {
     if (!capped.has(entry.type) || entry.neverModeled) return entry;
-    const { retrieveConfirmed: _dropped, ...rest } = entry;
-    return { ...rest, requested: true, pending: true };
+    const { retrieveConfirmed: _dropped, pending: _wasPending, ...rest } = entry;
+    return { ...rest, requested: true, capped: true };
   });
 };
 
@@ -2198,6 +2251,12 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
                 confirmedTypes,
               ),
               args.reportsCapStats,
+              // FIX-2 (coverage-spine): when THIS run has no fresh reportsCap
+              // evidence of its own (a `--no-pull` rebuild, a scoped refresh),
+              // fall back to the last manifest's — real, not fabricated —
+              // capped-retrieve evidence instead of regressing the row to the
+              // FOLD_ERASED "pending" default.
+              previousManifest?.reportsCap,
             ),
             args.reportNodeStats,
           ),

@@ -162,12 +162,16 @@ const SURFACE: ReadonlyArray<{
   readonly unknown: Record<string, unknown>;
   readonly scopeOf: (data: Record<string, unknown>) => unknown;
   /**
-   * Set when the tool does NOT refuse an unknown object name today. Currently
-   * one tool: `unused_fields_deep` answers `{fields: [], totalCount: 0}` for an
-   * object that does not exist in the vault, with nothing saying the name
-   * matched nothing — a separate unchecked-zero defect, PRE-EXISTING and
-   * untouched by the case-folding fix. Flagged here rather than silently
-   * skipped, so it is visible the next time someone reads this file.
+   * Set when a tool does NOT refuse an unknown object name. FIXED for
+   * `unused_fields_deep` (UNUSED-FIELDS-DEEP-SILENT-UNKNOWN-OBJECT): it used
+   * to answer `{fields: [], totalCount: 0}` for an object that does not exist
+   * in the vault, with nothing saying the name matched nothing — an
+   * unchecked zero indistinguishable from "this object genuinely has no
+   * unused fields." It now routes through the same `resolveExistingObjectScope`
+   * every other optionally-object-scoped tool uses, so an unresolvable name is
+   * a named `invalid-query`. No entry below sets this flag today; it stays
+   * defined as a tripwire so a future tool that skips the shared resolver is
+   * flagged here rather than silently accepted.
    */
   readonly refusesUnknown?: false;
 }> = [
@@ -235,7 +239,6 @@ const SURFACE: ReadonlyArray<{
     lower: { objectApiName: 'wombat__c' },
     unknown: { objectApiName: 'NoSuchThing__c' },
     scopeOf: (d) => (d.appliedScope as { componentId?: string })?.componentId ?? CANONICAL,
-    refusesUnknown: false,
   },
 ];
 

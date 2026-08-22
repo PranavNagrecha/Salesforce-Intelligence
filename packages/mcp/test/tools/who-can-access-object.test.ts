@@ -13,6 +13,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { jsonResult } from '../../src/tools/tool-dispatch.js';
 import { whoCanAccessObjectHandler } from '../../src/tools/who-can-access-object.js';
 
 const MANIFEST: VaultManifest = {
@@ -608,5 +609,238 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
     }
     expect(seen.length).toBe(total);
     expect(new Set(seen).size).toBe(total);
+  });
+});
+
+// WHO-CAN-ACCESS-SILENT-BUDGET-DROP: at a large `limit` the handler's own page
+// used to fit `limit` but not the GLOBAL response byte budget, so `jsonResult`
+// tail-truncated `granters` out from under the handler's already-computed
+// `hasMore` / `truncated` — measured on a real vault, 218 rows became 109
+// delivered while `data.truncated` still read `false`. Reproduced here with a
+// large synthetic object and driven THROUGH `jsonResult` (the handler alone
+// never sees the trim that caused the bug), mirroring
+// flow-fault-audit.test.ts's `envelopeOf` pattern for the identical defect
+// class.
+const BUDGET_OBJ = 'CustomObject:Budget__c';
+const BUDGET_PERMSET_COUNT = 300;
+const budgetSeed: ExtractionResult = {
+  nodes: [
+    node({ id: BUDGET_OBJ, type: 'CustomObject', apiName: 'Budget__c', properties: { sharingModel: 'Private' } }),
+    ...Array.from({ length: BUDGET_PERMSET_COUNT }, (_, i) =>
+      node({
+        id: `PermissionSet:Budget_PS_${String(i).padStart(3, '0')}`,
+        type: 'PermissionSet',
+        apiName: `Budget_PS_${String(i).padStart(3, '0')}`,
+      }),
+    ),
+  ],
+  edges: Array.from({ length: BUDGET_PERMSET_COUNT }, (_, i) =>
+    edge({
+      fromId: `PermissionSet:Budget_PS_${String(i).padStart(3, '0')}`,
+      toId: BUDGET_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+  ),
+};
+
+describe('whoCanAccessObjectHandler — whole-response byte budget', () => {
+  let budgetDir: string;
+  let budgetStore: GraphStore;
+  let budgetCtx: Context;
+
+  beforeAll(async () => {
+    budgetDir = mkdtempSync(join(tmpdir(), 'sfi-who-can-access-budget-'));
+    const opened = await openGraph(join(budgetDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    budgetStore = opened.value;
+    const imported = await importExtractionResults(budgetStore, [budgetSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    budgetCtx = { vaultRoot: budgetDir, manifest: MANIFEST, graph: budgetStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(budgetStore);
+    rmSync(budgetDir, { recursive: true, force: true });
+  });
+
+  interface EnvelopePage {
+    readonly granters: readonly { readonly granterId: string; readonly via: string }[];
+    readonly limit: number;
+    readonly offset: number;
+    readonly hasMore: boolean;
+    readonly truncated: boolean;
+    readonly total: number;
+    readonly droppedCount: number | undefined;
+  }
+
+  /** Walk the tool the way a host does: handler → jsonResult envelope → parse. */
+  const envelopeOf = async (
+    ctx: Context,
+    args: { componentId: string; limit?: number; offset?: number },
+  ): Promise<EnvelopePage> => {
+    const r = await whoCanAccessObjectHandler(ctx, args);
+    if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
+    const envelope = jsonResult(r.value, { args });
+    const block = envelope.content[0];
+    const text = block !== undefined && block.type === 'text' ? block.text : '{}';
+    const parsed = JSON.parse(text) as {
+      data?: Record<string, unknown>;
+      responseBudget?: { droppedCount?: number };
+    };
+    const data = parsed.data;
+    if (data === undefined) throw new Error(`no data in envelope: ${text.slice(0, 300)}`);
+    return {
+      granters: data['granters'] as EnvelopePage['granters'],
+      limit: data['limit'] as number,
+      offset: data['offset'] as number,
+      hasMore: data['hasMore'] as boolean,
+      truncated: data['truncated'] as boolean,
+      total: (data['summary'] as { total: number }).total,
+      droppedCount: parsed.responseBudget?.droppedCount,
+    };
+  };
+
+  it('FAIL-BEFORE/PASS-AFTER: a max-limit walk through the ENVELOPE reaches every row with no global trim', async () => {
+    const previous = process.env['SFI_MAX_RESPONSE_BYTES'];
+    // A tight cap forces the shrink at EVERY page, not just the first — the
+    // same guarantee the real-vault repro needed at the default budget, made
+    // deterministic here regardless of exactly how many bytes one
+    // AccessGranter row serializes to.
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '15000';
+    try {
+      const seen: string[] = [];
+      let offset = 0;
+      let pages = 0;
+      let total = -1;
+      for (;;) {
+        const page = await envelopeOf(budgetCtx, { componentId: BUDGET_OBJ, limit: 250, offset });
+        total = page.total;
+        for (const g of page.granters) seen.push(`${g.granterId}|${g.via}`);
+        pages += 1;
+        // Pre-fix: the global guard silently bisected `granters` underneath
+        // this handler's own `hasMore`/`truncated`, and `responseBudget`
+        // carried a `droppedCount` while `data.truncated` still read `false`.
+        expect(page.droppedCount, `page ${pages}: global guard must never engage`).toBeUndefined();
+        // The applied `limit` must equal what was actually shipped, UNLESS
+        // this is the final (natural-exhaustion) page, where fewer rows than
+        // the applied limit legitimately remain.
+        if (page.hasMore) expect(page.limit).toBe(page.granters.length);
+        else expect(page.granters.length).toBeLessThanOrEqual(page.limit);
+        if (!page.hasMore) break;
+        offset += page.granters.length;
+        expect(pages).toBeLessThan(120);
+      }
+      expect(total).toBe(BUDGET_PERMSET_COUNT);
+      expect(seen).toHaveLength(BUDGET_PERMSET_COUNT);
+      expect(new Set(seen).size).toBe(BUDGET_PERMSET_COUNT);
+    } finally {
+      if (previous === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = previous;
+    }
+  });
+
+  it('a max-limit request at the DEFAULT budget shrinks the page and stays resumable (no env override)', async () => {
+    const first = await envelopeOf(budgetCtx, { componentId: BUDGET_OBJ, limit: 250 });
+    expect(first.droppedCount).toBeUndefined();
+    expect(first.truncated).toBe(true);
+    expect(first.hasMore).toBe(true);
+    // Requested 250; the whole-response fit shrank it below that.
+    expect(first.limit).toBeLessThan(250);
+    expect(first.limit).toBe(first.granters.length);
+
+    // Walk to exhaustion — the default budget may still shrink subsequent
+    // pages, so don't assume one more call finishes the set.
+    const seen = new Set(first.granters.map((g) => `${g.granterId}|${g.via}`));
+    let offset = first.offset + first.granters.length;
+    let pages = 1;
+    for (;;) {
+      const page = await envelopeOf(budgetCtx, { componentId: BUDGET_OBJ, limit: 250, offset });
+      expect(page.droppedCount).toBeUndefined();
+      for (const g of page.granters) seen.add(`${g.granterId}|${g.via}`);
+      pages += 1;
+      if (!page.hasMore) break;
+      offset += page.granters.length;
+      expect(pages).toBeLessThan(120);
+    }
+    expect(seen.size).toBe(BUDGET_PERMSET_COUNT);
+  });
+
+  it('a small in-budget request is unaffected (no shrink, byte-identical shape)', async () => {
+    const r = await whoCanAccessObjectHandler(budgetCtx, { componentId: BUDGET_OBJ, limit: 40 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.limit).toBe(40);
+    expect(r.value.data.granters.length).toBe(40);
+  });
+});
+
+// WHO-CAN-ACCESS-NONUNIQUE-KEY: `granterId|via` is documented as the row
+// addressing key, but two DIFFERENT sharing rules of the SAME type sharing
+// with the SAME principal at different access levels emit two rows whose
+// `granterId|via` is identical — measured on a real vault:
+// `Group:nonO_A_Users|criteria-sharing-rule` from two distinct SharingRule
+// components (218 total rows, 217 distinct `granterId|via` keys).
+// `sourceRuleId` disambiguates them.
+const DUPKEY_OBJ = 'CustomObject:DupKey__c';
+const dupKeySeed: ExtractionResult = {
+  nodes: [
+    node({ id: DUPKEY_OBJ, type: 'CustomObject', apiName: 'DupKey__c', properties: { sharingModel: 'Private' } }),
+    node({ id: 'Group:Shared_Target', type: 'Group', apiName: 'Shared_Target' }),
+    node({ id: 'SharingRule:DupKey__c.Rule_Read', type: 'SharingRule', apiName: 'DupKey__c.Rule_Read', parentId: DUPKEY_OBJ, properties: { ruleType: 'criteria', accessLevel: 'Read' } }),
+    node({ id: 'SharingRule:DupKey__c.Rule_Edit', type: 'SharingRule', apiName: 'DupKey__c.Rule_Edit', parentId: DUPKEY_OBJ, properties: { ruleType: 'criteria', accessLevel: 'Edit' } }),
+  ],
+  edges: [
+    edge({ fromId: 'SharingRule:DupKey__c.Rule_Read', toId: 'Group:Shared_Target', edgeType: 'sharedWith' }),
+    edge({ fromId: 'SharingRule:DupKey__c.Rule_Edit', toId: 'Group:Shared_Target', edgeType: 'sharedWith' }),
+  ],
+};
+
+describe('whoCanAccessObjectHandler — sourceRuleId disambiguates same-type sharing rules', () => {
+  let dupDir: string;
+  let dupStore: GraphStore;
+  let dupCtx: Context;
+
+  beforeAll(async () => {
+    dupDir = mkdtempSync(join(tmpdir(), 'sfi-who-can-access-dupkey-'));
+    const opened = await openGraph(join(dupDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    dupStore = opened.value;
+    const imported = await importExtractionResults(dupStore, [dupKeySeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    dupCtx = { vaultRoot: dupDir, manifest: MANIFEST, graph: dupStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(dupStore);
+    rmSync(dupDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: two rules of the same type sharing with the same group are addressable', async () => {
+    const r = await whoCanAccessObjectHandler(dupCtx, { componentId: DUPKEY_OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const rows = r.value.data.granters.filter((g) => g.granterId === 'Group:Shared_Target');
+    expect(rows).toHaveLength(2);
+    // Pre-fix: both rows shared the identical `granterId|via` key
+    // (`Group:Shared_Target|criteria-sharing-rule`) with no field to tell
+    // them apart other than parsing `detail` prose.
+    const legacyKeys = new Set(rows.map((g) => `${g.granterId}|${g.via}`));
+    expect(legacyKeys.size).toBe(1);
+    // sourceRuleId makes the full key unique.
+    const fullKeys = new Set(rows.map((g) => `${g.granterId}|${g.via}|${g.sourceRuleId ?? ''}`));
+    expect(fullKeys.size).toBe(2);
+    expect(rows.map((g) => g.sourceRuleId).sort()).toEqual([
+      'SharingRule:DupKey__c.Rule_Edit',
+      'SharingRule:DupKey__c.Rule_Read',
+    ]);
+  });
+
+  it('object-permission and god-mode rows carry no sourceRuleId (already unique on granterId|via)', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const objectPermRow = r.value.data.granters.find((g) => g.via === 'object-permission-read');
+    expect(objectPermRow?.sourceRuleId).toBeUndefined();
   });
 });

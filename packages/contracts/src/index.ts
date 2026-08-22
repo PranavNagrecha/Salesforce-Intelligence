@@ -1082,8 +1082,35 @@ export interface CoverageEntry {
    * build" from an operator-scoped refresh that excluded the type. Pending
    * rows keep `retrieved: 0`, so readers that predate the flag partition them
    * as partial coverage — absence-claim caveats still fire.
+   *
+   * FIX-2 (coverage-spine): `pending` means NOT YET ATTEMPTED — a staged tier
+   * that has not run, or a family this refresh never touched. A family that
+   * WAS attempted and came back with a real, non-zero, intentionally-bounded
+   * result (a usage-ranked report/dashboard pull, or a node-persistence cap)
+   * is a DIFFERENT honesty state — see {@link CoverageEntry.capped} — and must
+   * never set `pending` instead. The two are mutually exclusive: a row is
+   * never both. (Regression measured on a real vault: every Report/Dashboard
+   * row a capped pull produced read `pending: true` alongside a non-zero
+   * `retrieved`, indistinguishable from a staged tier that had not started.)
    */
   readonly pending?: boolean;
+  /**
+   * FIX-2 (coverage-spine): true when this family's retrieval was
+   * intentionally bounded — the usage-ranked report/dashboard pull
+   * (`SFI_REPORTS_CAP`) or the report/dashboard node-persistence ceiling
+   * (`SFI_REPORT_NODE_CAP`) — AND `retrieved` is REAL, ATTEMPTED evidence: a
+   * genuine count of members that landed, just not every one the org holds.
+   * This is a "partial with a known cap", never "never attempted": a reader
+   * asking "did anything even run for this family?" can now tell "yes,
+   * partially" (`capped`) from "no, nothing has been attempted yet"
+   * (`pending`). A capped row still counts as incomplete coverage — excluded
+   * from `covered`, folded into `missingCoverage`, same absence caveats as
+   * before — because a dependency beyond the cap genuinely was not checked;
+   * only the REASON the row is incomplete is now distinguishable. Mutually
+   * exclusive with `pending` and with `retrieveConfirmed` (a capped pull is,
+   * by definition, not a confirmed-complete one).
+   */
+  readonly capped?: boolean;
   /**
    * CR-P3-3: true ONLY when the Metadata API CONFIRMED-CLEAN retrieved this
    * type — i.e. the org's `sf org list metadata-types` describe was non-null

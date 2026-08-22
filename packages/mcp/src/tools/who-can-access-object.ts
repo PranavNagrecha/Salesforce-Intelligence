@@ -68,6 +68,7 @@ import {
   toCustomObjectId,
   toObjectApiName,
 } from './input-aliases.js';
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 import {
@@ -121,10 +122,22 @@ export type WhoCanAccessObjectInput = z.infer<typeof whoCanAccessObjectInputSche
  * CR-04: object CRUD capabilities (read / create / edit / delete) are
  * ORTHOGONAL planes — a grantor can hold any combination, so each is enumerated
  * independently with its OWN `via` value. Distinct `via` values keep the
- * caller's `granterId|via` addressing collision-free (a grantor with both Read
- * and Edit emits two rows that are individually addressable). `view-all-object`
- * / `modify-all-object` are the object-level record-scope bypasses; the
- * `system-*` pair is god-mode.
+ * caller's `granterId|via` addressing collision-free FOR OBJECT-PERMISSION AND
+ * SYSTEM GOD-MODE ROWS (a grantor with both Read and Edit emits two rows that
+ * are individually addressable — one `grantedBy` edge per grantor, one node
+ * per god-mode check). `view-all-object` / `modify-all-object` are the
+ * object-level record-scope bypasses; the `system-*` pair is god-mode.
+ *
+ * The four `…-sharing-rule` variants do NOT carry this guarantee: `via`
+ * encodes the RULE TYPE, not the rule's identity, so two DIFFERENT rules of
+ * the same type sharing with the same principal (e.g. two criteria rules on
+ * one object both targeting the same Group, one Read and one Edit) emit two
+ * rows with the identical `granterId|via` pair — measured on a real vault:
+ * `Group:nonO_A_Users|criteria-sharing-rule` from two distinct
+ * `SharingRule` components. Those rows — and their expanded group-member /
+ * role-subordinate rows — carry {@link AccessGranter.sourceRuleId}
+ * specifically so `granterId|via|sourceRuleId` IS collision-free; do not
+ * address a sharing-rule-derived row by `granterId|via` alone.
  */
 export type AccessVia =
   | 'object-permission-read'
@@ -160,6 +173,21 @@ export interface AccessGranter {
   /** Whether the path reaches ALL records or only records visible per OWD/sharing. */
   readonly scope: 'all-records' | 'shared-records';
   readonly detail: string;
+  /**
+   * The exact `SharingRule` component id this row came from. Present ONLY on
+   * sharing-rule-derived rows (`via` one of the four `…-sharing-rule`
+   * variants, including their expanded group-member / role-subordinate
+   * rows) — absent on object-permission and system god-mode rows, where
+   * `granterId|via` is already collision-free on its own.
+   *
+   * `via` names the rule TYPE, not the rule; two different rules of the same
+   * type sharing with the same principal at different access levels produce
+   * two rows whose `granterId|via` pair is IDENTICAL (measured on a real
+   * vault: `Group:nonO_A_Users|criteria-sharing-rule` from two distinct
+   * rules). `granterId|via|sourceRuleId` is the addressing key that is
+   * actually unique per row.
+   */
+  readonly sourceRuleId?: string;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -242,6 +270,10 @@ const flag = (p: Readonly<Record<string, unknown>>, k: string): boolean => p[k] 
 
 const stringProp = (p: Readonly<Record<string, unknown>>, k: string): string =>
   typeof p[k] === 'string' ? (p[k] as string) : '';
+
+/** Serialized size of a value, the same measure `jsonResult`'s global guard uses. */
+const utf8Bytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
 
 /**
  * The parent CustomObject api name a SharingRule applies to. The v1.1 sharing
@@ -469,6 +501,9 @@ export const whoCanAccessObjectHandler = async (
         via,
         access: ruleAccessToOp(accessLevel),
         scope: 'shared-records',
+        // Disambiguates `granterId|via` when a second rule of the SAME type
+        // shares with the SAME principal — see AccessGranter.sourceRuleId.
+        sourceRuleId: rule.id,
         detail:
           ruleType === 'criteria'
             ? `criteria sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\``
@@ -512,6 +547,7 @@ export const whoCanAccessObjectHandler = async (
             via,
             access: ruleAccessToOp(accessLevel),
             scope: 'shared-records',
+            sourceRuleId: rule.id,
             detail: `${ruleType || 'owner'} sharing rule ${rule.id} (${accessLevel}) shares with group ${edge.toId}, which contains this ${member.memberType} member${subDetail}${unresolved}`,
           });
         }
@@ -553,6 +589,7 @@ export const whoCanAccessObjectHandler = async (
             via,
             access: ruleAccessToOp(accessLevel),
             scope: 'shared-records',
+            sourceRuleId: rule.id,
             detail: `${ruleType || 'owner'} sharing rule ${rule.id} (${accessLevel}) shares with ${edge.toId} and its subordinate roles, which include this descendant role${internalNote}`,
           });
         }
@@ -618,28 +655,6 @@ export const whoCanAccessObjectHandler = async (
     }
   }
 
-  const page = interleaved.slice(offset, offset + limit);
-  const hasMore = offset + page.length < total;
-  const truncated = hasMore || offset > 0;
-
-  // Per-kind TRUE totals + a named sample of EACH kind, so a kind the page
-  // cannot hold is still counted and named rather than silently absent.
-  const pageRowsByKind = new Map<string, number>();
-  for (const g of page) {
-    pageRowsByKind.set(g.granterType, (pageRowsByKind.get(g.granterType) ?? 0) + 1);
-  }
-  const byGranterType = kindOrder.map((granterType) => {
-    const rows = byKind.get(granterType) ?? [];
-    const distinctIds = [...new Set(rows.map((g) => g.granterId))].sort();
-    return {
-      granterType,
-      rows: rows.length,
-      distinctGranters: distinctIds.length,
-      rowsOnThisPage: pageRowsByKind.get(granterType) ?? 0,
-      sample: distinctIds.slice(0, GRANTER_KIND_SAMPLE_LIMIT),
-    };
-  });
-
   const externalOwdNote =
     externalOwd !== null
       ? ` External OWD (externalSharingModel): '${externalOwd}' — controls access for Experience Cloud / community users.`
@@ -651,29 +666,34 @@ export const whoCanAccessObjectHandler = async (
     total > distinctGranters
       ? ` ${total} granter rows come from ${distinctGranters} distinct Profile/PermissionSet/role/group(s) — each independent capability (read/create/edit/delete + View/Modify-All) is its own row, so a principal can appear in several. Count ACTORS by \`summary.distinctGranters\`, not row count.`
       : '';
-  const kindNote =
-    byGranterType.length > 0
-      ? ` Rows are INTERLEAVED across granter kinds (round-robin), so this page samples every kind rather than one alphabetical block: ${byGranterType
-          .map(
-            (k) =>
-              `${k.granterType} ${k.rowsOnThisPage.toString()} of ${k.rows.toString()} row(s) / ${k.distinctGranters.toString()} principal(s)`,
-          )
-          .join('; ')}. \`summary.byGranterType\` carries the complete per-kind counts and a named sample of each kind.`
-      : '';
-  const pageNote = truncated ? ` Showing granters ${offset}–${offset + page.length} of ${total}; summary holds the complete counts. Page with offset/limit.` : '';
   const scanTruncated = truncatedTypes.length > 0;
   const scanNote = scanTruncated ? ` ${scanTruncationNote(truncatedTypes, scanLimit)}` : '';
 
-  // Dedup the holder-query ids: a grantor now spans multiple capability rows on
-  // a page, but its active-holder count is per-principal, so query it once.
-  const containerIds = [
+  // WHO-CAN-ACCESS-SILENT-BUDGET-DROP: at a large `limit` the handler's own
+  // page fits `limit` but not the GLOBAL response byte budget, so the
+  // envelope's blind tail-truncation pass (`jsonResult`) used to cut
+  // `granters` out from under this handler's already-computed `hasMore` /
+  // `truncated` — 218 real rows became 109 delivered while `data.truncated`
+  // still read `false`. Fit the WHOLE `data` payload to the response budget
+  // HERE, before jsonResult ever sees it, so `hasMore` / `truncated` / the
+  // resume `offset` always describe the rows actually shipped (mirrors
+  // flow_fault_audit's `flowFaultResponseBudgetBytes` fix — same defect
+  // class, same cure: size the page against the whole response, not just the
+  // one array).
+  //
+  // Dedup the holder-query ids ONCE against the full requested-limit page (a
+  // superset of any smaller candidate page below, since a fixed `offset`
+  // makes every smaller `pageLimit` a PREFIX of this one) — the search below
+  // then only needs to FILTER this one result, never re-query the graph.
+  const fullPage = interleaved.slice(offset, offset + limit);
+  const fullContainerIds = [
     ...new Set(
-      page
+      fullPage
         .map((g) => g.granterId)
         .filter((id) => id.startsWith('Profile:') || id.startsWith('PermissionSet:')),
     ),
   ];
-  const dataShape = await readActiveHoldersFor(ctx, containerIds as never);
+  const fullDataShape = await readActiveHoldersFor(ctx, fullContainerIds as never);
 
   const blindSpots: string[] = [...BLIND_SPOTS];
   if (restrictionRules.length > 0) {
@@ -708,8 +728,62 @@ export const whoCanAccessObjectHandler = async (
     blindSpots.push(SHARING_USER_ENUMERATION_NOT_AVAILABLE);
   }
 
-  return ok({
-    data: {
+  // Builds the COMPLETE `data` payload for a candidate page size — every
+  // field the response ships, not just the paged ones — so the byte check
+  // below measures exactly what `jsonResult` will measure. Sizing only the
+  // paged subset (granters/summary/…) undercounted the fixed fields
+  // (componentId/objectLabel/owd/…/blindSpots) and let a "fits" candidate
+  // still land over budget once assembled — caught by re-running the FIX 2
+  // repro after the first pass of this fix and seeing the global guard
+  // engage anyway.
+  const buildData = (pageLimit: number): WhoCanAccessObjectOutput => {
+    const page = interleaved.slice(offset, offset + pageLimit);
+    const hasMore = offset + page.length < total;
+    const truncated = hasMore || offset > 0;
+
+    // Per-kind TRUE totals + a named sample of EACH kind, so a kind the page
+    // cannot hold is still counted and named rather than silently absent.
+    const pageRowsByKind = new Map<string, number>();
+    for (const g of page) {
+      pageRowsByKind.set(g.granterType, (pageRowsByKind.get(g.granterType) ?? 0) + 1);
+    }
+    const byGranterType = kindOrder.map((granterType) => {
+      const rows = byKind.get(granterType) ?? [];
+      const distinctIds = [...new Set(rows.map((g) => g.granterId))].sort();
+      return {
+        granterType,
+        rows: rows.length,
+        distinctGranters: distinctIds.length,
+        rowsOnThisPage: pageRowsByKind.get(granterType) ?? 0,
+        sample: distinctIds.slice(0, GRANTER_KIND_SAMPLE_LIMIT),
+      };
+    });
+    const kindNote =
+      byGranterType.length > 0
+        ? ` Rows are INTERLEAVED across granter kinds (round-robin), so this page samples every kind rather than one alphabetical block: ${byGranterType
+            .map(
+              (k) =>
+                `${k.granterType} ${k.rowsOnThisPage.toString()} of ${k.rows.toString()} row(s) / ${k.distinctGranters.toString()} principal(s)`,
+            )
+            .join('; ')}. \`summary.byGranterType\` carries the complete per-kind counts and a named sample of each kind.`
+        : '';
+    const pageNote = truncated ? ` Showing granters ${offset}–${offset + page.length} of ${total}; summary holds the complete counts. Page with offset/limit.` : '';
+
+    // `fullDataShape.holders` was queried for the FULL requested-limit page;
+    // every smaller candidate's container ids are a SUBSET of it (same fixed
+    // `offset`, shorter prefix), so a candidate's shape is a pure in-memory
+    // FILTER — no extra graph round-trips inside the fit search below.
+    const pageContainerIds = new Set(
+      page
+        .map((g) => g.granterId)
+        .filter((id) => id.startsWith('Profile:') || id.startsWith('PermissionSet:')),
+    );
+    const dataShape =
+      fullDataShape === undefined
+        ? undefined
+        : { ...fullDataShape, holders: fullDataShape.holders.filter((h) => pageContainerIds.has(h.id)) };
+
+    return {
       componentId,
       objectLabel: objectNode.label ?? objectNode.apiName,
       owd,
@@ -723,7 +797,7 @@ export const whoCanAccessObjectHandler = async (
         sharedRecordsAccess: total - allRecordsAccess,
         byGranterType,
       },
-      limit,
+      limit: pageLimit,
       offset,
       hasMore,
       truncated,
@@ -732,7 +806,37 @@ export const whoCanAccessObjectHandler = async (
       ...(dataShape !== undefined ? { dataShape } : {}),
       blindSpots,
       boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${multiRowNote}${kindNote}${pageNote}${scanNote}`,
-    },
+    };
+  };
+
+  // Largest page that fits the WHOLE-response budget. Binary search rather
+  // than a shrink-until-it-fits loop so the answer is the MAXIMUM fitting
+  // page (an under-filled page is not wrong, but it costs the caller extra
+  // round-trips) — mirrors flow_fault_audit's search exactly. Measures the
+  // COMPLETE `data` object (`buildData`'s return), not just the paged
+  // subset, so a candidate that "fits" here really does fit what
+  // `jsonResult` will measure.
+  const budget = toolLocalPayloadBudgetBytes();
+  let data = buildData(limit);
+  if (utf8Bytes(data) > budget && data.granters.length > 1) {
+    let lo = 1;
+    let hi = data.granters.length - 1;
+    let best = buildData(1);
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const candidate = buildData(mid);
+      if (utf8Bytes(candidate) <= budget) {
+        best = candidate;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    data = best;
+  }
+
+  return ok({
+    data,
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

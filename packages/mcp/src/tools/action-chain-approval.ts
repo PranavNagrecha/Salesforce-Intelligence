@@ -23,14 +23,21 @@
  *   6. Approver assignment — each step's `assignedApprover`, by user, queue,
  *      group, role, role-and-subordinates, a related user field, or the
  *      hierarchy field named at `nextAutomatedApprover`.
- *   7. Step actions — `approvalActions` on approve, `rejectionActions` on
- *      reject, with `rejectBehavior` deciding whether a rejection ends the
- *      request or returns to the previous step.
- *   8. Final approval — `finalApprovalActions` plus `finalApprovalRecordLock`.
- *   9. Final rejection — `finalRejectionActions` plus `finalRejectionRecordLock`.
- *  10. Recall — `recallActions`, available only when `allowRecall` is true.
- *  11. Re-entry — field updates fired by approval actions write to the record,
- *      and that write re-enters the object's ordinary save order.
+ *   7. Step approval actions — a step's `approvalActions` fire when its
+ *      approver approves.
+ *   8. Step rejection actions — a step's `rejectionActions` fire when its
+ *      approver rejects, with `rejectBehavior` deciding whether the
+ *      rejection ends the request or returns it to the previous step.
+ *   9. Final approval — `finalApprovalActions` fire once the last step
+ *      approves.
+ *  10. Final rejection — `finalRejectionActions` fire when a rejection ends
+ *      the request outright (see step 8's `rejectBehavior`).
+ *  11. Final lock — `finalApprovalRecordLock` decides whether the record
+ *      stays locked after final approval; `finalRejectionRecordLock`
+ *      decides the same after final rejection.
+ *  12. Recall — `recallActions`, available only when `allowRecall` is true.
+ *  13. Re-entry — field updates fired by approval actions write to the
+ *      record, and that write re-enters the object's ordinary save order.
  *
  * ## The two honest holes this module surfaces
  *

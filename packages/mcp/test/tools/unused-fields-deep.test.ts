@@ -294,6 +294,13 @@ describe('unusedFieldsDeepHandler', () => {
       const imp = await importExtractionResults(s, [
         {
           nodes: [
+            // FIX 1 (UNUSED-FIELDS-DEEP-SILENT-UNKNOWN-OBJECT): this isolated
+            // store needs its OWN `CustomObject:Account` node — the handler
+            // now resolves + VERIFIES the `parentObjectFilter` scope against
+            // the vault before scanning, so a filter naming an object with no
+            // node of its own is refused as `invalid-query` rather than
+            // silently matched by field-id string alone.
+            makeNode({ id: ACCOUNT_ID, type: 'CustomObject', apiName: 'Account' }),
             makeNode({
               id: piiField,
               apiName: 'SSN__c',
@@ -1141,6 +1148,49 @@ describe('unusedFieldsDeepHandler — FLD-01 objectId filtering', () => {
     expect(byObjectId.value.data.fields.map((f) => f.id).sort()).toEqual(
       byApiName.value.data.fields.map((f) => f.id).sort(),
     );
+  });
+
+  // UNUSED-FIELDS-DEEP-SILENT-UNKNOWN-OBJECT: an object name that matches
+  // NOTHING in the vault must be a named refusal, never a false
+  // `{fields: [], totalCount: 0}` — an unchecked zero indistinguishable from
+  // "this object genuinely has no unused fields." See also the broader
+  // cross-tool assertion in object-case-resolution.test.ts.
+  it('refuses an object name that matches nothing, instead of a false empty result', async () => {
+    const r = await unusedFieldsDeepHandler(ctx, { objectApiName: 'NoSuchObjectAtAll__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('NoSuchObjectAtAll__c');
+  });
+
+  it('refuses an unknown object via the legacy parentObjectFilter synonym too', async () => {
+    const r = await unusedFieldsDeepHandler(ctx, { parentObjectFilter: 'NoSuchObjectAtAll__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('echoes appliedScope (vault casing) on a scoped call, and omits it on a bare org-wide call', async () => {
+    const scoped = await unusedFieldsDeepHandler(ctx, { objectApiName: 'account' });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    expect(scoped.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:Account',
+      object: 'Account',
+    });
+    // A real object typed in the wrong case still answers (case-insensitive
+    // RESOLUTION, not identity) with the same fields as the exactly-cased call.
+    const exact = await unusedFieldsDeepHandler(ctx, { objectApiName: 'Account' });
+    expect(exact.ok).toBe(true);
+    if (!exact.ok) return;
+    expect(scoped.value.data.fields.map((f) => f.id).sort()).toEqual(
+      exact.value.data.fields.map((f) => f.id).sort(),
+    );
+
+    const bare = await unusedFieldsDeepHandler(ctx, {});
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect('appliedScope' in bare.value.data).toBe(false);
   });
 });
 
