@@ -87,16 +87,23 @@ export interface WhatIfEnvelope {
   readonly disclosure: string;
 }
 
+/**
+ * @param limitations Optional, ADDITIVE. Named things the answer did not
+ *   evaluate — e.g. a comparison category whose source property this vault's
+ *   refresh never extracted. Omitting it keeps the historical `[]`, so all
+ *   existing callers are byte-identical.
+ */
 export const offlineTrust = (
   ctx: Context,
   completeness: TrustSummary['completeness'],
   involvedTypes?: readonly string[],
+  limitations?: readonly string[],
 ): TrustSummary => ({
   provenance: 'offline_snapshot',
   confidence: 'declared',
   freshness: buildMixedFreshness(ctx.manifest, involvedTypes),
   completeness,
-  limitations: [],
+  limitations: limitations === undefined ? [] : [...limitations],
 });
 
 /**
@@ -817,11 +824,23 @@ export const METHOD_SIGNATURE_REQUIRED_COVERAGE = [
   'AuraDefinitionBundle',
 ] as const;
 
+/**
+ * @param extraNotEvaluated Optional, ADDITIVE, default-preserving. Categories
+ *   the CALLER could not evaluate for a reason coverage does not see — a
+ *   comparison whose source property this vault's refresh never wrote, for
+ *   instance. When non-empty it forces `completeness.status` off `'complete'`
+ *   and lands the names in `trust.limitations`; a caller that omits it (four
+ *   of the five what-if tools do) gets byte-identical output.
+ *
+ *   Without this, a tool could report `completeness: complete` while its own
+ *   `notEvaluatedCategories` was non-empty — the response contradicting itself.
+ */
 export const attachCoverageToWhatIf = (
   ctx: Context,
   requiredTypes: readonly string[],
   purpose: string,
   rawVerdict: string,
+  extraNotEvaluated?: readonly string[],
 ): {
   readonly verdict: string;
   readonly coverageCaveat?: CoverageCaveat;
@@ -834,9 +853,12 @@ export const attachCoverageToWhatIf = (
     'safe',
     'review',
   );
+  const notEvaluated = extraNotEvaluated ?? [];
   const completeness: TrustSummary['completeness'] =
     coverageCaveat === undefined
-      ? { status: 'complete' }
+      ? notEvaluated.length > 0
+        ? { status: 'partial' }
+        : { status: 'complete' }
       : {
           status: coverageCaveat.status,
           missingCoverage: coverageCaveat.missingCoverage,
@@ -844,6 +866,16 @@ export const attachCoverageToWhatIf = (
   return {
     verdict,
     ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
-    trust: offlineTrust(ctx, completeness),
+    trust: offlineTrust(
+      ctx,
+      completeness,
+      undefined,
+      notEvaluated.length > 0
+        ? notEvaluated.map(
+            (c) =>
+              `${c} was NOT evaluated — this vault's refresh did not extract its source property, so it is excluded from the comparison entirely (see summary.notEvaluatedCategories).`,
+          )
+        : undefined,
+    ),
   };
 };
