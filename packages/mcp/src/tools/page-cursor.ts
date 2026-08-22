@@ -689,3 +689,168 @@ export const paginateLegacy = <T>(
     oversizedRowUnslimmable: page.oversizedRowUnslimmable,
   };
 };
+
+// ---------------------------------------------------------------------------
+// Reconciling a HANDLER's page pointer after the GLOBAL budget trimmed it
+// ---------------------------------------------------------------------------
+
+/** What {@link reconcileHandlerPageAfterGlobalTrim} did to the payload. */
+export type HandlerPageReconciliation = 'corrected' | 'invalidated' | 'none';
+
+/** Read `key` off a record as a finite number, else `null`. */
+const numberAt = (rec: Record<string, unknown>, key: string): number | null => {
+  const v = rec[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+};
+
+/** The `pageInfo` object on a payload, when it is one. */
+const pageInfoOf = (rec: Record<string, unknown>): Record<string, unknown> | null => {
+  const p = rec['pageInfo'];
+  return p !== null && typeof p === 'object' && !Array.isArray(p)
+    ? (p as Record<string, unknown>)
+    : null;
+};
+
+/**
+ * Page sizes the payload itself DECLARES. Used to identify which trimmed list
+ * is the handler's page — not by guessing, but by matching a number the
+ * handler published against a list's PRE-trim length.
+ *
+ *   - `pageInfo.returnedCount` — the cursor contract's own page size.
+ *   - `returnedCount` — the same field, flattened by some handlers.
+ *   - `nextOffset - offset` — the slice length the pointer was computed from.
+ *   - `totalCount - offset` — the LAST page, where the handler emitted no
+ *     pointer at all because it believed the list was exhausted. That case
+ *     matters most: rows were dropped and nothing in the payload said so.
+ */
+const declaredPageSizes = (rec: Record<string, unknown>): readonly number[] => {
+  const sizes: number[] = [];
+  const info = pageInfoOf(rec);
+  if (info !== null) {
+    const returned = numberAt(info, 'returnedCount');
+    if (returned !== null) sizes.push(returned);
+  }
+  const flatReturned = numberAt(rec, 'returnedCount');
+  if (flatReturned !== null) sizes.push(flatReturned);
+  const offset = numberAt(rec, 'offset');
+  const nextOffset = numberAt(rec, 'nextOffset');
+  if (offset !== null && nextOffset !== null) sizes.push(nextOffset - offset);
+  const totalCount = numberAt(rec, 'totalCount');
+  if (offset !== null && totalCount !== null) sizes.push(totalCount - offset);
+  return sizes;
+};
+
+/** True when the payload carries ANY handler-emitted pagination pointer. */
+const hasHandlerPointer = (rec: Record<string, unknown>): boolean =>
+  'nextOffset' in rec ||
+  'nextCursor' in rec ||
+  pageInfoOf(rec) !== null ||
+  'hasMore' in rec ||
+  'truncated' in rec;
+
+/**
+ * Repair — or, failing that, REMOVE — a handler's own pagination pointer after
+ * the global response budget tail-trimmed the page underneath it.
+ *
+ * ## The bug this closes
+ *
+ * A cursor-aware handler builds a page, computes `nextOffset = offset + page
+ * length`, and mints a `nextCursor` encoding that offset. The global guard in
+ * `jsonResult` then discovers the envelope is over budget and tail-trims the
+ * largest `data` array — which is that very page. The pointer is left alone,
+ * so it advances by rows DELIVERED **plus** rows DROPPED, and the response
+ * said, verbatim, *"use this tool's own nextCursor to page (the handler's
+ * pagination is authoritative)"* — a sentence that is false precisely when it
+ * is printed. Measured on a real vault, `code_quality_audit` at `limit: 500`
+ * and a 12 KB budget walked to exhaustion and reached **41 of 647** rows;
+ * whole windows were unreachable, and the final page dropped 19 more while
+ * reporting `truncated: false`.
+ *
+ * ## Identification is a MATCH, never a guess
+ *
+ * A corrected pointer that indexes the wrong list is worse than none — the
+ * same lesson as the guard's own `nextOffset`, which is now restricted to the
+ * sole-top-level-list case. Here the payload gives something stronger than a
+ * heuristic: it PUBLISHES its page size ({@link declaredPageSizes}), so a
+ * trimmed top-level list whose PRE-trim length equals a declared size is
+ * positively the handler's page. Exactly one such match → correct it. Zero,
+ * or more than one → the pointer cannot be stood behind, so it is REMOVED and
+ * the caller is told the response cannot be resumed.
+ *
+ * ## Why the cursor is dropped rather than corrected
+ *
+ * A `nextCursor` is opaque and encodes the PRE-trim offset inside a signed
+ * token; nothing outside the minting handler can rewrite it. Leaving it beside
+ * a corrected `nextOffset` would hand a cursor-following host the overshoot the
+ * offset-following host was just saved from. It is removed on both branches.
+ *
+ * Mutates `data` in place. A payload with no handler pointer, or with nothing
+ * trimmed, is left byte-identical.
+ *
+ * @returns which branch ran, so the caller can say so in its disclosure.
+ */
+export const reconcileHandlerPageAfterGlobalTrim = (
+  data: unknown,
+  trim: {
+    /** Dotted paths pass 1 actually trimmed, relative to `data`. */
+    readonly truncatedPaths: readonly string[];
+    /** Surviving length per trimmed path. */
+    readonly keptByPath: Readonly<Record<string, number>>;
+    /** PRE-trim length per trimmed path. */
+    readonly originalByPath: Readonly<Record<string, number>>;
+  },
+): HandlerPageReconciliation => {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    return 'none';
+  }
+  const rec = data as Record<string, unknown>;
+  if (!hasHandlerPointer(rec)) return 'none';
+
+  const topLevelTrimmed = trim.truncatedPaths.filter((p) => !p.includes('.'));
+  if (topLevelTrimmed.length === 0) return 'none';
+
+  const declared = new Set(declaredPageSizes(rec));
+  const matches = topLevelTrimmed.filter((p) =>
+    declared.has(trim.originalByPath[p] ?? -1),
+  );
+
+  const info = pageInfoOf(rec);
+  const dropPointer = (): void => {
+    delete rec['nextCursor'];
+    delete rec['nextOffset'];
+    if (info !== null) info['nextCursor'] = null;
+  };
+
+  if (matches.length !== 1) {
+    // Cannot name the paged list, so cannot name a resume point. Say nothing
+    // rather than something wrong — but keep the "there is more" flags, or the
+    // caller reads a cut page as a complete one.
+    dropPointer();
+    if ('truncated' in rec) rec['truncated'] = true;
+    if ('hasMore' in rec) rec['hasMore'] = true;
+    if (info !== null && 'hasMore' in info) info['hasMore'] = true;
+    return 'invalidated';
+  }
+
+  const path = matches[0] as string;
+  const kept = trim.keptByPath[path] ?? 0;
+  const original = trim.originalByPath[path] ?? 0;
+  // The handler's OWN offset, preferred from what it published; `nextOffset`
+  // minus the page it built is the same number by construction, and is the
+  // fallback for a handler that echoes no `offset`.
+  const publishedOffset = numberAt(rec, 'offset');
+  const nextOffset = numberAt(rec, 'nextOffset');
+  const handlerOffset =
+    publishedOffset ?? (nextOffset === null ? 0 : nextOffset - original);
+
+  delete rec['nextCursor'];
+  if (info !== null) info['nextCursor'] = null;
+  rec['nextOffset'] = handlerOffset + kept;
+  if (info !== null) {
+    if ('returnedCount' in info) info['returnedCount'] = kept;
+    if ('hasMore' in info) info['hasMore'] = true;
+  }
+  if ('truncated' in rec) rec['truncated'] = true;
+  if ('hasMore' in rec) rec['hasMore'] = true;
+  return 'corrected';
+};

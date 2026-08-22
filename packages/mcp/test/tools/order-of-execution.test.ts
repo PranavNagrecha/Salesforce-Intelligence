@@ -29,7 +29,7 @@ import {
   type SoePerEvent,
 } from '../../src/tools/order-of-execution.js';
 import {
-  SOE_MAX_PAYLOAD_BYTES,
+  soeBudgetBytes,
   tallyPhaseCounts,
 } from '../../src/tools/soe-payload-bounds.js';
 import { jsonResult } from '../../src/tools/tool-dispatch.js';
@@ -756,8 +756,8 @@ describe('orderOfExecutionHandler — one envelope law (ORDER-OF-EXECUTION-OVERS
     // phases-dropped disclosure note) was appended AFTER enforcement measured
     // `data`, re-inflating it PAST its own SOE budget (~40826 B observed).
     // PASS-AFTER: the scaffolding is reserved for, so the FINAL `data` — notes
-    // and phasesOmitted included — stays within SOE_MAX_PAYLOAD_BYTES.
-    expect(utf8Bytes(data)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+    // and phasesOmitted included — stays within soeBudgetBytes().
+    expect(utf8Bytes(data)).toBeLessThanOrEqual(soeBudgetBytes());
 
     // The load-bearing disclosure survives WHOLE through the real dispatch guard
     // — it is neither slimmed nor forced into an oversize error. Before the fix

@@ -202,6 +202,31 @@ export const isUnprovenRegistrationKind = (kind: EntryPointKind): boolean =>
   UNPROVEN_REGISTRATION_KINDS.includes(kind);
 
 /**
+ * The ONE sentence stating what {@link UNPROVEN_REGISTRATION_KINDS} means — the
+ * prose face of {@link isFrameworkSubclass} / {@link isCallableDispatch}.
+ *
+ * `find_dead_code` (as a `boundaries[]` entry) and `method_reachability` (as a
+ * `disclosure` suffix) each carried their own constant, both named
+ * `UNPROVEN_REGISTRATION_DISCLOSURE`, with different text. The PREDICATES were
+ * centralised here and the sentence was not, so two copies of one rule sat
+ * behind one name: an editor fixing the claim in either file would have fixed
+ * half of it. Both tools now read this constant and prepend only their own
+ * VERDICT framing, which is genuinely tool-specific (one is about a
+ * `definitely_dead` cascade, the other about the entry points found in one
+ * response).
+ *
+ * Verbatim product copy; do not reword without re-reading both call sites.
+ */
+export const UNPROVEN_REGISTRATION_DISCLOSURE =
+  'A class that extends a base class from ANOTHER namespace (a managed package or platform ' +
+  'framework instantiates its own subclasses) or declares the Callable dynamic-invocation ' +
+  'interface is registered OUTSIDE Apex — in a string literal, a Custom Metadata record, or ' +
+  'managed-package code that mints no edge — so it has zero incoming edges by construction. ' +
+  'Both signals say the class is BUILT to be invoked from outside this vault; NEITHER proves ' +
+  'the registration is live. Treat it as "not dead", never as "proven reachable" — confirm the ' +
+  'registration in the org before relying on it.';
+
+/**
  * True when this incoming edge is a UI `controller=` binding — a
  * VisualforcePage / VisualforceComponent / AuraDefinitionBundle referencing the
  * class. Those bindings are `declared` in the graph because the markup names

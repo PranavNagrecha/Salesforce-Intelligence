@@ -25,6 +25,8 @@
  * as before — no new keys, byte-identical output.
  */
 
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
+
 /** A single action entry as emitted by the SOE composers. Structural so both tools' own `SoeStepAction` satisfy it. */
 export interface BoundableAction {
   readonly kind: string;
@@ -75,7 +77,24 @@ export interface BoundableStep {
  * (`vaultState`, `disclosure`, the truncation note) so a payload that passes
  * this check also clears the global guard.
  */
-export const SOE_MAX_PAYLOAD_BYTES = 40_000;
+/**
+ * The cap a composed SOE payload is fitted to, DERIVED from the global response
+ * budget.
+ *
+ * It used to be a hard-coded `40_000` — the same number as the global budget's
+ * default, which reserves 1 024 of that for the envelope's own fields. Its
+ * effective ceiling is therefore 38 976, so a save-order payload fitted to
+ * EXACTLY 40 000 was unconditionally over it, and the global reducer — which
+ * IS allowed to drop steps — trimmed a payload whose own guard had refused to
+ * drop any. Measured on a real org: a busy object's save order lost 55 of 109
+ * steps that way, with `allowStepDrop: false` in force the whole time.
+ *
+ * Two magic numbers that must stay ordered drift the moment either moves, so
+ * this one is computed instead. `soeBudgetBytes() < responseReductionCap()`
+ * holds by construction at every value of `SFI_MAX_RESPONSE_BYTES`, and
+ * `response-budget.test.ts` pins the ORDERING, not the values.
+ */
+export const soeBudgetBytes = (): number => toolLocalPayloadBudgetBytes();
 
 /**
  * Action lists at or below this length are never trimmed. They are not the
@@ -123,12 +142,12 @@ export interface SoeBudgetOptions {
   readonly allowStepDrop?: boolean;
   /**
    * Ceiling this pass trims the payload to, in bytes. Defaults to
-   * {@link SOE_MAX_PAYLOAD_BYTES}.
+   * {@link soeBudgetBytes}.
    *
    * A caller that appends HONESTY scaffolding to the payload AFTER enforcement
    * — the four-event `order_of_execution` view attaches per-event
    * `phasesOmitted` and a phases-dropped disclosure note once it knows what the
-   * step-drop shed — passes a value BELOW {@link SOE_MAX_PAYLOAD_BYTES} to
+   * step-drop shed — passes a value BELOW {@link soeBudgetBytes} to
    * reserve headroom for those additions. Without the reserve the post-
    * enforcement additions push the payload back over budget, forcing the global
    * dispatch guard to mangle the (load-bearing) disclosure or — since the nested
@@ -136,13 +155,13 @@ export interface SoeBudgetOptions {
    * answer. Reserving here keeps the FINAL `data` (scaffolding included) within
    * budget, so both save-order tools obey one envelope law
    * (ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL). Never raised above
-   * {@link SOE_MAX_PAYLOAD_BYTES}.
+   * {@link soeBudgetBytes}.
    */
   readonly budgetBytes?: number;
 }
 
 /**
- * Enforce {@link SOE_MAX_PAYLOAD_BYTES} on a composed SOE payload, IN PLACE.
+ * Enforce {@link soeBudgetBytes} on a composed SOE payload, IN PLACE.
  *
  * @param payload    the full tool response data (serialized to measure size)
  * @param containers the step arrays inside `payload` — one for a single-event
@@ -167,10 +186,8 @@ export const enforceSoeByteBudget = (
 ): SoeBudgetResult => {
   const allowStepDrop = options.allowStepDrop ?? true;
   // Never above the global SOE ceiling; a caller may reserve headroom below it.
-  const budgetBytes = Math.min(
-    options.budgetBytes ?? SOE_MAX_PAYLOAD_BYTES,
-    SOE_MAX_PAYLOAD_BYTES,
-  );
+  const ceiling = soeBudgetBytes();
+  const budgetBytes = Math.min(options.budgetBytes ?? ceiling, ceiling);
   if (sizeOf(payload) <= budgetBytes) {
     return { truncated: false, actionsOmitted: 0, conditionalsTrimmed: 0, stepsOmitted: 0 };
   }
@@ -299,11 +316,25 @@ export const enforceSoeByteBudget = (
 };
 
 /**
+ * The clause {@link soeTruncationNote} adds when THIS layer dropped no step.
+ *
+ * It is a claim about the payload as the tool-local guard left it, and the
+ * GLOBAL response reducer can invalidate it afterwards by tail-truncating
+ * `soe`. Named here so {@link reconcileSoePhasesOmittedAfterGlobalTrim} can
+ * excise the exact clause once that has happened, instead of leaving a
+ * response asserting "every save-order STEP is present" beside a `soe` holding
+ * 27 of 109 steps. Removing it leaves the sentence in precisely the shape the
+ * `stepsOmitted > 0` branch produces.
+ */
+const ALL_STEPS_PRESENT_CLAIM =
+  ': every save-order STEP is present and in order, but';
+
+/**
  * The verbatim note appended to a truncated SOE response's disclosure so the
  * caller knows the step list is complete but per-step detail was capped to fit.
  */
 export const soeTruncationNote = (result: SoeBudgetResult): string => {
-  const budgetKb = Math.round(SOE_MAX_PAYLOAD_BYTES / 1000);
+  const budgetKb = Math.round(soeBudgetBytes() / 1000);
   const parts: string[] = [];
   if (result.actionsOmitted > 0) {
     parts.push(
@@ -324,7 +355,7 @@ export const soeTruncationNote = (result: SoeBudgetResult): string => {
   const lead =
     result.stepsOmitted > 0
       ? `Response trimmed to fit the ~${budgetKb} KB MCP response budget`
-      : `Response trimmed to fit the ~${budgetKb} KB MCP response budget: every save-order STEP is present and in order, but`;
+      : `Response trimmed to fit the ~${budgetKb} KB MCP response budget${ALL_STEPS_PRESENT_CLAIM}`;
   return `${lead} ${parts.join('; ')}. Query a single object/event for full detail.`;
 };
 
@@ -453,6 +484,75 @@ export const computePhasesOmitted = (
   return omitted;
 };
 
+/** Escape a literal so it can be embedded in a `RegExp` source. */
+const escapeRegExp = (raw: string): string =>
+  raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The two halves of the PHASE-FILTERED shortfall sentence, either side of its
+ * one variable slot (`present`). The sentence AND the matcher that finds an
+ * already-baked copy are both assembled from these, so a rewording can never
+ * leave behind a matcher that silently stops matching and starts appending
+ * duplicate prose.
+ */
+const filteredPhaseShortfallHead = (
+  phase: Exclude<SoePhase, 'save'>,
+  declared: number,
+): string => `You asked for the ${phase} phase, which holds ${declared} step(s); `;
+const FILTERED_PHASE_SHORTFALL_TAIL =
+  ' fitted in this response. This is a byte-budget cut, not a smaller phase — narrow further with limit/offset, or pass includeConceptReasoning: false.';
+
+/**
+ * Verbatim shortfall sentence for a truncated PHASE-FILTERED call.
+ *
+ * Lives here, beside {@link computePhasesOmitted}, because the numbers in it
+ * are that function's output and nothing else's. The handler bakes it from the
+ * step count it can see; the GLOBAL budget can cut `soe` again afterwards, and
+ * {@link reconcileSoePhasesOmittedAfterGlobalTrim} then rewrites this sentence
+ * from the RECONCILED omission — one template, one source of numbers, so the
+ * prose and `phasesOmitted` can never state two different counts for one fact.
+ */
+export const filteredPhaseShortfallNote = (
+  omission: SoePhaseOmission,
+): string =>
+  `${filteredPhaseShortfallHead(omission.phase, omission.declared)}${
+    omission.present
+  }${FILTERED_PHASE_SHORTFALL_TAIL}`;
+
+/** The two halves of the CROSS-PHASE sentence, either side of its phase list. */
+const CROSS_PHASE_SHORTFALL_HEAD = 'Note: ';
+const CROSS_PHASE_SHORTFALL_TAIL =
+  ' truncated out of the returned sequence — re-query with the `phase` filter to see the full roster.';
+
+/** Verbatim CROSS-PHASE shortfall sentence, from the same reconciled list. */
+export const crossPhaseShortfallNote = (
+  omitted: readonly SoePhaseOmission[],
+): string =>
+  `${CROSS_PHASE_SHORTFALL_HEAD}${omitted
+    .map((p) => `${p.phase} (${p.present}/${p.declared} shown)`)
+    .join(', ')}${CROSS_PHASE_SHORTFALL_TAIL}`;
+
+/**
+ * Replace an already-baked shortfall sentence with the one built from the
+ * RECONCILED omission, or append it when the handler baked none (the global
+ * trim can create a shortfall the handler never saw).
+ */
+const restatePhaseShortfall = (
+  disclosure: string,
+  fresh: string,
+  head: string,
+  slot: string,
+  tail: string,
+): string => {
+  const pattern = new RegExp(
+    `${escapeRegExp(head)}${slot}${escapeRegExp(tail)}`,
+    'g',
+  );
+  return pattern.test(disclosure)
+    ? disclosure.replace(pattern, fresh)
+    : `${disclosure} ${fresh}`;
+};
+
 /**
  * Reconcile `phasesOmitted` on a composed-SOE payload AFTER the GLOBAL response
  * budget (`jsonResult`) tail-truncated its `data.soe` array — the second half of
@@ -538,6 +638,38 @@ export const reconcileSoePhasesOmittedAfterGlobalTrim = (
   );
   if (omitted.length > 0) {
     rec['phasesOmitted'] = omitted;
+    // The handler baked its shortfall PROSE from the step count it could see;
+    // the global trim has since cut `soe` further. Leaving the sentence alone
+    // shipped two numbers for one fact ("25 fitted in this response" beside
+    // `phasesOmitted: [{declared: 40, present: 12}]`). Restate it from the
+    // reconciled omission — and APPEND it when the handler baked none, which is
+    // the ordinary case on the cross-phase path where the tool-local guard
+    // never drops a step and only the global trim does.
+    const disclosure = rec['disclosure'];
+    if (typeof disclosure === 'string') {
+      const sole = omitted[0];
+      // The tool-local guard ran with `allowStepDrop: false`, so its truncation
+      // note claims "every save-order STEP is present and in order". Steps have
+      // since been dropped, so that clause is now false — excise it before
+      // restating the counts.
+      const corrected = disclosure.replace(ALL_STEPS_PRESENT_CLAIM, '');
+      rec['disclosure'] =
+        onlyPhase !== undefined && omitted.length === 1 && sole !== undefined
+          ? restatePhaseShortfall(
+              corrected,
+              filteredPhaseShortfallNote(sole),
+              filteredPhaseShortfallHead(sole.phase, sole.declared),
+              '\\d+',
+              FILTERED_PHASE_SHORTFALL_TAIL,
+            )
+          : restatePhaseShortfall(
+              corrected,
+              crossPhaseShortfallNote(omitted),
+              CROSS_PHASE_SHORTFALL_HEAD,
+              '[^.]+?',
+              CROSS_PHASE_SHORTFALL_TAIL,
+            );
+    }
     return true;
   }
   // Survivors still fully represent every phase — drop any stale marker so a

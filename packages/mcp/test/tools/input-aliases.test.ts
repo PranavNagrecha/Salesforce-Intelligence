@@ -387,6 +387,71 @@ describe('resolveContainerAlias', () => {
     ).toBe('PermissionSet:Beta_Set');
   });
 
+  // S1 — the resolver must not report its OWN bare-name default back to the
+  // caller as their disagreement. `componentId` names no family; only the
+  // typed selectors do. An over-eager refusal is a regression, not honesty.
+  it('a BARE componentId beside a typed selector with the SAME name resolves, it does not collide', () => {
+    // Pre-fix: `componentId` defaulted to `Profile:Sales_Access`, then refused
+    // with "container selectors name different targets (PermissionSet:
+    // Sales_Access, Profile:Sales_Access)" — naming a Profile NEITHER selector
+    // asked about. Both keys are declared on user_ability and tab_availability,
+    // so this shape is reachable through the advertised surface.
+    const ps = resolveContainerAlias({
+      componentId: 'Sales_Access',
+      permissionSetApiName: 'Sales_Access',
+    });
+    expect(ps.ok).toBe(true);
+    if (!ps.ok) return;
+    expect(ps.value).toEqual({
+      componentId: 'PermissionSet:Sales_Access',
+      containerType: 'PermissionSet',
+      apiName: 'Sales_Access',
+    });
+    // The profile-family direction was already fine and must stay fine.
+    expect(
+      idOf({ componentId: 'Sales_Access', profileApiName: 'Sales_Access' }),
+    ).toBe('Profile:Sales_Access');
+  });
+
+  it('with NO typed selector, a bare componentId keeps the historical Profile default', () => {
+    expect(idOf({ componentId: 'Sales_Access' })).toBe('Profile:Sales_Access');
+  });
+
+  it('a bare componentId naming a DIFFERENT thing still refuses', () => {
+    const r = resolveContainerAlias({
+      componentId: 'Other_Access',
+      permissionSetApiName: 'Sales_Access',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('PermissionSet:Sales_Access');
+    expect(r.error.message).toContain('Profile:Other_Access');
+  });
+
+  it('a PREFIXED componentId disagreeing with a typed selector still refuses — the prefix IS a claim', () => {
+    const r = resolveContainerAlias({
+      componentId: 'Profile:Sales_Access',
+      permissionSetApiName: 'Sales_Access',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message).toContain('PermissionSet:Sales_Access');
+    expect(r.error.message).toContain('Profile:Sales_Access');
+  });
+
+  it('a bare componentId does not rescue two typed selectors that genuinely disagree', () => {
+    const r = resolveContainerAlias({
+      componentId: 'Sales_Access',
+      profileApiName: 'Alpha_Profile',
+      permissionSetApiName: 'Sales_Access',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message).toContain('Profile:Alpha_Profile');
+    expect(r.error.message).toContain('PermissionSet:Sales_Access');
+  });
+
   it('a WRONG Type: prefix passes through unchanged for the caller to reject', () => {
     // Never mangled into `Profile:CustomObject:…` — the phantom-Profile bug the
     // two tools' comments describe stays fixed.

@@ -78,8 +78,25 @@ export interface NamingConventionAnalysis {
     /** Of those, how many fall under {@link MIN_GROUP_SIZE} and emit nothing. */
     readonly objectsBelowMinimumGroupSize: number;
     readonly minimumGroupSize: number;
-    /** Standard fields dropped org-wide before grouping. */
+    /**
+     * Standard fields dropped before grouping, WITHIN THE ANALYZED SCOPE.
+     *
+     * It used to be the org-wide total on every call, which under a
+     * single-object scope printed a numerator and a denominator from two
+     * different populations — `objectsWithCustomFields: 1` beside a
+     * `standardFieldsExcluded` in the thousands, with nothing in the response
+     * saying they were counted over different sets. Both numbers now describe
+     * the same scope; {@link standardFieldsExcludedOrgWide} keeps the org-wide
+     * figure, labelled as such.
+     */
     readonly standardFieldsExcluded: number;
+    /**
+     * Standard fields dropped ORG-WIDE before grouping, whatever the scope.
+     * Equal to {@link standardFieldsExcluded} on a `scope: 'all'` call — the
+     * two are the same population there — and the wider context on a scoped
+     * one.
+     */
+    readonly standardFieldsExcludedOrgWide: number;
     /** Custom-field count for a SCOPED call; `null` for `scope: 'all'`. */
     readonly scopedObjectCustomFieldCount: number | null;
   };
@@ -255,13 +272,26 @@ const fetchAllCustomFields = async (
  */
 const groupFieldsByParent = (
   fields: readonly Node[],
-): { groups: readonly FieldGroup[]; standardFieldsExcluded: number } => {
+): {
+  groups: readonly FieldGroup[];
+  standardFieldsExcluded: number;
+  standardFieldsExcludedByParent: ReadonlyMap<string, number>;
+} => {
   const byParent = new Map<string, Node[]>();
+  // Tallied PER PARENT as well as in total, so a scoped call can report the
+  // exclusion count for the object it actually analyzed instead of borrowing
+  // the org-wide one.
+  const excludedByParent = new Map<string, number>();
   let standardFieldsExcluded = 0;
   for (const field of fields) {
     if (field.parentId === null) continue;
     if (!isCustomFieldApiName(field.apiName)) {
       standardFieldsExcluded += 1;
+      const parentApiName = field.parentId.slice(field.parentId.indexOf(':') + 1);
+      excludedByParent.set(
+        parentApiName,
+        (excludedByParent.get(parentApiName) ?? 0) + 1,
+      );
       continue;
     }
     const existing = byParent.get(field.parentId) ?? [];
@@ -274,7 +304,11 @@ const groupFieldsByParent = (
     parentApiName: parentId.slice(parentId.indexOf(':') + 1),
     fields: byParent.get(parentId) ?? [],
   }));
-  return { groups, standardFieldsExcluded };
+  return {
+    groups,
+    standardFieldsExcluded,
+    standardFieldsExcludedByParent: excludedByParent,
+  };
 };
 
 // Parse a scope string into a parent api name (`'CustomField:X.*'` -> `'X'`)
@@ -331,9 +365,8 @@ export const analyzeNamingConventions = async (
     });
   }
 
-  const { groups, standardFieldsExcluded } = groupFieldsByParent(
-    fieldsResult.value,
-  );
+  const { groups, standardFieldsExcluded, standardFieldsExcludedByParent } =
+    groupFieldsByParent(fieldsResult.value);
   const filtered =
     scopedParentApiName === null
       ? groups
@@ -359,7 +392,11 @@ export const analyzeNamingConventions = async (
         (g) => g.fields.length < MIN_GROUP_SIZE,
       ).length,
       minimumGroupSize: MIN_GROUP_SIZE,
-      standardFieldsExcluded,
+      standardFieldsExcluded:
+        scopedParentApiName === null
+          ? standardFieldsExcluded
+          : (standardFieldsExcludedByParent.get(scopedParentApiName) ?? 0),
+      standardFieldsExcludedOrgWide: standardFieldsExcluded,
       scopedObjectCustomFieldCount:
         scopedParentApiName === null
           ? null

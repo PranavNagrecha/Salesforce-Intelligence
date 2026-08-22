@@ -45,7 +45,20 @@ export interface NamingConventionReportOutput {
     readonly objectsWithCustomFields: number;
     readonly objectsBelowMinimumGroupSize: number;
     readonly minimumGroupSize: number;
+    /**
+     * Standard fields dropped before grouping WITHIN THE ANALYZED SCOPE — the
+     * same population `objectsWithCustomFields` counts over. Under a
+     * single-object scope this used to carry the org-wide total, so the block
+     * printed `objectsWithCustomFields: 1` beside a figure in the thousands
+     * with nothing saying the two were counted over different sets.
+     */
     readonly standardFieldsExcluded: number;
+    /**
+     * The ORG-WIDE exclusion count, labelled as such IN THE RESPONSE rather
+     * than only in the tool description. Equal to `standardFieldsExcluded` on
+     * an unscoped call.
+     */
+    readonly standardFieldsExcludedOrgWide: number;
   };
   /** Present ONLY when a SCOPED call produced zero observations. Verbatim. */
   readonly note?: string;
@@ -127,6 +140,7 @@ export const namingConventionReportHandler = async (
         objectsBelowMinimumGroupSize: analyzed.objectsBelowMinimumGroupSize,
         minimumGroupSize: analyzed.minimumGroupSize,
         standardFieldsExcluded: analyzed.standardFieldsExcluded,
+        standardFieldsExcludedOrgWide: analyzed.standardFieldsExcludedOrgWide,
       },
       ...(note !== undefined ? { note } : {}),
     },

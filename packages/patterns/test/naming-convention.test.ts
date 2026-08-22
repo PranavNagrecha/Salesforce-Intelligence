@@ -439,3 +439,68 @@ describe('analyzeNamingConventions: positive control (FIX 2)', () => {
     expect(prefix?.evidence.matching).toBe(10);
   });
 });
+
+/**
+ * S3 — a scoped call must not print an org-wide denominator beside a scoped
+ * numerator. `standardFieldsExcluded` was computed over ALL fields, before the
+ * scope filter, while `objectsWithCustomFields` was computed after it — so a
+ * single-object scope read `objectsWithCustomFields: 1` next to a
+ * `standardFieldsExcluded` counted over the whole org, with nothing in the
+ * response saying the two came from different populations.
+ */
+describe('analyzeNamingConventions: scoped and org-wide exclusion counts are labelled (S3)', () => {
+  let store: GraphStore;
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  beforeAll(async () => {
+    const nodes: Node[] = [
+      parentObject('Widget_Session__c'),
+      parentObject('Widget_Invoice__c'),
+    ];
+    // The SCOPED object: 6 custom fields + 3 standard ones.
+    for (const name of [
+      'ses_start__c',
+      'ses_end__c',
+      'ses_duration__c',
+      'ses_host__c',
+      'ses_room__c',
+      'ses_code__c',
+    ]) {
+      nodes.push(field('Widget_Session__c', name));
+    }
+    for (let i = 0; i < 3; i += 1) {
+      nodes.push(field('Widget_Session__c', `SessionStandard${i}`));
+    }
+    // Everything ELSE in the org: 40 standard fields on another object.
+    nodes.push(field('Widget_Invoice__c', 'inv_total__c'));
+    for (let i = 0; i < 40; i += 1) {
+      nodes.push(field('Widget_Invoice__c', `InvoiceStandard${i}`));
+    }
+    store = await seedStore('s3-scoped-exclusions.db', nodes);
+  });
+
+  it('reports the SCOPED exclusion count beside the scoped object count', async () => {
+    const r = await analyzeNamingConventions(store, {
+      scope: 'CustomField:Widget_Session__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.analyzed.objectsWithCustomFields).toBe(1);
+    // Pre-fix this was 43 — every standard field in the org, printed next to a
+    // denominator of 1.
+    expect(r.value.analyzed.standardFieldsExcluded).toBe(3);
+    // …and the org-wide figure is still available, named as org-wide.
+    expect(r.value.analyzed.standardFieldsExcludedOrgWide).toBe(43);
+  });
+
+  it('leaves an UNSCOPED call reporting the same number in both slots', async () => {
+    const r = await analyzeNamingConventions(store);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.analyzed.objectsWithCustomFields).toBe(2);
+    expect(r.value.analyzed.standardFieldsExcluded).toBe(43);
+    expect(r.value.analyzed.standardFieldsExcludedOrgWide).toBe(43);
+  });
+});
