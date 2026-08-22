@@ -158,3 +158,13 @@
   `pairs + unpaired === fieldCount` per side and FAILS LOUD in `boundaries[]`
   when it does not hold, and `limit` / `offset` / `cursor` / `section` page one
   designated list while the other two keep publishing their counts.
+
+- **`sfi.search_components` discloses the true total.** `{"query":"Age"}`
+  matches 1,931 nodes on the reference vault and the tool returned 25 rows with
+  no `totalCount` and no `hasMore` — the reader could not tell a complete answer
+  from a 1.3% sample. Every response now carries `totalCount` (the TRUE
+  post-filter count, computed in the SAME query via `COUNT(*) OVER ()` so it
+  cannot drift from the rows), `limit`, `offset`, `hasMore`, `nextOffset`, and a
+  verbatim `boundaries[]` entry stating the matches are LEXICAL substring hits
+  and the ranking is a lexical score, not relevance. A truncated page adds a
+  `note`. `offset` is a new input.

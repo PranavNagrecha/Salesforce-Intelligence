@@ -56,6 +56,7 @@ export {
   listNodesByIds,
   listNodesByType,
   searchNodes,
+  searchNodesPage,
 } from './queries.js';
 export type {
   Contributor,
@@ -70,6 +71,7 @@ export type {
   NodeIdentity,
   SearchHit,
   SearchNodesOptions,
+  SearchNodesPage,
   Subgraph,
 } from './queries.js';
 export {

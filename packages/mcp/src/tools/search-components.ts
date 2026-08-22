@@ -17,7 +17,7 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   resolveComponents,
-  searchNodes,
+  searchNodesPage,
   type MatchKind,
   type ResolveDisposition,
 } from '@sf-intelligence/graph';
@@ -33,6 +33,13 @@ import type { Context } from '../server.js';
 const SEARCH_MAX_LIMIT = 100;
 
 /**
+ * Default page size, mirrored from `graph.searchNodes`. Surfaced here so the
+ * response can ECHO the limit it applied rather than leaving the reader to
+ * infer it from the row count.
+ */
+const SEARCH_DEFAULT_LIMIT = 25;
+
+/**
  * Zod schema for the `sfi.search_components` tool input. `query` must be a
  * non-empty string; `limit` is an integer bounded by the graph layer's
  * maximum; `types` is a free-form string array that the handler narrows to
@@ -42,6 +49,8 @@ const SEARCH_MAX_LIMIT = 100;
 export const searchComponentsInputSchema = z.object({
   query: z.string().min(1),
   limit: z.number().int().min(1).max(SEARCH_MAX_LIMIT).optional(),
+  /** Zero-based page offset. Paired with `limit` to walk the FULL match set. */
+  offset: z.number().int().nonnegative().optional(),
   types: z.array(z.string()).optional(),
 });
 
@@ -79,6 +88,16 @@ export interface SearchComponentsSuggestions {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface SearchComponentsOutput {
   readonly matches: readonly SearchComponentsMatch[];
+  /** TRUE total matching the query (post-`types` filter), before limit/offset. */
+  readonly totalCount: number;
+  readonly limit: number;
+  readonly offset: number;
+  readonly hasMore: boolean;
+  readonly nextOffset: number | null;
+  /** Verbatim; on EVERY response. */
+  readonly boundaries: readonly string[];
+  /** Verbatim; present only when `hasMore`. */
+  readonly note?: string;
   /**
    * Present ONLY when `matches` is empty AND the typo-tolerant resolver found
    * candidates. Lets clients recover from a misspelled/filler query without a
@@ -86,6 +105,14 @@ export interface SearchComponentsOutput {
    */
   readonly suggestions?: SearchComponentsSuggestions;
 }
+
+/**
+ * Verbatim boundary on EVERY response. Returning 25 rows out of 1,931 with no
+ * total and no `hasMore` left the reader unable to tell a complete answer from
+ * a 1.3% sample — and a lexical score is not a relevance score.
+ */
+const LEXICAL_MATCH_BOUNDARY =
+  'Matches are lexical, case-insensitive substring hits across api name, label, and raw node properties. A hit may be an incidental substring ("age" inside "Page"), not a semantic match. Ranking is a lexical score, not relevance — for meaning-based search use `sfi.find_semantic_field`.';
 
 /** Verbatim note attached to fallback suggestions. */
 const SUGGESTIONS_NOTE =
@@ -108,11 +135,15 @@ export const searchComponentsHandler = async (
   ctx: Context,
   input: SearchComponentsInput,
 ): Promise<Result<McpResponse<SearchComponentsOutput>, McpError>> => {
-  // `searchNodes` returns `readonly SearchHit[]` whose shape — `{ id, score,
-  // snippet }` — is identical to `SearchComponentsMatch`, so the value
-  // forwards without remapping.
-  const queryResult = await searchNodes(ctx.graph, input.query, {
-    ...(input.limit !== undefined ? { limit: input.limit } : {}),
+  // `searchNodesPage` returns `{ hits, totalCount }`; each hit's shape —
+  // `{ id, score, snippet }` — is identical to `SearchComponentsMatch`, so the
+  // rows forward without remapping. The total comes from the SAME query, so it
+  // cannot drift from the rows it describes.
+  const limit = input.limit ?? SEARCH_DEFAULT_LIMIT;
+  const offset = input.offset ?? 0;
+  const queryResult = await searchNodesPage(ctx.graph, input.query, {
+    limit,
+    offset,
     ...(input.types !== undefined
       ? { types: input.types as readonly ComponentType[] }
       : {}),
@@ -125,7 +156,8 @@ export const searchComponentsHandler = async (
     });
   }
 
-  let matches = queryResult.value;
+  let matches = queryResult.value.hits;
+  const totalCount = queryResult.value.totalCount;
 
   // B22: when lexical search returns Flow hits, prefer api_name prefix matches
   // (searchNodes scores prefix 2.8 > contains 2.5) — re-sort Flow rows only so
@@ -133,6 +165,9 @@ export const searchComponentsHandler = async (
   const flowHits = matches.filter((m) => m.id.startsWith('Flow:'));
   if (flowHits.length > 1) {
     const prefix = input.query.replace(/%/g, '');
+    // NOTE: this re-sort is PAGE-LOCAL — it only ever sees the rows in the
+    // current page, and it always did. Do not extend it; SQL-side ranking is
+    // where a cross-page ordering belongs.
     const sortedFlows = [...flowHits].sort((a, b) => {
       const aApi = a.id.slice('Flow:'.length);
       const bApi = b.id.slice('Flow:'.length);
@@ -173,9 +208,26 @@ export const searchComponentsHandler = async (
     }
   }
 
+  // Simple arithmetic beats `paginateLegacy` here: the slice already happened
+  // in SQL, so there is no in-memory list for that pager to page.
+  const hasMore = offset + matches.length < totalCount;
+
   return ok({
     data: {
       matches,
+      totalCount,
+      limit,
+      offset,
+      hasMore,
+      nextOffset: hasMore ? offset + matches.length : null,
+      boundaries: [LEXICAL_MATCH_BOUNDARY],
+      ...(hasMore
+        ? {
+            note: `Showing ${matches.length} of ${totalCount} match(es) (offset=${offset}). MORE remain — advance with offset=${
+              offset + matches.length
+            }. This list is INCOMPLETE; do not treat it as every component matching this query.`,
+          }
+        : {}),
       ...(suggestions !== undefined ? { suggestions } : {}),
     },
     vaultState: {

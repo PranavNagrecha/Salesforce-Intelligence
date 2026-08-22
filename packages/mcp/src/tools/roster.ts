@@ -204,6 +204,8 @@ const SEARCH_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object
   properties: {
     query: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 100 },
+    // FIX 4: real paging, so a 1,931-match query is reachable past its first page.
+    offset: { type: 'integer', minimum: 0 },
     types: { type: 'array', items: { type: 'string' } },
   },
   required: ['query'],
@@ -4577,7 +4579,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.search_components',
     description:
-      'Free-text search across vault components. Returns ranked matches with snippet previews. Searches `api_name`, `label`, AND `properties_json` — so it finds text embedded in node properties such as ValidationRule `errorConditionFormula` or CustomField `formula`. KEY USE CASE: to find every ValidationRule whose formula contains a `$Permission.*` guard (e.g. `NOT($Permission.SkipValidation)`), call `search_components({ query: "SkipValidation", types: ["ValidationRule"] })` — the formula text is stored offline and is fully searchable without a vault refresh. Do NOT claim `$Permission.*` guards in errorConditionFormula are undetectable from metadata; the formula text is present in node properties and will surface here.',
+      'Free-text search across vault components. Returns ranked matches with snippet previews. Searches `api_name`, `label`, AND `properties_json` — so it finds text embedded in node properties such as ValidationRule `errorConditionFormula` or CustomField `formula`. KEY USE CASE: to find every ValidationRule whose formula contains a `$Permission.*` guard (e.g. `NOT($Permission.SkipValidation)`), call `search_components({ query: "SkipValidation", types: ["ValidationRule"] })` — the formula text is stored offline and is fully searchable without a vault refresh. Do NOT claim `$Permission.*` guards in errorConditionFormula are undetectable from metadata; the formula text is present in node properties and will surface here. Every response carries `totalCount` (the TRUE post-filter match count, not the page length), `limit`, `offset`, `hasMore`, `nextOffset`, and a verbatim `boundaries[]` entry stating that matches are LEXICAL substring hits (an "age" hit inside "Page" is not a semantic match) and that the ranking is a lexical score, not relevance — use `sfi.find_semantic_field` for meaning-based search. A truncated page adds a `note` naming the true total and the next offset, so a 25-of-1931 answer can never read as complete.',
     inputSchema: SEARCH_COMPONENTS_INPUT_SCHEMA,
   },
   {
