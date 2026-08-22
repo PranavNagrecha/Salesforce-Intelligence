@@ -1280,6 +1280,318 @@ adheres to [Semantic Versioning](https://semver.org).
 - A lower-case api name was `component-not-found`. Salesforce api names are case-insensitive, so a total miss now retries the lookup case-insensitively and profiles the object it finds, echoing `appliedScope.resolvedFrom` beside the canonical `componentId` it actually answered about. Never a silent substitution: an exact id never pays for the retry, and two ids differing only by case are `invalid-query` naming both.
 - Re-verified across all 129 objects of the real vault at the default cap and at `maxRowsPerSection: 100`: zero errors, largest response 35,983 bytes (default) / 35,812 bytes (cap 100), both inside the tool's own 36,000-byte budget and the dispatcher's 40,000.
 
+### Fixed (tool-family QA chain — permissions, schema, automation)
+
+- **`sfi.find_formula_references` refuses a field it does not hold.** Four
+  distinct causes produced a byte-identical `{ referencers: [], totalCount: 0 }`
+  and three of them were lies: a miscased id, a typo'd id, a node of another
+  type, and a real field that genuinely has no formula references. Only the last
+  is an empty result. The tool now runs the same existence gate nine sibling
+  field tools already pay for — `component-not-found` with typo-tolerant
+  `resolveSuggestions`, and the phantom-aware wording that keeps a STANDARD
+  field id from reading as "does not exist".
+
+  **Behaviour change for callers:** an unknown id that used to return an empty
+  list now returns an error envelope.
+
+- **`find_formula_references`'s empty-result coverage caveat is reachable.**
+  `FORMULA_REFERENCE_REQUIRED_COVERAGE` named two families (`CustomField`,
+  `ValidationRule`) when eleven actually produce `references` edges into a
+  field. It is now the observed producer set, censused from both reference
+  vaults: `ListView`, `ReportType`, `FlexiPage`, `QuickAction`, `WebLink`,
+  `ApprovalProcess`, `MatchingRule`, `CustomMetadataRecord`, and `Index` join
+  the two. **This makes the caveat fire on more vaults** — that is the point:
+  a zero from a vault missing `ListView` was never "none", it was "not checked".
+
+- **The response-budget guard no longer goes blind on nested lists.** Pass 1
+  read only the top-level keys of `data`, so a tool nesting its lists
+  (`field_lineage`'s `data.upstream.sources`) offered it no array to cut and the
+  whole response fell through to an opaque `oversize` error. It now descends one
+  level and names the dotted paths it trimmed in `responseBudget.truncatedPaths`.
+  Only payloads that were ALREADY over budget change; nothing under budget moves.
+
+- **`sfi.field_meaning` counts every edge that consumes the field's value.**
+  `usageFrequency.incomingReads` counted `readsFrom` alone, so a field read by
+  formulas, validation rules and list views reported `0` — the number an admin
+  deletes a field on. On the reference vault that was wrong for 2,911 fields.
+  It now counts `readsFrom` + `references`, publishes the per-type breakdown in
+  `readsByEdgeType` (so the old number is recoverable exactly), names the
+  vocabulary in `countedEdgeTypes`, and publishes the inbound edges it saw and
+  rejected in `excludedByEdgeType` — `usedInLayout` is placement, `grantedBy` is
+  permission, `parentOf` is structure. A verbatim `note` states all of it, and
+  `incomingReads: 0` now adds a boundary saying the zero is not proof of disuse.
+
+  **Behaviour change for callers:** `incomingReads` is larger for most fields.
+  It is an EDGE count, not a referrer count, so it legitimately differs from
+  `find_formula_references`'s `totalCount`.
+
+- **`sfi.value_change_audit` and `sfi.what_if_remove_picklist_value` answer the
+  same coverage question the same way.** They carried two hand-copied family
+  lists (9 vs 10 entries) and two near-duplicate private caveat formatters, so
+  the SAME field on the SAME vault produced `completeness: 'complete'` from one
+  and a five-family caveat from the other — a self-contradiction across one
+  pair of tools. Both now read the shared `VALUE_LITERAL_READER_COVERAGE`
+  through the shared `buildCoverageCaveat`, differing only in the subject noun
+  phrase. A set-equality test across the two tools is the guard against drifting
+  again.
+
+  **Behaviour change for callers:** the caveat message text changed for both
+  tools (private format → shared format), and `value_change_audit` now reports
+  `partial` on vaults where it used to claim `complete`.
+
+- **`sfi.explain_formula` reads the resolved relationship edge, and never mints
+  an id that names no node.** A dotted path (`Advisor__r.Email`) returned a bare
+  `toId: null` even when the refresh's relationship-resolver had already
+  produced the target — the join key (`properties.traversalPath`) is
+  byte-identical to the tokenizer's `ref.path`, and nothing read it. A
+  single-segment reference minted `CustomField:{parent}.{path}` without ever
+  asking whether that node existed. Both are the same defect: the resolver
+  guessed. Every `toId` now names a real node or is `null` with a `resolution`
+  (`relationship-unresolved` | `not-in-vault` | `no-parent-scope`) and a
+  verbatim note. On a vault whose refresh produced no resolver edges, every
+  dotted path reports `relationship-unresolved` — correct, and pinned by a test.
+
+- **`sfi.explain_formula` emits literal VALUES.** `literals` carried one
+  `{value: null}` row per counted literal — asserting three numeric literals
+  exist while refusing to say what any of them were. The tokenizer already held
+  the text and threw it away. `stringLiteralCount` / `numericLiteralCount` are
+  unchanged.
+
+- **`sfi.get_naming_convention_report` stops calling standard fields "custom
+  fields".** The recognizer grouped every `CustomField` node, so it reported
+  conventions about names Salesforce chose. On the reference vault 22 of 101
+  observations described objects with ZERO custom fields, and three objects had
+  the reported convention INVERTED by a standard-field majority. Standard fields
+  are now excluded before grouping (`isCustomFieldApiName`, new in
+  `@sf-intelligence/core`), and the response publishes the denominators —
+  `analyzed.objectsWithCustomFields`, `objectsBelowMinimumGroupSize`,
+  `minimumGroupSize`, `standardFieldsExcluded` — so an EMPTY observation list
+  reads as NOT ENOUGH EVIDENCE rather than "no convention here". A scoped call
+  that finds nothing says exactly that in a verbatim `note`.
+
+  **Behaviour change for callers:** `evidence.total` on every existing
+  observation is a custom-field-only denominator now, so the ratios move. That
+  is a CORRECTION, not a regression.
+
+  Same false label, same trip: `resolve_field_or_suggest`'s object-id
+  suggestion said "Here are the N custom field(s) on X" while listing standard
+  fields too. The list is deliberately left unfiltered — a caller may want a
+  standard field — and the sentence now says what it actually is.
+
+- **`sfi.lookup_record` honours the scope-echo contract.** Its non-strict input
+  schema STRIPPED `objectApiName`, so a caller who scoped the question to the
+  wrong object got a confident answer about a different one. It now echoes
+  `appliedScope` {objectApiName, source} with the record's canonical casing,
+  refuses a disagreeing selector with a named `invalid-query`, and — via
+  `.strict()`, mirrored as `additionalProperties: false` in the advertised JSON
+  Schema — refuses an unrecognized argument rather than ignoring it. Agreement
+  is case-insensitive, since Salesforce api names are.
+
+- **`sfi.what_if_remove_picklist_value` checks the value exists before rendering
+  a verdict.** A typo'd value returned a `review` verdict byte-identical to a
+  real value's — and the caller's next action on this tool's output is a
+  metadata delete. The declared value set is now resolved first (inline
+  `picklistValues`, else the field's GlobalValueSet edge). A value the field
+  does not declare is refused with `invalid-query` listing the declared values
+  and a did-you-mean; no impact scan is run. `valueState`
+  (`active` | `inactive` | `not-checked`) and `declaredValues` are added to the
+  payload. An already-INACTIVE value is still scanned, with a boundary saying
+  the removal is a metadata DELETE, not a deactivation. When the value set
+  cannot be resolved, the scan proceeds but says the value was NOT CHECKED
+  rather than treating unresolvable as fine.
+
+  **Behaviour change for callers:** a host that used to get a verdict for a typo
+  now gets a refusal.
+
+- **`sfi.compare_object_across_vaults` tells an extractor gap from org drift.**
+  `collectDrift` emitted a row whenever the canonical JSON differed, which is
+  true when a key is merely MISSING on one side — so comparing a current vault
+  against one built by an older builder manufactured a drift row per object for
+  every property that builder never wrote (up to 129 false rows on the
+  reference pair). A one-query property-presence census now classifies every
+  one-sided difference three ways: an extractor-coverage gap (moved out of
+  `objectLevelDrift` into the new `propertyCoverageGaps[]`, with both sides'
+  counts), a census-confirmed real absence (stays in drift with
+  `presence: 'absent-in-a' | 'absent-in-b'` and a note), or — when the census
+  cannot run — a drift row flagged `causeUnknown: true` saying both readings are
+  open. It never silently picks a side.
+
+  **Behaviour change for callers:** `PropertyDrift.valueA` / `valueB` are now
+  OPTIONAL (omitted, not `null`, when the key is absent on that side), and
+  `presence` is new. `compare_vaults` has its own copy of the type and is
+  untouched.
+
+- **`sfi.field_lineage` has the knobs its own oversize advice named.** The
+  generic oversize message told callers to narrow with `limit` / `offset` /
+  `cursor` — knobs this tool did not have — so a hub field's lineage was simply
+  unanswerable. It now pages one designated `section`
+  (`upstream.sources` | `downstream.effects`) with `limit` (default 200, max
+  500) / `offset` / `cursor`, and publishes `upstream.sourceCount` /
+  `downstream.effectCount` as TRUE pre-page totals. Paging keys are emitted
+  ONLY when the response is actually paged, so an in-budget answer is
+  byte-identical. Naming a section the requested `direction` did not produce is
+  a named `invalid-query`; the DEFAULT falls back to the section that exists.
+
+- **`sfi.field_mapping_between_objects` never states a total it cannot
+  enumerate.** On a 592-field object the dispatcher silently dropped rows, so
+  the response published a `fieldCount` its own lists did not add up to and the
+  caller had no knob to reach the rest. `counts` now publishes the TRUE total
+  for all three lists, `reconciliation` asserts the invariant
+  `pairs + unpaired === fieldCount` per side and FAILS LOUD in `boundaries[]`
+  when it does not hold, and `limit` / `offset` / `cursor` / `section` page one
+  designated list while the other two keep publishing their counts.
+
+- **`sfi.search_components` discloses the true total.** `{"query":"Age"}`
+  matches 1,931 nodes on the reference vault and the tool returned 25 rows with
+  no `totalCount` and no `hasMore` — the reader could not tell a complete answer
+  from a 1.3% sample. Every response now carries `totalCount` (the TRUE
+  post-filter count, computed in the SAME query via `COUNT(*) OVER ()` so it
+  cannot drift from the rows), `limit`, `offset`, `hasMore`, `nextOffset`, and a
+  verbatim `boundaries[]` entry stating the matches are LEXICAL substring hits
+  and the ranking is a lexical score, not relevance. A truncated page adds a
+  `note`. `offset` is a new input.
+
+- **`sfi.search_components` stops letting the alphabet outrank the query.** A
+  whole-token match that was not a PREFIX scored the same 2.5 as an incidental
+  substring, and the tie broke on `api_name ASC` — so a query for "Age" put
+  `ADM_Manage_External_Users` ahead of the field the caller meant. A new 2.6
+  tier sits between prefix (2.8) and contains (2.5) for a query matching a whole
+  token of the api name, with `length(api_name) ASC` as the tie-break before
+  `api_name ASC`. The 3.0 / 2.8 / 2.0 / 1.0 tiers are untouched, so the
+  exact-then-prefix window `object_360` depends on is unchanged.
+
+- **The response trimmer could shorten the "here is what I did not check"
+  list.** When pass 1 of the global byte budget learned to descend one level
+  into `data`, `data.trust` and `data.coverageCaveat` — present on every
+  analysis tool — became reachable, so `trust.limitations` and
+  `coverageCaveat.missingCoverage` turned into trim candidates for the first
+  time. Neither publishes a count, so a silently shortened blind-spot roster
+  read as the complete one: the single direction a trim must never fail in.
+  Disclosure lists are now excluded from trimming outright, at both levels
+  (`limitations`, `missingCoverage`, `blindSpots`, `boundaries`,
+  `dataNotAvailable`, `phasesOmitted`, … and anything inside `trust` /
+  `coverageCaveat`). A payload that cannot fit with its disclosures intact
+  falls through to the structured `oversize` error naming the tool's own
+  narrowing knobs — an honest refusal beats a quietly truncated caveat.
+
+- **`nextOffset` could index a different list than the one it was returned
+  for.** The same descent made a NESTED cut satisfy the `dropped > 0` test, so
+  a trimmed `data.upstream.sources` emitted `nextOffset: 50` on a response
+  whose top-level `matches` held 12 untouched rows — a host replaying
+  `offset=50` gets an empty page and concludes it reached the tail. The hint is
+  now emitted only when exactly one TOP-LEVEL list was trimmed; every other
+  shape gets the existing note stating plainly that the dropped tail cannot be
+  resumed. The nested-trim sentence also stopped asserting that the trimmed
+  lists publish their true totals — a claim neither disclosure list makes.
+
+- **`what_happens_on_save` spent the answer's budget on optional enrichment.**
+  The concept-reasoning block was built first and its size subtracted from the
+  save-order budget, so an opt-out-able block reserved space ahead of the
+  order of execution the tool exists to return: on a real org's busiest object,
+  `soe` came back with 27 of 109 steps with reasoning on and 54 with
+  `includeConceptReasoning: false`. The steps are now fitted first against the
+  whole budget and reasoning gets what is left (still capped by its own
+  reservation ceiling). On a heavy object nothing remains and the block is
+  dropped, with a verbatim note saying the steps kept the budget and that no
+  concept layer was checked — "not checked", never "nothing found".
+
+- **A trimmed save-order response contradicted its own prose.** Two sentences
+  were baked before the global trim and never revisited: the phase-shortfall
+  sentence (`"…25 fitted in this response"` beside a reconciled
+  `phasesOmitted` of 12) and the truncation note's claim that *"every
+  save-order STEP is present and in order"* on a payload holding 27 of 109
+  steps. The reconciler that already re-stamps `phasesOmitted` after a global
+  trim now also restates both sentences from that same reconciled value —
+  appending the shortfall prose when the trim, not the handler, created the
+  shortfall — so every count in the response derives from one source.
+
+- **A container-selector refusal manufactured the disagreement it reported.**
+  `{ componentId: 'X', permissionSetApiName: 'X' }` was refused with
+  *"container selectors name different targets (PermissionSet:X, Profile:X)"* —
+  the Profile came from the resolver's own bare-name default, not from the
+  caller. A bare `componentId` states no family, so it no longer competes with
+  a typed selector that names the same api name. Genuinely disagreeing
+  selectors — two different names, or two different resolved ids — still refuse
+  with the same message.
+
+- **A scoped naming-convention report printed an org-wide denominator.**
+  `analyzed.standardFieldsExcluded` was counted over every field in the org
+  before the scope filter while `objectsWithCustomFields` was counted after it,
+  so a single-object scope read `objectsWithCustomFields: 1` beside a figure in
+  the thousands. The exclusion count is now scoped to the analyzed object, and
+  the org-wide figure ships beside it as `standardFieldsExcludedOrgWide` —
+  labelled in the response, not only in the tool description.
+
+- **Two constants, one name, different text.** `find_dead_code` and
+  `method_reachability` each defined `UNPROVEN_REGISTRATION_DISCLOSURE` with
+  its own wording of the same rule, while the predicates behind it had already
+  been centralised. The claim now lives once in `apex-reachability.ts` beside
+  `isFrameworkSubclass` / `isCallableDispatch`; each tool prepends only its own
+  verdict framing, and a drift test pins the shared body byte-identical across
+  both surfaces.
+
+- **A trimmed page left its pointer past rows the caller never received.** A
+  cursor-aware handler computes `nextOffset = offset + page length` and mints a
+  `nextCursor` for it; the global response guard then tail-trimmed that very
+  page and left the pointer alone, while printing *"use this tool's own
+  nextCursor to page (the handler's pagination is authoritative)"* — false
+  exactly when it was printed. The pointer advanced by rows delivered **plus**
+  rows dropped, so whole windows were unreachable: walking
+  `code_quality_audit` to exhaustion at `limit: 500` and a 12 KB budget reached
+  94 of 647 rows across seven gaps, and `unused_fields_deep` at a 30 KB budget
+  reached 281 of 570 across twenty-one. The guard now identifies the paged list
+  by MATCHING a trimmed list's pre-trim length against the page size the
+  payload itself publishes, corrects `nextOffset` to the rows actually
+  delivered, and removes the opaque `nextCursor` (which encodes the pre-trim
+  offset and cannot be rewritten from outside the handler). Where the paged
+  list cannot be positively identified the pointer is REMOVED rather than
+  guessed, and the response says the page cannot be resumed. Both walks now
+  reach every row, contiguously, with no gaps or overlaps — and neither tool
+  was touched.
+
+- **The save-order cap sat above the ceiling it had to clear.**
+  `SOE_MAX_PAYLOAD_BYTES` was hard-coded at 40 000 — the same number as the
+  global response budget's default, which reserves 1 024 of it for the
+  envelope's own fields, so the reducer's effective ceiling is 38 976. A
+  save-order payload fitted to exactly its own limit was therefore
+  unconditionally re-trimmed by a reducer that IS allowed to drop steps,
+  undoing the tool-local guard's `allowStepDrop: false` promise one layer up: a
+  57-step object lost 29 of them. The tool-local cap is now DERIVED from the
+  global budget and its reserve, so `tool-local < global effective` holds by
+  construction at every value of `SFI_MAX_RESPONSE_BYTES`, and the test pins
+  the ordering rather than the numbers. That object now returns 57 of 57.
+
+- **One inactive-roster census, and it stops prescribing a flag it then
+  negates.** `what_happens_on_save` and `order_of_execution` each carried a
+  byte-identical private copy of the census block under a comment promising the
+  two would stay in lockstep; it now lives once in `soe-active.ts`, beside the
+  predicate it counts over, with a cross-tool test pinning both renderings
+  byte-identical. In its new home the note is conditional on what the caller
+  actually sent: a `{phase}`-only call used to read "re-query with
+  `includeInactive: true` for the full list" immediately followed by "stays
+  suppressed even when `includeInactive: true` was passed".
+
+A tool's advertised JSON Schema is what a schema-driven MCP host validates arguments against before it sends them. When it understates the validator, the missing keys are not merely undocumented — they are unreachable, and the capability behind them is effectively unshipped. Eighteen such disagreements across fifteen tools are corrected here, and a generalised gate now asserts the equality for all 217 tools instead of three.
+
+- `sfi.order_of_execution` advertised exactly `{objectApiName}` while the validator accepted eleven keys and had become `.strict()`. Six of the eleven were the per-event pagination and scoping this tool was built around — `events`, `event`, `includeInactive`, `limit`, `offset`, `cursor` — so a host could ask for the whole four-event composition and nothing else. `sfi.describe_analysis` serves `inputSchema` verbatim, so the same understatement reached the gateway.
+- `sfi.what_happens_on_save` advertised three of nine keys. Its own response tells the reader to "re-query with `includeInactive: true` for the full list" — a re-query no host could construct, because that key was not advertised. The `phase` recovery path for a truncated phase was unreachable for the same reason.
+- `sfi.lifecycle_process` did not advertise `recordType` / `recordTypeId` / `businessProcess`: the RecordType scope DECIDES which automation is excluded from the answer, so a caller asking a scoped question silently received the unscoped one. Its `objectId` alias carried a code comment calling itself an "ADVERTISED ALIAS" while no advertisement listed it.
+- `sfi.find_hardcoded_values` did not advertise `excludeTestClasses` — a flag its own description instructs callers to pass — nor the `componentId` / `nameContains` scope keys, leaving an org-wide scan as the only reachable call.
+- `sfi.find_hardcoded_values_anywhere` advertised four of the six `scope` values its validator accepts; the two missing ones (`restriction-rule`, `custom-label`) exist specifically to close a blind spot and were themselves unrequestable.
+- Also corrected: `sfi.get_component`, `sfi.guest_exposure_report`, `sfi.explain_apex_method`, `sfi.field_360`, `sfi.safe_to_delete_field`, `sfi.object_access_audit` (unadvertised keys); `sfi.action_chain`, `sfi.object_360`, `sfi.community_catalog` (a `.strict()` validator with no `additionalProperties: false`); `sfi.trace_debug_log`, and the `required` lists that named one member of an interchangeable pair and so refused the other call shape.
+- `sfi.search_components` was inventoried in the high-fanout enumeration audit as a top-N truncator with "no resume", after it had gained `offset` plus `totalCount`/`hasMore`/`nextOffset`. The release gate reads that row to decide whether a dropped tail needs a real-org probe, so the row was false in the direction that suppresses the requirement — and the audit structurally could not notice, because its `handler-capped` branch was empty. The converse is now asserted in both directions.
+
+A vault whose `source/` tree held TWO copies of the same retrieval — a legacy flat layout (`source/profiles/…`) left behind beside the Salesforce DX layout the current refresh writes (`source/main/default/profiles/…`) — was assembled from both copies, silently. This is the exact failure the product exists to prevent: it manufactured components that existed in NEITHER retrieval, and in the permission direction it turned a revoked grant back into a granted one.
+
+- **Nodes were last-writer-wins, and the walk order handed the win to the STALE copy.** The refresh walker visits directories alphabetically, so `main/` is walked before `profiles/` and the flat copy was the last `INSERT OR REPLACE`. Every affected component's properties came from the OLDER retrieval, with nothing in `vaultState`, the manifest, or the node itself saying so. On a real vault this meant a profile that still declared a login-bypass user permission in the older copy, and no longer declared it in the newer one, read back as if the permission were still granted.
+- **Edges were UNIONED.** The cold edge insert is `INSERT OR IGNORE` on the composite key, so a grant present in EITHER copy survived into the graph. A permission removed between the two retrievals could not be removed from the answer.
+- **Both are now resolved at the import layer, and never silently.** `resolveDuplicateSourcePaths` runs at the one choke point every import path passes through: it detects components present at more than one source path, keeps ONE copy, drops the losing copy's nodes AND the edges that copy minted, and stamps a `sourceConflict` disclosure on every component whose copies actually disagreed.
+- **Precedence is stated, not guessed.** The Salesforce DX copy (`…/main/default/…`) wins — it is the only layout the retrieve writes and the only one an `sfdx-project.json` declares as source. "Newest wins" was rejected as unimplementable rather than inconvenient: file mtime does not survive a copy or a fresh retrieve, and the vault's retrieval ledger records `retrievedAt` per metadata FAMILY, never per path, so nothing in a vault can say which of two same-type directories is the newer one. Where the DX convention cannot discriminate — neither copy is DX-canonical, or both are (two package directories) — the winner is lexicographic purely so the build is reproducible, and the disclosure says `precedence: 'undetermined'` instead of implying recency.
+- **Disclosure reaches the surfaces a reader actually uses.** `sfi.get_component` carries `sourceConflict` at the TOP LEVEL of the response (not buried in `properties`, which the metadata-probe projection is allowed to trim), naming every path, the copy the answer came from, and how it was chosen. The manifest carries a `duplicateSourcePaths` roll-up naming the duplicated layout roots and the counts; `sfi.get_manifest` passes it through and `sfi.health_check` refuses to report `healthy` while it is present. `sfi refresh` prints a warning block and returns `partial` when any duplicate CONFLICTS.
+- **Grep-based evidence was double-counted for the same reason.** `collectVaultSourceFiles` — the single file-collection point behind `sfi.search_apex_source`, `sfi.search_flow_metadata` and `sfi.find_hardcoded_values_anywhere` — returned both copies of every duplicated file, so every literal match counted twice, including a class's own declaration line. It now returns one copy per logical file using the same DX precedence, so a component's structured answer and its text-match evidence describe the same retrieval.
+
+A vault with a single source layout is unchanged on every surface: no `sourceConflict` on any node, no `duplicateSourcePaths` on the manifest, no new warning, and the same files from the collector.
+
 ## [0.3.0] — 2026-08-07
 
 ### Added

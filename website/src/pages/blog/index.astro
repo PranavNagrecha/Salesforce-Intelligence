@@ -8,6 +8,14 @@ const description =
 
 const posts = [
   {
+    slug: "sf-intelligence-0-3-1",
+    tag: "0.3.1",
+    date: "2026-08-22",
+    title: "0.3.1 — the tools audit themselves",
+    blurb:
+      "A correctness release against tools that were already shipped: 39 verified defects across the permissions, schema and automation families, each reproduced against a real org - a reachability walk that called 85 of 186 Apex classes dead and certified itself complete, a stale retrieval that overwrote the current one so a removed permission still read as granted, and a response trimmer that had started shortening the list of things it had not checked. Plus the 18 regressions those fixes introduced, and the gates that now catch both.",
+  },
+  {
     slug: "sf-intelligence-0-3-0",
     tag: "0.3.0",
     date: "2026-08-10",

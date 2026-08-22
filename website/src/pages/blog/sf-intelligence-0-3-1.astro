@@ -1,0 +1,230 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "sf-intelligence 0.3.1 - 39 defects in shipped tools, and the 18 the fixes caused";
+const description =
+  "What shipped in sf-intelligence 0.3.1: 39 verified defects fixed in already-shipped tools, the 18 regressions the fixes introduced, and the gates that now catch both.";
+
+const faqs = [
+  {
+    q: "What kind of release is sf-intelligence 0.3.1?",
+    a: "A correctness release against tools that were already shipped. No new capability tier. Three adversarial audits went through the permissions, schema-and-search, and automation tool families with an explicit instruction to hunt only tools that predated the work, and produced 39 verified defects - each one reproduced against a real org vault, measured for scale, and checked against a sibling tool that answered the same question. Every fix carries a test proven to fail before the change, and the numbers quoted in these notes were re-measured after the merge rather than carried over from the design.",
+  },
+  {
+    q: "Why did sf-intelligence report most of an org's Apex as dead code?",
+    a: "Because the reachability walk only followed callsApex edges. A class reached through async dispatch, a static-field reference, or a Visualforce controller binding looked unreachable, and the soundness block attached complete: true to that verdict because it was derived from a dynamic-Apex signal that knew nothing about which edge types had been skipped. On one org it called 85 of 186 classes likely dead, 75 of them test classes. Three tools shared that defect through three separate hardcoded walks. They now share one primitive that treats usage as every incoming edge type except structural and access edges - a deny-list, because an allow-list is what caused the bug: it was written before dispatchesAsync existed and could never learn about it. The same org now reports zero.",
+  },
+  {
+    q: "Why did a Salesforce permission still read as granted after it was removed?",
+    a: "Because a vault can hold two complete retrievals of the same org, and the importer let the older one win. Node writes are INSERT OR REPLACE keyed on component id, and the directory walk is alphabetical, so a copy under the SFDX layout was written first and a stale flat copy overwrote it. On a real vault three profiles reported a multi-factor-authentication bypass that the current retrieval no longer declared. The canonical layout now wins, and any component present at more than one path with differing content carries a sourceConflict field naming every path, which copy answered, and how that copy was chosen. Where the vault cannot establish which retrieval is current it says precedence is undetermined rather than guessing - retrieval timestamps are recorded per metadata family, never per path, so a newest-wins rule would be a guess wearing a timestamp.",
+  },
+  {
+    q: "What is the advertised-versus-enforced schema gate in sf-intelligence?",
+    a: "A test that asserts every tool's advertised JSON Schema matches the validator that actually runs, across all 217 registered tools, on four axes: the property set, which keys are genuinely required, whether a strict validator advertises additionalProperties false, and enum membership in both directions. Required is measured by removal rather than by reading optionality off the shape, because a key can be optional to a caller who supplies an alias instead. It found 45 disagreements. Eighteen were introduced by this release's own work and are fixed; the remaining 27 predate it and are baselined with a written reason each, and the baseline fails if an entry goes stale or a known drift widens.",
+  },
+  {
+    q: "Does a paginated sf-intelligence tool return every row it says it has?",
+    a: "It does now, and two tools did not before. A resume pointer was computed from what a handler intended to return rather than what survived a second trim applied further down, so following it skipped whole windows: one tool claimed 647 findings and 94 were reachable, another claimed 570 and 542 were reachable. A pointer is now corrected only on a positive match against a page size the payload itself publishes, and invalidated with a stated reason otherwise. Separately, a search that gained pagination in this release shipped without a total order on its sort, so a tied name let one row appear on two pages and a sibling on none - fixed, and the rule written at the query.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "sf-intelligence 0.3.1: 39 defects in shipped tools, and the 18 the fixes caused",
+    description:
+      "The 0.3.1 release of sf-intelligence: 39 verified defects fixed across the permissions, schema and automation tool families, the 18 regressions the fixes themselves introduced, an advertised-versus-enforced schema gate over all 217 tools, and a stale retrieval that could overwrite the current one.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    datePublished: "2026-08-22",
+    dateModified: "2026-08-22",
+    inLanguage: "en",
+    keywords:
+      "sf-intelligence 0.3.1, Salesforce MCP release notes, Apex dead code detection, Salesforce metadata vault, MCP tool schema parity, Salesforce order of execution truncation, offline Salesforce dependency analysis",
+    articleSection: "Engineering",
+    mainEntityOfPage: `${site.url}/blog/sf-intelligence-0-3-1`,
+    image: `${site.url}/assets/img/og-image.png`,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog/sf-intelligence-0-3-1"
+  heading="0.3.1 — the tools audit themselves"
+  intro={`0.3.1 adds no capability. It turns three adversarial audits on tools that were already shipped, and fixes what they found: <strong>39 verified defects</strong>, each reproduced against a real org. Then it fixes the <strong>18 more</strong> that those fixes introduced, because a release that only reports the first number is telling you half of what happened.`}
+  crumbs={[{ label: "blog", href: "/blog" }, { label: "sf-intelligence-0-3-1", href: "/blog/sf-intelligence-0-3-1" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "sf-intelligence 0.3.1", path: "/blog/sf-intelligence-0-3-1" }]}
+  jsonld={jsonld}
+  ogType="article"
+  datePublished="2026-08-22"
+  dateModified="2026-08-22"
+>
+
+  <h2>The shape of the problem</h2>
+
+  <p>
+    This product sells one thing: a tool that will not answer confidently from
+    data it does not have. Every defect below is a violation of that, committed
+    by the product itself.
+  </p>
+
+  <p>
+    They cluster into three shapes. A tool asserting a <strong>zero it never
+    checked</strong>. A tool <strong>naming a total it then does not
+    enumerate</strong>. And a tool <strong>contradicting a sibling</strong> that
+    answers the same question correctly — which turned out to be the highest-yield
+    audit signal available: every cross-tool disagreement chased was a real defect
+    in one of them.
+  </p>
+
+  <h2>What moved</h2>
+
+  <table>
+    <thead>
+      <tr><th>Measurement</th><th>Before</th><th>After</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Apex classes reported as likely dead, of 186</td><td>85</td><td><strong>0</strong></td></tr>
+      <tr><td>Classes reported as having no test, of which some had one</td><td>58</td><td><strong>19</strong></td></tr>
+      <tr><td>Save-order steps returned for a busy object</td><td>5 of 57, marked complete</td><td><strong>57 of 57</strong></td></tr>
+      <tr><td>Share of a save response spent on the actual answer</td><td>12%</td><td><strong>78%</strong></td></tr>
+      <tr><td>Trigger-deactivation verdicts carrying information</td><td>0 of 22</td><td><strong>22 of 22</strong></td></tr>
+      <tr><td>Rows reachable by paging a code-quality audit</td><td>94 of 647</td><td><strong>647 of 647</strong></td></tr>
+      <tr><td>Rows reachable by paging an unused-field audit</td><td>281 of 570</td><td><strong>570 of 570</strong></td></tr>
+      <tr><td>Naming observations describing objects with no custom fields</td><td>22 of 101</td><td><strong>0</strong></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Three that are worth naming individually</h2>
+
+  <h3>A reachability walk that certified its own blind spot</h3>
+
+  <p>
+    Three tools each carried their own hardcoded walk over a single edge type.
+    A class reached by async dispatch, a static-field reference, or a page
+    controller binding looked unreachable — and the soundness block attached
+    <code>complete: true</code>, because it was derived from a signal that knew
+    nothing about which edge types had been skipped. A fourth tool walked the
+    fuller set and disagreed with 81 of the 85 verdicts.
+  </p>
+
+  <p>
+    They now share one primitive, and usage is defined as a <strong>deny-list</strong>:
+    every incoming edge type except structural and access edges. That direction is
+    deliberate. An allow-list is what caused the bug — it was written before the
+    async-dispatch edge type existed, and could never have learned about it.
+  </p>
+
+  <h3>A stale retrieval that overwrote the current one</h3>
+
+  <p>
+    A vault can end up holding two complete retrievals. Node writes are keyed on
+    component id and replace on conflict, and the directory walk is alphabetical,
+    so the older copy was written second and won. On a real org, three profiles
+    reported a multi-factor-authentication bypass that the current retrieval no
+    longer declared.
+  </p>
+
+  <p>
+    The canonical layout now wins, and every conflicted component carries a
+    <code>sourceConflict</code> field naming both paths, the copy that answered,
+    and how it was chosen. Where the vault genuinely cannot tell which retrieval
+    is current, it says so rather than picking — retrieval times are recorded per
+    metadata family, never per path, so a newest-wins rule would be a guess
+    wearing a timestamp.
+  </p>
+
+  <h3>The honesty payload was being truncated</h3>
+
+  <p>
+    The response trimmer learned to descend one level into the payload, which
+    made the <em>disclosure</em> arrays reachable — the lists of what the tool did
+    not check. On a tight budget it began shortening them, under a note claiming
+    a true total was published somewhere it was not.
+  </p>
+
+  <p>
+    Disclosures are now never trim candidates. If a response cannot fit, it
+    refuses and names the knobs that would narrow it. An honest refusal beats a
+    quietly shortened list of blind spots, because a reader who does not notice
+    the shortening ends up <em>more</em> confident than the evidence supports.
+  </p>
+
+  <h2>The 18 we caused</h2>
+
+  <p>
+    Fixing 39 honesty defects introduced 18 more. A search that gained pagination
+    got a sort with no total order, so one row appeared twice and another never.
+    Ten inputs were built and never advertised, so no schema-driven host could
+    reach them — including the pagination that was the point of the work. A budget
+    fix was undone by an enrichment block that reserved its share before the
+    answer was seated.
+  </p>
+
+  <p>
+    Every one of those was invisible to the test suite. There were more than eight
+    thousand passing tests at the moment the trimmer was silently shortening the
+    list of things it had not checked. They were caught by a review pass reading
+    the diff, and by an adversarial pass asking real questions against real vaults.
+  </p>
+
+  <p>
+    We are reporting that number because a release note claiming a clean sweep
+    from the same team that shipped the original 39 would not be credible, and
+    because the ratio is the argument for the process rather than against it.
+  </p>
+
+  <h2>What was actually wrong, underneath</h2>
+
+  <p>
+    Almost every defect was a <strong>second copy of something</strong>. Two
+    constants with the same name and different text. A block duplicated across two
+    files under a comment promising they would stay identical. A hand-copied JSON
+    Schema beside the validator that actually runs. Two counters for one fact. Two
+    byte limits that had to stay ordered, set independently, in the wrong order.
+  </p>
+
+  <p>
+    Every one of those was written by someone who knew about the duplication —
+    several are documented as duplicates in their own comments. The comment was
+    the mechanism, and comments do not hold. So the durable part of this release is
+    not the fixes; it is what replaced those comments:
+  </p>
+
+  <ul>
+    <li>A schema-parity gate over all <strong>217 tools</strong> on four axes, with 27 pre-existing violations baselined and reasoned rather than hidden.</li>
+    <li>A tool-local byte budget <strong>derived</strong> from the global one, so the ordering holds by construction instead of by convention.</li>
+    <li>Drift tests that run two implementations of a shared predicate against the same fixture and assert they agree, in place of a promise that they will.</li>
+    <li>A documentation pin that could not fire — its pattern could not match across a line break, so a stale count sat next to three correct ones and the file reported clean.</li>
+  </ul>
+
+  <h2>Upgrading</h2>
+
+  <p>
+    Nothing in this release changes a tool's input contract in a way that breaks
+    an existing call. Ten tools <em>gained</em> advertised inputs they already
+    accepted, one tool dropped an input that was a pure synonym for the canonical
+    one, and several tools now refuse selector combinations that previously
+    resolved silently to something you did not ask for.
+  </p>
+
+  <p>
+    If your vault holds more than one retrieval of the same org — a source tree
+    with both a flat layout and an SFDX layout — rebuild it. Until you do, the
+    tools will now tell you which components are affected instead of quietly
+    answering from whichever copy sorted last.
+  </p>
+
+</DocPage>
