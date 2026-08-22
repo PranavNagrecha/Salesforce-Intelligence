@@ -71,6 +71,16 @@ const ALL_FAMILIES = [
   'Report',
   'Dashboard',
   'ListView',
+  // FIX 1 widened FORMULA_REFERENCE_REQUIRED_COVERAGE from 2 families to the
+  // OBSERVED producer set of `references` edges into a CustomField. A
+  // "complete coverage" fixture has to cover all of them or the caveat
+  // legitimately fires — which is the fix working, not a regression.
+  'ReportType',
+  'WebLink',
+  'ApprovalProcess',
+  'MatchingRule',
+  'CustomMetadataRecord',
+  'Index',
 ] as const;
 
 const coveredRow = (type: string): CoverageEntry => ({
