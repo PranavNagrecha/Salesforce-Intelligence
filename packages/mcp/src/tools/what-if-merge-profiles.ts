@@ -93,6 +93,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+} from './absence-disclosure.js';
+import {
   attachCoverageToWhatIf,
   type CoverageCaveat,
   type Verdict,
@@ -119,7 +123,9 @@ type SettingType =
   | 'apex-class-access'
   | 'tab-visibility'
   | 'layout-assignment'
-  | 'record-type-visibility';
+  | 'record-type-visibility'
+  | 'application-visibility'
+  | 'login-restriction';
 
 /**
  * One conflict in the merge output. `profileAValue` and `profileBValue`
@@ -166,6 +172,27 @@ export interface WhatIfMergeProfilesOutput {
   readonly verdict: Verdict;
   readonly coverageCaveat?: CoverageCaveat;
   readonly trust: TrustSummary;
+  /**
+   * Whether the two profiles CAN be merged at all.
+   *
+   * A blocker is NOT a conflict. User license is immutable in Salesforce, so a
+   * cross-license pair cannot be merged at any policy — modelling that as an
+   * eighth `MergeConflict` with a `recommendedPolicy` would be the same lie in
+   * a new field. When `blockers` is non-empty the verdict is `blocking` and the
+   * conflict list below is informational only.
+   *
+   * `mergeable: null` means a license was NOT extracted on one side, so
+   * compatibility was not checked — never a verified "compatible".
+   */
+  readonly compatibility: {
+    readonly mergeable: boolean | null;
+    readonly blockers: readonly {
+      readonly kind: 'user-license';
+      readonly profileAValue: string | null;
+      readonly profileBValue: string | null;
+      readonly reason: string;
+    }[];
+  };
   readonly conflicts: readonly MergeConflict[];
   readonly summary: {
     readonly totalSettings: number;
@@ -217,17 +244,10 @@ export interface WhatIfMergeProfilesOutput {
  * surfaces but does not resolve.
  */
 const DISCLOSURE =
-  'v2.3 surfaces conflicts but does NOT auto-resolve. Recommended policies are heuristic; manually verify each conflict before applying. Profile-edition rollup (e.g., admin-level overrides) is not modeled.';
-
-/**
- * Appended to the disclosure when tab visibility was not extracted, so a
- * "no tab conflicts" result is not mistaken for a verified comparison.
- * The Profile extractor emits `properties.tabVisibilities` at every
- * refresh (P11-UI-app-tab-visibility-extract); this fires only for a
- * profile from a vault refreshed before that extraction landed.
- */
-const TAB_VISIBILITY_NOT_EXTRACTED_DISCLOSURE =
-  'Tab visibility was NOT compared — a compared profile has no `properties.tabVisibilities` (its vault refresh predates the P11 app/tab visibility extraction; re-run `/sfi-refresh`). tab-visibility conflicts are "not evaluated", not "none"; see `summary.notEvaluatedCategories`.';
+  'v2.3 surfaces conflicts but does NOT auto-resolve. Recommended policies are heuristic; manually verify each conflict before applying. Profile-edition rollup (e.g., admin-level overrides) is not modeled. ' +
+  'Categories compared: user permissions, object permissions, field permissions, apex class access, tab visibilities, layout assignments, record-type visibilities, application visibilities, and login restrictions (IP ranges + login hours). ' +
+  'Login restrictions and application visibilities carry recommendedPolicy "manual-only" — for a security restriction, "most permissive" means REMOVING it, which is never a safe default. ' +
+  'Any category this vault did not extract is named in summary.notEvaluatedCategories and is "not compared", never "no conflicts".';
 
 /**
  * Pagination bounds for the per-conflict list. Merging two wide Profiles
@@ -290,6 +310,23 @@ interface ProfileSettings {
   readonly tabVisibilitiesExtracted: boolean;
   readonly layoutAssignments: ReadonlyMap<string, string>;
   readonly recordTypeVisibilities: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+  /** `<applicationVisibilities>` keyed by application api name. */
+  readonly applicationVisibilities: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+  /** `<loginIpRanges>` verbatim, so a reviewer sees both sides' windows. */
+  readonly loginIpRanges: readonly unknown[];
+  /** `<loginHours>` per-weekday windows, verbatim. */
+  readonly loginHours: readonly unknown[];
+  /** `<userLicense>`, or `null` when the property was never extracted. */
+  readonly userLicense: string | null;
+  /**
+   * Per-category "was the source property extracted at all" sentinels.
+   *
+   * Property-derived categories only. `object-permission` / `field-permission`
+   * / `apex-class-access` come from `grantedBy` EDGES, not from a node
+   * property, so there is no key whose absence distinguishes "never extracted"
+   * from "extracted, none" — inventing one would fabricate a signal.
+   */
+  readonly extracted: Readonly<Record<string, boolean>>;
 }
 
 /**
@@ -319,7 +356,7 @@ const readUserPermissions = (
  * `visibility` string is the verbatim Salesforce enum value
  * (`'DefaultOff' | 'DefaultOn' | 'Hidden'`).
  */
-const readTabVisibilities = (
+export const readTabVisibilities = (
   profile: Node,
 ): ReadonlyMap<string, string> => {
   const raw = profile.properties['tabVisibilities'];
@@ -344,7 +381,7 @@ const readTabVisibilities = (
  * the canonical `'{layout}|{recordType}'` string so two profiles can
  * disagree on the `recordType` axis as well as the `layout` axis.
  */
-const readLayoutAssignments = (
+export const readLayoutAssignments = (
   profile: Node,
 ): ReadonlyMap<string, string> => {
   const raw = profile.properties['layoutAssignments'];
@@ -372,7 +409,7 @@ const readLayoutAssignments = (
  * `{ recordType: string, default: boolean, visible: boolean | null }`
  * per the v1.2 extractor convention.
  */
-const readRecordTypeVisibilities = (
+export const readRecordTypeVisibilities = (
   profile: Node,
 ): ReadonlyMap<string, Readonly<Record<string, unknown>>> => {
   const raw = profile.properties['recordTypeVisibilities'];
@@ -485,7 +522,38 @@ const gatherGrants = async (
 };
 
 /**
- * Compose all seven setting maps for one profile. Errors propagate
+ * Read `properties.applicationVisibilities` from a Profile node. Each entry
+ * carries `{ application, default, visible }` — structurally the SAME
+ * two-axis shape as a record-type visibility, which is why the two share a
+ * comparator instead of growing a third one.
+ */
+export const readApplicationVisibilities = (
+  profile: Node,
+): ReadonlyMap<string, Readonly<Record<string, unknown>>> => {
+  const raw = profile.properties['applicationVisibilities'];
+  if (!Array.isArray(raw)) return new Map();
+  const out = new Map<string, Readonly<Record<string, unknown>>>();
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const application = entry['application'];
+    if (typeof application !== 'string' || application.length === 0) continue;
+    out.set(application, {
+      default: entry['default'] === true,
+      visible: entry['visible'],
+    });
+  }
+  return out;
+};
+
+/** Read a property as a verbatim array; `[]` when absent or malformed. */
+const readArrayProperty = (profile: Node, key: string): readonly unknown[] => {
+  const raw = profile.properties[key];
+  return Array.isArray(raw) ? (raw as readonly unknown[]) : [];
+};
+
+/**
+ * Compose all setting maps for one profile. Errors propagate
  * verbatim so the caller can wrap them in the `internal` McpError
  * envelope.
  */
@@ -507,6 +575,30 @@ const gatherProfileSettings = async (
     ),
     layoutAssignments: readLayoutAssignments(profile),
     recordTypeVisibilities: readRecordTypeVisibilities(profile),
+    applicationVisibilities: readApplicationVisibilities(profile),
+    loginIpRanges: readArrayProperty(profile, 'loginIpRanges'),
+    loginHours: readArrayProperty(profile, 'loginHours'),
+    userLicense:
+      typeof profile.properties['userLicense'] === 'string'
+        ? (profile.properties['userLicense'] as string)
+        : null,
+    extracted: {
+      'user-permission': familyWasExtracted(profile.properties, 'userPermissions'),
+      'tab-visibility': familyWasExtracted(profile.properties, 'tabVisibilities'),
+      'layout-assignment': familyWasExtracted(profile.properties, 'layoutAssignments'),
+      'record-type-visibility': familyWasExtracted(
+        profile.properties,
+        'recordTypeVisibilities',
+      ),
+      'application-visibility': familyWasExtracted(
+        profile.properties,
+        'applicationVisibilities',
+      ),
+      // `[]`-when-absent by extractor contract, so the KEY is the sentinel:
+      // a profile with zero IP ranges is a CHECKED zero.
+      'login-restriction': familyWasExtracted(profile.properties, 'loginIpRanges'),
+      'user-license': typeof profile.properties['userLicense'] === 'string',
+    },
   });
 };
 
@@ -723,6 +815,76 @@ const compareRecordTypeVisibilities = (
 };
 
 /**
+ * Compare `<applicationVisibilities>` across the two profiles.
+ *
+ * The payload is the IDENTICAL `{ default, visible }` two-axis shape as a
+ * record-type visibility, so it reuses {@link recordTypeVisibilityEqual}
+ * rather than growing a third comparator that could drift from it.
+ *
+ * `recommendedPolicy` is `manual-only`, not `max`: `visible` alone would be a
+ * clean OR, but `default` is single-valued per profile (exactly one default
+ * app), so no mechanical policy is correct for the pair.
+ */
+const compareApplicationVisibilities = (
+  a: ReadonlyMap<string, Readonly<Record<string, unknown>>>,
+  b: ReadonlyMap<string, Readonly<Record<string, unknown>>>,
+): { agreed: number; conflicts: MergeConflict[] } => {
+  const keys = new Set<string>([...a.keys(), ...b.keys()]);
+  const conflicts: MergeConflict[] = [];
+  let agreed = 0;
+  for (const key of keys) {
+    const av = a.get(key);
+    const bv = b.get(key);
+    if (recordTypeVisibilityEqual(av, bv)) {
+      agreed += 1;
+      continue;
+    }
+    conflicts.push({
+      settingType: 'application-visibility',
+      settingId: key,
+      profileAValue: av ?? null,
+      profileBValue: bv ?? null,
+      recommendedPolicy: 'manual-only',
+    });
+  }
+  return { agreed, conflicts };
+};
+
+/**
+ * Compare the two login-restriction surfaces (`loginIpRanges`, `loginHours`).
+ *
+ * `recommendedPolicy` MUST be `manual-only`, never `max`. For a SECURITY
+ * restriction the "most permissive" policy means DELETING the restriction; a
+ * merge tool that recommends `max` on an IP allowlist is recommending its
+ * removal. Values are the arrays verbatim so a reviewer sees both sides.
+ */
+const compareLoginRestrictions = (
+  a: ProfileSettings,
+  b: ProfileSettings,
+): { agreed: number; conflicts: MergeConflict[] } => {
+  const conflicts: MergeConflict[] = [];
+  let agreed = 0;
+  const pairs: readonly { id: string; av: readonly unknown[]; bv: readonly unknown[] }[] = [
+    { id: 'loginIpRanges', av: a.loginIpRanges, bv: b.loginIpRanges },
+    { id: 'loginHours', av: a.loginHours, bv: b.loginHours },
+  ];
+  for (const { id, av, bv } of pairs) {
+    if (JSON.stringify(av) === JSON.stringify(bv)) {
+      agreed += 1;
+      continue;
+    }
+    conflicts.push({
+      settingType: 'login-restriction',
+      settingId: id,
+      profileAValue: av,
+      profileBValue: bv,
+      recommendedPolicy: 'manual-only',
+    });
+  }
+  return { agreed, conflicts };
+};
+
+/**
  * Resolve a profile id to its Node, mapping the absent case to
  * `component-not-found` and the query-failure case to `internal`.
  * Mirrors the `safe-to-delete-field`-style guard used by every other
@@ -787,6 +949,12 @@ const buildMergeProfilesProposal = (
   vaultState: { readonly sourceTreeHash: string; readonly refreshedAt: string },
 ): ProposalArtifact => {
   const reasons = [
+    // A deploy-shaped artifact that omits "this merge is impossible" is the
+    // worst place for that omission to survive, so the blocker leads.
+    ...out.compatibility.blockers.map((b) => `BLOCKER (${b.kind}): ${b.reason}`),
+    ...(out.compatibility.mergeable === null
+      ? ['compatibility.mergeable is null — user license was NOT compared on this vault.']
+      : []),
     `${out.summary.conflicts} conflict(s) across ${out.summary.totalSettings} setting(s); ${out.summary.agreed} agreed.`,
     ...out.summary.byCategory.map((b) => `conflicts in ${b.key}: ${b.count}`),
     ...out.summary.byPolicy.map((b) => `recommendedPolicy ${b.key}: ${b.count}`),
@@ -893,21 +1061,113 @@ export const whatIfMergeProfilesHandler = async (
   // Honesty gate: only compare tab visibility when at least one profile
   // actually had the property extracted. An always-empty map would
   // otherwise report a fabricated "no tab conflicts".
-  const tabVisExtracted =
-    aSettings.tabVisibilitiesExtracted || bSettings.tabVisibilitiesExtracted;
+  // Honesty gate, generalised: a category whose SOURCE PROPERTY neither profile
+  // carries was never modeled, and comparing two always-empty maps would report
+  // a fabricated "no conflicts". `notEvaluatedCategories` was previously pushed
+  // to for tab-visibility only; every property-derived category now gets the
+  // same treatment, and each un-evaluated one fires the shared absence sentence.
+  //
+  // NOT sentinelled: object-permission / field-permission / apex-class-access.
+  // Those come from `grantedBy` EDGES, not from a node property, so there is no
+  // key whose absence separates "never extracted" from "extracted, none".
+  // Inventing one would fabricate a signal.
   const notEvaluatedCategories: string[] = [];
-  const tabVis = tabVisExtracted
+  const notExtractedSentences: string[] = [];
+  const evaluated = (category: string, sentinelProperty: string, subject: string): boolean => {
+    if (aSettings.extracted[category] === true || bSettings.extracted[category] === true) {
+      return true;
+    }
+    notEvaluatedCategories.push(category);
+    notExtractedSentences.push(
+      notExtractedFamilyDisclosure({
+        subject,
+        verb: 'compared',
+        sentinelProperty,
+        containers: [profileIdA, profileIdB].sort(),
+        surface: '`conflicts` / `summary.agreed`',
+        zeroReading: `"no ${subject.toLowerCase()} conflicts"`,
+      }),
+    );
+    return false;
+  };
+  const EMPTY = { agreed: 0, conflicts: [] as MergeConflict[] };
+
+  const tabVis = evaluated('tab-visibility', 'tabVisibilities', 'Tab visibility')
     ? compareTabVisibilities(aSettings.tabVisibilities, bSettings.tabVisibilities)
-    : { agreed: 0, conflicts: [] as MergeConflict[] };
-  if (!tabVisExtracted) notEvaluatedCategories.push('tab-visibility');
-  const layoutAssign = compareLayoutAssignments(
-    aSettings.layoutAssignments,
-    bSettings.layoutAssignments,
-  );
-  const rtVis = compareRecordTypeVisibilities(
-    aSettings.recordTypeVisibilities,
-    bSettings.recordTypeVisibilities,
-  );
+    : EMPTY;
+  const layoutAssign = evaluated(
+    'layout-assignment',
+    'layoutAssignments',
+    'Layout assignment',
+  )
+    ? compareLayoutAssignments(aSettings.layoutAssignments, bSettings.layoutAssignments)
+    : EMPTY;
+  const rtVis = evaluated(
+    'record-type-visibility',
+    'recordTypeVisibilities',
+    'Record-type visibility',
+  )
+    ? compareRecordTypeVisibilities(
+        aSettings.recordTypeVisibilities,
+        bSettings.recordTypeVisibilities,
+      )
+    : EMPTY;
+  const appVis = evaluated(
+    'application-visibility',
+    'applicationVisibilities',
+    'Application visibility',
+  )
+    ? compareApplicationVisibilities(
+        aSettings.applicationVisibilities,
+        bSettings.applicationVisibilities,
+      )
+    : EMPTY;
+  const loginRestrictions = evaluated(
+    'login-restriction',
+    'loginIpRanges',
+    'Login restriction',
+  )
+    ? compareLoginRestrictions(aSettings, bSettings)
+    : EMPTY;
+
+  // COMPATIBILITY — a BLOCKER, not a conflict. User license is immutable in
+  // Salesforce: two profiles on different licenses cannot be merged at any
+  // policy, so every recommendation below is informational for such a pair.
+  const licenseExtracted =
+    aSettings.extracted['user-license'] === true && bSettings.extracted['user-license'] === true;
+  const blockers: WhatIfMergeProfilesOutput['compatibility']['blockers'][number][] = [];
+  if (!licenseExtracted) {
+    notEvaluatedCategories.push('user-license');
+    notExtractedSentences.push(
+      notExtractedFamilyDisclosure({
+        subject: 'User license',
+        verb: 'compared',
+        sentinelProperty: 'userLicense',
+        containers: [
+          ...(aSettings.extracted['user-license'] === true ? [] : [profileIdA as string]),
+          ...(bSettings.extracted['user-license'] === true ? [] : [profileIdB as string]),
+        ].sort(),
+        surface: '`compatibility.mergeable`',
+        zeroReading: '"compatible"',
+      }),
+    );
+  } else if (aSettings.userLicense !== bSettings.userLicense) {
+    blockers.push({
+      kind: 'user-license',
+      profileAValue: aSettings.userLicense,
+      profileBValue: bSettings.userLicense,
+      reason:
+        `User license is IMMUTABLE in Salesforce: ${profileIdA} is on "${aSettings.userLicense}" ` +
+        `and ${profileIdB} is on "${bSettings.userLicense}", so these two profiles cannot be ` +
+        'merged at all. Every recommendation below describes what a merge WOULD change and is ' +
+        'NOT deployable across this license boundary — move the users to one license first, or ' +
+        'consolidate into permission sets instead.',
+    });
+  }
+  const compatibility: WhatIfMergeProfilesOutput['compatibility'] = {
+    mergeable: licenseExtracted ? blockers.length === 0 : null,
+    blockers,
+  };
 
   const allConflicts: MergeConflict[] = [
     ...userPerm.conflicts,
@@ -917,6 +1177,8 @@ export const whatIfMergeProfilesHandler = async (
     ...tabVis.conflicts,
     ...layoutAssign.conflicts,
     ...rtVis.conflicts,
+    ...appVis.conflicts,
+    ...loginRestrictions.conflicts,
   ];
   const conflicts = sortConflicts(allConflicts);
 
@@ -927,7 +1189,9 @@ export const whatIfMergeProfilesHandler = async (
     apexAccess.agreed +
     tabVis.agreed +
     layoutAssign.agreed +
-    rtVis.agreed;
+    rtVis.agreed +
+    appVis.agreed +
+    loginRestrictions.agreed;
   const totalSettings = agreed + conflicts.length;
 
   // Complete rollups over ALL conflicts — the actionable headline that
@@ -985,19 +1249,33 @@ export const whatIfMergeProfilesHandler = async (
   const baseDisclosure = truncated
     ? `${DISCLOSURE} Returning conflicts ${offset}–${offset + page.length} of ${conflicts.length} (page size ${limit}); summary.byCategory / byPolicy hold the COMPLETE counts. Page through the rest with offset/limit.`
     : DISCLOSURE;
-  const disclosure =
-    notEvaluatedCategories.length > 0
-      ? `${baseDisclosure} ${TAB_VISIBILITY_NOT_EXTRACTED_DISCLOSURE}`
-      : baseDisclosure;
+  const disclosure = [
+    baseDisclosure,
+    ...notExtractedSentences,
+    ...(blockers.length > 0
+      ? [
+          blockers[0]!.reason,
+          'VERDICT: blocking. This pair cannot be merged; the conflict list is informational only.',
+        ]
+      : []),
+  ].join(' ');
 
   // Unified what-if envelope (P8-what-if-suite): no conflicts → safe, else
   // review (each conflict needs a human policy decision). Coverage downgrades
   // a `safe` result to `review` so absence of conflicts is never overstated.
+  // A license blocker outranks the conflict count: the pair cannot be merged at
+  // all. `applyCoverageToVerdict` only ever rewrites `safe`, so `blocking`
+  // survives the coverage pass untouched and that shared helper needs no change.
+  const rawVerdict =
+    blockers.length > 0 ? 'blocking' : conflicts.length === 0 ? 'safe' : 'review';
   const { verdict, coverageCaveat, trust } = attachCoverageToWhatIf(
     ctx,
     ['Profile'],
     'Profile merge conflict analysis',
-    conflicts.length === 0 ? 'safe' : 'review',
+    rawVerdict,
+    // A non-empty notEvaluatedCategories must not sit next to
+    // `completeness: complete` — the response would contradict itself.
+    notEvaluatedCategories,
   );
 
   const vaultState = {
@@ -1010,6 +1288,7 @@ export const whatIfMergeProfilesHandler = async (
     verdict: verdict as Verdict,
     ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     trust,
+    compatibility,
     conflicts: page,
     summary: {
       totalSettings,

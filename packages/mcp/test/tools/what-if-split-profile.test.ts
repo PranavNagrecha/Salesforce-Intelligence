@@ -494,3 +494,215 @@ describe('whatIfSplitProfileInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+// =============================================================================
+// FIX 1 — the tool excluded three families the platform really does support,
+// then called the resulting plan `safe`.
+//
+// The old disclosure said tab / record-type / application visibilities "are not
+// split (Profile-only settings in the Salesforce metadata model)". That is
+// false about Salesforce, and this product already contradicted it:
+// `effective_permissions` unions record-type visibility FROM permission sets,
+// and both extractors normalise the permset forms onto the same property keys.
+//
+// Correcting only the prose would have left `summary.assignedCount` /
+// `unassignedCount` silently excluding movable settings — and those are the
+// numbers a caller reads as "the plan is complete", and the numbers the verdict
+// is computed from.
+// =============================================================================
+
+const VIS_PROFILE = 'Profile:Visibility_Rich';
+const VIS_PROFILE_NO_RT = 'Profile:Visibility_No_Rt';
+const VIS_PROFILE_EMPTY = 'Profile:Visibility_Empty';
+const VIS_PS_1 = 'PermissionSet:Widget_Ops';
+const VIS_PS_2 = 'PermissionSet:Reporting_Ops';
+
+const visibilityProps = {
+  userPermissions: ['ApiEnabled'],
+  tabVisibilities: [
+    { tab: 'Widget__c', visibility: 'DefaultOn' },
+    { tab: 'Secret__c', visibility: 'Hidden' },
+  ],
+  recordTypeVisibilities: [
+    { recordType: 'Widget__c.Standard_Widget', default: true, visible: true },
+    { recordType: 'Widget__c.Retired_Widget', default: false, visible: false },
+  ],
+  applicationVisibilities: [{ application: 'Widget_Console', default: false, visible: true }],
+  layoutAssignments: [{ layout: 'Widget__c-Widget Layout', recordType: null }],
+};
+
+const visibilitySeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: VIS_PROFILE, apiName: 'Visibility_Rich', properties: visibilityProps }),
+    // Same profile with `recordTypeVisibilities` DELETED — the sentinel case.
+    makeNode({
+      id: VIS_PROFILE_NO_RT,
+      apiName: 'Visibility_No_Rt',
+      properties: (() => {
+        const p: Record<string, unknown> = { ...visibilityProps };
+        delete p['recordTypeVisibilities'];
+        return p;
+      })(),
+    }),
+    // Extracted but genuinely EMPTY — present-and-empty must not render like
+    // absent, and must not disturb the four pre-existing categories.
+    makeNode({
+      id: VIS_PROFILE_EMPTY,
+      apiName: 'Visibility_Empty',
+      properties: {
+        userPermissions: ['ApiEnabled'],
+        tabVisibilities: [],
+        recordTypeVisibilities: [],
+        applicationVisibilities: [],
+        layoutAssignments: [],
+      },
+    }),
+    makeNode({ id: VIS_PS_1, type: 'PermissionSet', apiName: 'Widget_Ops' }),
+    makeNode({ id: VIS_PS_2, type: 'PermissionSet', apiName: 'Reporting_Ops' }),
+  ],
+  edges: [],
+};
+
+describe('whatIfSplitProfileHandler — the three splittable visibility families', () => {
+  let visDir: string;
+  let visStore: GraphStore;
+  let visCtx: Context;
+
+  beforeAll(async () => {
+    visDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-split-vis-'));
+    const opened = await openGraph(join(visDir, 'g.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    visStore = opened.value;
+    const imported = await importExtractionResults(visStore, [visibilitySeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    visCtx = { vaultRoot: visDir, manifest: FIXTURE_MANIFEST, graph: visStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(visStore);
+    rmSync(visDir, { recursive: true, force: true });
+  });
+
+  it('splits the movable states and quarantines the ones only a Profile can express', async () => {
+    const r = await whatIfSplitProfileHandler(visCtx, {
+      profileId: VIS_PROFILE,
+      targetPermSets: [VIS_PS_1, VIS_PS_2],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    // Today all six of these rows are absent from the response entirely.
+    const tab = d.assignments.find((a) => a.settingType === 'tab-visibility');
+    expect(tab?.settingId).toBe('Widget__c');
+    // The Profile spelling is TRANSLATED to the PermissionSet <tabSettings> one.
+    expect(tab?.currentValue).toBe('Visible');
+
+    const rt = d.assignments.find((a) => a.settingType === 'record-type-visibility');
+    expect(rt?.settingId).toBe('Widget__c.Standard_Widget');
+    expect(rt?.currentValue).toEqual({ visible: true, default: false });
+    // Part of the setting moves, part cannot.
+    expect(rt?.transferNote).toContain('DEFAULT designation does not');
+    expect(rt?.transferNote).toContain('Profile-only');
+
+    const app = d.assignments.find((a) => a.settingType === 'application-visibility');
+    expect(app?.settingId).toBe('Widget_Console');
+
+    const nt = d.nonTransferableSettings;
+    expect(nt.map((n) => n.settingId).sort()).toEqual([
+      'Secret__c',
+      'Widget__c-Widget Layout|default',
+      'Widget__c.Retired_Widget',
+    ]);
+    expect(d.summary.nonTransferableCount).toBe(3);
+    expect(nt.find((n) => n.settingId === 'Secret__c')?.reason).toContain('cannot hide a tab');
+    expect(
+      nt.find((n) => n.settingId === 'Widget__c.Retired_Widget')?.reason,
+    ).toContain('cannot un-see a record type');
+    expect(
+      nt.find((n) => n.settingId === 'Widget__c-Widget Layout|default')?.reason,
+    ).toContain('no layout-assignment element');
+  });
+
+  it('the disclosure no longer claims the three families are Profile-only', async () => {
+    const r = await whatIfSplitProfileHandler(visCtx, {
+      profileId: VIS_PROFILE,
+      targetPermSets: [VIS_PS_1],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.disclosure).not.toContain(
+      'Profile-only settings in the Salesforce metadata model',
+    );
+    expect(d.disclosure).toContain('ARE split');
+    expect(d.disclosure).toContain('DefaultOn -> Visible');
+    expect(d.disclosure).toContain('A permission set is ADDITIVE');
+    expect(d.disclosure).toContain(
+      'cannot move to a permission set at all and are listed in nonTransferableSettings',
+    );
+  });
+
+  it('an UNEXTRACTED family forces `review` — `safe` must never mean "I did not look"', async () => {
+    const r = await whatIfSplitProfileHandler(visCtx, {
+      profileId: VIS_PROFILE_NO_RT,
+      targetPermSets: [VIS_PS_1],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.verdict).toBe('review');
+    expect(d.summary.notEvaluatedCategories).toContain('record-type-visibility');
+    expect(d.disclosure).toContain('Record-type visibility was NOT checked');
+    expect(d.disclosure).toContain('recordTypeVisibilities');
+    // And it fabricated nothing.
+    expect(
+      d.assignments.filter((a) => a.settingType === 'record-type-visibility'),
+    ).toEqual([]);
+    expect(
+      d.nonTransferableSettings.filter((n) => n.settingType === 'record-type-visibility'),
+    ).toEqual([]);
+  });
+
+  it('present-and-EMPTY is not the same as absent', async () => {
+    const r = await whatIfSplitProfileHandler(visCtx, {
+      profileId: VIS_PROFILE_EMPTY,
+      targetPermSets: [VIS_PS_1],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.notEvaluatedCategories).toEqual([]);
+    expect(d.disclosure).not.toContain('was NOT checked');
+    expect(d.summary.nonTransferableCount).toBe(0);
+    // The four pre-existing categories are untouched: one user permission, no
+    // grant edges in this seed.
+    expect(d.summary.assignedCount).toBe(1);
+    expect(d.assignments[0]?.settingType).toBe('user-permission');
+  });
+
+  it('the cursor key stays a total order across the three new setting types', async () => {
+    const first = await whatIfSplitProfileHandler(visCtx, {
+      profileId: VIS_PROFILE,
+      targetPermSets: [VIS_PS_1, VIS_PS_2],
+      limit: 2,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const d1 = first.value.data;
+    expect(d1.hasMore).toBe(true);
+    const second = await whatIfSplitProfileHandler(visCtx, {
+      profileId: VIS_PROFILE,
+      targetPermSets: [VIS_PS_1, VIS_PS_2],
+      limit: 10,
+      cursor: d1.nextCursor as string,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const keys = [...d1.assignments, ...second.value.data.assignments].map(
+      (a) => `${a.settingType} ${a.settingId} ${a.targetPermSetId}`,
+    );
+    expect(new Set(keys).size).toBe(keys.length); // no dupes
+    expect(keys.length).toBe(d1.summary.assignedCount); // no gaps
+  });
+});

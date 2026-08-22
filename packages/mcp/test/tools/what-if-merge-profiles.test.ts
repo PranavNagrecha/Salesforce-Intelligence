@@ -670,3 +670,231 @@ describe('whatIfMergeProfilesHandler — format: proposal (Finding #35)', () => 
     expect(result.value.data.proposal).toBeUndefined();
   });
 });
+
+// =============================================================================
+// FIX 4 — the tool asserted an exhaustive conflict list over three categories
+// it never walked.
+//
+// The license half is the sharpest: 1,089 of 1,326 profile pairs in one vault
+// are cross-license, and for those the tool emitted up to 3,060 `max`-policy
+// recommendations that CANNOT BE DEPLOYED, labelled `completeness: complete`
+// with `limitations: []`. A recommendation that cannot be executed, labelled
+// complete, is worse than no recommendation.
+// =============================================================================
+
+const LIC_A = 'Profile:License_Alpha';
+const LIC_B = 'Profile:License_Beta';
+const LIC_C = 'Profile:License_Alpha_Twin';
+const NO_APPS = 'Profile:No_Apps_Extracted';
+
+/** Every property-derived family present, so only the axis under test varies. */
+const fullProfileProps = (over: Record<string, unknown>): Record<string, unknown> => ({
+  userPermissions: ['ApiEnabled'],
+  tabVisibilities: [],
+  layoutAssignments: [],
+  recordTypeVisibilities: [],
+  applicationVisibilities: [],
+  loginIpRanges: [],
+  loginHours: [],
+  userLicense: 'Alpha Platform',
+  ...over,
+});
+
+const licenseSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: LIC_A,
+      apiName: 'License_Alpha',
+      properties: fullProfileProps({
+        applicationVisibilities: [{ application: 'App_One', default: true, visible: true }],
+        loginIpRanges: [
+          { startAddress: '198.51.100.1', endAddress: '198.51.100.9' },
+          { startAddress: '203.0.113.1', endAddress: '203.0.113.9' },
+        ],
+      }),
+    }),
+    makeNode({
+      id: LIC_B,
+      apiName: 'License_Beta',
+      properties: fullProfileProps({
+        userLicense: 'Beta Platform',
+        applicationVisibilities: [{ application: 'App_One', default: false, visible: false }],
+      }),
+    }),
+    makeNode({
+      id: LIC_C,
+      apiName: 'License_Alpha_Twin',
+      properties: fullProfileProps({
+        applicationVisibilities: [{ application: 'App_One', default: true, visible: true }],
+        loginIpRanges: [
+          { startAddress: '198.51.100.1', endAddress: '198.51.100.9' },
+          { startAddress: '203.0.113.1', endAddress: '203.0.113.9' },
+        ],
+      }),
+    }),
+    // Same as LIC_A but the applicationVisibilities key was NEVER WRITTEN.
+    makeNode({
+      id: NO_APPS,
+      apiName: 'No_Apps_Extracted',
+      properties: (() => {
+        const p = fullProfileProps({});
+        delete p['applicationVisibilities'];
+        return p;
+      })(),
+    }),
+  ],
+  edges: [],
+};
+
+describe('whatIfMergeProfilesHandler — compatibility, apps and login restrictions', () => {
+  let licDir: string;
+  let licStore: GraphStore;
+  let licCtx: Context;
+
+  beforeAll(async () => {
+    licDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-merge-license-'));
+    const opened = await openGraph(join(licDir, 'g.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    licStore = opened.value;
+    const imported = await importExtractionResults(licStore, [licenseSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    licCtx = { vaultRoot: licDir, manifest: FIXTURE_MANIFEST, graph: licStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(licStore);
+    rmSync(licDir, { recursive: true, force: true });
+  });
+
+  it('a cross-license pair is BLOCKING, not `review` with deployable-looking advice', async () => {
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: LIC_A,
+      profileIdB: LIC_B,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Today: `review`, and no `compatibility` key at all.
+    expect(d.verdict).toBe('blocking');
+    expect(d.compatibility.mergeable).toBe(false);
+    expect(d.compatibility.blockers).toHaveLength(1);
+    expect(d.compatibility.blockers[0]?.kind).toBe('user-license');
+    expect(d.compatibility.blockers[0]?.profileAValue).toBe('Alpha Platform');
+    expect(d.compatibility.blockers[0]?.profileBValue).toBe('Beta Platform');
+    expect(d.disclosure).toMatch(/cannot be merged/);
+    expect(d.disclosure).toContain('IMMUTABLE in Salesforce');
+    expect(d.disclosure).toContain('VERDICT: blocking');
+  });
+
+  it('the blocker reaches the deploy-shaped proposal artifact', async () => {
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: LIC_A,
+      profileIdB: LIC_B,
+      format: 'proposal',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const evidence = JSON.stringify(r.value.data.proposal);
+    expect(evidence).toContain('BLOCKER (user-license)');
+  });
+
+  it('application visibilities are COMPARED, at manual-only', async () => {
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: LIC_A,
+      profileIdB: LIC_B,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Today: zero. The property was never walked.
+    const apps = r.value.data.conflicts.filter(
+      (c) => c.settingType === 'application-visibility',
+    );
+    expect(apps).toHaveLength(1);
+    expect(apps[0]?.settingId).toBe('App_One');
+    expect(apps[0]?.recommendedPolicy).toBe('manual-only');
+  });
+
+  it('login restrictions are COMPARED, and NEVER at policy `max`', async () => {
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: LIC_A,
+      profileIdB: LIC_B,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const login = r.value.data.conflicts.filter((c) => c.settingType === 'login-restriction');
+    expect(login).toHaveLength(1);
+    expect(login[0]?.settingId).toBe('loginIpRanges');
+    // `max` on an IP allowlist means DELETING the restriction. Asserted as a
+    // negative because that is the failure this line exists to prevent.
+    expect(login[0]?.recommendedPolicy).toBe('manual-only');
+    expect(login[0]?.recommendedPolicy).not.toBe('max');
+    // Both sides' windows are surfaced verbatim for the reviewer.
+    expect(login[0]?.profileAValue).toHaveLength(2);
+    expect(login[0]?.profileBValue).toHaveLength(0);
+  });
+
+  it('a same-license, all-agreeing pair stays `safe` with mergeable true', async () => {
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: LIC_A,
+      profileIdB: LIC_C,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.compatibility.mergeable).toBe(true);
+    expect(d.compatibility.blockers).toEqual([]);
+    expect(d.conflicts).toEqual([]);
+    expect(d.summary.agreed).toBe(d.summary.totalSettings);
+    expect(d.summary.notEvaluatedCategories).toEqual([]);
+    // NOT blocking: same license, so the merge is possible. (The fixture
+    // manifest carries no coverage block, so the pre-existing coverage pass
+    // downgrades `safe` to `review` here — orthogonal to this fix, and the
+    // point of this assertion is that `blocking` did not leak in.)
+    expect(d.verdict).not.toBe('blocking');
+    expect(['safe', 'review']).toContain(d.verdict);
+    // Nothing un-evaluated → no not-evaluated limitations.
+    expect(d.trust.limitations).toEqual([]);
+  });
+
+  it('a self-merge produces no spurious blocker', async () => {
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: LIC_A,
+      profileIdB: LIC_A,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.compatibility.mergeable).toBe(true);
+    expect(r.value.data.compatibility.blockers).toEqual([]);
+  });
+
+  it('an UNEXTRACTED category is named, disclosed, and drags completeness off `complete`', async () => {
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: NO_APPS,
+      profileIdB: NO_APPS,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.notEvaluatedCategories).toContain('application-visibility');
+    expect(d.disclosure).toContain('Application visibility was NOT compared');
+    expect(d.disclosure).toContain('applicationVisibilities');
+    // No fabricated app conflicts.
+    expect(d.conflicts.filter((c) => c.settingType === 'application-visibility')).toEqual([]);
+    // The response must not claim `complete` next to a not-evaluated list.
+    expect(d.trust.completeness.status).not.toBe('complete');
+    expect(d.trust.limitations.length).toBeGreaterThan(0);
+  });
+
+  it('present-and-EMPTY is a compared zero, not a not-evaluated one', async () => {
+    // LIC_A/LIC_C both carry `tabVisibilities: []`. Extracted and empty must
+    // NOT render the same as never-extracted.
+    const r = await whatIfMergeProfilesHandler(licCtx, {
+      profileIdA: LIC_A,
+      profileIdB: LIC_C,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.notEvaluatedCategories).not.toContain('tab-visibility');
+    expect(r.value.data.disclosure).not.toContain('Tab visibility was NOT compared');
+  });
+});
