@@ -59,7 +59,12 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByIds } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listNodesByIds,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -67,6 +72,7 @@ import type { Context } from '../server.js';
 import { coercePrefix } from './coerce-id.js';
 import { expandPermissionSetGroup, findPermissionSetGroupsContaining } from './permission-set-group.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { clampedNodeScanLimit, scanHitCap } from './scan-cap.js';
 import {
   PERMSET_INTERSECTION_NOT_AVAILABLE,
   USER_ASSIGNMENT_NOT_IN_VAULT,
@@ -82,6 +88,117 @@ const GRANTOR_TYPES: ReadonlySet<ComponentType> = new Set<ComponentType>([
   'Profile',
   'PermissionSet',
 ]);
+
+/**
+ * OBJECT-ACCESS-OMITS-SYSTEM-PERMISSIONS.
+ *
+ * `Modify All Data` / `View All Data` are USER permissions on the Profile /
+ * PermissionSet itself (`properties.userPermissions`), not `objectPermissions`
+ * on any object — so they mint NO `grantedBy` edge and are structurally
+ * invisible to this tool's edge walk. On an object no profile or permission set
+ * declares explicit object permissions for, that produced `grants: []` with
+ * `granters: 0 / read: 0 / modifyAll: 0` and NOTHING else: an admin reading it
+ * concludes the object is locked down, while every holder of these two
+ * permissions can read or modify every record of it.
+ *
+ * The zeros were never wrong — they were unreadable. This is the object-mode
+ * counterpart of the permission-set-mode "the zeros in `summary` are BY
+ * CONSTRUCTION" note: census the holders, say the axis is not modeled here, and
+ * name `sfi.who_can_access_object` as the tool that DOES model it.
+ */
+const SYSTEM_PERMISSION_NAMES = Object.freeze({
+  modifyAllData: 'ModifyAllData',
+  viewAllData: 'ViewAllData',
+} as const);
+
+/** Org-wide census of the two system permissions this tool does NOT model. */
+interface SystemPermissionCensus {
+  /** Always false — stated so a reader never infers these are in `summary`. */
+  readonly modeledInSummary: false;
+  /**
+   * Distinct Profiles + PermissionSets carrying `ModifyAllData` / `ViewAllData`
+   * / either. `null` (never 0) when NO Profile or PermissionSet node carries a
+   * `userPermissions` property at all — the extractor did not stamp it, so the
+   * census is NOT CHECKED rather than empty.
+   */
+  readonly modifyAllDataGranters: number | null;
+  readonly viewAllDataGranters: number | null;
+  readonly distinctGranters: number | null;
+  /** True when a per-type scan hit the node cap, so the census is a floor. */
+  readonly scanTruncated: boolean;
+  /** Verbatim, host-citable disclosure. Always present. */
+  readonly note: string;
+}
+
+/**
+ * Census `ModifyAllData` / `ViewAllData` holders across Profiles and
+ * PermissionSets — the same `properties.userPermissions` read
+ * `who_can_access_object` does, so the two tools cannot disagree about who
+ * holds them.
+ */
+const censusSystemPermissions = async (
+  ctx: Context,
+  objectApiName: string,
+): Promise<Result<SystemPermissionCensus, McpError>> => {
+  const scanLimit = clampedNodeScanLimit();
+  const modifyAll = new Set<string>();
+  const viewAll = new Set<string>();
+  let anyNodeCarriesUserPermissions = false;
+  let scanTruncated = false;
+  for (const type of ['Profile', 'PermissionSet'] as const) {
+    const nodesResult = await listNodesByType(ctx.graph, type as ComponentType, {
+      limit: scanLimit,
+    });
+    if (!nodesResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${nodesResult.error.message}`,
+      });
+    }
+    if (scanHitCap(nodesResult.value.length, scanLimit)) scanTruncated = true;
+    for (const node of nodesResult.value) {
+      const perms = node.properties['userPermissions'];
+      if (!Array.isArray(perms)) continue;
+      anyNodeCarriesUserPermissions = true;
+      if (perms.includes(SYSTEM_PERMISSION_NAMES.modifyAllData)) {
+        modifyAll.add(node.id);
+      }
+      if (perms.includes(SYSTEM_PERMISSION_NAMES.viewAllData)) {
+        viewAll.add(node.id);
+      }
+    }
+  }
+  const pointer =
+    `These are USER permissions on the Profile / PermissionSet, not \`objectPermissions\` on \`${objectApiName}\`, so they mint no \`grantedBy\` edge and are NOT counted in \`grants\` / \`summary\` / \`byGranterType\` — ` +
+    'a zero there means "no explicit object permission is declared", never "nobody can read or modify these records". ' +
+    'Call `sfi.who_can_access_object` for the access answer that DOES model them (plus sharing rules and the org-wide default).';
+  if (!anyNodeCarriesUserPermissions) {
+    return ok({
+      modeledInSummary: false,
+      modifyAllDataGranters: null,
+      viewAllDataGranters: null,
+      distinctGranters: null,
+      scanTruncated,
+      note:
+        'NOT CHECKED: no Profile or PermissionSet node in this vault carries a `userPermissions` property, so system-level `Modify All Data` / `View All Data` holders could not be counted — reported as null, not 0. ' +
+        pointer,
+    });
+  }
+  const distinct = new Set<string>([...modifyAll, ...viewAll]);
+  const truncation = scanTruncated
+    ? ` The Profile / PermissionSet scan hit the ${scanLimit}-node cap, so these counts are a FLOOR.`
+    : '';
+  return ok({
+    modeledInSummary: false,
+    modifyAllDataGranters: modifyAll.size,
+    viewAllDataGranters: viewAll.size,
+    distinctGranters: distinct.size,
+    scanTruncated,
+    note:
+      `${distinct.size} distinct Profile(s) / PermissionSet(s) hold a system-level record bypass org-wide: ${modifyAll.size} with \`Modify All Data\` (read/edit/delete EVERY record of every object, this one included) and ${viewAll.size} with \`View All Data\` (read every record). The two sets OVERLAP — a granter holding both is counted in both, and \`distinctGranters\` is their union, so the two counts do not add up to it. ` +
+      `${pointer}${truncation}`,
+  });
+};
 
 /** Zod schema for the `sfi.object_access_audit` tool input. */
 export const objectAccessAuditInputSchema = z
@@ -200,6 +317,14 @@ export interface ObjectAccessAuditOutput {
       >
     >;
   };
+  /**
+   * OBJECT-ACCESS-OMITS-SYSTEM-PERMISSIONS. Org-wide census of the
+   * `Modify All Data` / `View All Data` holders this tool does NOT model, so
+   * every zero in `summary` is readable as "no explicit object permission
+   * declared" rather than "nobody can touch these records". Object mode only —
+   * permission-set mode already discloses its by-construction zeros in `note`.
+   */
+  readonly systemPermissions?: SystemPermissionCensus;
   /** Present when user/assignment data is not in the vault. */
   readonly assignmentDisclosure?: string;
 }
@@ -539,7 +664,23 @@ export const objectAccessAuditHandler = async (
           ? ` ${mutingPsgIds.size} of those group(s) (${[...mutingPsgIds].sort().join(', ')}) reference a muting permission set — muting is NOT subtracted here (this roster shows raw grant paths), so effective access may be lower; use \`sfi.effective_permissions\` for the muting-correct net grant (R6-06).`
           : '')
       : undefined;
-  const note = [kindNote, multiPathNote, psgNote]
+  // OBJECT-ACCESS-OMITS-SYSTEM-PERMISSIONS. Census the two record-bypass user
+  // permissions this tool structurally cannot see, so `grants: []` /
+  // `modifyAll: 0` can never be read as "the object is locked down".
+  const objectApiName = componentId.slice(CUSTOM_OBJECT_PREFIX.length);
+  const systemPermsResult = await censusSystemPermissions(ctx, objectApiName);
+  if (!systemPermsResult.ok) return systemPermsResult;
+  const systemPermissions = systemPermsResult.value;
+  // The object-mode counterpart of the permission-set-mode by-construction
+  // note (which fires at `grants: []` there). An EMPTY grant roster is exactly
+  // where a reader is most likely to conclude "nobody has access", so say what
+  // the empty roster does and does not prove — the `kindNote` above is gated on
+  // `grants.length > 0` and therefore never covered this case.
+  const emptyRosterNote =
+    grants.length === 0
+      ? `NO Profile or PermissionSet declares explicit \`objectPermissions\` on \`${objectApiName}\`, so \`grants\` is empty and every count in \`summary\` is 0 BY CONSTRUCTION. That is NOT "the object is locked down": it means no DECLARED object-level CRUD grant exists in this vault. Record access can still come from the system permissions in \`systemPermissions\`, from the org-wide default plus sharing rules, or from a family this vault did not retrieve — \`sfi.who_can_access_object\` composes all of those.`
+      : undefined;
+  const note = [emptyRosterNote, kindNote, multiPathNote, psgNote, systemPermissions.note]
     .filter((n) => n !== undefined)
     .join(' ');
   const assignmentDisclosure = userAssignmentUnavailable(ctx)
@@ -567,6 +708,7 @@ export const objectAccessAuditHandler = async (
       grants,
       ...(note !== '' ? { note } : {}),
       summary,
+      systemPermissions,
       ...(assignmentDisclosure !== undefined ? { assignmentDisclosure } : {}),
     },
     vaultState: {

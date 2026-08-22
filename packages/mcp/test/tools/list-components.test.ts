@@ -1118,3 +1118,135 @@ describe('listComponentsHandler — description-presence filter', () => {
     expect(r.value.data.retrievalHint).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// LIST-COMPONENTS-PENDING-READ-AS-NEVER-PULLED
+//
+// A `pending` coverage row means requested + retrieved + not turned into nodes:
+// the default reports pull is usage-ranked and capped, and what it reads is
+// FOLDED onto CustomField nodes (`usedInReport`) rather than minted as `Report`
+// nodes. That row is (correctly) folded into `missingCoverage`, so an empty
+// `Report` page fell into the generic branch and told the user the refresh
+// "did not pull this type" and to widen `--types` — on a vault whose own
+// manifest recorded hundreds of reports landed, and whose field tools answer
+// `usedInReport: true` off exactly that pull. Both halves of the sentence were
+// false, and `--types` is not even the lever (`--with-reports` is).
+// ---------------------------------------------------------------------------
+describe('listComponentsHandler retrievalHint — pending vs never-pulled', () => {
+  const PENDING_MANIFEST = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      // Requested, retrieved, capped: node minting is what is pending.
+      { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true },
+      // Never requested at all — the genuine "did not pull" case, kept as the
+      // control so the two sentences cannot collapse back into one.
+      { type: 'StaticResource', requested: false, retrieved: 0, errored: false, neverModeled: false },
+    ],
+    reportsCap: {
+      reports: { total: 4296, requested: 359, retrieved: 284 },
+      dashboards: { total: 83, requested: 83, retrieved: 75 },
+    },
+  };
+
+  let dir: string;
+  let s: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-lc-pending-'));
+    const opened = await openGraph(join(dir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    s = opened.value;
+    const imp = await importExtractionResults(s, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: dir, manifest: PENDING_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does NOT claim the refresh skipped a pending type, and cites the pull volume off the manifest', async () => {
+    const r = await listComponentsHandler(ctx, { type: 'Report' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components).toHaveLength(0);
+    const hint = r.value.data.retrievalHint ?? '';
+    // The false sentence, gone.
+    expect(hint).not.toContain('did not pull');
+    expect(hint).not.toContain('--types` to include Report');
+    // What is actually true, with the manifest's own numbers.
+    expect(hint).toContain('DID retrieve');
+    expect(hint).toContain('pending');
+    expect(hint).toContain('284');
+    expect(hint).toContain('359');
+    expect(hint).toContain('4296');
+    expect(hint).toContain('usedInReport');
+    // and the remedy that actually mints nodes.
+    expect(hint).toContain('--with-reports');
+    // still never proof of absence.
+    expect(hint).toContain('never proof the org has none');
+  });
+
+  it('keeps the "did not pull" sentence for a type the refresh genuinely never requested', async () => {
+    const r = await listComponentsHandler(ctx, { type: 'StaticResource' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.retrievalHint).toContain('did not pull');
+    expect(r.value.data.retrievalHint).toContain('/sfi-refresh');
+  });
+
+  it('prescribes --with-reports (never --types) even on the never-requested analytics branch', async () => {
+    const notRequested: Context = {
+      ...ctx,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        coverage: [
+          { type: 'Report', requested: false, retrieved: 0, errored: false, neverModeled: false },
+        ],
+      },
+    };
+    const r = await listComponentsHandler(notRequested, { type: 'Report' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.retrievalHint).toContain('--with-reports');
+    expect(r.value.data.retrievalHint).not.toContain('--types` to include Report');
+  });
+
+  it('emits NO hint at all when the pending type actually has nodes (the fresh-vault case)', async () => {
+    // A vault where the Report row is still `pending` but node minting DID
+    // happen returns rows, so the sentence must not fire at all — the stale and
+    // fresh vaults have to differ here, not just in wording.
+    const withReports = mkdtempSync(join(tmpdir(), 'sfi-lc-reports-'));
+    const opened = await openGraph(join(withReports, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const imp = await importExtractionResults(opened.value, [
+      {
+        nodes: [
+          makeNode({
+            id: 'Report:Folder/Alpha',
+            type: 'Report',
+            apiName: 'Folder/Alpha',
+            label: 'Alpha',
+            sourcePath: 'reports/Folder/Alpha.report-meta.xml',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    const r = await listComponentsHandler(
+      { vaultRoot: withReports, manifest: PENDING_MANIFEST, graph: opened.value },
+      { type: 'Report' },
+    );
+    await closeGraph(opened.value);
+    rmSync(withReports, { recursive: true, force: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(1);
+    expect(r.value.data.retrievalHint).toBeUndefined();
+    // The row is still `pending`, so the inventory is still not authoritative.
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Report');
+  });
+});

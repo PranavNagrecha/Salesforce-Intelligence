@@ -332,9 +332,136 @@ describe('objectAccessAuditHandler — bounded graph queries', () => {
     const large = await seedWideObject(200);
     expect(small.result.ok).toBe(true);
     expect(large.result.ok).toBe(true);
-    // ONE batched grantor fetch — not one per grant.
+    // ONE batched grantor fetch — not one per grant. This is the assertion
+    // that matters and it is UNCHANGED: the query count does not grow with the
+    // granter count.
     expect(large.nodeQueries).toBe(small.nodeQueries);
     expect(large.edgeQueries).toBe(small.edgeQueries);
-    expect(large.nodeQueries + large.edgeQueries).toBeLessThanOrEqual(4);
+    // Constant raised 4 -> 6 for OBJECT-ACCESS-OMITS-SYSTEM-PERMISSIONS: the
+    // handler now also censuses `ModifyAllData` / `ViewAllData` holders with
+    // ONE capped scan per grantor type (Profile, PermissionSet). Two extra
+    // O(1) reads — still independent of `granterCount`, which the two
+    // equalities above prove.
+    expect(large.nodeQueries + large.edgeQueries).toBeLessThanOrEqual(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OBJECT-ACCESS-OMITS-SYSTEM-PERMISSIONS
+//
+// `Modify All Data` / `View All Data` are USER permissions on the Profile /
+// PermissionSet, not `objectPermissions` on the object, so they mint no
+// `grantedBy` edge and this tool cannot see them. On an object nobody declares
+// explicit object permissions for, that produced `grants: []` with every
+// summary count 0 and no note of any kind — which reads as "the object is
+// locked down" while every holder of those two permissions can read or modify
+// every record of it. The zeros were correct; they were unreadable.
+//
+// The same file already solves this shape once: permission-set mode says the
+// zeros are "BY CONSTRUCTION". Object mode needed the equivalent.
+// ---------------------------------------------------------------------------
+describe('objectAccessAuditHandler — system permissions this tool cannot see', () => {
+  const OBJ_ID = 'CustomObject:NoGrants__c';
+
+  const buildCtx = async (
+    nodes: readonly Node[],
+  ): Promise<{ ctx: Context; close: () => Promise<void> }> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-oaa-syspermq-'));
+    const opened = await openGraph(join(dir, 'oaa.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const imported = await importExtractionResults(opened.value, [
+      { nodes: [...nodes], edges: [] },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    return {
+      ctx: { vaultRoot: dir, manifest: MANIFEST, graph: opened.value },
+      close: async () => {
+        await closeGraph(opened.value);
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  };
+
+  it('counts the ModifyAllData / ViewAllData holders and says they are NOT in `summary`', async () => {
+    const { ctx, close } = await buildCtx([
+      node({ id: OBJ_ID, type: 'CustomObject', apiName: 'NoGrants__c' }),
+      node({
+        id: 'Profile:Elevated',
+        type: 'Profile',
+        apiName: 'Elevated',
+        properties: { userPermissions: ['ModifyAllData', 'ApiEnabled'] },
+      }),
+      node({
+        id: 'PermissionSet:Readers',
+        type: 'PermissionSet',
+        apiName: 'Readers',
+        properties: { userPermissions: ['ViewAllData'] },
+      }),
+      node({
+        id: 'PermissionSet:Plain',
+        type: 'PermissionSet',
+        apiName: 'Plain',
+        properties: { userPermissions: [] },
+      }),
+    ]);
+    const r = await objectAccessAuditHandler(ctx, { objectApiName: 'NoGrants__c' });
+    await close();
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The zeros are unchanged — they were never the bug.
+    expect(r.value.data.grants).toEqual([]);
+    expect(r.value.data.summary.distinctGranters).toBe(0);
+    expect(r.value.data.summary.modifyAll).toBe(0);
+    // What was missing: the census of the axis this tool does not model.
+    const sys = r.value.data.systemPermissions;
+    expect(sys).toBeDefined();
+    expect(sys?.modeledInSummary).toBe(false);
+    expect(sys?.modifyAllDataGranters).toBe(1);
+    expect(sys?.viewAllDataGranters).toBe(1);
+    expect(sys?.distinctGranters).toBe(2);
+    expect(sys?.note).toContain('sfi.who_can_access_object');
+    // and a note on an EMPTY roster saying what the empty roster does not prove.
+    expect(r.value.data.note).toContain('BY CONSTRUCTION');
+    expect(r.value.data.note).toContain('NOT "the object is locked down"');
+    expect(r.value.data.note).toContain('sfi.who_can_access_object');
+  });
+
+  it('reports NULL, not 0, when no Profile/PermissionSet node carries userPermissions', async () => {
+    const { ctx, close } = await buildCtx([
+      node({ id: OBJ_ID, type: 'CustomObject', apiName: 'NoGrants__c' }),
+      node({ id: 'Profile:Bare', type: 'Profile', apiName: 'Bare' }),
+    ]);
+    const r = await objectAccessAuditHandler(ctx, { objectApiName: 'NoGrants__c' });
+    await close();
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sys = r.value.data.systemPermissions;
+    expect(sys?.modifyAllDataGranters).toBeNull();
+    expect(sys?.viewAllDataGranters).toBeNull();
+    expect(sys?.distinctGranters).toBeNull();
+    expect(sys?.note).toContain('NOT CHECKED');
+    expect(sys?.note).toContain('not 0');
+  });
+
+  it('discloses the system-permission census on a NON-empty roster too', async () => {
+    // A profile can hold `Modify All Data` while its declared object
+    // permissions are read-only, so `byGranterType.Profile.modifyAll: 0` is
+    // just as misreadable on a populated roster as on an empty one.
+    const { ctx, close } = await buildCtx([
+      node({ id: OBJ_ID, type: 'CustomObject', apiName: 'NoGrants__c' }),
+      node({
+        id: 'Profile:Elevated',
+        type: 'Profile',
+        apiName: 'Elevated',
+        properties: { userPermissions: ['ModifyAllData'] },
+      }),
+    ]);
+    const withEdge = await objectAccessAuditHandler(ctx, {
+      objectApiName: 'NoGrants__c',
+    });
+    await close();
+    expect(withEdge.ok).toBe(true);
+    if (!withEdge.ok) return;
+    expect(withEdge.value.data.systemPermissions?.modifyAllDataGranters).toBe(1);
   });
 });

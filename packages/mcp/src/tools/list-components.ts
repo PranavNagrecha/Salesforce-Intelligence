@@ -25,7 +25,11 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { STANDARD_OBJECT_FIELD_SNAPSHOT } from '@sf-intelligence/extractors';
 import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
-import { summarizeCoverage } from '@sf-intelligence/vault';
+import {
+  buildCoverageEntries,
+  type ExtendedVaultManifest,
+  summarizeCoverage,
+} from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -35,6 +39,69 @@ import { buildEnumerationCoverageCaveat, type CoverageCaveat } from './coverage-
 import { argsFingerprint, decodeCursor, encodeCursor, PAGE_CURSOR_VERSION } from './page-cursor.js';
 
 const LIST_COMPONENTS_TOOL = 'sfi.list_components';
+
+/**
+ * LIST-COMPONENTS-PENDING-READ-AS-NEVER-PULLED.
+ *
+ * The folder-based analytics families. The default refresh DOES pull them
+ * (usage-ranked and capped — `manifest.reportsCap` records org total vs
+ * requested vs landed) but folds what it read onto the CustomField nodes the
+ * reports reference (`properties.usedInReport` / `usedInDashboard`) instead of
+ * minting `Report` / `Dashboard` NODES, and marks the coverage row `pending`.
+ *
+ * The bug this closes: an empty page for a `pending` type fell into the
+ * `missingCoverage` branch and told the user "the last refresh did not pull
+ * this type … widen `--types`" — false on both halves. The refresh pulled
+ * hundreds of reports (which is exactly why `field_360` and
+ * `safe_to_delete_field` correctly answer `usedInReport: true` on the same
+ * vault), and `--types` is not the lever: the uncapped pull is
+ * `sfi refresh --with-reports` (see `report-dashboard-usage.ts`).
+ *
+ * `coverage_report` already models the distinction with its own `pending[]`
+ * bucket; this is that bucket, read here.
+ */
+const FOLDED_ANALYTICS_TYPES: Readonly<Record<string, 'reports' | 'dashboards'>> =
+  Object.freeze({ Report: 'reports', Dashboard: 'dashboards' });
+
+/** The remedy flag that actually mints nodes for a given type. */
+const refreshRemedyFor = (type: string): string =>
+  type in FOLDED_ANALYTICS_TYPES
+    ? '`/sfi-refresh` with `sfi refresh --with-reports` (the uncapped folder pull; `--types` is NOT the lever for folder-based analytics — the default pull is usage-ranked and capped)'
+    : `\`/sfi-refresh\` (widen \`--types\` to include ${type})`;
+
+/**
+ * The honest hint for a `pending` coverage row whose page came back empty:
+ * retrieved-but-not-noded, NOT never-pulled. Every number is read off the
+ * manifest — when `reportsCap` is absent the sentence says the pull volume is
+ * unknown rather than inventing one.
+ */
+const pendingRetrievalHint = (
+  manifest: ExtendedVaultManifest,
+  type: string,
+  retrievedRows: number,
+): string => {
+  const capKey = FOLDED_ANALYTICS_TYPES[type];
+  const cap = capKey === undefined ? undefined : manifest.reportsCap?.[capKey];
+  const volume =
+    cap === undefined
+      ? `The manifest records no pull volume for this type, so how much was read CANNOT be stated from this vault.`
+      : `\`manifest.reportsCap.${capKey}\` records ${cap.retrieved} member(s) landed` +
+        `${cap.requested === undefined ? '' : ` of ${cap.requested} requested`}` +
+        ` against an org total of ${cap.total}.`;
+  const folded =
+    capKey === undefined
+      ? ''
+      : ` What it read was FOLDED onto the CustomField nodes those ${capKey} reference (\`properties.usedInReport\` / \`usedInDashboard\`) rather than minted as \`${type}\` nodes — which is why \`sfi.field_360\` and \`sfi.safe_to_delete_field\` can still report report/dashboard usage on a vault this enumeration finds empty.`;
+  const rows =
+    retrievedRows > 0
+      ? ` The coverage row itself records ${retrievedRows} retrieved member(s).`
+      : '';
+  return (
+    `No \`${type}\` NODES in this vault — but the last refresh DID retrieve this type: its coverage row is \`pending\` (requested, retrieved, and not turned into nodes), which is a BUILD outcome, not a retrieve gap. ` +
+    `${volume}${rows}${folded} ` +
+    `So absence here is "not enumerable from this vault", never proof the org has none. To mint \`${type}\` nodes run ${refreshRemedyFor(type)}.`
+  );
+};
 
 const STANDARD_OBJECT_API_NAMES = new Set<string>(STANDARD_OBJECT_FIELD_SNAPSHOT);
 
@@ -652,12 +719,27 @@ export const listComponentsHandler = async (
     descriptionPresence === undefined
   ) {
     const cov = summarizeCoverage(ctx.manifest, [input.type]);
+    // LIST-COMPONENTS-PENDING-READ-AS-NEVER-PULLED: read the `pending` row
+    // BEFORE the generic missingCoverage branch. `pending` types are folded
+    // into `missingCoverage` (correctly — they are not enumerable), but their
+    // REASON and their REMEDY are different, and the generic sentence stated
+    // both wrongly: it claimed the refresh never pulled the type on a vault
+    // whose manifest records hundreds of retrieved members.
+    const pendingRow = buildCoverageEntries(ctx.manifest).find(
+      (entry) => entry.type === input.type && entry.pending === true,
+    );
     if (cov.notModeledTypes.includes(input.type)) {
       retrievalHint =
         `No \`${input.type}\` in the vault — this type is NOT modeled by the current build, so its absence means "not analyzed", never "none in the org".`;
+    } else if (pendingRow !== undefined) {
+      retrievalHint = pendingRetrievalHint(
+        ctx.manifest,
+        input.type,
+        pendingRow.retrieved,
+      );
     } else if (cov.missingCoverage.includes(input.type)) {
       retrievalHint =
-        `No \`${input.type}\` retrieved into this vault — the last refresh did not pull this type (a scoped, errored, or empty retrieve that returned zero rows). A requested-but-empty retrieve is byte-identical to "the org has none", so this is reported as "not retrieved", not proof of absence. Run \`/sfi-refresh\` (widen \`--types\` to include ${input.type}) before concluding the org has none.`;
+        `No \`${input.type}\` retrieved into this vault — the last refresh did not pull this type (a scoped, errored, or empty retrieve that returned zero rows). A requested-but-empty retrieve is byte-identical to "the org has none", so this is reported as "not retrieved", not proof of absence. Run ${refreshRemedyFor(input.type)} before concluding the org has none.`;
     } else {
       const parentApi =
         input.parentId !== undefined ? objectApiNameFromParentId(input.parentId) : null;
