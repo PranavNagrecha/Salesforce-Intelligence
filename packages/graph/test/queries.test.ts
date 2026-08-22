@@ -18,6 +18,7 @@ import {
   listNodeIdentities,
   listNodesByType,
   searchNodes,
+  searchNodesPage,
 } from '../src/queries.js';
 import { initSchema } from '../src/schema.js';
 import { closeGraph, openGraph, type GraphStore } from '../src/store.js';
@@ -1344,5 +1345,142 @@ describe('parseProperties — C-3 (finding 34) regression', () => {
     warnSpy.mockRestore();
 
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// =============================================================================
+// PAGING TOTAL ORDER — `searchNodesPage` must be exhaustive under `api_name`
+// ties, and must publish a TRUE total on a page past the end.
+//
+// The regression this pins: `ORDER BY score DESC, length(api_name) ASC,
+// api_name ASC` has NO unique final key. A vault where many nodes share one
+// api_name (every object carries a `Name` field) left the tied rows with no
+// total order, so DuckDB was free to order them differently for each OFFSET
+// window: an exhaustive walk returned one id twice and a tied sibling never.
+// Measured on a real vault: totalCount 646, union 645 distinct, 1 duplicate.
+//
+// The fixture below is built to make that reachable deterministically — a
+// large block of rows tied on ALL THREE pre-fix sort keys, straddling many
+// page boundaries at more than one page size.
+// =============================================================================
+
+/** Rows tied on score AND length(api_name) AND api_name — the pre-fix blind spot. */
+const TIED_NAME_COUNT = 60;
+/** Distractors that are NOT tied, so the walk is not a degenerate single block. */
+const PREFIX_HIT_COUNT = 40;
+
+const tieSeed: ExtractionResult = {
+  nodes: [
+    ...Array.from({ length: TIED_NAME_COUNT }, (_, i) =>
+      makeNode({
+        // Ids differ (they must — `id` is the primary key); api_name and label
+        // are IDENTICAL across all 60, which is the whole point.
+        id: `CustomField:Widget_Ledger_${String(i).padStart(4, '0')}__c.Name`,
+        type: 'CustomField',
+        apiName: 'Name',
+        label: 'Name',
+        parentId: `CustomObject:Widget_Ledger_${String(i).padStart(4, '0')}__c`,
+        sourcePath: `objects/Widget_Ledger_${String(i).padStart(4, '0')}__c/fields/Name.field-meta.xml`,
+      }),
+    ),
+    ...Array.from({ length: PREFIX_HIT_COUNT }, (_, i) =>
+      makeNode({
+        id: `CustomField:Widget_Plate__c.Nameplate_${String(i).padStart(3, '0')}__c`,
+        type: 'CustomField',
+        apiName: `Nameplate_${String(i).padStart(3, '0')}__c`,
+        label: `Nameplate ${i}`,
+        parentId: 'CustomObject:Widget_Plate__c',
+        sourcePath: `objects/Widget_Plate__c/fields/Nameplate_${String(i).padStart(3, '0')}__c.field-meta.xml`,
+      }),
+    ),
+  ],
+  edges: [],
+};
+
+describe('searchNodesPage — exhaustive paging under api_name ties', () => {
+  let tieDir: string;
+  let tieStore: GraphStore;
+
+  beforeAll(async () => {
+    tieDir = mkdtempSync(join(tmpdir(), 'sfi-graph-tie-page-'));
+    const opened = await openGraph(join(tieDir, 'tie.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    tieStore = opened.value;
+    const imported = await importExtractionResults(tieStore, [tieSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+  });
+
+  afterAll(async () => {
+    await closeGraph(tieStore);
+    rmSync(tieDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a walk to exhaustion is the WHOLE set, once each, at every page size', async () => {
+    for (const limit of [7, 13, 25]) {
+      const seen: string[] = [];
+      let offset = 0;
+      let total = -1;
+      let pages = 0;
+      for (;;) {
+        const r = await searchNodesPage(tieStore, 'Name', { limit, offset });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        total = r.value.totalCount;
+        for (const hit of r.value.hits) seen.push(hit.id);
+        pages += 1;
+        if (offset + r.value.hits.length >= total) break;
+        offset += r.value.hits.length;
+        expect(pages).toBeLessThan(100);
+      }
+      const distinct = new Set(seen);
+      // Pre-fix: `seen.length` still hit `total`, but `distinct.size` came up
+      // short — a row was served twice and a tied sibling never at all.
+      expect(total).toBe(TIED_NAME_COUNT + PREFIX_HIT_COUNT);
+      expect(seen, `page size ${limit}: row count`).toHaveLength(total);
+      expect(distinct.size, `page size ${limit}: DISTINCT ids`).toBe(total);
+    }
+  });
+
+  it('the tied block itself is ordered identically no matter where the page boundary falls', async () => {
+    // Walk in one page, then in pages of 9, and compare the sequences. Without
+    // a unique final sort key these two orderings are free to disagree.
+    const whole = await searchNodesPage(tieStore, 'Name', { limit: 100 });
+    expect(whole.ok).toBe(true);
+    if (!whole.ok) return;
+    const paged: string[] = [];
+    for (let offset = 0; offset < whole.value.totalCount; offset += 9) {
+      const r = await searchNodesPage(tieStore, 'Name', { limit: 9, offset });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const hit of r.value.hits) paged.push(hit.id);
+    }
+    expect(paged).toEqual(whole.value.hits.map((h) => h.id));
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a page PAST THE END still reports the TRUE total', async () => {
+    const r = await searchNodesPage(tieStore, 'Name', { limit: 25, offset: 100_000 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.hits).toEqual([]);
+    // Pre-fix: 0 — an UNCHECKED zero indistinguishable from "nothing matched".
+    expect(r.value.totalCount).toBe(TIED_NAME_COUNT + PREFIX_HIT_COUNT);
+  });
+
+  it('a GENUINE miss still reports 0, at any offset', async () => {
+    const zero = await searchNodesPage(tieStore, 'NonexistentXyzzy', { offset: 50 });
+    expect(zero.ok).toBe(true);
+    if (!zero.ok) return;
+    expect(zero.value.totalCount).toBe(0);
+  });
+
+  it('the over-run total honours the SAME types filter as the page', async () => {
+    const r = await searchNodesPage(tieStore, 'Name', {
+      offset: 100_000,
+      types: ['CustomObject'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Every seeded node is a CustomField, so the filtered total is a CHECKED 0.
+    expect(r.value.totalCount).toBe(0);
   });
 });

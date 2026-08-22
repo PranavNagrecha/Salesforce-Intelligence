@@ -21,6 +21,7 @@ import {
   classifyFaultSurface,
   flowFaultAuditHandler,
 } from '../../src/tools/flow-fault-audit.js';
+import { jsonResult } from '../../src/tools/tool-dispatch.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -803,5 +804,169 @@ describe('flowFaultAuditHandler — a clean vault is a CHECKED zero', () => {
     // No paging fields on a whole-fits call.
     expect(d.nextCursor).toBeUndefined();
     expect(d.pageInfo).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// FLOW-FAULT-AUDIT-RESUME-POINTER-OVERSHOOT — the resume pointer must describe
+// rows that were DELIVERED, not rows the handler intended to deliver.
+//
+// The regression: the handler budgeted only the `flows` ARRAY (30 KB) while the
+// response ALSO carries `rendered`, whose markdown table is built from the same
+// page and costs about as much again. `{limit: 500}` over 234 flagged flows
+// produced a ~65 KB envelope — the pager kept 140 rows and stamped
+// `nextOffset: 140`, then the GLOBAL envelope guard tail-trimmed `flows` to 70
+// and left the pointer untouched. Rows 70-139 were unreachable by any call, the
+// final page reported `truncated: false`, and the guard's own note told the
+// caller that "the handler's pagination is authoritative".
+//
+// Measured on a real vault: limit 25 reached 234 of 234; limit 500, following
+// the tool's own nextOffset, reached 164 — 70 rows lost in the gap.
+//
+// These tests drive the handler THROUGH `jsonResult`, which is what the server
+// does, because the handler alone never sees the trim that caused the bug.
+// =============================================================================
+
+interface EnvelopePage {
+  readonly flows: readonly { readonly id: string }[];
+  readonly truncated: boolean;
+  readonly nextOffset: number | undefined;
+  readonly totalCount: number;
+  readonly droppedCount: number | undefined;
+}
+
+/** Walk the tool the way a host does: handler → jsonResult envelope → parse. */
+const envelopeOf = async (
+  ctx: Context,
+  args: { limit?: number; offset?: number },
+): Promise<EnvelopePage> => {
+  const r = await flowFaultAuditHandler(ctx, args);
+  if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
+  const envelope = jsonResult(r.value, { args });
+  const block = envelope.content[0];
+  const text =
+    block !== undefined && block.type === 'text' ? block.text : '{}';
+  const parsed = JSON.parse(text) as {
+    data?: Record<string, unknown>;
+    responseBudget?: { droppedCount?: number };
+  };
+  const data = parsed.data;
+  if (data === undefined) {
+    throw new Error(`no data in envelope: ${text.slice(0, 300)}`);
+  }
+  return {
+    flows: data['flows'] as readonly { readonly id: string }[],
+    truncated: data['truncated'] as boolean,
+    nextOffset: data['nextOffset'] as number | undefined,
+    totalCount: data['totalCount'] as number,
+    droppedCount: parsed.responseBudget?.droppedCount,
+  };
+};
+
+describe('flowFaultAuditHandler — resume pointer describes DELIVERED rows', () => {
+  let ptrDir: string;
+  let ptrStore: GraphStore;
+  let ptrCtx: Context;
+
+  beforeAll(async () => {
+    ptrDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ffa-ptr-'));
+    const opened = await openGraph(join(ptrDir, 'ffa-ptr.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    ptrStore = opened.value;
+    const imp = await importExtractionResults(ptrStore, [pagingSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ptrCtx = { vaultRoot: ptrDir, manifest: FIXTURE_MANIFEST, graph: ptrStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(ptrStore);
+    rmSync(ptrDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a limit-500 walk through the ENVELOPE reaches every row', async () => {
+    const seen: string[] = [];
+    let offset = 0;
+    let pages = 0;
+    let total = -1;
+    for (;;) {
+      const page = await envelopeOf(ptrCtx, { limit: 500, offset });
+      total = page.totalCount;
+      for (const f of page.flows) seen.push(f.id);
+      pages += 1;
+      // Pre-fix: page 1 delivered 70 rows but pointed at 140.
+      expect(
+        page.nextOffset ?? offset + page.flows.length,
+        `page ${pages}: pointer must equal offset + delivered`,
+      ).toBe(offset + page.flows.length);
+      if (!page.truncated || page.nextOffset === undefined) break;
+      offset = page.nextOffset;
+      expect(pages).toBeLessThan(60);
+    }
+    expect(total).toBe(PAGING_FLOW_COUNT);
+    // Pre-fix: 164 of 234 — 70 rows unreachable by any argument.
+    expect(new Set(seen).size).toBe(PAGING_FLOW_COUNT);
+    expect(seen).toHaveLength(PAGING_FLOW_COUNT);
+  });
+
+  it('a limit-25 walk through the ENVELOPE reaches every row too', async () => {
+    const seen: string[] = [];
+    let offset = 0;
+    let pages = 0;
+    for (;;) {
+      const page = await envelopeOf(ptrCtx, { limit: 25, offset });
+      for (const f of page.flows) seen.push(f.id);
+      pages += 1;
+      if (!page.truncated || page.nextOffset === undefined) break;
+      offset = page.nextOffset;
+      expect(pages).toBeLessThan(60);
+    }
+    expect(new Set(seen).size).toBe(PAGING_FLOW_COUNT);
+    expect(seen).toHaveLength(PAGING_FLOW_COUNT);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: the envelope guard has nothing left to drop', async () => {
+    for (const args of [{ limit: 500 }, { limit: 500, offset: 100 }, { limit: 234 }]) {
+      const page = await envelopeOf(ptrCtx, args);
+      // Pre-fix: droppedCount 70 on `{limit: 500}` — the handler had already
+      // published a pointer for rows the guard then removed underneath it.
+      expect(
+        page.droppedCount,
+        `${JSON.stringify(args)} must not be trimmed by the global guard`,
+      ).toBeUndefined();
+    }
+  });
+
+  it('an over-large limit shrinks the page, and `limit` echoes what was applied', async () => {
+    const r = await flowFaultAuditHandler(ptrCtx, { limit: 500 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.truncated).toBe(true);
+    // The echoed page size is the one actually used, not the 500 requested.
+    expect(d.limit).toBe(d.flows.length);
+    expect(d.nextOffset).toBe(d.flows.length);
+  });
+
+  it('an operator-lowered SFI_MAX_RESPONSE_BYTES shrinks the page rather than losing rows', async () => {
+    const previous = process.env['SFI_MAX_RESPONSE_BYTES'];
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '12000';
+    try {
+      const seen: string[] = [];
+      let offset = 0;
+      let pages = 0;
+      for (;;) {
+        const page = await envelopeOf(ptrCtx, { limit: 500, offset });
+        for (const f of page.flows) seen.push(f.id);
+        pages += 1;
+        expect(page.droppedCount).toBeUndefined();
+        if (!page.truncated || page.nextOffset === undefined) break;
+        offset = page.nextOffset;
+        expect(pages).toBeLessThan(120);
+      }
+      expect(new Set(seen).size).toBe(PAGING_FLOW_COUNT);
+    } finally {
+      if (previous === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = previous;
+    }
   });
 });

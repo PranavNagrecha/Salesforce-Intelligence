@@ -38,6 +38,7 @@ import type { CoverageSummary, ExtendedVaultManifest } from '@sf-intelligence/va
 
 import { CHAINED_RULES } from '../../src/knowledge/chained-rules.js';
 import { COMPOUND_RULES } from '../../src/knowledge/compound-rules.js';
+import { CONCEPT_RULES } from '../../src/knowledge/loader.js';
 import { SUPERSEDES_RULES } from '../../src/knowledge/supersedes-rules.js';
 import type { Context } from '../../src/server.js';
 import {
@@ -1076,6 +1077,13 @@ describe('interpretHandler — rule firing', () => {
     expect(only.claim).not.toContain(STACK_FLOW_OBSOLETE);
   });
 
+  // UPDATED, not deleted. What these two really guarded is that the additive
+  // filter NARROWS the rule set, and that the count moves with it. They pinned
+  // that through `selectedRules + CHAINED + COMPOUND + SUPERSEDES`, which is
+  // also the expression that published 200 beside the digest's 195 (and 5
+  // beside 0 under a filter). The invariant survives; the second counter does
+  // not — `rulesConsidered` is now THE number, and the second-pass rules are
+  // counted in their own field.
   it('narrows to a single rule via the ruleIds filter (additive)', async () => {
     const r = await interpretHandler(ctx, {
       componentId: MD_FIELD,
@@ -1083,9 +1091,18 @@ describe('interpretHandler — rule firing', () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
+    expect(r.value.data.rulesConsidered).toBe(1);
     expect(r.value.data.rulesConsidered).toBe(
-      1 + CHAINED_RULES.length + COMPOUND_RULES.length + SUPERSEDES_RULES.length,
+      r.value.data.completeness.rulesConsidered,
     );
+    expect(r.value.data.secondPassRules).toBe(
+      CHAINED_RULES.length + COMPOUND_RULES.length + SUPERSEDES_RULES.length,
+    );
+    expect(r.value.data.ruleSelection).toEqual({
+      ruleIds: ['rule:relationship/master-detail-cascade'],
+      rulesSelected: 1,
+      rulesInModel: CONCEPT_RULES.length,
+    });
     expect(
       r.value.data.interpretations.every(
         (i) => i.ruleId === 'rule:relationship/master-detail-cascade',
@@ -1100,10 +1117,95 @@ describe('interpretHandler — rule firing', () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
+    expect(r.value.data.rulesConsidered).toBe(0);
     expect(r.value.data.rulesConsidered).toBe(
+      r.value.data.completeness.rulesConsidered,
+    );
+    expect(r.value.data.secondPassRules).toBe(
       CHAINED_RULES.length + COMPOUND_RULES.length + SUPERSEDES_RULES.length,
     );
     expect(r.value.data.interpretations).toHaveLength(0);
+  });
+});
+
+// =============================================================================
+// TWO CONTRADICTORY RULE COUNTERS — `completeness.rulesConsidered: 195` shipped
+// beside a top-level `rulesConsidered: 200` on EVERY response, and under a
+// `ruleIds` filter the pair diverged to 0 vs 5 while
+// `completeness.noRuleCoversComponentType` flipped true and rendered "NOTHING
+// was checked for this CustomObject: of 0 concept rules…". The tool's own
+// description tells a reader to consult that field FIRST, so it is the field
+// most likely to be believed — and a caller-applied filter is not a coverage
+// gap.
+// =============================================================================
+
+describe('interpretHandler — ONE authoritative rule counter', () => {
+  it('FAIL-BEFORE/PASS-AFTER: the two counters agree on an UNFILTERED call', async () => {
+    const r = await interpretHandler(ctx, { componentId: MD_FIELD });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: 200 vs 195.
+    expect(d.rulesConsidered).toBe(d.completeness.rulesConsidered);
+    expect(d.rulesConsidered).toBe(CONCEPT_RULES.length);
+    // The second-pass rules are not lost — they are counted where they belong.
+    expect(d.secondPassRules).toBe(
+      CHAINED_RULES.length + COMPOUND_RULES.length + SUPERSEDES_RULES.length,
+    );
+    // An unfiltered call carries no selection block.
+    expect(d.ruleSelection).toBeUndefined();
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a filter that matches NOTHING blames the filter, not the component type', async () => {
+    const r = await interpretHandler(ctx, {
+      componentId: MD_FIELD,
+      ruleIds: ['rule:does-not-exist/anywhere'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: 5 vs 0.
+    expect(d.rulesConsidered).toBe(0);
+    expect(d.completeness.rulesConsidered).toBe(0);
+    // Still SILENCE — an empty interpretations list here is not a clean bill.
+    expect(d.completeness.noRuleCoversComponentType).toBe(true);
+    // …but the stated REASON is the caller's own filter. The degenerate
+    // "of 0 concept rules, 0 are provably inapplicable … and 0 could not be
+    // evaluated" sentence is now unreachable on this path.
+    expect(d.completeness.summary).not.toMatch(/of 0 concept rules/);
+    expect(d.completeness.summary).toContain("THIS CALL'S OWN concepts/ruleIds filter");
+    expect(d.completeness.summary).toContain(`selected 0 of the ${CONCEPT_RULES.length} concept rules`);
+    expect(d.completeness.summary).toContain('caller-applied narrowing');
+    // The disclosure a host relays carries the same reason, verbatim.
+    expect(d.disclosure).toContain(d.completeness.summary);
+    expect(d.ruleSelection).toEqual({
+      ruleIds: ['rule:does-not-exist/anywhere'],
+      rulesSelected: 0,
+      rulesInModel: CONCEPT_RULES.length,
+    });
+  });
+
+  it('an empty concepts filter takes the same honest path', async () => {
+    const r = await interpretHandler(ctx, { componentId: MD_FIELD, concepts: [] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.rulesConsidered).toBe(0);
+    expect(d.completeness.summary).toContain("THIS CALL'S OWN concepts/ruleIds filter");
+    expect(d.ruleSelection).toEqual({
+      concepts: [],
+      rulesSelected: 0,
+      rulesInModel: CONCEPT_RULES.length,
+    });
+  });
+
+  it('an UNFILTERED "nothing covers this type" verdict keeps the engine\'s own wording', async () => {
+    // Whatever component this lands on, the unfiltered summary must never be
+    // rewritten — the filter attribution is for filtered calls ONLY.
+    const r = await interpretHandler(ctx, { componentId: MD_FIELD });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.completeness.summary).not.toMatch(/CALL'S OWN/);
   });
 });
 
