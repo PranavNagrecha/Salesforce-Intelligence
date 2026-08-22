@@ -95,3 +95,12 @@
   suggestion said "Here are the N custom field(s) on X" while listing standard
   fields too. The list is deliberately left unfiltered — a caller may want a
   standard field — and the sentence now says what it actually is.
+
+- **`sfi.lookup_record` honours the scope-echo contract.** Its non-strict input
+  schema STRIPPED `objectApiName`, so a caller who scoped the question to the
+  wrong object got a confident answer about a different one. It now echoes
+  `appliedScope` {objectApiName, source} with the record's canonical casing,
+  refuses a disagreeing selector with a named `invalid-query`, and — via
+  `.strict()`, mirrored as `additionalProperties: false` in the advertised JSON
+  Schema — refuses an unrecognized argument rather than ignoring it. Agreement
+  is case-insensitive, since Salesforce api names are.

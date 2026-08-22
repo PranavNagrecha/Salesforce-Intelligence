@@ -59,6 +59,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { firstNonEmpty } from './input-aliases.js';
+
 /**
  * The two record-typed ComponentTypes the tool accepts as input. v1.6
  * R2 introduced these two extractors together; the tool is the unified
@@ -74,6 +76,23 @@ const CUSTOM_METADATA_RECORD_PREFIX = 'CustomMetadataRecord:';
 const CUSTOM_SETTING_RECORD_PREFIX = 'CustomSettingRecord:';
 
 /**
+ * The arguments this tool advertises, named once so the refusal can list them.
+ * `typeApiName` is an ACCEPTED alias rather than an advertised argument, so it
+ * is deliberately absent.
+ */
+const LOOKUP_RECORD_ADVERTISED_KEYS = ['recordId', 'objectApiName'] as const;
+
+/**
+ * Verbatim refusal for a mistyped argument. A silently-stripped key means the
+ * answer is about a question the caller did not ask, which is the failure this
+ * whole tool surface exists to prevent.
+ */
+const unrecognizedArgumentMessage = (keys: readonly string[]): string =>
+  `Unrecognized argument(s): ${keys
+    .map((k) => `\`${k}\``)
+    .join(', ')}. \`sfi.lookup_record\` accepts: ${LOOKUP_RECORD_ADVERTISED_KEYS.join(', ')}. A mistyped argument is refused rather than ignored, so the answer is never about a question you did not ask.`;
+
+/**
  * Zod schema for the `sfi.lookup_record` tool input.
  *
  *   - `recordId`: required, non-empty string. The canonical record id
@@ -82,10 +101,32 @@ const CUSTOM_SETTING_RECORD_PREFIX = 'CustomSettingRecord:';
  *     Invalid prefixes surface as `invalid-query` from the handler,
  *     not a Zod-level rejection — Zod cannot express the prefix
  *     constraint here.
+ *   - `objectApiName` (alias `typeApiName`): OPTIONAL natural selector. When
+ *     supplied it must AGREE with the type the record id already names;
+ *     disagreement is a named `invalid-query`, never a silent answer about the
+ *     other object. Agreement is case-insensitive — Salesforce api names are —
+ *     and `appliedScope` echoes the CANONICAL casing from the node.
+ *
+ * `.strict()`: an unrecognized argument is REFUSED rather than stripped. The
+ * enumeration the design required was run before flipping it — nothing in
+ * `route-question.ts`, `intent-router.ts`, `funnel-utterances.ts`, `eval/`, or
+ * the skills forwards any key to this tool but `recordId`.
  */
-export const lookupRecordInputSchema = z.object({
-  recordId: z.string().min(1),
-});
+export const lookupRecordInputSchema = z
+  .object(
+    {
+      recordId: z.string().min(1),
+      objectApiName: z.string().min(1).optional(),
+      typeApiName: z.string().min(1).optional(),
+    },
+    {
+      errorMap: (issue, ctx) =>
+        issue.code === z.ZodIssueCode.unrecognized_keys
+          ? { message: unrecognizedArgumentMessage(issue.keys) }
+          : { message: ctx.defaultError },
+    },
+  )
+  .strict();
 
 /** Parsed input shape, inferred from `lookupRecordInputSchema`. */
 export type LookupRecordInput = z.infer<typeof lookupRecordInputSchema>;
@@ -112,6 +153,16 @@ export interface LookupRecordOutput {
   readonly label: string;
   readonly protected: boolean;
   readonly values: readonly RecordFieldValue[];
+  /**
+   * What the answer is actually scoped to, per CLAUDE.md's scope-honesty rule.
+   * `source` says whether the caller named it or the record id determined it.
+   * `objectApiName` is the CANONICAL casing read off the node, not the
+   * caller's spelling.
+   */
+  readonly appliedScope: {
+    readonly objectApiName: string;
+    readonly source: 'recordId' | 'objectApiName';
+  };
 }
 
 /**
@@ -241,6 +292,35 @@ export const lookupRecordHandler = async (
     });
   }
 
+  // Scope honesty. `objectApiName` used to be STRIPPED by the non-strict
+  // schema, so a caller who scoped the question to the wrong object got a
+  // confident answer about a different one.
+  const canonicalTypeApiName = readTypeApiName(node);
+  const suppliedObject = firstNonEmpty(input.objectApiName);
+  const suppliedType = firstNonEmpty(input.typeApiName);
+  if (
+    suppliedObject !== undefined &&
+    suppliedType !== undefined &&
+    suppliedObject.toLowerCase() !== suppliedType.toLowerCase()
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: `object selectors name different targets (\`${suppliedObject}\` vs \`${suppliedType}\`); pass exactly one of objectApiName / typeApiName`,
+      path: 'objectApiName',
+    });
+  }
+  const supplied = suppliedObject ?? suppliedType;
+  if (
+    supplied !== undefined &&
+    supplied.toLowerCase() !== canonicalTypeApiName.toLowerCase()
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: `\`objectApiName\` names \`${supplied}\`, but record \`${input.recordId}\` belongs to \`${canonicalTypeApiName}\`. Pass the matching object api name, or omit \`objectApiName\` — the record id already determines the scope.`,
+      path: 'objectApiName',
+    });
+  }
+
   const protectedRaw = node.properties['protected'];
   const isProtected = protectedRaw === true;
   const labelRaw = node.properties['label'];
@@ -255,10 +335,14 @@ export const lookupRecordHandler = async (
     data: {
       recordId: node.id,
       type: node.type,
-      typeApiName: readTypeApiName(node),
+      typeApiName: canonicalTypeApiName,
       label,
       protected: isProtected,
       values: readRecordValues(node),
+      appliedScope: {
+        objectApiName: canonicalTypeApiName,
+        source: supplied !== undefined ? 'objectApiName' : 'recordId',
+      },
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

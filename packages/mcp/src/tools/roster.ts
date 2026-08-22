@@ -1977,7 +1977,9 @@ const EVENT_SUBSCRIBERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.lookup_record`. Mirrors
- * `lookupRecordInputSchema`. The `recordId` prefix constraint
+ * `lookupRecordInputSchema`, INCLUDING its `.strict()` (as
+ * `additionalProperties: false`) and the optional `objectApiName` /
+ * `typeApiName` scope selectors. The `recordId` prefix constraint
  * (must start with `CustomMetadataRecord:` or `CustomSettingRecord:`)
  * is not expressible in JSON Schema, so callers that supply a non-
  * record id will be rejected at the handler's `classifyRecordId`
@@ -1990,8 +1992,15 @@ const LOOKUP_RECORD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       recordId: { type: 'string', minLength: 1 },
+      // Optional scope selector (alias: `typeApiName`). Must AGREE with the
+      // type the record id names; disagreement is a named `invalid-query`.
+      objectApiName: { type: 'string', minLength: 1 },
+      typeApiName: { type: 'string', minLength: 1 },
     },
     required: ['recordId'],
+    // Mirrors the Zod `.strict()`: an unrecognized argument is refused, not
+    // stripped. Advertised and enforced must not drift.
+    additionalProperties: false,
   });
 
 /**
@@ -5112,7 +5121,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   },
   {
     name: 'sfi.lookup_record',
-    description: "Given a CustomMetadataRecord or CustomSettingRecord canonical id (e.g., `CustomMetadataRecord:Marketo_Api_Setting__mdt.Default`), return the record's label, protected flag, parent type ApiName, and the full per-field value list. Each value carries `field`, `value`, `valueType`, and `isMasked`; managed-package masked content surfaces as `{ value: null, isMasked: true }` (the R2 extractor honesty axis — values masked by Salesforce as the literal `***` are NOT fabricated). `invalid-query` when the id does not start with one of the two record-type prefixes; `component-not-found` when the record id is unknown to the vault.",
+    description: "Given a CustomMetadataRecord or CustomSettingRecord canonical id (e.g., `CustomMetadataRecord:Marketo_Api_Setting__mdt.Default`), return the record's label, protected flag, parent type ApiName, and the full per-field value list. Each value carries `field`, `value`, `valueType`, and `isMasked`; managed-package masked content surfaces as `{ value: null, isMasked: true }` (the R2 extractor honesty axis — values masked by Salesforce as the literal `***` are NOT fabricated). Accepts an OPTIONAL `objectApiName` (alias `typeApiName`) scope selector: it must AGREE with the type the record id already names — a disagreement is a named `invalid-query` rather than a confident answer about a different object — and the response echoes `appliedScope` {objectApiName, source} with the CANONICAL casing read off the node. Agreement is case-insensitive, since Salesforce api names are. An unrecognized argument is REFUSED, not silently stripped, so the answer is never about a question you did not ask. `invalid-query` when the id does not start with one of the two record-type prefixes; `component-not-found` when the record id is unknown to the vault.",
     inputSchema: LOOKUP_RECORD_INPUT_SCHEMA,
   },
   {
