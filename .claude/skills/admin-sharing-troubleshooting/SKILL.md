@@ -257,6 +257,21 @@ For each step:
   Sets for sharing sets; Setup → Account Teams for teams; the actual
   record's field values for criteria predicates).
 
+One correction to make when you quote the `SharingSets` stage: its
+`reason` still says sharing sets are "not modeled in v1.1", and that
+sentence is out of date. `SharingSet` IS an extracted component type —
+`sfi.list_components({ type: 'SharingSet' })` and `sfi.get_component`
+answer on one, and each node carries its `accessMappings`
+(`userField` → `objectField` per mapped object) and granted
+`profiles`. Two things are still true and are why the verdict stays
+`unknown`: a vault built before the extractor shipped holds no
+`SharingSet` nodes until a re-refresh (`object_360` says so per vault:
+"NOT MODELED in this vault … NOTHING was checked"), and whether a set
+grants a SPECIFIC user access to a SPECIFIC record needs that record's
+`objectField` value and that user's `userField` value — live record
+data. Say "the configuration is readable; the applicability is not"
+rather than "sf-intelligence cannot see sharing sets".
+
 ### Step 4 — Provide the bottom-line aggregate verdict
 
 After the timeline, give the top-level `verdict` in one sentence,

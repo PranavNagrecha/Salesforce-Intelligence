@@ -4,8 +4,8 @@
   tool's one-line summary, and a populated `category`.
 
   The router's contract is "the funnel advises, the host LLM decides", but under
-  the default `core` tool profile the host is advertised 19 of 207 tools. For the
-  other 188 a candidate row named a tool whose description was nowhere in the
+  the default `core` tool profile the host is advertised 19 of 212 tools. For the
+  other 193 a candidate row named a tool whose description was nowhere in the
   host's context, recoverable only by an `sfi.describe_analysis` round trip per
   candidate. The host was being asked to choose between bare names.
 

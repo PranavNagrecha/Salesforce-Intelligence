@@ -277,7 +277,7 @@ field.
 
 Under the default profile, 19 advertised tool schemas (217 registered; 5
 back-compat aliases stay hidden) form the core spine — including
-`sfi.live_consent`. The full non-hidden roster is 210 schemas and costs tens
+`sfi.live_consent`. The full non-hidden roster is 212 schemas and costs tens
 of thousands of context tokens in MCP clients that do not defer tool
 definitions. **Default is `core`** (AUDIT-F6): only that 19-schema spine is
 advertised and directly invokable. Everything else stays reachable via
@@ -582,8 +582,8 @@ component they resolved and return cited claims plus a `completeness` digest.
 
 **DEFAULT ON.** Pass `includeConceptReasoning: false` to opt out. The engine was
 previously reachable only through `sfi.interpret`, which required a pre-resolved
-canonical component id — measured, ZERO of 193 rules could fire in any answer a
-user actually asks for.
+canonical component id — measured, ZERO of the model's rules could fire in any
+answer a user actually asks for.
 
 Read `completeness` BEFORE the claims. It keeps four states apart, and the
 distinction is the point:

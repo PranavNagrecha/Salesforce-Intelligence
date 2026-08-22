@@ -363,7 +363,7 @@ answer carries a known-coverage caveat instead of a silent blind spot.
 | **MCP roster** | Every `sfi.*` tool is registered in code; run `sfi.capabilities` (see `productManifest`) for the live registered/advertised counts — never a handwritten number |
 | **Graph model** | A broad `ComponentType` union across **103** component types (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by **23** typed edge types — see `sfi.capabilities` for how tools group those families. Counts are pinned by `eval/product-manifest.json`. |
 | **Concept Model** | Concept Model (143 concepts / 195 rules) — org-independent, curated — JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret`. No org data lives in the model. Same figures in `eval/product-manifest.json`. |
-| **26** | skills + **5** slash commands + **2** subagents (Claude Code plugin layer) that auto-activate in a session |
+| **26** | skills + **5** slash commands + **4** subagents (Claude Code plugin layer) that auto-activate in a session |
 
 ## What it does NOT do
 

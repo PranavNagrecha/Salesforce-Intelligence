@@ -6,8 +6,10 @@ description: |
   does Account.Industry__c touch", "give me the full field profile
   for X", "where does this field's data come from", "what fires when
   this field changes", "show me the upstream + downstream walk for
-  this field". Cascades the v3.0 synthesis tools (`field_360`,
-  `field_lineage`) over the v2.0a conditional-context tier
+  this field", and the same question one tier up: "show me
+  everything about the Contact object". Cascades the v3.0 synthesis
+  tools (`field_360`, `field_lineage`) plus the object-tier
+  counterpart `object_360`, over the v2.0a conditional-context tier
   (`firesWhen` edges, `ConditionalContext` nodes). Discloses the Q165
   honesty anchor verbatim (`dataNotAvailable[]` array of list-view
   filters, reports, dashboards) and the v2.0a synthetic ConditionalContext
@@ -54,9 +56,14 @@ the user's question explicitly named the unavailable categories.**
 This is the Q165 honesty anchor — a synthesis tool that fails to
 disclose its omissions is a contract violation. v3.0 surfaces
 incoming `references`, `readsFrom`, `writesTo`, `usedInLayout`,
-`firesWhen`, and friends — but list views, reports, dashboards,
-named credentials passing the field as a default argument, and
-managed-package callers are all invisible.
+`firesWhen`, and friends. What each `dataNotAvailable` entry now
+means is narrower than its name — read the anchor below before
+repeating it: list-view **column and filter field identity** IS
+composed (into the `listViews` section), and report/dashboard field
+usage IS folded onto the field as a property. What stays invisible is
+list-view filter PREDICATE EVALUATION, the literal value a report
+filters for, named credentials passing the field as a default
+argument, and managed-package callers.
 
 The v2.0a synthetic ConditionalContext id-prefix classification
 brittleness: when `field_360` surfaces the `automations` section
@@ -77,6 +84,26 @@ phrasing. Concrete triggers:
 - **"Show me everything about / give me the full profile for /
   field 360 on / deep dive on `Account.Industry__c`."** — Use
   `sfi.field_360`.
+- **The same question about an OBJECT** — "show me everything about
+  `Contact`", "what is attached to this object", "what points at
+  `Invoice__c`". — Use `sfi.object_360` with `objectApiName`. Twelve
+  sections: what the object CONTAINS and would take with it (`owns`),
+  what lives outside and points AT it (`usage`), `identity`, `brief`,
+  `automations`, `permissions`, `relationships`, `recordTypes`,
+  `sharing`, `recordPages`, `analytics`, `recordData`. Two things to
+  state when you render it:
+  - **It adjudicates nothing.** `summary.verdict` is `null` by
+    construction; there is no delete verdict and no blocker list. An
+    object with active flows, profile grants or records is not
+    thereby undeletable — those are consequences to weigh. Never
+    translate its counts into "safe" or "unsafe to delete".
+  - **`dataNotAvailable[]` names what it refuses to fake** — six
+    RECORD-DATA gaps (field population, record recency, last record
+    created/modified, record count, top owner / top creator, "when was
+    this last used"), each naming the live tool that can answer it,
+    plus report authorship, which is a permanent privacy boundary: the
+    refresh never persists a report's author, owner or running user.
+    The tool never calls the live plane itself.
 - **"Where does `Industry__c`'s data come from?"** /
   **"What populates this field?"** /
   **"Trace the upstream lineage for `Industry__c`."** — Use
@@ -269,10 +296,15 @@ the answer is the walk tree with per-step `sourceKind` /
 > The following categories are NOT extracted and surface as
 > `dataNotAvailable`:
 >
-> - **List-view filters.** Salesforce list view filter criteria
->   referencing the field are not extracted. Reports filtered by
->   this field will continue to function but are invisible to
->   the synthesis.
+> - **List-view filters.** The field IDENTITY of a list view's
+>   columns and filter predicates IS extracted and composed into
+>   the `listViews` section (heuristic regex; each row's
+>   `referenceKind` is `fieldRef` for a column, `filterRef` for a
+>   filter predicate, or `columnAndFilter` for both). What remains
+>   unmodeled — and what `dataNotAvailable: 'list-view-filters'`
+>   now names — is the saved view's runtime filter PREDICATE
+>   EVALUATION: whether a given record passes the filter. Never
+>   report the whole category as unextracted.
 > - **Reports.** The default refresh pulls a usage-ranked, capped
 >   slice of reports; `sfi refresh --with-reports` pulls all.
 >   Report *field usage* is folded onto the field
@@ -435,7 +467,7 @@ Claude's flow:
     "confidence": "mixed",
     "dataNotAvailable": ["list-view-filters", "reports", "dashboards"],
     "boundaries": [
-      "v3.0 synthesis reads what v0.1-v2.9 already extracted. List-view filters, reports, dashboards, named-credential default-argument plumbing, and managed-package callers are NOT extracted; this field may have references in those categories that are invisible to this report.",
+      "v3.0 synthesis reads what v0.1-v2.9 already extracted. List-view filter EVALUATION, report/dashboard filter literals, named-credential default-argument plumbing, and managed-package callers are NOT extracted; this field may have references in those categories that are invisible to this report.",
       "Section confidence is mixed — see per-section labels. Parsed Apex edges (source apex-ast) are high-confidence; the remaining heuristic edges (Apex recall-scanner backfill on parse-failure files, LWC scanner field reads) need source verification before refactoring."
     ]
   }
@@ -512,13 +544,17 @@ Claude's flow:
 > The following categories are NOT extracted in v3.0 and surface
 > as `dataNotAvailable`:
 >
-> - **List-view filters.** This field may be a filter criterion
->   in an Account list view; the list view extractor is a future-
->   milestone item.
-> - **Reports.** Tabular / matrix / summary reports filtered by
->   or grouped on Industry__c are not extracted.
-> - **Dashboards.** Dashboard components referencing Industry__c
->   are not extracted.
+> - **List-view filters.** The `listViews` section names the list
+>   views whose columns or filter predicates reference
+>   Industry__c. What is NOT modeled is whether a given record
+>   passes such a filter.
+> - **Reports.** Report field usage is folded onto the field
+>   (`usedInReport` plus the capped `usedInReports` name list) and
+>   `Report:` nodes persist, but the literal value a report filters
+>   FOR is never persisted.
+> - **Dashboards.** Same shape: `usedInDashboard` is folded and
+>   `Dashboard:` nodes persist; component-level filter literals are
+>   not.
 > - **Named-credential default-argument plumbing.** A
 >   NamedCredential that passes Industry__c as a default argument
 >   is captured only when the integration's payload schema

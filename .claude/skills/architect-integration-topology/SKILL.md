@@ -808,7 +808,9 @@ Claude's flow:
 > subscriptions and managed-package listeners remain invisible. CDC
 > subscribers are a separate axis — CDC uses `AccountChangeEvent`-shaped
 > channel names, not `__e` Platform Events, and
-> `sfi.cdc_subscribers` covers them.
+> `sfi.event_topology` covers them (it also covers the Platform Event
+> half, and names the events the org references but the vault never
+> retrieved).
 >
 > For what PUBLISHES `Account_Change__e`, call
 > `sfi.event_subscribers` with the `eventId` — its `publishers[]`

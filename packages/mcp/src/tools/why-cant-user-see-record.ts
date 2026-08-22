@@ -2257,7 +2257,14 @@ const UNKNOWN_TAIL: readonly AccessReasoningStep[] = Object.freeze([
   step(
     'SharingSets',
     'unknown',
-    'sharing sets require Experience Cloud configuration not modeled in v1.1',
+    // `SharingSet` IS an extracted component type now, so the old "not modeled"
+    // wording is stale. The verdict stays `unknown` for a different and more
+    // durable reason: a sharing set grants access by MATCHING a field on the
+    // running user against a field on the record, so whether it grants access
+    // to a GIVEN record is record-level data the vault does not hold. Whether
+    // any sharing set EXISTS is now answerable — `sfi.object_360` reports it
+    // per object, as a CHECKED none when the org declares none.
+    'sharing sets ARE extracted now, but whether one grants access to a GIVEN record depends on matching a user field against a record field — record-level data the vault does not hold. Ask `sfi.object_360` which sharing sets touch this object',
   ),
   step(
     'AccountTeams',

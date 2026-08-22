@@ -4,12 +4,16 @@ description: |
   Answers Salesforce developer code-quality questions: "audit my Apex
   for quality issues", "find governor-limit risks", "where do we have
   hardcoded IDs / emails / usernames", "check CRUD / FLS enforcement",
-  "what tests are missing / fake-covered", "find dead code". Drives
+  "what tests are missing / fake-covered", "find dead code", "review
+  this Apex class", "what methods does this class have". Drives
   the v2.1 quality-recognizer cascade (`code_quality_audit`,
   `governor_limit_risks`, `find_hardcoded_values`, `crud_fls_audit`,
-  `test_coverage_gaps`) and the v2.4 hygiene tool `find_dead_code`.
-  Every finding is `confidence: 'heuristic'` — pattern recognition is
-  recognition, not declaration. Discloses the v2.1 boundary verbatim:
+  `test_coverage_gaps`), the v2.4 hygiene tool `find_dead_code`, and
+  `apex_structure` for a question about ONE named class or trigger
+  (parsed on demand; adds AST-only checks at `confidence: 'parsed'`).
+  Every recognizer finding is `confidence: 'heuristic'` — pattern
+  recognition is recognition, not declaration; only `apex_structure`'s
+  eight AST-only checks rise above that. Discloses the v2.1 boundary verbatim:
   the recognizer pattern-matches on tokenized Apex source (not a compiler AST),
   so cross-class blindness, custom security utility helpers invisible, dynamic
   SOQL invisible, reflective field access invisible, custom test-assertion
@@ -137,9 +141,16 @@ Defer to another skill when:
 
 ## The cascade
 
-The six tools run in this order from broad to narrow. Each one
-narrows the same `qualityIssues[]` mirror to a different lens.
+The six org-wide tools run in this order from broad to narrow. Each
+one narrows the same `qualityIssues[]` mirror to a different lens.
 Pick the right entry point by user intent.
+
+**When the question is about ONE class or trigger, start at
+`sfi.apex_structure` instead** (§7). The six below all read the
+extraction-time recognizer mirror, which is a tokenizer, not a
+compiler AST. `sfi.apex_structure` parses the `.cls` / `.trigger` on
+demand and adds checks the recognizer catalog cannot express — at
+`confidence: 'parsed'` rather than `'heuristic'`.
 
 ### 1. `sfi.code_quality_audit` — broad sweep
 
@@ -336,6 +347,45 @@ dead", "what can I delete"). ALWAYS pair `definitely_dead` and
 disclosure: dynamic dispatch, reflective invocation, framework
 wiring (TriggerHandler / fflib), and managed-package callers are
 invisible to the graph edges this tool walks.
+
+### 7. `sfi.apex_structure` — ONE class or trigger, parsed on demand
+
+The per-component entry point, and the right one whenever the user
+names a class or a trigger ("review this class", "what does this class
+do", "list its methods", "does it enforce sharing"). It parses the
+source with the ANTLR Apex grammar at request time — nothing
+persisted, no refresh needed — and returns the declared methods with
+rendered signatures, fields and inner types, the sharing keyword and
+what it means for enforcement, every SOQL / SOSL / DML / callout /
+async-dispatch site with its line, its enclosing method and whether it
+sits inside a loop BODY, the declared entry-point surface, what the
+component reads and writes, its covering tests, and a `review` block.
+
+```json
+{ "classRef": "AccountService" }
+{ "classRef": "ApexClass:AccountService", "method": "recalculate" }
+```
+
+Two things to read before the findings:
+
+- **`review.rulesEvaluatedHere`** names every rule that ran, so an
+  empty `findings` list reads as CHECKED rather than as unscanned.
+- **`confidence` is per finding.** Eight AST-only checks
+  (`callout-in-loop`, `async-dispatch-in-loop`, `dml-before-callout`,
+  `database-partial-result-discarded`,
+  `soql-assigned-to-single-sobject`,
+  `no-sharing-declared-on-entry-point`,
+  `without-sharing-external-entry-point`,
+  `trigger-logic-in-trigger-body`) carry `parsed` or `declared`. The
+  19-rule recognizer catalog is mirrored alongside them verbatim at
+  `heuristic` — the same findings the six tools above return, not a
+  second opinion.
+
+A parse failure returns `structure: null` and says so; it never
+returns an empty structure that reads as "this class has nothing in
+it". `entryPoints.checked` is the AND of "the source parsed", "the
+inbound-edge query succeeded" and "the reachability walk succeeded",
+so a zero there is only a real zero when `checked` is `true`.
 
 ## Honesty axes
 

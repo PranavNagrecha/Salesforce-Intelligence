@@ -184,8 +184,11 @@ If the user names a rule by display label rather than API name
 ("the discount workflow"), call `sfi.search_components({ query:
 'discount workflow', types: ['WorkflowRule'] })` to translate
 before firing the impact tool. Don't guess — workflow rule names
-are bespoke per org, and a wrong canonical id silently returns an
-empty impact set.
+are bespoke per org. A canonical id that matches nothing at all now
+returns `error.kind: 'component-not-found'` rather than an empty
+slice, but an id that resolves to the WRONG component still answers
+confidently about that component, and nothing in the payload will say
+so.
 
 If the user supplies a record-level shape ("does the discount
 approval fire on opportunity 006xx12345?"), **refuse the record-

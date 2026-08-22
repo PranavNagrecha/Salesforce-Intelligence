@@ -1,9 +1,10 @@
 # Routing — how a question reaches a tool
 
-This product ships 212 registered tools. Routing is the machinery that turns one
-plain-language question into a choice among them. It is the difference between a
-capability existing and a capability being usable, which is why this document is
-long: it covers how each stage works, **and what each stage does not do**.
+This product registers 217 tools, 212 of which are advertised under
+`SFI_TOOL_PROFILE=full`. Routing is the machinery that turns one plain-language
+question into a choice among them. It is the difference between a capability
+existing and a capability being usable, which is why this document is long: it
+covers how each stage works, **and what each stage does not do**.
 
 Audience: people wiring sf-intelligence into a host, and anyone changing the
 router. For what end users can ask see
@@ -23,7 +24,7 @@ every number in §13 is a variation on it.
 | --- | --- | --- | --- | --- |
 | 0 | Normalise | `semantic-funnel.ts` `tokenize()` | lowercase, strip punctuation, drop stopwords, light plural stem, phrase-synonym expansion **on the query only** | no lemmatiser, no spell-correction, no learned synonyms |
 | 1 | Refusal gates | `refusal-gates.ts` | fail closed by SHAPE before any matching — **7 kinds**, first-hit-wins | cannot judge whether an allowed question is answerable |
-| 2 | Deterministic intent | `intent-router.ts` | **265 rules producing 234 distinct intents**, each mapping to tools, plane, `suggestedArgs`, multi-step plans | silent on ~68% of fresh phrasings; see §13 |
+| 2 | Deterministic intent | `intent-router.ts` | **275 rules producing 241 distinct intents**, each mapping to tools, plane, `suggestedArgs`, multi-step plans | silent on ~68% of fresh phrasings; see §13 |
 | 3 | Lexical funnel | `semantic-funnel.ts` | L2-normalised TF-IDF cosine over a per-tool document | no embeddings in any shipped install (§4) |
 | 4 | Candidate assembly | `tools/route-question.ts` | fuse regex + funnel, band confidence, attach `answers`/`category`, render | never runs a tool, never resolves a component |
 | 5 | Host decision | your LLM | pick, supply args, run, ground | — |
@@ -45,7 +46,7 @@ returns, for one plain-language question:
 | `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground via `sfi.synthesize_answer`. |
 
 `answers` exists because the default tool profile is `core`, which advertises 19
-of 207 tools. For every other candidate the shortlist would otherwise name a tool
+of 212 tools. For every other candidate the shortlist would otherwise name a tool
 whose description is nowhere in your context, recoverable only by an
 `sfi.describe_analysis` round trip per candidate. The one-liner is the same text
 `sfi.list_analyses` renders, so you can pick without a second call — and, just as
@@ -90,10 +91,10 @@ way to make a tool findable is to change this document:
 | --- | --- |
 | tool **name** words | `sfi.find_dead_code` becomes `find dead code` |
 | `TOOL_KEYWORDS` | curated per-tool overlay for tools whose prose does not echo how people ask |
-| `FUNNEL_UTTERANCES` | **2,006 ask-phrasings across 207 tools** — the primary lever |
+| `FUNNEL_UTTERANCES` | **2,138 ask-phrasings across 212 tools** — the primary lever |
 | `tool.description` | the host-facing contract, **boilerplate-stripped** first |
 | capability map | `tools/capabilities.ts` CATEGORIES title / description / examples |
-| `INTERPRET_CONCEPT_CARDS` | 46 cards giving `sfi.interpret` per-concept documents |
+| `INTERPRET_CONCEPT_CARDS` | 48 cards giving `sfi.interpret` per-concept documents |
 
 **Description text is also a retrieval document, and that cuts both ways.** Text
 repeated verbatim across N tools depresses the document frequency of every term
@@ -111,8 +112,8 @@ tokenized verbatim. Weighted expansion uses `EXPANSION_WEIGHT = 0.5`.
 **The plural stem is load-bearing, not a bug.** `tokenize()` stems plurals with a
 single trailing-`s` strip, which mangles two of the three English plural forms —
 `communities` becomes `communitie`, `classes` becomes `classe`. It is applied to
-the query *and* the corpus, so the two still collide, and the 2,006 utterances
-were tuned against exactly that behaviour. A correct rule-based stemmer was
+the query *and* the corpus, so the two still collide, and the utterance corpus
+was tuned against exactly that behaviour. A correct rule-based stemmer was
 implemented and measured: **+10 points at rank-1 on a 30-question sample, −23 on
 the 1,000-question authority set.** It was reverted. Changing tokenisation
 invalidates the tuning built on top of it; treat it as a corpus-wide migration,
@@ -147,10 +148,11 @@ sub-bar lift".
 
 Regenerating the static assets and enabling the gate was re-measured for this
 document: **recall identical at every K**. The reason is visible in the raw
-embedding ranking — all 206 tool vectors land inside a **0.51-0.56** cosine band.
-A distilled static model mean-pools its token rows, so 206 long, jargon-dense
-documents collapse to nearly the same point. The RRF fusion is deliberately
-asymmetric (`RRF_K_LEX = 10`, `RRF_K_EMBED = 60`) so the embedding can only
+embedding ranking — every tool vector lands inside a **0.51-0.56** cosine band
+(measured when the index held 206 vectors; it holds 217 today and the shape is
+unchanged). A distilled static model mean-pools its token rows, so a couple of
+hundred long, jargon-dense documents collapse to nearly the same point. The RRF
+fusion is deliberately asymmetric (`RRF_K_LEX = 10`, `RRF_K_EMBED = 60`) so the embedding can only
 promote a lexical near-miss, never displace a lexical hit — which is why turning
 it on changes so little.
 
@@ -456,7 +458,7 @@ Current numbers:
 ### The two numbers you must not confuse
 
 **`router-goldset` 98.8% is tuning, not accuracy.** It grades the full pipeline
-on the set the 234 intents were fitted to. On fresh questions the same pipeline
+on the set the 241 intents were fitted to. On fresh questions the same pipeline
 scores **60.0%** — a **38.8-point generalization gap**. Never quote the goldset
 top-1 as the product's routing accuracy. BUILD-CONTRACT already says it: recall
 is the **authority**, the goldset is a **tripwire**, and nothing is ever tuned on
@@ -480,11 +482,15 @@ contributor, not as a decider.**
 
 ### Per-tool reachability
 
-Querying each tool by its own first utterance: rank-1 **74.9%**, top-8 **96.6%**
-(207 tools with utterances). Four tools carry no utterances at all — three of
-those are deliberately retired and say so in their own descriptions
-(`release_readiness_report`, `find_apex_usages`, `churn`), and routing to a
-retired tool would be the defect, not the fix.
+Querying each tool by its own first utterance: rank-1 **75.5%**, top-8 **96.7%**
+(212 tools with utterances). Five registered tools carry no utterances at all,
+and four of those are hidden from `tools/list` on purpose:
+`release_readiness_report`, `churn` and `cdc_subscribers` each name their
+survivor in their own description (`cdc_subscribers` folded into
+`sfi.event_topology`), and `find_apex_usages` folded into
+`sfi.find_code_usages` with a `nodeTypes` narrow. Routing to a retired tool
+would be the defect, not the fix. The fifth, `field_cleanup_candidates`, is a
+live composed tool with no ask-phrasings — a genuine reachability gap.
 
 ### What the deterministic layer memorised
 
@@ -514,9 +520,11 @@ Every caveat below was verified against the corpora themselves, not inferred.
 - **Grading accepts a tool FAMILY, not a tool.** Each row carries a hand-written
   list of acceptable tools (mean 2.22, max 4). A "hit" means any family member
   reached the top-K.
-- **Only 67 distinct tools are ever accepted anywhere in the corpus**, out of 206
-  funnel-indexable ones. **Roughly 139 tools have zero generalization coverage** —
-  the harness cannot regress what it never grades.
+- **Only 67 distinct tools are ever accepted anywhere in the corpus**, out of the
+  211 the funnel indexes. **144 tools have zero generalization coverage** — the
+  harness cannot regress what it never grades. Its accept-lists also still name
+  `sfi.cdc_subscribers` and `sfi.find_apex_usages`, two tools now hidden from
+  `tools/list`.
 - **Both recall harnesses stop at `semanticCandidates`** — the RAW funnel. The
   list a host actually receives is built by `buildFunnelCandidates`, which fuses
   the regex route, de-crowds what-if families, applies the mode rerank and breaks
@@ -561,21 +569,24 @@ The list people most often assume wrongly:
   derived (§6).
 - **The refusal gates can refuse a question the product has a tool for.** They run on
   the raw string BEFORE any matching, so they cannot know a tool exists. Reproduced:
-  `read this debug log and tell me which class ran` — the funnel ranks
-  `sfi.explain_debug_log` at **0.433**, far above the 0.26 floor, while
-  `detectRefusalShape` classifies the same string `runtime-analytics` and the route
-  returns `tools: []`, with the tool it just refused listed under "Nearest reads".
-- **12 of the product's own 2,006 funnel utterances are gated by its own refusal
-  detectors** (10 `write-imperative`, 1 `out-of-scope`, 1 `runtime-analytics`). These are
-  the phrasings the corpus teaches the funnel to expect, so a user who asks exactly the
-  way the product advertises is refused. Among them:
-  `sfi.explain_debug_log` — "read this debug log and tell me which class ran";
+  `build me a timeline from this Apex debug log` — the funnel ranks
+  `sfi.trace_debug_log` at **0.503**, far above the 0.26 floor, while
+  `detectRefusalShape` classifies the same string `write-imperative` and the route
+  returns `tools: []`. The verb, not the subject, is what the gate reads.
+- **12 of the product's own 2,138 funnel utterances are gated by its own refusal
+  detectors** (11 `write-imperative`, 1 `out-of-scope`). These are the phrasings the
+  corpus teaches the funnel to expect, so a user who asks exactly the way the product
+  advertises is refused. Among them:
+  `sfi.trace_debug_log` — "build me a timeline from this Apex debug log";
   `sfi.what_if_merge_profiles` — "merge <A> into <B> — what are the collisions?" (a
   SIMULATION question, which is the read-only alternative the write gate exists to
   offer); `sfi.automation_collisions` — "is anything overwriting the field my flow just
   set?"; `sfi.export_manifest` — "create a package.xml with all custom components".
   Reproduce with `detectRefusalShape` over `FUNNEL_UTTERANCES`. **A new tool's utterances
-  should be run through the refusal gates as part of adding them.**
+  should be run through the refusal gates as part of adding them.** The `runtime-analytics`
+  arm no longer fires on a PASTED log — "read this debug log and tell me which class ran"
+  routes — while a RETRIEVAL phrasing ("pull the debug log from yesterday's batch run")
+  is still refused, correctly: nothing here fetches a log from an org.
 - **It cannot rescue a tool that answers wrongly.** Perfect routing to a tool
   that reports "clean" because it never scanned anything still produces a wrong
   answer. Routing quality and answer quality are independent axes, and only one

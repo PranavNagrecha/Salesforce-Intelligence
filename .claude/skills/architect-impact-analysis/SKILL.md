@@ -154,24 +154,32 @@ top matches for them to disambiguate.
 ### Step 2 — Confirm the target exists (ALWAYS)
 
 Do not skip this step, even when you derived the ID by translation in
-Step 1. `sfi.get_impact` returns an empty impact set for an id that is
-not in the vault at all, and that is **byte-identical** to a real
-"nothing depends on this" — the disclosure says "Complete impact slice
-… 0 node(s) / 0 edge(s)" either way. A typo in the api name therefore
-reads as a clean bill of health, which is the single most dangerous way
-this tool can be wrong.
+Step 1. `sfi.get_impact` now fails closed on an id it cannot place: an
+id matched by no node AND no referring edge returns
+`error.kind: 'component-not-found'` naming the id, rather than the
+empty slice it used to return — that empty slice was byte-identical to
+a real "nothing depends on this", so a typo read as a clean bill of
+health. Do not narrate a `component-not-found` as "nothing depends on
+this"; it means the walk never happened. Re-check the type prefix and
+spelling (`sfi.resolve` disambiguates a bare name).
 
-Confirm the id resolves first — `sfi.resolve`, or
-`sfi.get_component` with `maxBodyBytes: 0` (the cheap existence probe).
+Resolving first is still the cheaper path — `sfi.resolve`, or
+`sfi.get_component` with `maxBodyBytes: 0` (the existence probe) —
+because it also catches the id that resolves to the WRONG component.
 Only report "no dependents" for an id that came back as a real
 component.
 
-The same ambiguity has a second face: an id that IS referenced by other
-metadata but was never retrieved itself (a **phantom** — typically a
-standard or managed-package component). There, `impact.nodes` comes
-back non-empty while `impact.edges` is empty, and the root is missing
-from its own node list. Check for the root in `impact.nodes` before
-narrating the slice.
+The ambiguity the error does not cover is the **phantom**: an id that
+IS referenced by other metadata but was never retrieved itself
+(typically a standard or managed-package component). It has referring
+edges, so the walk runs — `impact.nodes` comes back non-empty while
+`impact.edges` is empty, and the root is missing from its own node
+list. The tool does disclose this now: `truncated` is `true`, the
+disclosure says PARTIAL, names the phantom root, counts the collected
+edges it dropped, and points at `sfi.find_component_usages` on the same
+id (which reads the edge table without a node join). Check for the root
+in `impact.nodes` before narrating the slice, and follow the disclosure
+rather than reporting the thin slice as the answer.
 
 If you ran `sfi.search_components` in Step 1, the top match (highest
 `score`) is usually right. Cite it explicitly to the user before
@@ -228,11 +236,15 @@ It is NOT a guarantee. A **phantom** root — an id other metadata
 references but the refresh never retrieved — has no node row, so it is
 absent from its own `impact.nodes`. Measured on a real vault: an impact
 walk on a phantom standard object returned 14 nodes and 0 edges, none of
-the 14 being the root, under the words "Complete impact slice". Those 14
-were its access-granting containers, connected to nothing. Before you
-narrate a slice, check that `impact.nodes` actually contains the id you
-asked about; if it does not, say the component itself is not in the
-vault rather than describing the leftovers as its dependents.
+the 14 being the root. Those 14 were its access-granting containers,
+connected to nothing. The tool no longer calls that slice complete —
+`truncated` is `true`, the disclosure reports it as PARTIAL, names the
+phantom root, counts the collected edges it dropped for a missing
+endpoint, and points at `sfi.find_component_usages` — but the check is
+still yours to make. Before you narrate a slice, confirm
+`impact.nodes` actually contains the id you asked about; if it does
+not, say the component itself is not in the vault rather than
+describing the leftovers as its dependents.
 
 **R6-19 — `diagram`.** When the (already-capped) impact slice has
 30 or fewer nodes, the response ALSO carries `diagram`: a

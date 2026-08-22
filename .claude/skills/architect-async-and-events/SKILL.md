@@ -105,9 +105,12 @@ overtaken by shipped work — do not repeat them):
 **There is no `isCdcEnabled` property.** Nothing in `packages/*/src`
 writes it — no extractor, no enricher, no graph-build step. The
 producer-side question ("is this object enabled for CDC?") is answered
-from `cdc_subscribers`' `channelMembers[]`, whose entries carry
-`selectedEntity` (the object bound onto the channel), `channelId`,
-`channelType`, and the declared `filterExpression`. Do not call
+by `sfi.event_topology`: `cdcEntities[]` lists the entities a
+`PlatformEventChannelMember` SELECTS (that selection IS the enablement
+declaration), each carrying the channel it is bound onto and the
+declared `filterExpression`. An empty `cdcEntities` quotes the manifest
+coverage row, so it reads as a CHECKED zero or as NOT CHECKED — never
+as a bare "no CDC". Do not call
 `sfi.get_component` on a CustomObject and read `properties.isCdcEnabled`
 — it will be `undefined` for every object in every vault, and an
 `undefined` read as "not CDC-enabled" is a fabricated negative.
@@ -141,13 +144,19 @@ Fire this skill on async / event / scheduled-job / outbound-message
 
 - **"Who subscribes to CDC events on `Account`?"** /
   **"What's the CDC topology for `Account`?"** —
-  Use `sfi.cdc_subscribers` with
-  `sObjectFilter: 'Account'`.
+  Use `sfi.event_topology` with
+  `{ "objectApiName": "Account" }`.
 - **"What change-data-capture subscribers do we have?"** /
-  **"Audit our CDC subscribers."** — Use `sfi.cdc_subscribers`
-  with no filter.
-- **"Who listens to `AccountChangeEvent`?"** — Same; v2.8
-  recognizes the event-name pattern.
+  **"Audit our CDC subscribers."** — Use `sfi.event_topology`
+  with `{ "filter": "cdc" }`.
+- **"Who listens to `AccountChangeEvent`?"** — Same; the
+  event-name pattern is recognized.
+
+`sfi.cdc_subscribers` is a retired back-compat alias. It is not
+advertised under the default `core` profile and is not directly
+invokable there — reach it, if you must, through
+`sfi.run_analysis { name: 'sfi.cdc_subscribers' }`. Prefer
+`sfi.event_topology`.
 
 ### Async chain depth shape
 
@@ -282,20 +291,22 @@ name pattern and aggregates their incoming `listensTo` edges.
 Subscribers are restricted to ApexTrigger, ApexClass, Flow — the
 three v1.5 R3 `listensTo` producers.
 
-Fire this when the user asks about CDC topology. Surface the
-verbatim disclosure: CDC subscription detection here recognizes
-by NAME PATTERN only. Programmatic `EventBus.subscribe(...)`
-registration is INVISIBLE.
+Do not fire this by choice — `sfi.event_topology` returns the same
+CDC facts alongside the platform-event half. It survives only for
+callers that already name it. The disclosure it carries applies to
+both: CDC subscription detection recognizes by NAME PATTERN only, and
+programmatic `EventBus.subscribe(...)` registration is INVISIBLE.
 
 There is **no** `properties.isCdcEnabled` flag on CustomObject — the
 signal has zero producers in the codebase, so reading it returns
 `undefined` for every object. The producer-side question ("is this
-object bound onto a change-event channel?") is answered by the SAME
-tool: `cdc_subscribers` returns `channelMembers[]`, and a member whose
-`selectedEntity` is the object IS the declared CDC binding, with its
-`channelId` / `channelType` / `filterExpression`. An empty
-`channelMembers[]` means no `*.platformEventChannelMember-meta.xml`
-bound the object in the retrieved metadata — not proof CDC is off.
+object bound onto a change-event channel?") belongs to
+`sfi.event_topology`'s `cdcEntities[]`. This alias returns the same
+binding as `channelMembers[]`, where a member whose `selectedEntity` is
+the object IS the declared CDC binding, with its `channelId` /
+`channelType` / `filterExpression`. An empty `channelMembers[]` means no
+`*.platformEventChannelMember-meta.xml` bound the object in the
+retrieved metadata — not proof CDC is off.
 
 ### 2. `sfi.async_chain_depth` — transitive `dispatchesAsync` walk
 
@@ -639,7 +650,7 @@ non-persistence notes.
 | Reading `properties.isCdcEnabled`, `parsedCron`, `rawCronExpression`, or `maxDepthObserved`. | None of these exist — zero producers in `packages/*/src`. A read returns `undefined`, and `undefined` narrated as "not enabled" / "no schedule" / "depth 0" is a fabricated negative finding. The real keys are `channelMembers[].selectedEntity` (CDC binding), `cronExpressions[]` / `cronExpression` (both always empty), and `maxDepth`. |
 | Calling `sfi.endpoint_catalog` when the user asked "draw me the integration topology". | The endpoint catalog is the URL-axis composite; the integration map is the topology composite. Defer to `architect-integration-topology` for the topology question. |
 | Surfacing an `outbound_message_catalog` endpoint URL as "this URL is reachable". | v2.8 does NOT probe. The URL is captured verbatim; verify reachability separately. State the v2.8 disclaimer. |
-| Confusing CDC events with Platform Events. | They're separate axes. Platform Events: `__e` suffix, `sfi.event_subscribers` (v1.5). CDC events: `{Object}ChangeEvent` / `*__ChangeEvent` pattern, `sfi.cdc_subscribers` (v2.8). Different name shapes, different tools. |
+| Confusing CDC events with Platform Events. | They're separate axes — `__e` suffix versus the `{Object}ChangeEvent` / `*__ChangeEvent` pattern — and `sfi.event_topology` is the front door for both, reporting each half separately. `sfi.event_subscribers` is the single-event detail view for a Platform Event; it covers neither CDC nor referenced-but-not-retrieved events. |
 | Treating the `chainAsync` non-persistence as a bug. | It's a deliberate scope decision. The transitive edge would explode the graph size for queries that don't need it; `sfi.async_chain_depth` composes it at query time. State this when explaining why the chain doesn't appear in `sfi.get_edges` results. |
 | Treating `confidence: heuristic` on an async edge (typically `@future` dispatch) as authoritative. | The v0.3 Apex scanner heuristically tags `@future` callers because the dispatch mechanism is a method-level annotation rather than a `System.X(...)` call. Cite confidence and recommend verification. |
 | Skipping the URL-not-validated boundary on an endpoint-catalog response. | The disclosure is the architect's protection against treating a catalog URL as a confirmed integration. ALWAYS surface, even when the catalog is short. |

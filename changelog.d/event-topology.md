@@ -54,8 +54,8 @@
   enablement and code-subscriber facts are returned by `sfi.event_topology`
   alongside the platform-event half. The handler stays dispatchable by name and
   through `sfi.run_analysis`; it no longer occupies a schema slot on
-  `tools/list`, so the advertised roster is **net-flat at 207** rather than
-  growing for a consolidation.
+  `tools/list`, so the advertised roster is **net-flat across this
+  consolidation** rather than growing for it.
 
 - **`sfi.event_subscribers` narrowed to the single-event detail view.** Its
   org-wide catalog phrasings moved to `sfi.event_topology`; the catalog mode

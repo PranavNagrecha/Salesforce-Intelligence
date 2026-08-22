@@ -155,6 +155,7 @@ A few cues to break ties:
 |---|---|---|
 | **Schema (broad)** | `sfi.list_components` (filter by `type`) | `sfi.search_components` for fuzzy lookup |
 | **Schema (specific)** | `sfi.get_component` (by canonical ID) | `sfi.search_components` if the ID is wrong |
+| **Whole-object profile ("everything about `Contact`", "what is attached to this object", "what points at it")** | `sfi.object_360` (by `objectApiName`) — twelve sections covering what the object owns, what points at it, who can touch it, and when its metadata last changed. It ANALYSES and never adjudicates: `summary.verdict` is `null` by construction, so never read its counts as a "safe/unsafe to delete" answer | `sfi.get_impact` on `CustomObject:{Name}` for the edge-walked dependency slice |
 | **Dependency** | `sfi.get_edges` (one hop, with `direction`) | `sfi.get_subgraph` (up to 3 hops) |
 | **Permission** | `sfi.search_components` to find the permset/profile, then `sfi.get_edges` for `grantedBy` | `sfi.get_component` on the permset/profile for the full body |
 | **Naming / convention** | `sfi.get_naming_convention_report` (with `scope`) | none — if the report is empty, say so |
