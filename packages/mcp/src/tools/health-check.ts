@@ -481,6 +481,16 @@ export const healthCheckHandler = async (
     issues.push(profileGrantIntegrity.reason);
   }
 
+  // DUPLICATE-SOURCE detect+disclose (trust-critical): the vault's `source/`
+  // tree holds two copies of the same retrieval target, so some components were
+  // assembled from two different retrievals. The vault must NOT report healthy
+  // while that is true — a permission revoked in one copy and still present in
+  // the other is exactly the answer this product must never give confidently.
+  const duplicateSourcePaths = ctx.manifest.duplicateSourcePaths;
+  if (duplicateSourcePaths !== undefined && duplicateSourcePaths.components > 0) {
+    issues.push(duplicateSourcePaths.disclosure);
+  }
+
   // P13-STAGED-tiers: a staged refresh is mid-build. Degraded with explicit
   // tier progress, so consumers qualify every answer until the final tier
   // clears the marker.

@@ -37,6 +37,7 @@ import {
   computeChangeSet,
   copyFacts,
   type CoverageStatus,
+  type DuplicateSourceSummary,
   getNodeById,
   type GraphError,
   importExtractionResults,
@@ -230,6 +231,14 @@ export interface RefreshResult {
    * map is non-empty.
    */
   readonly skippedDirectories: Readonly<Record<string, number>>;
+  /**
+   * DUPLICATE-SOURCE detect+disclose: present only when this refresh found the
+   * same component at more than one path under `source/`. The CLI summary emits
+   * a warning block naming the duplicated roots; a CONFLICTING duplicate also
+   * forces `status: 'partial'`, because a component assembled from two
+   * retrievals cannot be answered about with confidence.
+   */
+  readonly duplicateSourcePaths?: DuplicateSourceSummary;
   /**
    * Plain-language diff of this refresh against the previous manifest —
    * what the org gained, lost, or (when the source tree is identical) that
@@ -2234,6 +2243,12 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     coverage,
     coverageComputedAt,
     skippedDirectories: walked.skippedDirectories,
+    // DUPLICATE-SOURCE detect+disclose: emitted only when the walk found the
+    // same component under more than one source root. Its absence means the
+    // vault has ONE source layout, which is the normal, trustworthy case.
+    ...(walked.duplicateSourcePaths !== undefined
+      ? { duplicateSourcePaths: walked.duplicateSourcePaths }
+      : {}),
     ...(opts.stagedMarker !== undefined ? { staged: opts.stagedMarker } : {}),
     ...(args.apexAstStats !== undefined ? { apexAst: args.apexAstStats } : {}),
     ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
@@ -2471,15 +2486,23 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     // attempted and did not deliver, so Report/Dashboard coverage is unproven.
     // (`sfi refresh` exits non-zero on non-success, which is the point — the
     // shipped defect was a clean exit over a pull that had errored.)
+    // A CONFLICTING duplicate source path forces `partial` for the same reason
+    // as a profile-grant disclosure: the vault built, but some components were
+    // assembled from two different retrievals of the same metadata, so their
+    // permissions/properties are unresolved until the stale tree is removed.
     status:
       walked.failures.length === 0 &&
       args.retrieveFailures.length === 0 &&
       profileGrantDisclosure === null &&
+      (walked.duplicateSourcePaths?.conflicting ?? 0) === 0 &&
       args.reportPull === undefined
         ? 'success'
         : 'partial',
     counts,
     skippedDirectories: walked.skippedDirectories,
+    ...(walked.duplicateSourcePaths !== undefined
+      ? { duplicateSourcePaths: walked.duplicateSourcePaths }
+      : {}),
     errors: walked.failures,
     durationMs: Date.now() - started,
     ...(args.retrieveFailures.length > 0 ? { retrieveFailures: args.retrieveFailures } : {}),
@@ -4995,6 +5018,19 @@ export const formatRefreshSummary = (result: RefreshResult): string => {
       `  ${result.reportPull.mode} pull ${result.reportPull.outcome} at ${result.reportPull.attemptedAt}: ${result.reportPull.error}`,
       '  Report/Dashboard coverage rows are marked errored + pending, and this run is recorded on the manifest as `reportPull`.',
       '  A "0 reports" answer from this vault means NOT CHECKED, not none. Re-run `sfi refresh` (or `--with-reports`) to prove coverage.',
+    );
+  }
+  if (result.duplicateSourcePaths !== undefined) {
+    const dup = result.duplicateSourcePaths;
+    lines.push(
+      '',
+      'WARNING — this vault holds the same components under more than one source root.',
+      `  Roots: ${dup.paths.join(', ')}`,
+      `  ${dup.components} component(s) present at more than one path; ${dup.conflicting} with DIFFERING content.`,
+      '  Copies were NOT merged — the Salesforce DX `main/default` copy was used where the layout could order them',
+      `  (${dup.undeterminedPrecedence} conflict(s) could not be ordered and were resolved lexicographically for reproducibility only).`,
+      '  The vault records no per-path retrieval time, so which tree is NEWER cannot be determined from the vault itself.',
+      '  Delete the stale tree and re-run `sfi refresh` before trusting permission or property answers for the affected components.',
     );
   }
   const skippedWarning = formatSkippedWarning(result.skippedDirectories);

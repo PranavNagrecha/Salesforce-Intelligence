@@ -102,6 +102,38 @@ export interface ExtendedVaultManifest extends VaultManifest {
     readonly priorGrantedByEdges: number | null;
   };
   /**
+   * DUPLICATE-SOURCE detect+disclose (trust-critical): present only when the
+   * last refresh found the SAME component at more than one path under
+   * `source/` — i.e. the vault holds two copies of the same retrieval target
+   * (typically a legacy flat tree left behind beside the Salesforce DX
+   * `main/default` tree). Before this disclosure existed, the importer silently
+   * assembled such components from both copies (nodes last-writer-wins, edges
+   * UNIONED), so a permission revoked in the newer retrieval could still read
+   * as granted. The importer now keeps ONE copy per component and flags every
+   * component whose copies disagreed; this roll-up names the duplicated layout
+   * roots and the counts. Consumers: `sfi.health_check` reports `degraded`
+   * with `disclosure`, and `sfi.get_manifest` surfaces the field. A vault with
+   * a single source layout has NO such field.
+   *
+   * The shape mirrors `DuplicateSourceSummary` in `@sf-intelligence/graph`;
+   * it is restated structurally here because the vault package must not depend
+   * on the graph package.
+   */
+  readonly duplicateSourcePaths?: {
+    /** Components found at more than one source path. */
+    readonly components: number;
+    /** Of those, how many had DIFFERING content between the copies. */
+    readonly conflicting: number;
+    /** Of the conflicting ones, how many could not be ordered by the DX rule. */
+    readonly undeterminedPrecedence: number;
+    /** The duplicated layout roots, e.g. `source/` and `source/main/default/`. */
+    readonly paths: readonly string[];
+    /** Conflicting-component counts per `ComponentType`. */
+    readonly byType: Readonly<Record<string, number>>;
+    /** Reader-facing statement of what the vault is and what to do about it. */
+    readonly disclosure: string;
+  };
+  /**
    * P15-PHANTOM-manifest-summary: refresh-time roll-up of dangling edge
    * targets by phantom taxonomy bucket (ADR-004 — counts only, no stub nodes).
    */

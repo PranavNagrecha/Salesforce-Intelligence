@@ -7,7 +7,12 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 
+import {
+  type DuplicateSourceSummary,
+  resolveDuplicateSourcePaths,
+} from './duplicate-source.js';
 import { mintRelationshipTraversalEdges } from './relationship-refs.js';
+import { relativizeSourcePath } from './relativize.js';
 import type { GraphError, GraphStore } from './store.js';
 
 /**
@@ -24,6 +29,13 @@ import type { GraphError, GraphStore } from './store.js';
 export interface ImportCounts {
   readonly nodesInserted: number;
   readonly edgesInserted: number;
+  /**
+   * Present ONLY when this import found the same component at more than one
+   * source path (see `./duplicate-source.ts`). Absent on a normal vault. The
+   * refresh copies it onto the manifest so `health_check` and `get_manifest`
+   * can disclose that some components were assembled from two retrievals.
+   */
+  readonly duplicateSourcePaths?: DuplicateSourceSummary;
 }
 
 /**
@@ -170,30 +182,12 @@ const canonicalJson = (value: unknown): string => {
 };
 
 /**
- * Normalize a node's `sourcePath` to a vault-relative, separator-portable
- * form so the persisted graph never leaks an absolute local path (which
- * carries the user's username + filesystem layout — a privacy + portability
- * problem, and noise in committed/shared artifacts).
- *
- * Strategy: keep the path from the vault root (`org-kb/`) onward; if that
- * marker is absent, fall back to the Salesforce DX `source/` root; if neither
- * is present (e.g. an already-relative test path) the value is returned
- * unchanged. Backslashes are normalized to `/` so vaults built on Windows and
- * POSIX produce identical ids/paths.
- *
- * @example
- *   relativizeSourcePath('/home/dev/proj/org-kb/source/main/default/classes/X.cls')
- *   // => 'source/main/default/classes/X.cls'
+ * Re-exported from `./relativize.js`, which now owns the implementation so the
+ * duplicate-source detector can normalize paths identically without creating an
+ * import cycle with this module. Kept exported here because callers and tests
+ * import it from `import.ts`.
  */
-export const relativizeSourcePath = (p: string): string => {
-  if (p.length === 0) return p;
-  const norm = p.replace(/\\/g, '/');
-  const orgKb = norm.lastIndexOf('/org-kb/');
-  if (orgKb !== -1) return norm.slice(orgKb + '/org-kb/'.length);
-  const src = norm.lastIndexOf('/source/');
-  if (src !== -1) return norm.slice(src + 1);
-  return norm;
-};
+export { relativizeSourcePath };
 
 /**
  * Build the 10-column parameter tuple for a node's `nodes` row, in the exact
@@ -916,9 +910,24 @@ export const importExtractionResults = async (
 ): Promise<Result<ImportCounts, GraphError>> => {
   const { connection } = store;
 
+  // TRUST GATE — must run BEFORE anything flattens the results. A vault whose
+  // `source/` tree holds two copies of the same retrieval (a legacy flat tree
+  // beside the DX `main/default` tree) would otherwise be assembled silently:
+  // nodes by `INSERT OR REPLACE` (whichever copy the walk reached LAST wins —
+  // alphabetically that is the OLD flat tree) and edges by `INSERT OR IGNORE`
+  // (a UNION, so a grant present in EITHER copy survives). Both produce a
+  // component that existed in neither retrieval; the union in particular turns
+  // a revoked permission back into a granted one. Resolving here — the one
+  // choke point every import path passes through — means no caller can skip it.
+  // Idempotent: on an already-resolved set it finds nothing and returns the
+  // same array reference. See `./duplicate-source.ts` for the precedence rule
+  // and why "newest wins" is not implementable from what a vault records.
+  const resolved = resolveDuplicateSourcePaths(results);
+  const duplicateSourcePaths = resolved.summary;
+
   const allNodes: Node[] = [];
   const allEdges: Edge[] = [];
-  for (const result of results) {
+  for (const result of resolved.results) {
     for (const node of result.nodes) allNodes.push(node);
     for (const edge of result.edges) allEdges.push(edge);
   }
@@ -991,5 +1000,6 @@ export const importExtractionResults = async (
   return ok({
     nodesInserted: nodeOutcome.rowsChanged,
     edgesInserted: edgeOutcome.rowsChanged,
+    ...(duplicateSourcePaths !== null ? { duplicateSourcePaths } : {}),
   });
 };
