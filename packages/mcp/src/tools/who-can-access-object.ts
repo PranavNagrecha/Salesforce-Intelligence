@@ -62,7 +62,12 @@ import type { Context } from '../server.js';
 
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
 import { expandGroupMembers } from './group-membership.js';
-import { mergeInputAliases, toCustomObjectId } from './input-aliases.js';
+import {
+  canonicalizeObjectScope,
+  mergeInputAliases,
+  toCustomObjectId,
+  toObjectApiName,
+} from './input-aliases.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 import {
@@ -277,8 +282,18 @@ export const whoCanAccessObjectHandler = async (
       path: 'componentId',
     });
   }
-  const componentId = input.componentId as ComponentId;
-  const objectApiName = componentId.slice(CUSTOM_OBJECT_PREFIX.length);
+  // Case-INSENSITIVE resolution through the ONE shared canonicalizer: api names
+  // are case-insensitive on the platform, so `CustomObject:contact` names the
+  // same object as `CustomObject:Contact`. The id used and echoed below is the
+  // VAULT's exact casing; a case-only ambiguity is a named `invalid-query`; an
+  // unknown name is left alone for the `component-not-found` just below.
+  const canonical = await canonicalizeObjectScope(ctx.graph, {
+    componentId: input.componentId,
+    object: toObjectApiName(input.componentId),
+  });
+  if (!canonical.ok) return err(canonical.error);
+  const componentId = canonical.value.componentId as ComponentId;
+  const objectApiName = canonical.value.object;
 
   const objectResult = await getNodeById(ctx.graph, componentId);
   if (!objectResult.ok) {

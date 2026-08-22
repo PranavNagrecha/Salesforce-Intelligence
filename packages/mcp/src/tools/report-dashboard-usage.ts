@@ -45,7 +45,8 @@
  * (back-compat).
  */
 
-import type { Node } from '@sf-intelligence/contracts';
+import type { Node, VaultManifest } from '@sf-intelligence/contracts';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 
 export interface ReportDashboardUsage {
   readonly usedInReport: boolean;
@@ -108,6 +109,124 @@ export const reportDashboardUsageDetail = (node: Node): ReportDashboardUsageDeta
 };
 
 /**
+ * The analytics families whose retrieve coverage decides whether an ABSENT
+ * folded stamp is a CHECKED `false` or an UNCHECKED `null`.
+ */
+export const ANALYTICS_COVERAGE_TYPES: readonly string[] = ['Report', 'Dashboard'];
+
+/**
+ * True when BOTH analytics families were fully retrieved into this vault — the
+ * only condition under which "this field carries no folded usage stamp" is a
+ * statement about the org rather than about the vault.
+ *
+ * ONE definition: `field_360` and `field_lineage` each wrote
+ * `summarizeCoverage(ctx.manifest, ['Report','Dashboard']).status === 'complete'`
+ * inline, and `safe_to_delete_field` needed a third copy.
+ */
+export const analyticsFamiliesRetrieved = (manifest: VaultManifest): boolean =>
+  summarizeCoverage(manifest, ANALYTICS_COVERAGE_TYPES).status === 'complete';
+
+/**
+ * The folded report/dashboard signal rendered so that EVERY value in it is
+ * readable as CHECKED or UNCHECKED.
+ *
+ * WHY THIS SHAPE EXISTS. `reportDashboardUsageDetail` answers with plain
+ * booleans and plain arrays, and on a vault holding zero reports that produced
+ *
+ *     { usedInReport: true, reportNames: [], usedInDashboard: false, dashboardNames: [] }
+ *
+ * in which THREE of the four values are unreadable. `true` was asserted from a
+ * legacy node stamp with nothing behind it; `reportNames: []` says "zero
+ * reports" when it means "names not captured"; and `usedInDashboard: false` was
+ * never checked at all, because the Dashboard family was never retrieved. A
+ * `true` with an empty evidence list is the same defect as a `0` with no
+ * coverage caveat, pointing the other way.
+ *
+ *   - `usedInReport` / `usedInDashboard`: `true` when the fold stamped it;
+ *     `false` ONLY when the families were retrieved and no stamp exists (a
+ *     checked absence); `null` when they were not retrieved (unchecked).
+ *   - `reportNames` / `dashboardNames`: the capped, sorted name list; `[]` only
+ *     beside a CHECKED `false` (retrieved, none reference the field); `null`
+ *     whenever the flag is `true` or `null` but no names are in the vault.
+ *   - `evidenceNote`: always present, and states which of those cases applies.
+ */
+export interface ReportDashboardEvidence {
+  /** `true` stamped, `false` retrieved-and-absent, `null` NOT CHECKED. */
+  readonly usedInReport: boolean | null;
+  /** `true` stamped, `false` retrieved-and-absent, `null` NOT CHECKED. */
+  readonly usedInDashboard: boolean | null;
+  /** Capped names; `null` = names not in this vault, NEVER "zero reports". */
+  readonly reportNames: readonly string[] | null;
+  /** True total when `reportNames` was truncated by the fold-time cap; absent otherwise. */
+  readonly reportsTruncatedTotal?: number;
+  /** Capped names; `null` = names not in this vault, NEVER "zero dashboards". */
+  readonly dashboardNames: readonly string[] | null;
+  /** True total when `dashboardNames` was truncated by the fold-time cap; absent otherwise. */
+  readonly dashboardsTruncatedTotal?: number;
+  /** Verbatim sentence saying what was checked, what was not, and how to close the gap. */
+  readonly evidenceNote: string;
+}
+
+/** Verbatim clause: the families were retrieved, so an absent stamp is a real `false`. */
+const EVIDENCE_FLAGS_CHECKED =
+  'The Report and Dashboard families WERE retrieved into this vault, so `false` here means "retrieved, and nothing references this field".';
+
+/** Verbatim clause: the families were never retrieved, so an absent stamp proves nothing. */
+const EVIDENCE_FLAGS_UNCHECKED =
+  'The Report and Dashboard families were NOT retrieved into this vault, so a family with no folded stamp is reported `null` (NOT CHECKED) rather than `false` — run `sfi refresh --with-reports` to check it.';
+
+/** Verbatim clause: the boolean is stamped but the fold captured no names. */
+const EVIDENCE_NAMES_UNAVAILABLE =
+  'WHICH report(s)/dashboard(s) is not in this vault: the fold stamped the boolean only, so the name list is `null` — "names not captured", NEVER "zero reports". Re-run `sfi refresh --no-pull` to repopulate the names, then re-run this tool to see what would break.';
+
+/**
+ * Build the checked/unchecked view of the folded analytics signal for one
+ * CustomField node. `analyticsRetrieved` comes from
+ * {@link analyticsFamiliesRetrieved}.
+ */
+export const reportDashboardEvidence = (
+  node: Node,
+  analyticsRetrieved: boolean,
+): ReportDashboardEvidence => {
+  const detail = reportDashboardUsageDetail(node);
+  const flag = (stamped: boolean): boolean | null =>
+    stamped ? true : analyticsRetrieved ? false : null;
+  const usedInReport = flag(detail.usedInReport);
+  const usedInDashboard = flag(detail.usedInDashboard);
+  const names = (
+    used: boolean | null,
+    list: readonly string[],
+  ): readonly string[] | null => {
+    // A CHECKED `false` has a genuinely empty evidence list.
+    if (used === false) return [];
+    // Stamped or unchecked with nothing captured: absent, not zero.
+    return list.length > 0 ? list : null;
+  };
+  const reportNames = names(usedInReport, detail.reportNames);
+  const dashboardNames = names(usedInDashboard, detail.dashboardNames);
+  const namesUnavailable =
+    (usedInReport === true && reportNames === null) ||
+    (usedInDashboard === true && dashboardNames === null);
+  const evidenceNote = [
+    analyticsRetrieved ? EVIDENCE_FLAGS_CHECKED : EVIDENCE_FLAGS_UNCHECKED,
+    ...(namesUnavailable ? [EVIDENCE_NAMES_UNAVAILABLE] : []),
+  ].join(' ');
+  return {
+    usedInReport,
+    usedInDashboard,
+    reportNames,
+    ...(detail.reportsTruncatedTotal !== undefined
+      ? { reportsTruncatedTotal: detail.reportsTruncatedTotal }
+      : {}),
+    dashboardNames,
+    ...(detail.dashboardsTruncatedTotal !== undefined
+      ? { dashboardsTruncatedTotal: detail.dashboardsTruncatedTotal }
+      : {}),
+    evidenceNote,
+  };
+};
+
+/**
  * True when the field is used by at least one report column / filter or a
  * dashboard component (per the folded `--with-reports` signal).
  */
@@ -135,6 +254,23 @@ export const formatNamedUsageClause = (
 };
 
 /**
+ * What {@link formatReportDashboardBreakEvidence} needs: the widened shape that
+ * BOTH `ReportDashboardUsageDetail` (booleans + arrays) and
+ * {@link ReportDashboardEvidence} (`boolean | null` + `string[] | null`) satisfy,
+ * so one formatter serves both without a second copy. Only a literal `true`
+ * counts as usage here — `null` is "not checked" and must never render as
+ * "would break".
+ */
+export interface ReportDashboardBreakSource {
+  readonly usedInReport: boolean | null;
+  readonly usedInDashboard: boolean | null;
+  readonly reportNames: readonly string[] | null;
+  readonly reportsTruncatedTotal?: number;
+  readonly dashboardNames: readonly string[] | null;
+  readonly dashboardsTruncatedTotal?: number;
+}
+
+/**
  * R6-24-WIRE / Finding #36: evidence lines for delete-proposal XML comments
  * that NAME the reports/dashboards a field deletion would break — not just
  * the folded boolean. Returns `[]` when the field has no folded usage.
@@ -143,29 +279,30 @@ export const formatNamedUsageClause = (
  * - Boolean only (pre-#36 vault) → discloses that names need a re-refresh.
  */
 export const formatReportDashboardBreakEvidence = (
-  detail: ReportDashboardUsageDetail,
+  detail: ReportDashboardBreakSource,
   opts?: { readonly fieldId?: string },
 ): readonly string[] => {
-  if (!detail.usedInReport && !detail.usedInDashboard) return [];
+  if (detail.usedInReport !== true && detail.usedInDashboard !== true) return [];
   const where = [
-    detail.usedInReport
+    detail.usedInReport === true
       ? formatNamedUsageClause(
           'report(s)',
-          detail.reportNames,
+          detail.reportNames ?? [],
           detail.reportsTruncatedTotal,
         )
       : null,
-    detail.usedInDashboard
+    detail.usedInDashboard === true
       ? formatNamedUsageClause(
           'dashboard(s)',
-          detail.dashboardNames,
+          detail.dashboardNames ?? [],
           detail.dashboardsTruncatedTotal,
         )
       : null,
   ].filter((x): x is string => x !== null);
   const prefix = opts?.fieldId !== undefined ? `${opts.fieldId} — ` : '';
   const hasNames =
-    detail.reportNames.length > 0 || detail.dashboardNames.length > 0;
+    (detail.reportNames?.length ?? 0) > 0 ||
+    (detail.dashboardNames?.length ?? 0) > 0;
   if (!hasNames) {
     return [
       `${prefix}would break folded report/dashboard usage (boolean only — names not in vault; re-run \`sfi refresh\` / \`sfi refresh --with-reports\` to populate)`,

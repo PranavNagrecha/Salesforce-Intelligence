@@ -70,6 +70,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { canonicalizeObjectScope, toObjectApiName } from './input-aliases.js';
 import { expandPermissionSetGroup, findPermissionSetGroupsContaining } from './permission-set-group.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { clampedNodeScanLimit, scanHitCap } from './scan-cap.js';
@@ -388,7 +389,22 @@ export const objectAccessAuditHandler = async (
 ): Promise<Result<McpResponse<ObjectAccessAuditOutput>, McpError>> => {
   const targetResult = resolveTargetId(input);
   if (!targetResult.ok) return targetResult;
-  const targetId = targetResult.value;
+  let targetId = targetResult.value;
+
+  // OBJECT mode only: fold CASE against the vault through the ONE shared
+  // canonicalizer (api names are case-insensitive on the platform, so
+  // `CustomObject:contact` is `CustomObject:Contact`). The id used and echoed
+  // is the VAULT's exact casing; a case-only ambiguity refuses by name; an
+  // unknown name falls through to this tool's own `component-not-found`.
+  // PermissionSet mode is untouched — it is not an object scope.
+  if (targetId.startsWith(CUSTOM_OBJECT_PREFIX)) {
+    const canonical = await canonicalizeObjectScope(ctx.graph, {
+      componentId: targetId,
+      object: toObjectApiName(targetId),
+    });
+    if (!canonical.ok) return err(canonical.error);
+    targetId = canonical.value.componentId;
+  }
 
   if (targetId.startsWith(PERMISSION_SET_PREFIX)) {
     const componentId = targetId as ComponentId;

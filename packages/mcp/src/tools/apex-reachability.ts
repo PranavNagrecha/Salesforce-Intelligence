@@ -99,7 +99,18 @@ export type EntryPointKind =
  * Two tools agreeing on a wrong verdict is WORSE than two tools disagreeing:
  * disagreement is a signal a reader can act on, corroboration is one they trust.
  *
- * These two predicates are DECLARED facts about the class taken from node
+ * THE DOMINANT CASE, added later. The list above named the exotic shapes and
+ * missed the ordinary one: an ApexClass implementing `Schedulable`,
+ * `Database.Batchable` or `Queueable`. Measured org-wide, 16 of the 18 classes
+ * the dead-code scan reported were one of those, and the justification it
+ * printed for calling them dead — that such a class "must be enqueued /
+ * executed / scheduled by user Apex" — is simply not how the platform works.
+ * An admin scheduling a class through Setup > Schedule Apex creates a
+ * `CronTrigger` RECORD; `CronTrigger` is data, never metadata, so it is never
+ * retrieved and mints nothing. `System.enqueueJob` / `Database.executeBatch`
+ * run from anonymous Apex just as well. See {@link isAsyncDispatchRegistration}.
+ *
+ * These predicates are DECLARED facts about the class taken from node
  * properties — no cross-node scan, no extra query — so the same definition can
  * be evaluated in TypeScript here and in SQL inside `find_dead_code`'s CTE, and
  * a behavioural drift test pins the two to agree.
@@ -114,6 +125,12 @@ export type EntryPointKind =
 export const UNPROVEN_REGISTRATION_KINDS: readonly EntryPointKind[] = [
   'framework-subclass',
   'callable-dispatch',
+  // ASYNC-DISPATCH REGISTRATION IS ALSO UNPROVABLE OFFLINE. Added after 16 of
+  // 18 org-wide `likely_dead` classes turned out to be Schedulable or Batchable
+  // — see `isAsyncDispatchRegistration` for the platform reason.
+  'queueable',
+  'batchable',
+  'schedulable',
 ];
 
 /**
@@ -144,6 +161,53 @@ export const isCallableDispatch = (node: Node): boolean => {
   const impl = node.properties['implements'];
   return Array.isArray(impl) && impl.includes(CALLABLE_INTERFACE);
 };
+
+/**
+ * The node properties that mark an ASYNC-DISPATCH class — one implementing
+ * `Queueable`, `Database.Batchable` or `Schedulable`.
+ *
+ * Kept as a named list because `find_dead_code` evaluates the same three flags
+ * in SQL and a drift test runs both over one fixture.
+ */
+export const ASYNC_DISPATCH_PROPERTY_KEYS: readonly string[] = [
+  'isQueueable',
+  'isBatchable',
+  'isSchedulable',
+];
+
+/**
+ * True when the class implements `Queueable`, `Database.Batchable` or
+ * `Schedulable`.
+ *
+ * WHY THIS IS AN UNPROVEN REGISTRATION AND NOT A LIVENESS QUESTION. The
+ * dispatch that starts such a class does NOT have to exist in metadata:
+ *
+ *   - An admin who schedules a class through **Setup -> Schedule Apex** creates
+ *     a `CronTrigger` record. `CronTrigger` is DATA, not metadata — it is never
+ *     retrieved into the vault and mints no node and no edge — so a class
+ *     scheduled that way is indistinguishable, offline, from one nobody ever
+ *     scheduled. No refresh can close that gap.
+ *   - `System.enqueueJob` / `Database.executeBatch` / `System.schedule` run just
+ *     as well from ANONYMOUS Apex — the Developer Console, a deployment script,
+ *     a one-off remediation — which is never vaulted either.
+ *
+ * So "no dispatch site in this vault" is the EXPECTED reading for a live
+ * scheduled job, not evidence against it. Measured on the reference org: of 18
+ * classes the org-wide scan called `likely_dead`, 16 implement `Schedulable` or
+ * `Database.Batchable`.
+ */
+export const isAsyncDispatchRegistration = (node: Node): boolean =>
+  ASYNC_DISPATCH_PROPERTY_KEYS.some((k) => node.properties[k] === true);
+
+/**
+ * True when the class is registered somewhere no metadata edge can reach — a
+ * framework subclass, a `Callable` dispatch target, or an async-dispatch class.
+ * The ONE predicate `find_dead_code`'s SQL is pinned against.
+ */
+export const isUnprovenRegistration = (node: Node): boolean =>
+  isFrameworkSubclass(node) ||
+  isCallableDispatch(node) ||
+  isAsyncDispatchRegistration(node);
 
 /** Node types whose incoming `references` edge is a `controller=` binding. */
 const UI_CONTROLLER_SOURCE_PREFIXES: readonly string[] = [
@@ -219,12 +283,16 @@ export const isUnprovenRegistrationKind = (kind: EntryPointKind): boolean =>
  */
 export const UNPROVEN_REGISTRATION_DISCLOSURE =
   'A class that extends a base class from ANOTHER namespace (a managed package or platform ' +
-  'framework instantiates its own subclasses) or declares the Callable dynamic-invocation ' +
-  'interface is registered OUTSIDE Apex — in a string literal, a Custom Metadata record, or ' +
-  'managed-package code that mints no edge — so it has zero incoming edges by construction. ' +
-  'Both signals say the class is BUILT to be invoked from outside this vault; NEITHER proves ' +
-  'the registration is live. Treat it as "not dead", never as "proven reachable" — confirm the ' +
-  'registration in the org before relying on it.';
+  'framework instantiates its own subclasses), declares the Callable dynamic-invocation ' +
+  'interface, or implements Queueable / Database.Batchable / Schedulable is registered OUTSIDE ' +
+  'the metadata a vault holds: in a string literal, a Custom Metadata record, managed-package ' +
+  'code, anonymous Apex run from the Developer Console or a deployment script, or a CronTrigger ' +
+  'record written by Setup > Schedule Apex. CronTrigger is DATA, not metadata — it is never ' +
+  'retrieved, so no refresh can close that gap. None of those registrations mints an edge, so ' +
+  'such a class has zero incoming edges by construction. Every one of these signals says the ' +
+  'class is BUILT to be invoked from outside this vault; NONE of them proves the registration ' +
+  'is live. Treat it as "not dead", never as "proven reachable" — confirm the registration in ' +
+  'the org before relying on it.';
 
 /**
  * True when this incoming edge is a UI `controller=` binding — a

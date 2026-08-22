@@ -26,7 +26,7 @@
 
 import type { ComponentId, McpError } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
+import { getNodeById, searchNodes, type GraphStore } from '@sf-intelligence/graph';
 
 import { coercePrefix } from './coerce-id.js';
 
@@ -257,6 +257,145 @@ export const resolveObjectAlias = (
   return ok({ componentId, object: toObjectApiName(componentId) });
 };
 
+/** Canonical prefix for every object scope this module resolves. */
+const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
+
+/**
+ * Window for the case-variant probe — `searchNodes`'s own `SEARCH_MAX_LIMIT`,
+ * so this asks for as much as the query will give.
+ *
+ * `searchNodes` ranks exact then prefix matches first, so a case variant of the
+ * requested name sits inside this window on any realistic org; a miss falls
+ * through to the CALLER's `component-not-found` rather than to a silently
+ * different object. The probe is an indexed ILIKE and runs ONLY when the
+ * exactly-cased id already missed, so the cost is paid once, on the path that
+ * was about to fail anyway.
+ */
+const OBJECT_CASE_VARIANT_LIMIT = 100;
+
+/**
+ * Every `CustomObject:` id in the vault whose api name matches `apiName`
+ * IGNORING CASE.
+ *
+ * Salesforce api names are case-insensitive — `contact`, `Contact` and
+ * `CONTACT` name the same object in SOQL, in a formula and in the Setup UI — so
+ * a caller who types the lower-case form is not naming a different object.
+ * `object_360` proved this out first; the lookup lives here now so the whole
+ * object-scoped surface shares ONE definition instead of seven.
+ *
+ * The list is returned rather than a decision, because the two callers want
+ * different things from it: `object_360` re-runs its whole gather against the
+ * corrected id, while {@link canonicalizeObjectScope} only rewrites the id.
+ */
+export const objectIdCaseVariants = async (
+  graph: GraphStore,
+  apiName: string,
+): Promise<Result<readonly string[], McpError>> => {
+  const hits = await searchNodes(graph, apiName, {
+    types: ['CustomObject'],
+    limit: OBJECT_CASE_VARIANT_LIMIT,
+  });
+  if (!hits.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${hits.error.message}` });
+  }
+  const folded = apiName.toLowerCase();
+  return ok(
+    hits.value
+      .map((h) => h.id as string)
+      .filter((id) => id.slice(CUSTOM_OBJECT_PREFIX.length).toLowerCase() === folded)
+      .sort(),
+  );
+};
+
+/**
+ * OBJECT-CASE-AMBIGUITY — verbatim refusal when two vault nodes differ ONLY by
+ * case. Product copy; do not reword.
+ *
+ * Case-insensitive RESOLUTION must never become case-insensitive IDENTITY: two
+ * ids that fold to the same name are two components, and picking one silently
+ * is how a reader ends up holding an answer about the other.
+ */
+const objectCaseAmbiguityMessage = (
+  apiName: string,
+  ids: readonly string[],
+): string =>
+  `\`${apiName}\` matches ${ids.length} objects in this vault that differ only by CASE ` +
+  `(${ids.join(', ')}). Salesforce api names are case-insensitive, so nothing here can pick ` +
+  'between them — pass the exact `componentId` you mean. No scope was applied.';
+
+/** A resolved object scope plus the caller-supplied id it was corrected from. */
+export interface CanonicalObjectScope extends ResolvedObjectScope {
+  /**
+   * The id the CALLER passed, when the vault spells the same api name
+   * differently; `null` when no correction happened. The `componentId` above is
+   * always the vault's exact casing — echo THAT as `appliedScope`, never the
+   * caller's, or the response asserts a component id that does not exist.
+   */
+  readonly resolvedFrom: string | null;
+}
+
+/**
+ * Rewrite a resolved object scope to the vault's EXACT casing.
+ *
+ * Three outcomes:
+ *   - the id exists as given -> returned unchanged (`resolvedFrom: null`), and
+ *     an exactly-cased id never pays for the probe;
+ *   - exactly one case variant exists -> that id, with `resolvedFrom` set;
+ *   - two or more variants -> `invalid-query`, never a silent pick.
+ *
+ * An api name matching NOTHING is returned UNCHANGED, deliberately: each tool
+ * owns its own `component-not-found` wording (and some answer from edges when
+ * the object has no node of its own), so this resolver must not pre-empt it.
+ */
+export const canonicalizeObjectScope = async (
+  graph: GraphStore,
+  scope: ResolvedObjectScope,
+): Promise<Result<CanonicalObjectScope, McpError>> => {
+  const exact = await getNodeById(graph, scope.componentId as ComponentId);
+  if (!exact.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${exact.error.message}` });
+  }
+  if (exact.value !== null) return ok({ ...scope, resolvedFrom: null });
+  const variants = await objectIdCaseVariants(graph, scope.object);
+  if (!variants.ok) return err(variants.error);
+  const others = variants.value.filter((id) => id !== scope.componentId);
+  if (others.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: objectCaseAmbiguityMessage(scope.object, others),
+      path: 'objectApiName',
+    });
+  }
+  const only = others[0];
+  if (only === undefined) return ok({ ...scope, resolvedFrom: null });
+  return ok({
+    componentId: only,
+    object: toObjectApiName(only),
+    resolvedFrom: scope.componentId,
+  });
+};
+
+/**
+ * {@link resolveObjectAlias} + {@link canonicalizeObjectScope}: the entry point
+ * every object-scoped tool should use when it has a graph handle.
+ *
+ * `route_question("What runs when I save a contact?")` binds
+ * `{objectApiName: 'contact'}`, and the sync resolver alone turned that into
+ * `CustomObject:contact` — an id no vault holds — so the flagship admin
+ * question died on `component-not-found` while `object_360` answered the same
+ * name happily. Same input, same org, two answers.
+ */
+export const resolveObjectAliasInVault = async (
+  graph: GraphStore,
+  raw: unknown,
+  opts: ResolveObjectAliasOptions = {},
+): Promise<Result<CanonicalObjectScope | null, McpError>> => {
+  const resolved = resolveObjectAlias(raw, opts);
+  if (!resolved.ok) return err(resolved.error);
+  if (resolved.value === null) return ok(null);
+  return canonicalizeObjectScope(graph, resolved.value);
+};
+
 /**
  * Resolve an OPTIONAL object scope for an object-scoped analysis tool and
  * VERIFY the named object exists in the vault. The honor half of the
@@ -277,7 +416,7 @@ export const resolveExistingObjectScope = async (
   raw: unknown,
   opts: Pick<ResolveObjectAliasOptions, 'unhandledPrefix'> = {},
 ): Promise<Result<ResolvedObjectScope | null, McpError>> => {
-  const resolved = resolveObjectAlias(raw, {
+  const resolved = await resolveObjectAliasInVault(graph, raw, {
     required: false,
     bareComponentIdIsObject: true,
     ...(opts.unhandledPrefix !== undefined ? { unhandledPrefix: opts.unhandledPrefix } : {}),

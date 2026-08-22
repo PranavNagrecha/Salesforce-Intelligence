@@ -32,7 +32,12 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { mergeInputAliases, toObjectApiName } from './input-aliases.js';
+import {
+  canonicalizeObjectScope,
+  mergeInputAliases,
+  toCustomObjectId,
+  toObjectApiName,
+} from './input-aliases.js';
 import { composeSoeForEvents, type SoeStep } from './order-of-execution.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
@@ -450,7 +455,17 @@ export const lifecycleProcessHandler = async (
   ctx: Context,
   input: LifecycleProcessInput,
 ): Promise<Result<McpResponse<LifecycleProcessOutput>, McpError>> => {
-  const object = input.objectApiName;
+  // Salesforce api names are case-insensitive, so `contact` names `Contact`.
+  // ONE shared canonicalizer decides that for the whole object-scoped surface;
+  // it rewrites to the VAULT's exact casing, refuses a case-only ambiguity by
+  // name, and leaves an unknown name untouched so the SOE composition below
+  // still produces its own `component-not-found`.
+  const canonical = await canonicalizeObjectScope(ctx.graph, {
+    componentId: toCustomObjectId(input.objectApiName),
+    object: toObjectApiName(input.objectApiName),
+  });
+  if (!canonical.ok) return err(canonical.error);
+  const object = canonical.value.object;
   const event: LifecycleEvent = input.event ?? 'update';
   const field = input.field ?? null;
   const value = input.value ?? null;

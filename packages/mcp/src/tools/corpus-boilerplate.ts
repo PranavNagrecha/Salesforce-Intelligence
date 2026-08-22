@@ -170,6 +170,22 @@ const RULES: readonly BoilerplateRule[] = [
     endsAtDescriptionEnd: false,
   },
   {
+    // SECOND MECHANISM (length normalisation), single carrier: the
+    // dynamic-registration block on `find_dead_code`. It is REQUIRED reading —
+    // it is the sentence that stops a reader deleting a running scheduled job,
+    // and it grew when async dispatch joined the rule (CronTrigger is data, not
+    // metadata, so no metadata walk can see a Setup > Schedule Apex
+    // registration) — and it is pure ballast for retrieval: `class`, `code`,
+    // `registration`, `metadata`, `namespace` are terms the Apex family already
+    // competes on, and ~1.2 KB of them on a ~4 KB description dilutes every word
+    // that actually discriminates this tool. Stripping keeps the advertised
+    // contract byte-for-byte while leaving the indexed document as it was
+    // before the block grew.
+    id: 'dead-code-dynamic-registration',
+    marker: ' DYNAMIC REGISTRATION is separated from death:',
+    endsAtDescriptionEnd: true,
+  },
+  {
     // SECOND MECHANISM, single carrier: 774 B — 44% of the description. The
     // composition manifest names which sub-analyses ran and which did not; it
     // is the honesty payload for a report that previously degenerated into one

@@ -91,8 +91,20 @@ const withStore = async <T>(run: (ctx: Context) => Promise<T>): Promise<T> => {
 const SHARED_CLAIM_PHRASES = [
   'declares the Callable dynamic-invocation interface',
   'zero incoming edges by construction',
-  'NEITHER proves the registration is live',
+  // Was 'NEITHER proves the registration is live' while the rule covered
+  // exactly two signals. The rule now covers three (async dispatch joined it —
+  // 16 of 18 org-wide `likely_dead` classes were Schedulable or Batchable), so
+  // the sentence had to stop saying "neither". The INVARIANT this pinned is
+  // unchanged: both tools must ship the same words for it.
+  'NONE of them proves the registration is live',
   'never as "proven reachable"',
+  // PLATFORM TRUTH, pinned here because a wrong verdict on it gets a running
+  // scheduled job deleted. Setup > Schedule Apex writes a CronTrigger RECORD;
+  // records are not metadata, are never retrieved, and no refresh can change
+  // that — so a metadata walk cannot see the registration at all.
+  'implements Queueable / Database.Batchable / Schedulable',
+  'CronTrigger is DATA, not metadata',
+  'no refresh can close that gap',
 ] as const;
 
 describe('unproven dynamic registration — one rule, one sentence (S10)', () => {

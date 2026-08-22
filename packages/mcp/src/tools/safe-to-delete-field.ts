@@ -192,10 +192,12 @@ import {
   type ProposalEvidence,
 } from './proposal-artifact.js';
 import {
+  analyticsFamiliesRetrieved,
   formatReportDashboardBreakEvidence,
   REPORT_DASHBOARD_USAGE_CAVEAT,
+  reportDashboardEvidence,
   reportDashboardUsageDetail,
-  type ReportDashboardUsageDetail,
+  type ReportDashboardEvidence,
 } from './report-dashboard-usage.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 import { indexRestatedConditionEdges } from './restated-condition-edges.js';
@@ -476,12 +478,19 @@ export interface SafeToDeleteFieldOutput {
    */
   readonly livePopulation?: LivePopulationEvidence;
   /**
-   * Finding #36 / R6-24-WIRE: WHICH reports/dashboards reference this field
-   * (capped fold-time name lists). Present only when folded usage is set —
-   * feeds `format:'proposal'` evidence comments so a delete bundle names what
-   * would break, not just a boolean.
+   * Finding #36 / R6-24-WIRE: WHICH reports/dashboards reference this field.
+   * Present only when at least one family carries a folded usage stamp — feeds
+   * `format:'proposal'` evidence comments so a delete bundle names what would
+   * break, not just a boolean.
+   *
+   * EVERY value here is readable as CHECKED or UNCHECKED. It used to be a plain
+   * `ReportDashboardUsageDetail`, which on a stale vault emitted
+   * `{usedInReport: true, reportNames: [], usedInDashboard: false, dashboardNames: []}`
+   * — an unchecked `true` asserted from a legacy stamp, an empty evidence list
+   * that read as "zero reports", and a `false` for a family that was never
+   * retrieved. `null` + `evidenceNote` now carry each of those cases.
    */
-  readonly reportUsage?: ReportDashboardUsageDetail;
+  readonly reportUsage?: ReportDashboardEvidence;
   /**
    * AUDIT-F4 — shared EvidenceEnvelope v2 projection of verdict / reasoning /
    * coverage / trust. Additive; legacy keys remain the primary surface.
@@ -1363,6 +1372,8 @@ const coreSafeToDeleteFieldHandler = async (
   // additional remainder is added. Examples are unioned by id — both sides
   // mint the same `Report:{Folder}/{Name}` identity.
   const rdUsage = reportDashboardUsageDetail(nodeResult.value);
+  // Whether an ABSENT folded stamp is a checked `false` or an unchecked `null`.
+  const analyticsRetrieved = analyticsFamiliesRetrieved(ctx.manifest);
   let analyticsCountIsFloor = false;
   if (rdUsage.usedInReport || rdUsage.usedInDashboard) {
     const existing = buckets.get('analytics');
@@ -1571,7 +1582,12 @@ const coreSafeToDeleteFieldHandler = async (
       ...(flsGrantCount > 0 ? { flsGrantCount } : {}),
       ...(livePopulation !== undefined ? { livePopulation } : {}),
       ...(rdUsage.usedInReport || rdUsage.usedInDashboard
-        ? { reportUsage: rdUsage }
+        ? {
+            reportUsage: reportDashboardEvidence(
+              nodeResult.value,
+              analyticsRetrieved,
+            ),
+          }
         : {}),
       trust,
     },

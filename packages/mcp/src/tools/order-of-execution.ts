@@ -65,7 +65,7 @@ import {
   type ApexReceiverVerification,
   type ReceiverVerifiableStep,
 } from './apex-receiver.js';
-import { resolveObjectAlias } from './input-aliases.js';
+import { resolveObjectAliasInVault } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import {
   buildInactiveSummary,
@@ -1511,7 +1511,9 @@ export const orderOfExecutionHandler = async (
 ): Promise<Result<McpResponse<OrderOfExecutionOutput>, McpError>> => {
   // L2 Alias OS: resolve the object from any of objectApiName / object /
   // objectId / CustomObject: componentId. Disagreeing aliases -> invalid-query.
-  const scopeResult = resolveObjectAlias(rawInput);
+  // `...InVault` also folds CASE against the vault's own ids (api names are
+  // case-insensitive on the platform); the echoed id is the VAULT's spelling.
+  const scopeResult = await resolveObjectAliasInVault(ctx.graph, rawInput);
   if (!scopeResult.ok) return err(scopeResult.error);
   if (scopeResult.value === null) {
     return err({
