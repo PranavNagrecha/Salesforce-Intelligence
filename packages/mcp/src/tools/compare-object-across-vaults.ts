@@ -565,7 +565,17 @@ export const compareObjectAcrossVaultsHandler = async (
     // Cached across BOTH axes (object-level and every field) — the same
     // (side, type, key) triples repeat across hundreds of fields.
     const census = makeCensus(openA.value.store, openB.value.store);
-    const propertyCoverageGaps: PropertyCoverageGap[] = [];
+    // Gap rows are VAULT-WIDE facts (a census over every node of the type), so
+    // the same (propertyPath, presentIn) pair repeats identically once per
+    // field that carries it. Dedupe: 300 byte-identical rows carry no more
+    // information than one, and burying the object-level gaps under them is
+    // its own kind of dishonesty.
+    const gapsByKey = new Map<string, PropertyCoverageGap>();
+    const addGaps = (rows: readonly PropertyCoverageGap[]): void => {
+      for (const row of rows) {
+        gapsByKey.set(`${row.presentIn}|${row.propertyPath}`, row);
+      }
+    };
     const objectLevelDrift: PropertyDrift[] = [];
     if (objA !== null && objB !== null) {
       const classified = await collectDrift(
@@ -578,7 +588,7 @@ export const compareObjectAcrossVaultsHandler = async (
         input.vaultB,
       );
       objectLevelDrift.push(...classified.drift);
-      propertyCoverageGaps.push(...classified.gaps);
+      addGaps(classified.gaps);
     }
 
     const [fieldsA, fieldsB] = await Promise.all([
@@ -633,7 +643,7 @@ export const compareObjectAcrossVaultsHandler = async (
             input.vaultB,
           );
           const drift = classified.drift;
-          propertyCoverageGaps.push(...classified.gaps);
+          addGaps(classified.gaps);
           shapeModifiedFields.push({
             fieldApiName: key,
             side: 'both',
@@ -689,7 +699,13 @@ export const compareObjectAcrossVaultsHandler = async (
         objectExistsInA: objA !== null,
         objectExistsInB: objB !== null,
         objectLevelDrift,
-        propertyCoverageGaps,
+        propertyCoverageGaps: [...gapsByKey.values()].sort((x, y) =>
+          x.propertyPath < y.propertyPath
+            ? -1
+            : x.propertyPath > y.propertyPath
+              ? 1
+              : 0,
+        ),
         addedFields,
         removedFields,
         shapeModifiedFields,
