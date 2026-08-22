@@ -240,11 +240,10 @@ describe('findHardcodedValuesHandler', () => {
     expect(r.value.data.truncated).toBe(true);
   });
 
-  it('returns empty matches and empty boundaries when nothing matches the category', async () => {
+  it('a zero-match scan over a SCANNED-clean node says what it read and how', async () => {
     // Build a transient ctx whose node WAS scanned and came back clean —
-    // `qualityIssues: []` present, empty. That is the only shape entitled to a
-    // silent empty response; a node with no `qualityIssues` KEY was never
-    // scanned and is covered by the next test.
+    // `qualityIssues: []` present, empty. A node with no `qualityIssues` KEY
+    // was never scanned and is covered by the next test.
     const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fhv-empty-'));
     const opened = await openGraph(join(localDir, 'empty.db'));
     expect(opened.ok).toBe(true);
@@ -273,8 +272,19 @@ describe('findHardcodedValuesHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.matches.length).toBe(0);
-    expect(r.value.data.boundaries.length).toBe(0);
-    expect(r.value.data.qualityScanCoverage).toBeUndefined();
+    // INVARIANT GUARDED: a scanned-and-clean node must NOT be told to re-run
+    // `sfi refresh` — the NOT-SCANNED note is for a missing `qualityIssues` KEY.
+    //
+    // MOVED (FIX 6): was `boundaries.length === 0` +
+    // `qualityScanCoverage === undefined`. "No hardcoded values here" and
+    // "nothing here was ever scanned" returned the identical empty payload;
+    // the heuristic disclosure and the census now ride on both.
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toMatch(/heuristic/i);
+    expect(joined).not.toContain('NOT SCANNED IN THIS VAULT');
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+    ]);
     await closeGraph(localStore);
     rmSync(localDir, { recursive: true, force: true });
   });
@@ -334,8 +344,20 @@ describe('findHardcodedValuesHandler', () => {
     });
     expect(scoped.ok).toBe(true);
     if (!scoped.ok) return;
-    expect(scoped.value.data.qualityScanCoverage).toBeUndefined();
-    expect(scoped.value.data.boundaries.length).toBe(0);
+    // INVARIANT GUARDED: the NOT-SCANNED note follows the SCOPE — a call scoped
+    // to the scanned class alone has no gap to report.
+    //
+    // MOVED (FIX 6): was `qualityScanCoverage === undefined` +
+    // `boundaries.length === 0`. The scoped census now states `ApexClass 1/1`
+    // so the scoped clean answer proves the class was read, and the scanner
+    // disclosure rides along; only the NOT-SCANNED note is scope-dependent.
+    expect(scoped.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+    ]);
+    expect(scoped.value.data.boundaries.join(' ')).not.toContain(
+      'NOT SCANNED IN THIS VAULT',
+    );
+    expect(scoped.value.data.boundaries.join(' ')).toMatch(/heuristic/i);
 
     await closeGraph(localStore);
     rmSync(localDir, { recursive: true, force: true });
@@ -555,5 +577,273 @@ describe('findHardcodedValuesHandler: url category (P4-hardcoded-scan)', () => {
     if (!r.ok) return;
     expect(r.value.data.byCategory.url).toBe(1);
     expect(r.value.data.byCategory.email).toBe(1);
+  });
+});
+
+// =============================================================================
+// FIX 6 / D-3 — `matches: []` is the false-clean shape. A scoped scan of a
+// SCANNED-and-clean class used to return `boundaries: []` and no census, i.e.
+// exactly what a class nobody read returns.
+// =============================================================================
+describe('findHardcodedValuesHandler — FIX 6 clean-scope disclosure', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a clean single class comes back with populated boundaries', async () => {
+    const r = await findHardcodedValuesHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches).toEqual([]);
+    expect(r.value.data.totalCount).toBe(0);
+    // PRE-FIX: `boundaries` was `[]` on exactly this shape.
+    expect(r.value.data.boundaries.length).toBeGreaterThan(0);
+    expect(r.value.data.boundaries.join(' ')).toMatch(/heuristic/i);
+  });
+
+  it('a clean single class proves it was READ: census present, nodes === scanned', async () => {
+    const r = await findHardcodedValuesHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+    ]);
+  });
+
+  it('the ROW-level refusal disclosure stays gated on there being a test-class row', async () => {
+    // INVARIANT GUARDED: TEST_CLASS_REFUSAL_DISCLOSURE is a claim about the rows
+    // THIS response returned ("some of these may be deliberate fixtures"), not
+    // about the scanner — so unlike the heuristic disclosure it must NOT fire
+    // on a response with no test-class row in it.
+    const r = await findHardcodedValuesHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).not.toContain(
+      'may be intentional test fixtures',
+    );
+  });
+});
+
+// =============================================================================
+// FIX 13 — the per-match `inTestClass` flag already existed; the AGGREGATE
+// lied. Measured on a real org, 110 of 116 matches sat inside @isTest classes,
+// where a hardcoded id or email is the correct Apex idiom — so `totalCount`
+// overstated the actionable work ~19x. Fixture below reproduces that ratio in
+// miniature: 10 fixture matches, 2 production matches.
+// =============================================================================
+describe('findHardcodedValuesHandler — FIX 13 production / test-fixture split', () => {
+  let splitDir: string;
+  let splitStore: GraphStore;
+  let splitCtx: Context;
+
+  const issue = (n: number, rule: string): Record<string, unknown> => ({
+    rule,
+    severity: 'medium',
+    location: `line ${n.toString()}`,
+    explanation: `hardcoded literal #${n.toString()}`,
+    confidence: 'heuristic',
+  });
+
+  beforeAll(async () => {
+    splitDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fhv-split-'));
+    const opened = await openGraph(join(splitDir, 'split.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    splitStore = opened.value;
+    const imported = await importExtractionResults(splitStore, [
+      {
+        nodes: [
+          // 2 PRODUCTION matches: one id, one email.
+          makeNode({
+            id: 'ApexClass:LedgerService',
+            apiName: 'LedgerService',
+            properties: {
+              isTest: false,
+              qualityIssues: [
+                issue(11, 'hardcoded-id'),
+                issue(12, 'hardcoded-email'),
+              ],
+            },
+          }),
+          // 10 TEST-FIXTURE matches: 1 id + 9 emails.
+          makeNode({
+            id: 'ApexClass:LedgerServiceTest',
+            apiName: 'LedgerServiceTest',
+            properties: {
+              isTest: true,
+              qualityIssues: [
+                issue(1, 'hardcoded-id'),
+                issue(2, 'hardcoded-email'),
+                issue(3, 'hardcoded-email'),
+                issue(4, 'hardcoded-email'),
+                issue(5, 'hardcoded-email'),
+                issue(6, 'hardcoded-email'),
+                issue(7, 'hardcoded-email'),
+                issue(8, 'hardcoded-email'),
+                issue(9, 'hardcoded-email'),
+                issue(10, 'hardcoded-email'),
+              ],
+            },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    splitCtx = {
+      vaultRoot: splitDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: splitStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(splitStore);
+    rmSync(splitDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: splits the headline into production vs test fixture', async () => {
+    const r = await findHardcodedValuesHandler(splitCtx, { limit: 500 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // totalCount is NOT replaced — it still counts everything.
+    expect(r.value.data.totalCount).toBe(12);
+    expect(r.value.data.productionCount).toBe(2);
+    expect(r.value.data.testFixtureCount).toBe(10);
+    // The parts reconcile with the whole, always.
+    expect(
+      (r.value.data.productionCount ?? 0) + (r.value.data.testFixtureCount ?? 0),
+    ).toBe(r.value.data.totalCount);
+  });
+
+  it('byCategory stays the FULL set and byCategoryProduction rides alongside it', async () => {
+    const r = await findHardcodedValuesHandler(splitCtx, { limit: 500 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // FULL: 2 ids (1 prod + 1 test), 10 emails (1 prod + 9 test).
+    expect(r.value.data.byCategory.id).toBe(2);
+    expect(r.value.data.byCategory.email).toBe(10);
+    // PRODUCTION only.
+    expect(r.value.data.byCategoryProduction?.id).toBe(1);
+    expect(r.value.data.byCategoryProduction?.email).toBe(1);
+  });
+
+  it('states the split verbatim in boundaries', async () => {
+    const r = await findHardcodedValuesHandler(splitCtx, { limit: 500 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      '10 of 12 matches are inside @isTest classes, where a hardcoded id or email is usually a deliberate fixture. The actionable production count is 2. Pass excludeTestClasses: true to scan production only.',
+    );
+  });
+
+  it('excludeTestClasses: true scans production only and says how many it dropped', async () => {
+    const r = await findHardcodedValuesHandler(splitCtx, {
+      excludeTestClasses: true,
+      limit: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches.length).toBe(2);
+    expect(r.value.data.totalCount).toBe(2);
+    for (const m of r.value.data.matches) {
+      expect(m.inTestClass).toBe(false);
+    }
+    expect(r.value.data.appliedScope?.excludeTestClasses).toBe(true);
+    expect(r.value.data.appliedScope?.mode).toBe('all');
+    // A filter that removes rows must say how many, or the smaller totalCount
+    // reads as a smaller org rather than a narrower question.
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      '10 match(es) inside @isTest classes were filtered out',
+    );
+  });
+
+  it('all matches in test classes → productionCount: 0, and that zero is CHECKED', async () => {
+    const r = await findHardcodedValuesHandler(splitCtx, {
+      componentId: 'ApexClass:LedgerServiceTest',
+      limit: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(10);
+    expect(r.value.data.productionCount).toBe(0);
+    expect(r.value.data.testFixtureCount).toBe(10);
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'The actionable production count is 0.',
+    );
+  });
+
+  it('refuses a test-class scope combined with excludeTestClasses instead of returning an empty scan', async () => {
+    const r = await findHardcodedValuesHandler(splitCtx, {
+      componentId: 'ApexClass:LedgerServiceTest',
+      excludeTestClasses: true,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toBe(
+      'You scoped to an @isTest class and also excluded test classes; those cannot both hold.',
+    );
+  });
+
+  it('a cursor minted with excludeTestClasses cannot be replayed against the unfiltered list', async () => {
+    // Without the flag in argsFingerprint the token decodes cleanly and resumes
+    // at an offset that points at a DIFFERENT row — a silent skip across the
+    // production/fixture boundary.
+    const filtered = await findHardcodedValuesHandler(splitCtx, {
+      excludeTestClasses: true,
+      limit: 1,
+    });
+    expect(filtered.ok).toBe(true);
+    if (!filtered.ok) return;
+    const cursor = filtered.value.data.nextCursor;
+    expect(cursor).toBeDefined();
+    if (cursor === undefined) return;
+
+    const replayed = await findHardcodedValuesHandler(splitCtx, {
+      cursor,
+      limit: 1,
+    });
+    expect(replayed.ok).toBe(false);
+    if (replayed.ok) return;
+    expect(replayed.error.kind).toBe('invalid-query');
+
+    // ...and the same cursor still resumes correctly WITH the flag.
+    const resumed = await findHardcodedValuesHandler(splitCtx, {
+      cursor,
+      excludeTestClasses: true,
+      limit: 1,
+    });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.value.data.offset).toBe(1);
+  });
+
+  it('a fixture with zero test-class matches keeps the pre-split response shape', async () => {
+    // The no-cost claim: the split fields appear exactly when they say
+    // something `totalCount` / `byCategory` do not. Scoped to the production
+    // class, `totalCount` IS the production count, so all three stay absent and
+    // the serialized data keys are unchanged from pre-FIX-13.
+    const r = await findHardcodedValuesHandler(splitCtx, {
+      componentId: 'ApexClass:LedgerService',
+      limit: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(2);
+    expect(r.value.data.productionCount).toBeUndefined();
+    expect(r.value.data.testFixtureCount).toBeUndefined();
+    expect(r.value.data.byCategoryProduction).toBeUndefined();
+    expect(r.value.data.appliedScope?.excludeTestClasses).toBeUndefined();
+    expect(Object.keys(r.value.data)).toEqual([
+      'matches',
+      'totalCount',
+      'byCategory',
+      'qualityScanCoverage',
+      'boundaries',
+      'truncated',
+      'appliedScope',
+    ]);
   });
 });

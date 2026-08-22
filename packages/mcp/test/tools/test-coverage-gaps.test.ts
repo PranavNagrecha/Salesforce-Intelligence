@@ -691,3 +691,86 @@ describe('testCoverageGapsHandler — coverage through non-callsApex usage edges
     expect(gap?.coverageStatus).toBe('uncovered');
   });
 });
+
+// =============================================================================
+// FIX 6 / D-3 — `gaps: []` is the FALSE-CLEAN shape for this tool: it is what a
+// genuinely well-tested org returns AND what a shallow walk, a dynamic-dispatch
+// blind spot, or an unscanned test roster returns. Gating the three
+// scanner-behaviour disclosures on `sorted.length > 0` silenced them exactly
+// there. This fixture is the honest clean case: one production class, one
+// SCANNED test class that calls it with no fake assertion → zero gaps.
+// =============================================================================
+describe('testCoverageGapsHandler — FIX 6 clean-scan disclosure', () => {
+  let cleanDir: string;
+  let cleanStore: GraphStore;
+  let cleanCtx: Context;
+
+  beforeAll(async () => {
+    cleanDir = mkdtempSync(join(tmpdir(), 'sfi-tcg-clean-'));
+    const opened = await openGraph(join(cleanDir, 'tcg-clean.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    cleanStore = opened.value;
+    const imported = await importExtractionResults(cleanStore, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:WidgetService',
+            apiName: 'WidgetService',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+          makeNode({
+            id: 'ApexClass:WidgetServiceTest',
+            apiName: 'WidgetServiceTest',
+            // SCANNED (`qualityIssues` KEY present) and free of
+            // `fake-assertion` — so `WidgetService` is genuinely not a gap.
+            properties: { isTest: true, qualityIssues: [] },
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:WidgetServiceTest',
+            toId: 'ApexClass:WidgetService',
+            edgeType: 'callsApex',
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    cleanCtx = {
+      vaultRoot: cleanDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: cleanStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(cleanStore);
+    rmSync(cleanDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a zero-gap scan comes back with populated boundaries', async () => {
+    const r = await testCoverageGapsHandler(cleanCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.gaps).toEqual([]);
+    expect(r.value.data.totalGapsCount).toBe(0);
+    // PRE-FIX: `boundaries` was `[]` on exactly this shape.
+    expect(r.value.data.boundaries.length).toBeGreaterThan(0);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toMatch(/meaningful-assertion|System\.assertEquals/i);
+    expect(joined).toMatch(/dynamic dispatch|Type\.forName/i);
+    expect(joined).toMatch(/depth 3|capped at depth/i);
+  });
+
+  it('a zero-gap scan proves the test roster was READ: census present, nodes === scanned', async () => {
+    const r = await testCoverageGapsHandler(cleanCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+    ]);
+    expect(r.value.data.boundaries.join(' ')).not.toContain(
+      'NOT SCANNED IN THIS VAULT',
+    );
+  });
+});

@@ -195,13 +195,19 @@ describe('codeQualityAuditHandler', () => {
     expect(joined).toMatch(/industry-consensus/i);
   });
 
-  it('returns empty issues and no FINDING boundaries when no rule matches the filter', async () => {
-    // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. This used to assert
-    // `boundaries.length === 0` — a zero with nothing said about it. That is
-    // the exact false-clean shape the coverage disclosure closes: the org-wide
-    // path now always states what was NOT scanned (this fixture holds a node
-    // with no `qualityIssues` key) and what can never be scanned (Flow). The
-    // three FINDING-conditional boundaries stay gated on there being findings.
+  it('a zero-finding response states HOW the scanner works, not just that it found nothing', async () => {
+    // INVARIANT GUARDED: a zero-finding response is the FALSE-CLEAN shape, so
+    // it is the one that most needs to say what was scanned and how (D-3).
+    //
+    // MOVED (FIX 6). Two earlier revisions of this assertion:
+    //   v1 `boundaries.length === 0`         — a zero with nothing said at all.
+    //   v2 `not.toMatch(/heuristic/i)` +
+    //      `not.toMatch(/industry-consensus/i)` — the coverage notes fired but
+    //      the three SCANNER-BEHAVIOUR disclosures stayed gated on findings,
+    //      so "no rule matched" still could not say the match is heuristic,
+    //      that dynamic Apex is invisible to it, or where the severity scale
+    //      comes from. Those three describe the SCANNER, are true on an empty
+    //      result, and are now unconditional. The gate they lost is the bug.
     const r = await codeQualityAuditHandler(ctx, {
       ruleFilter: ['no-such-rule'],
     });
@@ -210,8 +216,11 @@ describe('codeQualityAuditHandler', () => {
     expect(r.value.data.totalCount).toBe(0);
     expect(r.value.data.issues.length).toBe(0);
     const joined = r.value.data.boundaries.join(' ');
-    expect(joined).not.toMatch(/heuristic/i);
-    expect(joined).not.toMatch(/industry-consensus/i);
+    // The three scanner-behaviour disclosures, on a zero-finding response.
+    expect(joined).toMatch(/heuristic/i);
+    expect(joined).toMatch(/dynamic SOQL|dynamic.*invisible/i);
+    expect(joined).toMatch(/industry-consensus/i);
+    // ...alongside the two coverage notes, which were already unconditional.
     expect(joined).toContain('NOT SCANNED IN THIS VAULT');
     expect(joined).toContain('NOT CHECKED BY DESIGN');
     expect(r.value.data.truncated).toBe(false);
@@ -511,5 +520,77 @@ describe('codeQualityAuditInputSchema', () => {
     expect(
       codeQualityAuditInputSchema.safeParse({ limit: 501 }).success,
     ).toBe(false);
+  });
+});
+
+// =============================================================================
+// FIX 6 / D-3 — a zero must be readable as CHECKED or UNCHECKED. `ApexClass:
+// Clean` was scanned (`qualityIssues: []` present, empty) and came back clean;
+// a scoped audit of it used to return `issues: []`, `boundaries: []`, and no
+// census — byte-identical to an audit of a class nothing ever read.
+// =============================================================================
+describe('codeQualityAuditHandler — FIX 6 clean-scope disclosure', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a clean single class comes back with populated boundaries', async () => {
+    const r = await codeQualityAuditHandler(ctx, {
+      componentId: 'ApexClass:Clean',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.issues).toEqual([]);
+    expect(r.value.data.totalCount).toBe(0);
+    // PRE-FIX: `boundaries` was `[]` on exactly this shape.
+    expect(r.value.data.boundaries.length).toBeGreaterThan(0);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toMatch(/heuristic/i);
+    expect(joined).toMatch(/dynamic SOQL|dynamic.*invisible/i);
+    expect(joined).toMatch(/industry-consensus/i);
+  });
+
+  it('a clean single class proves it was READ: census present, nodes === scanned', async () => {
+    const r = await codeQualityAuditHandler(ctx, {
+      componentId: 'ApexClass:Clean',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+    ]);
+  });
+
+  it('an UNSCANNED single class is still readable as NOT CHECKED, not clean', async () => {
+    // The counter-case that makes the census above worth emitting: same empty
+    // `issues`, different census — `scanned: 0` — plus the refresh pointer.
+    const r = await codeQualityAuditHandler(ctx, {
+      componentId: 'ApexClass:NoExtraction',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.issues).toEqual([]);
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 0 },
+    ]);
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'NOT SCANNED IN THIS VAULT',
+    );
+  });
+
+  it('notCheckedTypes keeps its org-wide guard while the census does not', async () => {
+    // INVARIANT GUARDED: a caller who named one Apex class did not ask about
+    // Flows, so the permanent NOT_APEX_TYPES note stays org-wide. "Was this
+    // class read?" is a different question and has no such guard.
+    const scoped = await codeQualityAuditHandler(ctx, {
+      componentId: 'ApexClass:Clean',
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    expect(scoped.value.data.notCheckedTypes).toBeUndefined();
+    expect(scoped.value.data.boundaries.join(' ')).not.toContain(
+      'NOT CHECKED BY DESIGN',
+    );
+
+    const orgWide = await codeQualityAuditHandler(ctx, {});
+    expect(orgWide.ok).toBe(true);
+    if (!orgWide.ok) return;
+    expect(orgWide.value.data.notCheckedTypes).toBeDefined();
   });
 });

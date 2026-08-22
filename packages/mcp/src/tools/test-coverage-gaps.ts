@@ -229,13 +229,17 @@ export interface TestCoverageGapsOutput {
    * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Nodes read vs nodes that actually
    * carry a `qualityIssues` scan, over the TEST classes whose `fake-assertion`
    * findings drive the `fake-coverage` / `low-quality-coverage` verdicts.
-   * Present ONLY when some test class was never scanned — the path where a
-   * class is classified as adequately covered because nothing could be read
-   * about the tests covering it. A fully-scanned vault omits it and its
-   * response is unchanged.
+   * D-3: emitted UNCONDITIONALLY. It used to appear only when some test class
+   * was never scanned, so the answer that most needed it — `gaps: []`, the very
+   * shape an unscanned test roster produces — was the one that carried no
+   * census at all.
    */
-  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
-  /** Verbatim honesty disclosures; empty when no gaps. */
+  readonly qualityScanCoverage: readonly QualityScanTypeCoverage[];
+  /**
+   * Verbatim honesty disclosures. Never empty: the three scanner-behaviour
+   * disclosures describe HOW coverage is judged and are true whether or not a
+   * gap was found, so they live OUTSIDE the zero-gaps gate.
+   */
   readonly boundaries: readonly string[];
   /** Page size applied to this response (echoes the request; default 200). */
   readonly limit: number;
@@ -550,14 +554,16 @@ export const testCoverageGapsHandler = async (
   const truncated = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
 
-  const boundaries: string[] =
-    sorted.length === 0
-      ? []
-      : [
-          MEANINGFUL_ASSERTION_DISCLOSURE,
-          DYNAMIC_DISPATCH_DISCLOSURE,
-          DEPTH_CAP_DISCLOSURE,
-        ];
+  // D-3: all three describe HOW coverage is judged — what counts as a
+  // meaningful assertion, that dynamic dispatch is invisible, that the walk
+  // stops at depth 3 — and each is true whether or not a gap was found. Gating
+  // them on `sorted.length > 0` silenced them on `gaps: []`, which is precisely
+  // the answer an unscanned or shallow-walked roster produces.
+  const boundaries: string[] = [
+    MEANINGFUL_ASSERTION_DISCLOSURE,
+    DYNAMIC_DISPATCH_DISCLOSURE,
+    DEPTH_CAP_DISCLOSURE,
+  ];
 
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Lives OUTSIDE the zero-gaps gate:
   // "no gaps" is precisely the answer an unscanned test-class set produces, so
@@ -571,7 +577,7 @@ export const testCoverageGapsHandler = async (
       gaps: kept,
       totalGapsCount: sorted.length,
       byStatus,
-      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
+      qualityScanCoverage,
       boundaries,
       limit,
       offset,

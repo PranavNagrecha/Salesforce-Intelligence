@@ -42,6 +42,22 @@
  *     or `heuristic` (apex-scanner inference). The tool does not
  *     surface the per-edge confidence on the trigger-context list;
  *     callers wanting that detail should use `sfi.find_code_usages`.
+ *   - D-3: the two disclosures above are UNCONDITIONAL. A zero-finding
+ *     response is the false-clean shape, so it is the one that most
+ *     needs to say how the scanner works — gating them on
+ *     `classes.length > 0` silenced them exactly there.
+ *   - D-3 on the LIMIT axis: this tool is NAMED for governor limits and
+ *     models three static loop recognizers. `limitCoverage` names the
+ *     three it checks and the seven it never examines (heap size, Apex
+ *     CPU time, callouts, query rows, DML rows, future / queueable
+ *     invocations, email invocations), so `totalRiskCount: 0` is
+ *     readable as CHECKED for the three and UNCHECKED for the rest. It
+ *     rides on every response, single-class scope included; the prose
+ *     note is org-wide only. Runtime limits are closed by
+ *     `sfi.explain_debug_log`, not by any refresh.
+ *   - `qualityScanCoverage` rides on every response too, so
+ *     `classes: []` reads as "N nodes were read and scanned, none
+ *     matched" rather than as an unfalsifiable clean bill.
  *   - CR-22-B6: `entryPaths` is bounded (depth `ENTRY_PATH_MAX_DEPTH`=6,
  *     `ENTRY_PATH_MAX_PATHS`=12 paths) — previously JSDoc-only. A class
  *     entry now carries `entryPathsTruncated: true` (present only when
@@ -81,8 +97,11 @@ import type { Context } from '../server.js';
 import { partitionByBaseline } from './finding-suppression.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import {
+  buildNotCheckedLimitsNote,
   buildUnscannedNodesNote,
   censusQualityScanCoverage,
+  NOT_CHECKED_GOVERNOR_LIMITS,
+  type NotCheckedLimit,
   type QualityScanTypeCoverage,
 } from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
@@ -223,13 +242,32 @@ export interface GovernorLimitRisksOutput {
   readonly byRule: Readonly<Record<string, number>>;
   /**
    * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
-   * nodes that actually carry a `qualityIssues` scan. Present ONLY when some
-   * node in scope was never scanned — the path where `classes: []` means "not
-   * checked", not "clean". A fully-scanned vault omits it and its response is
-   * unchanged.
+   * nodes that actually carry a `qualityIssues` scan.
+   *
+   * D-3: emitted UNCONDITIONALLY. It used to appear only when some node in
+   * scope was never scanned, which left the clean case — `classes: []` with no
+   * census — indistinguishable from a scope nobody read. `ApexClass 1/1` is
+   * exactly the sentence a zero-finding answer needs: it converts "no findings"
+   * from unfalsifiable into "1 class was read and scanned, and none matched".
    */
-  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
-  /** Verbatim honesty disclosures; empty when nothing matched. */
+  readonly qualityScanCoverage: readonly QualityScanTypeCoverage[];
+  /**
+   * D-3 on the LIMIT axis. This tool is named for governor LIMITS and models
+   * exactly three static loop recognizers; every other governor limit is never
+   * examined. `checkedRules` names what a zero DOES cover, `notChecked` names
+   * what it does not. Emitted unconditionally — including on a single-class
+   * scope, because the unexamined limits are just as unexamined for one class
+   * as for the org.
+   */
+  readonly limitCoverage: {
+    readonly checkedRules: readonly string[];
+    readonly notChecked: readonly NotCheckedLimit[];
+  };
+  /**
+   * Verbatim honesty disclosures. Never empty: the two scanner-behaviour
+   * disclosures describe HOW this tool reads source and are true whether or not
+   * anything matched, so they live OUTSIDE the zero-findings gate.
+   */
   readonly boundaries: readonly string[];
   /** True when the class-level slice was trimmed to `limit`. */
   readonly truncated: boolean;
@@ -608,13 +646,31 @@ export const governorLimitRisksHandler = async (
   const truncated = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
 
-  const boundaries: string[] =
-    classes.length === 0
-      ? []
-      : [
-          GOVERNOR_LIMIT_HEURISTIC_DISCLOSURE,
-          GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE,
-        ];
+  // D-3: a zero must be readable as CHECKED or UNCHECKED, and a zero-finding
+  // response is the shape that most needs to say what was not scanned. These
+  // two describe HOW the scanner reads Apex source — true whether or not a
+  // finding qualified — so they are UNCONDITIONAL. Gating them on
+  // `classes.length > 0` meant the false-clean answer was the one answer that
+  // explained nothing about itself.
+  const boundaries: string[] = [
+    GOVERNOR_LIMIT_HEURISTIC_DISCLOSURE,
+    GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE,
+  ];
+
+  // The LIMIT axis of the same principle. The machine-readable block rides on
+  // every response (see `limitCoverage` on the output interface); the prose
+  // note is org-wide only, mirroring `code-quality-audit.ts`'s
+  // `NOT_APEX_TYPES` guard — a caller who named one class is asking about that
+  // class, and the block already carries the same facts for them.
+  const limitCoverage = {
+    checkedRules: [...GOVERNOR_LIMIT_RULES],
+    notChecked: NOT_CHECKED_GOVERNOR_LIMITS,
+  };
+  const notCheckedLimitsNote =
+    scopeId === null
+      ? buildNotCheckedLimitsNote(NOT_CHECKED_GOVERNOR_LIMITS)
+      : undefined;
+  if (notCheckedLimitsNote !== undefined) boundaries.push(notCheckedLimitsNote);
 
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. `detectCodeQualityIssues` ran from
   // the ApexClass extractor ONLY, so on a vault built before the trigger
@@ -671,7 +727,8 @@ export const governorLimitRisksHandler = async (
       totalRiskCount,
       suppressedRiskCount,
       byRule,
-      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
+      qualityScanCoverage,
+      limitCoverage,
       boundaries,
       truncated,
       soundness: soundnessFromDynamicApexIds([...dynamicApexIds]),

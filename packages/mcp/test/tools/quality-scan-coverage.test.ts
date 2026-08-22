@@ -231,18 +231,37 @@ describe('code_quality_audit — what it does not cover', () => {
     });
   });
 
-  it('omits BOTH on a class-scoped call — the caller did not ask about Flows', async () => {
+  // FIX 6 SPLIT THIS. The invariant it guarded — "a caller who named ONE Apex
+  // class did not ask about Flows, so do not lecture them about un-scanned
+  // types" — is unchanged and still pinned on `notCheckedTypes` below.
+  //
+  // What moved is the CENSUS. `qualityScanCoverage` answers a different
+  // question: "was the thing you named actually read and scanned?" That is
+  // exactly what a scoped CLEAN answer needs to be able to say, and suppressing
+  // it made a scanned-and-clean class indistinguishable from a never-scanned
+  // one. It now rides on every response, scoped or not.
+  it('omits notCheckedTypes on a class-scoped call — the caller did not ask about Flows', async () => {
     const result = await codeQualityAuditHandler(ctx, {
       componentId: 'ApexClass:ScannedDirty',
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.notCheckedTypes).toBeUndefined();
-    expect(result.value.data.qualityScanCoverage).toBeUndefined();
     // A scoped call on a SCANNED node emits no unscanned boundary either.
     expect(result.value.data.boundaries.join(' ')).not.toContain(
       'NOT SCANNED IN THIS VAULT',
     );
+  });
+
+  it('but STILL reports the census on a class-scoped call — "was this class read?"', async () => {
+    const result = await codeQualityAuditHandler(ctx, {
+      componentId: 'ApexClass:ScannedDirty',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+    ]);
   });
 
   it('still explains a scoped call on a node this vault never scanned', async () => {

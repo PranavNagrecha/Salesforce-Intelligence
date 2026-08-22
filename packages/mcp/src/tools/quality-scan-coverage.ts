@@ -111,3 +111,72 @@ export const buildNotCheckedTypesNote = (
     .map((n) => `${n.type}: ${n.reason}`)
     .join(' ')}`;
 };
+
+/**
+ * A governor limit this tool never examines, and why. The `reason` splits the
+ * same two ways the type census above does: a RUNTIME-only limit (heap, CPU,
+ * row counts) is a gap no `sfi refresh` can ever close, while "no static
+ * recognizer ships for X" is a gap a future recognizer closes.
+ */
+export interface NotCheckedLimit {
+  /** Human-readable governor-limit name, as Salesforce names it. */
+  readonly limit: string;
+  /** Why this tool cannot say anything about it. */
+  readonly reason: string;
+}
+
+/**
+ * D-3 applied to the LIMIT axis. `sfi.governor_limit_risks` is named for
+ * governor limits and models exactly three static loop recognizers
+ * (`soql-in-loop`, `dml-in-loop`, `database-upsert-no-options`). Every other
+ * governor limit is never examined — so `totalRiskCount: 0` was an UNCHECKED
+ * zero for all of them, on the tool whose name promises otherwise. Naming them
+ * is what makes the zero readable as CHECKED (for the three) and UNCHECKED
+ * (for these).
+ */
+export const NOT_CHECKED_GOVERNOR_LIMITS: readonly NotCheckedLimit[] = [
+  {
+    limit: 'heap size',
+    reason:
+      'requires runtime allocation data; not derivable from static source',
+  },
+  {
+    limit: 'Apex CPU time',
+    reason: 'requires runtime timing; not derivable from static source',
+  },
+  {
+    limit: 'callouts',
+    reason: 'no static recognizer ships for callout-in-loop',
+  },
+  {
+    limit: 'query rows',
+    reason:
+      'requires record volume; the vault holds metadata, never record data',
+  },
+  {
+    limit: 'DML rows',
+    reason:
+      'requires record volume; the vault holds metadata, never record data',
+  },
+  {
+    limit: 'future / queueable invocations',
+    reason: 'no static recognizer ships for async-dispatch-in-loop',
+  },
+  {
+    limit: 'email invocations',
+    reason: 'no static recognizer ships for email-in-loop',
+  },
+];
+
+/**
+ * The verbatim boundary naming the governor limits that were NOT examined.
+ * `undefined` for an empty list, mirroring {@link buildNotCheckedTypesNote}, so
+ * a caller can push the result without a second emptiness check.
+ */
+export const buildNotCheckedLimitsNote = (
+  notChecked: readonly NotCheckedLimit[],
+): string | undefined => {
+  if (notChecked.length === 0) return undefined;
+  const named = notChecked.map((n) => n.limit).join(', ');
+  return `NOT CHECKED — this tool models three static loop recognizers (soql-in-loop, dml-in-loop, database-upsert-no-options). The following governor limits were NOT examined and a zero here says nothing about them: ${named}. Some are runtime-only and no refresh can close them; for a RUNTIME limit that actually fired, use sfi.explain_debug_log.`;
+};
