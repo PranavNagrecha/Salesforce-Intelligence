@@ -96,6 +96,7 @@ export interface NotExtractedFamilyOptions {
  *   disclosures.unshift(notExtractedFamilyDisclosure({
  *     subject: 'Custom permissions',
  *     verb: 'checked',
+ *     pluralSubject: true,
  *     sentinelProperty: 'customPermissionGrantCount',
  *     containers: [...ids].sort(),
  *     surface: '`customPermissions` / `summary.customPermissions`',
@@ -147,12 +148,12 @@ export interface UnresolvedTargetsOptions {
   /**
    * The output list carrying the marked rows, in backticks.
    *
-   * NOTE: the contract sentence below is fixed product copy and does not
-   * interpolate this value — it says "grant(s) above", which is true in both
-   * the `boundaryNote` and the `disclosures` rendering. The field is part of
-   * the designed signature and every call site supplies the correct value, so
-   * naming the surface in the copy stays a one-line change here rather than an
-   * N-call-site change.
+   * CURRENTLY UNREFERENCED: the contract sentence below is fixed product copy
+   * and does not interpolate this value — it says "grant(s) above", which is
+   * true in both the `boundaryNote` and the `disclosures` rendering. The field
+   * is reserved in the interface signature so that a future version can
+   * interpolate the surface name without changing every call site. Every caller
+   * currently supplies this value correctly, but it is read by no code.
    */
   readonly surface: string;
 }

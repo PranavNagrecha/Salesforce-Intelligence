@@ -29,6 +29,13 @@
  *   - a class reached by a `references` edge from a VisualforcePage /
  *     VisualforceComponent / AuraDefinitionBundle — the `controller=`
  *     binding, an edge-derived kind rather than a node property.
+ *   - `ApexClass` with `properties.superclass` containing a `.` (a base class
+ *     from another namespace) — a managed-package or platform framework that
+ *     owns the base class instantiates the subclass outside this vault, so the
+ *     subclass is built to be invoked from outside.
+ *   - `ApexClass` with `properties.implements` including `Callable` — the
+ *     loosely-typed dynamic-invocation interface, a signal that the class is
+ *     built for dynamic dispatch from outside this vault's metadata.
  *
  * The same walk classifies reached ApexClass nodes with
  * `properties.isTest === true` as test coverage. The combined verdict:
@@ -43,7 +50,10 @@
  * **v2.7 honesty boundary**: dynamic dispatch (`Type.forName(...)`)
  * and reflective invocation are invisible to the heuristic; a class
  * genuinely invoked at runtime via reflection will surface as
- * `likely-dead-code`. The disclosure surfaces this verbatim.
+ * `likely-dead-code` UNLESS it matches a dynamic-registration classifier
+ * (framework-subclass or callable-dispatch). A class that extends a
+ * base-class from another namespace is presumed live, not dead. The
+ * disclosure surfaces the blind spot for everything else verbatim.
  *
  * Implementation notes:
  *   - One BFS walks upstream USAGE edges from the target, bounded by

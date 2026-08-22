@@ -7,8 +7,8 @@
  * pairwise diff per setting type. The tool DOES NOT auto-resolve
  * conflicts — it emits each conflict with a `recommendedPolicy`
  * (`max` / `min` / `manual-only`) that downstream callers can use as a
- * starting point for human review per WhatIfSemantics.md § "Default
- * posture".
+ * starting point for human review (the default posture surfaces
+ * recommended policies rather than auto-resolving).
  *
  * **Settings gathered per profile.** For each profile node:
  *
@@ -39,8 +39,8 @@
  *      `properties.recordTypeVisibilities` (`{ recordType, default,
  *      visible }` entries). Keyed by record type.
  *
- * **Per-setting conflict policy.** The recommended policy mirrors the
- * matrix in WhatIfSemantics.md § "Conflict shapes per setting type":
+ * **Per-setting conflict policy.** The recommended policy varies by
+ * setting type:
  *
  *   | settingType          | recommendedPolicy   |
  *   |----------------------|---------------------|
@@ -63,8 +63,8 @@
  *     disclosure.
  *
  * **Honesty axis (verbatim, in every response):** see `DISCLOSURE`
- * below. Surfacing the recommended policy without resolving is the
- * load-bearing v2.3 posture per WhatIfSemantics.md § "Default posture".
+ * below. The tool surfaces recommended policies without auto-resolving
+ * conflicts — that is the default posture for v2.3.
  *
  * Implementation notes:
  *   - Both profile ids must start with `Profile:`. Other prefixes
@@ -132,8 +132,7 @@ type SettingType =
  * carry the per-profile state at the disagreement point; the consumer
  * decides whether to apply the recommended policy.
  *
- * `recommendedPolicy` is the per-category default from
- * WhatIfSemantics.md § "Conflict shapes per setting type":
+ * `recommendedPolicy` is the per-category default:
  *   - `max` — the more permissive value wins (CRUD: edit > read > none;
  *     Boolean: OR).
  *   - `min` — the more restrictive value wins (rarely the default but
@@ -239,9 +238,8 @@ export interface WhatIfMergeProfilesOutput {
 }
 
 /**
- * The verbatim disclosure surfaced in every response. Encodes the
- * v2.3 boundary per WhatIfSemantics.md § "Default posture" — the tool
- * surfaces but does not resolve.
+ * The verbatim disclosure surfaced in every response. Encodes the v2.3
+ * boundary: the tool surfaces recommended policies but does not resolve.
  */
 const DISCLOSURE =
   'v2.3 surfaces conflicts but does NOT auto-resolve. Recommended policies are heuristic; manually verify each conflict before applying. Profile-edition rollup (e.g., admin-level overrides) is not modeled. ' +
@@ -755,9 +753,8 @@ const compareTabVisibilities = (
 
 /**
  * Compare layout assignments. Two profiles agree when they assign the
- * same layout for the same record type axis. Conflicts are
- * `manual-only` per WhatIfSemantics.md § "Tie-break rules" — there is
- * no clean comparator for two different layouts.
+ * same layout for the same record type axis. Conflicts are `manual-only`
+ * — there is no clean comparator for two different layouts.
  */
 const compareLayoutAssignments = (
   a: ReadonlyMap<string, string>,
