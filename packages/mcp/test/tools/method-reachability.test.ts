@@ -705,3 +705,162 @@ describe('methodReachabilityHandler — usage edge set (D-1) and path confidence
     expect(r.value.data.soundness.complete).toBe(true);
   });
 });
+
+// =============================================================================
+// DYNAMIC-REGISTRATION ENTRY POINTS. After the usage-set fix, 4 of 186 classes
+// still read `likely-dead-code` and find_dead_code independently agreed at
+// `definitely_dead`. All four are live: two extend a managed trigger-framework
+// base class registered only as a STRING LITERAL, two `implements Callable` and
+// are dispatched from a Custom Metadata record. Unifying the walk turned a
+// disagreement (actionable) into a corroboration (trusted) — of a wrong answer.
+// =============================================================================
+describe('methodReachabilityHandler — unproven dynamic registration', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mr-dyn-'));
+    const opened = await openGraph(join(dir, 'mr.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const out = await run({ vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  it('a namespaced-superclass subclass with ZERO in-edges is not dead', async () => {
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:WidgetAffiliationHandler',
+            apiName: 'WidgetAffiliationHandler',
+            properties: { isTest: false, superclass: 'pkg.TriggerRunnable' },
+          }),
+        ],
+        edges: [],
+      },
+      (c) => methodReachabilityHandler(c, { classApiName: 'ApexClass:WidgetAffiliationHandler' }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('entry-point-reachable');
+    const hit = r.value.data.entryPoints.find((e) => e.kind === 'framework-subclass');
+    expect(hit).toBeDefined();
+    // FLOORED at heuristic. A string-literal registration is a pattern match,
+    // never a modelled call, so it must not borrow `declared`.
+    expect(hit?.confidence).toBe('heuristic');
+  });
+
+  it('a Callable implementor with ZERO in-edges is not dead', async () => {
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:WidgetAddressHelper',
+            apiName: 'WidgetAddressHelper',
+            properties: { isTest: false, implements: ['Callable'] },
+          }),
+        ],
+        edges: [],
+      },
+      (c) => methodReachabilityHandler(c, { classApiName: 'ApexClass:WidgetAddressHelper' }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('entry-point-reachable');
+    expect(r.value.data.entryPoints.find((e) => e.kind === 'callable-dispatch')?.confidence).toBe(
+      'heuristic',
+    );
+  });
+
+  it('an all-unproven result SAYS it is unproven, and a real entry point does NOT', async () => {
+    const unproven = await withStore(
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:WidgetAddressHelper',
+            apiName: 'WidgetAddressHelper',
+            properties: { isTest: false, implements: ['Callable'] },
+          }),
+        ],
+        edges: [],
+      },
+      (c) => methodReachabilityHandler(c, { classApiName: 'ApexClass:WidgetAddressHelper' }),
+    );
+    if (!unproven.ok) throw new Error('handler failed');
+    expect(unproven.value.data.disclosure).toContain(
+      'Every entry point found here is an UNPROVEN dynamic registration',
+    );
+
+    // A REST resource is a proven platform entry point — no hedge.
+    const proven = await withStore(
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:WidgetRestApi',
+            apiName: 'WidgetRestApi',
+            properties: { isTest: false, isRestResource: true },
+          }),
+        ],
+        edges: [],
+      },
+      (c) => methodReachabilityHandler(c, { classApiName: 'ApexClass:WidgetRestApi' }),
+    );
+    if (!proven.ok) throw new Error('handler failed');
+    expect(proven.value.data.disclosure).not.toContain('UNPROVEN dynamic registration');
+  });
+
+  it('CONTROL: a LOCAL superclass is NOT a framework registration and stays dead', async () => {
+    // The predicate keys on a DOTTED superclass (another namespace). A local
+    // base class is ordinary inheritance and must not buy an amnesty.
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:LocalBaseSubclass',
+            apiName: 'LocalBaseSubclass',
+            properties: { isTest: false, superclass: 'LocalBase' },
+          }),
+        ],
+        edges: [],
+      },
+      (c) => methodReachabilityHandler(c, { classApiName: 'ApexClass:LocalBaseSubclass' }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('likely-dead-code');
+  });
+
+  it('a framework subclass UPSTREAM of a class makes that class reachable too', async () => {
+    // Unlike `test-class`, these fire at any depth: a framework-dispatched
+    // class that calls X really does make X reachable.
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({ id: 'ApexClass:WidgetService', apiName: 'WidgetService', properties: { isTest: false } }),
+          makeNode({
+            id: 'ApexClass:WidgetAffiliationHandler',
+            apiName: 'WidgetAffiliationHandler',
+            properties: { isTest: false, superclass: 'pkg.TriggerRunnable' },
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:WidgetAffiliationHandler',
+            toId: 'ApexClass:WidgetService',
+            edgeType: 'callsApex',
+          }),
+        ],
+      },
+      (c) => methodReachabilityHandler(c, { classApiName: 'ApexClass:WidgetService' }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('entry-point-reachable');
+    expect(r.value.data.entryPoints.some((e) => e.kind === 'framework-subclass' && e.depth === 1)).toBe(true);
+  });
+});

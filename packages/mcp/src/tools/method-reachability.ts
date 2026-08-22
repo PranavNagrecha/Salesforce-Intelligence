@@ -70,6 +70,7 @@ import type { Context } from '../server.js';
 import {
   entryKindsFor,
   isTestClassNode,
+  isUnprovenRegistrationKind,
   USAGE_EDGE_TYPES,
   walkUpstreamUsage,
   type EntryPointKind,
@@ -96,6 +97,15 @@ const REACHABILITY_DISCLOSURE =
  * and type-name usages that are never modelled as an inbound edge, and
  * downgrades what it finds. Verbatim product copy; do not reword.
  */
+const UNPROVEN_REGISTRATION_DISCLOSURE =
+  'Every entry point found here is an UNPROVEN dynamic registration: the class either extends a ' +
+  'base class from another namespace (a managed package or platform framework instantiates its ' +
+  'own subclasses) or declares the Callable dynamic-invocation interface. Both say the class is ' +
+  'BUILT to be invoked from outside this vault; NEITHER proves the registration is live, because ' +
+  'the registration itself lives in a string literal, a Custom Metadata record, or managed-package ' +
+  'code that mints no edge. Treat this as "not dead", never as "proven reachable" — confirm the ' +
+  'registration in the org before relying on it.';
+
 const LIKELY_DEAD_CODE_CROSS_REFERENCE =
   'likely-dead-code here means NO usage in-edge and NO entry-point classifier within depth 3. ' +
   'It is NOT the org\'s dead-code verdict: sfi.find_dead_code runs an additional whole-word ' +
@@ -346,7 +356,12 @@ export const methodReachabilityHandler = async (
         apiName: node.apiName,
         kind,
         depth,
-        confidence,
+        // An unproven dynamic registration is a PATTERN MATCH on a declared
+        // property, never a modelled call, so its hit is floored at the weakest
+        // tier no matter how strong the edges leading to it were. Reporting a
+        // string-literal framework registration at `declared` would be the same
+        // overclaim as rating a regex guess beside a real call.
+        confidence: isUnprovenRegistrationKind(kind) ? 'heuristic' : confidence,
         viaEdgeTypes,
       });
     }
@@ -389,10 +404,17 @@ export const methodReachabilityHandler = async (
     USAGE_EDGE_TYPES,
   );
 
+  // When the ONLY thing keeping a class off `likely-dead-code` is an unproven
+  // registration, say so. A bare `entry-point-reachable` here would read as
+  // certainty the walk does not have.
+  const allEntryPointsUnproven =
+    entryPoints.length > 0 && entryPoints.every((e) => isUnprovenRegistrationKind(e.kind));
   const disclosure =
     verdict === 'likely-dead-code'
       ? `${REACHABILITY_DISCLOSURE} ${LIKELY_DEAD_CODE_CROSS_REFERENCE}`
-      : REACHABILITY_DISCLOSURE;
+      : allEntryPointsUnproven
+        ? `${REACHABILITY_DISCLOSURE} ${UNPROVEN_REGISTRATION_DISCLOSURE}`
+        : REACHABILITY_DISCLOSURE;
 
   return ok({
     data: {

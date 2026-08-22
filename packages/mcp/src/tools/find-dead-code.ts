@@ -93,7 +93,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { NOT_USAGE_EDGE_TYPES } from './apex-reachability.js';
+import { CALLABLE_INTERFACE, NOT_USAGE_EDGE_TYPES } from './apex-reachability.js';
 import { buildCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
 import {
   firstNonEmpty,
@@ -124,6 +124,13 @@ const ASYNC_DISPATCH_DISCLOSURE =
   'async-dispatch dead-code (Queueable/Batchable/Schedulable): a class that "implements Queueable" is NOT automatically live — it must be enqueued/executed/scheduled by user Apex. A class with a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class) is treated as live; a class dispatched ONLY from @isTest code surfaces as likely_dead (test dispatch is rolled back at runtime) and one never dispatched as definitely_dead. A production enqueue guarded only by `!Test.isRunningTest()` STILL counts as a live production path. Blind spots: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers are invisible — verify before deleting.';
 const CUSTOM_FIELD_DISCLOSURE =
   'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
+const UNPROVEN_REGISTRATION_DISCLOSURE =
+  'dynamic registration: a class that extends a base class from another namespace (managed-package ' +
+  'or platform frameworks instantiate their own subclasses) or declares the Callable interface is ' +
+  'registered OUTSIDE Apex — in a string literal, a Custom Metadata record, or package code — so it ' +
+  'has zero incoming edges by construction. Those classes are reported `uncertain`, never ' +
+  '`definitely_dead`: their emptiness is expected, not evidence. They are not proven live either.';
+
 const STATIC_TYPE_USAGE_DISCLOSURE =
   'static-type-usage re-check: before an ApexClass is reported definitely_dead its api name is grep-searched (whole-word) across non-test production .cls/.trigger source. A class referenced only via a static-field or type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) — which the parser does NOT model as an inbound graph edge — is downgraded to `uncertain` (suppressed unless includeUncertain) instead of reported dead. Residual blind spots: the grep is line-literal (a class name in a comment or string could over-suppress), and dynamic `Type.forName(\'Other\')` references stay invisible.';
 
@@ -342,6 +349,19 @@ interface DeadCodeRow {
   readonly is_test: boolean;
   readonly is_own_entry_point: boolean;
   /**
+   * UNPROVEN dynamic registration: the class extends a base class from another
+   * namespace (a managed package / platform framework instantiates its own
+   * subclasses) or declares the `Callable` dynamic-invocation interface. Both
+   * are DECLARED properties of the class; neither proves the registration is
+   * live, because the registration lives in a string literal, a Custom Metadata
+   * record, or managed-package code that mints no edge. Maps to `uncertain` —
+   * never `definitely_dead`, and never a live verdict either.
+   *
+   * Kept behaviourally identical to `isFrameworkSubclass` / `isCallableDispatch`
+   * in `apex-reachability.ts` by a drift test.
+   */
+  readonly is_unproven_registration: boolean;
+  /**
    * Async-dispatch entry point only (Queueable / Batchable / Schedulable): an
    * ApexClass dispatched by USER code (`System.enqueueJob` / `Database.executeBatch`
    * / `System.schedule`), NOT invoked externally by the platform like REST / Aura /
@@ -409,6 +429,18 @@ export const NON_USAGE_EDGE_EXCLUSION_SQL = NOT_USAGE_EDGE_TYPES.map(
   (t) => `        AND e.edge_type <> '${t}'`,
 ).join('\n');
 
+/**
+ * The `is_unproven_registration` CTE predicate. `CALLABLE_INTERFACE` is imported
+ * from `apex-reachability.ts` rather than spelled again here, so the interface
+ * name cannot drift between the TS predicate and the SQL one.
+ */
+export const UNPROVEN_REGISTRATION_SQL = `             COALESCE(
+               type = 'ApexClass' AND (
+                 COALESCE(json_extract_string(properties_json, '$.superclass') LIKE '%.%', FALSE)
+                 OR COALESCE(json_extract_string(properties_json, '$.implements') LIKE '%"${CALLABLE_INTERFACE}"%', FALSE)
+               ),
+               FALSE)`;
+
 const fetchDeadCodeRows = async (
   store: GraphStore,
   types: readonly ComponentType[],
@@ -445,6 +477,15 @@ const fetchDeadCodeRows = async (
                      OR COALESCE(json_extract_string(properties_json, '$.hasInvocableMethod') = 'true', FALSE)
                    )),
                FALSE) AS is_own_entry_point,
+             -- UNPROVEN dynamic registration. Same two predicates as
+             -- isFrameworkSubclass / isCallableDispatch in apex-reachability.ts,
+             -- expressed in SQL because this tool's cascade is a single CTE (a
+             -- measured ~7x speedup that is not worth losing). A behavioural
+             -- drift test runs both over the same fixture and asserts they agree.
+             -- A dotted superclass means the base class lives in ANOTHER
+             -- namespace, so its owner instantiates the subclass and no local
+             -- callsApex edge can exist.
+${UNPROVEN_REGISTRATION_SQL} AS is_unproven_registration,
              -- Async-dispatch entry point: Queueable / Batchable / Schedulable.
              -- Dispatched by user Apex (enqueueJob / executeBatch / schedule), so
              -- a class nothing ever dispatches from PRODUCTION is dead even though
@@ -536,6 +577,7 @@ const fetchDeadCodeRows = async (
 ${NON_USAGE_EDGE_EXCLUSION_SQL}
     )
     SELECT c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point,
+           c.is_unproven_registration,
            c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics,
            COUNT(i.cid) AS incoming_count,
            COALESCE(BOOL_OR(i.from_is_null OR NOT i.from_is_test), FALSE) AS has_non_test_reach,
@@ -543,7 +585,7 @@ ${NON_USAGE_EDGE_EXCLUSION_SQL}
            COALESCE(BOOL_OR(i.from_is_production_dispatch), FALSE) AS has_production_dispatch
     FROM candidates c
     LEFT JOIN incoming i ON i.cid = c.id
-    GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics
+    GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.is_unproven_registration, c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics
   `;
   try {
     const params = [
@@ -792,6 +834,22 @@ export const findDeadCodeHandler = async (
       reasoning = ownEntryPoint
         ? 'component is its own entry point (REST/Aura/Invocable or trigger); platform invokes it'
         : 'reached by an entry-point class (REST resource / AuraEnabled / InvocableMethod / async-dispatch)';
+    } else if (row.is_unproven_registration) {
+      // Must sit ABOVE the incomingCount === 0 branch. These classes have zero
+      // incoming edges BY CONSTRUCTION — that is the whole point of dynamic
+      // registration — so without this branch they fall straight into
+      // `definitely_dead`, which is how two tools came to corroborate a wrong
+      // answer. `uncertain` is the honest tier: it is suppressed unless
+      // includeUncertain, so it does not add noise, and it never asserts the
+      // class is live.
+      verdict = 'uncertain';
+      reasoning =
+        'class is BUILT for dynamic registration — it extends a base class from another ' +
+        'namespace (a managed package or platform framework instantiates its own subclasses) ' +
+        'or declares the Callable dynamic-invocation interface. The registration itself lives ' +
+        'in a string literal, a Custom Metadata record, or managed-package code and mints no ' +
+        'edge, so zero incoming edges is EXPECTED here and is not evidence of death. Not ' +
+        'proven live either — confirm the registration in the org before deleting.';
     } else if (incomingCount === 0) {
       verdict = 'definitely_dead';
       reasoning =
@@ -973,6 +1031,13 @@ export const findDeadCodeHandler = async (
     )
   ) {
     boundaries.push(STATIC_TYPE_USAGE_DISCLOSURE);
+  }
+  // UNCONDITIONAL whenever ApexClass is in scope (D-3): this describes what the
+  // scanner cannot see, which is true whether or not anything matched. A clean
+  // ApexClass sweep is exactly the answer a dynamically-registered class
+  // produces, so it is the response that most needs to say so.
+  if (types.includes('ApexClass')) {
+    boundaries.push(UNPROVEN_REGISTRATION_DISCLOSURE);
   }
   // A CustomField flagged dead is the weakest verdict: Apex/Flow/SOQL field
   // reads are not graph edges, so an in-use field can surface as dead.

@@ -20,6 +20,8 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
+  isCallableDispatch,
+  isFrameworkSubclass,
   NOT_USAGE_EDGE_TYPES,
   USAGE_EDGE_TYPES,
 } from '../../src/tools/apex-reachability.js';
@@ -1450,5 +1452,122 @@ describe('find_dead_code — non-usage edge-type drift guard', () => {
     // direction (counted as usage) rather than silently calling code dead.
     expect([...USAGE_EDGE_TYPES, ...NOT_USAGE_EDGE_TYPES].sort()).toEqual([...EDGE_TYPES].sort());
     expect(USAGE_EDGE_TYPES.filter((t) => (NOT_USAGE_EDGE_TYPES as readonly string[]).includes(t))).toEqual([]);
+  });
+});
+
+// =============================================================================
+// DYNAMIC-REGISTRATION ENTRY POINTS. Unifying the usage walk made
+// method_reachability and find_dead_code AGREE — which is the goal, except that
+// on 4 real classes they agreed on `dead` when all four are live. Corroboration
+// of a wrong answer is worse than disagreement, because a reader trusts it.
+//
+// The two shapes, both DECLARED node properties, neither producing any edge:
+//   - a base class in ANOTHER namespace (`hed.TDTM_Runnable`), registered only
+//     as a string literal inside a managed framework's registration API
+//   - `implements Callable`, dispatched from a Custom Metadata record
+// =============================================================================
+describe('find_dead_code — unproven dynamic registration is uncertain, never definitely_dead', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-fdc-dyn-'));
+    const opened = await openGraph(join(dir, 'fdc.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const st = opened.value;
+    const imported = await importExtractionResults(st, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const out = await run({ vaultRoot: dir, manifest: MANIFEST, graph: st } as Context);
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  /** Zero in-edges on all three — that is the point: registration mints none. */
+  const seedDynamic: ExtractionResult = {
+    nodes: [
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:WidgetAffiliationHandler',
+        apiName: 'WidgetAffiliationHandler',
+        properties: { isTest: false, superclass: 'pkg.TriggerRunnable' },
+      }),
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:WidgetAddressHelper',
+        apiName: 'WidgetAddressHelper',
+        properties: { isTest: false, implements: ['Callable'] },
+      }),
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:PlainOrphanHelper',
+        apiName: 'PlainOrphanHelper',
+        properties: { isTest: false },
+      }),
+    ],
+    edges: [],
+  };
+
+  const verdictsFor = async () => {
+    const r = await withStore(seedDynamic, (c) =>
+      findDeadCodeHandler(c, { types: ['ApexClass'], includeUncertain: true, limit: 500 }),
+    );
+    if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
+    return new Map(r.value.data.candidates.map((x) => [x.componentId, x.verdict]));
+  };
+
+  it('a namespaced-superclass subclass is uncertain, not definitely_dead', async () => {
+    expect((await verdictsFor()).get('ApexClass:WidgetAffiliationHandler')).toBe('uncertain');
+  });
+
+  it('a Callable implementor is uncertain, not definitely_dead', async () => {
+    expect((await verdictsFor()).get('ApexClass:WidgetAddressHelper')).toBe('uncertain');
+  });
+
+  it('CONTROL: a plain class with zero in-edges is STILL definitely_dead', async () => {
+    // The classifiers must not become a blanket amnesty. If this ever flips,
+    // the predicate has gone too wide and the tool has stopped finding dead code.
+    expect((await verdictsFor()).get('ApexClass:PlainOrphanHelper')).toBe('definitely_dead');
+  });
+
+  it('the boundary naming the blind spot rides on EVERY ApexClass scan, clean or not', async () => {
+    const r = await withStore(
+      { nodes: [makeNode({ type: 'ApexClass', id: 'ApexClass:Solo', apiName: 'Solo', properties: { isTest: false } })], edges: [] },
+      (c) => findDeadCodeHandler(c, { types: ['ApexClass'], limit: 500 }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.some((b) => b.includes('dynamic registration:'))).toBe(true);
+  });
+
+  it('DRIFT GUARD: the SQL predicate and the TS predicates agree class-for-class', async () => {
+    // Behavioural parity, not string matching. find_dead_code keeps its single
+    // CTE (a measured ~7x speedup); the DEFINITION is what must not drift.
+    const nodes = [
+      { id: 'ApexClass:WidgetAffiliationHandler', props: { isTest: false, superclass: 'pkg.TriggerRunnable' } },
+      { id: 'ApexClass:WidgetAddressHelper', props: { isTest: false, implements: ['Callable'] } },
+      { id: 'ApexClass:PlainOrphanHelper', props: { isTest: false } },
+      { id: 'ApexClass:LocalBaseSubclass', props: { isTest: false, superclass: 'LocalBase' } },
+      { id: 'ApexClass:ComparableImpl', props: { isTest: false, implements: ['Comparable'] } },
+    ];
+    const seed: ExtractionResult = {
+      nodes: nodes.map((n) => makeNode({ type: 'ApexClass', id: n.id, apiName: n.id.split(':')[1] as string, properties: n.props })),
+      edges: [],
+    };
+    const r = await withStore(seed, (c) =>
+      findDeadCodeHandler(c, { types: ['ApexClass'], includeUncertain: true, limit: 500 }),
+    );
+    if (!r.ok) throw new Error('handler failed');
+    const sqlSaysUncertain = new Set(
+      r.value.data.candidates.filter((x) => x.verdict === 'uncertain').map((x) => x.componentId),
+    );
+    for (const n of nodes) {
+      const node = makeNode({ type: 'ApexClass', id: n.id, apiName: n.id.split(':')[1] as string, properties: n.props });
+      const tsSays = isFrameworkSubclass(node) || isCallableDispatch(node);
+      expect(
+        sqlSaysUncertain.has(n.id as never),
+        `${n.id}: TS predicate says ${tsSays}, SQL cascade says ${sqlSaysUncertain.has(n.id as never)}`,
+      ).toBe(tsSays);
+    }
   });
 });

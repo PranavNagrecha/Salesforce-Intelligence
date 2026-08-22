@@ -79,7 +79,71 @@ export type EntryPointKind =
   | 'batchable'
   | 'schedulable'
   | 'test-class'
-  | 'ui-controller';
+  | 'ui-controller'
+  | 'framework-subclass'
+  | 'callable-dispatch';
+
+/**
+ * DYNAMIC-REGISTRATION ENTRY POINTS — the blind spot that unifying the walk
+ * amplified rather than removed.
+ *
+ * Measured on the FRESH vault: after the usage-set fix, 4 of 186 classes still
+ * read `likely-dead-code`, and `find_dead_code` independently agreed at
+ * `definitely_dead`. All four are live. Two extend a managed trigger-framework
+ * base class and are registered ONLY as a string literal
+ * (`hed.TDTM_Global_API.TdtmToken('<ClassName>', 'Contact', 'BeforeUpdate', 10.0)`);
+ * two `implements Callable` and are dispatched from a Custom Metadata record via
+ * a `$$Class.method$$` template. Neither shape produces an edge, and no refresh
+ * would create one.
+ *
+ * Two tools agreeing on a wrong verdict is WORSE than two tools disagreeing:
+ * disagreement is a signal a reader can act on, corroboration is one they trust.
+ *
+ * These two predicates are DECLARED facts about the class taken from node
+ * properties — no cross-node scan, no extra query — so the same definition can
+ * be evaluated in TypeScript here and in SQL inside `find_dead_code`'s CTE, and
+ * a behavioural drift test pins the two to agree.
+ *
+ * They establish that a class is BUILT to be invoked from outside the vault.
+ * They NEVER establish that the registration is live, so:
+ *   - the entry-point hit is floored at `heuristic` confidence, never higher
+ *   - `find_dead_code` maps them to `uncertain`, never to a live verdict
+ * An unproven-but-named class is uncertain. It is not dead, and it is not
+ * proven reachable.
+ */
+export const UNPROVEN_REGISTRATION_KINDS: readonly EntryPointKind[] = [
+  'framework-subclass',
+  'callable-dispatch',
+];
+
+/**
+ * The Apex interface whose entire purpose is loosely-typed dynamic invocation
+ * (`Object call(String action, Map<String, Object> args)`). A class implementing
+ * it is declaring that something outside its own compilation unit will invoke it
+ * by name — a managed package, a Flow, or a Custom Metadata-driven dispatcher.
+ */
+export const CALLABLE_INTERFACE = 'Callable';
+
+/**
+ * True when the class extends a base class from ANOTHER NAMESPACE — a managed
+ * package (`hed.TDTM_Runnable`) or a platform namespace
+ * (`VisualEditor.DynamicPickList`). The owner of that namespace instantiates the
+ * subclass; local Apex never does, so no `callsApex` edge can exist.
+ *
+ * A dotted superclass is the whole signal, and it is deliberately general: it
+ * fires for any framework that dispatches its own subclasses, not just the ones
+ * this org happens to use.
+ */
+export const isFrameworkSubclass = (node: Node): boolean => {
+  const superclass = node.properties['superclass'];
+  return typeof superclass === 'string' && superclass.includes('.');
+};
+
+/** True when the class declares the `Callable` dynamic-invocation interface. */
+export const isCallableDispatch = (node: Node): boolean => {
+  const impl = node.properties['implements'];
+  return Array.isArray(impl) && impl.includes(CALLABLE_INTERFACE);
+};
 
 /** Node types whose incoming `references` edge is a `controller=` binding. */
 const UI_CONTROLLER_SOURCE_PREFIXES: readonly string[] = [
@@ -125,8 +189,17 @@ export const entryKindsFor = (
   // The single change that stops 75 of this org's 85 `likely-dead-code`
   // verdicts being wrong: nothing CALLS a test class, the test runner does.
   if (opts.isRoot && isTestClassNode(node)) kinds.push('test-class');
+  // The two UNPROVEN registration kinds. Unlike `test-class` these fire at ANY
+  // depth: a framework-dispatched class that calls X really does make X
+  // reachable, exactly as a trigger or a REST resource would.
+  if (isFrameworkSubclass(node)) kinds.push('framework-subclass');
+  if (isCallableDispatch(node)) kinds.push('callable-dispatch');
   return kinds;
 };
+
+/** True when every kind in `kinds` is an unproven dynamic registration. */
+export const isUnprovenRegistrationKind = (kind: EntryPointKind): boolean =>
+  UNPROVEN_REGISTRATION_KINDS.includes(kind);
 
 /**
  * True when this incoming edge is a UI `controller=` binding — a
