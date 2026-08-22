@@ -138,6 +138,20 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.find_component_usages': { bound: 'global-response-budget' },
   'sfi.generate_data_dictionary': { bound: 'global-response-budget' },
   'sfi.generate_sharing_summary': { bound: 'global-response-budget' },
+  // --- 9 paginated tools with limit + offset (or cursor) ---
+  'sfi.doc_coverage_report': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.limit_headroom_report': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.permission_set_consolidation': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.security_settings': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.field_lineage': { bound: 'paginated', note: 'limit + offset + cursor' },
+  'sfi.flow_bulkification_audit': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.nonselective_soql': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.picklist_integrity_scan': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.field_mapping_between_objects': { bound: 'paginated', note: 'limit + offset + cursor' },
+  // --- 3 handler-capped tools with limit but no resume knob ---
+  'sfi.trace_debug_log': { bound: 'handler-capped', note: 'limit caps display knobs (timeline spans, default 60/max 400) only; no pagination' },
+  'sfi.action_chain': { bound: 'handler-capped', note: 'limit caps ApprovalProcess list (default 5/max 25) only; no pagination' },
+  'sfi.event_topology': { bound: 'handler-capped', note: 'limit caps event inventory (default 50/max 500) only; no pagination' },
 });
 
 /**
