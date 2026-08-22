@@ -14,10 +14,17 @@ import type { Edge, Node } from '@sf-intelligence/contracts';
  *                              knowable from the formula's own file.
  *   `relatedListFieldRefs`     on a FlexiPage — dynamic related-list columns,
  *                              which are BARE field names on the RELATED object.
+ *   `unresolvedTraversalRefs`  on a ConditionalContext — the relationship-shaped
+ *                              refs a Flow decision, record-trigger filter, or
+ *                              validation-rule formula mentions
+ *                              (`Parent__r.Status__c`). `condition-extractor.ts`
+ *                              is a per-file function whose only object context
+ *                              is the parent object api name, so it cannot know
+ *                              that `Parent__r` reaches another object.
  *
- * Both used to be dropped, which is why a field read only through a traversal,
- * or shown only in a dynamic related list, could report zero referrers and be
- * certified deletable.
+ * All three used to be dropped, which is why a field read only through a
+ * traversal, or shown only in a dynamic related list, could report zero
+ * referrers and be certified deletable.
  *
  * The honesty rule this module keeps: **resolve or drop, never guess.** A
  * traversal whose relationship cannot be mapped to a vaulted object mints no
@@ -227,16 +234,20 @@ export const mintRelationshipTraversalEdges = (
     fromId: string,
     toId: string,
     confidence: Edge['confidence'],
+    edgeType: Edge['edgeType'],
     properties: Record<string, unknown>,
   ): void => {
     if (!fieldIds.has(toId)) return;
-    const key = `${fromId} ${toId} references`;
+    // The dedup key carries the edge TYPE — the same triple the graph is keyed
+    // on — so a `readsFrom` minted here is never suppressed by an unrelated
+    // `references` already present on the same pair, or vice versa.
+    const key = `${fromId} ${toId} ${edgeType}`;
     if (seen.has(key)) return;
     seen.add(key);
     edges.push({
       fromId,
       toId,
-      edgeType: 'references',
+      edgeType,
       confidence,
       source: RELATIONSHIP_RESOLVER_SOURCE,
       properties,
@@ -255,8 +266,33 @@ export const mintRelationshipTraversalEdges = (
           if (toId === null) continue;
           // `parsed`, not `declared`: the tokenizer parsed the path and the
           // relationship map resolved it. Nothing here is a declared pointer.
-          emit(node.id, toId, 'parsed', {
+          emit(node.id, toId, 'parsed', 'references', {
             referenceKind: 'formulaRelationshipTraversal',
+            traversalPath: ref,
+          });
+        }
+      }
+    }
+
+    // ── Condition relationship traversals (Flow decision / VR / filter) ─────
+    // The third producer. `condition-extractor.ts` parks a relationship-shaped
+    // ref here instead of minting `CustomField:<Rel>__r.<Field>__c`, an id that
+    // names no node and that NO refresh on any org could ever create. The edge
+    // is `readsFrom`, not `references`: a condition READS the field, and
+    // `safe_to_delete_field` is a pure incoming-edge composition that must see
+    // it or it will certify a read field as deletable.
+    if (node.type === 'ConditionalContext') {
+      const refs = node.properties['unresolvedTraversalRefs'];
+      const owningObject = node.properties['objectApiName'];
+      if (Array.isArray(refs) && typeof owningObject === 'string' && owningObject.length > 0) {
+        for (const ref of refs) {
+          if (typeof ref !== 'string') continue;
+          const toId = resolveTraversalTarget(ref, owningObject, maps);
+          if (toId === null) continue; // resolve or drop, never guess
+          // `parsed`, not `declared`, for the same reason as the other two
+          // branches: a scrape plus an inferred join is never a declared pointer.
+          emit(node.id, toId, 'parsed', 'readsFrom', {
+            referenceKind: 'conditionRelationshipTraversal',
             traversalPath: ref,
           });
         }
@@ -286,7 +322,7 @@ export const mintRelationshipTraversalEdges = (
           // FlexiPage XML and the OBJECT it belongs to came from the inferred
           // childward map. Nothing declared this pointer. Stamping `declared`
           // overclaimed on the axis a caller weighs before deleting a field.
-          emit(node.id, `CustomField:${childObject}.${field}`, 'parsed', {
+          emit(node.id, `CustomField:${childObject}.${field}`, 'parsed', 'references', {
             referenceKind: 'relatedListFieldAlias',
             relatedListApiName,
           });
