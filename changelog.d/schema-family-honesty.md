@@ -149,3 +149,12 @@
   ONLY when the response is actually paged, so an in-budget answer is
   byte-identical. Naming a section the requested `direction` did not produce is
   a named `invalid-query`; the DEFAULT falls back to the section that exists.
+
+- **`sfi.field_mapping_between_objects` never states a total it cannot
+  enumerate.** On a 592-field object the dispatcher silently dropped rows, so
+  the response published a `fieldCount` its own lists did not add up to and the
+  caller had no knob to reach the rest. `counts` now publishes the TRUE total
+  for all three lists, `reconciliation` asserts the invariant
+  `pairs + unpaired === fieldCount` per side and FAILS LOUD in `boundaries[]`
+  when it does not hold, and `limit` / `offset` / `cursor` / `section` page one
+  designated list while the other two keep publishing their counts.
