@@ -4,7 +4,14 @@
  * "What can this profile / permission set RUN or DO?" — beyond record CRUD
  * (which `object_access_audit` / `why_cant_user_see_record` cover). Surfaces:
  *   - **runnableFlows** — Flows the container grants run access to (the
- *     `flowAccess` `grantedBy` edges the extractor now emits).
+ *     `flowAccess` `grantedBy` edges the extractor now emits). Each row carries
+ *     `targetMissing` (true when the granted `Flow:` id has no Flow node in this
+ *     vault — managed-package, or not retrieved). The GRANT is declared and
+ *     real; only the TARGET is unresolvable, so an admin following the id into
+ *     `resolve` / `get_component` is told why it dead-ends instead of
+ *     concluding the vault is broken. Same shape as `customPermissions` below,
+ *     deliberately — a parallel `unresolvedFlows[]` side-list would
+ *     desynchronise the moment `runnableFlows` paginates, which it does.
  *   - **loginRestrictions** — login IP ranges + whether login hours are set
  *     (Profile-only; permission sets carry no login security). Beyond the
  *     `ipRangeCount` scalar, the full `ipRanges` array (`{startAddress,
@@ -48,8 +55,22 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  edgeTargetMissing,
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+  unresolvedTargetsDisclosure,
+} from './absence-disclosure.js';
 import { declaredOnlyDependencyDisclosure } from './declared-only-disclosure.js';
 import {
+  assessUpdatability,
+  grantsObjectEdit,
+  grantsObjectRead,
+  hasModifyAllData,
+  RECORD_EDIT_DEPENDENCY,
+} from './field-update-access.js';
+import {
+  parseFieldParentObjectApiName,
   resolveContainerAlias,
   resolveFieldAlias,
   toObjectApiName,
@@ -223,8 +244,16 @@ export interface UserAbilityOutput {
   readonly componentId: string;
   readonly granterType: 'Profile' | 'PermissionSet';
   readonly granterLabel: string;
-  /** Flows the container can run (`Flow:` ids), paginated. */
-  readonly runnableFlows: readonly ComponentId[];
+  /**
+   * Flows the container can run, paginated. `targetMissing` is true when the
+   * granted `Flow:` id has no `Flow` node in this vault (a managed-package flow,
+   * or one this refresh did not retrieve) — the grant is declared and real, the
+   * definition is not resolvable here.
+   */
+  readonly runnableFlows: readonly {
+    readonly flowId: ComponentId;
+    readonly targetMissing: boolean;
+  }[];
   /** Profile-only login security. Empty ipRanges/loginHours for a permission set. */
   readonly loginRestrictions: {
     readonly ipRangeCount: number;
@@ -250,10 +279,20 @@ export interface UserAbilityOutput {
    * permissions), so the two are never double-counted.
    */
   readonly customPermissions: readonly { readonly name: string; readonly targetMissing: boolean }[];
+
   readonly summary: {
     readonly runnableFlows: number;
     readonly actionPermissions: number;
-    readonly customPermissions: number;
+    /**
+     * Custom permissions this container confers, or `null` when the container
+     * carries no extracted `customPermissionGrantCount` sentinel — i.e. the
+     * family was never extracted and NOTHING was checked. `0` is reserved for a
+     * CHECKED zero: a container that was examined and grants none.
+     *
+     * A false `0` in a security tool is a missed grant, which is why the two
+     * cases cannot share a value.
+     */
+    readonly customPermissions: number | null;
   };
   /**
    * Echoes the scope ACTUALLY applied.
@@ -277,8 +316,40 @@ export interface UserAbilityOutput {
    */
   readonly fieldAccess?: {
     readonly field: string;
+    /** Declared FLS READ on the field. FLS-ONLY — meaning unchanged. */
     readonly readable: boolean;
+    /** Declared FLS EDIT on the field. FLS-ONLY — meaning unchanged. */
     readonly editable: boolean;
+    /**
+     * The container's declared `<objectPermissions>` row for the field's parent
+     * object, or `null` when it declares none in this vault. `null` is "NOT
+     * CHECKED", never "denied" — the dominant cause is a standard object the
+     * refresh did not retrieve.
+     */
+    readonly objectPermission: {
+      readonly object: string;
+      readonly allowRead: boolean;
+      readonly allowEdit: boolean;
+      readonly modifyAllRecords: boolean;
+    } | null;
+    /** False for formula / auto-number / roll-up fields — the value is derived. */
+    readonly fieldUpdatable: boolean;
+    /** Why the field is not type-writable, or a caveat when its type is unknown. */
+    readonly fieldUpdatableNote?: string;
+    /** FLS read COMPOSED with object read. `null` = object access not checked. */
+    readonly canRead: boolean | null;
+    /**
+     * FLS edit COMPOSED with object edit and field type — the answer to "can
+     * this container edit {Object}.{field}?".
+     *
+     * `null` is MANDATORY for the absent-object-row case and `false` is reserved
+     * for a checked denial. Composed with the SAME predicates
+     * `field_access_audit` uses, so the two tools agree by construction rather
+     * than by coincidence.
+     */
+    readonly canUpdate: boolean | null;
+    /** ALWAYS present. States why `canUpdate` is what it is. */
+    readonly reason: string;
   };
   readonly limit: number;
   readonly offset: number;
@@ -343,13 +414,18 @@ export const userAbilityHandler = async (
   // most once. Belt-and-suspenders: dedup with a Set before sorting so the
   // total-order guarantee doesn't silently rely on the extractor's PK invariant
   // — a CR-22 resume over the deduped list can't dup or skip.
-  const runnable = [
-    ...new Set(
-      edgesResult.value
-        .filter((e) => e.properties['flowAccess'] === true && e.toId.startsWith('Flow:'))
-        .map((e) => e.toId as ComponentId),
-    ),
-  ].sort();
+  const flowTargetMissing = new Map<string, boolean>();
+  for (const e of edgesResult.value) {
+    if (e.properties['flowAccess'] !== true || !e.toId.startsWith('Flow:')) continue;
+    // Source of truth is the importer's marker, stamped by `edgeRowParams()`
+    // against the FINAL node set on both the cold-import and the incremental
+    // path — not a per-row `getNodeById`. Max-wins on the unlikely duplicate.
+    flowTargetMissing.set(e.toId, (flowTargetMissing.get(e.toId) ?? false) || edgeTargetMissing(e));
+  }
+  const runnable = [...flowTargetMissing.entries()]
+    .map(([flowId, targetMissing]) => ({ flowId: flowId as ComponentId, targetMissing }))
+    .sort((a, b) => (a.flowId < b.flowId ? -1 : a.flowId > b.flowId ? 1 : 0));
+  const missingFlowTargets = runnable.filter((f) => f.targetMissing).length;
 
   // Action permissions from userPermissions.
   const perms = node.properties['userPermissions'];
@@ -381,6 +457,14 @@ export const userAbilityHandler = async (
     });
   }
   const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
+  // CR-CAP-10 unchecked-zero: the extractor writes `customPermissionGrantCount`
+  // on every container it processes, INCLUDING containers granting zero, so the
+  // key's absence means the family was never extracted. The empty edge set above
+  // is then "not modeled", never a verified "no custom permissions".
+  const customPermissionsChecked = familyWasExtracted(
+    node.properties,
+    'customPermissionGrantCount',
+  );
 
   // USER-ABILITY-REJECTS-FIELD-SCOPE: optional FIELD scope — "can {profile} edit
   // {Object}.{field}?". Build a canonical CustomField id from `fieldId` (or
@@ -390,7 +474,24 @@ export const userAbilityHandler = async (
   // unresolvable field is `invalid-query`, never a silent field-dropped answer.
   const fieldScopeRequested =
     input.fieldId !== undefined || input.fieldApiName !== undefined;
-  let fieldAccess: { field: ComponentId; readable: boolean; editable: boolean } | null = null;
+  interface ComposedFieldAccess {
+    field: ComponentId;
+    readable: boolean;
+    editable: boolean;
+    objectPermission: {
+      object: string;
+      allowRead: boolean;
+      allowEdit: boolean;
+      modifyAllRecords: boolean;
+    } | null;
+    fieldUpdatable: boolean;
+    fieldUpdatableNote?: string;
+    canRead: boolean | null;
+    canUpdate: boolean | null;
+    reason: string;
+    parentObject: string;
+  }
+  let fieldAccess: ComposedFieldAccess | null = null;
   if (fieldScopeRequested) {
     // `undefined` = source not passed; `null` = a bare field name with no object
     // to qualify it (→ invalid-query); a string = a canonical CustomField id.
@@ -446,7 +547,79 @@ export const userAbilityHandler = async (
     // FLS edit implies read (Salesforce never grants edit without read).
     const editable = p['editable'] === true || p['edit'] === true;
     const readable = editable || p['readable'] === true || p['read'] === true;
-    fieldAccess = { field: fieldId, readable, editable };
+
+    // FLS is a NECESSARY but not SUFFICIENT condition. Compose it with the
+    // container's own object-level CRUD row and the field's type-writability,
+    // through the SAME predicates `field_access_audit` uses, so the two tools
+    // cannot return opposite answers to the identical question — which is what
+    // they did for 7,900 measured field/container pairs whose own object row
+    // says `allowEdit: false`.
+    const parentObject = parseFieldParentObjectApiName(fieldId) ?? '';
+    // Already loaded at the top of the handler — no extra graph query.
+    const objEdge = edgesResult.value.find((e) => e.toId === `CustomObject:${parentObject}`);
+    const objectPermission =
+      objEdge === undefined
+        ? null
+        : {
+            object: parentObject,
+            allowRead: objEdge.properties['allowRead'] === true,
+            allowEdit: objEdge.properties['allowEdit'] === true,
+            modifyAllRecords: objEdge.properties['modifyAllRecords'] === true,
+          };
+    // ModifyAllData implies object edit on every object but does NOT bypass
+    // FLS — the sibling tool's rule, via the shared predicate.
+    const modifyAllData = hasModifyAllData(node);
+    const objectEdit =
+      (objEdge !== undefined && grantsObjectEdit(objEdge.properties)) || modifyAllData;
+    const objectRead =
+      (objEdge !== undefined && grantsObjectRead(objEdge.properties)) || modifyAllData;
+    const { fieldUpdatable, fieldUpdatableNote } = assessUpdatability(
+      fieldNode.value ?? ({ properties: {} } as unknown as Node),
+      fieldNode.value === null,
+    );
+
+    let canUpdate: boolean | null;
+    let reason: string;
+    if (!editable) {
+      // A CHECKED denial: the FLS grant was read and it confers no edit.
+      canUpdate = false;
+      reason = `This container declares no FLS Edit on ${fieldId}, so it cannot update the value regardless of object-level access.`;
+    } else if (!fieldUpdatable) {
+      canUpdate = false;
+      reason = fieldUpdatableNote as string;
+    } else if (objectEdit) {
+      canUpdate = true;
+      reason = `This container holds BOTH declared FLS Edit on the field and object-level Edit on ${parentObject}. ${RECORD_EDIT_DEPENDENCY}`;
+    } else if (objectPermission === null) {
+      // The finding: absent is NOT denied. `false` here would be a fabricated
+      // denial, so the answer is `null` and it says why.
+      canUpdate = null;
+      reason = `This container declares NO <objectPermissions> row for ${parentObject} in this vault, so object-level Edit was NOT CHECKED — absent is not denied. canUpdate is null, never false. Confirm the object grant with effective_permissions scoped to ${parentObject}, or re-run /sfi-refresh if ${parentObject} may not have been retrieved.`;
+    } else {
+      canUpdate = false;
+      reason = `This container's declared <objectPermissions> row for ${parentObject} has allowEdit: false, so field-level Edit confers nothing. The editable: true above is the FIELD grant only.`;
+    }
+
+    const canRead = !readable
+      ? false
+      : objectRead
+        ? true
+        : objectPermission === null
+          ? null
+          : false;
+
+    fieldAccess = {
+      field: fieldId,
+      readable,
+      editable,
+      objectPermission,
+      fieldUpdatable,
+      ...(fieldUpdatableNote !== undefined ? { fieldUpdatableNote } : {}),
+      canRead,
+      canUpdate,
+      reason,
+      parentObject,
+    };
   }
 
   // Login restrictions (Profile only). Surface the FULL ip-range AND
@@ -492,7 +665,7 @@ export const userAbilityHandler = async (
       vaultHash: ctx.manifest.sourceTreeHash,
       argsFingerprint: fingerprint,
     },
-    keyOf: (id) => id,
+    keyOf: (f) => f.flowId,
   });
   const page = paged.items;
   const hasMore = paged.hasMore;
@@ -518,12 +691,26 @@ export const userAbilityHandler = async (
         ...(fieldAccess !== null ? { field: fieldAccess.field } : {}),
       },
       ...(fieldAccess !== null
-        ? { fieldAccess: { field: fieldAccess.field, readable: fieldAccess.readable, editable: fieldAccess.editable } }
+        ? {
+            fieldAccess: {
+              field: fieldAccess.field,
+              readable: fieldAccess.readable,
+              editable: fieldAccess.editable,
+              objectPermission: fieldAccess.objectPermission,
+              fieldUpdatable: fieldAccess.fieldUpdatable,
+              ...(fieldAccess.fieldUpdatableNote !== undefined
+                ? { fieldUpdatableNote: fieldAccess.fieldUpdatableNote }
+                : {}),
+              canRead: fieldAccess.canRead,
+              canUpdate: fieldAccess.canUpdate,
+              reason: fieldAccess.reason,
+            },
+          }
         : {}),
       summary: {
         runnableFlows: total,
         actionPermissions: actionPermissions.length,
-        customPermissions: customPermissions.length,
+        customPermissions: customPermissionsChecked ? customPermissions.length : null,
       },
       limit,
       offset,
@@ -542,9 +729,35 @@ export const userAbilityHandler = async (
             'Concretely for this surface: a container declaring `ExportReport` also confers `RunReports` (a dependency edge measured on a real org) and both are action permissions, yet only the declared one appears above.',
         })
         + ' '
-        + 'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
+        // The custom-permission clause DESCRIBES A POPULATED FIELD. When the
+        // family was never extracted the field is not populated, so emitting
+        // the clause makes the boundaryNote itself the thing that lies. Drop
+        // the clause and state the absence instead.
+        + (customPermissionsChecked
+          ? 'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
+          : 'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions. The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.')
+        + (customPermissionsChecked
+          ? ''
+          : ' '
+            + notExtractedFamilyDisclosure({
+              subject: 'Custom permissions',
+              verb: 'checked',
+              pluralSubject: true,
+              sentinelProperty: 'customPermissionGrantCount',
+              containers: [componentId],
+              surface: '`customPermissions` / `summary.customPermissions`',
+              zeroReading: '"no custom permissions"',
+            }))
         + (fieldAccess !== null
-          ? ` fieldAccess = this container's declared FLS on \`${fieldAccess.field}\` (read/edit; edit implies read; both false = no FLS granted). FLS is NOT record access — record visibility still needs OWD + sharing; for the full grantor breakdown on a field use \`field_access_audit\`.`
+          ? ` fieldAccess.readable / editable are this container's declared FLS ONLY. FLS is a NECESSARY but not SUFFICIENT condition: editing a value also needs object-level Edit on ${fieldAccess.parentObject} (canUpdate composes the two) and EDIT access to the specific record (runtime, not modeled). For the org-wide grantor breakdown on this field use field_access_audit.`
+          : '')
+        + (missingFlowTargets > 0
+          ? ' '
+            + unresolvedTargetsDisclosure({
+              count: missingFlowTargets,
+              targetKind: 'Flow',
+              surface: '`runnableFlows`',
+            })
           : '')
         + (missingCustomPerms > 0
           ? ` ${missingCustomPerms} granted custom permission(s) name a definition not present in this vault (targetMissing) — likely managed-package or not retrieved; the grant is declared but the definition is not resolvable here.`

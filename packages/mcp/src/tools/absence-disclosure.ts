@@ -63,6 +63,17 @@ export interface NotExtractedFamilyOptions {
   readonly subject: string;
   /** 'checked' | 'compared' — the verb the host tool uses for its own work. */
   readonly verb: string;
+  /**
+   * Number agreement for the copula: `false`/omitted renders "was", `true`
+   * renders "were".
+   *
+   * Not cosmetic. The two pinned contract sentences disagree on it —
+   * "Tab visibility was NOT compared" (singular subject) and "Custom
+   * permissions were NOT checked" (plural) — and no single hardcoded copula
+   * renders both. English number is a property of the SUBJECT, so it is
+   * declared next to the subject rather than inferred from its spelling.
+   */
+  readonly pluralSubject?: boolean;
   /** The node property that is ALWAYS written when the family WAS extracted. */
   readonly sentinelProperty: string;
   /** Container ids missing it (sorted by the caller; may be a single id). */
@@ -98,8 +109,9 @@ export const notExtractedFamilyDisclosure = (
   const shown = containers.slice(0, MAX_ENUMERATED_CONTAINERS);
   const rest = containers.length - shown.length;
   const ids = rest > 0 ? `${shown.join(', ')}, … and ${rest} more` : shown.join(', ');
+  const wasWere = options.pluralSubject === true ? 'were' : 'was';
   return (
-    `${options.subject} was NOT ${options.verb} — ${containers.length} container(s) carry no ` +
+    `${options.subject} ${wasWere} NOT ${options.verb} — ${containers.length} container(s) carry no ` +
     `extracted \`${options.sentinelProperty}\` property (${ids}); this vault's refresh predates ` +
     `${options.subject} extraction, so ${options.surface} is "not modeled", NEVER a verified ` +
     `${options.zeroReading}. Re-run \`/sfi-refresh\`.`

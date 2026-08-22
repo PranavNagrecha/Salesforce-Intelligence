@@ -239,6 +239,19 @@ export interface FieldUpdateAccess {
   readonly fieldUpdatableNote?: string;
   /** Grantors with FLS-edit on the field AND edit on the parent object. */
   readonly canUpdate: readonly UpdateGrantor[];
+  /**
+   * Grantors holding FLS Edit on the field that declare NO `<objectPermissions>`
+   * row for the parent object in this vault.
+   *
+   * They are absent from `canUpdate`, and an empty-looking `canUpdate` reads as
+   * "nobody can edit this" — but object Edit was NOT CHECKED for them, which is
+   * a different claim from a proven denial. `sfi.user_ability` answers
+   * `canUpdate: null` for exactly this case; without this count the two tools
+   * would contradict each other on the no-object-row population.
+   */
+  readonly flsEditWithoutObjectRow: number;
+  /** Present only when `flsEditWithoutObjectRow > 0`. */
+  readonly objectRowNote?: string;
   /** Verbatim reminder that record-level edit access is also required. */
   readonly recordEditDependency: string;
 }
@@ -517,6 +530,8 @@ export const fieldAccessAuditHandler = async (
   // on the parent object, gated by whether the field is type-writable at all.
   const { fieldUpdatable, fieldUpdatableNote } = assessUpdatability(effectiveField, notModeled);
   let canUpdate: UpdateGrantor[] = [];
+  let flsEditWithoutObjectRow = 0;
+  let parentObjectApiNameForNote = '';
   if (fieldUpdatable && editGrantors.length > 0) {
     const parentObjectApiName = parseFieldParentObjectApiName(fieldId);
     const parentObjectId =
@@ -533,7 +548,11 @@ export const fieldAccessAuditHandler = async (
         return err({ kind: 'internal', message: `graph query failed: ${objEdgesResult.error.message}` });
       }
       const objectEditGrantors = new Set<string>();
+      // Grantors that declare ANY objectPermissions row on the parent — the
+      // complement is "not checked", not "denied" (see flsEditWithoutObjectRow).
+      const grantorsWithObjectRow = new Set<string>();
       for (const e of objEdgesResult.value) {
+        grantorsWithObjectRow.add(e.fromId);
         if (grantsObjectEdit(e.properties)) {
           objectEditGrantors.add(e.fromId);
         }
@@ -556,12 +575,26 @@ export const fieldAccessAuditHandler = async (
         }
       }
       canUpdate = editGrantors.filter((g) => objectEditGrantors.has(g.grantorId));
+      flsEditWithoutObjectRow = editGrantors.filter(
+        (g) => !grantorsWithObjectRow.has(g.grantorId) && !objectEditGrantors.has(g.grantorId),
+      ).length;
+      parentObjectApiNameForNote = parentObjectApiName ?? parentObjectId;
     }
   }
   const update: FieldUpdateAccess = {
     fieldUpdatable,
     ...(fieldUpdatableNote !== undefined ? { fieldUpdatableNote } : {}),
     canUpdate,
+    flsEditWithoutObjectRow,
+    ...(flsEditWithoutObjectRow > 0
+      ? {
+          objectRowNote:
+            `${flsEditWithoutObjectRow} grantor(s) hold FLS Edit on this field but declare NO ` +
+            `<objectPermissions> row for ${parentObjectApiNameForNote} in this vault; they are NOT ` +
+            `listed in canUpdate because object Edit could not be confirmed — that is "not checked", ` +
+            `not a proven denial.`,
+        }
+      : {}),
     recordEditDependency: RECORD_EDIT_DEPENDENCY,
   };
 
