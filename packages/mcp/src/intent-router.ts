@@ -259,6 +259,19 @@ const normalize = (q: string): string =>
 const NAMED_COMPONENT_ID = '(?!\\w*__)[a-z][a-z0-9]*_[a-z0-9]+_[a-z0-9_]*[a-z0-9]';
 
 /**
+ * The "what if I CHANGE this" register, as a lookahead body (lowercased).
+ *
+ * `apex-structure` sits ahead of `what-if-method-signature` in the rule list,
+ * so its method-inventory patterns (`method … signature`) matched that rule's
+ * gold rows on first-match. Enumerating a class's methods and asking what
+ * BREAKS if a signature changes are different questions; this fragment is the
+ * only thing that tells them apart lexically. Kept as a string so it can be
+ * embedded as `^(?!${CHANGE_REGISTER})` in an anchored pattern.
+ */
+const CHANGE_REGISTER =
+  '.*\\b(?:what\\s+if|what\\s+breaks|breaks?\\s+if|if\\s+i\\s+chang\\w*|chang\\w*\\s+the\\s+(?:method\\s+)?signature|rename)\\b';
+
+/**
  * Source for a "the question NAMES a specific field" regex fragment
  * (lowercased). Matches either the dotted `<Object>.<field>` form
  * (`case.foo_code__c`, `lead.bar_id__c`, `opportunity.amount`) OR a
@@ -510,6 +523,57 @@ const deriveFlowGraphArgs = (
     args.walkthrough = true;
   }
   return args;
+};
+
+/**
+ * Apex vocabulary that has the PascalCase SHAPE of an api name but is never the
+ * class the question is about. Without this, "which methods are AuraEnabled"
+ * suggests `classRef: 'AuraEnabled'` — a fabricated argument, which is worse
+ * than no argument at all.
+ */
+const APEX_NAME_DENYLIST: ReadonlySet<string> = new Set([
+  'auraenabled',
+  'invocablemethod',
+  'invocablevariable',
+  'restresource',
+  'testvisible',
+  'httprequest',
+  'httpresponse',
+  'apexclass',
+  'apextrigger',
+  'apexstructure',
+  'lightningweb',
+  'processbuilder',
+  'salesforce',
+]);
+
+/**
+ * Derive `sfi.apex_structure` arguments for the `apex-structure` intent.
+ *
+ * ONE job: bind `classRef` to the api-name token the question names, and say
+ * NOTHING when it names none. The shape required is a PascalCase identifier
+ * with an internal capital after a lowercase run (`AccountService`,
+ * `WidgetLookupController`, `AccountTrigger`) — the shape Apex api names actually
+ * take and one no ordinary English word in a question has. `Apex`, `SOQL` and
+ * `Salesforce` cannot match it; the handful of annotation names that CAN are
+ * denied by name above.
+ *
+ * Suggested, never authoritative: a host may ignore `suggestedArgs`, and
+ * `sfi.resolve` still leads the route.
+ */
+const deriveApexStructureArgs = (
+  q: string,
+  question?: string,
+): Record<string, unknown> => {
+  const source = question ?? q;
+  const named = [
+    ...source.matchAll(/\b([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)\b/g),
+  ]
+    .map((m) => m[1])
+    .find(
+      (t) => t !== undefined && !APEX_NAME_DENYLIST.has(t.toLowerCase()),
+    );
+  return named === undefined ? {} : { classRef: named };
 };
 
 /** Optional hop depth from `get_impact … hops=2` phrasing. */
@@ -4770,6 +4834,78 @@ const RULES: readonly Rule[] = [
       /\bcustom\s+labels?\b.*\b(in|referenced).*\b(lwc|lightning)/i,
       /\bvisualforce\b.*\b(migrat|should\s+be\s+migrated)\b.*\blwc/i,
       /\bwhich\s+aura\s+components?\b.*\b(in\s+use|still)\b/,
+    ],
+  },
+  {
+    // The APEX STRUCTURE / REVIEW lane (`sfi.apex_structure`) — the per-method
+    // anatomy of ONE class or trigger plus the review a reviewer would give it.
+    //
+    // PLACEMENT is the whole design. It sits LATE, after every Apex sibling
+    // that owns an org-wide sweep or a cross-class walk (`governor-risks`,
+    // `trigger-quality`, `test-coverage`, `tests-for-change`, `dead-code`,
+    // `dependency-cycles`, `call-graph`, `review-change`, `code-quality`) and
+    // immediately BEFORE `explain-apex`, so every one of those wins first-match
+    // and this rule can only claim what would otherwise fall through.
+    //
+    // Every pattern REQUIRES a token `explain-apex`'s narration corpus never
+    // carries — "method(s)" in an INVENTORY sense, "signature", "method by
+    // method", "inner class", "anatomy", "code review", "reviewer" — so a bare
+    // "what does <Class> do" / "explain the <Class> class" still lands on
+    // `explain_apex_method`, which is what that tool answers.
+    //
+    // DELIBERATELY NOT CLAIMED, because an earlier or later rule already owns
+    // the phrasing and taking it would be a steal, not a fix:
+    //   - "structure of the <X> apex class"      → `schema` (rule sits earlier)
+    //   - "which methods are @AuraEnabled"       → `rest-endpoints`
+    //   - "is <X> bulkified / SOQL in a loop"    → `governor-risks`
+    //   - "<X> without sharing" (org-wide sweep) → `code-quality`
+    // The funnel — the routing authority on this project — carries utterances
+    // for all four, so they still reach this tool by rank, just not by rule.
+    intent: 'apex-structure',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.apex_structure'],
+    liveRequired: false,
+    needsResolve: true,
+    suggestArgs: deriveApexStructureArgs,
+    reason:
+      'The parsed anatomy of ONE Apex class or trigger — every method with its real signature, visibility, static/instance flag and annotations, inner types, the sharing keyword and what it MEANS for enforcement, every SOQL / DML / callout / async site with its line and whether it is inside a loop body — plus the review a reviewer would raise (the recognizer catalog mirrored verbatim as heuristic, plus eight AST-only checks). apex_structure reads the SOURCE; explain_apex_method narrates the class from graph properties and has no method inventory.',
+    patterns: [
+      /\bapex_structure\b/,
+      // "method by method" — a walk of the class, which explain_apex_method
+      // cannot produce because it enumerates no methods at all.
+      /\bmethod[-\s]by[-\s]method\b/,
+      // Method INVENTORY: methods + a declaration attribute.
+      //
+      // The leading guard is load-bearing and was added because the bare
+      // `method … signature` pair DID steal two gold rows from
+      // `what-if-method-signature` ("What breaks if I change the signature of a
+      // method in OpportunityService?", "What if I change the method signature
+      // of calculateTotal in PaymentService?"). That rule sits LATER in this
+      // list, so first-match handed them here. An enumeration ask never carries
+      // the change register; a what-if always does.
+      new RegExp(
+        `^(?!${CHANGE_REGISTER}).*\\bmethods?\\b[^.?!]{0,50}\\b(?:signatures?|visibility|return\\s+types?|static\\s+or\\s+instance)\\b`,
+      ),
+      new RegExp(
+        `^(?!${CHANGE_REGISTER}).*\\b(?:signatures?|visibility|return\\s+types?)\\b[^.?!]{0,50}\\bmethods?\\b`,
+      ),
+      // "what/which methods does <X> have / are declared / exist"
+      /\b(?:what|which|list|show\s+me)\b[^.?!]{0,25}\bmethods?\b[^.?!]{0,40}\b(?:have|has|exist|declared?|defined?|contain)\b/,
+      /\b(?:every|all\s+the)\s+methods?\b[^.?!]{0,40}\b(?:class|trigger|apex)\b/,
+      // Inner types — only a source parse can answer this.
+      /\binner\s+(?:class|classes|interfaces?|enums?)\b/,
+      // The reviewer register, anchored on an APEX target so it never reaches
+      // the `review-change` deploy-gate asks (which name a PR / changeset and
+      // are claimed by an earlier rule anyway).
+      /\b(?:code\s+review|review)\b[^.?!]{0,40}\b(?:apex\s+class|apex\s+trigger|this\s+class|this\s+trigger|the\s+\w+\s+class)\b/,
+      /\bwhat\s+would\s+a\s+(?:reviewer|senior|code\s+reviewer)\b/,
+      /\breview\b[^.?!]{0,40}\blike\s+a\s+(?:senior|experienced|good)\b/,
+      // "anatomy of" — vocabulary no other rule uses.
+      /\banatomy\b[^.?!]{0,40}\b(?:class|trigger|apex)\b/,
+      // "where does <X> query / do DML / call out" — a SITE question (line
+      // numbers), distinct from governor-risks' loop sweep, which sits earlier
+      // and keeps every "in a loop" phrasing.
+      /\bwhere\s+does\b[^.?!]{0,50}\b(?:soql|quer(?:y|ies|ying)|dml|callouts?)\b/,
     ],
   },
   {

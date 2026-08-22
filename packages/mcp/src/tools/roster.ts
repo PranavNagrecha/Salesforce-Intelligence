@@ -2526,6 +2526,42 @@ const FLOW_GRAPH_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.apex_structure`. Mirrors
+ * `apexStructureInputSchema` (apex-structure.ts), including its `.strict()`
+ * posture — `additionalProperties: false`, so a host that validates before
+ * sending sees the same rejection the handler would give. `classRef` accepts a
+ * canonical `ApexClass:` / `ApexTrigger:` id or a bare Apex name (both type
+ * namespaces are tried). Drift between this schema and the Zod schema is a
+ * code-review concern.
+ */
+const APEX_STRUCTURE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      classRef: { type: 'string', minLength: 1 },
+      include: {
+        type: 'array',
+        items: {
+          type: 'string',
+          enum: [
+            'methods',
+            'members',
+            'innerTypes',
+            'dataAccess',
+            'entryPoints',
+            'touches',
+            'review',
+            'tests',
+          ],
+        },
+      },
+      method: { type: 'string', minLength: 1 },
+    },
+    required: ['classRef'],
+    additionalProperties: false,
+  });
+
+/**
  * Concrete JSON Schema for `sfi.flow_bulkification_audit`. Mirrors
  * `flowBulkificationAuditInputSchema` (flow-bulkification-audit.ts). `limit`
  * caps the FLOW-level slice (max 500, default 100); `offset` pages the flow list
@@ -5272,6 +5308,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     name: 'sfi.explain_apex_method',
     description: "Given an ApexClass or ApexTrigger canonical id (`ApexClass:{ClassName}` or `ApexTrigger:{TriggerName}`), return a structured narrative payload for the explainer. The payload covers: identity (apiName, type, status, apiVersion, modifiers, lineCount, sourceBytes), the async classifiers (`isQueueable`, `isSchedulable`, `isBatchable`, `hasFutureMethod`, `hasInvocableMethod`, `hasAuraEnabledMethod`, `isRestResource`), the `isTest` flag, every outgoing `callsApex` edge (target id + target ApiName), every outgoing field-access edge (`readsFrom` and `writesTo` merged into one `fieldAccess` row per field with `accessType: 'read' | 'write' | 'both'`; field accesses whose receiver is an Apex `this`/`super` member or an un-type-resolved local variable are segregated into `unresolvedFieldAccess` as raw `receiver.field` tokens — NOT real object fields, mirroring `unresolvedCallTargets` for calls), and the R2 `qualityIssues` property mirror — the structured findings (`rule` / `severity` / `location` / `explanation`, the same objects `governor_limit_risks` / `code_quality_audit` surface), empty array when the vault pre-dates; when the component carries no `qualityIssues` property AT ALL it was never scanned, and the `disclosure` says so verbatim so the empty array reads as NOT CHECKED rather than clean. A deterministic `sharingSemantics` block answers \"does this run with sharing?\" from platform rules, not the common myth: `declared` (the source sharing keyword, or null when none), `effectiveModel` (`inherits-caller` when NO keyword on a synchronous entry — a no-keyword top-level class does NOT default to `without sharing`, it inherits the CALLER's context; `system-context` when NO keyword on async Apex — batch/schedulable/queueable/future runs in system mode invoked by the platform with no caller to inherit, so record sharing ends up unenforced because of system-context execution, NOT a `without sharing` default), `runsAsSystem` (true for async entries — they run as the system, never impersonating the user who submitted/scheduled the job), and a verbatim `note`. CRUD/FLS are a separate concern and need explicit checks regardless of the sharing model. `methodName` is accepted but surfaced verbatim — operates at class level; method-level granularity is deferred to. Honesty axis: `Structured narrative; Claude composes prose`. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`. Every response also carries `conceptReasoning` (DEFAULT ON; pass `includeConceptReasoning: false` to skip it): the deterministic concept-rule engine (`sfi.interpret`) run over this component, returning CITED claims on the shared EvidenceEnvelope v2 shape plus a `completeness` digest that keeps four states apart — rules that FIRED, rules EVALUATED against this component that matched nothing, rules PROVABLY inapplicable to this component type, and rules that could NOT be evaluated (the vault lacks their metadata, or their bind shape could not be proven inapplicable). Read `completeness.noRuleCoversComponentType` FIRST: when true, NOTHING was checked and an empty `claims` list is silence, never a clean bill of health. Its bytes are RESERVED from the response budget before the rest of the answer is fitted, and its claim list is capped for size — `sfi.interpret` is the uncapped surface.",
     inputSchema: EXPLAIN_APEX_METHOD_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.apex_structure',
+    description:
+      "The PARSED anatomy of ONE Apex class or trigger, plus the review a senior reviewer would give it — the Apex counterpart of `sfi.flow_graph(walkthrough)`. This is the tool for \"what does the <Class> class do and how is it built\", \"what methods does <Class> have and what are their signatures\", \"walk me through <Class> method by method\", \"which methods are @AuraEnabled / @InvocableMethod / @future\", \"where does <Class> query and where does it do DML\", \"is <Class> bulkified\", \"code review this Apex class\", \"what is risky about <Trigger>\", \"does <Class> run with sharing and what does that MEAN\", or \"is <Class> tested\". It PARSES the `.cls` / `.trigger` on demand with the ANTLR Apex grammar — nothing is persisted, so signatures and line numbers appear WITHOUT a re-refresh. `classRef` accepts a canonical `ApexClass:` / `ApexTrigger:` id or a BARE Apex name (both type namespaces are tried; a bare name that exists as neither returns `component-not-found` naming the closest vault Apex names, never a silent pick). Sections: (1) `meta` — identity, declared kind (a `.cls` may hold an interface or an enum), status, apiVersion, lineCount, modifiers, annotations, superclass, interfaces, a trigger's SObject + DML events, and `sharing` — the SAME `buildSharingSemantics` block `sfi.explain_apex_method` emits (composed, not restated), so \"no keyword\" is reported as `declared: null` with `effectiveModel: inherits-caller` or `system-context`, never as a `without sharing` default. A TRIGGER gets the trigger answer instead of the class one (`sharingSource: 'trigger-system-context'`): a trigger cannot declare the keyword at all and the platform runs it in SYSTEM CONTEXT, so it is never told it inherits a caller it does not have. (2) `structure` — every method and constructor with its rendered `signature`, return type, typed params, `visibility` + `visibilityDeclared` (false = no modifier was written and the value is Apex's `private` LANGUAGE DEFAULT, stated in `visibilityNote`), static/virtual/abstract/override/testMethod/webservice flags, per-method annotations, owning type (inner classes included) and its `line`–`endLine` span; plus fields/properties, inner classes/interfaces/enums, and `dataAccess`: every SOQL, SOSL, DML, callout, async-dispatch and dynamic-Apex SITE with its line, its enclosing method, and `inLoopBody` — true ONLY inside the loop's BODY, so a `for (X x : [SELECT …])` header query is correctly reported false. (3) `entryPoints` — the declared surface read from source (`@AuraEnabled` / `@InvocableMethod` / `@RestResource` / `@future` / `webservice` / Queueable / Schedulable / Database.Batchable / the trigger itself, each with what it MEANS for the transaction) plus `inbound` direct usage edges with confidence, `reachableFrom` + `reachabilityVerdict` composed VERBATIM from `sfi.method_reachability`, and `runsInSeparateTransaction`. (4) `touches` — objects and fields from the vault's own `readsFrom` / `writesTo` edges, with unresolved receivers (`this.x`, untyped locals) segregated as raw tokens. (5) `review` — the extraction-time 19-rule recognizer catalog MIRRORED verbatim (`confidence: 'heuristic'`) PLUS eight checks that need the syntax tree and which no regex can express, named in `rulesEvaluatedHere` so an empty list reads CHECKED: `callout-in-loop`, `async-dispatch-in-loop`, `dml-before-callout` (uncommitted-work-pending), `database-partial-result-discarded` (`Database.x(…, false)` whose result array is dropped, so failed rows fail silently), `soql-assigned-to-single-sobject` (QueryException on zero rows), `no-sharing-declared-on-entry-point`, `without-sharing-external-entry-point`, `trigger-logic-in-trigger-body`. (6) `tests` — covering test classes composed verbatim from `method_reachability`. HONESTY (verbatim in `disclosure` / `boundaries[]`): a parse failure yields `structure: null` with `parse.reason`, NEVER an empty structure — \"could not read\" and \"declares nothing\" must not render the same. Absent facts are `null` with a reason and never `false`/`0`/`[]`: `meta.absent[]` names every meta fact the vault did not record and says why (so `meta.lineCount: null` is readable as UNKNOWN, not 0), and `entryPoints.runsInSeparateTransaction` is null (not false) on a CLASS from a vault predating the async classifiers — while for a TRIGGER it is a knowable platform rule (`false`, it runs inside the firing DML's transaction) rather than a null. Every zero-able section carries `checked` and a note saying what its emptiness means, and a `coverageCaveat` attaches when the ApexClass/ApexTrigger families are not fully retrieved. Single-file parse — a superclass, an implemented interface, and any helper class this one calls are OUTSIDE what was read, so a method that delegates its DML to a helper shows zero DML sites. Dynamic Apex (`Database.query`, `Type.forName`, `Schema.getGlobalDescribe`) puts a verbatim blind-spot line in `boundaries[]` and drops `review.completeness` to `partial`. Every list is a `{items, total, truncated}` triple carrying its TRUE pre-cap total. NEIGHBOURS: `sfi.explain_apex_method` narrates the class from graph properties and has NO method inventory; `sfi.call_graph` / `sfi.downstream_effects` walk BETWEEN classes; `sfi.code_quality_audit` / `sfi.governor_limit_risks` sweep the ORG for the same recognizer findings without reading the class; `sfi.search_apex_source` greps text. Large classes: `include` narrows to a subset of body sections (`methods|members|innerTypes|dataAccess|entryPoints|touches|review|tests`) and `method: '<name>'` narrows every section to ONE method; any narrowing (including a byte-budget shed) is DISCLOSED in a `narrowing` block with `omittedSections` and the exact call that returns them. The input schema is STRICT: a mistyped argument is rejected as `invalid-query`, never silently dropped. A non-Apex `Type:` prefix → `invalid-query`; an unknown name → `component-not-found`; an unknown `method` → `invalid-query` listing the methods that ARE declared.",
+    inputSchema: APEX_STRUCTURE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.explain_formula',
