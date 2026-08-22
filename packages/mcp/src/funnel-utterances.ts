@@ -1636,6 +1636,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
   // "review", "line", "loop", "structure", "anatomy", "risky"), so widening
   // this lane does not depress the narration asks it sits beside.
   'sfi.apex_structure': [
+    // QA measured these reaching the WRONG tool or nothing at all. Each is a
+    // question about ONE Apex component that this tool answers directly:
+    // sharing semantics, covering tests, the reviewer register, bulkification
+    // of an APEX class (the flow audit answered one of these about FLOWS).
+    'does <ApexClass> run with sharing and what does that mean?',
+    'is <ApexClass> bulkified?',
+    'is <ApexClass> tested? which test classes cover it?',
+    'is the <ApexTrigger> trigger risky?',
+    'what is risky about this apex class?',
+    'how is the <ApexClass> class built?',
     'what methods does <ApexClass> have and what are their signatures?',
     'list every method in <ApexClass> with its visibility and return type',
     'walk me through <ApexClass> method by method',
@@ -2652,6 +2662,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'open the field 360 for <Field__c>',
   ],
   'sfi.object_360': [
+    // QA measured these unrouted while this tool is exactly the answer.
+    'what is attached to the <Object> object?',
+    'what would I be touching if I retired the <Object> object?',
+    'what would I be affecting if I removed <Object__c>?',
     'tell me everything about the Contact object - where is it used, what automations touch it, can I delete it',
     'give me the full picture of the <Object__c> object',
     'everything about the Account object in one place',

@@ -332,3 +332,84 @@ describe('parseApexStructure — failure posture', () => {
     });
   });
 });
+
+describe('parseApexStructure — a query site says what it is, and only that', () => {
+  it('does NOT attribute a query nested in a CALL / CONSTRUCTOR argument to the enclosing declaration', async () => {
+    // FAIL-BEFORE: the walk to the nearest VariableDeclarator crossed the
+    // argument list, so both of these were reported "assigned directly to a
+    // single sObject variable" — a sentence that does not describe the code
+    // (and, for `pick(...)`, a plain false positive: the callee takes a List).
+    const r = await parse(`
+      public class Repro {
+        public static void viaConstructor() {
+          Widget__c w = new Widget__c(OwnerId = [SELECT Id FROM Owner__c LIMIT 1].Id);
+        }
+        public static void viaCall() {
+          Widget__c w2 = Picker.pick([SELECT Id FROM Widget__c]);
+        }
+      }
+    `);
+    expect(r.parsed).toBe(true);
+    const sites = r.structure!.soqlSites;
+    expect(sites).toHaveLength(2);
+    for (const site of sites) {
+      expect(site.assignedToSingleSObject).toBe(false);
+      expect(site.singleSObjectForm).toBeNull();
+    }
+  });
+
+  it('still recognises the real initializer shape, and names the indexed one apart', async () => {
+    const r = await parse(`
+      public class Repro2 {
+        public static void go() {
+          Widget__c direct = [SELECT Id FROM Widget__c LIMIT 1];
+          Widget__c indexed = [SELECT Id FROM Widget__c LIMIT 1][0];
+          List<Widget__c> bulk = [SELECT Id FROM Widget__c];
+        }
+      }
+    `);
+    const [direct, indexed, bulk] = r.structure!.soqlSites;
+    expect(direct!.assignedToSingleSObject).toBe(true);
+    expect(direct!.singleSObjectForm).toBe('initializer');
+    // FAIL-BEFORE: the indexed shape was indistinguishable from the
+    // initializer, so the consumer named System.QueryException for a line that
+    // throws System.ListException.
+    expect(indexed!.assignedToSingleSObject).toBe(true);
+    expect(indexed!.singleSObjectForm).toBe('indexed');
+    expect(bulk!.assignedToSingleSObject).toBe(false);
+    expect(bulk!.singleSObjectForm).toBeNull();
+  });
+});
+
+describe('parseApexStructure — a rendered expression is readable', () => {
+  it('keeps the whitespace of the source, so `new X(…)` is not `newX(…)`', async () => {
+    const r = await parse(`
+      public class Dispatcher {
+        public static void go(Id target) {
+          System.enqueueJob(new WidgetJob(target));
+        }
+      }
+    `);
+    const site = r.structure!.asyncDispatchSites[0]!;
+    // FAIL-BEFORE: ANTLR's getText() concatenates tokens with no separator, so
+    // this rendered `System.enqueueJob(newWidgetJob(target))` — a call to a
+    // method that does not exist, printed beside a real line number.
+    expect(site.expression).toBe('System.enqueueJob(new WidgetJob(target))');
+    expect(site.expression).not.toContain('newWidgetJob');
+  });
+});
+
+describe('parseApexStructure — a syntax error is readable, not a token dump', () => {
+  it('compacts the ANTLR follow set instead of spelling all ~165 alternatives', async () => {
+    const r = await parse('public class Broken { public void go( { }');
+    expect(r.parsed).toBe(false);
+    expect(r.parseErrors.length).toBeGreaterThan(0);
+    for (const error of r.parseErrors) {
+      // FAIL-BEFORE: ~1.8 KB per error, repeated verbatim into parse.reason
+      // AND boundaries[] — 6.6 KB of unreadable noise for a 1-line file.
+      expect(error.length).toBeLessThanOrEqual(250);
+    }
+    // The cut is VISIBLE: the count of dropped alternatives is kept.
+    expect(r.parseErrors.some((e) => /expecting one of \d+:/.test(e))).toBe(true);
+  });
+});
