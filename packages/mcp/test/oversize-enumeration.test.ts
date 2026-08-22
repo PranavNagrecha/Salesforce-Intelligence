@@ -185,4 +185,104 @@ describe('analyzeOversizeEnumeration', () => {
     }
     expect(offenders).toEqual([]);
   });
+
+  /**
+   * THE CONVERSE, and why `sfi.search_components` stayed mislabeled.
+   *
+   * The loop above skips everything that is not `paginated`, and until now the
+   * analyzer's `handler-capped` branch was literally empty — so a row could
+   * claim "limit caps but no resume" while the tool advertised `offset`, and
+   * nothing in this file could notice. That is the dangerous direction: the
+   * release gate reads `bound` to decide whether a dropped tail needs a probe,
+   * so an understating row SUPPRESSES the requirement.
+   */
+  it('no `handler-capped` inventory tool advertises a resume knob in V01_TOOLS', () => {
+    const roster = new Map(V01_TOOLS.map((t) => [t.name, t]));
+    const offenders: string[] = [];
+    for (const [name, entry] of Object.entries(HIGH_FANOUT_INVENTORY)) {
+      if (entry.bound !== 'handler-capped') continue;
+      const props = (roster.get(name)?.inputSchema?.properties ?? {}) as Record<
+        string,
+        unknown
+      >;
+      if (props['offset'] !== undefined || props['cursor'] !== undefined) {
+        offenders.push(name);
+      }
+    }
+    // FAIL-BEFORE: ['sfi.search_components'] — it gained `offset` (plus
+    // totalCount/hasMore/nextOffset) and kept the truncator row.
+    expect(offenders).toEqual([]);
+  });
+
+  it('no `global-response-budget` inventory tool advertises a caller `limit`', () => {
+    const roster = new Map(V01_TOOLS.map((t) => [t.name, t]));
+    const offenders: string[] = [];
+    for (const [name, entry] of Object.entries(HIGH_FANOUT_INVENTORY)) {
+      if (entry.bound !== 'global-response-budget') continue;
+      const props = (roster.get(name)?.inputSchema?.properties ?? {}) as Record<
+        string,
+        unknown
+      >;
+      if (props['limit'] !== undefined) offenders.push(name);
+    }
+    // FAIL-BEFORE (once `sfi.order_of_execution` advertised its per-event page
+    // knobs): ['sfi.order_of_execution'].
+    expect(offenders).toEqual([]);
+  });
+
+  it('the analyzer itself flags a handler-capped row that grew a resume knob', () => {
+    const tools = Object.keys(HIGH_FANOUT_INVENTORY).map((name) => {
+      const entry = HIGH_FANOUT_INVENTORY[name]!;
+      if (name === 'sfi.query_graph') return tool(name, ['limit', 'cursor']);
+      const props =
+        entry.bound === 'paginated'
+          ? ['componentId', 'limit', 'offset']
+          : entry.bound === 'graph-payload-budget'
+            ? ['rootId', 'hops']
+            : ['componentId'];
+      return tool(name, props);
+    });
+    const { violations } = analyzeOversizeEnumeration(tools, allProbes());
+    const flagged = violations.filter((v) => v.tool === 'sfi.query_graph');
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0]!.message).toContain('ADVERTISES a resume knob');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: search_components is inventoried as paginated and advertises offset', () => {
+    const name = 'sfi.search_components';
+    expect(HIGH_FANOUT_INVENTORY[name]?.bound).toBe('paginated');
+    expect(HIGH_FANOUT_INVENTORY[name]?.note).not.toContain('no resume');
+    const props = (V01_TOOLS.find((t) => t.name === name)?.inputSchema
+      ?.properties ?? {}) as Record<string, unknown>;
+    expect(props['limit']).toBeDefined();
+    expect(props['offset']).toBeDefined();
+  });
+
+  /**
+   * Every inventory ROW's `bound` must agree with the tool's REAL advertised
+   * schema — the synthesized happy-path case at the top of this file stamps its
+   * own properties, so it can never catch a row that disagrees with the roster.
+   *
+   * Scoped to the classification axis on purpose. The analyzer ALSO sweeps for
+   * tools that declare `limit` while sitting in neither `HIGH_FANOUT_INVENTORY`
+   * nor `LIMIT_TOOL_EXCLUSIONS`, and against the real roster that sweep is
+   * currently non-empty (12 tools at the time of writing: doc_coverage_report,
+   * limit_headroom_report, permission_set_consolidation, security_settings,
+   * action_chain, nonselective_soql, flow_bulkification_audit,
+   * picklist_integrity_scan, event_topology, field_lineage,
+   * field_mapping_between_objects, trace_debug_log). That is a REGISTRATION
+   * backlog, not a classification lie: closing it means adding a real-org
+   * high-fanout probe per tool in the qa harness, which is a different repo and
+   * a different change. Filtered out here so this assertion says exactly what
+   * it means — and named here so it is a known number, not a silent one.
+   */
+  it('every inventory row\'s bound agrees with the REAL advertised schema', () => {
+    const { violations } = analyzeOversizeEnumeration(V01_TOOLS, allProbes());
+    const misclassified = violations.filter(
+      (v) => !v.message.includes('is not in HIGH_FANOUT_INVENTORY'),
+    );
+    // FAIL-BEFORE: sfi.search_components — handler-capped while advertising
+    // `offset`; and sfi.order_of_execution once it advertised its page knobs.
+    expect(misclassified).toEqual([]);
+  });
 });
