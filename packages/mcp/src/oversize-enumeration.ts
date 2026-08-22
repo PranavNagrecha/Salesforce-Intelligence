@@ -138,6 +138,35 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.find_component_usages': { bound: 'global-response-budget' },
   'sfi.generate_data_dictionary': { bound: 'global-response-budget' },
   'sfi.generate_sharing_summary': { bound: 'global-response-budget' },
+  // --- Added to close the "declares a limit but is in neither the inventory
+  //     nor the exclusions" gap. Classified from the ADVERTISED schema: a tool
+  //     is `paginated` only if a host can SEE a resume knob, because a cursor
+  //     that exists in zod but not in the advertised schema is unreachable.
+  //
+  //     PROBE DEBT, stated because this module's header says every inventoried
+  //     tool "must also carry a real-org high-fanout probe" in tool-smoke.mjs:
+  //     of the twelve below, only `field_lineage` has one. The other eleven are
+  //     classified from their schemas, NOT proven against a hub node on a real
+  //     org. `paginated` here means "a resume knob is advertised", never "paging
+  //     was measured to reach the tail" -- this batch found a tool whose pointer
+  //     advanced past what it delivered, so the two are not the same claim.
+  //     The unit test cannot catch this: it passes a synthetic probe set derived
+  //     from this very inventory, and the harness gate the header names
+  //     (check-oversize-enumeration.mjs) is not present in the repo.
+  // --- 9 paginated tools with limit + offset (or cursor) ---
+  'sfi.doc_coverage_report': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.limit_headroom_report': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.permission_set_consolidation': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.security_settings': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.field_lineage': { bound: 'paginated', note: 'limit + offset + cursor' },
+  'sfi.flow_bulkification_audit': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.nonselective_soql': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.picklist_integrity_scan': { bound: 'paginated', note: 'limit + offset' },
+  'sfi.field_mapping_between_objects': { bound: 'paginated', note: 'limit + offset + cursor' },
+  // --- 3 handler-capped tools with limit but no resume knob ---
+  'sfi.trace_debug_log': { bound: 'handler-capped', note: 'limit caps display knobs (timeline spans, default 60/max 400) only; no pagination' },
+  'sfi.action_chain': { bound: 'handler-capped', note: 'limit caps ApprovalProcess list (default 5/max 25) only; no pagination' },
+  'sfi.event_topology': { bound: 'handler-capped', note: 'limit caps event inventory (default 50/max 500) only; no pagination' },
 });
 
 /**
