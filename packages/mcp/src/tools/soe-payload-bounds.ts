@@ -38,6 +38,28 @@ export interface BoundableConditional {
   readonly conditionContextId: string;
   expression: string;
   fieldRefs: readonly string[];
+  /**
+   * The grounding census. Carried through Pass 3 DELIBERATELY.
+   *
+   * The trim empties `fieldRefs`, and an empty `fieldRefs` is only readable
+   * because this census says whether the refs were CHECKED and how many were
+   * grounded. A type that discarded it would turn every trimmed condition into
+   * an unreadable `fieldRefs: []` — "this condition reads nothing" — which is
+   * the exact false-absence this batch exists to remove. It lives here rather
+   * than being re-stamped by the handler afterwards so that a future change to
+   * this pass cannot silently reintroduce that shape.
+   */
+  refGrounding?: {
+    readonly checked: boolean;
+    readonly grounded: number;
+    readonly ungrounded: number;
+  };
+  /**
+   * The verbose ungrounded roster. Declared so this pass OWNS the decision to
+   * drop it rather than discarding it by omission: it is the bloat the budget
+   * came for, and `refGrounding.ungrounded` still reports how many there were.
+   */
+  ungroundedRefs?: readonly unknown[];
 }
 
 export interface BoundableStep {
@@ -223,10 +245,19 @@ export const enforceSoeByteBudget = (
       }
     }
     if (target === undefined) break; // nothing left to slim — global guard backstops
+    const priorConditional = target.conditional!;
     target.conditional = {
-      conditionContextId: target.conditional!.conditionContextId,
+      conditionContextId: priorConditional.conditionContextId,
       expression: '',
       fieldRefs: [],
+      // PRESERVE the census. `fieldRefs: []` next to `conditionalTruncated:
+      // true` says the list was CUT; without these counts it would instead read
+      // as "this condition reads nothing".
+      ...(priorConditional.refGrounding !== undefined
+        ? { refGrounding: priorConditional.refGrounding }
+        : {}),
+      // `ungroundedRefs` is intentionally NOT carried: it is the verbose part
+      // the budget cut, and refGrounding.ungrounded still names how many.
     };
     target.conditionalTruncated = true;
     conditionalsTrimmed += 1;
@@ -401,10 +432,20 @@ export interface SoePhaseOmission {
 export const computePhasesOmitted = (
   declared: SoePhaseCounts,
   survivingSoe: readonly { readonly phase: SoePhase }[],
+  /**
+   * When the payload is PHASE-FILTERED, restrict the comparison to that one
+   * phase. A phase-filtered `soe` is an intentional subset, so comparing it
+   * against every phase's declared count would flag every such response; but
+   * comparing it against ITS OWN declared count is exactly the question that
+   * matters — "did the requested phase come back whole?". Omitting the
+   * parameter keeps the full cross-phase behaviour byte-identical.
+   */
+  onlyPhase?: SoePhase,
 ): SoePhaseOmission[] => {
   const survived = tallyPhaseCounts(survivingSoe);
   const omitted: SoePhaseOmission[] = [];
   for (const phase of AUTOMATION_PHASES) {
+    if (onlyPhase !== undefined && phase !== onlyPhase) continue;
     if (declared[phase] > survived[phase]) {
       omitted.push({ phase, declared: declared[phase], present: survived[phase] });
     }
@@ -436,10 +477,10 @@ export const computePhasesOmitted = (
  * divergent copy (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES).
  *
  * No-op unless `data` is a composed-SOE payload (an `soe` array of phase-tagged
- * steps + a `summary.phaseCounts` map) on the FULL, un-filtered view
- * (`appliedPhaseFilter` absent — a phase-filtered `soe` is an intentional subset
- * whose cross-phase delta is not an omission). Every non-SOE payload is left
- * byte-identical. Mutates `data` in place.
+ * steps + a `summary.phaseCounts` map). It runs on the phase-FILTERED view too,
+ * scoped to the requested phase: that view is the RECOVERY path the full view
+ * points at, so a shortfall there is the last place a caller can find out.
+ * Every non-SOE payload is left byte-identical. Mutates `data` in place.
  *
  * @returns `true` when it changed `phasesOmitted`, else `false`.
  */
@@ -451,8 +492,18 @@ export const reconcileSoePhasesOmittedAfterGlobalTrim = (
   }
   const rec = data as Record<string, unknown>;
   // A phase-filtered view narrows `soe` on purpose while `phaseCounts` stays the
-  // whole composition, so a cross-phase delta there is not an omission.
-  if (rec['appliedPhaseFilter'] !== undefined) return false;
+  // whole composition, so a CROSS-PHASE delta there is not an omission. That
+  // reasoning is right and the old action was not: returning early skipped the
+  // backstop entirely, so a phase-filtered payload trimmed by the GLOBAL budget
+  // lost steps with nothing to say so — the defect surviving in the very path
+  // that exists to catch it. Narrow the comparison to the requested phase
+  // instead: a phase filter chooses WHICH phase comes back, never consents to
+  // getting a partial one silently.
+  const appliedPhaseFilterRaw = rec['appliedPhaseFilter'];
+  const onlyPhase =
+    typeof appliedPhaseFilterRaw === 'string'
+      ? (appliedPhaseFilterRaw as SoePhase)
+      : undefined;
   const soe = rec['soe'];
   const summary = rec['summary'];
   if (
@@ -483,6 +534,7 @@ export const reconcileSoePhasesOmittedAfterGlobalTrim = (
   const omitted = computePhasesOmitted(
     phaseCounts as SoePhaseCounts,
     soe as readonly { readonly phase: SoePhase }[],
+    onlyPhase,
   );
   if (omitted.length > 0) {
     rec['phasesOmitted'] = omitted;

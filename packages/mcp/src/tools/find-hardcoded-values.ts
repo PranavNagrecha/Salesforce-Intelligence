@@ -41,6 +41,18 @@
  * `boundaries` array on the response carries this disclosure when at
  * least one finding's parent ApexClass has `isTest: true`.
  *
+ * **Test-fixture split** (FIX 13) — the refusal axis above is per-match, but
+ * the AGGREGATE used to hide it: measured on a real org, 110 of 116 matches sat
+ * inside `@isTest` classes, so `totalCount: 116` overstated the actionable work
+ * ~19x. `productionCount` / `testFixtureCount` / `byCategoryProduction` split
+ * the headline (emitted whenever the set holds a test-class row);
+ * `totalCount` and `byCategory` are UNCHANGED and still span everything.
+ * `excludeTestClasses: true` drops the fixture rows before the sort and the
+ * page, echoes itself in `appliedScope`, and is folded into the cursor
+ * fingerprint so a page cannot be replayed across the boundary. Scoping to an
+ * `@isTest` class AND excluding test classes is refused as `invalid-query`
+ * rather than answered with an empty scan of the class the caller named.
+ *
  * Implementation notes:
  *   - The v2.1 recognizer's `location` string carries
  *     `line {N}` for raw-line matches; the `explanation` carries the
@@ -124,6 +136,25 @@ const SEVERITY_SET: ReadonlySet<string> = new Set([
 /** Verbatim refusal-pattern disclosure for test-class hardcoded IDs. */
 const TEST_CLASS_REFUSAL_DISCLOSURE =
   'string literals inside @isTest classes that look like IDs may be intentional test fixtures. Verify before treating as a bug.';
+/**
+ * FIX 13. Emitted whenever the matched set holds at least one `@isTest` row, so
+ * a caller reading `totalCount` learns immediately how much of it is fixture
+ * noise rather than shipping code.
+ */
+const buildTestFixtureSplitDisclosure = (
+  testFixtureCount: number,
+  totalCount: number,
+  productionCount: number,
+): string =>
+  `${testFixtureCount.toString()} of ${totalCount.toString()} matches are inside @isTest classes, where a hardcoded id or email is usually a deliberate fixture. The actionable production count is ${productionCount.toString()}. Pass excludeTestClasses: true to scan production only.`;
+
+/**
+ * FIX 13. A filter that removes rows must say how many it removed, or the
+ * shrunken `totalCount` reads as a smaller org rather than a narrower question.
+ */
+const buildExcludeTestClassesDisclosure = (excludedCount: number): string =>
+  `excludeTestClasses: true — ${excludedCount.toString()} match(es) inside @isTest classes were filtered out BEFORE this count and are not represented in matches, totalCount or byCategory. Re-run without excludeTestClasses to see them.`;
+
 const HEURISTIC_CONFIDENCE_DISCLOSURE =
   'pattern recognition is heuristic — every finding carries confidence: heuristic. The recognizer matches on literal-shape (key prefixes for IDs, strict email regex for emails); managed-package literals embedded in installed code may surface as false positives.';
 
@@ -145,6 +176,12 @@ export const findHardcodedValuesInputSchema = z.object({
   // never mistakes an unfiltered org-wide roster for a scoped answer.
   componentId: z.string().min(1).optional(),
   nameContains: z.string().min(1).optional(),
+  // FIX 13. `true` drops every match whose parent class is `@isTest` BEFORE the
+  // sort and the page, so `matches` / `totalCount` / `byCategory` describe
+  // production code only. Default `false` — the unfiltered response is
+  // unchanged. Folded into the cursor fingerprint below: a page minted with the
+  // filter on must never resume against the unfiltered list.
+  excludeTestClasses: z.boolean().optional(),
   limit: z
     .number()
     .int()
@@ -199,7 +236,13 @@ export interface FindHardcodedValuesOutput {
   readonly appliedScope?: {
     readonly component: string | null;
     readonly nameContains: string | null;
-    readonly mode: 'component' | 'nameContains';
+    readonly mode: 'component' | 'nameContains' | 'all';
+    /**
+     * FIX 13. Echoed ONLY when the caller passed `excludeTestClasses: true`, so
+     * a host can never mistake a production-only scan for the full one. Absent
+     * means the scan covered test classes as well.
+     */
+    readonly excludeTestClasses?: true;
   };
   /** Per-category counter across the FULL matched set. */
   readonly byCategory: Readonly<{
@@ -210,14 +253,47 @@ export interface FindHardcodedValuesOutput {
     readonly 'sandbox-data': number;
   }>;
   /**
-   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
-   * nodes that actually carry a `qualityIssues` scan. Present ONLY when some
-   * node in scope was never scanned — the path where `matches: []` means "not
-   * checked", not "no hardcoded values here". A fully-scanned vault omits it
-   * and its response is unchanged.
+   * FIX 13. Of `totalCount`, how many matches sit in code that actually ships.
+   * A hardcoded id or email inside an `@isTest` class is usually a deliberate
+   * fixture, and on a real org they dominate the headline — 110 of 116 measured
+   * — so `totalCount` alone overstates the actionable work by ~19x.
+   *
+   * ADDITIVE: `totalCount` is unchanged and still counts every match, and
+   * `productionCount + testFixtureCount === totalCount` always. Both are
+   * emitted exactly when `testFixtureCount > 0`, i.e. when the split carries
+   * information; with no test-class match in the set `totalCount` IS the
+   * production count and `byCategory` IS `byCategoryProduction`, and the
+   * response stays byte-identical to the pre-split shape.
    */
-  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
-  /** Verbatim honesty disclosures. */
+  readonly productionCount?: number;
+  /** FIX 13. Of `totalCount`, how many matches are inside an `@isTest` class. */
+  readonly testFixtureCount?: number;
+  /**
+   * FIX 13. `byCategory` restricted to the production matches. `byCategory`
+   * itself is untouched and still spans the FULL set. Emitted alongside
+   * `productionCount`.
+   */
+  readonly byCategoryProduction?: Readonly<{
+    readonly id: number;
+    readonly email: number;
+    readonly username: number;
+    readonly url: number;
+    readonly 'sandbox-data': number;
+  }>;
+  /**
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
+   * nodes that actually carry a `qualityIssues` scan.
+   *
+   * D-3: emitted UNCONDITIONALLY. It used to appear only when some node in
+   * scope was never scanned, so `matches: []` on a fully-scanned scope carried
+   * no census — indistinguishable from a scope nothing ever read.
+   */
+  readonly qualityScanCoverage: readonly QualityScanTypeCoverage[];
+  /**
+   * Verbatim honesty disclosures. Never empty: the heuristic-confidence
+   * disclosure describes HOW the recognizers match and is true on a
+   * zero-match response too.
+   */
   readonly boundaries: readonly string[];
   /** True when the matched count exceeded `limit` (more matches behind this page). */
   readonly truncated: boolean;
@@ -351,6 +427,7 @@ export const findHardcodedValuesHandler = async (
   }
   const nameNeedle =
     input.nameContains !== undefined ? input.nameContains.toLowerCase() : null;
+  const excludeTestClasses = input.excludeTestClasses === true;
 
   const limit = input.limit ?? FIND_HARDCODED_DEFAULT_LIMIT;
   const ruleSet: ReadonlySet<string> =
@@ -359,7 +436,6 @@ export const findHardcodedValuesHandler = async (
       : new Set([CATEGORY_TO_RULE[input.category]]);
 
   const collected: HardcodedValueMatch[] = [];
-  let sawTestClassFinding = false;
 
   // CR-22 B3: scan EVERY node of each Apex type by paging the SQL OFFSET forward
   // (window-by-window at the clamped cap) so findings on node 501+ are reachable
@@ -385,6 +461,19 @@ export const findHardcodedValuesHandler = async (
     if (input.componentId !== undefined) {
       if (node.id !== input.componentId) continue;
       componentIdMatched = true;
+      // FIX 13 edge case. Scoping to an @isTest class and excluding test
+      // classes are contradictory instructions; honouring the second would
+      // return an empty scan OF THE THING THE CALLER NAMED, which reads as
+      // "that class is clean". Refuse instead of answering a question nobody
+      // asked.
+      if (excludeTestClasses && isTestClass(node)) {
+        return err({
+          kind: 'invalid-query',
+          message:
+            'You scoped to an @isTest class and also excluded test classes; those cannot both hold.',
+          path: 'excludeTestClasses',
+        });
+      }
     }
     if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
       continue;
@@ -397,7 +486,6 @@ export const findHardcodedValuesHandler = async (
       const issue = coerceIssue(rawIssue);
       if (issue === null) continue;
       if (!ruleSet.has(issue.rule)) continue;
-      if (inTest) sawTestClassFinding = true;
       collected.push({
         componentId: node.id,
         type: node.type,
@@ -422,7 +510,14 @@ export const findHardcodedValuesHandler = async (
     });
   }
 
-  const sorted = [...collected].sort(compareMatches);
+  // FIX 13. Filter BEFORE the sort and the page, so `totalCount`, `byCategory`
+  // and every cursor offset describe the same list the caller asked for.
+  const retained = excludeTestClasses
+    ? collected.filter((m) => !m.inTestClass)
+    : collected;
+  const excludedTestFixtureCount = collected.length - retained.length;
+
+  const sorted = [...retained].sort(compareMatches);
 
   const byCategory = {
     id: 0,
@@ -431,10 +526,30 @@ export const findHardcodedValuesHandler = async (
     url: 0,
     'sandbox-data': 0,
   };
+  // FIX 13. `byCategory` stays the FULL set — replacing it would silently
+  // change what every existing caller reads. The production-only tally rides
+  // ALONGSIDE it.
+  const byCategoryProduction = {
+    id: 0,
+    email: 0,
+    username: 0,
+    url: 0,
+    'sandbox-data': 0,
+  };
+  let productionCount = 0;
   for (const m of sorted) {
+    if (!m.inTestClass) productionCount += 1;
     const cat = ruleToCategory(m.rule);
-    if (cat !== null) byCategory[cat] += 1;
+    if (cat !== null) {
+      byCategory[cat] += 1;
+      if (!m.inTestClass) byCategoryProduction[cat] += 1;
+    }
   }
+  const testFixtureCount = sorted.length - productionCount;
+  // The refusal-pattern disclosure is a claim about the rows THIS response
+  // returns, so it follows the retained set: with the filter on there is no
+  // test-class row to caveat.
+  const sawTestClassFinding = testFixtureCount > 0;
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the one narrowing arg `category` so a token minted
@@ -447,6 +562,12 @@ export const findHardcodedValuesHandler = async (
     ...(input.nameContains !== undefined
       ? { nameContains: input.nameContains }
       : {}),
+    // FIX 13. Without this a cursor minted over the production-only list would
+    // decode cleanly against the unfiltered one and resume at an offset that
+    // points at a different row — a silent skip across the boundary. Added only
+    // when the filter is ON so the default fingerprint (and therefore every
+    // existing cursor) is unchanged.
+    ...(excludeTestClasses ? { excludeTestClasses: true } : {}),
   });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
@@ -459,12 +580,31 @@ export const findHardcodedValuesHandler = async (
     offset = decoded.value.o;
   }
 
-  const boundaries: string[] = [];
-  if (sorted.length > 0) {
-    boundaries.push(HEURISTIC_CONFIDENCE_DISCLOSURE);
-    if (sawTestClassFinding) {
-      boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
-    }
+  // D-3: the heuristic-confidence disclosure describes HOW the recognizers
+  // match (literal shape, key prefixes, a strict email regex) and is true
+  // whether or not anything matched — so it is UNCONDITIONAL. It used to be
+  // gated on `sorted.length > 0`, which silenced it on the zero-match response,
+  // the one shape that most needs to say what the scanner actually did.
+  //
+  // TEST_CLASS_REFUSAL_DISCLOSURE stays gated on `sawTestClassFinding` on
+  // purpose: it is a claim about ROWS THIS RESPONSE RETURNED ("some of these
+  // may be deliberate fixtures"), not a claim about the scanner, so it is false
+  // advertising on a response with no test-class row in it.
+  const boundaries: string[] = [HEURISTIC_CONFIDENCE_DISCLOSURE];
+  if (sawTestClassFinding) {
+    boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
+    boundaries.push(
+      buildTestFixtureSplitDisclosure(
+        testFixtureCount,
+        sorted.length,
+        productionCount,
+      ),
+    );
+  }
+  if (excludeTestClasses) {
+    boundaries.push(
+      buildExcludeTestClassesDisclosure(excludedTestFixtureCount),
+    );
   }
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. `SCANNED_TYPES` includes
   // ApexTrigger, but `detectCodeQualityIssues` ran from the ApexClass extractor
@@ -533,10 +673,18 @@ export const findHardcodedValuesHandler = async (
       matches: slice,
       totalCount: sorted.length,
       byCategory,
-      ...(unscannedNote !== undefined ? { qualityScanCoverage } : {}),
+      // FIX 13. Emitted exactly when the split says something `totalCount` and
+      // `byCategory` do not. With no test-class match in the set the two pairs
+      // are equal by construction and the response stays byte-identical.
+      ...(testFixtureCount > 0
+        ? { productionCount, testFixtureCount, byCategoryProduction }
+        : {}),
+      qualityScanCoverage,
       boundaries,
       truncated,
-      ...(input.componentId !== undefined || input.nameContains !== undefined
+      ...(input.componentId !== undefined ||
+      input.nameContains !== undefined ||
+      excludeTestClasses
         ? {
             appliedScope: {
               component: input.componentId ?? null,
@@ -544,7 +692,12 @@ export const findHardcodedValuesHandler = async (
               mode:
                 input.componentId !== undefined
                   ? ('component' as const)
-                  : ('nameContains' as const),
+                  : input.nameContains !== undefined
+                    ? ('nameContains' as const)
+                    : ('all' as const),
+              ...(excludeTestClasses
+                ? { excludeTestClasses: true as const }
+                : {}),
             },
           }
         : {}),

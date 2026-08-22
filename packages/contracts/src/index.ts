@@ -662,10 +662,25 @@ export interface TrustSummary {
      * answers stay byte-stable until a producer opts in.
      */
     readonly overall?: 'uniform' | 'mixed';
-    /** Per-family `retrievedAt` (ISO) for the families an answer depended on. */
+    /**
+     * Per-family `retrievedAt` (ISO) for the families an answer depended on.
+     * ABSENT when `overall` is `'uniform'` — every family would carry the same
+     * timestamp `oldestEvidenceAt` already holds. `familiesOmitted` says so
+     * explicitly, so the absence is a DISCLOSED collapse, not a silent drop.
+     */
     readonly families?: Readonly<Record<string, string>>;
     /** Oldest `retrievedAt` among {@link families} — the weak link. */
     readonly oldestEvidenceAt?: string;
+    /**
+     * How many families' clocks were read. Present WITH or WITHOUT
+     * {@link families}, so a collapsed map still reports its true total.
+     */
+    readonly familyCount?: number;
+    /**
+     * Why {@link families} is absent: `'uniform'` — every family shares
+     * `oldestEvidenceAt`. Absent when `families` is present.
+     */
+    readonly familiesOmitted?: 'uniform';
   }>;
   readonly completeness: Readonly<{
     readonly status: 'complete' | 'partial' | 'unknown';

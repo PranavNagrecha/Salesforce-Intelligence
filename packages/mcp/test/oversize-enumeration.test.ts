@@ -130,16 +130,45 @@ describe('analyzeOversizeEnumeration', () => {
   // 0.2.0 gate regression: record_creation_paths and flow_fault_audit shipped
   // with a `limit` input but were never registered in HIGH_FANOUT_INVENTORY,
   // so the release gate (check-oversize-enumeration.mjs) flagged them as
-  // unaudited enumerators. Both are limit-capped truncators with NO resume
-  // knob (they disclose the cut via *Truncated flags + full counts), so the
-  // truthful classification is `handler-capped`.
-  it('FAIL-BEFORE/PASS-AFTER: the two 0.2.0 limit enumerators are inventoried as handler-capped', () => {
-    for (const name of ['sfi.record_creation_paths', 'sfi.flow_fault_audit']) {
-      const entry = HIGH_FANOUT_INVENTORY[name];
-      expect(entry, `${name} must be in HIGH_FANOUT_INVENTORY`).toBeDefined();
-      expect(entry?.bound, `${name} must be handler-capped`).toBe('handler-capped');
-      expect(LIMIT_TOOL_EXCLUSIONS.has(name), `${name} must not be excluded`).toBe(false);
-    }
+  // unaudited enumerators.
+  //
+  // The INVARIANT this pinned — and still pins below — is: a tool with a
+  // `limit` is REGISTERED, and its `bound` tells the truth about whether the
+  // dropped tail is reachable. A limit-capped truncator with NO resume knob is
+  // `handler-capped`; a tool with a real resume knob is `paginated`.
+  //
+  // SPLIT by FIX 4. `record_creation_paths` is untouched and keeps its
+  // `handler-capped` pin below — it is still a limit-only truncator.
+  // `flow_fault_audit` gained a REAL resume knob (offset + CR-22 cursor +
+  // handler-side byte budget), so `handler-capped` became right-about-
+  // yesterday: the classification moves to `paginated` in the same change that
+  // added the knob, and the sibling assertion further down ("every `paginated`
+  // inventory tool exposes a real resume knob in V01_TOOLS") now covers it.
+  it('FAIL-BEFORE/PASS-AFTER: record_creation_paths is a limit-only truncator, inventoried as handler-capped', () => {
+    const name = 'sfi.record_creation_paths';
+    const entry = HIGH_FANOUT_INVENTORY[name];
+    expect(entry, `${name} must be in HIGH_FANOUT_INVENTORY`).toBeDefined();
+    expect(entry?.bound, `${name} must be handler-capped`).toBe('handler-capped');
+    expect(LIMIT_TOOL_EXCLUSIONS.has(name), `${name} must not be excluded`).toBe(false);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: flow_fault_audit has a real resume knob, so it is inventoried as paginated', () => {
+    const name = 'sfi.flow_fault_audit';
+    const entry = HIGH_FANOUT_INVENTORY[name];
+    expect(entry, `${name} must be in HIGH_FANOUT_INVENTORY`).toBeDefined();
+    expect(entry?.bound, `${name} must be paginated`).toBe('paginated');
+    expect(LIMIT_TOOL_EXCLUSIONS.has(name), `${name} must not be excluded`).toBe(false);
+  });
+
+  // FIX 14: `meaningful_test_audit` gained `limit`, which brings it into scope
+  // for this gate. Registering it in the SAME change is the point — the 0.2.0
+  // regression above was exactly a `limit` shipping without an inventory row.
+  it('FAIL-BEFORE/PASS-AFTER: meaningful_test_audit is registered as paginated', () => {
+    const name = 'sfi.meaningful_test_audit';
+    const entry = HIGH_FANOUT_INVENTORY[name];
+    expect(entry, `${name} must be in HIGH_FANOUT_INVENTORY`).toBeDefined();
+    expect(entry?.bound, `${name} must be paginated`).toBe('paginated');
+    expect(LIMIT_TOOL_EXCLUSIONS.has(name), `${name} must not be excluded`).toBe(false);
   });
 
   it('every `paginated` inventory tool exposes a real resume knob in V01_TOOLS', () => {

@@ -105,6 +105,44 @@ const RULES: readonly BoilerplateRule[] = [
     tail: 'echoed as `appliedScope.container`.',
     endsAtDescriptionEnd: false,
   },
+  {
+    // AUTOMATION-FAMILY-QA. The honesty batch added long contract blocks to a
+    // dozen descriptions — pagination mechanics, activation-status partitions,
+    // composed-analysis manifests. Each is REQUIRED reading for a host (code
+    // and description must agree) and useless for RETRIEVAL: the blocks are
+    // dense in exactly the vocabulary that separates the automation tools from
+    // one another (`flow`, `order`, `phase`, `trigger`, `status`, `automation`,
+    // `truncated`), so indexing them depressed those terms' IDF corpus-wide.
+    //
+    // MEASURED, not theorised: the advisory-tier funnel probe
+    // ("contact has many active record-triggered flows - is their execution
+    // order deterministic, and what is the risk?") fell 0.260 -> 0.258, below
+    // FUNNEL_PRIMARY_MIN_SCORE, and the tool it demoted was
+    // `sfi.automation_build_advisor` — which the batch never touched. Third
+    // instance of this exact failure mode; see the two above.
+    id: 'flow-fault-audit-paging-and-status',
+    marker: ' The worst-first list PAGES:',
+    tail: 'UNKNOWN, never assumed Active.',
+    endsAtDescriptionEnd: false,
+  },
+  {
+    id: 'flow-bulkification-scope-and-status',
+    marker: ' OBJECT SCOPE is now honored rather than ignored,',
+    tail: '`null` when the vault records no status.',
+    endsAtDescriptionEnd: false,
+  },
+  {
+    id: 'what-if-trigger-two-axis',
+    marker: ' TWO AXES, REPORTED SEPARATELY.',
+    tail: 'not a proof of harmlessness.',
+    endsAtDescriptionEnd: false,
+  },
+  {
+    id: 'automation-risk-report-composition-manifest',
+    marker: ' WHAT IT COMPOSED, STATED OUTRIGHT:',
+    tail: 'under another name should say so.',
+    endsAtDescriptionEnd: false,
+  },
 ];
 
 /** The markers, for the guard test that pins advertised-present / indexed-absent. */

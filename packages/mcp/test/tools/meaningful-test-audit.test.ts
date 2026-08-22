@@ -619,3 +619,157 @@ describe('meaningfulTestAuditInputSchema', () => {
     ).toBe(false);
   });
 });
+
+// =============================================================================
+// FIX 14 — the resume knob, added BEFORE it is needed.
+//
+// Two properties, and they pull against each other on purpose:
+//   1. COSTS NOTHING TODAY — a corpus that fits emits no paging fields at all,
+//      so the response is byte-identical to the pre-paging shape.
+//   2. THE TAIL IS REACHABLE — over the byte budget the handler makes the cut,
+//      says so, and hands back a cursor that walks to the end.
+// =============================================================================
+
+const PAGED_TEST_CLASS_COUNT = 600;
+
+/** Invented names, long enough that 600 rows blow past the 34 KB page budget. */
+const pagedTestClassName = (i: number): string =>
+  `Widget_Ledger_Reconciliation_Service_Test_${String(i).padStart(4, '0')}`;
+
+const pagedSeed: ExtractionResult = {
+  nodes: Array.from({ length: PAGED_TEST_CLASS_COUNT }, (_, i) =>
+    makeNode({
+      id: `ApexClass:${pagedTestClassName(i)}`,
+      apiName: pagedTestClassName(i),
+      properties: {
+        isTest: true,
+        // Identical scores across every row, so `compareEntries`' final
+        // `testClassId` tiebreak is the ONLY thing making the order total —
+        // exactly the condition under which a weak comparator dups/skips.
+        assertionCount: 4,
+        sourceBytes: 2000,
+        qualityIssues: [{ rule: 'fake-assertion', location: 'line 7' }],
+      },
+    }),
+  ),
+  edges: [],
+};
+
+describe('meaningfulTestAuditHandler — FIX 14 resume knob', () => {
+  let pageDir: string;
+  let pageStore: GraphStore;
+  let pageCtx: Context;
+
+  beforeAll(async () => {
+    pageDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-mta-page-'));
+    const opened = await openGraph(join(pageDir, 'mta-page.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    pageStore = opened.value;
+    const imp = await importExtractionResults(pageStore, [pagedSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    pageCtx = { vaultRoot: pageDir, manifest: FIXTURE_MANIFEST, graph: pageStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(pageStore);
+    rmSync(pageDir, { recursive: true, force: true });
+  });
+
+  it('COSTS NOTHING: a corpus that fits emits NO paging fields (byte-identical)', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(Object.keys(r.value.data).sort()).toEqual(
+      ['appliedScope', 'disclosure', 'tests', 'totalTestClassCount'].sort(),
+    );
+    expect(r.value.data.tests).toHaveLength(5);
+    expect(r.value.data.disclosure).not.toMatch(/nextCursor/);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a 600-class corpus is CUT, says so, and keeps the full count', async () => {
+    const r = await meaningfulTestAuditHandler(pageCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix there was no cut at all: `tests.length === 600 === totalTestClass
+    // Count`, and the over-budget payload was trimmed downstream with the
+    // response still claiming to hold the whole ranking.
+    expect(d.tests.length).toBeLessThan(PAGED_TEST_CLASS_COUNT);
+    expect(d.truncated).toBe(true);
+    expect(d.nextCursor).toBeDefined();
+    // `totalTestClassCount` is the FULL count, never the page length.
+    expect(d.totalTestClassCount).toBe(PAGED_TEST_CLASS_COUNT);
+    expect(d.disclosure).toContain(
+      `Showing ${d.tests.length} of ${PAGED_TEST_CLASS_COUNT} test classes. totalTestClassCount is the FULL count; advance with the returned nextCursor.`,
+    );
+  });
+
+  it('ROUND TRIP: the cursor walks to the tail with no dups and no gaps', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    let total = -1;
+    for (;;) {
+      const r = await meaningfulTestAuditHandler(
+        pageCtx,
+        cursor === undefined ? {} : { cursor },
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      pages += 1;
+      total = d.totalTestClassCount;
+      for (const t of d.tests) seen.push(t.testClassId);
+      if (d.truncated !== true) break;
+      expect(d.nextCursor).toBeDefined();
+      cursor = d.nextCursor;
+      expect(pages).toBeLessThan(50);
+    }
+    expect(total).toBe(PAGED_TEST_CLASS_COUNT);
+    expect(pages).toBeGreaterThan(1);
+    expect(new Set(seen).size).toBe(total);
+    expect(seen).toHaveLength(total);
+  });
+
+  it('an explicit offset resumes without re-listing the head', async () => {
+    const first = await meaningfulTestAuditHandler(pageCtx, { limit: 10 });
+    const second = await meaningfulTestAuditHandler(pageCtx, { limit: 10, offset: 10 });
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.value.data.tests).toHaveLength(10);
+    expect(second.value.data.tests).toHaveLength(10);
+    expect(first.value.data.offset).toBe(0);
+    expect(second.value.data.offset).toBe(10);
+    const firstIds = new Set(first.value.data.tests.map((t) => t.testClassId));
+    for (const t of second.value.data.tests) {
+      expect(firstIds.has(t.testClassId)).toBe(false);
+    }
+  });
+
+  it('the final page reports truncated:false and emits no cursor', async () => {
+    const tail = await meaningfulTestAuditHandler(pageCtx, {
+      limit: 5,
+      offset: PAGED_TEST_CLASS_COUNT - 3,
+    });
+    expect(tail.ok).toBe(true);
+    if (!tail.ok) return;
+    expect(tail.value.data.tests).toHaveLength(3);
+    expect(tail.value.data.truncated).toBe(false);
+    expect(tail.value.data.nextCursor).toBeUndefined();
+    expect(tail.value.data.totalTestClassCount).toBe(PAGED_TEST_CLASS_COUNT);
+  });
+
+  it('the ranking is a TOTAL order, so equal-score rows still page deterministically', async () => {
+    const a = await meaningfulTestAuditHandler(pageCtx, { limit: 20 });
+    const b = await meaningfulTestAuditHandler(pageCtx, { limit: 20 });
+    expect(a.ok && b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+    expect(a.value.data.tests.map((t) => t.testClassId)).toEqual(
+      b.value.data.tests.map((t) => t.testClassId),
+    );
+    // Every score is identical in this fixture, so the order IS the tiebreak.
+    expect(a.value.data.tests.map((t) => t.testClassId)).toEqual(
+      [...a.value.data.tests.map((t) => t.testClassId)].sort(),
+    );
+  });
+});

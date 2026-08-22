@@ -29,7 +29,7 @@
  * top of the dynamic-Apex one for field/object roots so "no referrers found" is
  * never presented as certainty.
  */
-import type { ComponentId, ComponentType, Node } from '@sf-intelligence/contracts';
+import type { ComponentId, ComponentType, EdgeType, Node } from '@sf-intelligence/contracts';
 import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
 
 /**
@@ -53,9 +53,12 @@ export interface SoundnessBlindSpot {
    * (data-backed by `properties.qualityIssues[]`); `unwalked-referrer-class` is
    * the STRUCTURAL blind spot for referrer classes not modeled as incoming
    * edges (roll-ups, layout placement, flow decision/filter reads, tab/app
-   * membership). Extensible.
+   * membership); `unwalked-edge-type` is the STRUCTURAL blind spot for a
+   * reachability walk that traversed a strict SUBSET of the usage edge types,
+   * so a component reachable only through an un-walked type is absent from the
+   * result. Extensible.
    */
-  readonly kind: 'dynamic-apex' | 'unwalked-referrer-class';
+  readonly kind: 'dynamic-apex' | 'unwalked-referrer-class' | 'unwalked-edge-type';
   /**
    * Canonical ids carrying the blind spot (e.g. the dynamic-Apex classes).
    * EMPTY for `unwalked-referrer-class`: the blind spot is structural (no edge
@@ -71,6 +74,17 @@ export interface SoundnessBlindSpot {
    * for `dynamic-apex`.
    */
   readonly referrerClasses?: readonly string[];
+  /**
+   * For `kind: 'unwalked-edge-type'`: the edge types the walk DID traverse.
+   * Absent for the other kinds.
+   */
+  readonly walkedEdgeTypes?: readonly EdgeType[];
+  /**
+   * For `kind: 'unwalked-edge-type'`: the usage edge types the walk did NOT
+   * traverse. A component reachable ONLY through one of these is absent from
+   * the result. Absent for the other kinds.
+   */
+  readonly unwalkedEdgeTypes?: readonly EdgeType[];
 }
 
 /** Uniform soundness envelope returned by static-analysis tools. */
@@ -213,6 +227,54 @@ export const soundnessForImpactWalk = (
   return {
     complete: false,
     blindSpots: [...base.blindSpots, referrerBlindSpot],
+    staticCoverage: 'partial',
+  };
+};
+
+/**
+ * REACH-WALK-EDGE-TYPE-BLIND-SPOT — the note attached to an
+ * `unwalked-edge-type` blind spot. Verbatim product copy; do not reword.
+ */
+export const UNWALKED_EDGE_TYPE_NOTE =
+  'This walk traversed only the edge types named in walkedEdgeTypes. The usage edge types ' +
+  'listed in unwalkedEdgeTypes were NOT traversed, so a component reachable ONLY through one ' +
+  'of them is absent from this result. An empty result means "not found among the edge types ' +
+  'walked", never "nothing reaches this".';
+
+/**
+ * Soundness for a REACHABILITY walk, where completeness is DERIVED from what the
+ * walk actually traversed rather than read off an unrelated signal. Layers an
+ * `unwalked-edge-type` blind spot on top of the `dynamic-apex` one whenever
+ * `walkedEdgeTypes` is a strict subset of `usageEdgeTypes`.
+ *
+ * `usageEdgeTypes` is passed in rather than imported so this shared helper keeps
+ * ZERO dependencies on any one tool module — callers pass the single
+ * `USAGE_EDGE_TYPES` derivation from `apex-reachability.ts`, so the definition
+ * still lives in exactly one place.
+ *
+ * When the walk covered the FULL usage set the envelope is byte-identical to
+ * `soundnessFromNodes(nodes)` — this is not a permanent downgrade, it is a
+ * downgrade exactly when one is warranted.
+ */
+export const soundnessForReachabilityWalk = (
+  nodes: Iterable<Node>,
+  walkedEdgeTypes: readonly EdgeType[],
+  usageEdgeTypes: readonly EdgeType[],
+): Soundness => {
+  const base = soundnessFromNodes(nodes);
+  const walked = new Set<EdgeType>(walkedEdgeTypes);
+  const unwalkedEdgeTypes = usageEdgeTypes.filter((t) => !walked.has(t));
+  if (unwalkedEdgeTypes.length === 0) return base;
+  const blindSpot: SoundnessBlindSpot = {
+    kind: 'unwalked-edge-type',
+    componentIds: [],
+    note: UNWALKED_EDGE_TYPE_NOTE,
+    walkedEdgeTypes: [...walkedEdgeTypes],
+    unwalkedEdgeTypes,
+  };
+  return {
+    complete: false,
+    blindSpots: [...base.blindSpots, blindSpot],
     staticCoverage: 'partial',
   };
 };

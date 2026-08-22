@@ -82,6 +82,15 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { offlineTrust } from './coverage-trust.js';
+// The activation-status boundary + the two status readers are imported (not
+// pasted) so the prose in BOTH flow audits is character-for-character the same
+// sentence and can never drift apart.
+import {
+  FLOW_ACTIVATION_STATUS_DISCLOSURE,
+  flowIsRunnable,
+  readFlowStatus,
+} from './flow-fault-audit.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
@@ -128,10 +137,23 @@ const FLOW_BULK_CONFIDENCE_DISCLOSURE =
  *     handler. The slice is over FLOWS, not individual findings — a Flow with 7
  *     risks counts as 1 entry in the limit budget.
  *   - `offset`: optional zero-based offset for paging the FLOW list forward.
+ *   - `objectApiName` / `object` / `objectId` / `componentId`: the
+ *     interchangeable OBJECT identifiers a router / host reaches for
+ *     (BULKIFICATION-AUDIT-DROPS-OBJECT-SCOPE). A record-triggered Flow carries
+ *     `properties.triggerObject`, so its findings ARE attributable to an object
+ *     — exactly as the `flow_fault_audit` sibling already proves. With a scope
+ *     the sweep narrows to record-triggered flows on that object and echoes
+ *     `appliedScope`; without one the response is byte-identical to the bare
+ *     pre-scope shape. A `componentId` carrying a NON-object prefix is refused,
+ *     never silently widened back to org-wide (this tool has no reverse mode).
  */
 export const flowBulkificationAuditInputSchema = z.object({
   limit: z.number().int().min(1).max(FLOW_BULK_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
@@ -207,6 +229,20 @@ export interface FlowBulkLoopBodyCoverage {
 export interface FlowBulkFlowEntry {
   readonly componentId: ComponentId;
   readonly apiName: string;
+  /**
+   * FLOW-AUDITS-IGNORE-ACTIVATION-STATUS: the Flow's recorded activation status
+   * (`Active` / `Draft` / `Obsolete` / `InvalidDraft` / …), or `null` when this
+   * vault does not record one. `null` is UNKNOWN — never coerced to `'Active'`.
+   */
+  readonly status: string | null;
+  /**
+   * `true` when `status === 'Active'`, `false` for any other RECORDED status,
+   * and `null` when `status` is `null`. An unknown status must never collapse
+   * to `false`, mirroring `find_dead_code`'s
+   * `COALESCE(status,'') NOT IN ('Obsolete','InvalidDraft')` rule that an
+   * unknown-status flow is treated as in-use.
+   */
+  readonly isRunnable: boolean | null;
   readonly risks: readonly FlowBulkRisk[];
 }
 
@@ -226,6 +262,18 @@ export interface FlowBulkSoundness {
 
 /** Output payload. */
 export interface FlowBulkificationAuditOutput {
+  /**
+   * Present ONLY on an object-scoped call
+   * (BULKIFICATION-AUDIT-DROPS-OBJECT-SCOPE) — echoes the object the sweep was
+   * narrowed to (record-triggered flows whose `triggerObject` is that object)
+   * so a host never reads a scoped answer as org-wide. Absent on the bare call,
+   * keeping that response byte-identical. `object` is the canonical
+   * `CustomObject:` id; `mode` is always `component` when present.
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   /** Per-Flow entries with at least one risk, sorted by componentId ASC (sliced by `limit`). */
   readonly flows: readonly FlowBulkFlowEntry[];
   /** Flows with >=1 risk BEFORE the `limit` slice. */
@@ -524,6 +572,17 @@ const FLOW_UNPARSED_NOTE =
 const UNMODELED_IN_LOOP_CAP = 25;
 
 /**
+ * BULKIFICATION-AUDIT-DROPS-OBJECT-SCOPE — the verbatim boundary emitted ONLY
+ * on an object-scoped call. Product copy; do not reword. It names what the
+ * scope EXCLUDED, so an empty scoped result can never be mistaken for an empty
+ * org-wide one.
+ */
+const scopedToObjectNote = (object: string): string =>
+  `Scoped to record-triggered flows whose triggerObject is ${object}. Screen, ` +
+  'autolaunched, scheduled, and platform-event flows have no single object and ' +
+  'are EXCLUDED from this scoped view — run the bare audit for them.';
+
+/**
  * The verbatim callee boundary — the honest half of `subflow-in-loop` /
  * `action-in-loop`. Emitted whenever a loop body held a subflow or an action,
  * whether or not that produced a finding, because the reader's question is what
@@ -582,6 +641,20 @@ export const flowBulkificationAuditHandler = async (
   const limit = input.limit ?? FLOW_BULK_DEFAULT_LIMIT;
   const offset = input.offset ?? 0;
 
+  // BULKIFICATION-AUDIT-DROPS-OBJECT-SCOPE: resolve the optional object scope
+  // (and verify the object exists) BEFORE scanning, exactly as the
+  // `flow_fault_audit` sibling does. `null` = bare org-wide call
+  // (byte-identical); a resolved scope narrows the sweep to record-triggered
+  // flows on that object; an unresolvable / absent object → `invalid-query`.
+  // `unhandledPrefix: 'refuse'` because this tool has NO reverse mode: a
+  // `componentId` with a non-object prefix would otherwise be dropped and the
+  // caller would silently get the org-wide report.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input, {
+    unhandledPrefix: 'refuse',
+  });
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
+
   const scan = await scanAllNodesOfTypes(ctx.graph, ['Flow']);
   if (!scan.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
@@ -600,6 +673,14 @@ export const flowBulkificationAuditHandler = async (
   const unmodeledInLoops = new Set<string>();
 
   for (const node of scan.value.nodes) {
+    // Object-scoped: keep only flows that RUN ON the scoped object — a
+    // record-triggered flow's `triggerObject` (bare api name). Screen /
+    // autolaunched / scheduled / platform-event flows have no `triggerObject`
+    // and are correctly excluded; the scope boundary below says so out loud so
+    // an empty scoped result is never read as an empty org-wide one.
+    if (scope !== null && node.properties['triggerObject'] !== scope.object) {
+      continue;
+    }
     scannedFlowCount += 1;
     const audited = await auditOneFlow(ctx, node);
     if (audited === null) {
@@ -619,7 +700,17 @@ export const flowBulkificationAuditHandler = async (
       byRule[risk.rule] = (byRule[risk.rule] ?? 0) + 1;
       totalRiskCount += 1;
     }
-    entries.push({ componentId: node.id, apiName: node.apiName, risks });
+    // FLOW-AUDITS-IGNORE-ACTIVATION-STATUS: a Draft / Obsolete flow's
+    // bulkification findings are LATENT, not live. `status: null` means the
+    // vault does not record one — UNKNOWN, never `'Active'`, never `false`.
+    const status = readFlowStatus(node.properties);
+    entries.push({
+      componentId: node.id,
+      apiName: node.apiName,
+      status,
+      isRunnable: flowIsRunnable(status),
+      risks,
+    });
   }
 
   const sortedUnmodeled = [...unmodeledInLoops].sort();
@@ -663,6 +754,16 @@ export const flowBulkificationAuditHandler = async (
   // produced a clean-looking zero, so the count of what was walked is exactly
   // the sentence a reader needed and did not get.
   boundaries.push(loopBodyCoverageNote(loopBodyCoverage));
+  // FLOW-AUDITS-IGNORE-ACTIVATION-STATUS. Unconditional, like the coverage note
+  // above: it describes how the audit REPORTS status, which is true whether or
+  // not anything was flagged.
+  boundaries.push(FLOW_ACTIVATION_STATUS_DISCLOSURE);
+  // BULKIFICATION-AUDIT-DROPS-OBJECT-SCOPE: only on a scoped call, and it names
+  // what the scope EXCLUDED — an empty scoped result must be distinguishable
+  // from an empty org-wide one.
+  if (scope !== null) {
+    boundaries.push(scopedToObjectNote(scope.object));
+  }
   if (loopBodyCoverage.loopsWithSubflow > 0 || loopBodyCoverage.loopsWithAction > 0) {
     boundaries.push(FLOW_BULK_CALLEE_DISCLOSURE);
   }
@@ -693,6 +794,12 @@ export const flowBulkificationAuditHandler = async (
 
   return ok({
     data: {
+      // appliedScope FIRST + only when scoped, so a bare call omits the whole
+      // block (the pre-scope shape) and a scoped one can never be read as
+      // org-wide.
+      ...(scope !== null
+        ? { appliedScope: { object: scope.componentId, mode: 'component' as const } }
+        : {}),
       flows: slice,
       totalFlowCount: entries.length,
       scannedFlowCount,

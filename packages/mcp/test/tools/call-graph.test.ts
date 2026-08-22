@@ -19,6 +19,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { USAGE_EDGE_TYPES } from '../../src/tools/apex-reachability.js';
 import {
   callGraphHandler,
   callGraphInputSchema,
@@ -818,8 +819,23 @@ describe('callGraphHandler — bounded graph queries (transitive)', () => {
       ],
       cycleDetected: false,
       maxDepthReached: 2,
+      // The nodes, edges, cycle flag and depth above are the pre-batch values
+      // UNCHANGED — that is the invariant this golden guards, and the default
+      // walk is still `callsApex` only. `walkedEdgeTypes` / `otherUsageInEdges`
+      // / `soundness` are additive: they exist so that `edges: []` can be read
+      // as "no callsApex call was modelled" rather than "no callers". Here the
+      // root has ZERO unwalked usage in-edges, and 0 is a CHECKED zero.
+      walkedEdgeTypes: ['callsApex'],
+      otherUsageInEdges: { count: 0, byType: {} },
+      soundness: result.value.data.soundness,
       disclosure: result.value.data.disclosure,
     });
+    // The walk covered a strict SUBSET of the usage set, so soundness must say so.
+    expect(result.value.data.soundness.complete).toBe(false);
+    expect(
+      result.value.data.soundness.blindSpots.find((b) => b.kind === 'unwalked-edge-type')
+        ?.unwalkedEdgeTypes,
+    ).toContain('dispatchesAsync');
   });
 
   // Root callsApex `width` leaf classes (a wide frontier at depth 1); each leaf
@@ -859,5 +875,106 @@ describe('callGraphHandler — bounded graph queries (transitive)', () => {
     expect(wide.edgeQueries).toBe(narrow.edgeQueries);
     expect(wide.nodeQueries).toBe(narrow.nodeQueries);
     expect(wide.edgeQueries + wide.nodeQueries).toBeLessThan(15);
+  });
+});
+
+// =============================================================================
+// CALL-GRAPH-EMPTY-IS-NOT-NO-CALLERS. `call_graph` keeps `callsApex` as its
+// default on purpose — a `references` edge is not a call. What was wrong was
+// presenting `edges: []` as an unqualified absence. These pin the three things
+// that make the zero honest.
+// =============================================================================
+describe('callGraphHandler — an empty edges array is not "no callers"', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-cg-honest-'));
+    const opened = await openGraph(join(dir, 'cg.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const st = opened.value;
+    const imported = await importExtractionResults(st, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const out = await run({ vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: st } as Context);
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  /** A class with ZERO callsApex in-edges and five usage in-edges of other types. */
+  const seedUnwalked: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:LedgerTarget', apiName: 'LedgerTarget' }),
+      ...Array.from({ length: 4 }, (_u, i) =>
+        makeNode({ id: `ApexClass:Referrer${i}`, apiName: `Referrer${i}` }),
+      ),
+      makeNode({ id: 'ApexClass:LedgerScheduler', apiName: 'LedgerScheduler' }),
+    ],
+    edges: [
+      ...Array.from({ length: 4 }, (_u, i) =>
+        makeEdge({
+          fromId: `ApexClass:Referrer${i}`,
+          toId: 'ApexClass:LedgerTarget',
+          edgeType: 'references',
+        }),
+      ),
+      makeEdge({
+        fromId: 'ApexClass:LedgerScheduler',
+        toId: 'ApexClass:LedgerTarget',
+        edgeType: 'dispatchesAsync',
+        confidence: 'declared',
+      }),
+    ],
+  };
+
+  it('edges is EMPTY, otherUsageInEdges counts the 5 it did not follow, soundness is NOT complete', async () => {
+    const r = await withStore(seedUnwalked, (c) =>
+      callGraphHandler(c, { rootId: 'ApexClass:LedgerTarget', direction: 'upstream', maxDepth: 3 }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.edges).toEqual([]);
+    expect(r.value.data.otherUsageInEdges?.count).toBe(5);
+    expect(r.value.data.otherUsageInEdges?.byType).toEqual({ references: 4, dispatchesAsync: 1 });
+    expect(r.value.data.walkedEdgeTypes).toEqual(['callsApex']);
+    expect(r.value.data.soundness.complete).toBe(false);
+    expect(r.value.data.soundness.staticCoverage).toBe('partial');
+    expect(r.value.data.disclosure).toContain(
+      'An empty edges array therefore means "no callsApex call was modelled", NEVER "no callers"',
+    );
+  });
+
+  it('edgeTypes WIDENS the walk, and a full usage walk drops otherUsageInEdges and is complete', async () => {
+    const r = await withStore(seedUnwalked, (c) =>
+      callGraphHandler(c, {
+        rootId: 'ApexClass:LedgerTarget',
+        direction: 'upstream',
+        maxDepth: 3,
+        edgeTypes: [...USAGE_EDGE_TYPES],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.edges).toHaveLength(5);
+    // Nothing was left unfollowed. The field is still emitted, as a CHECKED
+    // zero — an absent field would read as "not checked".
+    expect(r.value.data.otherUsageInEdges).toEqual({ count: 0, byType: {} });
+    expect(r.value.data.soundness.complete).toBe(true);
+  });
+
+  it('a narrower widening still reports what it left out', async () => {
+    const r = await withStore(seedUnwalked, (c) =>
+      callGraphHandler(c, {
+        rootId: 'ApexClass:LedgerTarget',
+        direction: 'upstream',
+        maxDepth: 3,
+        edgeTypes: ['callsApex', 'references'],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.edges).toHaveLength(4);
+    expect(r.value.data.otherUsageInEdges?.count).toBe(1);
+    expect(r.value.data.otherUsageInEdges?.byType).toEqual({ dispatchesAsync: 1 });
   });
 });

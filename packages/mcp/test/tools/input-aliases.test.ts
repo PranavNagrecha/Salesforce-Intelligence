@@ -167,6 +167,57 @@ describe('resolveObjectAlias — L2 object normalizer', () => {
   it('no object named → ok(null) when not required (reverse mode)', () => {
     expect(unwrap(resolveObjectAlias({}, { required: false }))).toBeNull();
   });
+
+  describe('unhandledPrefix', () => {
+    it("DEFAULT is 'ignore' — the three polymorphic callers still reach their reverse mode", () => {
+      // If this regresses, layout_assignments / lightning_pages / list_view_sharing
+      // start refusing the ids they exist to accept.
+      for (const cid of [
+        'Layout:Widget__c.My Layout',
+        'FlexiPage:My_Page',
+        'ListView:Widget__c.My_View',
+      ]) {
+        const r = resolveObjectAlias(
+          { componentId: cid },
+          { bareComponentIdIsObject: false, required: false },
+        );
+        expect(r.ok).toBe(true);
+        expect(unwrap(r)).toBeNull();
+      }
+    });
+
+    it("'refuse' turns an unhandled prefix into a NAMED invalid-query, never a silent org-wide widening", () => {
+      const r = resolveObjectAlias(
+        { componentId: 'ApexClass:WidgetService' },
+        { required: false, unhandledPrefix: 'refuse' },
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.kind).toBe('invalid-query');
+        expect(r.error.path).toBe('componentId');
+        expect(r.error.message).toBe(
+          "componentId 'ApexClass:WidgetService' is a ApexClass: id, and this tool scopes only " +
+            'by OBJECT. It was NOT applied — pass objectApiName / object / objectId, or a ' +
+            'CustomObject: id. Refusing rather than returning the org-wide report, which would ' +
+            'answer a question you did not ask.',
+        );
+      }
+    });
+
+    it("'refuse' still accepts a CustomObject: componentId and a bare api name", () => {
+      expect(
+        scope(resolveObjectAlias({ componentId: 'CustomObject:Widget__c' }, { unhandledPrefix: 'refuse' }))
+          .object,
+      ).toBe('Widget__c');
+      expect(
+        scope(resolveObjectAlias({ componentId: 'Widget__c' }, { unhandledPrefix: 'refuse' })).object,
+      ).toBe('Widget__c');
+    });
+
+    it("'refuse' leaves the unscoped bare call alone (ok(null), not a refusal)", () => {
+      expect(unwrap(resolveObjectAlias({}, { required: false, unhandledPrefix: 'refuse' }))).toBeNull();
+    });
+  });
 });
 
 describe('resolveFieldAlias — L2 field normalizer', () => {

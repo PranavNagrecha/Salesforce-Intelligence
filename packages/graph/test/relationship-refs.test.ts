@@ -40,6 +40,22 @@ const field = (
   properties,
 });
 
+const conditionalContext = (
+  apiName: string,
+  properties: Record<string, unknown>,
+): Node => ({
+  id: `ConditionalContext:${apiName}` as ComponentId,
+  type: 'ConditionalContext',
+  apiName,
+  label: null,
+  parentId: null,
+  sourcePath: `conditions/${apiName}.xml`,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties,
+});
+
 const flexiPage = (apiName: string, properties: Record<string, unknown>): Node => ({
   id: `FlexiPage:${apiName}` as ComponentId,
   type: 'FlexiPage',
@@ -303,5 +319,97 @@ describe('mintRelationshipTraversalEdges — dynamic related-list columns', () =
     const edges: Edge[] = [];
     mintRelationshipTraversalEdges([LOOKUP, rival, CHILD_FIELD, page], edges);
     expect(edges).toEqual([]);
+  });
+});
+
+describe('mintRelationshipTraversalEdges — condition relationship traversals', () => {
+  it('resolves a condition traversal onto the REAL field, as a readsFrom at parsed', () => {
+    const ctx = conditionalContext('VR_Enrolment_Blocked', {
+      objectApiName: 'Enrolment__c',
+      unresolvedTraversalRefs: ['Programme__r.Status__c'],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, ctx], edges);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.fromId).toBe('ConditionalContext:VR_Enrolment_Blocked');
+    // The whole point: the edge lands on the field that EXISTS, not on
+    // `CustomField:Programme__r.Status__c`, which names no node and never could.
+    expect(edges[0]?.toId).toBe('CustomField:Programme__c.Status__c');
+    expect(edges[0]?.edgeType).toBe('readsFrom');
+    expect(edges[0]?.confidence).toBe('parsed');
+    expect(edges[0]?.properties['referenceKind']).toBe('conditionRelationshipTraversal');
+    expect(edges[0]?.properties['traversalPath']).toBe('Programme__r.Status__c');
+  });
+
+  it('walks a multi-hop condition traversal', () => {
+    const faculty = field('Programme__c', 'Faculty__c', {
+      referenceTo: 'Faculty__c',
+      relationshipName: 'Programmes',
+    });
+    const facultyCode = field('Faculty__c', 'Code__c', {});
+    const ctx = conditionalContext('Flow_Decision_A', {
+      objectApiName: 'Enrolment__c',
+      unresolvedTraversalRefs: ['Programme__r.Faculty__r.Code__c'],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, faculty, facultyCode, ctx], edges);
+    expect(edges.map((e) => e.toId)).toEqual(['CustomField:Faculty__c.Code__c']);
+  });
+
+  it('RESOLVE OR DROP: an unresolvable hop mints NOTHING, never a dangling id', () => {
+    const ctx = conditionalContext('Flow_Decision_B', {
+      objectApiName: 'Enrolment__c',
+      unresolvedTraversalRefs: ['Missing__r.Whatever__c', 'Owner.Name'],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, ctx], edges);
+    expect(edges).toEqual([]);
+  });
+
+  it('mints nothing when the relationship key is AMBIGUOUS (never picks one)', () => {
+    // Two lookups on Enrolment__c whose traversal spelling collides on
+    // different targets — buildRelationshipMaps drops the key.
+    const dupe = field('Enrolment__c', 'programme__c', {
+      referenceTo: 'Archive__c',
+      relationshipName: 'ArchivedEnrolments',
+    });
+    const ctx = conditionalContext('Flow_Decision_C', {
+      objectApiName: 'Enrolment__c',
+      unresolvedTraversalRefs: ['Programme__r.Status__c'],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, dupe, TARGET_FIELD, ctx], edges);
+    expect(edges).toEqual([]);
+  });
+
+  it('mints nothing without the objectApiName resolution base', () => {
+    const ctx = conditionalContext('Flow_Decision_D', {
+      unresolvedTraversalRefs: ['Programme__r.Status__c'],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, ctx], edges);
+    expect(edges).toEqual([]);
+  });
+
+  it('a readsFrom is NOT suppressed by a pre-existing references edge on the same pair', () => {
+    // The dedup key carries the edge type; before the fix `emit` hardcoded
+    // `references` in the key and this readsFrom would have been swallowed.
+    const ctx = conditionalContext('VR_Enrolment_Blocked', {
+      objectApiName: 'Enrolment__c',
+      unresolvedTraversalRefs: ['Programme__r.Status__c'],
+    });
+    const edges: Edge[] = [
+      {
+        fromId: 'ConditionalContext:VR_Enrolment_Blocked' as ComponentId,
+        toId: 'CustomField:Programme__c.Status__c' as ComponentId,
+        edgeType: 'references',
+        confidence: 'heuristic',
+        source: 'someone-else',
+        properties: {},
+      } as Edge,
+    ];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, ctx], edges);
+    expect(edges).toHaveLength(2);
+    expect(edges[1]?.edgeType).toBe('readsFrom');
   });
 });

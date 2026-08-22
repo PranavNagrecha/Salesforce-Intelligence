@@ -150,7 +150,13 @@ describe('automation_risk_report — default mode is UNCHANGED (byte-identity)',
     if (!r.ok) return;
     expect('mode' in r.value.data).toBe(false);
     expect('sprawl' in r.value.data).toBe(false);
-    expect('boundaries' in r.value.data).toBe(false);
+    // UPDATED (FIX 9) — INVARIANT: the "this report composes TWO analyses"
+    // boundary is UNCONDITIONAL, so `boundaries` is no longer a sprawl-only
+    // key; it is the shared verbatim-disclosure array. The sprawl-only keys
+    // above are still absent, and the two byte-identity tests below still pin
+    // mode:'risk' ≡ the bare call. What must NOT leak is `sprawl`/`scoreBasis`.
+    expect('boundaries' in r.value.data).toBe(true);
+    expect('sprawl' in r.value.data).toBe(false);
     // The risk report still composes its two halves.
     expect(r.value.data.governorClasses).not.toBeNull();
     expect(Array.isArray(r.value.data.findings)).toBe(true);

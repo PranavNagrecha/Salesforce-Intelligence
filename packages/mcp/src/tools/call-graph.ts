@@ -58,8 +58,10 @@ import type {
   ComponentId,
   ComponentType,
   ConfidenceLevel,
+  EdgeType,
   McpError,
   McpResponse,
+  Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
@@ -71,8 +73,13 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  countUnwalkedUsageInEdges,
+  USAGE_EDGE_TYPES,
+} from './apex-reachability.js';
 import { coercePrefix } from './coerce-id.js';
 import { mergeInputAliases } from './input-aliases.js';
+import { soundnessForReachabilityWalk, type Soundness } from './soundness.js';
 
 /** Inclusive upper bound on `maxDepth`. */
 const CALL_GRAPH_MAX_DEPTH = 5;
@@ -99,6 +106,20 @@ const CALL_GRAPH_DISCLOSURE =
   'call_graph surfaces method-level call TARGETS: each callsApex edge lists `methods` — the methods of the target class the source invokes (heuristic, from the Apex scanner) — and the optional `method` filter narrows the root\'s direct callers/callees to edges involving that target method. Each callsApex edge MAY carry `callerMethods` — the method(s) of the SOURCE class that contain the call-site, available ONLY on AST-extracted edges (`source: \'apex-ast\'`); it is a class-level UNION (the source methods that call ANY method of the target, NOT partitioned to the specific target method even when the `method` filter is applied — so do not read it as "the methods that call the filtered target method"). Edges WITHOUT it (the heuristic Apex scanner, Flow/declared callers, or a pre-upgrade vault) leave the caller method UNKNOWN — absence is not "no caller". Edges remain at-least-one-call between two classes.';
 
 /**
+ * CALL-GRAPH-EMPTY-IS-NOT-NO-CALLERS. Appended to every response. `call_graph`
+ * DELIBERATELY keeps `callsApex` as its default: a `references` edge is not a
+ * call, and rendering one as a call in a *call* graph misrepresents control
+ * flow. The honest fix is to say what was not followed, and to count it.
+ * Verbatim product copy; do not reword.
+ */
+const CALL_GRAPH_UNWALKED_DISCLOSURE =
+  'This graph walks callsApex ONLY. Async dispatch (Database.executeBatch / System.enqueueJob / ' +
+  'System.schedule) mints a dispatchesAsync edge, and a static-field or type-name reference mints ' +
+  'a references edge; NEITHER is traversed here. An empty edges array therefore means "no callsApex ' +
+  'call was modelled", NEVER "no callers" — read otherUsageInEdges for the count this walk did not ' +
+  'follow, or pass edgeTypes to widen it.';
+
+/**
  * Zod schema for the `sfi.call_graph` tool input.
  *
  *   - `rootId`: required, non-empty string. Must start with
@@ -117,6 +138,16 @@ const callGraphInputBaseSchema = z.object({
   direction: z.enum(['downstream', 'upstream', 'both']).optional().default('both'),
   maxDepth: z.number().int().min(1).max(CALL_GRAPH_MAX_DEPTH).optional(),
   method: z.string().min(1).optional(),
+  /**
+   * Widen the walk beyond `callsApex`. Defaults to `['callsApex']` — a call
+   * graph is about CALLS, so static-type `references` are counted (see
+   * `otherUsageInEdges`) but not rendered as call edges unless asked for.
+   * Only usage edge types are accepted; `parentOf` / `grantedBy` are not usage.
+   */
+  edgeTypes: z
+    .array(z.enum(USAGE_EDGE_TYPES as unknown as [EdgeType, ...EdgeType[]]))
+    .min(1)
+    .optional(),
 });
 
 export const callGraphInputSchema = z.preprocess(
@@ -173,6 +204,29 @@ export interface CallGraphOutput {
   readonly edges: readonly CallGraphEdge[];
   readonly cycleDetected: boolean;
   readonly maxDepthReached: number;
+  /**
+   * The edge types this walk traversed. Echoed on EVERY response, not only
+   * when widened, so `edges: []` is readable as "checked these types" rather
+   * than an unbounded absence claim.
+   */
+  readonly walkedEdgeTypes: readonly EdgeType[];
+  /**
+   * The root's incoming USAGE edges this walk did NOT traverse, with a per-type
+   * breakdown. This is the field that stops `edges: []` reading as "no
+   * callers": a `count` of 0 is a CHECKED zero, and a non-zero count names
+   * exactly what was left unfollowed. ALWAYS present — a `count` of 0 next to
+   * `walkedEdgeTypes` is a CHECKED zero, whereas an absent field would be
+   * UNCHECKED-shaped.
+   */
+  readonly otherUsageInEdges: {
+    readonly count: number;
+    readonly byType: Readonly<Record<string, number>>;
+  };
+  /**
+   * Blind spots DERIVED from the walk: `complete: false` naming `references` /
+   * `dispatchesAsync` whenever a strict subset of the usage set was traversed.
+   */
+  readonly soundness: Soundness;
   readonly disclosure: string;
 }
 
@@ -300,6 +354,8 @@ const walkOneDirection = async (
   maxDepth: number,
   /** P4-C5: when set, filter the root's DIRECT edges to those calling it. */
   method: string | undefined,
+  /** The edge types to traverse. Defaults to `['callsApex']` at the caller. */
+  edgeTypes: readonly EdgeType[],
 ): Promise<
   Result<
     {
@@ -329,7 +385,7 @@ const walkOneDirection = async (
     // now one per DEPTH LEVEL, independent of frontier WIDTH.
     const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
       direction,
-      edgeTypes: ['callsApex'],
+      edgeTypes,
     });
     if (!edgeBatch.ok) return err(edgeBatch.error.message);
     for (const nodeId of frontier) {
@@ -402,7 +458,7 @@ const walkOneDirection = async (
 const resolveNodes = async (
   ctx: Context,
   discovered: ReadonlyMap<ComponentId, number>,
-): Promise<Result<CallGraphNode[], string>> => {
+): Promise<Result<{ nodes: CallGraphNode[]; raw: readonly Node[] }, string>> => {
   // ONE batched `listNodesByIds` over every discovered id, replacing the
   // per-node `getNodeById` N+1 (~#discovered serial DuckDB queries). Ids with
   // no matching row are dropped by `listNodesByIds` exactly like the old
@@ -423,7 +479,10 @@ const resolveNodes = async (
       depth,
     });
   }
-  return ok(out);
+  // The RAW nodes go back too: `soundnessForReachabilityWalk` reads
+  // `properties.qualityIssues` for the dynamic-Apex signal, which the trimmed
+  // CallGraphNode does not carry. Reusing this fetch keeps the query count flat.
+  return ok({ nodes: out, raw: nodesRes.value });
 };
 
 /** Deterministic comparator: depth ASC then id ASC. */
@@ -472,6 +531,13 @@ export const callGraphHandler = async (
   }
   const rootId = coercedRootId as ComponentId;
   const maxDepth = input.maxDepth ?? CALL_GRAPH_DEFAULT_DEPTH;
+  // DELIBERATE default. See CALL_GRAPH_UNWALKED_DISCLOSURE: widening this
+  // silently would put static-type references into a graph whose contract is
+  // about calls. The zero is made honest by `otherUsageInEdges` + `soundness`.
+  const walkedEdgeTypes: readonly EdgeType[] =
+    input.edgeTypes !== undefined
+      ? ([...input.edgeTypes] as EdgeType[])
+      : (['callsApex'] as EdgeType[]);
 
   const directions: ('in' | 'out')[] =
     input.direction === 'downstream'
@@ -488,7 +554,7 @@ export const callGraphHandler = async (
   let maxDepthReached = 0;
 
   for (const dir of directions) {
-    const res = await walkOneDirection(ctx, rootId, dir, maxDepth, input.method);
+    const res = await walkOneDirection(ctx, rootId, dir, maxDepth, input.method, walkedEdgeTypes);
     if (!res.ok) {
       return err({
         kind: 'internal',
@@ -520,7 +586,7 @@ export const callGraphHandler = async (
     });
   }
 
-  const sortedNodes = [...nodesRes.value].sort(compareNodes);
+  const sortedNodes = [...nodesRes.value.nodes].sort(compareNodes);
   // Self-contained-slice invariant (CR-13, mirrors getSubgraph's returnedIds
   // filter in queries.ts): every emitted edge must have BOTH endpoints present
   // in `nodes`. `resolveNodes` drops ids with no real node row, so an edge
@@ -535,6 +601,17 @@ export const callGraphHandler = async (
     .filter((e) => nodeIds.has(e.fromId) && nodeIds.has(e.toId))
     .sort(compareEdges);
 
+  // ONE extra query: the root's usage in-edges this walk did NOT follow.
+  const unwalkedRes = await countUnwalkedUsageInEdges(ctx, rootId, walkedEdgeTypes);
+  if (!unwalkedRes.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${unwalkedRes.error}` });
+  }
+  const soundness = soundnessForReachabilityWalk(
+    nodesRes.value.raw,
+    walkedEdgeTypes,
+    USAGE_EDGE_TYPES,
+  );
+
   return ok({
     data: {
       rootId,
@@ -543,7 +620,13 @@ export const callGraphHandler = async (
       edges: sortedEdges,
       cycleDetected,
       maxDepthReached,
-      disclosure: CALL_GRAPH_DISCLOSURE,
+      walkedEdgeTypes,
+      // ALWAYS emitted, including as `{count: 0, byType: {}}`. An absent field
+      // is UNCHECKED-shaped; a zero here alongside walkedEdgeTypes is a CHECKED
+      // zero, which is the whole point of the field.
+      otherUsageInEdges: unwalkedRes.value,
+      soundness,
+      disclosure: `${CALL_GRAPH_DISCLOSURE} ${CALL_GRAPH_UNWALKED_DISCLOSURE}`,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

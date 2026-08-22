@@ -20,6 +20,10 @@ import {
   isDebugLog,
   parseGovernorLimit,
 } from '../../src/tools/explain-debug-log.js';
+import {
+  LIMIT_TO_STATIC_RULES,
+  parseGovernorLimit as sharedParseGovernorLimit,
+} from '../../src/tools/governor-limit-signature.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -132,6 +136,27 @@ describe('parseGovernorLimit', () => {
   });
   it('returns null when there is no governor-limit signal', () => {
     expect(parseGovernorLimit('just some ordinary text about accounts')).toBeNull();
+  });
+
+  // FIX 10 — the recogniser is SHARED with sfi.explain_error, not copied.
+  // `explain-debug-log.ts` already imports FROM `explain-error.ts`, so the
+  // detector was lifted into `governor-limit-signature.ts` and both tools
+  // import it. Identity (not just equal behaviour) is what makes the two tools
+  // incapable of disagreeing about one string.
+  it('is the SAME function object the shared signature module exports', () => {
+    expect(parseGovernorLimit).toBe(sharedParseGovernorLimit);
+  });
+
+  it('maps every limit type to a static rule list — an empty list is a CHECKED zero', () => {
+    // The mapping is TOTAL over GovernorLimitType, so `[]` means "no static
+    // rule models this limit", never "nobody looked".
+    const types = Object.keys(LIMIT_TO_STATIC_RULES);
+    expect(types).toContain('other');
+    expect(LIMIT_TO_STATIC_RULES.soql).toEqual(['soql-in-loop']);
+    expect(LIMIT_TO_STATIC_RULES.heap).toEqual([]);
+    for (const t of types) {
+      expect(Array.isArray(LIMIT_TO_STATIC_RULES[t as keyof typeof LIMIT_TO_STATIC_RULES])).toBe(true);
+    }
   });
 });
 

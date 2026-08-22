@@ -870,3 +870,227 @@ describe('condition field edges are minted only for structurally valid field ids
     expect(result.conditionFieldEdges[0]?.edgeType).toBe('readsFrom');
   });
 });
+
+/**
+ * FIX 15 (1) — `CustomField:<Rel>__r.<Field>__c` names no node and NO refresh on
+ * any org could ever create it: a Salesforce object api name never ends in
+ * `__r`. Minting it as a `readsFrom` edge published a citable component id for a
+ * component that does not exist, and — worse — the REAL field it traverses to
+ * gained no incoming edge at all, so `safe_to_delete_field` (a pure
+ * `listEdges(field, 'in')` composition) certified a read field as deletable.
+ *
+ * The extractor cannot resolve the traversal itself: `extractConditions` is a
+ * per-file function whose only object context is `parentObjectApiName`, and
+ * knowing which object `<Rel>__r` reaches needs every object's lookup fields at
+ * once. So it PARKS the verbatim path plus the resolution base on the node, and
+ * `mintRelationshipTraversalEdges` in `@sf-intelligence/graph` resolves it into
+ * a `readsFrom` onto the real `CustomField:` node — or drops it.
+ *
+ * INVARIANT PINNED BY THIS BLOCK: `properties.fieldRefs` is unchanged and
+ * verbatim. It is the honest record of what the condition MENTIONS and the
+ * multi-edge JOIN rules read it; the defect was republishing it as citable
+ * component ids, not recording it.
+ */
+describe('FIX 15 — relationship-shaped refs are parked, never minted as edges', () => {
+  const FLOW_ID = 'Flow:Enrolment_Guard' as ComponentId;
+  const FLOW_SOURCE = 'flows/Enrolment_Guard.flow-meta.xml';
+
+  const oneCriteriaSource = (
+    fields: readonly string[],
+  ): readonly ConditionSource[] => [
+    {
+      kind: 'criteria',
+      items: fields.map((field) => ({
+        field,
+        operation: 'equals',
+        value: 'x',
+      })),
+      booleanFilter: null,
+    },
+  ];
+
+  it('mints NO readsFrom edge to CustomField:<Rel>__r.<Field>__c', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Programme__r.Outcome__c']),
+    });
+
+    expect(result.conditionFieldEdges.map((e) => e.toId)).not.toContain(
+      'CustomField:Programme__r.Outcome__c',
+    );
+    // Nothing else takes its place either — the extractor resolves nothing.
+    expect(result.conditionFieldEdges).toEqual([]);
+  });
+
+  it('parks the VERBATIM dotted path on properties.unresolvedTraversalRefs', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Programme__r.Outcome__c']),
+    });
+
+    expect(
+      result.conditionNodes[0]!.properties['unresolvedTraversalRefs'],
+    ).toEqual(['Programme__r.Outcome__c']);
+  });
+
+  it('parks the parent object as properties.objectApiName (the resolution base)', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Programme__r.Outcome__c']),
+    });
+
+    expect(result.conditionNodes[0]!.properties['objectApiName']).toBe(
+      'Enrolment__c',
+    );
+  });
+
+  it('STILL records the ref verbatim in properties.fieldRefs (honest record preserved)', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Programme__r.Outcome__c']),
+    });
+
+    expect(result.conditionNodes[0]!.properties.fieldRefs).toEqual([
+      'CustomField:Programme__r.Outcome__c',
+    ]);
+    expect(result.conditionsMirror[0]!.fieldRefs).toEqual([
+      'CustomField:Programme__r.Outcome__c',
+    ]);
+  });
+
+  it('NO-REGRESSION: a same-object ref still mints its edge exactly as before', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Outcome__c', 'Programme__r.Outcome__c']),
+    });
+
+    // Exactly one edge: the same-object field. The traversal mints none.
+    expect(result.conditionFieldEdges.length).toBe(1);
+    expect(result.conditionFieldEdges[0]!.toId).toBe(
+      'CustomField:Enrolment__c.Outcome__c',
+    );
+    expect(result.conditionFieldEdges[0]!.edgeType).toBe('readsFrom');
+    expect(result.conditionFieldEdges[0]!.confidence).toBe('declared');
+    expect(result.conditionFieldEdges[0]!.fromId).toBe(
+      'ConditionalContext:Flow:Enrolment_Guard.condition-0',
+    );
+    // Both refs stay verbatim in fieldRefs, in source order.
+    expect(result.conditionNodes[0]!.properties.fieldRefs).toEqual([
+      'CustomField:Enrolment__c.Outcome__c',
+      'CustomField:Programme__r.Outcome__c',
+    ]);
+  });
+
+  it('omits BOTH keys when the condition names no traversal (absent = checked, not empty)', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Outcome__c']),
+    });
+
+    const props = result.conditionNodes[0]!.properties;
+    expect('unresolvedTraversalRefs' in props).toBe(false);
+    expect('objectApiName' in props).toBe(false);
+  });
+
+  it('walks MULTI-HOP paths to the resolver verbatim (resolveTraversalTarget handles them)', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Programme__r.Faculty__r.Code__c']),
+    });
+
+    expect(result.conditionFieldEdges).toEqual([]);
+    expect(
+      result.conditionNodes[0]!.properties['unresolvedTraversalRefs'],
+    ).toEqual(['Programme__r.Faculty__r.Code__c']);
+  });
+
+  it('objectApiName is explicit null — never a fabricated base — with no object context', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: null,
+      sources: oneCriteriaSource(['Programme__r.Outcome__c']),
+    });
+
+    const props = result.conditionNodes[0]!.properties;
+    expect(props['unresolvedTraversalRefs']).toEqual([
+      'Programme__r.Outcome__c',
+    ]);
+    // null, not omitted and not a string: the base is UNKNOWN, so the graph
+    // resolver's `typeof owningObject === 'string'` guard mints nothing.
+    expect('objectApiName' in props).toBe(true);
+    expect(props['objectApiName']).toBeNull();
+  });
+
+  it('dedups repeated traversals, preserving first-occurrence order', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource([
+        'Programme__r.Outcome__c',
+        'Faculty__r.Code__c',
+        'Programme__r.Outcome__c',
+      ]),
+    });
+
+    expect(
+      result.conditionNodes[0]!.properties['unresolvedTraversalRefs'],
+    ).toEqual(['Programme__r.Outcome__c', 'Faculty__r.Code__c']);
+  });
+
+  it('an OBJECT-segment ref that merely CONTAINS __r is untouched (suffix test, not substring)', () => {
+    const result = extractConditions({
+      parentId: FLOW_ID,
+      parentSourcePath: FLOW_SOURCE,
+      parentObjectApiName: 'Enrolment__c',
+      sources: oneCriteriaSource(['Programme__rc__c.Outcome__c']),
+    });
+
+    expect(result.conditionFieldEdges.map((e) => e.toId)).toEqual([
+      'CustomField:Programme__rc__c.Outcome__c',
+    ]);
+    expect(
+      'unresolvedTraversalRefs' in result.conditionNodes[0]!.properties,
+    ).toBe(false);
+  });
+
+  it('applies to the FORMULA surface too (validation-rule condition), at parsed confidence', () => {
+    const result = extractConditions({
+      parentId: 'ValidationRule:Enrolment__c.Guard' as ComponentId,
+      parentSourcePath: 'objects/Enrolment__c/Enrolment__c.object-meta.xml',
+      parentObjectApiName: 'Enrolment__c',
+      sources: [
+        {
+          kind: 'formula',
+          expression: 'ISBLANK(Programme__r.Outcome__c)',
+        },
+      ],
+    });
+
+    expect(result.conditionNodes[0]!.properties.fieldRefs).toEqual([
+      'CustomField:Programme__r.Outcome__c',
+    ]);
+    expect(result.conditionFieldEdges).toEqual([]);
+    expect(
+      result.conditionNodes[0]!.properties['unresolvedTraversalRefs'],
+    ).toEqual(['Programme__r.Outcome__c']);
+    expect(result.conditionNodes[0]!.properties['objectApiName']).toBe(
+      'Enrolment__c',
+    );
+  });
+});

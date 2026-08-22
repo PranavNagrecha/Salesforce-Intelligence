@@ -463,8 +463,113 @@ export const fieldCleanupCandidatesHandler = async (
 // sfi.automation_risk_report
 // ---------------------------------------------------------------------------
 
+/**
+ * What happened to ONE composed sub-analysis.
+ *
+ *   - `ran` — the sub-handler returned; `findingCount` is what it contributed.
+ *   - `failed` — the sub-handler ERRORED. `findingCount` is `null`, never `0`:
+ *     before this manifest existed a failed sub-handler contributed nothing and
+ *     SAID nothing, so it was indistinguishable from a clean zero.
+ *   - `excluded-by-scope` — the caller's object scope excluded it. Also
+ *     `findingCount: null` — it was not checked, so it has no count.
+ */
+export type ComposedAnalysisStatus = 'ran' | 'failed' | 'excluded-by-scope';
+
+/** One row of the composition manifest — emitted UNCONDITIONALLY, one per sub-analysis. */
+export interface ComposedAnalysis {
+  /** The sub-analysis, by tool name. */
+  readonly analysis: string;
+  readonly status: ComposedAnalysisStatus;
+  /**
+   * Findings this analysis contributed to `findings`. `null` — NEVER `0` —
+   * whenever the analysis did not actually run to completion.
+   */
+  readonly findingCount: number | null;
+  /** Why a zero is a checked zero, why it failed, or why it was excluded. */
+  readonly note?: string;
+}
+
+/** One automation-layer surface this report does NOT cover, and the tool that does. */
+export interface NotCheckedSurface {
+  readonly surface: string;
+  readonly reason: string;
+  readonly tool: string;
+}
+
+/**
+ * Verbatim, emitted on EVERY non-sprawl response. A zero in this report is a
+ * zero for two analyses, and without this sentence a caller reads it as a zero
+ * for the automation layer.
+ */
+const AUTOMATION_RISK_BOUNDARY =
+  'This report composes TWO analyses: legacy-automation migration candidates and Apex governor-limit findings. It is NOT the whole automation layer. Flow fault handling, Flow bulkification, trigger recursion guards, and inactive automation were NOT checked here and each has its own tool (see notChecked). A zero in this report is a zero for the two analyses named in composedFrom, nothing more.';
+
+/**
+ * The automation-layer surfaces this report does not compose. Same shape as
+ * `quality-scan-coverage.ts`'s `NOT_APEX_TYPES` / `buildNotCheckedTypesNote`,
+ * on the automation axis instead of the Apex one.
+ */
+const AUTOMATION_RISK_NOT_CHECKED: readonly NotCheckedSurface[] = Object.freeze([
+  Object.freeze({
+    surface: 'Flow fault handling',
+    reason: 'not composed here',
+    tool: 'sfi.flow_fault_audit',
+  }),
+  Object.freeze({
+    surface: 'Flow bulkification',
+    reason: 'not composed here',
+    tool: 'sfi.flow_bulkification_audit',
+  }),
+  Object.freeze({
+    surface: 'Trigger recursion guards',
+    reason:
+      'not composed here; the recognizer output lives in the code-quality catalog',
+    tool: 'sfi.code_quality_audit',
+  }),
+  Object.freeze({
+    surface: 'Inactive automation',
+    reason: 'not composed here',
+    tool: 'sfi.order_of_execution',
+  }),
+]);
+
+/**
+ * The object-scope exclusion prose. ONE constant with TWO consumers — the
+ * scoped `disclosure` (byte-identical to before) and the `excluded-by-scope`
+ * row of `composedFrom` — so the two can never drift apart.
+ */
+const GOVERNOR_SCOPE_EXCLUSION_PROSE =
+  'Governor-limit findings live in Apex classes, which are not attributable to a single object, so they are ' +
+  'EXCLUDED from this object-scoped view — run sfi.governor_limit_risks (org-wide or per-class), or the bare ' +
+  'automation_risk_report, for those.';
+
+/** Verbatim: this report degenerated into one of its two halves for this org. */
+const degenerationNote = (analysis: string): string =>
+  `Every finding in this report came from a single composed analysis (${analysis}) — the other contributed 0. This report is not adding synthesis over that tool for this org; run it directly for its full options.`;
+
+/** A CHECKED zero from a sub-analysis that really ran. */
+const checkedZeroNote = (subject: string): string =>
+  `This org has 0 ${subject}. That is a CHECKED zero, not a skipped check.`;
+
+/** A sub-analysis that ERRORED — the case that could not be expressed before. */
+const failedAnalysisNote = (analysis: string, kind: string): string =>
+  `${analysis} FAILED (${kind}) and contributed nothing to this report. findingCount is null, NOT 0 — this report cannot say whether that analysis would have found anything, and its silence must not be read as a clean zero.`;
+
 export interface AutomationRiskReportOutput extends SynthesisBase {
   readonly governorClasses: GovernorLimitRisksOutput['classes'] | null;
+  /**
+   * UNCONDITIONAL on the default / `mode: 'risk'` response — one row per
+   * composed sub-analysis, saying whether it RAN, FAILED, or was
+   * EXCLUDED-BY-SCOPE, and how much it contributed. Absent only on
+   * `mode: 'sprawl'`, which composes nothing.
+   */
+  readonly composedFrom?: readonly ComposedAnalysis[];
+  /**
+   * UNCONDITIONAL on the default / `mode: 'risk'` response — the
+   * automation-layer surfaces this report does NOT cover, each with the tool
+   * that does. Absent only on `mode: 'sprawl'`.
+   */
+  readonly notChecked?: readonly NotCheckedSurface[];
   /**
    * Present ONLY on an object-scoped call
    * (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE) — echoes the object the
@@ -490,7 +595,12 @@ export interface AutomationRiskReportOutput extends SynthesisBase {
    * first"), NOT a graded verdict — every number is a heuristic ranking signal.
    */
   readonly sprawl?: SprawlBlock;
-  /** Verbatim honesty disclosures for the sprawl ranking. Present ONLY in `mode: 'sprawl'`. */
+  /**
+   * Verbatim honesty disclosures. On `mode: 'sprawl'` these describe the
+   * density ranking. On the default / `mode: 'risk'` response they carry the
+   * UNCONDITIONAL "this report composes TWO analyses" boundary, plus the
+   * degeneration sentence when every finding came from one half.
+   */
   readonly boundaries?: readonly string[];
 }
 
@@ -596,12 +706,19 @@ export const automationRiskReportHandler = async (
   // Legacy-automation half: Process Builders are parented to an object, so it
   // narrows honestly. Forward the object scope to the composed sub-handler when
   // scoped (it re-resolves + filters by `parentObjectId`).
+  // The composition MANIFEST. Every sub-analysis appends exactly one row,
+  // whatever happened to it — `if (pb.ok)` alone made a FAILED sub-handler
+  // contribute nothing and say nothing, which is indistinguishable from a
+  // clean zero.
+  const composedFrom: ComposedAnalysis[] = [];
+
   const pb = await processBuilderMigrationCandidatesHandler(ctx, {
     limit,
     ...(scope !== null ? { componentId: scope.componentId } : {}),
   });
   if (pb.ok) {
-    for (const item of pb.value.data.processBuilders.slice(0, limit)) {
+    const page = pb.value.data.processBuilders.slice(0, limit);
+    for (const item of page) {
       findings.push({
         rank: 0,
         severity: 'high',
@@ -611,6 +728,25 @@ export const automationRiskReportHandler = async (
         confidence: 'declared',
       });
     }
+    composedFrom.push({
+      analysis: 'sfi.process_builder_migration_candidates',
+      status: 'ran',
+      findingCount: page.length,
+      ...(page.length === 0
+        ? { note: checkedZeroNote('Process Builders') }
+        : {}),
+    });
+  } else {
+    composedFrom.push({
+      analysis: 'sfi.process_builder_migration_candidates',
+      status: 'failed',
+      // null, never 0 — see ComposedAnalysis.findingCount.
+      findingCount: null,
+      note: failedAnalysisNote(
+        'sfi.process_builder_migration_candidates',
+        pb.error.kind,
+      ),
+    });
   }
 
   // Governor-limit half: findings live in Apex classes, which are NOT
@@ -622,8 +758,10 @@ export const automationRiskReportHandler = async (
     const gov = await governorLimitRisksHandler(ctx, { limit });
     if (gov.ok) {
       governorClasses = gov.value.data.classes;
+      let govFindingCount = 0;
       for (const entry of governorClasses.slice(0, limit)) {
         for (const risk of entry.risks) {
+          govFindingCount += 1;
           findings.push({
             rank: 0,
             severity: risk.severity === 'critical' ? 'critical' : 'high',
@@ -634,16 +772,52 @@ export const automationRiskReportHandler = async (
           });
         }
       }
+      composedFrom.push({
+        analysis: 'sfi.governor_limit_risks',
+        status: 'ran',
+        findingCount: govFindingCount,
+        ...(govFindingCount === 0
+          ? { note: checkedZeroNote('Apex governor-limit findings') }
+          : {}),
+      });
+    } else {
+      composedFrom.push({
+        analysis: 'sfi.governor_limit_risks',
+        status: 'failed',
+        findingCount: null,
+        note: failedAnalysisNote('sfi.governor_limit_risks', gov.error.kind),
+      });
     }
+  } else {
+    // Not a zero and not a failure — the caller's object scope excluded it.
+    // The exclusion prose belongs on the row, next to the `null` count it
+    // explains; the same constant still renders in the scoped disclosure.
+    composedFrom.push({
+      analysis: 'sfi.governor_limit_risks',
+      status: 'excluded-by-scope',
+      findingCount: null,
+      note: GOVERNOR_SCOPE_EXCLUSION_PROSE,
+    });
+  }
+
+  // The report is UNCONDITIONALLY explicit that it is two analyses, not the
+  // automation layer — and names the degeneration when only one half spoke.
+  const boundaries: string[] = [AUTOMATION_RISK_BOUNDARY];
+  const ranAnalyses = composedFrom.filter((c) => c.status === 'ran');
+  const contributors = ranAnalyses.filter((c) => (c.findingCount ?? 0) > 0);
+  const ranButEmpty = ranAnalyses.filter((c) => c.findingCount === 0);
+  // Only when the OTHER half actually RAN and found nothing. An
+  // `excluded-by-scope` half is already explained by its own row and by the
+  // scoped disclosure, so calling that "degeneration" would be noise.
+  if (contributors.length === 1 && ranButEmpty.length > 0) {
+    boundaries.push(degenerationNote((contributors[0] as ComposedAnalysis).analysis));
   }
 
   const disclosure =
     scope === null
       ? SYNTHESIS_DISCLOSURE
       : `Scoped to ${scope.componentId}: only legacy automation (Process Builders) parented to this object is shown. ` +
-        'Governor-limit findings live in Apex classes, which are not attributable to a single object, so they are ' +
-        'EXCLUDED from this object-scoped view — run sfi.governor_limit_risks (org-wide or per-class), or the bare ' +
-        `automation_risk_report, for those. ${SYNTHESIS_DISCLOSURE}`;
+        `${GOVERNOR_SCOPE_EXCLUSION_PROSE} ${SYNTHESIS_DISCLOSURE}`;
 
   return ok({
     data: {
@@ -654,6 +828,9 @@ export const automationRiskReportHandler = async (
         : {}),
       findings: sortFindings(findings),
       governorClasses,
+      composedFrom,
+      notChecked: AUTOMATION_RISK_NOT_CHECKED,
+      boundaries,
       trust: coverageTrust(ctx),
       disclosure,
     },

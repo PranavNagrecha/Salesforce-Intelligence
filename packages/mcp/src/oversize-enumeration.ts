@@ -59,6 +59,15 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.pii_inventory': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.history_tracking_gaps': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor (R7-W7, mirrors pii_inventory)' },
   'sfi.test_coverage_gaps': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
+  // FIX 4: flow_fault_audit was a limit-capped truncator with no resume; it now
+  // pages with limit + offset + a CR-22 cursor bound to its object scope, and
+  // the handler (not the envelope reducer) makes the byte cut. Promoted out of
+  // `handler-capped` in the SAME change that added the knob.
+  'sfi.flow_fault_audit': { bound: 'paginated', note: 'limit + offset + byte trim + CR-22 cursor; full counts stay whole-set, scanTruncated stays a separate flag' },
+  // FIX 14: pre-emptive pagination. `limit` brings it into scope for this gate,
+  // so it is registered here in the same change rather than surfacing later as
+  // an unaudited enumerator.
+  'sfi.meaningful_test_audit': { bound: 'paginated', note: 'limit + offset + byte trim + CR-22 cursor; totalTestClassCount stays the FULL count' },
   'sfi.crud_fls_audit': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.what_if_merge_profiles': { bound: 'paginated', note: 'Admin merge page-500 repro' },
   'sfi.what_if_split_profile': { bound: 'paginated' },
@@ -91,7 +100,6 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.domain_clusters': { bound: 'paginated', note: 'per-cluster member section cursor + cluster-count byte budget + CR-RV12 candidateTruncated (CR-22)' },
   'sfi.org_history': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   'sfi.record_creation_paths': { bound: 'handler-capped', note: 'limit (default 100, max 500) caps creators+triggers lists; full counts + creatorsTruncated/triggersTruncated disclosure, no cursor (0.2.0)' },
-  'sfi.flow_fault_audit': { bound: 'handler-capped', note: 'limit (default 100, max 500) caps the worst-first offender list; full counts + truncated/scanTruncated disclosure, no cursor (0.2.0)' },
   'sfi.unused_components': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.unused_fields_deep': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.governor_limit_risks': { bound: 'paginated', note: 'limit + offset + CR-22 cursor; B3 full-type scan windows past 500' },

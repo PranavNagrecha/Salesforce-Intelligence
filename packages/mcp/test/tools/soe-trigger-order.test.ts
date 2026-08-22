@@ -539,9 +539,14 @@ describe('order_of_execution — the two SOE tools stay in lockstep', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(
-      apiNamesInPhase(result.value.data.byEvent.insert.soe, 'before-save-flows'),
-    ).toEqual([
+    // FIX 1 made `byEvent` a Partial<Record<SoeEvent, …>>, because the
+    // composition seam can now be asked for a SUBSET of the four events. That
+    // makes "the insert event was actually composed" a real assertion rather
+    // than an assumption — so assert it, instead of reaching through with `!`.
+    const insert = result.value.data.byEvent.insert;
+    expect(insert, 'the insert event must be composed on an unfiltered call').toBeDefined();
+    if (insert === undefined) return;
+    expect(apiNamesInPhase(insert.soe, 'before-save-flows')).toEqual([
       'GammaExtracted',
       'AlphaExtracted',
       'BetaExtracted',

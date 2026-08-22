@@ -770,3 +770,224 @@ describe('automationRiskReportHandler — object scope (AUTOMATION-RISK-REPORT-I
     expect(r.error.message).toMatch(/no object named 'NoSuchObject__c'/i);
   });
 });
+
+// =============================================================================
+// FIX 9 — automation_risk_report must say what it composed and what it did not.
+//
+// (1) `composedFrom` is an UNCONDITIONAL manifest. The silent-failure bug it
+//     closes: `if (pb.ok)` / `if (gov.ok)` meant a FAILED sub-handler
+//     contributed nothing and SAID nothing, so it was indistinguishable from a
+//     clean zero. A failed row carries `findingCount: null`, never `0`.
+// (2) `notChecked` + the verbatim "this report composes TWO analyses" boundary
+//     are UNCONDITIONAL, so a zero here can never be read as a zero for the
+//     automation layer.
+// =============================================================================
+
+describe('automationRiskReportHandler — FIX 9 composition manifest', () => {
+  const fixNode = (o: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'Flow',
+    apiName: 'Anon',
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...o,
+  });
+
+  /** An ApexClass carrying a static governor-limit finding, no Process Builders. */
+  const GOV_ONLY_NODES: Node[] = [
+    fixNode({
+      id: 'ApexClass:LedgerBatchService',
+      type: 'ApexClass',
+      apiName: 'LedgerBatchService',
+      properties: {
+        qualityIssues: [
+          {
+            rule: 'soql-in-loop',
+            severity: 'high',
+            location: 'LedgerBatchService.cls:22',
+            explanation: 'SOQL inside a loop risks the 100-query governor limit.',
+          },
+        ],
+      },
+    }),
+  ];
+
+  /** A Process Builder and nothing else — the mirror-image degeneration. */
+  const PB_ONLY_NODES: Node[] = [
+    fixNode({ id: 'CustomObject:Widget__c', type: 'CustomObject', apiName: 'Widget__c' }),
+    fixNode({
+      id: 'Flow:Widget_Intake_PB',
+      type: 'Flow',
+      apiName: 'Widget_Intake_PB',
+      parentId: 'CustomObject:Widget__c',
+      properties: { processType: 'Workflow', active: true, decisionCount: 1, actionCount: 1 },
+    }),
+  ];
+
+  const dirs: string[] = [];
+  const stores: GraphStore[] = [];
+
+  const seedCtx = async (nodes: Node[]): Promise<Context> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-synth-fix9-'));
+    dirs.push(dir);
+    const opened = await openGraph(join(dir, 'fix9.duckdb'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    stores.push(opened.value);
+    const imp = await importExtractionResults(opened.value, [{ nodes, edges: [] }]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    return { vaultRoot: dir, manifest: MANIFEST, graph: opened.value };
+  };
+
+  let govOnlyCtx: Context;
+  let pbOnlyCtx: Context;
+  let emptyCtx: Context;
+
+  /**
+   * A graph whose every read throws — the case that could NOT be expressed
+   * before: a sub-handler that failed rather than found nothing.
+   */
+  const brokenCtx: Context = {
+    vaultRoot: '/nonexistent',
+    manifest: MANIFEST,
+    graph: {
+      connection: {
+        runAndReadAll: () => {
+          throw new Error('fixture: graph read failed');
+        },
+        run: () => {
+          throw new Error('fixture: graph read failed');
+        },
+      },
+      instance: {},
+    } as unknown as GraphStore,
+  };
+
+  beforeAll(async () => {
+    govOnlyCtx = await seedCtx(GOV_ONLY_NODES);
+    pbOnlyCtx = await seedCtx(PB_ONLY_NODES);
+    emptyCtx = await seedCtx([]);
+  });
+
+  afterAll(async () => {
+    for (const s of stores) await closeGraph(s);
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('names a CHECKED zero from the half that ran and found nothing, and names the degeneration', async () => {
+    // FAIL-BEFORE: `if (pb.ok)` produced no row at all — a 0-Process-Builder
+    // org was byte-identical to one whose PB analysis had errored, and the
+    // report never said every finding came from one composed tool.
+    const r = await automationRiskReportHandler(govOnlyCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const pbRow = d.composedFrom?.find(
+      (c) => c.analysis === 'sfi.process_builder_migration_candidates',
+    );
+    const govRow = d.composedFrom?.find(
+      (c) => c.analysis === 'sfi.governor_limit_risks',
+    );
+    expect(pbRow?.status).toBe('ran');
+    expect(pbRow?.findingCount).toBe(0);
+    expect(pbRow?.note).toBe(
+      'This org has 0 Process Builders. That is a CHECKED zero, not a skipped check.',
+    );
+    expect(govRow?.status).toBe('ran');
+    expect(govRow?.findingCount).toBeGreaterThan(0);
+    expect(govRow?.note).toBeUndefined();
+    expect(d.boundaries).toContain(
+      'Every finding in this report came from a single composed analysis (sfi.governor_limit_risks) — the other contributed 0. This report is not adding synthesis over that tool for this org; run it directly for its full options.',
+    );
+  });
+
+  it('names the degeneration the other way round when only the legacy half contributes', async () => {
+    const r = await automationRiskReportHandler(pbOnlyCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(
+      d.composedFrom?.find((c) => c.analysis === 'sfi.governor_limit_risks')
+        ?.findingCount,
+    ).toBe(0);
+    expect(d.boundaries).toContain(
+      'Every finding in this report came from a single composed analysis (sfi.process_builder_migration_candidates) — the other contributed 0. This report is not adding synthesis over that tool for this org; run it directly for its full options.',
+    );
+  });
+
+  it('a FAILED sub-analysis is `failed` with findingCount null — never a silent 0', async () => {
+    // FAIL-BEFORE: both sub-handlers erred, both were skipped by `if (x.ok)`,
+    // and the response was a clean-looking empty report with no way to tell.
+    const r = await automationRiskReportHandler(brokenCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.findings).toEqual([]);
+    // WRONG-VALUE proof (not a missing-symbol one): pre-fix the ENTIRE payload
+    // contained no trace of the failure at all — a clean-looking empty report.
+    expect(JSON.stringify(d)).toContain('failed');
+    expect(d.composedFrom).toHaveLength(2);
+    for (const row of d.composedFrom ?? []) {
+      expect(row.status).toBe('failed');
+      expect(row.findingCount).toBeNull();
+      // The distinction the whole fix exists for.
+      expect(row.findingCount).not.toBe(0);
+      expect(row.note).toContain('findingCount is null, NOT 0');
+    }
+    // A failed composition must NOT read as a clean zero: no degeneration
+    // sentence (nothing "contributed 0" — nothing ran), and the boundary holds.
+    expect(d.boundaries?.join(' ')).not.toContain('came from a single composed analysis');
+    expect(d.boundaries).toContain(
+      'This report composes TWO analyses: legacy-automation migration candidates and Apex governor-limit findings. It is NOT the whole automation layer. Flow fault handling, Flow bulkification, trigger recursion guards, and inactive automation were NOT checked here and each has its own tool (see notChecked). A zero in this report is a zero for the two analyses named in composedFrom, nothing more.',
+    );
+  });
+
+  it('notChecked + the TWO-analyses boundary are present on an EMPTY report', async () => {
+    const r = await automationRiskReportHandler(emptyCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.findings).toEqual([]);
+    // Both halves ran and found nothing — two CHECKED zeros, not silence.
+    expect(d.composedFrom?.every((c) => c.status === 'ran')).toBe(true);
+    expect(d.composedFrom?.every((c) => c.findingCount === 0)).toBe(true);
+    // No degeneration: nothing came from anywhere, so nothing degenerated.
+    expect(d.boundaries?.join(' ')).not.toContain('came from a single composed analysis');
+    expect(d.notChecked?.map((n) => n.tool)).toEqual([
+      'sfi.flow_fault_audit',
+      'sfi.flow_bulkification_audit',
+      'sfi.code_quality_audit',
+      'sfi.order_of_execution',
+    ]);
+    for (const surface of d.notChecked ?? []) {
+      expect(surface.surface.length).toBeGreaterThan(0);
+      expect(surface.reason.length).toBeGreaterThan(0);
+    }
+    expect(d.boundaries?.[0]).toContain('It is NOT the whole automation layer');
+  });
+
+  it('an object-scoped call marks the governor half `excluded-by-scope`, with the reason on the row', async () => {
+    const r = await automationRiskReportHandler(pbOnlyCtx, {
+      objectApiName: 'Widget__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const govRow = d.composedFrom?.find(
+      (c) => c.analysis === 'sfi.governor_limit_risks',
+    );
+    expect(govRow?.status).toBe('excluded-by-scope');
+    // Not checked ⇒ null, never 0.
+    expect(govRow?.findingCount).toBeNull();
+    expect(govRow?.note).toContain('EXCLUDED from this object-scoped view');
+    // The same prose still renders in the disclosure — one constant, two
+    // consumers, so the row and the prose cannot drift.
+    expect(d.disclosure).toContain(govRow?.note as string);
+    // notChecked and the boundary hold under a scope too.
+    expect(d.notChecked).toHaveLength(4);
+    expect(d.boundaries?.[0]).toContain('composes TWO analyses');
+  });
+});

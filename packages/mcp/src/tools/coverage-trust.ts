@@ -63,8 +63,25 @@ export interface BlindSpot {
  *   - `risky`    — impacts found that likely break callers/automation.
  *   - `blocking` — a hard metadata blocker (the change cannot be made as-is).
  *   - `unknown`  — the tool could not classify (degraded/partial signal).
+ *   - `already-inactive` — the component does not RUN in the org today
+ *                  (Obsolete / Draft / InvalidDraft Flow, Inactive trigger), so
+ *                  disabling it changes no runtime behaviour. A separate AXIS
+ *                  from the five above, which describe the dependency
+ *                  STRUCTURE: a tool emitting this also emits
+ *                  `structuralVerdict` carrying what the structure says, so
+ *                  "it is already off" is never confused with "nothing depends
+ *                  on it". Deliberately NOT folded into `safe` — `safe` means
+ *                  "no impacts at all", and reusing it would make an
+ *                  inactive-but-heavily-depended-on component read identically
+ *                  to a genuinely inert one.
  */
-export type Verdict = 'safe' | 'review' | 'risky' | 'blocking' | 'unknown';
+export type Verdict =
+  | 'safe'
+  | 'review'
+  | 'risky'
+  | 'blocking'
+  | 'unknown'
+  | 'already-inactive';
 
 /**
  * The result envelope every `what_if_*` tool's `data` payload conforms to

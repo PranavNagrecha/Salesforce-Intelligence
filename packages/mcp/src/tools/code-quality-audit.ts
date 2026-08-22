@@ -286,12 +286,14 @@ export interface CodeQualityAuditOutput {
   readonly summary: CodeQualityAuditSummary;
   /**
    * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
-   * nodes that actually carry a `qualityIssues` scan. Present ONLY on the
-   * org-wide path (a class-scoped call is about one named node, and its own
-   * unscanned state is already in `boundaries`). A type whose `scanned` is
+   * nodes that actually carry a `qualityIssues` scan. A type whose `scanned` is
    * below its `nodes` returned "not checked", never "clean".
+   *
+   * D-3: emitted UNCONDITIONALLY, including on a class-scoped call. It used to
+   * be org-wide only, which left the single-class clean answer — `issues: []`
+   * with no census — unable to say whether the class was read at all.
    */
-  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
+  readonly qualityScanCoverage: readonly QualityScanTypeCoverage[];
   /**
    * Types this audit structurally cannot cover on any vault after any refresh —
    * currently `Flow`, because the recognizers read Apex syntax. Present ONLY on
@@ -299,7 +301,11 @@ export interface CodeQualityAuditOutput {
    * every automation surface.
    */
   readonly notCheckedTypes?: readonly NotCheckedType[];
-  /** Verbatim honesty disclosures; empty when the response has no findings. */
+  /**
+   * Verbatim honesty disclosures. Never empty: the three scanner-behaviour
+   * disclosures describe HOW this tool reads source and are true whether or not
+   * a rule matched, so they live OUTSIDE the zero-findings gate.
+   */
   readonly boundaries: readonly string[];
   /** True when the matched count exceeded `limit` and `issues` was sliced. */
   readonly truncated: boolean;
@@ -552,14 +558,16 @@ export const codeQualityAuditHandler = async (
   const truncated = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
 
-  const boundaries: string[] =
-    sorted.length === 0
-      ? []
-      : [
-          HEURISTIC_CONFIDENCE_DISCLOSURE,
-          DYNAMIC_BLIND_SPOT_DISCLOSURE,
-          SEVERITY_CONSENSUS_DISCLOSURE,
-        ];
+  // D-3: these three describe HOW the scanner reads source — heuristic
+  // confidence, the dynamic-Apex blind spot, the severity scale's provenance —
+  // and every one of them is true whether or not a rule matched. Gating them on
+  // `sorted.length > 0` meant the zero-finding response, which IS the
+  // false-clean shape, was the only one that explained nothing about itself.
+  const boundaries: string[] = [
+    HEURISTIC_CONFIDENCE_DISCLOSURE,
+    DYNAMIC_BLIND_SPOT_DISCLOSURE,
+    SEVERITY_CONSENSUS_DISCLOSURE,
+  ];
 
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Both notes live OUTSIDE the
   // zero-findings gate on purpose: a zero-finding response IS the false-clean
@@ -595,9 +603,11 @@ export const codeQualityAuditHandler = async (
       issues: slice,
       totalCount: sorted.length,
       summary: { bySeverity, byRule, byType },
-      ...(scopeId === null
-        ? { qualityScanCoverage, notCheckedTypes: NOT_APEX_TYPES }
-        : {}),
+      qualityScanCoverage,
+      // `notCheckedTypes` keeps its org-wide guard: a caller who named one Apex
+      // class did not ask about Flows. The census above has no such guard —
+      // "was this class read?" is exactly what a scoped clean answer must say.
+      ...(scopeId === null ? { notCheckedTypes: NOT_APEX_TYPES } : {}),
       boundaries,
       truncated,
       ...(isPaged ? { limit, offset } : {}),

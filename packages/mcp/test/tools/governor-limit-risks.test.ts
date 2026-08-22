@@ -274,7 +274,7 @@ describe('governorLimitRisksHandler', () => {
     expect(joined).toMatch(/trigger-context|callsApex/i);
   });
 
-  it('returns empty classes and empty boundaries when no class has governor-limit findings', async () => {
+  it('a zero-finding org-wide scan still states how the scanner works and which limits it never examined', async () => {
     // Build a tempo context with only one node carrying no governor-limit rules.
     const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-glr-empty-'));
     const localStoreRes = await openGraph(join(localDir, 'empty.db'));
@@ -304,7 +304,15 @@ describe('governorLimitRisksHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.classes.length).toBe(0);
-    expect(r.value.data.boundaries.length).toBe(0);
+    // INVARIANT GUARDED: a zero-finding response is the FALSE-CLEAN shape (D-3).
+    // MOVED (FIX 6): was `boundaries.length === 0`. The two disclosures describe
+    // HOW the scanner reads Apex and are true with zero findings, and the
+    // org-wide path also names the governor limits it never examined.
+    expect(r.value.data.boundaries.length).toBeGreaterThan(0);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toMatch(/heuristic/i);
+    expect(joined).toMatch(/trigger-context|callsApex/i);
+    expect(joined).toContain('NOT CHECKED —');
     await closeGraph(localStore);
     rmSync(localDir, { recursive: true, force: true });
   });
@@ -628,14 +636,110 @@ describe('governorLimitRisksHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', 
     expect(joined).toContain('`soundness` envelope');
   });
 
-  it('a SCANNED-and-clean class stays byte-identical (no note, no coverage field)', async () => {
+  it('a SCANNED-and-clean class proves it was read: census present, no NOT-SCANNED note', async () => {
+    // INVARIANT GUARDED: the refresh-closable NOT-SCANNED note fires only for a
+    // node with no `qualityIssues` KEY — a scanned-and-clean class must NOT be
+    // told to re-run `sfi refresh`.
+    //
+    // MOVED (FIX 6): was `qualityScanCoverage === undefined` and
+    // `boundaries === []` — "byte-identical to the pre-coverage shape". That
+    // byte-identity WAS the defect on this path: a clean single class and a
+    // class nobody ever read returned the same empty payload. The census now
+    // rides on every response and says `ApexClass 1/1` — read and scanned.
     const r = await governorLimitRisksHandler(ctx, {
       componentId: 'ApexClass:CleanCls',
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.classes).toEqual([]);
-    expect(r.value.data.qualityScanCoverage).toBeUndefined();
-    expect(r.value.data.boundaries).toEqual([]);
+    expect(r.value.data.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+    ]);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).not.toContain('NOT SCANNED IN THIS VAULT');
+    expect(joined).toMatch(/heuristic/i);
+  });
+});
+
+// =============================================================================
+// FIX 6 / D-3 — a zero must be readable as CHECKED or UNCHECKED, and a
+// zero-finding response is the shape that most needs to say what was not
+// scanned. `ApexClass:CleanCls` was SCANNED and came back clean: the honest
+// answer is "one class read, one class scanned, three loop recognizers ran,
+// none matched, and here are the seven governor limits nobody looked at".
+// =============================================================================
+describe('governorLimitRisksHandler — FIX 6 clean-scope disclosure', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a clean single class comes back with populated boundaries', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes).toEqual([]);
+    expect(r.value.data.totalRiskCount).toBe(0);
+    // PRE-FIX: `boundaries` was `[]` — the tool said nothing whatsoever about a
+    // zero it had every ability to explain.
+    expect(r.value.data.boundaries.length).toBeGreaterThan(0);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toMatch(/heuristic/i);
+    expect(joined).toMatch(/trigger-context|callsApex/i);
+  });
+
+  it('names the governor limits it never examined, on a clean scan', async () => {
+    const r = await governorLimitRisksHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const notChecked = r.value.data.limitCoverage.notChecked.map((n) => n.limit);
+    // MEMBERSHIP, never array equality — shipping a callout-in-loop recognizer
+    // later must move a limit OUT of this list without breaking the test.
+    expect(notChecked).toContain('heap size');
+    expect(notChecked).toContain('Apex CPU time');
+    // Every entry states WHY, so "not checked" is never bare.
+    for (const entry of r.value.data.limitCoverage.notChecked) {
+      expect(entry.reason.length).toBeGreaterThan(0);
+    }
+    // ...and the three rules a zero DOES cover are named.
+    expect(r.value.data.limitCoverage.checkedRules).toContain('soql-in-loop');
+    expect(r.value.data.limitCoverage.checkedRules).toContain('dml-in-loop');
+    expect(r.value.data.limitCoverage.checkedRules).toContain(
+      'database-upsert-no-options',
+    );
+  });
+
+  it('limitCoverage rides on a single-class scope too (the limits are unchecked for one class as well)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.limitCoverage.notChecked.map((n) => n.limit),
+    ).toContain('Apex CPU time');
+    // The PROSE note stays org-wide only — a caller who named one class is
+    // asking about that class, and the machine-readable block already told
+    // them. (Mirrors the NOT_APEX_TYPES guard in code_quality_audit.)
+    expect(r.value.data.boundaries.join(' ')).not.toContain('NOT CHECKED —');
+  });
+
+  it('the org-wide zero carries the verbatim not-checked-limits note', async () => {
+    const r = await governorLimitRisksHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain(
+      'NOT CHECKED — this tool models three static loop recognizers (soql-in-loop, dml-in-loop, database-upsert-no-options). The following governor limits were NOT examined and a zero here says nothing about them: heap size, Apex CPU time, callouts, query rows, DML rows, future / queueable invocations, email invocations. Some are runtime-only and no refresh can close them; for a RUNTIME limit that actually fired, use sfi.explain_debug_log.',
+    );
+  });
+
+  it('qualityScanCoverage rides on a fully-scanned scope with nodes === scanned', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.qualityScanCoverage.length).toBeGreaterThan(0);
+    for (const c of r.value.data.qualityScanCoverage) {
+      expect(c.scanned).toBe(c.nodes);
+    }
   });
 });

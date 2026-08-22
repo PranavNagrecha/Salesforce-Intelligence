@@ -16,6 +16,7 @@ import type { Context } from '../../src/server.js';
 import {
   classifyRecordTypeScope,
   lifecycleProcessHandler,
+  lifecycleProcessInputSchema,
 } from '../../src/tools/lifecycle-process.js';
 
 const MANIFEST: VaultManifest = {
@@ -155,6 +156,79 @@ const ticketSeed: ExtractionResult = {
   ],
 };
 
+
+// =============================================================================
+// LIFECYCLE-PROCESS-LAUNDERS-UPSTREAM-TRUNCATION (FIX 1).
+//
+// LedgerEntry__c carries 60 ACTIVE update-save validation rules, each with a
+// long `firesWhen` condition expression and a long error message. Every name
+// here is invented.
+//
+// The point of the sizing: composed across all four DML events the payload is
+// large enough that `order_of_execution`'s byte enforcer reaches its LAST
+// RESORT pass and DROPS trailing steps. The old lifecycle_process read that
+// enforced response and recomputed `summary.totalSteps` from the survivors —
+// laundering someone else's truncation into `truncated: false` over an
+// incomplete sequence.
+// =============================================================================
+const LEDGER = 'CustomObject:LedgerEntry__c';
+const LEDGER_VR_COUNT = 60;
+/** ~600 chars — big enough that the four-event view cannot hold the set. */
+const LONG_EXPRESSION =
+  'NOT(ISBLANK(TEXT(Status__c))) && Amount__c > 0 && ' +
+  'AND(NOT(ISPICKVAL(Status__c, "Void")), NOT(ISPICKVAL(Status__c, "Draft"))) && '.repeat(6);
+/** ~500 chars — a VR errorMessage is NOT trimmable by the SOE budget passes. */
+const LONG_ERROR =
+  'This ledger entry cannot be saved with the current combination of amount, status and posting period. '.repeat(5);
+
+const ledgerVr = (i: number): { nodes: Node[]; edges: Edge[] } => {
+  const n = String(i).padStart(2, '0');
+  const vrId = `ValidationRule:LedgerEntry__c.Rule_${n}`;
+  const condId = `ConditionalContext:${vrId}.condition-0`;
+  return {
+    nodes: [
+      node({
+        id: vrId,
+        type: 'ValidationRule',
+        apiName: `LedgerEntry__c.Rule_${n}`,
+        parentId: LEDGER,
+        properties: { active: true, errorMessage: LONG_ERROR, errorDisplayField: null },
+      }),
+      node({
+        id: condId,
+        type: 'ConditionalContext',
+        apiName: `${vrId}.condition-0`,
+        parentId: vrId,
+        properties: {
+          kind: 'formula',
+          expression: LONG_EXPRESSION,
+          fieldRefs: ['CustomField:LedgerEntry__c.Amount__c'],
+          synthesized: false,
+        },
+      }),
+    ],
+    edges: [
+      edge({ fromId: LEDGER, toId: vrId, edgeType: 'parentOf' }),
+      edge({ fromId: vrId, toId: condId, edgeType: 'firesWhen', confidence: 'parsed' }),
+    ],
+  };
+};
+
+const ledgerVrs = Array.from({ length: LEDGER_VR_COUNT }, (_, i) => ledgerVr(i));
+
+const ledgerSeed: ExtractionResult = {
+  nodes: [
+    node({
+      id: LEDGER,
+      type: 'CustomObject',
+      apiName: 'LedgerEntry__c',
+      properties: { sharingModel: 'Private' },
+    }),
+    ...ledgerVrs.flatMap((v) => v.nodes),
+  ],
+  edges: ledgerVrs.flatMap((v) => v.edges),
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -164,7 +238,7 @@ beforeAll(async () => {
   const opened = await openGraph(join(tempDir, 'g.db'));
   if (!opened.ok) throw new Error(opened.error.message);
   store = opened.value;
-  const imported = await importExtractionResults(store, [seed, ticketSeed]);
+  const imported = await importExtractionResults(store, [seed, ticketSeed, ledgerSeed]);
   if (!imported.ok) throw new Error(imported.error.message);
   ctx = { vaultRoot: tempDir, manifest: MANIFEST, graph: store };
 });
@@ -447,5 +521,161 @@ describe('lifecycleProcessHandler — CR-22 continuation cursor', () => {
     });
     expect(replay.ok).toBe(false); if (replay.ok) return;
     expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
+describe('lifecycleProcessHandler — LIFECYCLE-PROCESS-LAUNDERS-UPSTREAM-TRUNCATION (FIX 1)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: totalSteps is the COMPOSITION total and a cut page says truncated', async () => {
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'LedgerEntry__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The composition holds all 60 rules plus the `save` placeholder. Before
+    // the fix this read the byte-budget-ENFORCED four-event response and
+    // reported whatever survived — a number strictly below this.
+    expect(d.summary.totalSteps).toBe(LEDGER_VR_COUNT + 1);
+    // ...and the page genuinely does NOT hold them all...
+    expect(d.process.length).toBeLessThan(LEDGER_VR_COUNT);
+    // ...so it must SAY so. Before the fix these two could not both hold:
+    // the total was recomputed from the page, so the page always looked whole.
+    expect(d.truncated).toBe(true);
+    expect(d.hasMore).toBe(true);
+    expect(typeof d.nextCursor).toBe('string');
+  });
+
+  it('a page cut by the handler byte budget carries the verbatim page-boundary sentence', async () => {
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'LedgerEntry__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const limit = d.limit;
+    expect(d.process.length).toBeLessThan(limit); // cut by BYTES, not by `limit`
+    expect(d.disclosures).toContain(
+      `Page trimmed to ${d.process.length} of ${limit} requested steps to stay within this response's byte budget; the sequence is COMPLETE at ${d.summary.totalSteps} steps and the remainder is reachable — advance with the returned nextCursor. This is a page boundary, not a missing step.`,
+    );
+  });
+
+  it('INVARIANT: totalSteps >= process.length and truncated === (process.length + offset < totalSteps)', async () => {
+    // Asserted as a RELATION over several shapes — never a pinned constant —
+    // so re-tuning the byte budget or the fixture cannot silently void it.
+    const cases: Array<{ object: string; event: 'insert' | 'update'; limit?: number; offset?: number }> = [
+      { object: 'LedgerEntry__c', event: 'update' },
+      { object: 'LedgerEntry__c', event: 'update', limit: 10 },
+      { object: 'LedgerEntry__c', event: 'update', limit: 10, offset: 55 },
+      { object: 'LedgerEntry__c', event: 'update', limit: 200, offset: 61 },
+      { object: 'Opportunity', event: 'update' },
+      { object: 'Opportunity', event: 'update', limit: 1 },
+      { object: 'Ticket__c', event: 'insert' },
+    ];
+    for (const c of cases) {
+      const r = await lifecycleProcessHandler(ctx, {
+        objectApiName: c.object,
+        event: c.event,
+        ...(c.limit !== undefined ? { limit: c.limit } : {}),
+        ...(c.offset !== undefined ? { offset: c.offset } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.summary.totalSteps).toBeGreaterThanOrEqual(d.process.length);
+      expect(d.truncated).toBe(d.process.length + d.offset < d.summary.totalSteps);
+    }
+  });
+
+  it('a record-type scope subtracts its OWN exclusion from totalSteps and says how it reconciles', async () => {
+    const scoped = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      event: 'update',
+      recordType: 'Vip_Ticket',
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    const d = scoped.value.data;
+    const excluded = d.appliedScope?.excludedStepCount ?? 0;
+    expect(excluded).toBeGreaterThan(0);
+    const unscoped = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      event: 'update',
+    });
+    expect(unscoped.ok).toBe(true);
+    if (!unscoped.ok) return;
+    // excludedStepCount + scoped totalSteps === the unscoped composition total.
+    expect(excluded + d.summary.totalSteps).toBe(unscoped.value.data.summary.totalSteps);
+    expect(
+      d.disclosures.some((s) => s.includes('is the POST-exclusion total')),
+    ).toBe(true);
+  });
+
+  it('composes ONE event: an unknown object still surfaces the shared not-admitted error', async () => {
+    const r = await lifecycleProcessHandler(ctx, { objectApiName: 'NoSuchObj__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+});
+
+describe('lifecycleProcessInputSchema — FIX 12: .strict() with alias passthrough', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a typo’d key is REFUSED, and the refusal names the real knobs', () => {
+    const parsed = lifecycleProcessInputSchema.safeParse({
+      objectApiName: 'Opportunity',
+      feild: 'StageName',
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.map((i) => i.message).join('; ')).toBe(
+      "Unknown argument 'feild'. This tool accepts: objectApiName, objectId, field, value, event, recordType, recordTypeId, businessProcess, limit, offset, cursor. Refusing rather than ignoring it — a silently-dropped argument returns a confident answer to a question you did not ask.",
+    );
+  });
+
+  it('the objectId ALIAS survives .strict() — mergeInputAliases copies, it never deletes', () => {
+    // The trap: `mergeInputAliases` folds `objectId` into `objectApiName` and
+    // LEAVES `objectId` on the object, so a naive `.strict()` would reject the
+    // very alias-only call the merge exists to serve.
+    const parsed = lifecycleProcessInputSchema.safeParse({ objectId: 'Opportunity' });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.objectApiName).toBe('Opportunity');
+  });
+
+  it('every advertised knob still survives .strict()', () => {
+    for (const raw of [
+      { objectApiName: 'Opportunity' },
+      { objectId: 'CustomObject:Opportunity' },
+      { objectApiName: 'Opportunity', field: 'StageName', value: 'Closed Won' },
+      { objectApiName: 'Opportunity', event: 'insert' },
+      { objectApiName: 'Ticket__c', recordType: 'Vip_Ticket' },
+      { objectApiName: 'Ticket__c', recordTypeId: 'RecordType:Ticket__c.Vip_Ticket' },
+      { objectApiName: 'Ticket__c', businessProcess: 'Vip Process' },
+      { objectApiName: 'Opportunity', limit: 5, offset: 1 },
+    ]) {
+      expect(lifecycleProcessInputSchema.safeParse(raw).success).toBe(true);
+    }
+  });
+});
+
+describe('lifecycleProcessHandler — FIX 15 (3): coupling survives an UNGROUNDED ref', () => {
+  it('a field the condition mentions but the vault never retrieved still couples', async () => {
+    // `CustomField:Opportunity.StageName` is in the condition's fieldRefs but
+    // has no node in this vault, so FIX 15 (3) moves it to `ungroundedRefs` —
+    // it is not a citable component id. It IS still a reference the condition
+    // makes, and gating `coupledToField` on retrieval completeness would turn
+    // a partial vault into a silent "nothing is coupled to StageName".
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Opportunity',
+      field: 'StageName',
+      value: 'Closed Won',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const won = r.value.data.coupledAutomation.find((s) => s.componentId === WON_WF);
+    expect(won?.coupledToField).toBe(true);
+    expect(r.value.data.summary.fieldCoupledSteps).toBe(1);
   });
 });

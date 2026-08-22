@@ -358,6 +358,122 @@ const subflowObsoleteParentSeed: ExtractionResult = {
   ],
 };
 
+
+// =============================================================================
+// Suite 6 (FIX 5): the VERDICT-CARRIES-INFORMATION fixtures. Four invented
+// Flows with deliberately different edge sets AND different runtime states, so
+// the verdict distribution can be asserted as a RELATION (more than one
+// distinct value) rather than a pinned constant.
+//
+//   Ledger_Sync_Flow    Obsolete, 3 outgoing effects → already-inactive / blocking
+//   Widget_Intake_Flow  Active, triggersOn ONLY      → safe (+ notProvenHarmless)
+//   Sprocket_Read_Flow  Active, triggersOn + readsFrom → safe (read is INPUT)
+//   Gadget_Audit_Flow   NO status property, writesTo → currentlyRunning null
+// =============================================================================
+
+const FLOW_OBSOLETE_ID = 'Flow:Ledger_Sync_Flow';
+const FIELD_LEDGER_TOTAL = 'CustomField:Ledger__c.Total__c';
+const APEX_LEDGER = 'ApexClass:LedgerService';
+const EMAIL_LEDGER = 'EmailTemplate:LedgerDigest';
+const FLOW_ENTRY_ONLY_ID = 'Flow:Widget_Intake_Flow';
+const OBJ_WIDGET = 'CustomObject:Widget__c';
+const FLOW_READ_ONLY_ID = 'Flow:Sprocket_Read_Flow';
+const OBJ_SPROCKET = 'CustomObject:Sprocket__c';
+const FIELD_SPROCKET_SERIAL = 'CustomField:Sprocket__c.Serial__c';
+const FLOW_NO_STATUS_ID = 'Flow:Gadget_Audit_Flow';
+const FIELD_GADGET_CODE = 'CustomField:Gadget__c.Code__c';
+
+const verdictSpreadSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: FLOW_OBSOLETE_ID,
+      type: 'Flow',
+      apiName: 'Ledger_Sync_Flow',
+      properties: { status: 'Obsolete' },
+    }),
+    makeNode({
+      id: FIELD_LEDGER_TOTAL,
+      type: 'CustomField',
+      apiName: 'Total__c',
+    }),
+    makeNode({ id: APEX_LEDGER, type: 'ApexClass', apiName: 'LedgerService' }),
+    makeNode({
+      id: EMAIL_LEDGER,
+      type: 'EmailTemplate',
+      apiName: 'LedgerDigest',
+    }),
+    makeNode({
+      id: FLOW_ENTRY_ONLY_ID,
+      type: 'Flow',
+      apiName: 'Widget_Intake_Flow',
+      properties: { status: 'Active' },
+    }),
+    makeNode({ id: OBJ_WIDGET, type: 'CustomObject', apiName: 'Widget__c' }),
+    makeNode({
+      id: FLOW_READ_ONLY_ID,
+      type: 'Flow',
+      apiName: 'Sprocket_Read_Flow',
+      properties: { status: 'Active' },
+    }),
+    makeNode({ id: OBJ_SPROCKET, type: 'CustomObject', apiName: 'Sprocket__c' }),
+    makeNode({
+      id: FIELD_SPROCKET_SERIAL,
+      type: 'CustomField',
+      apiName: 'Serial__c',
+    }),
+    makeNode({
+      // NO `status` property at all — the vault does not record it.
+      id: FLOW_NO_STATUS_ID,
+      type: 'Flow',
+      apiName: 'Gadget_Audit_Flow',
+      properties: {},
+    }),
+    makeNode({ id: FIELD_GADGET_CODE, type: 'CustomField', apiName: 'Code__c' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: FLOW_OBSOLETE_ID,
+      toId: FIELD_LEDGER_TOTAL,
+      edgeType: 'writesTo',
+      properties: { operation: 'recordUpdate' },
+    }),
+    makeEdge({
+      fromId: FLOW_OBSOLETE_ID,
+      toId: APEX_LEDGER,
+      edgeType: 'callsApex',
+    }),
+    makeEdge({
+      fromId: FLOW_OBSOLETE_ID,
+      toId: EMAIL_LEDGER,
+      edgeType: 'sendsEmail',
+      confidence: 'declared',
+    }),
+    makeEdge({
+      fromId: FLOW_ENTRY_ONLY_ID,
+      toId: OBJ_WIDGET,
+      edgeType: 'triggersOn',
+      confidence: 'declared',
+    }),
+    makeEdge({
+      fromId: FLOW_READ_ONLY_ID,
+      toId: OBJ_SPROCKET,
+      edgeType: 'triggersOn',
+      confidence: 'declared',
+    }),
+    makeEdge({
+      fromId: FLOW_READ_ONLY_ID,
+      toId: FIELD_SPROCKET_SERIAL,
+      edgeType: 'readsFrom',
+    }),
+    makeEdge({
+      fromId: FLOW_NO_STATUS_ID,
+      toId: FIELD_GADGET_CODE,
+      edgeType: 'writesTo',
+      properties: { operation: 'recordUpdate' },
+    }),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -377,6 +493,7 @@ beforeAll(async () => {
     platformEventSeed,
     subflowActiveParentsSeed,
     subflowObsoleteParentSeed,
+    verdictSpreadSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -418,19 +535,24 @@ describe('whatIfDeactivateFlowHandler', () => {
     expect(data.flowId).toBe(FLOW_RICH_ID);
     expect(data.apiName).toBe('AccountNotify');
     expect(data.status).toBe('Active');
-    // Five impacts: triggersOn, callsApex, readsFrom, writesTo, sendsEmail.
+    // UPDATED (FIX 5a) — INVARIANT: an entry point is not a dependent.
+    // `triggersOn` used to be a 5th impact; it is the Flow's own START and is
+    // now RECATEGORISED (never dropped) into `entryPoints`. Four impacts
+    // remain: callsApex, readsFrom (input-only), writesTo, sendsEmail.
     // firesWhen is surfaced via `firingConditions`, NOT impacts.
-    expect(data.impacts.length).toBe(5);
+    expect(data.impacts.length).toBe(4);
     const ids = data.impacts.map((i) => i.componentId).sort();
     expect(ids).toEqual(
-      [
-        ACCOUNT_OBJ,
-        APEX_CLS,
-        EMAIL_TPL,
-        FIELD_INDUSTRY,
-        FIELD_REVENUE,
-      ].sort(),
+      [APEX_CLS, EMAIL_TPL, FIELD_INDUSTRY, FIELD_REVENUE].sort(),
     );
+    // Nothing was dropped: the object the Flow starts on is still reported.
+    expect(data.entryPoints).toEqual([
+      {
+        kind: 'triggersOn',
+        componentId: ACCOUNT_OBJ,
+        note: 'the object this Flow starts on; deactivating removes the record-trigger here',
+      },
+    ]);
   });
 
   it('surfaces firesWhen edges as firingConditions, not as impacts', async () => {
@@ -457,12 +579,15 @@ describe('whatIfDeactivateFlowHandler', () => {
     if (!result.ok) return;
     const data = result.value.data;
     const byId = new Map(data.impacts.map((i) => [i.componentId, i]));
-    // triggersOn → metadata-blocker
-    expect(byId.get(ACCOUNT_OBJ)?.category).toBe('metadata-blocker');
+    // UPDATED (FIX 5a) — INVARIANT: entry points leave `impacts`; a READ is an
+    // INPUT to this Flow, not a downstream effect of it.
+    // triggersOn → NOT an impact any more (see `entryPoints`)
+    expect(byId.has(ACCOUNT_OBJ)).toBe(false);
     // writesTo → metadata-blocker
     expect(byId.get(FIELD_REVENUE)?.category).toBe('metadata-blocker');
-    // readsFrom → metadata-blocker
-    expect(byId.get(FIELD_INDUSTRY)?.category).toBe('metadata-blocker');
+    // readsFrom → input-only (was metadata-blocker — the sharpest instance of
+    // the category error: a Get Records lookup rated `blocking`)
+    expect(byId.get(FIELD_INDUSTRY)?.category).toBe('input-only');
     // sendsEmail → metadata-blocker
     expect(byId.get(EMAIL_TPL)?.category).toBe('metadata-blocker');
     // callsApex → code-needs-update
@@ -478,7 +603,7 @@ describe('whatIfDeactivateFlowHandler', () => {
     expect(result.value.data.verdict).toBe('blocking');
   });
 
-  it('aggregates verdict to `risky` when only callsApex impacts exist', async () => {
+  it('aggregates STRUCTURAL verdict to `risky` when only callsApex impacts exist', async () => {
     const result = await whatIfDeactivateFlowHandler(ctx, {
       flowId: FLOW_BARE_ID,
     });
@@ -486,7 +611,14 @@ describe('whatIfDeactivateFlowHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.impacts.length).toBe(1);
     expect(result.value.data.impacts[0]?.category).toBe('code-needs-update');
-    expect(result.value.data.verdict).toBe('risky');
+    // UPDATED (FIX 5b) — INVARIANT: runtime state is its own axis. This
+    // fixture Flow is `Draft`, so it does not run today: the HEADLINE is
+    // `already-inactive` and the structural answer keeps `risky`. Before the
+    // fix the headline was `risky`, which told the caller that deactivating
+    // automation that is already off would skip an Apex call.
+    expect(result.value.data.structuralVerdict).toBe('risky');
+    expect(result.value.data.verdict).toBe('already-inactive');
+    expect(result.value.data.runtimeState.currentlyRunning).toBe(false);
   });
 
   it('aggregates verdict to `safe` when the Flow has no outgoing edges', async () => {
@@ -498,6 +630,11 @@ describe('whatIfDeactivateFlowHandler', () => {
     expect(result.value.data.impacts.length).toBe(0);
     expect(result.value.data.firingConditions.length).toBe(0);
     expect(result.value.data.verdict).toBe('safe');
+    // ADDED (FIX 5a) — `safe` alone over-claims: an empty result is a
+    // statement about the edge types walked, not a proof of harmlessness.
+    expect(result.value.data.notProvenHarmless).toContain(
+      'not a proof that disabling is harmless',
+    );
   });
 
   it('sorts impacts deterministically by (category, componentId)', async () => {
@@ -648,6 +785,137 @@ describe('whatIfDeactivateFlowHandler', () => {
     const disclosure = result.value.data.disclosure;
     expect(disclosure).toContain('subflow');
     expect(disclosure).toContain('Flow.Interview');
+  });
+});
+
+
+// =============================================================================
+// FIX 5 — the verdict must carry information.
+//
+// Two independent causes, both asserted here:
+//   (a) de-tautologise — `triggersOn` / `listensTo` are the Flow's own ENTRY
+//       POINT and must not pin the verdict; `readsFrom` is an INPUT.
+//   (b) runtime state is its own axis — a Flow that is already off must not be
+//       told that deactivating it breaks things. Measured before the fix: 67 of
+//       71 non-Active Flows returned `blocking`.
+// =============================================================================
+
+describe('whatIfDeactivateFlowHandler — FIX 5 verdict information content', () => {
+  it('an OBSOLETE Flow with three outgoing effects reads `already-inactive`, keeping `blocking` as the structural answer', async () => {
+    // FAIL-BEFORE: the status was resolved and emitted but never consulted, so
+    // this returned `blocking` about a Flow that does not run today.
+    const r = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: FLOW_OBSOLETE_ID,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    expect(data.impacts.length).toBe(3);
+    expect(data.verdict).toBe('already-inactive');
+    expect(data.structuralVerdict).toBe('blocking');
+    expect(data.runtimeState.status).toBe('Obsolete');
+    expect(data.runtimeState.currentlyRunning).toBe(false);
+    expect(data.runtimeState.note).toBe(
+      'This Flow is Obsolete — it does not run in the org today, so deactivating it changes no runtime behaviour. structuralVerdict below describes what WOULD stop if it were Active. That is NOT a claim that nothing depends on it: 3 dependent(s) are listed in impacts, and they will be affected if it is ever reactivated.',
+    );
+  });
+
+  it('a Flow whose ONLY edge is its entry point is `safe`, with the not-proven sentence', async () => {
+    // FAIL-BEFORE: `triggersOn` was an unconditional metadata-blocker, so every
+    // record-triggered Flow returned `blocking`.
+    const r = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: FLOW_ENTRY_ONLY_ID,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    expect(data.impacts).toEqual([]);
+    expect(data.structuralVerdict).toBe('safe');
+    expect(data.verdict).toBe('safe');
+    expect(data.notProvenHarmless).toBe(
+      'No downstream effect is visible in this vault. That is a statement about the edge types walked (writesTo, callsApex, dispatchesAsync, sendsEmail, subflow references), not a proof that disabling is harmless — dynamic dispatch, managed-package callers, and framework wiring are invisible here.',
+    );
+    expect(data.entryPoints).toEqual([
+      {
+        kind: 'triggersOn',
+        componentId: OBJ_WIDGET,
+        note: 'the object this Flow starts on; deactivating removes the record-trigger here',
+      },
+    ]);
+  });
+
+  it('a readsFrom impact is `input-only`, drops "stops this action", and moves no verdict', async () => {
+    // FAIL-BEFORE: category was `metadata-blocker` and the verdict `blocking`
+    // — a Get Records lookup rated as a hard blocker.
+    const r = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: FLOW_READ_ONLY_ID,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    const read = data.impacts.find(
+      (i) => i.componentId === FIELD_SPROCKET_SERIAL,
+    );
+    expect(read?.category).toBe('input-only');
+    expect(read?.explanation).toBe(
+      "Flow 'Sprocket_Read_Flow' reads CustomField 'Serial__c'. Deactivating the Flow removes that read; 'Serial__c' itself is unchanged and nothing downstream of it is affected. Listed because it is a dependency of this Flow, not a dependent on it.",
+    );
+    expect(read?.explanation).not.toContain('stops this action');
+    // The read is reported but carries no verdict, and the entry point is out
+    // of `impacts`, so a read-only Flow is structurally `safe`.
+    expect(data.structuralVerdict).toBe('safe');
+    expect(data.verdict).toBe('safe');
+    expect(data.notProvenHarmless).toBeDefined();
+  });
+
+  it('an ABSENT status is `currentlyRunning: null` — never a fabricated false', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: FLOW_NO_STATUS_ID,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    expect(data.runtimeState.currentlyRunning).toBeNull();
+    expect(data.runtimeState.currentlyRunning).not.toBe(false);
+    expect(data.runtimeState.status).toBeNull();
+    expect(data.runtimeState.note).toBe(
+      "This component's activation status is not recorded in this vault, so whether it runs today is UNKNOWN — not assumed active and not assumed inactive. Treat the verdict as the structural answer only, and confirm the status in the org.",
+    );
+    // Unknown status must NOT be read as "off".
+    expect(data.verdict).not.toBe('already-inactive');
+    expect(data.verdict).toBe(data.structuralVerdict);
+    expect(data.structuralVerdict).toBe('blocking');
+  });
+
+  it('an ACTIVE Flow reports both axes and they agree', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, { flowId: FLOW_RICH_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.runtimeState.currentlyRunning).toBe(true);
+    expect(r.value.data.runtimeState.status).toBe('Active');
+    expect(r.value.data.verdict).toBe(r.value.data.structuralVerdict);
+  });
+
+  it('VERDICT-DISTRIBUTION INVARIANT: different edge sets produce different verdicts', async () => {
+    // The regression this catches is the one the fix exists for: a verdict that
+    // is the same word for every input carries no information. Assert the
+    // RELATION (more than one distinct verdict), never an org-wide constant.
+    const ids = [
+      FLOW_OBSOLETE_ID,
+      FLOW_ENTRY_ONLY_ID,
+      FLOW_READ_ONLY_ID,
+      FLOW_NO_STATUS_ID,
+      FLOW_RICH_ID,
+    ];
+    const verdicts: string[] = [];
+    for (const id of ids) {
+      const r = await whatIfDeactivateFlowHandler(ctx, { flowId: id });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      verdicts.push(r.value.data.verdict);
+    }
+    expect(verdicts).toHaveLength(5);
+    expect(new Set(verdicts).size).toBeGreaterThan(1);
   });
 });
 
