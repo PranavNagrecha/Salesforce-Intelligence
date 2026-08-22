@@ -69,7 +69,12 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, resolveComponents } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listNodesByIds,
+  resolveComponents,
+} from '@sf-intelligence/graph';
 import type {
   ApexCallSite,
   ApexDmlSite,
@@ -172,6 +177,31 @@ export interface ApexClassRef {
   readonly type: ComponentType;
 }
 
+/**
+ * The sharing keyword was NOT READ — a third state, distinct from both "no
+ * keyword is declared" and "a keyword is declared".
+ *
+ * It arises when the source did not parse AND the vault node carries no
+ * `modifiers` array: nothing anywhere in this answer looked at the class
+ * declaration. Reporting `effectiveModel: 'inherits-caller'` there would be a
+ * WRONG SECURITY ANSWER, because a `without sharing` class whose source fails
+ * to parse produces exactly the same inputs — so no enforcement model is
+ * asserted at all.
+ */
+export interface ApexSharingNotRead {
+  readonly declared: null;
+  readonly effectiveModel: 'not-read';
+  /**
+   * Derived from the vault's async classifiers, which are independent of the
+   * source — `null` when the node does not carry them either.
+   */
+  readonly runsAsSystem: boolean | null;
+  readonly note: string;
+}
+
+/** The sharing block: the composed semantics, or the NOT-READ state. */
+export type ApexStructureSharing = ExplainApexSharingSemantics | ApexSharingNotRead;
+
 /** Identity facts, every one read from the vault node or the parsed source. */
 export interface ApexStructureMeta {
   readonly apiName: string;
@@ -191,19 +221,34 @@ export interface ApexStructureMeta {
   readonly annotations: readonly string[] | null;
   readonly superclass: string | null;
   readonly interfaces: readonly string[] | null;
-  /** Trigger only. `object: null` when the grammar yielded no SObject name. */
+  /**
+   * Trigger only. `object: null` when the grammar yielded no SObject name.
+   * `events: null` when NOBODY read them — a trigger whose source did not
+   * parse, on a vault node that carries no `events` property, must not report
+   * `[]`, which reads as "this trigger fires on no event". `meta.absent[]`
+   * carries the reason for each.
+   */
   readonly trigger: {
     readonly object: string | null;
-    readonly events: readonly string[];
+    readonly events: readonly string[] | null;
   } | null;
   /**
    * Sharing ENFORCEMENT semantics, composed from `explain_apex_method`'s
    * single implementation. `declared: null` means no keyword was written —
-   * which is NOT `without sharing`; read `effectiveModel` and `note`.
+   * which is NOT `without sharing`; read `effectiveModel` and `note`. When
+   * nothing READ the keyword at all the block is {@link ApexSharingNotRead}
+   * (`effectiveModel: 'not-read'`), which is a third state distinct from both.
    */
-  readonly sharing: ExplainApexSharingSemantics;
-  /** Where the sharing keyword was read from, or that the type cannot declare one. */
-  readonly sharingSource: 'parsed-source' | 'node-modifiers' | 'trigger-system-context';
+  readonly sharing: ApexStructureSharing;
+  /**
+   * Where the sharing keyword was read from, that the type cannot declare one,
+   * or that NOTHING read it (`not-read`).
+   */
+  readonly sharingSource:
+    | 'parsed-source'
+    | 'node-modifiers'
+    | 'trigger-system-context'
+    | 'not-read';
   /**
    * Every `meta` field that came back `null` BECAUSE the vault did not record
    * it, each with the reason. This is what keeps a null readable: without it a
@@ -245,8 +290,14 @@ export interface ApexDataAccess {
   readonly callouts: CappedList<ApexCallSite>;
   readonly asyncDispatch: CappedList<ApexCallSite>;
   readonly dynamicApex: CappedList<ApexCallSite>;
-  /** Distinct object names read from every query's `FROM` clause. */
-  readonly queriedObjects: readonly string[];
+  /**
+   * Distinct object names read from every query's `FROM` clause. A capped list
+   * like every sibling in this block: a section emptied by `include`, by
+   * `method` narrowing or by the byte budget keeps its TRUE `total` and flips
+   * `truncated`, so an empty `items` beside `soql.total: 1` can never be read
+   * as "this class queries no objects".
+   */
+  readonly queriedObjects: CappedList<string>;
   readonly note: string;
 }
 
@@ -301,6 +352,37 @@ export interface ApexEntryPoints {
   readonly note: string;
 }
 
+/**
+ * Why a `readsFrom` / `writesTo` target is NOT reported as a real object field.
+ *
+ * The heuristic Apex scanner keys its edges on the TEXTUAL receiver, so it
+ * emits a `CustomField:` id for anything that appears left of a dot — an Apex
+ * class, an inner DTO, a relationship traversal, a describe token. Each of
+ * those has its own reason here, because "nobody could resolve this" and "this
+ * is provably not an SObject field" are different facts.
+ */
+export type ApexUnresolvedReason =
+  /** `this.x` / an untyped local — the receiver is not a type at all. */
+  | 'unresolved-receiver'
+  /** The receiver names an ApexClass NODE in this vault: an Apex type, not an SObject. */
+  | 'apex-type-receiver'
+  /** `Foo__r.Bar` — a relationship traversal, not a field ON the receiver. */
+  | 'relationship-traversal'
+  /** `Contact.fields` / `X.SObjectType` — an Apex describe token, not a field. */
+  | 'describe-token'
+  /** Nothing in this vault names the receiver: an unvaulted SObject, or an Apex type. */
+  | 'receiver-not-in-vault';
+
+/** One `readsFrom` / `writesTo` target that is NOT reported as a field. */
+export interface ApexUnresolvedAccess {
+  /** The raw `receiver.field` token, verbatim. NEVER a component id. */
+  readonly token: string;
+  readonly reason: ApexUnresolvedReason;
+}
+
+/** What this vault says a `readsFrom` / `writesTo` receiver token IS. */
+export type ApexReceiverKind = 'sobject' | 'apex-type' | 'not-in-vault';
+
 /** "What does it touch" — objects and fields, from the vault's own edges. */
 export interface ApexTouches {
   readonly checked: boolean;
@@ -315,11 +397,16 @@ export interface ApexTouches {
     readonly confidence: string;
   }>;
   /**
-   * Edges whose RECEIVER never resolved to an object (`this.x`, an untyped
-   * local). Raw tokens, segregated so they are never read as real fields —
-   * the same split `explain_apex_method` makes.
+   * Every target that is NOT reported as a real field, with the reason.
+   *
+   * A `CustomField:` id is emitted into `fields` ONLY when its receiver names
+   * an SObject NODE in this vault. Everything else lands here as a RAW TOKEN
+   * with a `reason` — an Apex type (`ValidationResultDTO.isComplete`), an inner
+   * class, a `__r` traversal, a describe token (`Contact.fields`), an untyped
+   * local (`app.Id`). Before the check, an Apex-type receiver sailed into
+   * `fields` AT `parsed` CONFIDENCE, naming a field that does not exist.
    */
-  readonly unresolvedFieldAccess: CappedList<string>;
+  readonly unresolvedFieldAccess: CappedList<ApexUnresolvedAccess>;
   readonly note: string;
 }
 
@@ -375,7 +462,12 @@ export interface ApexTests {
 
 /** What narrowing was applied, so a partial view is never mistaken for the whole. */
 export interface ApexStructureNarrowing {
-  readonly applied: 'include' | 'method' | 'budget';
+  /**
+   * `method+include` when BOTH knobs were given: they are honoured together,
+   * never one silently dropped — a response that answers a question the caller
+   * did not ask is worse than a refusal.
+   */
+  readonly applied: 'include' | 'method' | 'budget' | 'method+include';
   readonly include?: readonly IncludeSection[];
   readonly method?: string;
   readonly omittedSections?: readonly string[];
@@ -509,6 +601,26 @@ const TRIGGER_SHARING: ExplainApexSharingSemantics = {
   note: 'An Apex trigger CANNOT declare a sharing keyword — `declared: null` here means the keyword does not exist for this component type, not that one was omitted. Triggers execute in SYSTEM CONTEXT: record sharing, object CRUD, and field-level security are NOT enforced for the running user, and any class the trigger calls that declares no sharing keyword inherits that system context. To enforce sharing for the work a trigger does, move the logic into a `with sharing` handler class and call that.',
 };
 
+/**
+ * The sharing block for a CLASS whose keyword NOBODY READ — the source did not
+ * parse and the vault node carries no `modifiers`.
+ *
+ * `buildSharingSemantics(null, …)` would answer `effectiveModel:
+ * 'inherits-caller'` with a note opening "No sharing keyword is declared." —
+ * a sentence about a declaration nothing looked at. A `without sharing` class
+ * that fails to parse presents identically, so the model is not guessed.
+ */
+const sharingNotRead = (runsAsSystem: boolean | null): ApexSharingNotRead => ({
+  declared: null,
+  effectiveModel: 'not-read',
+  runsAsSystem,
+  note: `NOT READ — the sharing keyword was not read from ANYWHERE for this class: the source did not parse (see \`parse.reason\`) and this vault node carries no \`modifiers\` array. This is NOT "no keyword is declared" and NOT \`inherits-caller\`: a \`without sharing\` class whose source fails to parse produces exactly these inputs, so no enforcement model is asserted here. Read the \`.cls\` directly, or re-run /sfi-refresh so the node carries \`modifiers\`.${
+    runsAsSystem === null
+      ? ' `runsAsSystem` is null for the same reason class of absence: this node carries none of the async classifier properties either, so whether the platform runs this as the system was NOT CHECKED.'
+      : ' `runsAsSystem` IS known — it comes from the vault\'s async classifiers, which do not depend on the source parsing.'
+  }`,
+});
+
 /** Read the sharing keyword out of a modifiers array (the extractor's shape). */
 const sharingFromModifiers = (
   modifiers: readonly string[] | null,
@@ -535,10 +647,18 @@ interface ResolvedApexRef {
  * Resolve `classRef` to ONE ApexClass / ApexTrigger node.
  *
  * A canonical id is looked up directly. A bare name is tried as `ApexClass:`
- * then `ApexTrigger:` — the two namespaces do not collide in practice, and a
- * name that exists in both would resolve to the class, which is the shape a
- * caller writing a bare name means. A miss falls back to the fuzzy resolver
- * ONLY to name near-misses in the error; it never silently picks one.
+ * AND `ApexTrigger:`, and a name that exists in BOTH is an `invalid-query`
+ * naming both ids — never a silent pick.
+ *
+ * The namespaces collide far more than "not in practice": a
+ * `<Thing>TriggerTest` class beside a `<Thing>Trigger` trigger is an ordinary
+ * naming convention, and in a real org 7 of 22 triggers were shadowed by a
+ * same-named class. Returning the class answered a question about the TRIGGER
+ * with an 18-line test class — a plausible, entirely wrong answer, and the
+ * caller had nothing in the payload to notice it by.
+ *
+ * A miss falls back to the fuzzy resolver ONLY to name near-misses in the
+ * error; it never silently picks one either.
  */
 const resolveApexRef = async (
   ctx: Context,
@@ -569,6 +689,7 @@ const resolveApexRef = async (
     );
   }
 
+  const hits: Node[] = [];
   for (const id of candidates) {
     const found = await getNodeById(ctx.graph, id);
     if (!found.ok) {
@@ -578,18 +699,29 @@ const resolveApexRef = async (
         path: 'classRef',
       });
     }
-    if (found.value !== null) {
-      return ok({
-        ref: {
-          requested,
-          resolvedForm,
-          componentId: found.value.id,
-          apiName: found.value.apiName,
-          type: found.value.type,
-        },
-        node: found.value,
-      });
-    }
+    if (found.value !== null) hits.push(found.value);
+  }
+  if (hits.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `the bare Apex name '${requested}' is AMBIGUOUS in this vault — it names ${hits
+        .map((h) => h.id)
+        .join(' AND ')}. They are different components with different source, so this tool will not pick one for you: re-call with the canonical id you mean.`,
+      path: 'classRef',
+    });
+  }
+  const only = hits[0];
+  if (only !== undefined) {
+    return ok({
+      ref: {
+        requested,
+        resolvedForm,
+        componentId: only.id,
+        apiName: only.apiName,
+        type: only.type,
+      },
+      node: only,
+    });
   }
 
   // Not found. Name the near-misses so the caller can retry — never guess one.
@@ -755,7 +887,9 @@ const runAstChecks = (
         'parsed',
         site.line,
         site.inMethod,
-        `An inline SOQL result is assigned directly to a single sObject variable. When the query returns no rows this throws System.QueryException ("List has no rows for assignment"), which no null check can catch. Query into a List and test isEmpty() first.${opts.isTest ? ' Reported at low severity because this is a test class, where the throw is often the intended assertion.' : ''}`,
+        site.singleSObjectForm === 'indexed'
+          ? `An inline SOQL result is indexed straight into a single sObject variable (\`[SELECT …][0]\`). When the query returns no rows this throws System.ListException ("List index out of bounds: 0") — the list IS returned and it is the INDEXING that fails, so it is not the System.QueryException the un-indexed form throws, and no null check catches either. Query into a List and test isEmpty() first.${opts.isTest ? ' Reported at low severity because this is a test class, where the throw is often the intended assertion.' : ''}`
+          : `An inline SOQL result is assigned directly to a single sObject variable. When the query returns no rows this throws System.QueryException ("List has no rows for assignment"), which no null check can catch. Query into a List and test isEmpty() first.${opts.isTest ? ' Reported at low severity because this is a test class, where the throw is often the intended assertion.' : ''}`,
       ),
     );
   }
@@ -846,6 +980,31 @@ const mirrorCatalogFindings = (node: Node): readonly ApexReviewFinding[] => {
   return out;
 };
 
+/**
+ * The severity / confidence census of ONE findings list. Shared so a narrowed
+ * `review` cannot report a class-wide census beside a method-scoped list —
+ * `findings.total: 1` next to `{critical: 1, info: 1}` is a payload that
+ * disagrees with itself.
+ */
+const summariseFindings = (
+  findings: readonly ApexReviewFinding[],
+): ApexReview['summary'] => ({
+  critical: findings.filter((f) => f.severity === 'critical').length,
+  high: findings.filter((f) => f.severity === 'high').length,
+  medium: findings.filter((f) => f.severity === 'medium').length,
+  low: findings.filter((f) => f.severity === 'low').length,
+  info: findings.filter((f) => f.severity === 'info').length,
+  parsed: findings.filter((f) => f.confidence === 'parsed').length,
+  heuristic: findings.filter((f) => f.confidence === 'heuristic').length,
+  declared: findings.filter((f) => f.confidence === 'declared').length,
+});
+
+/** Distinct `FROM` / `RETURNING` object names across a set of query sites. */
+const queriedObjectsOf = (
+  ...sites: readonly (readonly ApexQuerySite[])[]
+): readonly string[] =>
+  [...new Set(sites.flat().flatMap((s) => s.objects))].sort();
+
 const SEVERITY_ORDER: Readonly<Record<ApexReviewFinding['severity'], number>> = {
   critical: 0,
   high: 1,
@@ -863,26 +1022,121 @@ type AccessType = 'read' | 'write' | 'both';
 const mergeAccess = (a: AccessType | undefined, b: AccessType): AccessType =>
   a === undefined || a === b ? b : 'both';
 
+const FIELD_PREFIX = 'CustomField:';
+const OBJECT_PREFIX = 'CustomObject:';
+
+/**
+ * Apex DESCRIBE tokens that read like a field name after a dot but are not
+ * fields: `Contact.fields`, `Account.SObjectType`, `Case.fieldSets`.
+ */
+const DESCRIBE_TOKENS: ReadonlySet<string> = new Set([
+  'fields',
+  'sobjecttype',
+  'fieldsets',
+  'getdescribe',
+]);
+
+/**
+ * Every receiver token an outgoing edge set would emit into `touches`, so the
+ * handler can ask the graph — in ONE batched query — whether each names an
+ * SObject, an Apex type, or nothing at all.
+ */
+export const touchReceiverTokens = (outgoing: readonly Edge[]): readonly string[] => {
+  const names = new Set<string>();
+  for (const edge of outgoing) {
+    if (edge.edgeType !== 'readsFrom' && edge.edgeType !== 'writesTo') continue;
+    if (edge.toId.startsWith(OBJECT_PREFIX)) {
+      names.add(edge.toId.slice(OBJECT_PREFIX.length));
+      continue;
+    }
+    if (!edge.toId.startsWith(FIELD_PREFIX)) continue;
+    const rest = edge.toId.slice(FIELD_PREFIX.length);
+    const dot = rest.indexOf('.');
+    if (dot > 0) names.add(rest.slice(0, dot));
+  }
+  return [...names];
+};
+
+const TOUCHES_TIER_NOTE =
+  'A `CustomField:` id reaches `fields` ONLY when its RECEIVER names an SObject node in this vault; `objects` is derived from those same verified receivers. Everything else is a RAW TOKEN in `unresolvedFieldAccess` with a `reason`: `unresolved-receiver` (`this.x` / an untyped local — the scanner keys edges on the textual receiver), `apex-type-receiver` (the receiver is an ApexClass NODE here, so the "field" is an Apex member), `relationship-traversal` (`Foo__r.Bar` — a field on the RELATED object, not on this one), `describe-token` (`Contact.fields` — Apex describe, not a field), and `receiver-not-in-vault` (nothing in this vault names it: an SObject this vault does not carry, an Apex system type, or an inner class — this tier is the one that cannot be told apart, so it is not claimed either way). Per-edge `confidence` is carried through on `fields` rows only.';
+
+/**
+ * Compose `touches` from the vault's own `readsFrom` / `writesTo` edges.
+ *
+ * `receiverKind` is the vault's answer for each receiver token, or `null` when
+ * the verification query itself FAILED — which is NOT CHECKED, never a clean
+ * empty list.
+ */
 const buildTouches = (
   outgoing: readonly Edge[],
   edgesAvailable: boolean,
+  receiverKind: ((name: string) => ApexReceiverKind) | null,
 ): ApexTouches => {
-  if (!edgesAvailable) {
+  if (!edgesAvailable || receiverKind === null) {
     return {
       checked: false,
       objects: emptyCapped(),
       fields: emptyCapped(),
       unresolvedFieldAccess: emptyCapped(),
-      note: 'NOT CHECKED — the field-access edges could not be read from the graph. This empty list is the absence of a query result, not the absence of field access.',
+      note: !edgesAvailable
+        ? 'NOT CHECKED — the field-access edges could not be read from the graph. This empty list is the absence of a query result, not the absence of field access.'
+        : 'NOT CHECKED — the edges were read, but the query that verifies each receiver against the vault FAILED, and an unverified receiver list is exactly what puts an Apex type in the field list. These empty lists are the absence of a query result, not the absence of field access.',
     };
   }
   const fieldAccess = new Map<string, { access: AccessType; confidence: string }>();
-  const unresolved = new Set<string>();
+  const objectAccess = new Map<string, AccessType>();
+  const unresolved = new Map<string, ApexUnresolvedReason>();
+  const noteUnresolved = (token: string, reason: ApexUnresolvedReason): void => {
+    if (!unresolved.has(token)) unresolved.set(token, reason);
+  };
+
   for (const edge of outgoing) {
     if (edge.edgeType !== 'readsFrom' && edge.edgeType !== 'writesTo') continue;
     const access: AccessType = edge.edgeType === 'readsFrom' ? 'read' : 'write';
+
+    // Object-LEVEL access: the scanner resolved a receiver but named no field.
+    if (edge.toId.startsWith(OBJECT_PREFIX)) {
+      const objectName = edge.toId.slice(OBJECT_PREFIX.length);
+      if (receiverKind(objectName) === 'sobject') {
+        objectAccess.set(objectName, mergeAccess(objectAccess.get(objectName), access));
+      } else {
+        noteUnresolved(
+          objectName,
+          receiverKind(objectName) === 'apex-type'
+            ? 'apex-type-receiver'
+            : 'receiver-not-in-vault',
+        );
+      }
+      continue;
+    }
+
+    if (!edge.toId.startsWith(FIELD_PREFIX)) continue;
+    const rest = edge.toId.slice(FIELD_PREFIX.length);
+    const dot = rest.indexOf('.');
+    if (dot <= 0) {
+      noteUnresolved(rest, 'unresolved-receiver');
+      continue;
+    }
+    const receiver = rest.slice(0, dot);
+    const field = rest.slice(dot + 1);
     if (isUnresolvedFieldReceiver(edge.toId)) {
-      unresolved.add(edge.toId.slice('CustomField:'.length));
+      noteUnresolved(rest, 'unresolved-receiver');
+      continue;
+    }
+    if (DESCRIBE_TOKENS.has(field.split('.')[0]?.toLowerCase() ?? '')) {
+      noteUnresolved(rest, 'describe-token');
+      continue;
+    }
+    if (receiver.endsWith('__r') || field.includes('.')) {
+      noteUnresolved(rest, 'relationship-traversal');
+      continue;
+    }
+    const kind = receiverKind(receiver);
+    if (kind !== 'sobject') {
+      noteUnresolved(
+        rest,
+        kind === 'apex-type' ? 'apex-type-receiver' : 'receiver-not-in-vault',
+      );
       continue;
     }
     const prior = fieldAccess.get(edge.toId);
@@ -893,12 +1147,12 @@ const buildTouches = (
   }
 
   const byObject = new Map<string, { access: AccessType; fields: Set<string> }>();
+  for (const [objectName, access] of objectAccess) {
+    byObject.set(objectName, { access, fields: new Set<string>() });
+  }
   for (const [fieldId, info] of fieldAccess) {
-    const rest = fieldId.startsWith('CustomField:')
-      ? fieldId.slice('CustomField:'.length)
-      : fieldId;
+    const rest = fieldId.slice(FIELD_PREFIX.length);
     const dot = rest.indexOf('.');
-    if (dot < 0) continue;
     const objectName = rest.slice(0, dot);
     const entry = byObject.get(objectName) ?? {
       access: info.access,
@@ -925,15 +1179,19 @@ const buildTouches = (
     }))
     .sort((a, b) => a.fieldId.localeCompare(b.fieldId));
 
+  const unresolvedRows = [...unresolved.entries()]
+    .map(([token, reason]) => ({ token, reason }))
+    .sort((a, b) => a.token.localeCompare(b.token));
+
   return {
     checked: true,
     objects: cap(objects, CAPS.objects),
     fields: cap(fields, CAPS.fields),
-    unresolvedFieldAccess: cap([...unresolved].sort(), CAPS.unresolvedFields),
+    unresolvedFieldAccess: cap(unresolvedRows, CAPS.unresolvedFields),
     note:
       objects.length === 0
-        ? 'CHECKED and empty — this component has no readsFrom / writesTo edge in the vault. That is not proof it touches nothing: dynamic Apex, reflective field access (obj.get(...)), and fields reached only through a helper class produce no edge here.'
-        : 'Objects and fields come from the vault\'s readsFrom / writesTo edges, whose per-edge `confidence` is carried through. Fields whose receiver never resolved to an object are segregated into unresolvedFieldAccess and are raw tokens, not components.',
+        ? `CHECKED and empty — this component has no readsFrom / writesTo edge whose receiver names an SObject in the vault. That is not proof it touches nothing: dynamic Apex, reflective field access (obj.get(...)), and fields reached only through a helper class produce no edge here, and anything the check demoted is listed in unresolvedFieldAccess with its reason. ${TOUCHES_TIER_NOTE}`
+        : `Objects and fields come from the vault's readsFrom / writesTo edges. ${TOUCHES_TIER_NOTE}`,
   };
 };
 
@@ -1093,7 +1351,7 @@ const EMPTY_SECTIONS: Readonly<{
         callouts: blank(s.dataAccess.callouts),
         asyncDispatch: blank(s.dataAccess.asyncDispatch),
         dynamicApex: blank(s.dataAccess.dynamicApex),
-        queriedObjects: [],
+        queriedObjects: blank(s.dataAccess.queriedObjects),
         note: s.dataAccess.note,
       },
     })),
@@ -1142,14 +1400,23 @@ const applyInclude = (
     current = EMPTY_SECTIONS[section](current);
     omitted.push(section);
   }
+  // A prior `method` narrowing is CARRIED, never overwritten: `include` and
+  // `method` are honoured together, and the block has to say so.
+  const prior = current.narrowing;
+  const alsoMethod = prior?.applied === 'method';
   return {
     ...current,
     narrowing: {
-      applied: 'include',
+      applied: alsoMethod ? 'method+include' : 'include',
+      ...(prior?.method === undefined ? {} : { method: prior.method }),
       include,
-      omittedSections: omitted,
-      truncated: omitted.length > 0,
-      recoverWith: 'call sfi.apex_structure again without `include` for the full body',
+      omittedSections: [
+        ...new Set([...(prior?.omittedSections ?? []), ...omitted]),
+      ],
+      truncated: omitted.length > 0 || (prior?.truncated ?? false),
+      recoverWith: alsoMethod
+        ? 'call sfi.apex_structure again without `include` for every section of this method, or without `method` for the whole class'
+        : 'call sfi.apex_structure again without `include` for the full body',
     },
   };
 };
@@ -1159,20 +1426,37 @@ const applyInclude = (
  * Returns `null` when the parsed structure declares no such method — the
  * caller turns that into `invalid-query` rather than an empty success that
  * would read as "that method has nothing in it".
+ *
+ * It narrows the UNCAPPED parse (`source`), never the already-capped payload.
+ * Filtering the capped lists produced a confidently FALSE zero: a class with
+ * 73 DML sites caps at {@link CAPS.sites} = 60, so a method whose five sites
+ * sat at indices 68-72 came back `dml: { items: [], total: 0 }` — "this method
+ * does no DML" — for a method that does five. `method` is exactly what
+ * {@link fitToBudget}'s own `recoverWith` tells the caller to reach for, so
+ * the knob that recovers a shed answer must not invent a different one.
  */
 const applyMethodNarrowing = (
   out: ApexStructureOutput,
   method: string,
+  source: {
+    readonly structure: ApexTypeStructure;
+    readonly findings: readonly ApexReviewFinding[];
+  },
 ): ApexStructureOutput | null => {
   if (out.structure === null) return null;
-  const wanted = out.structure.methods.items.filter(
+  const wanted = source.structure.methods.filter(
     (m) => m.name.toLowerCase() === method.toLowerCase(),
   );
   if (wanted.length === 0) return null;
   const names = new Set(wanted.map((m) => m.name.toLowerCase()));
   const inMethod = (site: { readonly inMethod: string | null }): boolean =>
     site.inMethod !== null && names.has(site.inMethod.toLowerCase());
-  const da = out.structure.dataAccess;
+  const s = source.structure;
+  const soql = s.soqlSites.filter(inMethod);
+  const sosl = s.soslSites.filter(inMethod);
+  const findings = source.findings.filter(
+    (f) => f.method !== null && names.has(f.method.toLowerCase()),
+  );
   return {
     ...out,
     structure: {
@@ -1181,24 +1465,23 @@ const applyMethodNarrowing = (
       members: blank(out.structure.members),
       innerTypes: blank(out.structure.innerTypes),
       dataAccess: {
-        ...da,
-        soql: cap(da.soql.items.filter(inMethod), CAPS.sites),
-        sosl: cap(da.sosl.items.filter(inMethod), CAPS.sites),
-        dml: cap(da.dml.items.filter(inMethod), CAPS.sites),
-        callouts: cap(da.callouts.items.filter(inMethod), CAPS.sites),
-        asyncDispatch: cap(da.asyncDispatch.items.filter(inMethod), CAPS.sites),
-        dynamicApex: cap(da.dynamicApex.items.filter(inMethod), CAPS.sites),
+        ...out.structure.dataAccess,
+        soql: cap(soql, CAPS.sites),
+        sosl: cap(sosl, CAPS.sites),
+        dml: cap(s.dmlSites.filter(inMethod), CAPS.sites),
+        callouts: cap(s.calloutSites.filter(inMethod), CAPS.sites),
+        asyncDispatch: cap(s.asyncDispatchSites.filter(inMethod), CAPS.sites),
+        dynamicApex: cap(s.dynamicApexSites.filter(inMethod), CAPS.sites),
+        queriedObjects: cap(queriedObjectsOf(soql, sosl), CAPS.objects),
       },
     },
     review: {
       ...out.review,
-      findings: cap(
-        out.review.findings.items.filter(
-          (f) => f.method !== null && names.has(f.method.toLowerCase()),
-        ),
-        CAPS.findings,
-      ),
-      note: `${out.review.note} NARROWED to method '${method}': class-level findings (sharing, api version, trigger shape) are NOT in this list — call without \`method\` for them.`,
+      findings: cap(findings, CAPS.findings),
+      // Recomputed: a class-wide summary beside a method-scoped list reads as
+      // findings the caller cannot see in the list it was handed.
+      summary: summariseFindings(findings),
+      note: `${out.review.note} NARROWED to method '${method}': class-level findings (sharing, api version, trigger shape) are NOT in this list — call without \`method\` for them. \`summary\` counts ONLY this method's findings.`,
     },
     narrowing: {
       applied: 'method',
@@ -1387,14 +1670,25 @@ export const apexStructureHandler = async (
   // ---- meta ----------------------------------------------------------------
   const nodeModifiers = readStringArrayOrNull(node, 'modifiers');
   const isTrigger = ref.type === 'ApexTrigger';
+  const classifiers = buildClassifiers(node);
+  const classifiersKnown = classifiersAvailable(node);
+  const asyncBoundaries: string[] = [];
+  if (classifiers.isQueueable) asyncBoundaries.push('Queueable');
+  if (classifiers.isBatchable) asyncBoundaries.push('Database.Batchable');
+  if (classifiers.isSchedulable) asyncBoundaries.push('Schedulable');
+  if (classifiers.hasFutureMethod) asyncBoundaries.push('@future');
+
+  // The keyword was read from NOWHERE: no parse, and no modifiers on the node.
+  const sharingUnread = !isTrigger && structure === null && nodeModifiers === null;
   const sharingSource: ApexStructureMeta['sharingSource'] = isTrigger
     ? 'trigger-system-context'
-    : structure === null
-      ? 'node-modifiers'
-      : 'parsed-source';
+    : sharingUnread
+      ? 'not-read'
+      : structure === null
+        ? 'node-modifiers'
+        : 'parsed-source';
   const declaredSharing =
     structure === null ? sharingFromModifiers(nodeModifiers) : (structure.sharing ?? null);
-  const classifiers = buildClassifiers(node);
 
   // Which meta facts are null because the vault never recorded them. A null the
   // caller cannot explain is indistinguishable from a fabricated zero.
@@ -1425,6 +1719,25 @@ export const apexStructureHandler = async (
     for (const [field, value] of unparsedFacts) {
       if (value === null) absent.push({ field, reason: unparsed(field) });
     }
+    // A trigger's SObject and events come from the trigger HEADER. With no
+    // parse and no node property, `events: []` would read as "fires on no
+    // event" — a false empty on the one fact that says WHEN it runs.
+    if (isTrigger) {
+      const triggerFacts: readonly (readonly [string, unknown])[] = [
+        ['trigger.object', readNullableString(node, 'triggerObject')],
+        ['trigger.events', readStringArrayOrNull(node, 'events')],
+      ];
+      for (const [field, value] of triggerFacts) {
+        if (value === null) absent.push({ field, reason: unparsed(field) });
+      }
+    }
+    if (sharingUnread) {
+      absent.push({
+        field: 'sharing.declared',
+        reason:
+          '`meta.sharing.declared` is null because the sharing keyword was NOT READ — the source did not parse and this node carries no `modifiers`. `meta.sharing.effectiveModel` is `not-read` rather than a guessed enforcement model; a `without sharing` class would look identical here.',
+      });
+    }
   }
 
   const meta: ApexStructureMeta = {
@@ -1443,15 +1756,19 @@ export const apexStructureHandler = async (
     interfaces: structure?.interfaces ?? readStringArrayOrNull(node, 'implements'),
     trigger:
       structure?.trigger ??
-      (ref.type === 'ApexTrigger'
+      (isTrigger
         ? {
             object: readNullableString(node, 'triggerObject'),
-            events: readStringArrayOrNull(node, 'events') ?? [],
+            // NOT `?? []`: an unread event list is null with a reason in
+            // `absent[]`, never an empty list that reads as "no events".
+            events: readStringArrayOrNull(node, 'events'),
           }
         : null),
     sharing: isTrigger
       ? TRIGGER_SHARING
-      : buildSharingSemantics(declaredSharing, classifiers),
+      : sharingUnread
+        ? sharingNotRead(classifiersKnown ? asyncBoundaries.length > 0 : null)
+        : buildSharingSemantics(declaredSharing, classifiers),
     sharingSource,
     absent,
   };
@@ -1485,15 +1802,32 @@ export const apexStructureHandler = async (
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
 
-  const asyncBoundaries: string[] = [];
-  if (classifiers.isQueueable) asyncBoundaries.push('Queueable');
-  if (classifiers.isBatchable) asyncBoundaries.push('Database.Batchable');
-  if (classifiers.isSchedulable) asyncBoundaries.push('Schedulable');
-  if (classifiers.hasFutureMethod) asyncBoundaries.push('@future');
-  const classifiersKnown = classifiersAvailable(node);
+  // Every reason a part of this section was NOT read. `checked` is the AND of
+  // them: a hardcoded `true` beside an empty `declared` told the caller a
+  // @RestResource class had been examined and found to expose nothing.
+  const entryPointsUnchecked: string[] = [];
+  if (structure === null) {
+    entryPointsUnchecked.push(
+      '`declared` was NOT CHECKED: the source did not parse (see `parse.reason`), so no annotation, interface or trigger header was read. An empty `declared` here is the absence of a READING, not the absence of an entry point — a @RestResource / @AuraEnabled class the grammar cannot parse reports exactly this.',
+    );
+  }
+  if (!inboundResult.ok) {
+    entryPointsUnchecked.push(
+      '`inbound` was NOT CHECKED: the incoming-edge query FAILED for this component, so its empty list is a missing query result, not the absence of callers.',
+    );
+  }
+  if (!reachability.ok) {
+    entryPointsUnchecked.push(
+      '`reachableFrom` / `reachabilityVerdict` were NOT CHECKED: the upstream reachability walk FAILED for this component.',
+    );
+  }
+  const uncheckedPrefix =
+    entryPointsUnchecked.length === 0
+      ? ''
+      : `NOT CHECKED — ${entryPointsUnchecked.join(' ')} `;
 
   const entryPoints: ApexEntryPoints = {
-    checked: true,
+    checked: entryPointsUnchecked.length === 0,
     declared: cap(declaredEntryPoints, CAPS.inbound),
     inbound: cap(inbound, CAPS.inbound),
     reachableFrom: cap(reachabilityData?.entryPoints ?? [], CAPS.inbound),
@@ -1508,11 +1842,13 @@ export const apexStructureHandler = async (
         ? asyncBoundaries.length > 0
         : null,
     asyncBoundaries,
-    note: isTrigger
-      ? `A trigger runs INSIDE the transaction of the DML that fired it — that is a platform rule, not a vault reading, so runsInSeparateTransaction is false rather than null here. Work it hands to a SEPARATE transaction shows up as \`structure.dataAccess.asyncDispatch\` sites, not as an async boundary on the trigger itself. \`declared\` is read from the source; \`reachableFrom\` is composed verbatim from sfi.method_reachability and \`inbound\` lists the DIRECT incoming usage edges with their confidence.${reachability.ok ? '' : ' The reachability walk FAILED for this component, so `reachableFrom` and `reachabilityVerdict` were NOT checked.'}`
-      : classifiersKnown
-      ? `\`declared\` is read from the source annotations and interfaces; \`reachableFrom\` is composed verbatim from sfi.method_reachability (upstream callsApex, depth 3) and \`inbound\` lists the DIRECT incoming usage edges with their confidence. An empty declared+inbound pair means no MODELED caller — dynamic dispatch (Type.forName), reflective invocation, framework base classes, and managed-package callers produce no edge, so it is not proof nothing calls this.${reachability.ok ? '' : ' The reachability walk FAILED for this component, so `reachableFrom` and `reachabilityVerdict` were NOT checked.'}`
-      : 'runsInSeparateTransaction is NULL: this vault node carries none of the async classifier properties (isQueueable / isBatchable / isSchedulable / hasFutureMethod), so the transaction shape was NOT CHECKED. Re-run /sfi-refresh to populate them. It was not reported false.',
+    note: `${uncheckedPrefix}${
+      isTrigger
+        ? 'A trigger runs INSIDE the transaction of the DML that fired it — that is a platform rule, not a vault reading, so runsInSeparateTransaction is false rather than null here. Work it hands to a SEPARATE transaction shows up as `structure.dataAccess.asyncDispatch` sites, not as an async boundary on the trigger itself. `declared` is read from the source; `reachableFrom` is composed verbatim from sfi.method_reachability and `inbound` lists the DIRECT incoming usage edges with their confidence.'
+        : classifiersKnown
+          ? '`declared` is read from the source annotations and interfaces; `reachableFrom` is composed verbatim from sfi.method_reachability (upstream callsApex, depth 3) and `inbound` lists the DIRECT incoming usage edges with their confidence. An empty declared+inbound pair means no MODELED caller — dynamic dispatch (Type.forName), reflective invocation, framework base classes, and managed-package callers produce no edge, so it is not proof nothing calls this.'
+          : 'runsInSeparateTransaction is NULL: this vault node carries none of the async classifier properties (isQueueable / isBatchable / isSchedulable / hasFutureMethod), so the transaction shape was NOT CHECKED. Re-run /sfi-refresh to populate them. It was not reported false.'
+    }`,
   };
 
   const tests: ApexTests = {
@@ -1530,10 +1866,32 @@ export const apexStructureHandler = async (
   const outgoingResult = await listEdges(ctx.graph, ref.componentId, {
     direction: 'out',
   });
-  const touches = buildTouches(
-    outgoingResult.ok ? outgoingResult.value : [],
-    outgoingResult.ok,
-  );
+  const outgoingEdges = outgoingResult.ok ? outgoingResult.value : [];
+  // ONE batched lookup answers, for every receiver token the edges would emit,
+  // whether this vault knows it as an SObject or as an Apex type. Without it a
+  // `CustomField:` id built from an Apex class receiver went into `fields` at
+  // the edge's own `parsed` confidence — a field that does not exist, in the
+  // top confidence tier.
+  const receiverNames = touchReceiverTokens(outgoingEdges);
+  const receiverProbe =
+    receiverNames.length === 0
+      ? ok([] as readonly Node[])
+      : await listNodesByIds(ctx.graph, [
+          ...receiverNames.map((n) => `${OBJECT_PREFIX}${n}` as ComponentId),
+          ...receiverNames.map((n) => `${APEX_CLASS_PREFIX}${n}` as ComponentId),
+        ]);
+  const receiverKind: ((name: string) => ApexReceiverKind) | null = receiverProbe.ok
+    ? ((): ((name: string) => ApexReceiverKind) => {
+        const known = new Set(receiverProbe.value.map((n) => n.id));
+        return (name: string): ApexReceiverKind =>
+          known.has(`${OBJECT_PREFIX}${name}`)
+            ? 'sobject'
+            : known.has(`${APEX_CLASS_PREFIX}${name}`)
+              ? 'apex-type'
+              : 'not-in-vault';
+      })()
+    : null;
+  const touches = buildTouches(outgoingEdges, outgoingResult.ok, receiverKind);
 
   // ---- review --------------------------------------------------------------
   const catalogFindings = mirrorCatalogFindings(node);
@@ -1552,16 +1910,7 @@ export const apexStructureHandler = async (
       a.rule.localeCompare(b.rule),
   );
 
-  const summary = {
-    critical: allFindings.filter((f) => f.severity === 'critical').length,
-    high: allFindings.filter((f) => f.severity === 'high').length,
-    medium: allFindings.filter((f) => f.severity === 'medium').length,
-    low: allFindings.filter((f) => f.severity === 'low').length,
-    info: allFindings.filter((f) => f.severity === 'info').length,
-    parsed: allFindings.filter((f) => f.confidence === 'parsed').length,
-    heuristic: allFindings.filter((f) => f.confidence === 'heuristic').length,
-    declared: allFindings.filter((f) => f.confidence === 'declared').length,
-  };
+  const summary = summariseFindings(allFindings);
 
   const usesDynamicApex =
     (structure?.dynamicApexSites.length ?? 0) > 0 ||
@@ -1612,13 +1961,10 @@ export const apexStructureHandler = async (
             callouts: cap(structure.calloutSites, CAPS.sites),
             asyncDispatch: cap(structure.asyncDispatchSites, CAPS.sites),
             dynamicApex: cap(structure.dynamicApexSites, CAPS.sites),
-            queriedObjects: [
-              ...new Set(
-                [...structure.soqlSites, ...structure.soslSites].flatMap(
-                  (s) => s.objects,
-                ),
-              ),
-            ].sort(),
+            queriedObjects: cap(
+              queriedObjectsOf(structure.soqlSites, structure.soslSites),
+              CAPS.objects,
+            ),
             note: DATA_ACCESS_NOTE,
           },
           loopCount: structure.loopCount,
@@ -1646,23 +1992,43 @@ export const apexStructureHandler = async (
     disclosure: DISCLOSURE,
   };
 
+  let narrowed = base;
   if (input.method !== undefined) {
-    const narrowed = applyMethodNarrowing(base, input.method);
-    if (narrowed === null) {
-      const known = (body?.methods.items ?? []).map((m) => m.name).slice(0, 20);
+    // The UNCAPPED parse and the UNCAPPED findings, never the payload: the
+    // capped lists are a rendering, and narrowing a rendering invents zeros.
+    const byMethod =
+      structure === null
+        ? null
+        : applyMethodNarrowing(base, input.method, {
+            structure,
+            findings: allFindings,
+          });
+    if (byMethod === null) {
+      // Named from the FULL method list, not the capped one — a method past
+      // the cap is declared, and telling the caller it does not exist while
+      // listing methods that do is the same lie in a different section.
+      const declared = (structure?.methods ?? []).map((m) => m.name);
+      const shown = declared.slice(0, 20);
+      const more =
+        declared.length > shown.length
+          ? ` (and ${String(declared.length - shown.length)} more)`
+          : '';
       return err({
         kind: 'invalid-query',
         message:
-          body === null
+          structure === null
             ? `cannot narrow to method '${input.method}': ${parse.reason}`
-            : `no method named '${input.method}' in ${ref.apiName}. Declared methods: ${known.join(', ') || '(none)'}`,
+            : `no method named '${input.method}' in ${ref.apiName}. Declared methods: ${shown.join(', ') || '(none)'}${more}`,
         path: 'method',
       });
     }
-    return ok({ data: fitToBudget(narrowed), vaultState });
+    narrowed = byMethod;
   }
   if (input.include !== undefined) {
-    return ok({ data: fitToBudget(applyInclude(base, input.include)), vaultState });
+    // BOTH knobs are honoured. Branching on `method` and returning dropped a
+    // valid `include` silently, and the response then looked like a complete
+    // answer to a question the caller had not asked.
+    narrowed = applyInclude(narrowed, input.include);
   }
-  return ok({ data: fitToBudget(base), vaultState });
+  return ok({ data: fitToBudget(narrowed), vaultState });
 };

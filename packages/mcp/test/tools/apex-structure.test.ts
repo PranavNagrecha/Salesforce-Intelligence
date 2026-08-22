@@ -164,6 +164,52 @@ const EXPOSED_SERVICE_SRC = `public without sharing class ExposedService {
 }
 `;
 
+/** Unparseable AND annotated `@RestResource` — the security-shaped parse failure. */
+const BROKEN_REST_SRC = `@RestResource(urlMapping='/widgets/*')
+public without sharing class BrokenRestService { public void go( { }
+`;
+
+/** An unparseable TRIGGER — its object and events can be read from nowhere. */
+const BROKEN_TRIGGER_SRC = `trigger BrokenTrigger on Widget__c (after insert) { if ( { }
+`;
+
+/**
+ * 70 DML sites across two methods: 65 in `filler`, then 5 in `tail`. `tail`'s
+ * sites sit at indices 65-69 — PAST the 60-site emission cap — which is the
+ * shape that made `method` narrowing answer "this method does no DML".
+ */
+const BULK_SERVICE_SRC = `public class BulkService {
+    public static void filler(List<Widget__c> rows) {
+${Array.from({ length: 65 }, () => '        update rows;').join('\n')}
+    }
+
+    public static void tail(List<Widget__c> rows) {
+        insert rows;
+        update rows;
+        upsert rows;
+        delete rows;
+        undelete rows;
+    }
+}
+`;
+
+/** The indexed single-row shape — a different exception from the initializer. */
+const INDEXED_SERVICE_SRC = `public class IndexedService {
+    public static Widget__c pick() {
+        Widget__c w = [SELECT Id FROM Widget__c LIMIT 1][0];
+        return w;
+    }
+}
+`;
+
+/** A class whose edges name Apex types and traversals, not only real fields. */
+const RECEIVER_SERVICE_SRC = `public class ReceiverService {
+    public static void go(Widget__c row) {
+        row.Name = 'x';
+    }
+}
+`;
+
 /** A large class used to prove the byte budget trims rather than blowing up. */
 const HUGE_SERVICE_SRC = `public class HugeService {
 ${Array.from(
@@ -237,6 +283,89 @@ const seed: ExtractionResult = {
       apiName: 'HugeService',
       sourcePath: 'source/classes/HugeService.cls',
       properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
+    }),
+    // Unparseable + externally annotated, and the node carries NO modifiers /
+    // annotations: the sharing keyword and the entry surface are readable from
+    // nowhere at all.
+    makeNode({
+      id: 'ApexClass:BrokenRestService',
+      apiName: 'BrokenRestService',
+      sourcePath: 'source/classes/BrokenRestService.cls',
+      properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
+    }),
+    // Unparseable, but the node DID record the modifiers — so the keyword IS
+    // readable and must still be reported.
+    makeNode({
+      id: 'ApexClass:BrokenSharingService',
+      apiName: 'BrokenSharingService',
+      sourcePath: 'source/classes/BrokenRestService.cls',
+      properties: {
+        ...CLASSIFIERS,
+        status: 'Active',
+        isTest: false,
+        modifiers: ['public', 'without sharing'],
+      },
+    }),
+    makeNode({
+      id: 'ApexClass:BulkService',
+      apiName: 'BulkService',
+      sourcePath: 'source/classes/BulkService.cls',
+      properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
+    }),
+    makeNode({
+      id: 'ApexClass:IndexedService',
+      apiName: 'IndexedService',
+      sourcePath: 'source/classes/IndexedService.cls',
+      properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
+    }),
+    makeNode({
+      id: 'ApexClass:ReceiverService',
+      apiName: 'ReceiverService',
+      sourcePath: 'source/classes/ReceiverService.cls',
+      properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
+    }),
+    // An Apex TYPE whose name appears as an edge receiver — the shape that put
+    // `CustomField:ValidationDTO.isComplete` in the resolved field list.
+    makeNode({
+      id: 'ApexClass:ValidationDTO',
+      apiName: 'ValidationDTO',
+      sourcePath: 'source/classes/CleanService.cls',
+      properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
+    }),
+    // A bare name that exists as BOTH a class and a trigger.
+    makeNode({
+      id: 'ApexClass:Shadowed',
+      apiName: 'Shadowed',
+      sourcePath: 'source/classes/CleanService.cls',
+      properties: { ...CLASSIFIERS, status: 'Active', isTest: true },
+    }),
+    makeNode({
+      id: 'ApexTrigger:Shadowed',
+      type: 'ApexTrigger',
+      apiName: 'Shadowed',
+      sourcePath: 'source/triggers/CleanTrigger.trigger',
+      properties: {
+        ...CLASSIFIERS,
+        status: 'Active',
+        triggerObject: 'Widget__c',
+        events: ['after insert'],
+      },
+    }),
+    makeNode({
+      id: 'ApexTrigger:BrokenTrigger',
+      type: 'ApexTrigger',
+      apiName: 'BrokenTrigger',
+      sourcePath: 'source/triggers/BrokenTrigger.trigger',
+      properties: { ...CLASSIFIERS, status: 'Active' },
+    }),
+    // The parent OBJECT of the field below. A real vault carries it; without
+    // it, nothing can tell an SObject receiver from an Apex type.
+    makeNode({
+      id: 'CustomObject:Widget__c',
+      type: 'CustomObject',
+      apiName: 'Widget__c',
+      sourcePath: 'source/objects/Widget__c/Widget__c.object-meta.xml',
+      properties: {},
     }),
     // A pre-classifier vault node: no isQueueable/... keys at all.
     makeNode({
@@ -312,6 +441,40 @@ const seed: ExtractionResult = {
       edgeType: 'readsFrom',
       confidence: 'heuristic',
     }),
+    // ReceiverService: one REAL field, and four targets that are not fields on
+    // an SObject at all. Every one of the four arrives at `parsed` confidence.
+    makeEdge({
+      fromId: 'ApexClass:ReceiverService',
+      toId: 'CustomField:Widget__c.Name',
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: 'ApexClass:ReceiverService',
+      toId: 'CustomField:ValidationDTO.isComplete',
+      edgeType: 'readsFrom',
+    }),
+    makeEdge({
+      fromId: 'ApexClass:ReceiverService',
+      toId: 'CustomField:Widget__c.Parent__r.Name',
+      edgeType: 'readsFrom',
+    }),
+    makeEdge({
+      fromId: 'ApexClass:ReceiverService',
+      toId: 'CustomField:Widget__c.fields',
+      edgeType: 'readsFrom',
+    }),
+    makeEdge({
+      fromId: 'ApexClass:ReceiverService',
+      toId: 'CustomField:InnerPayload.total',
+      edgeType: 'readsFrom',
+    }),
+    // Object-LEVEL access, with no field named: real object, so it belongs in
+    // `objects` — not in the FIELD list, where it was landing.
+    makeEdge({
+      fromId: 'ApexClass:ReceiverService',
+      toId: 'CustomObject:Widget__c',
+      edgeType: 'readsFrom',
+    }),
   ],
 };
 
@@ -329,6 +492,11 @@ beforeAll(async () => {
   write('source/classes/CleanService.cls', CLEAN_SERVICE_SRC);
   write('source/classes/ExposedService.cls', EXPOSED_SERVICE_SRC);
   write('source/classes/BrokenService.cls', BROKEN_SRC);
+  write('source/classes/BrokenRestService.cls', BROKEN_REST_SRC);
+  write('source/classes/BulkService.cls', BULK_SERVICE_SRC);
+  write('source/classes/IndexedService.cls', INDEXED_SERVICE_SRC);
+  write('source/classes/ReceiverService.cls', RECEIVER_SERVICE_SRC);
+  write('source/triggers/BrokenTrigger.trigger', BROKEN_TRIGGER_SRC);
   write('source/classes/HugeService.cls', HUGE_SERVICE_SRC);
   write('source/triggers/WidgetTrigger.trigger', WIDGET_TRIGGER_SRC);
   write('source/triggers/CleanTrigger.trigger', CLEAN_TRIGGER_SRC);
@@ -455,7 +623,9 @@ describe('apexStructureHandler — composed sections', () => {
     ]);
     expect(d.touches.fields.items[0]?.confidence).toBe('parsed');
     // `this.scratch` is a raw token, never a component.
-    expect(d.touches.unresolvedFieldAccess.items).toEqual(['this.scratch']);
+    expect(d.touches.unresolvedFieldAccess.items).toEqual([
+      { token: 'this.scratch', reason: 'unresolved-receiver' },
+    ]);
   });
 
   it('mirrors the recognizer catalog verbatim, as heuristic, alongside parsed checks', async () => {
@@ -707,5 +877,276 @@ describe('apexStructureHandler — a trigger transaction shape is a language fac
     expect(d.entryPoints.runsInSeparateTransaction).toBe(false);
     expect(d.entryPoints.note).toContain('platform rule, not a vault reading');
     expect(d.entryPoints.note).toContain('asyncDispatch');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// the review pass: nine confidently-false answers, each pinned
+// ---------------------------------------------------------------------------
+
+describe('apexStructureHandler — `method` narrows the PARSE, not the capped payload', () => {
+  it('returns a method\'s DML sites when they sit PAST the 60-site emission cap', async () => {
+    // FAIL-BEFORE: narrowing filtered the already-capped list, so a method
+    // whose five DML sites sit at indices 65-69 of 70 came back
+    // `dml: { items: [], total: 0, truncated: false }` — "this method does no
+    // DML" — for a method that does five.
+    const d = await run({ classRef: 'BulkService', method: 'tail' });
+    const dml = d.structure!.dataAccess.dml;
+    expect(dml.total).toBe(5);
+    expect(dml.items).toHaveLength(5);
+    for (const site of dml.items) expect(site.inMethod).toBe('tail');
+    expect(dml.items.map((s) => s.operation).sort()).toEqual([
+      'delete',
+      'insert',
+      'undelete',
+      'update',
+      'upsert',
+    ]);
+  });
+
+  it('finds a method declared PAST the 120-method cap instead of denying it exists', async () => {
+    // FAIL-BEFORE: the same capped-list read rejected a real method as
+    // `invalid-query "no method named …"` while listing methods that DO exist.
+    const d = await run({ classRef: 'HugeService', method: 'methodNumber250' });
+    expect(d.structure!.methods.items.map((m) => m.name)).toEqual(['methodNumber250']);
+  });
+
+  it('names the FULL declared method list when the method really is unknown', async () => {
+    const r = await apexStructureHandler(ctx, {
+      classRef: 'HugeService',
+      method: 'methodNumberNope',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('and 280 more');
+  });
+
+  it('recomputes review.summary for the narrowed list', async () => {
+    // FAIL-BEFORE: `findings.total: 2` sat beside a CLASS-WIDE census — a
+    // payload that disagrees with itself about how many findings there are.
+    const d = await run({ classRef: 'WidgetService', method: 'fanOut' });
+    const s = d.review.summary;
+    const counted = s.critical + s.high + s.medium + s.low + s.info;
+    expect(counted).toBe(d.review.findings.total);
+    expect(s.parsed + s.heuristic + s.declared).toBe(d.review.findings.total);
+    expect(d.review.note).toContain("counts ONLY this method's findings");
+  });
+});
+
+describe('apexStructureHandler — a parse failure is never a CHECKED zero', () => {
+  it('reports entryPoints as NOT CHECKED when the source did not parse', async () => {
+    // FAIL-BEFORE: `checked: true` beside an empty `declared` on a
+    // `@RestResource` class — a security-shaped false negative that read as
+    // "examined, exposes nothing".
+    const d = await run({ classRef: 'BrokenRestService' });
+    expect(d.parse.status).toBe('parse-failed');
+    expect(d.entryPoints.declared.items).toEqual([]);
+    expect(d.entryPoints.checked).toBe(false);
+    expect(d.entryPoints.note).toContain('NOT CHECKED');
+    expect(d.entryPoints.note).toContain('the source did not parse');
+    expect(d.entryPoints.note).toContain('absence of a READING');
+  });
+
+  it('keeps entryPoints CHECKED when everything it reads was read', async () => {
+    const d = await run({ classRef: 'WidgetService' });
+    expect(d.entryPoints.checked).toBe(true);
+    expect(d.entryPoints.note).not.toContain('NOT CHECKED');
+  });
+
+  it('refuses to name a sharing model nothing read', async () => {
+    // FAIL-BEFORE: `effectiveModel: 'inherits-caller'` with a note opening
+    // "No sharing keyword is declared." — about a declaration nobody read. A
+    // `without sharing` class that fails to parse looked identical.
+    const d = await run({ classRef: 'BrokenRestService' });
+    expect(d.meta.sharing.declared).toBeNull();
+    expect(d.meta.sharing.effectiveModel).toBe('not-read');
+    expect(d.meta.sharingSource).toBe('not-read');
+    expect(d.meta.sharing.note).toContain('NOT READ');
+    expect(d.meta.sharing.note).not.toContain('No sharing keyword is declared.');
+    expect(d.meta.absent.map((a) => a.field)).toContain('sharing.declared');
+  });
+
+  it('still reports the keyword when the NODE carries it, parse failure or not', async () => {
+    const d = await run({ classRef: 'BrokenSharingService' });
+    expect(d.parse.status).toBe('parse-failed');
+    expect(d.meta.sharing.declared).toBe('without sharing');
+    expect(d.meta.sharing.effectiveModel).toBe('without sharing');
+    expect(d.meta.sharingSource).toBe('node-modifiers');
+  });
+
+  it('reports an unread trigger event list as null, not as an empty list', async () => {
+    // FAIL-BEFORE: `events: []` on a trigger whose header nobody read — a
+    // false empty on the one fact that says WHEN it runs.
+    const d = await run({ classRef: 'ApexTrigger:BrokenTrigger' });
+    expect(d.parse.status).toBe('parse-failed');
+    expect(d.meta.trigger).toEqual({ object: null, events: null });
+    const fields = d.meta.absent.map((a) => a.field);
+    expect(fields).toContain('trigger.object');
+    expect(fields).toContain('trigger.events');
+    for (const row of d.meta.absent) {
+      if (row.field.startsWith('trigger.')) {
+        expect(row.reason).toContain('the source did not parse');
+      }
+    }
+  });
+});
+
+describe('apexStructureHandler — a failed graph query is disclosed like its sibling', () => {
+  /** A ctx whose INBOUND-edge query fails, and whose other queries do not. */
+  const withFailingInboundEdges = (): Context => {
+    const connection = ctx.graph.connection;
+    const patched = new Proxy(connection, {
+      get(target, prop, receiver: unknown) {
+        const value: unknown = Reflect.get(target, prop, receiver);
+        if (prop !== 'runAndReadAll' || typeof value !== 'function') return value;
+        const original = value as (sql: string, params?: unknown) => Promise<unknown>;
+        return async (sql: string, params?: unknown): Promise<unknown> => {
+          if (sql.includes('FROM edges WHERE to_id = ? ORDER BY')) {
+            throw new Error('simulated: the inbound-edge query failed');
+          }
+          return original.call(target, sql, params);
+        };
+      },
+    });
+    return { ...ctx, graph: { ...ctx.graph, connection: patched } };
+  };
+
+  it('reports inbound as NOT CHECKED when its query fails, like buildTouches does', async () => {
+    // FAIL-BEFORE: `inboundResult.ok ? … : []` produced an empty `inbound`
+    // with `checked: true` and no disclosure, while its sibling `buildTouches`
+    // said "NOT CHECKED — … the absence of a query result" for the same
+    // failure on the same graph handle.
+    const r = await apexStructureHandler(withFailingInboundEdges(), {
+      classRef: 'CleanService',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.entryPoints.inbound.items).toEqual([]);
+    expect(d.entryPoints.checked).toBe(false);
+    expect(d.entryPoints.note).toContain('`inbound` was NOT CHECKED');
+    expect(d.entryPoints.note).toContain('not the absence of callers');
+  });
+});
+
+describe('apexStructureHandler — a shed section never reads as an absence', () => {
+  it('keeps the TRUE queriedObjects total when dataAccess is dropped', async () => {
+    // FAIL-BEFORE: `queriedObjects: []` was a BARE array beside every
+    // `blank()`ed sibling, so a shed class read "queries no objects" next to
+    // `soql.total: 1, truncated: true`.
+    const full = await run({ classRef: 'WidgetService' });
+    expect(full.structure!.dataAccess.queriedObjects.total).toBeGreaterThan(0);
+    const shed = await run({ classRef: 'WidgetService', include: ['review'] });
+    const q = shed.structure!.dataAccess.queriedObjects;
+    expect(q.items).toEqual([]);
+    expect(q.total).toBe(full.structure!.dataAccess.queriedObjects.total);
+    expect(q.truncated).toBe(true);
+  });
+});
+
+describe('apexStructureHandler — include and method are honoured TOGETHER', () => {
+  it('applies both knobs and discloses both', async () => {
+    // FAIL-BEFORE: the handler branched on `method` and returned, so a valid
+    // `include` was silently DROPPED — `touches.objects` came back populated
+    // and `narrowing` reported only `applied: 'method'`.
+    const full = await run({ classRef: 'CleanService' });
+    expect(full.touches.objects.items.length).toBeGreaterThan(0);
+
+    const d = await run({
+      classRef: 'CleanService',
+      method: 'run',
+      include: ['methods'],
+    });
+    expect(d.narrowing?.applied).toBe('method+include');
+    expect(d.narrowing?.method).toBe('run');
+    expect(d.narrowing?.include).toEqual(['methods']);
+    // `method` still applied — the kept section is the narrowed one…
+    expect(d.structure!.methods.items.map((m) => m.name)).toEqual(['run']);
+    expect(d.structure!.members.items).toEqual([]);
+    // …and `include` too: touches is emptied, with its TRUE total kept.
+    expect(d.touches.objects.items).toEqual([]);
+    expect(d.touches.objects.total).toBe(full.touches.objects.total);
+    expect(d.touches.objects.truncated).toBe(true);
+    expect(d.narrowing?.omittedSections).toContain('touches');
+  });
+});
+
+describe('apexStructureHandler — a bare name is never silently picked', () => {
+  it('refuses a bare name that exists as BOTH a class and a trigger', async () => {
+    // FAIL-BEFORE: the class won silently. A question about the TRIGGER was
+    // answered with the same-named test class, and the payload carried nothing
+    // to notice it by.
+    const r = await apexStructureHandler(ctx, { classRef: 'Shadowed' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('ApexClass:Shadowed');
+    expect(r.error.message).toContain('ApexTrigger:Shadowed');
+    expect(r.error.message).toContain('AMBIGUOUS');
+  });
+
+  it('still answers either one by its canonical id', async () => {
+    expect((await run({ classRef: 'ApexTrigger:Shadowed' })).classRef.type).toBe(
+      'ApexTrigger',
+    );
+    expect((await run({ classRef: 'ApexClass:Shadowed' })).classRef.type).toBe(
+      'ApexClass',
+    );
+  });
+});
+
+describe('apexStructureHandler — touches emits only verified SObject fields', () => {
+  it('demotes Apex types, traversals and describe tokens out of the resolved lists', async () => {
+    // FAIL-BEFORE: every one of these arrived in `fields` — some at `parsed`
+    // confidence, the top tier — naming fields that do not exist, and put
+    // their Apex types in `objects` as if they were SObjects.
+    const d = await run({ classRef: 'ReceiverService' });
+    expect(d.touches.checked).toBe(true);
+    expect(d.touches.fields.items.map((f) => f.fieldId)).toEqual([
+      'CustomField:Widget__c.Name',
+    ]);
+    expect(d.touches.objects.items).toEqual([
+      { object: 'Widget__c', access: 'both', fieldCount: 1 },
+    ]);
+    const reasons = new Map(
+      d.touches.unresolvedFieldAccess.items.map((u) => [u.token, u.reason]),
+    );
+    expect(reasons.get('ValidationDTO.isComplete')).toBe('apex-type-receiver');
+    expect(reasons.get('Widget__c.Parent__r.Name')).toBe('relationship-traversal');
+    expect(reasons.get('Widget__c.fields')).toBe('describe-token');
+    expect(reasons.get('InnerPayload.total')).toBe('receiver-not-in-vault');
+    expect(d.touches.unresolvedFieldAccess.total).toBe(4);
+    expect(d.touches.note).toContain('ONLY when its RECEIVER names an SObject node');
+  });
+});
+
+describe('apexStructureHandler — the named exception is the one that throws', () => {
+  it('names System.ListException for the indexed single-row shape', async () => {
+    // FAIL-BEFORE: `[SELECT …][0]` was explained as System.QueryException,
+    // sending a reader to look for the wrong handler.
+    const d = await run({ classRef: 'IndexedService' });
+    const f = d.review.findings.items.find(
+      (x) => x.rule === 'soql-assigned-to-single-sobject',
+    )!;
+    expect(f.explanation).toContain('System.ListException');
+    expect(f.explanation).toContain('List index out of bounds');
+    // …and the un-indexed shape still names QueryException.
+    const w = await run({ classRef: 'WidgetService' });
+    const g = w.review.findings.items.find(
+      (x) => x.rule === 'soql-assigned-to-single-sobject',
+    )!;
+    expect(g.explanation).toContain('System.QueryException');
+  });
+});
+
+describe('apexStructureHandler — a syntax error is readable', () => {
+  it('carries a compacted parse error into parse.reason and boundaries', async () => {
+    const d = await run({ classRef: 'BrokenService' });
+    for (const error of d.parse.errors) expect(error.length).toBeLessThanOrEqual(250);
+    // FAIL-BEFORE: ~6.6 KB of `expecting {…}` token set across reason +
+    // boundaries for a one-line file.
+    expect(d.parse.reason.length).toBeLessThan(600);
+    expect(Buffer.byteLength(JSON.stringify(d.boundaries), 'utf8')).toBeLessThan(3_000);
   });
 });

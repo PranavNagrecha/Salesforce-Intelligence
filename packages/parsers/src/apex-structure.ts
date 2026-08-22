@@ -143,11 +143,27 @@ export interface ApexQuerySite extends SiteContext {
   /**
    * True when the query's result is assigned straight to a NON-collection,
    * NON-primitive variable (`Account a = [SELECT …];`) — the shape that throws
-   * `System.QueryException` on zero rows. False when it is assigned to a
-   * `List`/`Set`/`Map`, to a primitive (a `COUNT()` query), or to nothing this
-   * parser could tie to a declaration.
+   * on zero rows. False when it is assigned to a `List`/`Set`/`Map`, to a
+   * primitive (a `COUNT()` query), to a CALL or CONSTRUCTOR ARGUMENT inside
+   * such a declaration (`Account a = Helper.pick([SELECT …]);` — the query
+   * lands in the callee's parameter, not in `a`), or to nothing this parser
+   * could tie to a declaration.
    */
   readonly assignedToSingleSObject: boolean;
+  /**
+   * HOW the single-sObject assignment is written — the two shapes throw
+   * DIFFERENT exceptions on zero rows, and naming the wrong one sends a reader
+   * looking for the wrong handler:
+   *
+   *   - `initializer` — `Account a = [SELECT …];` throws
+   *     `System.QueryException` ("List has no rows for assignment to SObject").
+   *   - `indexed` — `Account a = [SELECT …][0];` throws
+   *     `System.ListException` ("List index out of bounds: 0"): the list IS
+   *     produced, and it is the INDEXING that fails.
+   *
+   * `null` whenever `assignedToSingleSObject` is false.
+   */
+  readonly singleSObjectForm: 'initializer' | 'indexed' | null;
 }
 
 /** DML operations the projection recognises. */
@@ -249,6 +265,49 @@ export interface ParseApexStructureOptions {
 }
 
 const ERROR_CAP = 3;
+
+/** How many alternatives of an ANTLR `expecting {…}` follow set to keep. */
+const EXPECTED_SET_CAP = 6;
+
+/** Hard ceiling on one rendered syntax error, after the follow set is cut. */
+const SYNTAX_ERROR_CAP = 240;
+
+/**
+ * Compact one ANTLR syntax error.
+ *
+ * The generated parser spells its ENTIRE follow set into every message — ~1.8
+ * KB of `expecting {'abstract', 'after', …}` per error, which this module hands
+ * to `parse.reason` and which the MCP tool repeats verbatim in `boundaries[]`.
+ * A six-line file produced 6.6 KB of it. The first few alternatives carry
+ * whatever diagnostic value the set has; the count is kept so the cut is
+ * visible rather than silent.
+ */
+const compactSyntaxError = (message: string): string => {
+  // The set runs to the END of the message and CONTAINS `'}'` and `','` as
+  // literal alternatives, so it is neither `[^}]*` nor comma-splittable.
+  const cut = message.replace(/expecting \{(.*)\}\s*$/, (_match, inner: string) => {
+    const parts: string[] = [];
+    let buffer = '';
+    let quoted = false;
+    for (const ch of String(inner)) {
+      if (ch === "'") quoted = !quoted;
+      if (ch === ',' && !quoted) {
+        parts.push(buffer.trim());
+        buffer = '';
+        continue;
+      }
+      buffer += ch;
+    }
+    parts.push(buffer.trim());
+    const kept = parts.filter((p) => p.length > 0);
+    return kept.length <= EXPECTED_SET_CAP
+      ? `expecting {${kept.join(', ')}}`
+      : `expecting one of ${String(kept.length)}: {${kept
+          .slice(0, EXPECTED_SET_CAP)
+          .join(', ')}, …}`;
+  });
+  return cut.length <= SYNTAX_ERROR_CAP ? cut : `${cut.slice(0, SYNTAX_ERROR_CAP)}…`;
+};
 const EXPRESSION_TEXT_CAP = 120;
 
 const LOOP_CONTEXTS: ReadonlySet<string> = new Set([
@@ -334,6 +393,38 @@ const directChild = (n: Ctx, want: string): Ctx | undefined =>
 
 const textOf = (n: Ctx | undefined): string =>
   typeof n?.getText === 'function' ? String(n.getText()) : '';
+
+/**
+ * The expression AS WRITTEN, with its whitespace.
+ *
+ * ANTLR's `getText()` concatenates token text with NO separator, so
+ * `new MRK_Helper(acc)` renders `newMRK_Helper(acc)` — which reads as a call to
+ * a method that does not exist, on a line number a reader will go and check.
+ * The original character range is recovered from the input stream instead
+ * (runs of whitespace collapse to one space so a multi-line expression stays
+ * one bounded line); `getText()` remains the fallback for a context that
+ * carries no usable stream.
+ */
+const sourceTextOf = (n: Ctx | undefined): string => {
+  const start = n?.start;
+  const stop = n?.stop;
+  try {
+    const stream = start?.getInputStream?.();
+    if (
+      stream != null &&
+      typeof stream.getText === 'function' &&
+      typeof start.start === 'number' &&
+      typeof stop?.stop === 'number' &&
+      stop.stop >= start.start
+    ) {
+      const raw = String(stream.getText(start.start, stop.stop)).replace(/\s+/g, ' ').trim();
+      if (raw.length > 0) return raw;
+    }
+  } catch {
+    // Fall through to the token-text rendering below.
+  }
+  return textOf(n);
+};
 
 const lineOf = (n: Ctx): number => Number(n?.start?.line ?? 0);
 const endLineOf = (n: Ctx): number => Number(n?.stop?.line ?? n?.start?.line ?? 0);
@@ -627,28 +718,49 @@ const PRIMITIVE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * True when a query literal is the initializer of a declaration whose type is
- * a single sObject — `Account a = [SELECT …];`, which throws
- * `System.QueryException` on zero rows and cannot be defended with a null
- * check. Only the DECLARATION-initializer shape is recognised; a re-assignment
- * to an already-declared variable needs a type table this single-pass reader
- * does not build, and is deliberately reported false rather than guessed.
+ * Contexts that END the walk to a declaration: the query sits inside a CALL or
+ * CONSTRUCTOR argument list, so its result lands in the callee's parameter and
+ * NOT in the variable being declared.
+ *
+ * Without this stop, `User u = new User(ProfileId = [SELECT … LIMIT 1].Id);`
+ * and `Account a = Helper.pick([SELECT …]);` both walked up to the enclosing
+ * declarator and were reported as "assigned directly to a single sObject
+ * variable" — a sentence that misdescribes the code (and, in the second shape,
+ * a plain false positive: the callee takes the List).
  */
-const isAssignedToSingleSObject = (query: Ctx): boolean => {
+const ARGUMENT_CONTEXTS: ReadonlySet<string> = new Set(['Arguments', 'ExpressionList']);
+
+/**
+ * How a query literal reaches a single-sObject variable, or `null` when it does
+ * not — `Account a = [SELECT …];` (`initializer`) and
+ * `Account a = [SELECT …][0];` (`indexed`) are BOTH zero-row time bombs, but
+ * they throw different exceptions, so the shape is carried rather than
+ * collapsed.
+ *
+ * Only the DECLARATION shapes are recognised; a re-assignment to an
+ * already-declared variable needs a type table this single-pass reader does not
+ * build, and is deliberately reported `null` rather than guessed. A query
+ * nested inside a call / constructor ARGUMENT of such a declaration is `null`
+ * too: it is the callee's parameter it lands in, not the declared variable.
+ */
+const singleSObjectFormOf = (query: Ctx): 'initializer' | 'indexed' | null => {
   let cur: Ctx | undefined = query?.parentCtx as Ctx | undefined;
   let declarator: Ctx | undefined;
+  let indexed = false;
   while (cur !== undefined && cur !== null) {
     const name = ctxName(cur);
     if (name === 'VariableDeclarator') {
       declarator = cur;
       break;
     }
+    if (ARGUMENT_CONTEXTS.has(name)) return null;
+    if (name === 'ArrayExpression') indexed = true;
     if (name === 'Statement' || name === 'Block' || METHOD_CONTEXTS.has(name)) {
-      return false;
+      return null;
     }
     cur = cur.parentCtx as Ctx | undefined;
   }
-  if (declarator === undefined) return false;
+  if (declarator === undefined) return null;
   let decl: Ctx | undefined = declarator.parentCtx as Ctx | undefined;
   while (
     decl !== undefined &&
@@ -658,12 +770,13 @@ const isAssignedToSingleSObject = (query: Ctx): boolean => {
   ) {
     decl = decl.parentCtx as Ctx | undefined;
   }
-  if (decl === undefined || decl === null) return false;
+  if (decl === undefined || decl === null) return null;
   const declaredType = textOf(directChild(decl, 'TypeRef')).trim();
-  if (declaredType.length === 0) return false;
-  if (/^(?:list|set|map)\s*</i.test(declaredType)) return false;
-  if (declaredType.endsWith('[]')) return false;
-  return !PRIMITIVE_TYPES.has(declaredType.toLowerCase());
+  if (declaredType.length === 0) return null;
+  if (/^(?:list|set|map)\s*</i.test(declaredType)) return null;
+  if (declaredType.endsWith('[]')) return null;
+  if (PRIMITIVE_TYPES.has(declaredType.toLowerCase())) return null;
+  return indexed ? 'indexed' : 'initializer';
 };
 
 /**
@@ -788,7 +901,9 @@ export const parseApexStructure = async (
   const errors: string[] = [];
   class Collecting extends errorListenerBase {
     public apexSyntaxError(line: number, column: number, message: string): void {
-      if (errors.length < ERROR_CAP) errors.push(`${line}:${column} ${message}`);
+      if (errors.length < ERROR_CAP) {
+        errors.push(`${line}:${column} ${compactSyntaxError(message)}`);
+      }
     }
   }
 
@@ -924,18 +1039,23 @@ export const parseApexStructure = async (
   innerTypes.sort((a, b) => a.line - b.line);
 
   // ---- data-access sites ---------------------------------------------------
-  const soqlSites: ApexQuerySite[] = findAll(tree, 'SoqlLiteral').map((q) => ({
-    line: lineOf(q),
-    objects: queryObjects(q),
-    assignedToSingleSObject: isAssignedToSingleSObject(q),
-    ...siteContextOf(q),
-  }));
+  const soqlSites: ApexQuerySite[] = findAll(tree, 'SoqlLiteral').map((q) => {
+    const singleSObjectForm = singleSObjectFormOf(q);
+    return {
+      line: lineOf(q),
+      objects: queryObjects(q),
+      assignedToSingleSObject: singleSObjectForm !== null,
+      singleSObjectForm,
+      ...siteContextOf(q),
+    };
+  });
   const soslSites: ApexQuerySite[] = findAll(tree, 'SoslLiteral').map((q) => ({
     line: lineOf(q),
     objects: queryObjects(q),
     // A SOSL literal always yields a `List<List<SObject>>`; the single-row
     // exception shape does not exist for it.
     assignedToSingleSObject: false,
+    singleSObjectForm: null,
     ...siteContextOf(q),
   }));
 
@@ -976,7 +1096,7 @@ export const parseApexStructure = async (
     if (key.length === 0) continue;
     const site = siteContextOf(call);
     const parent = call.parentCtx as Ctx | undefined;
-    const expression = truncate(textOf(parent ?? call));
+    const expression = truncate(sourceTextOf(parent ?? call));
     const line = lineOf(call);
 
     const dynamicKind = DYNAMIC_APEX_CALLS[key];
