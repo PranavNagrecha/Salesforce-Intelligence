@@ -104,10 +104,39 @@ const jsonld = [
       <tr><td>Rows reachable by paging a code-quality audit</td><td>94 of 647</td><td><strong>647 of 647</strong></td></tr>
       <tr><td>Rows reachable by paging an unused-field audit</td><td>281 of 570</td><td><strong>570 of 570</strong></td></tr>
       <tr><td>Naming observations describing objects with no custom fields</td><td>22 of 101</td><td><strong>0</strong></td></tr>
+      <tr><td>Scheduled/batch classes reported as likely dead</td><td>16 of 18</td><td><strong>0</strong></td></tr>
+      <tr><td>"What runs when I save a contact?" answered end to end</td><td>no</td><td><strong>yes</strong></td></tr>
     </tbody>
   </table>
 
-  <h2>Three that are worth naming individually</h2>
+  <h2>Four that are worth naming individually</h2>
+
+  <h3>A verdict justified by something untrue about Salesforce</h3>
+
+  <p>
+    The dead-code tool told you it was safe to delete classes that run on a
+    schedule. Its stated reason: such a class <em>"must be enqueued, executed or
+    scheduled by user Apex."</em> That is not how the platform works. An admin
+    scheduling a class through Setup creates a <code>CronTrigger</code> record —
+    <strong>data, not metadata</strong>. It is never retrieved, becomes no node,
+    mints no edge, and <strong>no refresh will ever close that gap</strong>.
+  </p>
+
+  <p>
+    On two real orgs, <strong>16 of the 18</strong> classes it called likely dead
+    were exactly those. The code did what it was told; what it had been told about
+    Salesforce was wrong — which is the one class of defect no amount of test
+    coverage or graph completeness can catch.
+  </p>
+
+  <p>
+    They are now <code>uncertain</code>, at heuristic confidence, and
+    <code>CronTrigger</code> is named as a blind spot that cannot be closed
+    offline. The control matters as much as the fix: across all component types,
+    <code>definitely_dead</code> is <strong>unchanged</strong> — 1,041 on one org
+    and 979 on the other. The tool did not stop finding dead code; it stopped
+    being certain where it had no right to be.
+  </p>
 
   <h3>A reachability walk that certified its own blind spot</h3>
 
@@ -209,6 +238,24 @@ const jsonld = [
     <li>Drift tests that run two implementations of a shared predicate against the same fixture and assert they agree, in place of a promise that they will.</li>
     <li>A documentation pin that could not fire — its pattern could not match across a line break, so a stale count sat next to three correct ones and the file reported clean.</li>
   </ul>
+
+  <h2>One question that did not work at all</h2>
+
+  <p>
+    <em>"What runs when I save a contact?"</em> — arguably the question this
+    product exists to answer — failed end to end. The router bound the object
+    name as typed, and seven object-scoped tools rejected a lower-case api name
+    that two others accepted. Salesforce api names are case-insensitive; the
+    product was not.
+  </p>
+
+  <p>
+    Fixed in one shared resolver rather than seven tools, with a private copy in
+    an eighth deleted in favour of it. Resolution does not become identity: the
+    id echoed back is always the vault's exact casing, and two ids differing only
+    by case refuse rather than picking one. The question now returns 57
+    save-order steps.
+  </p>
 
   <h2>Upgrading</h2>
 
