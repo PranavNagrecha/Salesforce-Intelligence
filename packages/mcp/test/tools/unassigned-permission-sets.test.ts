@@ -372,3 +372,123 @@ describe('coverage-aware-zero — PermissionSet not retrieved', () => {
     expect(r.value.data.coverageCaveat?.message).toMatch(/not checked/);
   });
 });
+
+// =============================================================================
+// FIX 7 — echo the filter that shrank the denominator.
+//
+// `totalScanned` is the whole output of a counting tool. It is the count AFTER
+// the input filters, and a reader who takes it for the org's PermissionSet
+// population reads a wrong number in the headline. The vocabulary already
+// existed (`totalPermissionSets` via countNodesByType, emitted only when the
+// 500-node scan cap bit); this reuses it for the filter case.
+// =============================================================================
+
+const FILTER_MANIFEST: VaultManifest = {
+  version: '0.1.0',
+  refreshedAt: '2026-05-27T14:33:08Z',
+  sourceOrg: 'me@example.com',
+  components: { PermissionSet: 5 },
+  edges: {},
+  sourceTreeHash: 'sha256:fixture-filter',
+};
+
+/** 3 plain + 2 managed-package permission sets. All names invented. */
+const seedManagedFiltered: ExtractionResult = {
+  nodes: [
+    makeNode({ id: 'PermissionSet:Plain_One', apiName: 'Plain_One' }),
+    makeNode({ id: 'PermissionSet:Plain_Two', apiName: 'Plain_Two' }),
+    makeNode({ id: 'PermissionSet:Plain_Three', apiName: 'Plain_Three' }),
+    makeNode({ id: 'PermissionSet:zeta__Packaged_One', apiName: 'zeta__Packaged_One' }),
+    makeNode({ id: 'PermissionSet:zeta__Packaged_Two', apiName: 'zeta__Packaged_Two' }),
+  ],
+  edges: [],
+};
+
+/** The SAME three plain sets, with nothing for a filter to drop. */
+const seedNothingFiltered: ExtractionResult = {
+  nodes: [
+    makeNode({ id: 'PermissionSet:Plain_One', apiName: 'Plain_One' }),
+    makeNode({ id: 'PermissionSet:Plain_Two', apiName: 'Plain_Two' }),
+    makeNode({ id: 'PermissionSet:Plain_Three', apiName: 'Plain_Three' }),
+  ],
+  edges: [],
+};
+
+describe('unassignedPermissionSetsHandler — filter denominator disclosure', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ups-filter-'));
+    const opened = await openGraph(join(tempDir, 'ups-filter.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [seedManagedFiltered]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FILTER_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('names the rows the default filter excluded instead of leaving totalScanned unexplained', async () => {
+    const r = await unassignedPermissionSetsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The pre-fix answer: `totalScanned: 3` with nothing explaining the other 2.
+    expect(d.totalScanned).toBe(3);
+    expect(d.filterExcluded).toEqual({ managedPackage: 2, muting: 0, total: 2 });
+    expect(d.totalPermissionSets).toBe(5);
+    expect(d.boundaries.some((b) => /AFTER the input filters/.test(b))).toBe(true);
+    expect(
+      d.boundaries.some((b) => b.includes('2 of 5 permission set(s) in this vault were excluded')),
+    ).toBe(true);
+  });
+
+  it('widening the filter scans everything and drops the disclosure', async () => {
+    const r = await unassignedPermissionSetsHandler(ctx, { includeManagedPackage: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.totalScanned).toBe(5);
+    expect('filterExcluded' in d).toBe(false);
+    expect('totalPermissionSets' in d).toBe(false);
+    expect(d.boundaries.some((b) => /AFTER the input filters/.test(b))).toBe(false);
+  });
+});
+
+describe('unassignedPermissionSetsHandler — nothing excluded stays byte-identical', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ups-nofilter-'));
+    const opened = await openGraph(join(tempDir, 'ups-nofilter.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [seedNothingFiltered]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FILTER_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('emits neither new key, and leaves boundaries at its pre-fix length', async () => {
+    const r = await unassignedPermissionSetsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.totalScanned).toBe(3);
+    expect('filterExcluded' in d).toBe(false);
+    expect('totalPermissionSets' in d).toBe(false);
+    expect(d.boundaries.length).toBe(2);
+  });
+});

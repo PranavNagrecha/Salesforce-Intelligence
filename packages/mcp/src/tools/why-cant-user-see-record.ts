@@ -2227,11 +2227,17 @@ const evaluatePermissionSetGroups = async (
       ),
     );
   }
+  // CR-CAP-16 posture: a stage that was NOT EVALUATED must not wear a denial
+  // word. Groups DO exist here and any of them could grant access; nothing was
+  // checked, because the caller supplied no group. `restricted` reads as "the
+  // groups were examined and grant nothing", which is a different — and false —
+  // claim. Matches the idiom `TerritoryAndGuestRules` / `ManualSharing` /
+  // `SharingSets` / `AccountTeams` already use in the same response.
   return ok(
     step(
       'PermissionSetGroup',
-      'restricted',
-      `${psgResult.value.length} permission set group(s) exist in vault but none were supplied in this user's context; pass an assigned PermissionSetGroup id in permissionSetIds to evaluate group-derived access (membership is expanded automatically).`,
+      'unknown',
+      `${psgResult.value.length} permission set group(s) exist in this vault but none were supplied in this user's context, so group-derived access was NOT EVALUATED — this is unknown, not restricted. Pass an assigned PermissionSetGroup id in permissionSetIds to evaluate it (membership is expanded automatically), or use sfi.live_user_permsets to discover which groups the user actually holds.`,
     ),
   );
 };

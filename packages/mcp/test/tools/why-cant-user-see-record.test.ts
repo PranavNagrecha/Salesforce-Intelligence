@@ -2385,11 +2385,13 @@ describe('whyCantUserSeeRecordHandler — restriction rules and PSG boundaries',
     expect(rr?.reason).toContain('restriction rule');
   });
 
-  it('reports PermissionSetGroup as informational when groups exist but none are assigned', async () => {
-    // CR-CAP-04: PSG membership is now MODELED. The user carries only a plain
-    // permission set (no PSG), so the PSG step is informational `restricted`
-    // (the old always-`unknown` stub is gone — membership is no longer an
-    // undecidable gap), and names that no assigned PSG was supplied.
+  it('reports PermissionSetGroup as NOT EVALUATED when groups exist but none are assigned', async () => {
+    // CR-CAP-04: PSG membership IS modeled, so the old always-`unknown` stub is
+    // gone. But when the caller supplies no group, nothing about the groups that
+    // DO exist was examined — and `restricted` claims they were examined and
+    // grant nothing. An unknown must not wear a denial word: this stage now
+    // matches the `TerritoryAndGuestRules` / `ManualSharing` idiom in the same
+    // response. It still names that no assigned PSG was supplied.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RESTRICTION_OBJ,
       userContext: { permissionSetIds: [RESTRICTION_PS] },
@@ -2397,9 +2399,99 @@ describe('whyCantUserSeeRecordHandler — restriction rules and PSG boundaries',
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const psg = result.value.data.reasoning.find((s) => s.stage === 'PermissionSetGroup');
-    expect(psg?.verdict).toBe('restricted');
+    expect(psg?.verdict).toBe('unknown');
+    expect(psg?.verdict).not.toBe('restricted');
+    expect(psg?.reason).toMatch(/NOT EVALUATED/);
     expect(psg?.reason).toContain('permission set group');
     expect(psg?.reason).toMatch(/none were supplied/i);
+  });
+
+  it('the top-level verdict is unchanged by the PermissionSetGroup step wording', async () => {
+    // The frozen UNKNOWN_TAIL already demotes the aggregate, so this stage's
+    // verdict never reached the headline. Asserted rather than assumed — the
+    // fix is a reasoning-chain correction and must stay one.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RESTRICTION_OBJ,
+      userContext: { permissionSetIds: [RESTRICTION_PS] },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('unknown');
+  });
+});
+
+// =============================================================================
+// A vault holding ZERO PermissionSetGroup nodes. That branch is genuinely
+// determinate — the vault WAS checked and holds no group, so no group can
+// grant anything — and must keep saying `restricted`. Deleting it would be the
+// easy over-correction, so it gets its own isolated graph (the shared fixture
+// seeds `PermissionSetGroup:Ops_Group`).
+// =============================================================================
+
+const NO_PSG_OBJ = 'CustomObject:NoGroupsObj';
+const NO_PSG_PS = 'PermissionSet:NoGroups_PS';
+const noPsgSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NO_PSG_OBJ,
+      apiName: 'NoGroupsObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({ id: NO_PSG_PS, type: 'PermissionSet', apiName: 'NoGroups_PS' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: NO_PSG_PS,
+      toId: NO_PSG_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+  ],
+};
+
+describe('whyCantUserSeeRecordHandler — PermissionSetGroup with zero groups in vault', () => {
+  let noPsgStore: GraphStore;
+  let noPsgDir: string;
+  let noPsgCtx: Context;
+
+  beforeAll(async () => {
+    noPsgDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-no-psg-'));
+    const opened = await openGraph(join(noPsgDir, 'no-psg.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    noPsgStore = opened.value;
+    const imported = await importExtractionResults(noPsgStore, [noPsgSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    noPsgCtx = { vaultRoot: noPsgDir, manifest: FIXTURE_MANIFEST, graph: noPsgStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(noPsgStore);
+    rmSync(noPsgDir, { recursive: true, force: true });
+  });
+
+  it('keeps the determinate `restricted` verdict verbatim when the vault holds no groups', async () => {
+    const result = await whyCantUserSeeRecordHandler(noPsgCtx, {
+      componentId: NO_PSG_OBJ,
+      userContext: { permissionSetIds: [NO_PSG_PS] },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const psg = result.value.data.reasoning.find((s) => s.stage === 'PermissionSetGroup');
+    expect(psg).toEqual({
+      stage: 'PermissionSetGroup',
+      verdict: 'restricted',
+      reason: 'no permission set groups in vault',
+    });
+  });
+
+  it('the top-level verdict on the zero-group vault is unchanged too', async () => {
+    const result = await whyCantUserSeeRecordHandler(noPsgCtx, {
+      componentId: NO_PSG_OBJ,
+      userContext: { permissionSetIds: [NO_PSG_PS] },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('unknown');
   });
 });
 

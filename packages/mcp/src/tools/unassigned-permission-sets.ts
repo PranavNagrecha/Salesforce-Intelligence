@@ -126,7 +126,25 @@ export interface UnassignedPermissionSetsOutput {
   readonly orphanedFromComponents: readonly UnassignedPermissionSetEntry[];
   readonly unassignedCount: number;
   readonly unknownAssignmentCount: number;
+  /**
+   * PermissionSets actually scanned — the count AFTER the input filters, not the
+   * org's PermissionSet population. When a filter excluded any, `filterExcluded`
+   * and `totalPermissionSets` say so; a bare `totalScanned` read as the org's
+   * population is the wrong number in the headline of a counting tool.
+   */
   readonly totalScanned: number;
+  /**
+   * Present ONLY when an input filter actually excluded >= 1 PermissionSet, so a
+   * vault where the filter dropped nothing stays byte-identical. Counted inside
+   * the existing filter pass — no second scan.
+   */
+  readonly filterExcluded?: {
+    /** Dropped by the default `includeManagedPackage: false`. */
+    readonly managedPackage: number;
+    /** Dropped by `includeMutingPermissionSets: false`. */
+    readonly muting: number;
+    readonly total: number;
+  };
   readonly enrichmentStatus: EnrichmentStatus;
   readonly summary: string;
   readonly boundaries: readonly string[];
@@ -153,7 +171,12 @@ export interface UnassignedPermissionSetsOutput {
    * true so a ≤500-PS org's golden does not move.
    */
   readonly scanTruncated?: boolean;
-  /** CR-RV12: the TRUE org-wide PermissionSet count (only when the scan was capped). */
+  /**
+   * The vault's TRUE org-wide PermissionSet count. Emitted whenever it exceeds
+   * `totalScanned` — i.e. when the >500 scan cap bit (`scanTruncated`) OR an
+   * input filter excluded rows (`filterExcluded`). Absent when the two agree, so
+   * an unfiltered, uncapped vault's golden does not move.
+   */
   readonly totalPermissionSets?: number;
   /**
    * CR-22 opaque continuation token, present ONLY when the designated list
@@ -279,13 +302,25 @@ export const unassignedPermissionSetsHandler = async (
   >;
   let enrichmentStatus = detectEnrichmentStatus(manifestExtras, psRes.value);
 
+  // Count what the filter drops, in the filter itself — `totalScanned` is the
+  // POST-filter count, and a reader who takes it for the org's population is
+  // reading a wrong number. One counter per reason, no second pass.
+  let excludedManagedPackage = 0;
+  let excludedMuting = 0;
   const filtered = psRes.value.filter((ps) => {
     const ns = namespacePrefixOf(ps.apiName);
-    if (!includeManaged && ns !== null) return false;
+    if (!includeManaged && ns !== null) {
+      excludedManagedPackage += 1;
+      return false;
+    }
     const isMuting = propertyBoolean(ps, 'isMutingPermissionSet');
-    if (!includeMuting && isMuting) return false;
+    if (!includeMuting && isMuting) {
+      excludedMuting += 1;
+      return false;
+    }
     return true;
   });
+  const filterExcludedTotal = excludedManagedPackage + excludedMuting;
 
   const unassigned: UnassignedPermissionSetEntry[] = [];
   const orphanedFromComponents: UnassignedPermissionSetEntry[] = [];
@@ -380,6 +415,17 @@ export const unassignedPermissionSetsHandler = async (
   }
   const totalPermissionSets = psCountRes.value;
   const scanTruncated = totalPermissionSets > LIST_PAGE_SIZE;
+  // The true count is worth emitting whenever it disagrees with `totalScanned`,
+  // whether the cap or a filter opened the gap. Equal → omitted, so an
+  // unfiltered <=500-PS vault's response is unchanged.
+  const emitTotalPermissionSets = totalPermissionSets > filtered.length;
+  const filterBoundary =
+    filterExcludedTotal === 0
+      ? null
+      : `totalScanned is the count AFTER the input filters, not the org's PermissionSet population: ` +
+        `${filterExcludedTotal} of ${totalPermissionSets} permission set(s) in this vault were excluded ` +
+        `before the scan (${excludedManagedPackage} managed-package, ${excludedMuting} muting). ` +
+        `Pass includeManagedPackage: true / includeMutingPermissionSets: true to widen it.`;
 
   const summary =
     enrichmentStatus === 'tooling-api-fresh' ||
@@ -452,11 +498,21 @@ export const unassignedPermissionSetsHandler = async (
       totalScanned: filtered.length,
       enrichmentStatus,
       summary,
-      boundaries: BOUNDARIES,
+      boundaries: filterBoundary === null ? BOUNDARIES : [...BOUNDARIES, filterBoundary],
       truncated,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(dataShape !== undefined ? { dataShape } : {}),
-      ...(scanTruncated ? { scanTruncated: true, totalPermissionSets } : {}),
+      ...(scanTruncated ? { scanTruncated: true } : {}),
+      ...(emitTotalPermissionSets ? { totalPermissionSets } : {}),
+      ...(filterExcludedTotal > 0
+        ? {
+            filterExcluded: {
+              managedPackage: excludedManagedPackage,
+              muting: excludedMuting,
+              total: filterExcludedTotal,
+            },
+          }
+        : {}),
       ...(emitCursor
         ? {
             nextCursor: paged.pageInfo.nextCursor as string,
