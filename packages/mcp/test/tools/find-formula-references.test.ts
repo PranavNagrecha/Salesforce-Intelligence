@@ -84,6 +84,23 @@ const seed: ExtractionResult = {
       sourcePath: 'objects/Account/fields/Industry__c.field-meta.xml',
     }),
     makeNode({
+      id: 'CustomField:Account.Age__c',
+      type: 'CustomField',
+      apiName: 'Age__c',
+      label: 'Age',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Age__c.field-meta.xml',
+    }),
+    makeNode({
+      id: 'CustomField:Account.UnreferencedField__c',
+      type: 'CustomField',
+      apiName: 'UnreferencedField__c',
+      label: 'Unreferenced Field',
+      parentId: 'CustomObject:Account',
+      sourcePath:
+        'objects/Account/fields/UnreferencedField__c.field-meta.xml',
+    }),
+    makeNode({
       id: 'ValidationRule:Account.AlphaVR',
       type: 'ValidationRule',
       apiName: 'AlphaVR',
@@ -118,6 +135,17 @@ const seed: ExtractionResult = {
       confidence: 'parsed',
       source: 'formula-tokenizer',
       properties: { tokenizedFromField: 'errorConditionFormula', formulaLength: 42 },
+    }),
+    makeEdge({
+      fromId: 'ValidationRule:Account.AlphaVR',
+      toId: 'CustomField:Account.Age__c',
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+      properties: {
+        tokenizedFromField: 'errorConditionFormula',
+        formulaLength: 12,
+      },
     }),
     makeEdge({
       fromId: 'ValidationRule:Account.BetaVR',
@@ -285,12 +313,14 @@ describe('findFormulaReferencesHandler', () => {
     expect('note' in data).toBe(false);
   });
 
-  it('returns an empty list for a field with no references', async () => {
+  it('returns an empty list for a REAL field with no references', async () => {
+    // `UnreferencedField__c` now EXISTS in the fixture. An empty referencer
+    // list is reserved for exactly this case — a field the vault holds that
+    // genuinely has no inbound `references` edge. An id naming no node is a
+    // different answer (see the existence-gate suite below).
     const result = await findFormulaReferencesHandler(ctx, {
       fieldId: 'CustomField:Account.UnreferencedField__c',
     });
-    // Unknown ids resolve to an empty list — the graph cannot
-    // distinguish "field absent" from "field present but unreferenced".
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.referencers.length).toBe(0);
@@ -472,5 +502,142 @@ describe('findFormulaReferencesInputSchema', () => {
       offset: -1,
     });
     expect(parsed.success).toBe(false);
+  });
+});
+
+/**
+ * FIX 1 — the existence gate.
+ *
+ * Four distinct causes used to produce a byte-identical
+ * `{ referencers: [], totalCount: 0 }`, and three of them were lies: a miscased
+ * id, a nonexistent field, a node of the wrong type, and a real field that
+ * genuinely has no formula references. Only the last one is an empty result.
+ */
+describe('findFormulaReferencesHandler — existence gate (FIX 1)', () => {
+  it('refuses a MISCASED field id instead of answering a false zero', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:account.age__c',
+    });
+    // The reported input. Pre-fix this returned `{referencers: [], totalCount: 0}`
+    // — indistinguishable from a real field with no formula references.
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+    expect(result.error.path).toBe('CustomField:account.age__c');
+  });
+
+  it('attaches typo-tolerant resolveSuggestions naming the canonical id', async () => {
+    // NOTE on the object-name case: `buildFieldResolveSuggestions` scopes the
+    // resolve to `CustomObject:{objectPart}` verbatim, so a miscased OBJECT
+    // half scopes to a parent that does not exist and returns no candidates.
+    // That is pre-existing shared-helper behaviour every field tool inherits,
+    // not something this fix introduces — the refusal above is the fix.
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.age__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+    const suggestions = (
+      result.error as unknown as {
+        readonly resolveSuggestions?: readonly {
+          readonly componentId: string;
+        }[];
+      }
+    ).resolveSuggestions;
+    expect(suggestions?.[0]?.componentId).toBe('CustomField:Account.Age__c');
+    expect(result.error.message).toContain(
+      'Typo-tolerant resolve suggestions are attached in `resolveSuggestions`',
+    );
+  });
+
+  it('refuses a field id that names no node', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Nonexistent__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+  });
+
+  it('names a node that exists but is not a CustomField', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.AlphaVR',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+  });
+
+  it('does NOT read a STANDARD field id as "does not exist"', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Name',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+    expect(result.error.message).toContain(
+      'is a standard-object field that may not be modeled in this vault',
+    );
+    expect(result.error.message).toContain(
+      'This is NOT proof the field is absent from the org.',
+    );
+  });
+
+  it('leaves the happy path byte-identical — 1 referencer, no coverageCaveat', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Age__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.totalCount).toBe(1);
+    expect(result.value.data.referencers.map((r) => r.id)).toEqual([
+      'ValidationRule:Account.AlphaVR',
+    ]);
+    expect(result.value.data.coverageCaveat).toBeUndefined();
+  });
+});
+
+/**
+ * FIX 1 (second half) — the empty-result caveat is REACHABLE.
+ *
+ * `FORMULA_REFERENCE_REQUIRED_COVERAGE` named two families when eleven produce
+ * `references` edges into a CustomField, so the already-written disclosure at
+ * the empty branch could effectively never fire. Widening the list to the
+ * OBSERVED producer set is what makes it reachable.
+ */
+describe('findFormulaReferencesHandler — empty-result coverage caveat (FIX 1)', () => {
+  it('names an uncovered PRODUCER family on a genuinely empty result', async () => {
+    const gapCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        coverage: [
+          { type: 'CustomField', requested: true, retrieved: 4, errored: false },
+          {
+            type: 'ValidationRule',
+            requested: true,
+            retrieved: 2,
+            errored: false,
+          },
+          { type: 'ListView', requested: true, retrieved: 0, errored: false },
+          { type: 'ReportType', requested: true, retrieved: 0, errored: false },
+        ],
+      } as unknown as typeof FIXTURE_MANIFEST,
+    };
+    const result = await findFormulaReferencesHandler(gapCtx, {
+      fieldId: 'CustomField:Account.UnreferencedField__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.totalCount).toBe(0);
+    const caveat = result.value.data.coverageCaveat;
+    expect(caveat).toBeDefined();
+    expect(caveat?.missingCoverage).toContain('ListView');
+    expect(caveat?.missingCoverage).toContain('ReportType');
+    expect(caveat?.message).toContain('This is an EMPTY result.');
+    expect(caveat?.message).toContain(
+      'Treat absence of dependencies in those families as "not checked", not "none".',
+    );
   });
 });

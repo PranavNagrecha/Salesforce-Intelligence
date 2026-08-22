@@ -783,13 +783,43 @@ export const APEX_USAGE_REQUIRED_COVERAGE = ['ApexClass', 'ApexTrigger'] as cons
 
 /**
  * Coverage families the formula-reference tool (`find_formula_references`)
- * reads from. Formula `references` edges originate from formula CustomFields
- * (the formula tokenizer) and Validation Rules, so a missing `CustomField` /
- * `ValidationRule` pull means an empty result is "not checked".
+ * reads from — i.e. the families that actually PRODUCE a `references` edge
+ * INTO a CustomField, so a missing pull for any of them makes an empty
+ * referencer list "not checked" rather than proven "none".
+ *
+ * This is the OBSERVED producer set, not a wish list. It was derived by
+ * censusing both reference vaults:
+ *
+ *   fresh (builder 0.3.0): ListView 3172, CustomField 683, FlexiPage 658,
+ *     ValidationRule 630, QuickAction 264, WebLink 122,
+ *     CustomMetadataRecord 108, ReportType 47, MatchingRule 46,
+ *     ApprovalProcess 3, Index 2
+ *   stale (builder 0.1.11): a strict subset — ListView, ValidationRule,
+ *     CustomField, WebLink, ReportType, FlexiPage
+ *
+ * The list previously named only `CustomField` and `ValidationRule`, which is
+ * why the tool's own empty-result caveat was effectively UNREACHABLE: those
+ * two are the families a refresh is most likely to have. Every family here is
+ * coverage-tracked (checked against `buildCoverageEntries` / the manifests, not
+ * assumed). `RestrictionRule` is deliberately ABSENT: it emits `references`
+ * edges, but none of them land on a CustomField in either vault, so naming it
+ * would disclose a gap that cannot exist.
+ *
+ * The stale vault's producer set is smaller, so the caveat legitimately fires
+ * there where it does not on the fresh vault. That is the fix working.
  */
 export const FORMULA_REFERENCE_REQUIRED_COVERAGE = [
   'CustomField',
   'ValidationRule',
+  'ListView',
+  'ReportType',
+  'FlexiPage',
+  'QuickAction',
+  'WebLink',
+  'ApprovalProcess',
+  'MatchingRule',
+  'CustomMetadataRecord',
+  'Index',
 ] as const;
 
 /**

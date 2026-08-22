@@ -980,10 +980,11 @@ describe('sf-intelligence v0.3 end-to-end', () => {
     //
     // v0.2 appended `sfi.get_impact` and `sfi.find_formula_references`
     // to `V01_TOOLS` (journal 0069); v0.3 appended `sfi.find_apex_usages`
-    // (journal 0075). All three take a component id; unknown ids
-    // resolve to empty results, not error envelopes, so the chosen ids
-    // only need to be syntactically valid — the assertion below checks
-    // for non-stub envelopes, not non-empty payloads.
+    // (journal 0075). All three take a component id. An id naming no node
+    // resolves to `component-not-found` (FIX 1 — `find_formula_references`
+    // no longer answers a false zero for a field it does not hold), which is
+    // still a NON-STUB envelope: the assertion below checks for non-stub
+    // envelopes, not non-empty payloads.
     const calls: ReadonlyArray<readonly [string, Readonly<Record<string, unknown>>]> = [
       ['sfi.search_components', { query: 'Account' }],
       // The fixture has no Account object, so a known field id is

@@ -4980,7 +4980,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.find_formula_references',
     description:
-      'List the incoming `references` edges to a field with the source nodes and edge-level metadata (e.g., formula tokenizer properties).',
+      'List the incoming `references` edges to a field with the source nodes and edge-level metadata (e.g., formula tokenizer properties). The field must EXIST: an id naming no CustomField node (a miscased id, a typo, a field the refresh never retrieved) is refused with `component-not-found` plus typo-tolerant `resolveSuggestions`, and a node of another type is named — an empty `referencers` list is reserved for a real field that genuinely has none. When that list IS empty, a `coverageCaveat` names any of the families that PRODUCE `references` edges into a field (CustomField formulas, ValidationRule, ListView, ReportType, FlexiPage, QuickAction, WebLink, ApprovalProcess, MatchingRule, CustomMetadataRecord, Index) the vault did not fully retrieve, so the zero reads as "not checked in those families", never as proven "none".',
     inputSchema: FIND_FORMULA_REFERENCES_INPUT_SCHEMA,
   },
   {
