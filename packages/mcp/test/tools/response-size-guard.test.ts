@@ -393,6 +393,112 @@ describe('jsonResult SOE phase-omission at the global budget seam', () => {
     expect(only?.present).toBeLessThan(only?.declared ?? 0);
   });
 
+  // S2 — the reconciler owns `phasesOmitted` AND the prose that quotes it.
+  it('restates the phase-filtered shortfall PROSE from the reconciled count, not the handler-time one', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    // The handler baked "…59 fitted in this response." from the step count it
+    // could see; the global trim then cuts `soe` further. Pre-fix the sentence
+    // kept saying 59 while `phasesOmitted` said something smaller — two numbers
+    // for one fact.
+    const body = {
+      data: soeData({
+        appliedPhaseFilter: 'pre-save-validation',
+        phasesOmitted: [
+          { phase: 'pre-save-validation', declared: 60, present: 59 },
+        ],
+        disclosure:
+          'Base disclosure. You asked for the pre-save-validation phase, which holds 60 step(s); 59 fitted in this response. This is a byte-budget cut, not a smaller phase — narrow further with limit/offset, or pass includeConceptReasoning: false.',
+      }),
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: {
+        readonly disclosure: string;
+        readonly phasesOmitted?: readonly {
+          readonly phase: string;
+          readonly declared: number;
+          readonly present: number;
+        }[];
+      };
+    };
+    const only = parsed.data.phasesOmitted?.[0];
+    expect(only).toBeDefined();
+    expect(only?.present).toBeLessThan(59);
+    expect(parsed.data.disclosure).toContain(
+      `which holds 60 step(s); ${only?.present} fitted in this response.`,
+    );
+    // The stale number is GONE, not merely joined by a second sentence.
+    expect(parsed.data.disclosure).not.toContain('59 fitted in this response');
+    expect(
+      parsed.data.disclosure.match(/fitted in this response/g),
+    ).toHaveLength(1);
+  });
+
+  it('excises the "every save-order STEP is present" claim once the global trim dropped steps', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    // `enforceSoeByteBudget` runs with `allowStepDrop: false`, so its own note
+    // truthfully claims every STEP survived. The global reducer then cuts `soe`
+    // and the claim becomes false — measured on a real object at 27 of 109
+    // steps, `truncatedPaths: ["soe"]`, under a sentence asserting every step
+    // was present.
+    const body = {
+      data: soeData({
+        disclosure:
+          'Base disclosure. Response trimmed to fit the ~40 KB MCP response budget: every save-order STEP is present and in order, but 224 per-step action edge(s) across the heaviest steps were omitted (see each step’s `actionsOmitted`). Query a single object/event for full detail.',
+      }),
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: {
+        readonly soe: readonly unknown[];
+        readonly disclosure: string;
+        readonly phasesOmitted?: readonly unknown[];
+      };
+    };
+    expect((parsed.data.phasesOmitted ?? []).length).toBeGreaterThan(0);
+    expect(parsed.data.disclosure).not.toContain(
+      'every save-order STEP is present and in order',
+    );
+    // The rest of the sentence survives — only the falsified clause is cut, and
+    // what remains is exactly the shape the step-drop branch already emits.
+    expect(parsed.data.disclosure).toContain(
+      'Response trimmed to fit the ~40 KB MCP response budget 224 per-step action edge(s)',
+    );
+  });
+
+  it('APPENDS the cross-phase shortfall prose when only the global trim created one', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    // The tool-local guard runs `allowStepDrop: false`, so on the cross-phase
+    // path the handler usually bakes NO shortfall sentence at all — the global
+    // trim is what drops the steps. `phasesOmitted` was stamped and the prose
+    // stayed silent about it.
+    const body = {
+      data: soeData({ disclosure: 'Base disclosure.' }),
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: {
+        readonly disclosure: string;
+        readonly phasesOmitted?: readonly {
+          readonly phase: string;
+          readonly declared: number;
+          readonly present: number;
+        }[];
+      };
+    };
+    const omitted = parsed.data.phasesOmitted ?? [];
+    expect(omitted.length).toBeGreaterThan(0);
+    expect(parsed.data.disclosure).toContain('Base disclosure.');
+    for (const o of omitted) {
+      expect(parsed.data.disclosure).toContain(
+        `${o.phase} (${o.present}/${o.declared} shown)`,
+      );
+    }
+    expect(parsed.data.disclosure).toContain(
+      'truncated out of the returned sequence',
+    );
+  });
+
   it('does NOT stamp phasesOmitted on a non-SOE payload that merely has a same-named array (no summary.phaseCounts)', () => {
     process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
     const soe = Array.from({ length: 400 }, (_, i) => ({
@@ -556,9 +662,16 @@ describe('jsonResult nested-list truncation (FIX 8 Half A)', () => {
       'upstream.sources',
     ]);
     expect(parsed.responseBudget?.droppedCount).toBeGreaterThan(0);
+    // The invariant this pins is that a nested cut is NAMED. The sentence used
+    // to add "Their published counts are the TRUE totals" — a claim about a
+    // count NEITHER trimmed list is obliged to publish (`trust.limitations`
+    // and `coverageCaveat.missingCoverage` publish none at all). The note now
+    // states only what is always true: a prefix is present, and any count that
+    // IS published describes the full list.
     expect(parsed.responseBudget?.note).toContain(
-      'Lists trimmed from the tail: upstream.sources. Their published counts are the TRUE totals; the rows shown are a prefix.',
+      'Lists trimmed from the tail: upstream.sources. Only a leading prefix of each is present; a count published elsewhere in this response describes the FULL list, not the rows shown.',
     );
+    expect(parsed.responseBudget?.note).not.toContain('TRUE totals');
     expect(parsed.data?.upstream.sources.length).toBeGreaterThan(0);
     expect(parsed.data?.upstream.sources.length).toBeLessThan(1000);
   });
@@ -599,5 +712,260 @@ describe('jsonResult nested-list truncation (FIX 8 Half A)', () => {
     expect(parsed.responseBudget?.note).not.toContain(
       'Lists trimmed from the tail',
     );
+  });
+});
+
+/**
+ * B6 — the trimmer must never shorten a DISCLOSURE list.
+ *
+ * Pass 1 descending one level into direct children of `data` made
+ * `data.trust` and `data.coverageCaveat` — present on every analysis tool —
+ * reachable, so `trust.limitations` and `coverageCaveat.missingCoverage`
+ * became trim candidates for the first time. Both are "here is what I did NOT
+ * check" lists and neither publishes a count, so a silent tail cut left a host
+ * reading a SHORTER blind-spot roster as the complete one: the one direction a
+ * trim must never fail in.
+ *
+ * Measured pre-fix at `SFI_MAX_RESPONSE_BYTES=6000`:
+ *   truncatedPaths: ["trust.limitations","coverageCaveat.missingCoverage"]
+ *   limitations kept 10 of 24   missingCoverage kept 10 of 18
+ * under a note asserting "Their published counts are the TRUE totals".
+ */
+describe('jsonResult never trims a disclosure list (B6)', () => {
+  const limitationsOf = (n: number): readonly string[] =>
+    Array.from(
+      { length: n },
+      (_, i) =>
+        `Limitation ${i}: metadata family number ${i} was not retrieved into this vault, so any reference it could hold to the target is invisible to the graph this tool walks.`,
+    );
+
+  it('cuts a sibling DATA list instead, even when the disclosure list is the largest array', () => {
+    // Sized so the disclosure list is the largest array in the payload:
+    // pre-fix the byte-descending sort reached `trust.limitations` FIRST and
+    // stopped there — `truncatedPaths: ["trust.limitations"]`, limitations cut
+    // 24 -> 12, `findings` untouched at 150. Post-fix the only candidate is
+    // `findings`, and the disclosure comes back whole.
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '7024';
+    const limitations = limitationsOf(24);
+    const body = {
+      data: {
+        verdict: 'safe',
+        findings: Array.from({ length: 150 }, (_, i) => ({ id: `Finding:${i}` })),
+        trust: {
+          provenance: 'snapshot',
+          confidence: 'medium',
+          freshness: {},
+          completeness: { status: 'partial' },
+          limitations,
+        },
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(
+      envelopeText(jsonResult(body, { knobs: ['limit'] })),
+    ) as {
+      readonly error?: unknown;
+      readonly data?: {
+        readonly findings: readonly unknown[];
+        readonly trust: { readonly limitations: readonly string[] };
+      };
+      readonly responseBudget?: { readonly truncatedPaths?: readonly string[] };
+    };
+    expect(parsed.error).toBeUndefined();
+    // The whole point: the disclosure survives intact, byte-for-byte.
+    expect(parsed.data?.trust.limitations).toEqual(limitations);
+    expect(parsed.responseBudget?.truncatedPaths).toEqual(['findings']);
+    expect(parsed.data?.findings.length).toBeLessThan(150);
+  });
+
+  it('refuses with a structured oversize error rather than shipping a shortened blind-spot roster', () => {
+    // The review's exact reproduction. The ONLY oversized lists here are
+    // disclosures, so there is nothing left to cut — and an honest refusal
+    // naming the tool's narrowing knobs beats a quietly truncated
+    // "what I did not check" list.
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    const limitations = limitationsOf(24).map(
+      (l) => `${l} Treat its absence as "not checked", never as "none".`,
+    );
+    const missingCoverage = Array.from(
+      { length: 18 },
+      (_, i) =>
+        `MetadataFamily_${i} (not retrieved for Widget_Session__c and 41 other objects)`,
+    );
+    const body = {
+      data: {
+        verdict: 'safe',
+        findings: Array.from({ length: 8 }, (_, i) => ({
+          id: `Finding:${i}`,
+          pad: 'x'.repeat(120),
+        })),
+        trust: {
+          provenance: 'snapshot',
+          confidence: 'medium',
+          freshness: {},
+          completeness: { status: 'partial' },
+          limitations,
+        },
+        coverageCaveat: {
+          status: 'partial',
+          missingCoverage,
+          message:
+            'usage cannot be confirmed because the vault has incomplete coverage.',
+        },
+      },
+      vaultState: VAULT_STATE,
+    };
+    const text = envelopeText(jsonResult(body, { knobs: ['limit'] }));
+    const parsed = JSON.parse(text) as {
+      readonly error?: { readonly kind: string; readonly message: string };
+      readonly data?: unknown;
+      readonly responseBudget?: { readonly truncatedPaths?: readonly string[] };
+    };
+    // Pre-fix: no error, `data` present, and BOTH disclosure lists silently
+    // cut to 10 with `truncatedPaths` naming them.
+    expect(parsed.responseBudget?.truncatedPaths).toBeUndefined();
+    expect(parsed.error?.kind).toBe('oversize');
+    expect(parsed.error?.message).toContain('limit');
+    expect(bytesOf(text)).toBeLessThanOrEqual(6000);
+  });
+
+  it('exempts every disclosure key at BOTH levels, including a top-level one', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '4000';
+    const boundaries = limitationsOf(30);
+    const blindSpots = Array.from({ length: 20 }, (_, i) => ({
+      plane: `Plane_${i}`,
+      kind: 'extractor-blind',
+    }));
+    const body = {
+      data: {
+        boundaries,
+        coverageCaveat: { status: 'partial', blindSpots },
+        rows: Array.from({ length: 40 }, (_, i) => ({ id: `Row:${i}` })),
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly error?: { readonly kind: string };
+      readonly responseBudget?: { readonly truncatedPaths?: readonly string[] };
+      readonly data?: {
+        readonly boundaries: readonly string[];
+        readonly coverageCaveat: { readonly blindSpots: readonly unknown[] };
+      };
+    };
+    // Whatever else happens to this payload, no disclosure path is ever named
+    // as trimmed, and neither list comes back short.
+    expect(parsed.responseBudget?.truncatedPaths ?? []).not.toContain(
+      'boundaries',
+    );
+    expect(parsed.responseBudget?.truncatedPaths ?? []).not.toContain(
+      'coverageCaveat.blindSpots',
+    );
+    if (parsed.data !== undefined) {
+      expect(parsed.data.boundaries).toHaveLength(30);
+      expect(parsed.data.coverageCaveat.blindSpots).toHaveLength(20);
+    }
+  });
+});
+
+/**
+ * B7 — `nextOffset` must index the list the caller is actually paging.
+ *
+ * Before pass 1 descended, `dropped > 0` implied a TOP-LEVEL cut. Afterwards a
+ * nested cut satisfied it too, and the emitted `nextOffset` was that nested
+ * list's kept length. Measured pre-fix: `truncatedPaths: ["upstream.sources"]`,
+ * `matches` untouched at 12, `sources` cut 400 -> 50, `nextOffset: 50`. A host
+ * replaying `offset=50` against a 12-row list reads the empty page as the tail.
+ */
+describe('jsonResult nextOffset indexes the paged list (B7)', () => {
+  const nestedBody = {
+    data: {
+      matches: Array.from({ length: 12 }, (_, i) => ({ id: `Match:${i}` })),
+      upstream: {
+        sources: Array.from({ length: 400 }, (_, i) => ({
+          id: `CustomField:Widget_Session__c.Source_${i}__c`,
+          role: 'formula-input',
+        })),
+        sourceCount: 400,
+      },
+    },
+    vaultState: VAULT_STATE,
+  };
+
+  it('omits nextOffset when only a NESTED list was trimmed, and says the tail is unresumable', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    const parsed = JSON.parse(
+      envelopeText(
+        jsonResult(nestedBody, {
+          args: { offset: 0 },
+          knobs: ['limit', 'offset'],
+        }),
+      ),
+    ) as {
+      readonly data?: { readonly matches: readonly unknown[] };
+      readonly responseBudget?: {
+        readonly truncatedPaths?: readonly string[];
+        readonly nextOffset?: number;
+        readonly note?: string;
+      };
+    };
+    expect(parsed.responseBudget?.truncatedPaths).toEqual(['upstream.sources']);
+    // Pre-fix this was 50 — the nested list's kept length, replayed against a
+    // 12-row `matches`.
+    expect(parsed.responseBudget?.nextOffset).toBeUndefined();
+    expect(parsed.data?.matches).toHaveLength(12);
+    expect(parsed.responseBudget?.note).toContain(
+      'the dropped tail cannot be resumed from this response',
+    );
+  });
+
+  it('omits nextOffset when SEVERAL lists were trimmed — which one it indexes would be a guess', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    const body = {
+      data: {
+        matches: Array.from({ length: 200 }, (_, i) => ({
+          id: `CustomField:Widget_Session__c.Match_${i}__c`,
+        })),
+        skipped: Array.from({ length: 200 }, (_, i) => ({
+          id: `CustomField:Widget_Session__c.Skipped_${i}__c`,
+        })),
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(
+      envelopeText(
+        jsonResult(body, { args: { offset: 0 }, knobs: ['limit', 'offset'] }),
+      ),
+    ) as {
+      readonly responseBudget?: {
+        readonly truncatedPaths?: readonly string[];
+        readonly nextOffset?: number;
+      };
+    };
+    expect((parsed.responseBudget?.truncatedPaths ?? []).length).toBeGreaterThan(
+      1,
+    );
+    expect(parsed.responseBudget?.nextOffset).toBeUndefined();
+  });
+
+  it('still emits nextOffset for the single-top-level-list case it was built for', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    const body = {
+      data: {
+        rows: Array.from({ length: 400 }, (_, i) => ({
+          id: `Row:${i}`,
+          label: `row number ${i} with some padding text`,
+        })),
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(
+      envelopeText(
+        jsonResult(body, { args: { offset: 40 }, knobs: ['limit', 'offset'] }),
+      ),
+    ) as {
+      readonly data: { readonly rows: readonly unknown[] };
+      readonly responseBudget: { readonly nextOffset: number };
+    };
+    expect(parsed.responseBudget.nextOffset).toBe(40 + parsed.data.rows.length);
   });
 });

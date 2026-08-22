@@ -377,6 +377,20 @@ export const resolveApexClassAlias = (
   return ok({ componentId, apexClass: componentId.slice('ApexClass:'.length) });
 };
 
+/**
+ * Bare api name for a container id — `Profile:` / `PermissionSet:` stripped,
+ * anything else (a bare name, or a wrong-`Type:` id passed through by
+ * `coercePrefix`) returned unchanged. ONE definition, used both to compare a
+ * bare `componentId` against the typed selectors and to build the resolved
+ * scope's `apiName`, so the comparison can never drift from the echo.
+ */
+const stripContainerPrefix = (id: string): string =>
+  id.startsWith('PermissionSet:')
+    ? id.slice('PermissionSet:'.length)
+    : id.startsWith('Profile:')
+      ? id.slice('Profile:'.length)
+      : id;
+
 /** A resolved permission CONTAINER scope: a Profile or a PermissionSet. */
 export interface ResolvedContainerScope {
   /** Canonical `Profile:<ApiName>` or `PermissionSet:<ApiName>`. */
@@ -417,6 +431,25 @@ export interface ResolvedContainerScope {
  * precise message instead of it being mangled into `Profile:CustomObject:…`
  * and 404-ing as a phantom.
  *
+ * ## A BARE `componentId` states no family, so it never manufactures a conflict
+ *
+ * `componentId` is the one key here that names no family of its own. Its
+ * `Profile:` default is a convenience of this resolver, not a claim the caller
+ * made — so it must not be weighed against a selector that DID name a family.
+ * `{ componentId: 'Sales_Access', permissionSetApiName: 'Sales_Access' }` used
+ * to default the bare id to `Profile:Sales_Access` and then refuse, reporting
+ * "container selectors name different targets (PermissionSet:Sales_Access,
+ * Profile:Sales_Access)" — a disagreement with a Profile NEITHER selector
+ * named. When a bare `componentId` repeats the api name a typed selector
+ * already gave, the two AGREE and the typed selector decides the family.
+ *
+ * Genuine disagreement is untouched: two different NAMES still refuse
+ * (`componentId: 'Other'` beside `permissionSetApiName: 'Sales_Access'`), and
+ * so do two different resolved IDS (`componentId: 'Profile:Sales_Access'`
+ * beside `permissionSetApiName: 'Sales_Access'` — the prefix there IS the
+ * caller's claim). With no typed selector present the bare-name Profile
+ * default is unchanged.
+ *
  * The refusal grammar is deliberately identical to `profile_security`'s
  * private `resolveProfileRef`, so the two never read as different products.
  */
@@ -427,11 +460,12 @@ export const resolveContainerAlias = (
   const required = opts.required ?? true;
   const src = asRecord(raw);
 
-  const candidates: string[] = [];
+  // Selectors that NAME their family. These are the caller's own claims.
+  const typed: string[] = [];
   // Profile-family keys: a bare name is a PROFILE api name.
   for (const key of ['profileId', 'profileApiName', 'profileName'] as const) {
     const v = readNonEmpty(src, key);
-    if (v !== undefined) candidates.push(coercePrefix(v, ['Profile:', 'PermissionSet:']));
+    if (v !== undefined) typed.push(coercePrefix(v, ['Profile:', 'PermissionSet:']));
   }
   // PermissionSet-family keys: a bare name is a PERMISSION SET api name.
   for (const key of [
@@ -440,11 +474,23 @@ export const resolveContainerAlias = (
     'permissionSetName',
   ] as const) {
     const v = readNonEmpty(src, key);
-    if (v !== undefined) candidates.push(coercePrefix(v, ['PermissionSet:', 'Profile:']));
+    if (v !== undefined) typed.push(coercePrefix(v, ['PermissionSet:', 'Profile:']));
   }
-  // Canonical `componentId`: a bare name keeps the historical Profile default.
+
+  const candidates: string[] = [...typed];
+  // Canonical `componentId`. A PREFIXED value is a claim like any other. A BARE
+  // one states no family, so it is dropped when a typed selector already named
+  // that same api name — otherwise this resolver's own `Profile:` default would
+  // be reported back to the caller as THEIR disagreement. With no typed
+  // selector to agree with, the historical Profile default stands.
   const cid = readNonEmpty(src, 'componentId');
-  if (cid !== undefined) candidates.push(coercePrefix(cid, ['Profile:', 'PermissionSet:']));
+  if (cid !== undefined) {
+    const restatesTypedName =
+      !cid.includes(':') && typed.some((t) => stripContainerPrefix(t) === cid);
+    if (!restatesTypedName) {
+      candidates.push(coercePrefix(cid, ['Profile:', 'PermissionSet:']));
+    }
+  }
 
   const resolved = oneDistinct(candidates, {
     required,
@@ -458,15 +504,10 @@ export const resolveContainerAlias = (
   if (resolved.value === null) return ok(null);
   const componentId = resolved.value;
   const isPermSet = componentId.startsWith('PermissionSet:');
-  const apiName = isPermSet
-    ? componentId.slice('PermissionSet:'.length)
-    : componentId.startsWith('Profile:')
-      ? componentId.slice('Profile:'.length)
-      : componentId;
   return ok({
     componentId,
     containerType: isPermSet ? 'PermissionSet' : 'Profile',
-    apiName,
+    apiName: stripContainerPrefix(componentId),
   });
 };
 

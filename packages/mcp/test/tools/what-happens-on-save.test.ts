@@ -18,7 +18,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { runTool } from '../../src/tools/index.js';
+import { jsonResult, runTool } from '../../src/tools/index.js';
 import { SOE_UNGROUNDED_REFS_NOTE } from '../../src/tools/order-of-execution.js';
 import {
   computeFilteredPhaseOmission,
@@ -1249,6 +1249,64 @@ const budgetActiveVrs = Array.from({ length: BUDGET_ACTIVE_COUNT }, (_, i) =>
   budgetActiveVr(i),
 );
 
+// =============================================================================
+// Seed (F4): a HEAVY object whose save-order alone fills the byte budget.
+// `WidgetLead__c` carries 110 ACTIVE validation rules with real-length firing
+// conditions, so the composed payload runs past SOE_MAX_PAYLOAD_BYTES on its
+// own. This is the shape where optional enrichment and the answer compete, and
+// where reserving enrichment bytes FIRST was measurably paid for in steps.
+// =============================================================================
+
+const F4_OBJ = 'CustomObject:WidgetLead__c';
+const F4_ACTIVE_COUNT = 110;
+
+const f4ActiveVr = (i: number): { nodes: Node[]; edges: Edge[] } => {
+  const n = String(i).padStart(2, '0');
+  const vrId = `ValidationRule:WidgetLead__c.Gate_${n}`;
+  const condId = `ConditionalContext:${vrId}.condition-0`;
+  return {
+    nodes: [
+      makeNode({
+        id: vrId,
+        type: 'ValidationRule',
+        apiName: `WidgetLead__c.Gate_${n}`,
+        parentId: F4_OBJ,
+        properties: {
+          active: true,
+          errorMessage: `Gate_${n} rejected this record because the qualification stage and the routing owner disagree.`,
+          errorDisplayField: null,
+        },
+      }),
+      makeNode({
+        id: condId,
+        type: 'ConditionalContext',
+        apiName: `${vrId}.condition-0`,
+        parentId: vrId,
+        properties: {
+          kind: 'formula',
+          expression: BUDGET_EXPRESSION,
+          fieldRefs: ['CustomField:WidgetLead__c.Stage__c'],
+          synthesized: false,
+        },
+      }),
+    ],
+    edges: [
+      makeEdge({ fromId: F4_OBJ, toId: vrId, edgeType: 'parentOf' }),
+      makeEdge({ fromId: vrId, toId: condId, edgeType: 'firesWhen', confidence: 'parsed' }),
+    ],
+  };
+};
+
+const f4ActiveVrs = Array.from({ length: F4_ACTIVE_COUNT }, (_, i) => f4ActiveVr(i));
+
+const f4HeavySeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: F4_OBJ, apiName: 'WidgetLead__c', properties: { sharingModel: 'Private' } }),
+    ...f4ActiveVrs.flatMap((v) => v.nodes),
+  ],
+  edges: [...f4ActiveVrs.flatMap((v) => v.edges)],
+};
+
 const budgetAllocationSeed: ExtractionResult = {
   nodes: [
     makeNode({ id: BUDGET_OBJ, apiName: 'WidgetOrder__c', properties: { sharingModel: 'Private' } }),
@@ -1345,6 +1403,7 @@ beforeAll(async () => {
     saveHeavySeed,
     receiverGuardSeed,
     budgetAllocationSeed,
+    f4HeavySeed,
     groundingSeed,
   ]);
   if (!imported.ok) {
@@ -2666,6 +2725,93 @@ describe('whatHappensOnSaveHandler — bounded graph queries', () => {
     expect(large.nodeQueries).toBe(small.nodeQueries);
     expect(large.edgeQueries).toBe(small.edgeQueries);
     expect(large.nodeQueries).toBeLessThan(60);
+  });
+});
+
+/**
+ * F4 — the ANSWER is fitted before optional enrichment, never after.
+ *
+ * Concept reasoning used to be built first and its size SUBTRACTED from the SOE
+ * budget, so an opt-out-able enrichment block reserved space ahead of the
+ * order-of-execution the tool exists to return. Measured on the busiest object
+ * of a real org: 27 of 109 steps with reasoning on, 54 of 109 with
+ * `includeConceptReasoning: false` — the enrichment cost half the answer.
+ */
+describe('whatHappensOnSaveHandler — F4: the answer is fitted before the enrichment', () => {
+  /** Steps that survive the FULL pipeline: handler budget then global reducer. */
+  const stepsInEnvelope = async (
+    args: Record<string, unknown>,
+  ): Promise<number> => {
+    const r = await whatHappensOnSaveHandler(ctx, args as never);
+    if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
+    const text = (
+      jsonResult(r.value, { args, knobs: ['limit', 'offset', 'phase'] })
+        .content[0] as { readonly text: string }
+    ).text;
+    const parsed = JSON.parse(text) as {
+      readonly data?: { readonly soe?: readonly unknown[] };
+    };
+    return parsed.data?.soe?.length ?? 0;
+  };
+
+  it('returns the SAME steps with reasoning on as with it off — enrichment is never paid for in steps', async () => {
+    // Measured through `jsonResult`, because that is where the loss showed up:
+    // the handler never drops a step (`allowStepDrop: false`), the GLOBAL
+    // reducer does, and a reasoning block reserved ahead of the steps left a
+    // bigger payload for it to cut. On the real org: 27 vs 54 of 109.
+    const on = await stepsInEnvelope({
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+    });
+    const off = await stepsInEnvelope({
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+      includeConceptReasoning: false,
+    });
+    // The fixture is genuinely at the budget — otherwise this proves nothing.
+    const full = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+    });
+    expect(full.ok && full.value.data.truncated).toBe(true);
+    expect(on).toBeGreaterThan(0);
+    expect(on).toBe(off);
+  });
+
+  it('DROPS the reasoning block when the steps used the budget, and says so', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix the block was RESERVED first and shipped; the steps paid for it.
+    expect(r.value.data.conceptReasoning).toBeUndefined();
+    expect(r.value.data.disclosure).toContain(
+      'Concept reasoning was NOT attached to this response',
+    );
+    expect(r.value.data.disclosure).toContain(
+      'that is "not checked", not "nothing found"',
+    );
+    // It must NOT prescribe a flag that would change nothing here.
+    expect(r.value.data.disclosure).not.toContain(
+      'includeConceptReasoning: false for the untrimmed order-of-execution',
+    );
+  });
+
+  it('a LIGHT object still gets its reasoning block, capped as before', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Headroom is a ceiling, not a licence: the block's own reservation cap
+    // still governs when the object leaves tens of KB free.
+    expect(r.value.data.conceptReasoning).toBeDefined();
+    expect(r.value.data.disclosure).not.toContain(
+      'Concept reasoning was NOT attached to this response',
+    );
   });
 });
 

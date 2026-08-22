@@ -71,6 +71,7 @@ import {
   entryKindsFor,
   isTestClassNode,
   isUnprovenRegistrationKind,
+  UNPROVEN_REGISTRATION_DISCLOSURE,
   USAGE_EDGE_TYPES,
   walkUpstreamUsage,
   type EntryPointKind,
@@ -97,14 +98,9 @@ const REACHABILITY_DISCLOSURE =
  * and type-name usages that are never modelled as an inbound edge, and
  * downgrades what it finds. Verbatim product copy; do not reword.
  */
-const UNPROVEN_REGISTRATION_DISCLOSURE =
-  'Every entry point found here is an UNPROVEN dynamic registration: the class either extends a ' +
-  'base class from another namespace (a managed package or platform framework instantiates its ' +
-  'own subclasses) or declares the Callable dynamic-invocation interface. Both say the class is ' +
-  'BUILT to be invoked from outside this vault; NEITHER proves the registration is live, because ' +
-  'the registration itself lives in a string literal, a Custom Metadata record, or managed-package ' +
-  'code that mints no edge. Treat this as "not dead", never as "proven reachable" — confirm the ' +
-  'registration in the org before relying on it.';
+const ALL_ENTRY_POINTS_UNPROVEN_DISCLOSURE =
+  'Every entry point found here is an UNPROVEN dynamic registration. ' +
+  UNPROVEN_REGISTRATION_DISCLOSURE;
 
 const LIKELY_DEAD_CODE_CROSS_REFERENCE =
   'likely-dead-code here means NO usage in-edge and NO entry-point classifier within depth 3. ' +
@@ -413,7 +409,7 @@ export const methodReachabilityHandler = async (
     verdict === 'likely-dead-code'
       ? `${REACHABILITY_DISCLOSURE} ${LIKELY_DEAD_CODE_CROSS_REFERENCE}`
       : allEntryPointsUnproven
-        ? `${REACHABILITY_DISCLOSURE} ${UNPROVEN_REGISTRATION_DISCLOSURE}`
+        ? `${REACHABILITY_DISCLOSURE} ${ALL_ENTRY_POINTS_UNPROVEN_DISCLOSURE}`
         : REACHABILITY_DISCLOSURE;
 
   return ok({

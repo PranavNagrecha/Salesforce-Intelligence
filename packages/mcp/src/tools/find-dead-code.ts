@@ -93,7 +93,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { CALLABLE_INTERFACE, NOT_USAGE_EDGE_TYPES } from './apex-reachability.js';
+import {
+  CALLABLE_INTERFACE,
+  NOT_USAGE_EDGE_TYPES,
+  UNPROVEN_REGISTRATION_DISCLOSURE,
+} from './apex-reachability.js';
 import { buildCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
 import {
   firstNonEmpty,
@@ -124,12 +128,16 @@ const ASYNC_DISPATCH_DISCLOSURE =
   'async-dispatch dead-code (Queueable/Batchable/Schedulable): a class that "implements Queueable" is NOT automatically live — it must be enqueued/executed/scheduled by user Apex. A class with a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class) is treated as live; a class dispatched ONLY from @isTest code surfaces as likely_dead (test dispatch is rolled back at runtime) and one never dispatched as definitely_dead. A production enqueue guarded only by `!Test.isRunningTest()` STILL counts as a live production path. Blind spots: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers are invisible — verify before deleting.';
 const CUSTOM_FIELD_DISCLOSURE =
   'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
-const UNPROVEN_REGISTRATION_DISCLOSURE =
-  'dynamic registration: a class that extends a base class from another namespace (managed-package ' +
-  'or platform frameworks instantiate their own subclasses) or declares the Callable interface is ' +
-  'registered OUTSIDE Apex — in a string literal, a Custom Metadata record, or package code — so it ' +
-  'has zero incoming edges by construction. Those classes are reported `uncertain`, never ' +
-  '`definitely_dead`: their emptiness is expected, not evidence. They are not proven live either.';
+/**
+ * THIS TOOL'S verdict framing for an unproven dynamic registration. The claim
+ * itself — what the two predicates establish and what they do not — lives ONCE
+ * in `apex-reachability.ts` beside the predicates, as
+ * {@link UNPROVEN_REGISTRATION_DISCLOSURE}; only the sentence about the
+ * `definitely_dead` cascade is local, because only this tool has one.
+ */
+const UNPROVEN_REGISTRATION_VERDICT_DISCLOSURE =
+  'dynamic registration: such a class is reported `uncertain`, never `definitely_dead` — its ' +
+  `emptiness is expected, not evidence. ${UNPROVEN_REGISTRATION_DISCLOSURE}`;
 
 const STATIC_TYPE_USAGE_DISCLOSURE =
   'static-type-usage re-check: before an ApexClass is reported definitely_dead its api name is grep-searched (whole-word) across non-test production .cls/.trigger source. A class referenced only via a static-field or type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) — which the parser does NOT model as an inbound graph edge — is downgraded to `uncertain` (suppressed unless includeUncertain) instead of reported dead. Residual blind spots: the grep is line-literal (a class name in a comment or string could over-suppress), and dynamic `Type.forName(\'Other\')` references stay invisible.';
@@ -1037,7 +1045,7 @@ export const findDeadCodeHandler = async (
   // ApexClass sweep is exactly the answer a dynamically-registered class
   // produces, so it is the response that most needs to say so.
   if (types.includes('ApexClass')) {
-    boundaries.push(UNPROVEN_REGISTRATION_DISCLOSURE);
+    boundaries.push(UNPROVEN_REGISTRATION_VERDICT_DISCLOSURE);
   }
   // A CustomField flagged dead is the weakest verdict: Apex/Flow/SOQL field
   // reads are not graph edges, so an in-use field can surface as dead.

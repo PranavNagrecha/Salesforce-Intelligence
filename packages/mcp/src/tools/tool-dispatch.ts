@@ -2246,6 +2246,43 @@ const TRUNCATE_KEEP_MIN = 10;
 const utf8Bytes = (value: unknown): number =>
   Buffer.byteLength(JSON.stringify(value), 'utf8');
 
+/**
+ * DISCLOSURE list keys the trimmer must never touch, at either level.
+ *
+ * These are the "here is what I did NOT check" lists — `trust.limitations`,
+ * `coverageCaveat.missingCoverage` / `blindSpots`, a generated doc's verbatim
+ * `boundaries`, an SOE payload's `phasesOmitted`. A shortened data list is a
+ * partial answer and says so; a shortened DISCLOSURE list reads as the complete
+ * roster of blind spots and points the reader toward MORE confidence, not less.
+ * There is no shape in which cutting one is safe, so the trimmer never does.
+ *
+ * See {@link collectTrimCandidates} for why exclusion (not "cut it and publish
+ * the total") is the right answer here.
+ */
+const HONESTY_LIST_KEYS: ReadonlySet<string> = new Set([
+  'blindSpots',
+  'boundaries',
+  'caveats',
+  'dataNotAvailable',
+  'disclosures',
+  'limitations',
+  'missingCoverage',
+  'notChecked',
+  'phasesOmitted',
+]);
+
+/**
+ * Direct children of `data` that exist ONLY to carry disclosures. Every array
+ * inside one is a disclosure list whatever it is named, so the whole container
+ * is exempt rather than just the keys enumerated above.
+ */
+const HONESTY_CONTAINER_KEYS: ReadonlySet<string> = new Set([
+  'completeness',
+  'coverageCaveat',
+  'honesty',
+  'trust',
+]);
+
 /** A trimmable list found under `data`, with the dotted path that names it. */
 interface TrimCandidate {
   /** Dotted path relative to `data` — `'matches'` or `'upstream.sources'`. */
@@ -2268,25 +2305,54 @@ interface TrimCandidate {
  *
  * The depth is deliberately 1 and must stay 1: an arbitrary-depth trimmer can
  * mangle a payload's structure in ways no test enumerates.
+ *
+ * ## Disclosures are NEVER candidates
+ *
+ * Descending one level made `data.trust` and `data.coverageCaveat` — direct
+ * children on every analysis tool — reachable, so `trust.limitations` and
+ * `coverageCaveat.missingCoverage` became trimmable for the first time. That
+ * composes badly with the coverage work that widened those lists past
+ * {@link TRUNCATE_KEEP_MIN}: a "here is what I did not check" list could be
+ * silently shortened, and neither list publishes a total a reader could use to
+ * notice.
+ *
+ * The alternative — cut it, then publish its true total — was rejected. It
+ * would need a count field minted on every disclosure shape of every tool, and
+ * a host that reads the short list without reading the count still ends up MORE
+ * confident than the evidence allows. The failure mode points the wrong way, so
+ * the answer is exclusion: {@link HONESTY_LIST_KEYS} and
+ * {@link HONESTY_CONTAINER_KEYS} are skipped at both levels.
+ *
+ * A payload that cannot fit with its disclosures intact is NOT silently
+ * shortened: it falls through to the pass-3 structured `oversize` error naming
+ * the tool's own narrowing knobs. An honest refusal beats a quietly truncated
+ * blind-spot list.
  */
 const collectTrimCandidates = (
   record: Record<string, unknown>,
 ): readonly TrimCandidate[] => {
   const candidates: TrimCandidate[] = [];
-  const trimmable = (v: unknown): boolean =>
-    Array.isArray(v) && (v as readonly unknown[]).length > TRUNCATE_KEEP_MIN;
+  const trimmable = (v: unknown, key: string): boolean =>
+    !HONESTY_LIST_KEYS.has(key) &&
+    Array.isArray(v) &&
+    (v as readonly unknown[]).length > TRUNCATE_KEEP_MIN;
   for (const key of Object.keys(record)) {
     const value = record[key];
-    if (trimmable(value)) {
+    if (trimmable(value, key)) {
       candidates.push({ path: key, owner: record, key });
       continue;
     }
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      Array.isArray(value) ||
+      HONESTY_CONTAINER_KEYS.has(key)
+    ) {
       continue;
     }
     const child = value as Record<string, unknown>;
     for (const childKey of Object.keys(child)) {
-      if (trimmable(child[childKey])) {
+      if (trimmable(child[childKey], childKey)) {
         candidates.push({
           path: `${key}.${childKey}`,
           owner: child,
@@ -2301,30 +2367,34 @@ const collectTrimCandidates = (
 /**
  * Pass 1 — truncate the largest arrays under `data` (top level, plus one level
  * into direct child objects) from the tail until the body fits (or nothing
- * further can be dropped). Returns the total dropped element count, the kept
- * length of the largest-trimmed array (for `nextOffset` when the call was
- * offset-shaped), and the dotted paths that were actually trimmed so the
- * disclosure can NAME what it cut instead of only counting it.
+ * further can be dropped). Returns the total dropped element count, the dotted
+ * paths that were actually trimmed so the disclosure can NAME what it cut
+ * instead of only counting it, and the SURVIVING length of each of those paths.
+ *
+ * The kept lengths are returned per PATH, not as a single "largest" number.
+ * `nextOffset` is an index into ONE named list, so the guard has to know WHICH
+ * list a length belongs to before it can offer one — see
+ * {@link jsonResult}'s `emitApproxNextOffset`.
  */
 const truncateDataArrays = (
   body: Record<string, unknown>,
   cap: number,
 ): {
   dropped: number;
-  keptOfLargest: number | null;
   truncatedPaths: readonly string[];
+  keptByPath: Readonly<Record<string, number>>;
 } => {
   const data = body['data'];
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-    return { dropped: 0, keptOfLargest: null, truncatedPaths: [] };
+    return { dropped: 0, truncatedPaths: [], keptByPath: {} };
   }
   const record = data as Record<string, unknown>;
   const candidates = [...collectTrimCandidates(record)].sort(
     (a, b) => utf8Bytes(b.owner[b.key]) - utf8Bytes(a.owner[a.key]),
   );
   let dropped = 0;
-  let keptOfLargest: number | null = null;
   const truncatedPaths: string[] = [];
+  const keptByPath: Record<string, number> = {};
   for (const candidate of candidates) {
     let list = candidate.owner[candidate.key] as unknown[];
     const droppedBefore = dropped;
@@ -2334,11 +2404,13 @@ const truncateDataArrays = (
       list = list.slice(0, keep);
       candidate.owner[candidate.key] = list;
     }
-    if (dropped > droppedBefore) truncatedPaths.push(candidate.path);
-    if (keptOfLargest === null && dropped > 0) keptOfLargest = list.length;
+    if (dropped > droppedBefore) {
+      truncatedPaths.push(candidate.path);
+      keptByPath[candidate.path] = list.length;
+    }
     if (utf8Bytes(body) <= cap) break;
   }
-  return { dropped, keptOfLargest, truncatedPaths };
+  return { dropped, truncatedPaths, keptByPath };
 };
 
 /** Pass 2 — slim every long string under a node to a head + trim marker. */
@@ -2398,7 +2470,10 @@ const slimDataStrings = (node: unknown): number => {
  *      arrays one level down in a direct child object of `data`, so a tool that
  *      nests its lists (`data.upstream.sources`) is trimmed rather than
  *      rejected (`responseBudget.truncated/droppedCount/truncatedPaths`, plus
- *      `nextOffset` when the call was offset-shaped);
+ *      `nextOffset` when the call was offset-shaped and exactly one TOP-LEVEL
+ *      list was cut). DISCLOSURE lists (`trust.limitations`,
+ *      `coverageCaveat.missingCoverage`, `boundaries`, …) are never candidates
+ *      — see {@link collectTrimCandidates};
  *   2. slim long strings to a head + `…[+N bytes trimmed]` marker;
  *   3. if it STILL does not fit, a structured `oversize` error naming the
  *      tool's own narrowing knobs (from its input schema).
@@ -2528,7 +2603,7 @@ export const jsonResult = (
   // Reserve room for the responseBudget and estimatedPayloadBytes fields so
   // the check applies to the final serialized envelope, not only its body.
   const reductionCap = Math.max(1, cap - Math.min(1_024, Math.floor(cap / 4)));
-  const { dropped, keptOfLargest, truncatedPaths } = truncateDataArrays(
+  const { dropped, truncatedPaths, keptByPath } = truncateDataArrays(
     clone,
     reductionCap,
   );
@@ -2561,8 +2636,23 @@ export const jsonResult = (
     const handlerPaginated = hasHandlerCursor(
       (clone as { readonly data?: unknown }).data,
     );
+    // `nextOffset` is an index into ONE list, and `offset` can only page a
+    // TOP-LEVEL one. Once pass 1 learned to descend, `dropped > 0` stopped
+    // implying a top-level cut: a trimmed `upstream.sources` produced a
+    // nextOffset that a host would replay against the untouched top-level list,
+    // read the empty page as the tail, and stop. So the hint is offered ONLY
+    // when exactly one list was trimmed AND it is top-level — the single case
+    // where "the list the caller is paging" is not a guess. Anything else
+    // (nested, or several lists cut at once) falls to the note below, which
+    // says plainly that the tail cannot be resumed from this response.
+    const soleTopLevelPath =
+      truncatedPaths.length === 1 && !(truncatedPaths[0] as string).includes('.')
+        ? (truncatedPaths[0] as string)
+        : null;
+    const keptOfPagedList =
+      soleTopLevelPath === null ? null : (keptByPath[soleTopLevelPath] ?? null);
     const emitApproxNextOffset =
-      dropped > 0 && offsetShaped && keptOfLargest !== null && !handlerPaginated;
+      dropped > 0 && offsetShaped && keptOfPagedList !== null && !handlerPaginated;
     // A nested list was reached only because the pass-1 guard now descends one
     // level. Name it: a reader who sees a shortened `upstream.sources` must be
     // able to tell WHICH list lost rows, not just that N were dropped.
@@ -2570,7 +2660,7 @@ export const jsonResult = (
     const nestedNote = nestedTrimmed
       ? ` Lists trimmed from the tail: ${truncatedPaths.join(
           ', ',
-        )}. Their published counts are the TRUE totals; the rows shown are a prefix.`
+        )}. Only a leading prefix of each is present; a count published elsewhere in this response describes the FULL list, not the rows shown.`
       : '';
     clone['responseBudget'] = {
       applied: true,
@@ -2580,7 +2670,7 @@ export const jsonResult = (
       ...(emitApproxNextOffset
         ? {
             nextOffset:
-              (typeof offset === 'number' ? offset : 0) + keptOfLargest,
+              (typeof offset === 'number' ? offset : 0) + keptOfPagedList,
           }
         : {}),
       ...(stringsSlimmed > 0 ? { stringsSlimmed } : {}),

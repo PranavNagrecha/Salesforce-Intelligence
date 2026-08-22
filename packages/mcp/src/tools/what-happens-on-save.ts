@@ -144,6 +144,7 @@ import {
   buildReservedConceptReasoning,
   CONCEPT_REASONING_SKIPPED_NOTE,
   CONCEPT_REASONING_UNAVAILABLE_NOTE,
+  CONCEPT_RESERVATION_MAX_BYTES,
   type ConceptReasoningEnvelope,
 } from './concept-reasoning.js';
 import { resolveObjectAlias } from './input-aliases.js';
@@ -172,7 +173,9 @@ import {
   AUTOMATION_PHASES,
   type BoundableStep,
   computePhasesOmitted,
+  crossPhaseShortfallNote,
   enforceSoeByteBudget,
+  filteredPhaseShortfallNote,
   SOE_MAX_PAYLOAD_BYTES,
   type SoePhase,
   type SoePhaseCounts,
@@ -621,18 +624,23 @@ export interface WhatHappensOnSaveOutput {
    * REASONING-REACHABILITY — deterministic concept-rule claims about the target
    * OBJECT, on the shared `EvidenceEnvelopeV2` contract plus a `completeness`
    * report that keeps "checked and found nothing" distinct from "never
-   * checked". DEFAULT ON — absent only when the caller passed
-   * `includeConceptReasoning: false`, or the reasoning read failed.
+   * checked". DEFAULT ON — absent when the caller passed
+   * `includeConceptReasoning: false`, when the reasoning read failed, or when
+   * the ANSWER used the budget (see below).
    *
-   * HOW IT SHARES THE BUDGET. This tool's 40 KB SOE budget
-   * (`SOE_MAX_PAYLOAD_BYTES`) sits just under a 45 KB global cap, so a block
-   * bolted on afterwards would push dense objects past the guard. Instead the
-   * block is built FIRST, fitted to `CONCEPT_RESERVATION_MAX_BYTES`, and its
-   * measured size RESERVED out of the SOE budget before the steps are fitted —
-   * reasoning claims its slice by right and the primary answer fills the rest.
-   * When that reservation actually costs a trim, the existing SOE truncation
-   * disclosure names reasoning's share and how to re-query without it.
-
+   * HOW IT SHARES THE BUDGET (F4). This tool's 40 KB SOE budget
+   * (`SOE_MAX_PAYLOAD_BYTES`) sits just under a 45 KB global cap, so the block
+   * cannot simply be bolted on afterwards. It used to claim its slice by RIGHT:
+   * built first and its size subtracted from the budget, so an opt-out-able
+   * enrichment reserved space ahead of the order of execution — measured on a
+   * real org's busiest object, 27 of 109 steps with reasoning on against 54
+   * with it off.
+   *
+   * The steps are now fitted FIRST, against the whole budget, and reasoning
+   * gets what is left (still capped by `CONCEPT_RESERVATION_MAX_BYTES` — the
+   * headroom is a ceiling, not a licence). On a heavy object nothing is left
+   * and the block is ABSENT, with a verbatim note saying the steps kept the
+   * budget and that no concept layer was checked.
    *
    * Read `completeness.noRuleCoversComponentType` FIRST: when true, no concept
    * rule applies to this component type and an empty `claims` list means
@@ -651,6 +659,38 @@ const PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE =
   'Concept reasoning is off by default on a phase-filtered query so the whole budget goes to the requested phase; pass includeConceptReasoning: true to force it.';
 
 /**
+ * F4. Room kept back from the SOE budget for the honesty prose appended AFTER
+ * `enforceSoeByteBudget` has measured `data` — the truncation note, the
+ * phase-shortfall sentence, and the concept-reasoning notes below. The longest
+ * combination observed on a real org runs under 1 KB; 2 KB is the reserve, so
+ * the prose can grow without pushing the payload back over the ceiling.
+ */
+const POST_ENFORCEMENT_DISCLOSURE_HEADROOM_BYTES = 2_000;
+
+/**
+ * F4. Below this much headroom a concept-reasoning block is not worth
+ * attempting: the fitter's own measured floor — counts, coverage, absence,
+ * trust and the four conditional honesty sentences, with EVERY enumeration
+ * emptied — is ~2.5 KB, so anything under it can only come back over budget.
+ * Asking for it anyway would spend a graph traversal to produce a block that
+ * has to be thrown away.
+ */
+const CONCEPT_REASONING_MIN_HEADROOM_BYTES = 2_500;
+
+/**
+ * F4. Verbatim note for a reasoning block dropped because the ANSWER used the
+ * budget. Product copy: it must read as a deliberate trade, not a failure, and
+ * it must not prescribe `includeConceptReasoning: false` — reasoning is already
+ * off in this response, and re-passing the flag would change nothing.
+ */
+const CONCEPT_REASONING_NO_HEADROOM_NOTE = (headroom: number): string =>
+  'Concept reasoning was NOT attached to this response: the order-of-execution steps are ' +
+  `fitted FIRST and left ${headroom} byte(s) of the response budget, below what a reasoning ` +
+  'block needs. The steps are the answer, so they keep the budget. No concept layer was ' +
+  'checked here — that is "not checked", not "nothing found". Re-query one `phase` at a time ' +
+  'for a narrower response with room for it.';
+
+/**
  * FIX 3 (4). The declared-vs-present check for a PHASE-FILTERED view.
  * `computePhasesOmitted` compares every phase, which under a filter would
  * report the deliberately-absent phases as omissions; here only the requested
@@ -665,10 +705,6 @@ export const computeFilteredPhaseOmission = (
   if (presentCount >= declared) return null;
   return { phase, declared, present: presentCount };
 };
-
-/** Verbatim shortfall sentence for a truncated phase-filtered call. */
-const filteredPhaseShortfallNote = (omission: SoePhaseOmission): string =>
-  `You asked for the ${omission.phase} phase, which holds ${omission.declared} step(s); ${omission.present} fitted in this response. This is a byte-budget cut, not a smaller phase — narrow further with limit/offset, or pass includeConceptReasoning: false.`;
 
 /**
  * The ALWAYS-PRESENT census of inactive configured automation on the target
@@ -1776,52 +1812,40 @@ export const whatHappensOnSaveHandler = async (
   // `phasesOmitted` after such a trim; that re-stamp is the one thing that
   // must never be lost, because it is what stops a shortened `soe` from
   // silently contradicting `summary.phaseCounts`.
-  // REASONING-REACHABILITY — opt-in concept-rule reasoning over the target
-  // OBJECT. Built BEFORE the byte-budget pass so its measured size can be
-  // RESERVED out of the SOE budget: the SOE budget (40 KB) sits just under the
-  // global response cap (45 KB), so an unreserved block would push a densely
-  // automated object past the guard. With the reservation, requesting reasoning
-  // may trim more per-step action tails — a trade the caller opted into and
-  // which is disclosed below. The default path never runs this and is
-  // byte-identical to before the flag existed.
-  // REASONING-REACHABILITY. Build the block now, but do NOT attach it until
-  // AFTER the byte-budget pass below.
+  // ANSWER FIRST, ENRICHMENT SECOND (F4).
   //
-  // WHY THE ORDER MATTERS: `enforceSoeByteBudget` measures `sizeOf(payload)`
-  // WHOLE. An earlier revision attached the block first AND subtracted its size
-  // from the budget — the block was inside what the budget measured, so it was
-  // charged twice and the effective allowance became `40_000 - 2N`. Measured
-  // result: 33 of 50 real objects had their entire action inventory stripped to
-  // zero on ~30 KB payloads, 10 KB UNDER budget, and the tool then disclosed a
-  // truncation its own arithmetic had invented. `order-of-execution.ts` gets
-  // this right by attaching its envelope after enforcement; this now matches.
+  // Concept reasoning used to be built BEFORE the byte-budget pass and its
+  // measured size SUBTRACTED from the SOE budget, so an optional enrichment
+  // block reserved space ahead of the answer the tool exists to give. Measured
+  // on the busiest object in a real org: `soe` came back with 27 of 109 steps
+  // with reasoning on and 54 of 109 with `includeConceptReasoning: false` — the
+  // enrichment was paid for in STEPS, roughly halving the answer, and the
+  // response disclosed the trade only in prose.
   //
-  // The block is fitted to CONCEPT_RESERVATION_MAX_BYTES (~2 KB) before it is
-  // ever attached, so the SOE budget keeps a fixed, small headroom instead of a
-  // moving subtraction.
+  // The allocation is now the other way round. `enforceSoeByteBudget` runs
+  // first against the WHOLE budget, so the steps are seated exactly as they are
+  // on an `includeConceptReasoning: false` call. Whatever headroom is left over
+  // is what reasoning may have, and `buildReservedConceptReasoning` is fitted to
+  // THAT number rather than to a fixed ceiling. On a heavy object the headroom
+  // is too small for even the block's irreducible honesty prose, and the block
+  // is DROPPED — the correct outcome, said out loud in the disclosure rather
+  // than paid for out of the caller's answer.
+  //
+  // The block is still attached only AFTER enforcement: `enforceSoeByteBudget`
+  // measures `sizeOf(payload)` WHOLE, so attaching first AND subtracting its
+  // size charged it twice (an earlier revision stripped 33 of 50 real objects'
+  // entire action inventory on ~30 KB payloads, 10 KB UNDER budget, and then
+  // disclosed a truncation its own arithmetic had invented).
   //
   // FIX 3 (3). A `phase` call is a RECOVERY call, not a reasoning call: the
   // caller is here because the full view could not hold that phase, so the
   // whole budget goes to the phase they asked for. An explicit
   // `includeConceptReasoning: true` still wins.
-  let conceptReasoning: ConceptReasoningEnvelope | undefined;
-  let conceptReasoningBytes = 0;
   const conceptReasoningOffByPhaseDefault =
     input.phase !== undefined && input.includeConceptReasoning === undefined;
   const wantConceptReasoning =
     input.includeConceptReasoning ?? input.phase === undefined;
-  if (wantConceptReasoning) {
-    const reserved = await buildReservedConceptReasoning(ctx, objectId);
-    if (reserved !== null) {
-      conceptReasoning = reserved.envelope;
-      conceptReasoningBytes = reserved.reservedBytes;
-    } else {
-      // R3 — a MISSING block must never be silent. `null` covers both a
-      // component that did not resolve and a graph read that failed, so the
-      // note attributes neither.
-      data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_UNAVAILABLE_NOTE(objectId)}`;
-    }
-  } else {
+  if (!wantConceptReasoning) {
     data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_SKIPPED_NOTE}`;
     if (conceptReasoningOffByPhaseDefault) {
       data.disclosure = `${data.disclosure} ${PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE}`;
@@ -1831,24 +1855,45 @@ export const whatHappensOnSaveHandler = async (
   const budget = enforceSoeByteBudget(
     data,
     [visibleSoe] as unknown as BoundableStep[][],
-    {
-      allowStepDrop: false,
-      // Reserve headroom for the block that will be ATTACHED AFTER this pass.
-      // Subtracted exactly once, because `data` does not contain it yet.
-      ...(conceptReasoningBytes > 0
-        ? { budgetBytes: SOE_MAX_PAYLOAD_BYTES - conceptReasoningBytes }
-        : {}),
-    },
+    { allowStepDrop: false },
   );
   if (budget.truncated) {
     data.truncated = true;
     data.disclosure = `${data.disclosure} ${soeTruncationNote(budget)}`;
-    // Name reasoning's share of the squeeze so the trade is never invisible.
-    if (conceptReasoningBytes > 0) {
-      data.disclosure =
-        `${data.disclosure} Concept reasoning reserved ${conceptReasoningBytes} bytes of this ` +
-        'response before the steps were fitted, so part of that trimming is its share; re-query ' +
-        'with `includeConceptReasoning: false` for the untrimmed order-of-execution.';
+  }
+
+  // The steps are seated. What is left of the budget — minus room for the
+  // honesty prose still to be appended below — is the enrichment's allowance.
+  let conceptReasoning: ConceptReasoningEnvelope | undefined;
+  if (wantConceptReasoning) {
+    const headroom =
+      SOE_MAX_PAYLOAD_BYTES -
+      Buffer.byteLength(JSON.stringify(data), 'utf8') -
+      POST_ENFORCEMENT_DISCLOSURE_HEADROOM_BYTES;
+    const reserved =
+      headroom >= CONCEPT_REASONING_MIN_HEADROOM_BYTES
+        ? await buildReservedConceptReasoning(ctx, objectId, {
+            // Headroom is a CEILING, never a licence. A small object leaves
+            // tens of KB free and the block's own target
+            // (`CONCEPT_RESERVATION_MAX_BYTES`) still governs there — fitting
+            // to the headroom alone would let a light object ship a 15 KB
+            // enrichment block, which is the size problem that cap exists for.
+            maxBytes: Math.min(headroom, CONCEPT_RESERVATION_MAX_BYTES),
+          })
+        : null;
+    if (reserved !== null && reserved.reservedBytes <= headroom) {
+      conceptReasoning = reserved.envelope;
+    } else if (reserved === null && headroom >= CONCEPT_REASONING_MIN_HEADROOM_BYTES) {
+      // R3 — a MISSING block must never be silent. `null` covers both a
+      // component that did not resolve and a graph read that failed, so the
+      // note attributes neither.
+      data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_UNAVAILABLE_NOTE(objectId)}`;
+    } else {
+      // Built but too big for what the steps left, or never attempted because
+      // the headroom was already below the floor. Same outcome, same sentence.
+      data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_NO_HEADROOM_NOTE(
+        Math.max(0, headroom),
+      )}`;
     }
   }
 
@@ -1869,10 +1914,7 @@ export const whatHappensOnSaveHandler = async (
     const phasesOmitted = computePhasesOmitted(phaseCounts, data.soe);
     if (phasesOmitted.length > 0) {
       data.phasesOmitted = phasesOmitted;
-      data.disclosure =
-        `${data.disclosure} Note: ${phasesOmitted
-          .map((p) => `${p.phase} (${p.present}/${p.declared} shown)`)
-          .join(', ')} truncated out of the returned sequence — re-query with the \`phase\` filter to see the full roster.`;
+      data.disclosure = `${data.disclosure} ${crossPhaseShortfallNote(phasesOmitted)}`;
     }
   } else {
     const omission = computeFilteredPhaseOmission(
