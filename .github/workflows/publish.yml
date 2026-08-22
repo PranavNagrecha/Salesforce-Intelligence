@@ -317,6 +317,25 @@ jobs:
             inside && /^## / { exit }
             inside { print }
           ' CHANGELOG.md > "$NOTES_FILE"
+          # GitHub rejects a release body over 125,000 characters with HTTP 422.
+          # v0.3.1's section was 139,898 and the release had to be cut by hand.
+          # Trim on a LINE boundary so the body never ends mid-sentence, leave
+          # headroom for the pointer, and say plainly that this is a summary --
+          # a truncated changelog that does not admit it is truncated is the
+          # exact defect this project exists to remove.
+          LIMIT=124000
+          if [ "$(wc -c < "$NOTES_FILE")" -gt "$LIMIT" ]; then
+            FULL_BYTES="$(wc -c < "$NOTES_FILE")"
+            echo "::notice::CHANGELOG section for $VERSION is ${FULL_BYTES} bytes; trimming to fit GitHub's 125000 limit."
+            TRIMMED="$(mktemp)"
+            head -c "$LIMIT" "$NOTES_FILE" | sed '$d' > "$TRIMMED"
+            {
+              printf '\n\n---\n\n'
+              printf '**This release note is TRUNCATED.** The full %s section is %s characters, past GitHub'"'"'s 125,000 limit for a release body.\n\n' "$VERSION" "$FULL_BYTES"
+              printf 'Read the complete entry in [CHANGELOG.md](https://github.com/%s/blob/main/CHANGELOG.md).\n' "$GITHUB_REPOSITORY"
+            } >> "$TRIMMED"
+            mv "$TRIMMED" "$NOTES_FILE"
+          fi
           SBOM_ARGS=()
           if [ -f sbom.cdx.json ]; then
             SBOM_ARGS+=(sbom.cdx.json)
