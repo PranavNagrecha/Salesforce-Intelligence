@@ -3430,9 +3430,10 @@ const VALUE_CHANGE_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * `whatIfChangeFieldTypeInputSchema`. The `fieldId` prefix constraint
  * (must start with `CustomField:`) is not expressible in JSON Schema;
  * non-matching prefixes surface as `invalid-query` at the handler
- * boundary. The `newType` enum mirrors the v2.3 field-type matrix in
- * `WhatIfSemantics.md` § "Field-type compatibility matrix"; drift
- * between Zod and this schema is a code-review concern.
+ * boundary. The `newType` enum defines the supported field types for
+ * compatibility checks (Text, LongTextArea, Number, Currency, Percent,
+ * Date, DateTime, Time, Email, Url, etc.); drift between Zod and this
+ * schema is a code-review concern.
  */
 const WHAT_IF_CHANGE_FIELD_TYPE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({

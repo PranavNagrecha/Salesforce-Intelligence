@@ -83,17 +83,16 @@
  * attachCoverageToWhatIf}); being switched off is not a
  * coverage-dependent claim, so `already-inactive` is never downgraded.
  *
- * **Honesty axis.** v2.3 surfaces the verbatim disclosure per the
- * WhatIfSemantics.md fail-conservative posture. Disabling is a
- * runtime metadata flag, not a deletion: the trigger remains in the
- * org and a later re-enable restores every effect listed. The v0.3
- * apex-scanner's edge confidence is `heuristic` for most outgoing
- * edges (regex-based token-pair extraction); the caller should
- * spot-check the trigger body when a finding's confidence is
- * `heuristic`. Indirect dispatch via trigger frameworks
- * (TriggerHandler base class, fflib) is partially invisible to the
- * heuristic walker — the WhatIfSemantics.md "Trigger framework
- * recognition partial" boundary disclosure applies.
+ * **Honesty axis.** v2.3 applies a fail-conservative approach when
+ * disclosing impact. Disabling is a runtime metadata flag, not a
+ * deletion: the trigger remains in the org and a later re-enable
+ * restores every effect listed. The v0.3 apex-scanner's edge
+ * confidence is `heuristic` for most outgoing edges (regex-based
+ * token-pair extraction); the caller should spot-check the trigger
+ * body when a finding's confidence is `heuristic`. Indirect dispatch
+ * via trigger frameworks (TriggerHandler base class, fflib) is
+ * partially invisible to the heuristic walker — trigger framework
+ * recognition is incomplete and should be manually verified.
  *
  * Implementation notes:
  *   - `triggerId` is required to start with `ApexTrigger:`. Other

@@ -89,15 +89,15 @@
  * to its own subject. Only `structuralVerdict` is coverage-downgraded;
  * being switched off is not a coverage-dependent claim.
  *
- * **Honesty axis.** v2.3 surfaces the verbatim disclosure per the
- * WhatIfSemantics.md fail-conservative posture. Deactivation does NOT
- * delete the Flow — its definition remains in the org and a later
- * reactivation restores every effect listed. Apex code that conditionally
- * invokes the Flow's outputs (via `Flow.Interview` or an
- * `@InvocableMethod` chain) remains invisible to the heuristic walker —
- * the subflow modeling is DECLARED `<subflows>` metadata only, not the
- * Apex `Flow.Interview` invocation path; the caller should spot-check Apex
- * callers via `sfi.find_code_usages` targeting the Flow id.
+ * **Honesty axis.** v2.3 applies a fail-conservative approach when
+ * disclosing impact. Deactivation does NOT delete the Flow — its
+ * definition remains in the org and a later reactivation restores every
+ * effect listed. Apex code that conditionally invokes the Flow's outputs
+ * (via `Flow.Interview` or an `@InvocableMethod` chain) remains invisible
+ * to the heuristic walker — the subflow modeling is DECLARED `<subflows>`
+ * metadata only, not the Apex `Flow.Interview` invocation path; the caller
+ * should spot-check Apex callers via `sfi.find_code_usages` targeting the
+ * Flow id.
  *
  * Implementation notes:
  *   - `flowId` is required to start with `Flow:`. Other prefixes return
