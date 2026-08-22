@@ -249,8 +249,12 @@ const noKeywordBatchSeed: ExtractionResult = {
       label: 'PaymentBatch',
       properties: {
         status: 'Active',
-        // `global` only — NO sharing keyword declared.
+        // `global` only — NO sharing keyword declared. `sharingModel: null` is
+        // what the extractor stamps for a class it READ and found no keyword on
+        // (real vault shape); it is NOT the same as the property being absent,
+        // which is the NOT-READ seed below.
         modifiers: ['global'],
+        sharingModel: null,
         implements: ['Database.Batchable<sObject>', 'Database.Stateful'],
         isTest: false,
         isQueueable: false,
@@ -289,6 +293,7 @@ const noKeywordQueueableSeed: ExtractionResult = {
         status: 'Active',
         // `public` only — NO sharing keyword, implements Queueable + AllowsCallouts.
         modifiers: ['public'],
+        sharingModel: null,
         implements: ['Queueable', 'Database.AllowsCallouts'],
         isTest: false,
         isQueueable: true,
@@ -324,6 +329,7 @@ const noKeywordSyncSeed: ExtractionResult = {
         status: 'Active',
         // `public` only — NO sharing keyword, synchronous.
         modifiers: ['public'],
+        sharingModel: null,
         isTest: false,
         isQueueable: false,
         isSchedulable: false,
@@ -335,6 +341,118 @@ const noKeywordSyncSeed: ExtractionResult = {
         lineCount: 40,
         sourceBytes: 800,
       },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 6: SHARING-KEYWORD-LIVES-IN-SHARINGMODEL — the REAL vault shape for a
+// class that DOES declare a keyword. The extractor's header parser splits the
+// class declaration into `modifiers` (access/abstract/virtual) and
+// `sharingModel` (the keyword); it does NOT join the keyword into `modifiers`.
+// Every fixture above happened to duplicate the keyword into `modifiers`, so a
+// tool reading ONLY `modifiers` looked correct here while answering
+// `declared: null` for every keyword-declaring class in a real vault — and the
+// `without sharing` direction is the security-relevant one.
+// =============================================================================
+
+const REAL_WITHOUT_ID = 'ApexClass:OrderIntakeService';
+const REAL_WITH_ID = 'ApexClass:OrderPortalController';
+const REAL_INHERITED_ID = 'ApexClass:OrderConditionEvaluator';
+
+const realShapeProps = (
+  sharingModel: string,
+): Record<string, unknown> => ({
+  status: 'Active',
+  // The extractor keeps the sharing keyword OUT of `modifiers`.
+  modifiers: ['public'],
+  sharingModel,
+  isTest: false,
+  isQueueable: false,
+  isSchedulable: false,
+  isBatchable: false,
+  hasFutureMethod: false,
+  hasInvocableMethod: false,
+  hasAuraEnabledMethod: false,
+  isRestResource: false,
+  lineCount: 60,
+  sourceBytes: 1200,
+});
+
+const realShapeSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: REAL_WITHOUT_ID,
+      apiName: 'OrderIntakeService',
+      label: 'OrderIntakeService',
+      properties: realShapeProps('without sharing'),
+    }),
+    makeNode({
+      id: REAL_WITH_ID,
+      apiName: 'OrderPortalController',
+      label: 'OrderPortalController',
+      properties: realShapeProps('with sharing'),
+    }),
+    makeNode({
+      id: REAL_INHERITED_ID,
+      apiName: 'OrderConditionEvaluator',
+      label: 'OrderConditionEvaluator',
+      properties: realShapeProps('inherited sharing'),
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 7: the LEGACY layout — the keyword joined into `modifiers`, with NO
+// `sharingModel` property. Kept readable so an old vault still gets a real
+// answer instead of falling through to NOT-READ.
+// =============================================================================
+
+const LEGACY_MODIFIERS_ID = 'ApexClass:LegacyLayoutService';
+
+const legacyModifiersSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: LEGACY_MODIFIERS_ID,
+      apiName: 'LegacyLayoutService',
+      label: 'LegacyLayoutService',
+      properties: {
+        status: 'Active',
+        modifiers: ['global', 'with sharing'],
+        isTest: false,
+        isQueueable: false,
+        isSchedulable: false,
+        isBatchable: false,
+        hasFutureMethod: false,
+        hasInvocableMethod: false,
+        hasAuraEnabledMethod: false,
+        isRestResource: false,
+        lineCount: 20,
+        sourceBytes: 400,
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 8: a node carrying NEITHER `sharingModel` NOR a keyword-bearing
+// `modifiers` array, and none of the async classifiers. NOTHING read the class
+// declaration, so no enforcement model may be asserted — a `without sharing`
+// class on such a node presents identically.
+// =============================================================================
+
+const NOT_READ_ID = 'ApexClass:UnreadDeclarationService';
+
+const notReadSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NOT_READ_ID,
+      apiName: 'UnreadDeclarationService',
+      label: 'UnreadDeclarationService',
+      properties: { status: 'Active', lineCount: 12, sourceBytes: 300 },
     }),
   ],
   edges: [],
@@ -360,6 +478,9 @@ beforeAll(async () => {
     noKeywordBatchSeed,
     noKeywordQueueableSeed,
     noKeywordSyncSeed,
+    realShapeSeed,
+    legacyModifiersSeed,
+    notReadSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -476,6 +597,99 @@ describe('explainApexMethodHandler', () => {
     expect(s.runsAsSystem).toBe(false);
     expect(s.note).toContain('INHERITS THE CALLER');
     expect(s.note).toContain('does NOT default to `without sharing`');
+  });
+
+  // ===========================================================================
+  // SHARING-KEYWORD-LIVES-IN-SHARINGMODEL. On a real vault the keyword is in
+  // `properties.sharingModel`, NOT in `properties.modifiers`. Reading only
+  // `modifiers` answered `declared: null` / `effectiveModel: 'inherits-caller'`
+  // for EVERY class that declares a keyword — telling a reviewer auditing
+  // sharing bypass that a `without sharing` class inherits the caller's
+  // context. `sfi.apex_structure` reads the same declaration correctly, so the
+  // product contradicted itself on the same class.
+  // ===========================================================================
+  it('reads `without sharing` from properties.sharingModel when modifiers does NOT carry it', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: REAL_WITHOUT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // The exact real-vault shape: no keyword anywhere in `modifiers`.
+    expect(data.modifiers).toEqual(['public']);
+    const s = data.sharingSemantics;
+    expect(s.declared).toBe('without sharing');
+    expect(s.effectiveModel).toBe('without sharing');
+    // The false answer this fix removes.
+    expect(s.effectiveModel).not.toBe('inherits-caller');
+    expect(data.sharingSource).toBe('node-sharing-model');
+  });
+
+  it('reads `with sharing` and `inherited sharing` from properties.sharingModel too', async () => {
+    const withResult = await explainApexMethodHandler(ctx, {
+      classApiName: REAL_WITH_ID,
+    });
+    expect(withResult.ok).toBe(true);
+    if (!withResult.ok) return;
+    expect(withResult.value.data.sharingSemantics.declared).toBe('with sharing');
+    expect(withResult.value.data.sharingSemantics.effectiveModel).toBe('with sharing');
+
+    const inheritedResult = await explainApexMethodHandler(ctx, {
+      classApiName: REAL_INHERITED_ID,
+    });
+    expect(inheritedResult.ok).toBe(true);
+    if (!inheritedResult.ok) return;
+    expect(inheritedResult.value.data.sharingSemantics.declared).toBe('inherited sharing');
+    expect(inheritedResult.value.data.sharingSemantics.effectiveModel).toBe(
+      'inherited sharing',
+    );
+  });
+
+  it('still reads the keyword out of `modifiers` on a legacy vault that carries no sharingModel', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: LEGACY_MODIFIERS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.sharingSemantics.declared).toBe('with sharing');
+    expect(result.value.data.sharingSource).toBe('node-modifiers');
+  });
+
+  it('reports NOT-READ (not inherits-caller) when NEITHER sharingModel NOR modifiers carries the keyword', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: NOT_READ_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    const s = data.sharingSemantics;
+    expect(s.declared).toBeNull();
+    // The third state, matching `sfi.apex_structure`'s vocabulary — asserting
+    // `inherits-caller` here would be a wrong security answer.
+    expect(s.effectiveModel).toBe('not-read');
+    expect(s.effectiveModel).not.toBe('inherits-caller');
+    expect(data.sharingSource).toBe('not-read');
+    // This node carries no classifiers either, so runsAsSystem is UNCHECKED,
+    // never a bare `false`.
+    expect(s.runsAsSystem).toBeNull();
+    expect(s.note).toContain('NOT READ');
+    expect(result.value.data.disclosure).toContain('NOT READ');
+  });
+
+  it('an ApexTrigger reports system-context, never inherits-caller (a trigger cannot declare a keyword)', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: TRIGGER_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    const s = data.sharingSemantics;
+    expect(s.declared).toBeNull();
+    expect(s.effectiveModel).toBe('system-context');
+    expect(s.effectiveModel).not.toBe('inherits-caller');
+    expect(s.runsAsSystem).toBe(true);
+    expect(data.sharingSource).toBe('trigger-system-context');
+    expect(s.note).toContain('CANNOT declare a sharing keyword');
   });
 
   it('surfaces calls with target ApiName', async () => {

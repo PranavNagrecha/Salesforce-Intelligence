@@ -266,6 +266,157 @@ const fullBodyFlowSeed: ExtractionResult = {
 };
 
 // =============================================================================
+// Seed S: the STALE-VAULT shape. A record-triggered flow whose ONLY firing
+// contexts are `<decisions>` rules — the record-trigger criterion was never
+// extracted (a real, observed builder gap: an older builder recorded a
+// `<start><filterFormula>` context but not a `<start><filters>` one). The
+// entry criteria are therefore UNKNOWN, and an empty list must not be read as
+// "this flow runs on every save". The decisions also carry no `sourceName`, so
+// their names are unrecoverable from this graph.
+// =============================================================================
+
+const STALE_FLOW_ID = 'Flow:Case_StaleVault';
+const STALE_DECISION_ID_1 = 'ConditionalContext:Flow:Case_StaleVault.condition-0';
+const STALE_DECISION_ID_2 = 'ConditionalContext:Flow:Case_StaleVault.condition-1';
+
+const staleVaultFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: STALE_FLOW_ID,
+      type: 'Flow',
+      apiName: 'Case_StaleVault',
+      label: 'Case Stale Vault',
+      properties: {
+        label: 'Case Stale Vault',
+        description: null,
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'Update',
+        flowExtractionWarnings: [],
+        conditions: [
+          {
+            kind: 'flow-decision',
+            conditionContextId: STALE_DECISION_ID_1,
+            expression: 'and',
+            fieldRefs: ['CustomField:Case.Status'],
+          },
+          {
+            kind: 'flow-decision',
+            conditionContextId: STALE_DECISION_ID_2,
+            expression: 'and',
+            fieldRefs: ['CustomField:Case.Resolution_Code__c'],
+          },
+        ],
+      },
+    }),
+    makeNode({
+      id: STALE_DECISION_ID_1,
+      type: 'ConditionalContext',
+      apiName: 'Flow:Case_StaleVault.condition-0',
+      parentId: STALE_FLOW_ID,
+      properties: {
+        kind: 'flow-decision',
+        expression: 'and',
+        fieldRefs: ['CustomField:Case.Status'],
+        synthesized: false,
+      },
+    }),
+    makeNode({
+      id: STALE_DECISION_ID_2,
+      type: 'ConditionalContext',
+      apiName: 'Flow:Case_StaleVault.condition-1',
+      parentId: STALE_FLOW_ID,
+      properties: {
+        kind: 'flow-decision',
+        expression: 'and',
+        fieldRefs: ['CustomField:Case.Resolution_Code__c'],
+        synthesized: false,
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: STALE_FLOW_ID,
+      toId: STALE_DECISION_ID_1,
+      edgeType: 'firesWhen',
+      source: 'condition-extractor',
+      properties: { conditionIndex: 0 },
+    }),
+    makeEdge({
+      fromId: STALE_FLOW_ID,
+      toId: STALE_DECISION_ID_2,
+      edgeType: 'firesWhen',
+      source: 'condition-extractor',
+      properties: { conditionIndex: 1 },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed U: a firing context carrying NO `kind` at all (a vault built before the
+// classifier). Entry criteria CANNOT be separated from decision rules, and
+// guessing either way would be an invented answer.
+// =============================================================================
+
+const UNCLASSIFIED_FLOW_ID = 'Flow:Case_Unclassified';
+const UNCLASSIFIED_CONDITION_ID =
+  'ConditionalContext:Flow:Case_Unclassified.condition-0';
+
+const unclassifiedConditionFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: UNCLASSIFIED_FLOW_ID,
+      type: 'Flow',
+      apiName: 'Case_Unclassified',
+      label: 'Case Unclassified',
+      properties: {
+        label: 'Case Unclassified',
+        description: null,
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'Update',
+        flowExtractionWarnings: [],
+        conditions: [
+          {
+            conditionContextId: UNCLASSIFIED_CONDITION_ID,
+            expression: 'Status EqualTo Closed',
+            fieldRefs: ['CustomField:Case.Status'],
+          },
+        ],
+      },
+    }),
+    makeNode({
+      id: UNCLASSIFIED_CONDITION_ID,
+      type: 'ConditionalContext',
+      apiName: 'Flow:Case_Unclassified.condition-0',
+      parentId: UNCLASSIFIED_FLOW_ID,
+      properties: {
+        expression: 'Status EqualTo Closed',
+        fieldRefs: ['CustomField:Case.Status'],
+        synthesized: false,
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: UNCLASSIFIED_FLOW_ID,
+      toId: UNCLASSIFIED_CONDITION_ID,
+      edgeType: 'firesWhen',
+      source: 'condition-extractor',
+      properties: { conditionIndex: 0 },
+    }),
+  ],
+};
+
+// =============================================================================
 // Seed 2: A minimal Flow — no body sections, no decisions, no trigger
 // conditions. Verifies the empty-array fallbacks.
 // =============================================================================
@@ -791,6 +942,8 @@ beforeAll(async () => {
     triggerSeed,
     subflowCallerSeed,
     r7FlowSeed,
+    staleVaultFlowSeed,
+    unclassifiedConditionFlowSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -837,12 +990,17 @@ describe('explainFlowHandler', () => {
     expect(data.status).toBe('Active');
     expect(data.processType).toBe('AutoLaunchedFlow');
     // Trigger info: triggerType from properties, triggerObject from
-    // outgoing triggersOn edge, conditions from outgoing firesWhen
-    // edges.
+    // outgoing triggersOn edge, ENTRY criteria from the outgoing firesWhen
+    // edges whose ConditionalContext is `kind: 'flow-recordtrigger'`.
     expect(data.triggerInfo.triggerType).toBe('RecordAfterSave');
     expect(data.triggerInfo.triggerObject).toBe(ACCOUNT_ID);
-    // Three firesWhen edges → three trigger conditions surface.
-    expect(data.triggerInfo.conditions.length).toBe(3);
+    // ENTRY-CRITERIA-ARE-NOT-DECISION-RULES: three firesWhen edges, but only
+    // ONE is a record-trigger context. The other two are `<decisions>` rules
+    // and belong to `decisions`, not to "when does this flow run?".
+    expect(data.triggerInfo.conditions.length).toBe(1);
+    expect(data.triggerInfo.conditionsState).toBe('entry-criteria');
+    expect(data.triggerInfo.conditionsNote).toBeNull();
+    expect(data.triggerInfo.unclassifiedConditions).toEqual([]);
     // The disclosure is the verbatim explainer-tier signal.
     expect(data.disclosure).toBe('Structured narrative; Claude composes prose');
     // P4-flow-conditions: conditions carry a runtime-evaluation heuristic flag.
@@ -1018,28 +1176,30 @@ describe('explainFlowHandler', () => {
     expect(stmt).toMatch(/next scheduled interval|runs again/);
   });
 
-  it('surfaces the fields each trigger/firing condition evaluates', async () => {
+  // ENTRY-CRITERIA-ARE-NOT-DECISION-RULES. `triggerInfo.conditions` answers
+  // "when does this flow RUN?" — so it must carry ONLY the `<start>` criteria.
+  // It used to dump every `firesWhen` context in, so the answer named the
+  // fields the flow's internal `<decisions>` branch on and the `<start>` block
+  // never mentions. `sfi.flow_graph` (which reads `start.filters`) always got
+  // this right; the two tools contradicted each other on the same flow.
+  it('surfaces ONLY the record-trigger entry criteria, with the fields each evaluates', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const conditions = result.value.data.triggerInfo.conditions;
-    // Three firesWhen edges → three conditions. Each must surface the
-    // `fieldRefs` from its ConditionalContext node — previously dropped,
-    // which left a real record-trigger/firing row as just the bare connector
-    // ("and") with no indication of WHAT gates the flow. The sibling tools
-    // order_of_execution + what_happens_on_save already read this same node
-    // property, and the v2.0f decision axis surfaces it; the trigger axis
-    // must agree (it read the same nodes but projected only `expression`).
-    expect(conditions.length).toBe(3);
+    expect(conditions.length).toBe(1);
+    expect(conditions[0]?.conditionKind).toBe('flow-recordtrigger');
+    expect(conditions[0]?.conditionContextId).toBe(FULL_CONDITION_TRIGGER_ID);
+    // Each entry criterion surfaces the `fieldRefs` from its ConditionalContext
+    // node — without them a real row is just the bare connector ("and") with no
+    // indication of WHAT gates the flow.
     expect(conditions[0]?.fieldReferences).toEqual([
       'CustomField:Account.Industry__c',
     ]);
-    expect(conditions[1]?.fieldReferences).toEqual([
-      'CustomField:Account.AnnualRevenue',
-    ]);
-    expect(conditions[2]?.fieldReferences).toEqual([
-      'CustomField:Account.EmployeeCount',
-    ]);
+    // The two decision fields must NOT appear as entry criteria.
+    const entryFields = conditions.flatMap((c) => [...c.fieldReferences]);
+    expect(entryFields).not.toContain('CustomField:Account.AnnualRevenue');
+    expect(entryFields).not.toContain('CustomField:Account.EmployeeCount');
   });
 
   it('surfaces action calls with target type and actionType for apex calls', async () => {
@@ -1099,34 +1259,90 @@ describe('explainFlowHandler', () => {
     expect(writes.some((w) => w.object.includes('.'))).toBe(false);
   });
 
-  it('surfaces decisions from the properties.conditions mirror', async () => {
+  // The mirror carries the `<start>` entry criterion alongside the
+  // `<decisions>` rules. Emitting all of it made the flow's record-trigger
+  // criterion appear as a decision named `condition-0` — a decision the flow
+  // does not have. Only `kind: 'flow-decision'` entries are decisions.
+  it('surfaces ONLY flow-decision entries from the properties.conditions mirror', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const decisions = result.value.data.decisions;
-    // The mirror has 3 entries; all 3 surface as decisions (the
-    // trigger-context entry is also a row, since the v2.0a mirror
-    // does not distinguish trigger vs decision at the schema level).
-    expect(decisions.length).toBe(3);
-    // The first entry corresponds to the trigger context.
-    expect(decisions[0]?.decisionName).toBe(
-      'Flow:Account_FullBody.condition-0',
+    // Mirror has 3 entries; the record-trigger one is NOT a decision.
+    expect(decisions.length).toBe(2);
+    expect(decisions.map((d) => d.conditionContextId)).toEqual([
+      FULL_DECISION_CONDITION_ID_1,
+      FULL_DECISION_CONDITION_ID_2,
+    ]);
+    // The entry criterion must not have leaked into the decision list.
+    expect(decisions.map((d) => d.conditionContextId)).not.toContain(
+      FULL_CONDITION_TRIGGER_ID,
     );
-    expect(decisions[0]?.conditions[0]).toBe('Industry__c = "Technology"');
-    // The second entry is the AnnualRevenue decision.
-    expect(decisions[1]?.conditions[0]).toBe('AnnualRevenue > 1000000');
+    expect(decisions.flatMap((d) => [...d.conditions])).not.toContain(
+      'Industry__c = "Technology"',
+    );
+    expect(decisions[0]?.conditions[0]).toBe('AnnualRevenue > 1000000');
+    expect(decisions[1]?.conditions[0]).toBe('EmployeeCount > 50');
     // Each decision surfaces the fields it evaluates (mirror `fieldRefs`) —
     // previously dropped, which left real flows (where the expression is just
     // the bare connector "and") with no indication of WHAT they branch on.
     expect(decisions[0]?.fieldReferences).toEqual([
-      'CustomField:Account.Industry__c',
-    ]);
-    expect(decisions[1]?.fieldReferences).toEqual([
       'CustomField:Account.AnnualRevenue',
     ]);
-    expect(decisions[2]?.fieldReferences).toEqual([
+    expect(decisions[1]?.fieldReferences).toEqual([
       'CustomField:Account.EmployeeCount',
     ]);
+  });
+
+  // ===========================================================================
+  // ENTRY-CRITERIA-ARE-NOT-DECISION-RULES — the honest-absence states. An
+  // empty `conditions` must be readable as CHECKED or UNCHECKED; it must never
+  // silently mean "this flow runs on every save".
+  // ===========================================================================
+  it('reports entry criteria as NOT-DETERMINED (never empty-means-none) when a record-triggered flow has no record-trigger context', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: STALE_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    const t = data.triggerInfo;
+    expect(t.conditions).toEqual([]);
+    expect(t.conditionsState).toBe('not-determined');
+    expect(t.conditionsNote).toContain('NOT DETERMINED');
+    expect(t.conditionsNote).toContain('INDISTINGUISHABLE');
+    // The decision fields must NOT be presented as the flow's entry criteria.
+    expect(t.conditions.flatMap((c) => [...c.fieldReferences])).toEqual([]);
+    // The zero is UNCHECKED and says so on the shared honesty surface.
+    expect(data.coverageCaveat?.status).toBe('unknown');
+    expect(data.coverageCaveat?.message).toContain('not checked');
+    // Both decisions still surface — with NULL names, not the synthetic ids.
+    expect(data.decisions.map((d) => d.decisionName)).toEqual([null, null]);
+    expect(data.decisions.map((d) => d.conditionContextId)).toEqual([
+      STALE_DECISION_ID_1,
+      STALE_DECISION_ID_2,
+    ]);
+    // Both gaps are reported; the entry-criteria gap must not hide the other.
+    expect(data.coverageCaveat?.missingCoverage.length).toBe(2);
+    expect(data.coverageCaveat?.message).toContain('Decision NAMES');
+  });
+
+  it('reports conditions as UNCLASSIFIED, and does not guess, when a firing context carries no `kind`', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: UNCLASSIFIED_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    const t = data.triggerInfo;
+    expect(t.conditionsState).toBe('unclassified');
+    // Not guessed into EITHER list.
+    expect(t.conditions).toEqual([]);
+    expect(data.decisions).toEqual([]);
+    // Surfaced verbatim, with the reason stated.
+    expect(t.unclassifiedConditions.length).toBe(1);
+    expect(t.unclassifiedConditions[0]?.conditionContextId).toBe(
+      UNCLASSIFIED_CONDITION_ID,
+    );
+    expect(t.unclassifiedConditions[0]?.conditionKind).toBeNull();
+    expect(t.conditionsNote).toContain('COULD NOT BE SEPARATED');
+    expect(data.coverageCaveat?.status).toBe('unknown');
   });
 
   it('returns empty arrays for a minimal Flow with no body', async () => {
@@ -1136,8 +1352,13 @@ describe('explainFlowHandler', () => {
     const data = result.value.data;
     // No triggersOn edge → null triggerObject.
     expect(data.triggerInfo.triggerObject).toBeNull();
-    // No firesWhen edges → empty conditions array.
+    // No firesWhen edges → empty conditions array. This flow is NOT record-
+    // triggered, so the empty entry-criteria list is a CHECKED zero: there is
+    // no `<start>` filter surface for criteria to live on, and the note says so.
     expect(data.triggerInfo.conditions).toEqual([]);
+    expect(data.triggerInfo.conditionsState).toBe('not-applicable');
+    expect(data.triggerInfo.conditionsNote).toContain('not a record trigger');
+    expect(data.coverageCaveat).toBeUndefined();
     // No outgoing edges in any category.
     expect(data.actionCalls).toEqual([]);
     expect(data.subflowCalls).toEqual([]);
@@ -1403,13 +1624,13 @@ describe('explainFlowHandler — bounded graph queries', () => {
 // =============================================================================
 // BUG 7 — the decision row must surface the firer's REAL name (the Flow
 // decision `<name>` + rule `<name>`, captured onto the mirror as `sourceName`)
-// instead of the synthetic `condition-N` handle. When no name was captured,
-// it falls back to the synthetic apiName (unchanged behaviour / older vaults).
+// instead of the synthetic `condition-N` handle. When no name was captured the
+// name is NULL, not the synthetic handle dressed up as a name.
 // =============================================================================
 describe('explainFlowHandler — decision names (BUG 7)', () => {
   const runWith = async (
     mirrorEntry: Record<string, unknown>,
-  ): Promise<readonly { decisionName: string }[]> => {
+  ): Promise<readonly { decisionName: string | null; conditionContextId: string }[]> => {
     const dir = mkdtempSync(join(tmpdir(), 'sfi-explainflow-bug7-'));
     const opened = await openGraph(join(dir, 'ef.db'));
     if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
@@ -1467,7 +1688,10 @@ describe('explainFlowHandler — decision names (BUG 7)', () => {
     expect(decisions[0]?.decisionName).not.toBe('Flow:Decide.condition-0');
   });
 
-  it('falls back to the synthetic condition-N name when no sourceName captured', async () => {
+  // ENTRY-CRITERIA-ARE-NOT-DECISION-RULES: `condition-0` is a GRAPH id, not a
+  // decision name. Rendering it in the `decisionName` slot made an unrecorded
+  // name indistinguishable from a recorded one — an invented value.
+  it('reports decisionName null (NOT the synthetic condition-N handle) when no sourceName was captured', async () => {
     const decisions = await runWith({
       kind: 'flow-decision',
       conditionContextId: 'ConditionalContext:Flow:Decide.condition-0',
@@ -1475,6 +1699,11 @@ describe('explainFlowHandler — decision names (BUG 7)', () => {
       fieldRefs: ['CustomField:Ns__Obj__c.Status__c'],
     });
     expect(decisions).toHaveLength(1);
-    expect(decisions[0]?.decisionName).toBe('Flow:Decide.condition-0');
+    expect(decisions[0]?.decisionName).toBeNull();
+    expect(decisions[0]?.decisionName).not.toBe('Flow:Decide.condition-0');
+    // The synthetic handle is still available — as a handle, labelled as one.
+    expect(decisions[0]?.conditionContextId).toBe(
+      'ConditionalContext:Flow:Decide.condition-0',
+    );
   });
 });
