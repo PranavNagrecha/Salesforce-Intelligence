@@ -77,6 +77,11 @@ import {
 } from './coverage-trust.js';
 import { readFieldDataType } from './field-properties.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { detectPicklistLiteralMismatch } from './picklist-literal-check.js';
+import {
+  normalizePicklistValues,
+  resolveGlobalValueSetValues,
+} from './picklist-values.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -123,7 +128,38 @@ export interface WhatIfRemovePicklistValueOutput {
   readonly coverageCaveat?: CoverageCaveat;
   readonly trust: TrustSummary;
   readonly disclosure: string;
+  /**
+   * Whether the value the caller named is actually ON this field.
+   *
+   * `not-checked` means the vault could not resolve the value set at all — it
+   * is NOT a synonym for "the value is fine". A destructive verdict whose
+   * subject was never verified has to say so.
+   */
+  readonly valueState: 'active' | 'inactive' | 'not-checked';
+  /** The declared value set; `null` when `valueState` is `not-checked`. */
+  readonly declaredValues: readonly string[] | null;
+  /** Verbatim `valueState`-driven disclosures. Absent when `active`. */
+  readonly boundaries?: readonly string[];
 }
+
+/**
+ * Verbatim boundary for a value that is already deactivated. The scan STILL
+ * runs — deactivating and deleting are different operations with different
+ * blast radii, and the caller asked about the delete.
+ */
+const inactiveValueBoundary = (value: string): string =>
+  `\`${value}\` is already INACTIVE on this field: it cannot be selected on new records, but existing records may still hold it. Removing it from the value set is a metadata delete, not a deactivation — the impact below is the impact of the DELETE.`;
+
+/**
+ * The field's api name for the refusal message. Falls back to the canonical id
+ * so the sentence never contains an empty backtick pair.
+ */
+const readFieldApiName = (node: Node, fieldId: ComponentId): string =>
+  node.apiName.length > 0 ? node.apiName : fieldId;
+
+/** Verbatim boundary when the vault cannot resolve the value set at all. */
+const notCheckedBoundary = (value: string): string =>
+  `This field's value set is not inline in the vault — commonly a GlobalValueSet reference this refresh did not resolve. Whether \`${value}\` is a declared value was NOT CHECKED, and the impact scan below assumes it exists. Confirm the value in Setup before acting.`;
 
 /**
  * The verbatim disclosure surfaced in every response. Encodes the
@@ -384,6 +420,60 @@ export const whatIfRemovePicklistValueHandler = async (
   }
 
   const value = input.value;
+
+  // VALUE EXISTENCE GATE. This is a destructive-verdict tool: a typo'd value
+  // used to return a `review` verdict byte-identical to a real value's, and
+  // the caller's next action is a metadata delete. Resolve the DECLARED value
+  // set first — inline, else the field's GlobalValueSet edge.
+  const inlineValues = normalizePicklistValues(
+    nodeResult.value.properties['picklistValues'],
+  );
+  const resolvedValues =
+    inlineValues ?? (await resolveGlobalValueSetValues(ctx, fieldId))?.values ?? null;
+
+  let valueState: 'active' | 'inactive' | 'not-checked';
+  let declaredValues: readonly string[] | null;
+  const boundaries: string[] = [];
+  if (resolvedValues === null) {
+    // NOT resolvable. Proceed, but never as though the value was checked.
+    valueState = 'not-checked';
+    declaredValues = null;
+    boundaries.push(notCheckedBoundary(value));
+  } else {
+    const match = resolvedValues.find(
+      (v) => v.value.trim().toLowerCase() === value.trim().toLowerCase(),
+    );
+    if (match === undefined) {
+      // Resolved and NOT present. Refuse — and reuse the sibling's matching +
+      // "did you mean" logic rather than writing a second one. Note that an
+      // empty-but-present value set lands here too (`Declared values: (none)`),
+      // which is correct and different from `not-checked`.
+      const mismatch = detectPicklistLiteralMismatch(
+        readFieldApiName(nodeResult.value, fieldId),
+        [value],
+        resolvedValues,
+      );
+      const declaredList =
+        (mismatch?.definedValues ?? resolvedValues)
+          .map((v) => v.value)
+          .join(', ') || '(none)';
+      const didYouMean =
+        mismatch !== null && mismatch.suggestions.length > 0
+          ? ` Did you mean ${mismatch.suggestions
+              .map((sug) => `'${sug}'`)
+              .join(' / ')}?`
+          : '';
+      return err({
+        kind: 'invalid-query',
+        message: `\`${value}\` is not a declared value on \`${fieldId}\`. Declared values: ${declaredList}.${didYouMean} Pass a declared value, or call \`sfi.explain_field\` on this field to list the value set. No impact scan was run.`,
+        path: 'value',
+      });
+    }
+    valueState = match.isActive ? 'active' : 'inactive';
+    declaredValues = resolvedValues.map((v) => v.value);
+    if (!match.isActive) boundaries.push(inactiveValueBoundary(value));
+  }
+
   const needles = buildValueNeedles(value);
 
   // Walk every incoming edge; for each source node, check whether its
@@ -500,6 +590,9 @@ export const whatIfRemovePicklistValueHandler = async (
       compatibility,
       impacts: sortedImpacts,
       verdict,
+      valueState,
+      declaredValues,
+      ...(boundaries.length > 0 ? { boundaries } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       trust: {
         provenance: 'offline_snapshot',

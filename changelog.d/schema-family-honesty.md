@@ -104,3 +104,19 @@
   `.strict()`, mirrored as `additionalProperties: false` in the advertised JSON
   Schema — refuses an unrecognized argument rather than ignoring it. Agreement
   is case-insensitive, since Salesforce api names are.
+
+- **`sfi.what_if_remove_picklist_value` checks the value exists before rendering
+  a verdict.** A typo'd value returned a `review` verdict byte-identical to a
+  real value's — and the caller's next action on this tool's output is a
+  metadata delete. The declared value set is now resolved first (inline
+  `picklistValues`, else the field's GlobalValueSet edge). A value the field
+  does not declare is refused with `invalid-query` listing the declared values
+  and a did-you-mean; no impact scan is run. `valueState`
+  (`active` | `inactive` | `not-checked`) and `declaredValues` are added to the
+  payload. An already-INACTIVE value is still scanned, with a boundary saying
+  the removal is a metadata DELETE, not a deactivation. When the value set
+  cannot be resolved, the scan proceeds but says the value was NOT CHECKED
+  rather than treating unresolvable as fine.
+
+  **Behaviour change for callers:** a host that used to get a verdict for a typo
+  now gets a refusal.

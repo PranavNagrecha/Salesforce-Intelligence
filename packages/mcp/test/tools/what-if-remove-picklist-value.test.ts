@@ -87,6 +87,8 @@ const makeEdge = (
 
 const ACCOUNT_OBJ = 'CustomObject:Account';
 const PICK_FIELD = 'CustomField:Account.Industry';
+const INACTIVE_PICK_FIELD = 'CustomField:Account.Legacy_Stage__c';
+const UNRESOLVED_PICK_FIELD = 'CustomField:Account.Unresolved_Stage__c';
 const TEXT_FIELD = 'CustomField:Account.NotPicklist';
 const VR_ID = 'ValidationRule:Account.Tech_Special';
 const VR_NO_MATCH_ID = 'ValidationRule:Account.OtherCheck';
@@ -107,6 +109,31 @@ const seed: ExtractionResult = {
       id: PICK_FIELD,
       type: 'CustomField',
       apiName: 'Industry',
+      parentId: ACCOUNT_OBJ,
+      // FIX 7: a real declared value set, so the tool can tell a typo from a
+      // value that genuinely has no impacts.
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: ['Tech', 'Banking', 'Finance'],
+      },
+    }),
+    // FIX 7: a value set whose only entry is DEACTIVATED.
+    makeNode({
+      id: INACTIVE_PICK_FIELD,
+      type: 'CustomField',
+      apiName: 'Legacy_Stage__c',
+      parentId: ACCOUNT_OBJ,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: [{ value: 'Legacy', isActive: false }],
+      },
+    }),
+    // FIX 7: a picklist whose value set the vault could NOT resolve — no
+    // inline values and no GlobalValueSet edge.
+    makeNode({
+      id: UNRESOLVED_PICK_FIELD,
+      type: 'CustomField',
+      apiName: 'Unresolved_Stage__c',
       parentId: ACCOUNT_OBJ,
       properties: { dataType: 'Picklist' },
     }),
@@ -403,16 +430,19 @@ describe('whatIfRemovePicklistValueHandler', () => {
     expect(result.value.data.compatibility).toBe('breaking');
   });
 
-  it('returns review/safe when no impacts match (unknown value)', async () => {
+  it('returns review/safe when a DECLARED value has no impacts', async () => {
+    // `Banking` is declared on the field and appears in no component text —
+    // the only case where an empty impact list is an honest answer.
     const result = await whatIfRemovePicklistValueHandler(ctx, {
       fieldId: PICK_FIELD,
-      value: 'NotAValueAnywhere',
+      value: 'Banking',
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.impacts.length).toBe(0);
     expect(result.value.data.compatibility).toBe('review');
     expect(result.value.data.verdict).toBe('safe');
+    expect(result.value.data.valueState).toBe('active');
   });
 
   it('sorts impacts by componentId ASC for deterministic output', async () => {
@@ -541,5 +571,105 @@ describe('whatIfRemovePicklistValueInputSchema', () => {
       value: '',
     });
     expect(parsed.success).toBe(false);
+  });
+});
+
+/**
+ * FIX 7 — check the value exists before rendering a destructive verdict.
+ *
+ * This is a `what_if_*` tool: a typo'd value used to return a `review` verdict
+ * byte-identical to a real value's, and the caller's next action is a metadata
+ * delete. Every other honesty rule in this product exists to prevent exactly
+ * that.
+ */
+describe('whatIfRemovePicklistValueHandler — value existence gate (FIX 7)', () => {
+  it('refuses a value the field does not declare', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tehc',
+    });
+    // Pre-fix: ok, `compatibility: 'review'`, `verdict: 'safe'` — identical to
+    // a real value that happens to have no impacts.
+    //
+    // NOTE on the missing "Did you mean": the suggestion engine is the shared
+    // `detectPicklistLiteralMismatch` / `suggestClosest`, which scores by
+    // substring containment and token overlap. A TRANSPOSITION ('Tehc' vs
+    // 'Tech') scores zero there, so no suggestion is offered. That is
+    // pre-existing shared-helper behaviour, and writing a second matcher here
+    // was explicitly out of scope — the refusal is the fix.
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toBe(
+      '`Tehc` is not a declared value on `CustomField:Account.Industry`. Declared values: Tech, Banking, Finance. Pass a declared value, or call `sfi.explain_field` on this field to list the value set. No impact scan was run.',
+    );
+  });
+
+  it('offers the shared did-you-mean when the suggester can score the typo', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Techno',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("Did you mean 'Tech'?");
+    expect(result.error.message).toContain('No impact scan was run.');
+  });
+
+  it('still scans an INACTIVE value, and says the delete is not a deactivation', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: INACTIVE_PICK_FIELD,
+      value: 'Legacy',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.valueState).toBe('inactive');
+    expect(result.value.data.declaredValues).toEqual(['Legacy']);
+    expect(result.value.data.boundaries).toContain(
+      '`Legacy` is already INACTIVE on this field: it cannot be selected on new records, but existing records may still hold it. Removing it from the value set is a metadata delete, not a deactivation — the impact below is the impact of the DELETE.',
+    );
+    expect(result.value.data.verdict).toBeDefined();
+  });
+
+  it('never silently proceeds as though an unresolvable value set was checked', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: UNRESOLVED_PICK_FIELD,
+      value: 'Anything',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.valueState).toBe('not-checked');
+    expect(result.value.data.declaredValues).toBeNull();
+    expect(result.value.data.boundaries).toContain(
+      "This field's value set is not inline in the vault — commonly a GlobalValueSet reference this refresh did not resolve. Whether `Anything` is a declared value was NOT CHECKED, and the impact scan below assumes it exists. Confirm the value in Setup before acting.",
+    );
+  });
+
+  it('leaves a real ACTIVE value byte-identical apart from the additive keys', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.valueState).toBe('active');
+    expect(result.value.data.declaredValues).toEqual([
+      'Tech',
+      'Banking',
+      'Finance',
+    ]);
+    expect(result.value.data.boundaries).toBeUndefined();
+    expect(result.value.data.impacts.length).toBeGreaterThan(0);
+  });
+
+  it('matches case-insensitively but echoes the caller spelling verbatim', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.valueState).toBe('active');
+    expect(result.value.data.value).toBe('tech');
   });
 });
