@@ -11,15 +11,24 @@
  * (`objectApiName`, `componentId: CustomObject:…`, `fieldId`), and the tool
  * must accept it, ECHO the scope it resolved (`appliedScope`), and NEVER
  * silently strip a mismatched alias. The `resolveObjectAlias` /
- * `resolveFieldAlias` / `resolveApexClassAlias` resolvers below are the ONE
- * shared normalizer every object- / field- / class-scoped tool routes through:
- * one distinct target → `ok`; disagreeing aliases or (when required) none →
- * `invalid-query`.
+ * `resolveFieldAlias` / `resolveApexClassAlias` / `resolveContainerAlias`
+ * resolvers below are the ONE shared normalizer every object- / field- /
+ * class- / container-scoped tool routes through: one distinct target → `ok`;
+ * disagreeing aliases or (when required) none → `invalid-query`.
+ *
+ * They are called from HANDLERS, never from `z.preprocess`. That is not a
+ * style preference: a preprocess step cannot emit a NAMED `invalid-query` —
+ * throwing from it yields a bare Zod error — and `z.object` strips unknown
+ * keys, so a marker smuggled out of preprocess vanishes silently.
+ * `mergeInputAliases` therefore stays first-wins on purpose; refusing is the
+ * resolvers' job.
  */
 
 import type { ComponentId, McpError } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
+
+import { coercePrefix } from './coerce-id.js';
 
 /** First non-empty trimmed string among `values`. */
 export const firstNonEmpty = (
@@ -323,6 +332,99 @@ export const resolveApexClassAlias = (
   if (!resolved.ok) return resolved;
   const componentId = resolved.value as string;
   return ok({ componentId, apexClass: componentId.slice('ApexClass:'.length) });
+};
+
+/** A resolved permission CONTAINER scope: a Profile or a PermissionSet. */
+export interface ResolvedContainerScope {
+  /** Canonical `Profile:<ApiName>` or `PermissionSet:<ApiName>`. */
+  readonly componentId: string;
+  /**
+   * Which container family the id names.
+   *
+   * Only meaningful once the caller has confirmed `componentId` carries a
+   * `Profile:` / `PermissionSet:` prefix. A `componentId` bearing some OTHER
+   * `Type:` prefix is deliberately passed through unchanged (see below) so the
+   * caller's own wrong-type check produces its precise message; for that value
+   * this field reads `'Profile'` and means nothing.
+   */
+  readonly containerType: 'Profile' | 'PermissionSet';
+  /** Bare container api name, with the container prefix stripped. */
+  readonly apiName: string;
+}
+
+/**
+ * Resolve a single permission CONTAINER from the interchangeable selectors a
+ * router / host may pass: `componentId`, `profileId` / `profileApiName` /
+ * `profileName`, and `permissionSetId` / `permissionSetApiName` /
+ * `permissionSetName`.
+ *
+ * ## Coercion is per key, by the KEY'S OWN name
+ *
+ * This is the whole point. The per-tool `z.preprocess` hack this replaces took
+ * the VALUE from one key and the PREFIX from the mere PRESENCE of another, so
+ * `{ profileApiName: 'X', permissionSetApiName: 'Y' }` answered about
+ * `PermissionSet:X` — a THIRD component neither selector named, whose answer
+ * differs materially. Here a `profile*` key can only ever produce a `Profile:`
+ * id from a bare name, a `permissionSet*` key only a `PermissionSet:` one, and
+ * two selectors naming different components are REFUSED.
+ *
+ * A `componentId` (or any selector value) that already carries a DIFFERENT
+ * `Type:` prefix is returned UNCHANGED — `coercePrefix`'s wrong-type branch —
+ * so the caller's own `Profile:`/`PermissionSet:` check rejects it with its
+ * precise message instead of it being mangled into `Profile:CustomObject:…`
+ * and 404-ing as a phantom.
+ *
+ * The refusal grammar is deliberately identical to `profile_security`'s
+ * private `resolveProfileRef`, so the two never read as different products.
+ */
+export const resolveContainerAlias = (
+  raw: unknown,
+  opts: { readonly required?: boolean } = {},
+): Result<ResolvedContainerScope | null, McpError> => {
+  const required = opts.required ?? true;
+  const src = asRecord(raw);
+
+  const candidates: string[] = [];
+  // Profile-family keys: a bare name is a PROFILE api name.
+  for (const key of ['profileId', 'profileApiName', 'profileName'] as const) {
+    const v = readNonEmpty(src, key);
+    if (v !== undefined) candidates.push(coercePrefix(v, ['Profile:', 'PermissionSet:']));
+  }
+  // PermissionSet-family keys: a bare name is a PERMISSION SET api name.
+  for (const key of [
+    'permissionSetId',
+    'permissionSetApiName',
+    'permissionSetName',
+  ] as const) {
+    const v = readNonEmpty(src, key);
+    if (v !== undefined) candidates.push(coercePrefix(v, ['PermissionSet:', 'Profile:']));
+  }
+  // Canonical `componentId`: a bare name keeps the historical Profile default.
+  const cid = readNonEmpty(src, 'componentId');
+  if (cid !== undefined) candidates.push(coercePrefix(cid, ['Profile:', 'PermissionSet:']));
+
+  const resolved = oneDistinct(candidates, {
+    required,
+    emptyMessage:
+      'name the profile or permission set — pass `componentId` (`Profile:X` / `PermissionSet:X`) or the natural `profileApiName` / `permissionSetApiName` selector',
+    conflictMessage: (distinct) =>
+      `container selectors name different targets (${distinct.join(', ')}); pass exactly one of componentId / profileId / profileApiName / permissionSetId / permissionSetApiName`,
+    path: 'componentId',
+  });
+  if (!resolved.ok) return resolved;
+  if (resolved.value === null) return ok(null);
+  const componentId = resolved.value;
+  const isPermSet = componentId.startsWith('PermissionSet:');
+  const apiName = isPermSet
+    ? componentId.slice('PermissionSet:'.length)
+    : componentId.startsWith('Profile:')
+      ? componentId.slice('Profile:'.length)
+      : componentId;
+  return ok({
+    componentId,
+    containerType: isPermSet ? 'PermissionSet' : 'Profile',
+    apiName,
+  });
 };
 
 /** Parse `CustomField:ObjectApi.FieldApi` → bare object api name. */
