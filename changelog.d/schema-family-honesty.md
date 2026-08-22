@@ -168,3 +168,12 @@
   verbatim `boundaries[]` entry stating the matches are LEXICAL substring hits
   and the ranking is a lexical score, not relevance. A truncated page adds a
   `note`. `offset` is a new input.
+
+- **`sfi.search_components` stops letting the alphabet outrank the query.** A
+  whole-token match that was not a PREFIX scored the same 2.5 as an incidental
+  substring, and the tie broke on `api_name ASC` — so a query for "Age" put
+  `ADM_Manage_External_Users` ahead of the field the caller meant. A new 2.6
+  tier sits between prefix (2.8) and contains (2.5) for a query matching a whole
+  token of the api name, with `length(api_name) ASC` as the tie-break before
+  `api_name ASC`. The 3.0 / 2.8 / 2.0 / 1.0 tiers are untouched, so the
+  exact-then-prefix window `object_360` depends on is unchanged.

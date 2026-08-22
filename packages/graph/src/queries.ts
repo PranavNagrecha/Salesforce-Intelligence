@@ -35,6 +35,16 @@ const NODE_COLUMNS =
 const EDGE_COLUMNS =
   'from_id, to_id, edge_type, confidence, source, properties_json';
 
+/**
+ * Escape a user query for use inside a regular expression.
+ *
+ * The whole-token score tier puts caller input in front of a regex engine for
+ * the first time. Every metacharacter is escaped so a query like `Amount(` is
+ * matched literally rather than throwing or matching something else.
+ */
+const regexEscape = (query: string): string =>
+  query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /** A single result row from `searchNodes`. */
 export interface SearchHit {
   readonly id: ComponentId;
@@ -995,10 +1005,16 @@ export const searchNodesPage = async (
 
   const pattern = `%${query}%`;
   const prefixPattern = `${query}%`;
-  // 1 exact + 4 score ILIKEs + 3 WHERE ILIKEs in this order.
+  // LIKE patterns are UNCHANGED — a `%` / `_` in a query keeps behaving exactly
+  // as it did, because changing LIKE semantics is not this fix. The new
+  // whole-token tier is the only place caller input reaches a REGEX engine, and
+  // it is escaped for that engine specifically.
+  const tokenPattern = `(^|[^A-Za-z0-9])${regexEscape(query)}([^A-Za-z0-9]|$)`;
+  // 1 exact + 1 prefix + 1 token-regex + 3 score ILIKEs + 3 WHERE ILIKEs.
   const params: DuckDBValue[] = [
     query,
     prefixPattern,
+    tokenPattern,
     pattern,
     pattern,
     pattern,
@@ -1021,6 +1037,7 @@ export const searchNodesPage = async (
       CASE
         WHEN api_name = ? THEN 3.0
         WHEN api_name ILIKE ? THEN 2.8
+        WHEN regexp_matches(lower(api_name), lower(?)) THEN 2.6
         WHEN api_name ILIKE ? THEN 2.5
         WHEN label ILIKE ? THEN 2.0
         WHEN properties_json ILIKE ? THEN 1.0
@@ -1028,7 +1045,7 @@ export const searchNodesPage = async (
       END AS score
     FROM nodes
     WHERE (api_name ILIKE ? OR label ILIKE ? OR properties_json ILIKE ?)${typesClause}
-    ORDER BY score DESC, api_name ASC
+    ORDER BY score DESC, length(api_name) ASC, api_name ASC
     LIMIT ? OFFSET ?`;
 
   try {
