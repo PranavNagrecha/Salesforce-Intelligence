@@ -100,6 +100,12 @@ const lifecycleProcessInputBaseSchema = z.object(
    * `objectApiName`; it never DELETES the source key, so an undeclared alias
    * would be an unrecognized key on an otherwise valid `{objectId: '<Obj>'}`
    * request. The handler still reads only the canonical `objectApiName`.
+   *
+   * "ADVERTISED" was a claim, not a fact, until `LIFECYCLE_PROCESS_INPUT_SCHEMA`
+   * in `roster.ts` actually listed it — for the whole life of this comment the
+   * key was accepted and unadvertised, which is the opposite of what it says.
+   * `advertised-schema-parity.test.ts` now asserts the claim for every tool, so
+   * the comment can only be true.
    */
   objectId: z.string().min(1).optional(),
   field: z.string().min(1).optional(),

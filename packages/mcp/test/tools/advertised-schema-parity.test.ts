@@ -20,6 +20,10 @@
  *
  * The fix interpolates the tuple. This test is what keeps it interpolated.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { changedSinceInputSchema } from '../../src/tools/changed-since.js';
@@ -27,6 +31,11 @@ import { SECTION_NAMES } from '../../src/tools/field-360.js';
 import { V01_TOOLS } from '../../src/tools/index.js';
 import { COMPONENT_TYPES } from '../../src/tools/list-components.js';
 import { unusedComponentsInputSchema } from '../../src/tools/unused-components.js';
+import {
+  computeParityViolations,
+  enforcedInputSchemas,
+  type ParityAxis,
+} from '../helpers/advertised-schema-parity.js';
 
 const advertisedSectionEnum = (): readonly string[] => {
   const tool = V01_TOOLS.find((t) => t.name === 'sfi.field_360');
@@ -134,6 +143,123 @@ describe('component-type enums: advertised set equals what the validator accepts
     // test can drift.
     for (const toolName of ['sfi.unused_components', 'sfi.changed_since']) {
       expect(advertisedTypeEnum(toolName)).toEqual([...COMPONENT_TYPES]);
+    }
+  });
+});
+
+/**
+ * THE GENERALISED GATE.
+ *
+ * Both blocks above are correct and both are NARROW: three tools, one property
+ * each, on the `enum` axis alone. A single batch then shipped ten tools whose
+ * advertised schema disagreed with the validator on the axes nobody checked —
+ * the property SET, `required`, and `additionalProperties` — and every one of
+ * them walked past a green suite.
+ *
+ * The correct assertion already existed in `route-question-schema-parity.
+ * test.ts`: `Object.keys(schema.shape).sort()` against the advertised keys. It
+ * was scoped to one tool. Here it runs over EVERY tool `dispatchTool` routes,
+ * plus `required`, plus `.strict()` ⇒ `additionalProperties: false`, plus the
+ * enum axis in BOTH directions.
+ *
+ * Known disagreements live in `advertised-schema-parity-baseline.json` with a
+ * per-entry reason. The baseline is matched EXACTLY: an unlisted violation
+ * fails, a listed-but-gone violation fails, and a violation whose key list
+ * changed fails — so it can only be shortened by repairs.
+ */
+describe('every tool advertises exactly the input contract it enforces', () => {
+  interface BaselineEntry {
+    readonly tool: string;
+    readonly axis: ParityAxis;
+    readonly fingerprint: string;
+    readonly reason: string;
+  }
+
+  const baseline: readonly BaselineEntry[] = (
+    JSON.parse(
+      readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), 'advertised-schema-parity-baseline.json'),
+        'utf8',
+      ),
+    ) as { readonly entries: readonly BaselineEntry[] }
+  ).entries;
+
+  const key = (v: { readonly tool: string; readonly axis: string; readonly fingerprint: string }): string =>
+    `${v.tool} :: ${v.axis} :: ${v.fingerprint}`;
+
+  const violations = computeParityViolations(V01_TOOLS);
+
+  it('every advertised tool has a dispatch arm with a resolvable Zod validator', () => {
+    // `computeParityViolations` throws rather than skipping when an arm cannot
+    // be parsed; this asserts the coverage NUMBER so a silently shrinking map
+    // is visible too.
+    const bindings = enforcedInputSchemas();
+    const rosterNames = new Set(V01_TOOLS.map((t) => t.name));
+    const unbound = [...rosterNames].filter((name) => !bindings.has(name));
+    expect(unbound).toEqual([]);
+    expect(bindings.size).toBeGreaterThanOrEqual(rosterNames.size);
+  });
+
+  it('has no advertised-vs-enforced disagreement outside the reasoned baseline', () => {
+    const baselined = new Set(baseline.map(key));
+    const unlisted = violations.filter((v) => !baselined.has(key(v)));
+    // FAIL-BEFORE: this gate reported 45 disagreements across 37 tools on the
+    // commit it landed against; 18 of them across 15 tools were introduced by
+    // the batch under review and are repaired in the same change, leaving the
+    // 27 pre-existing rows in the baseline beside it.
+    expect(unlisted.map(key)).toEqual([]);
+  });
+
+  it('the baseline holds no stale rows — it can only shrink', () => {
+    const live = new Set(violations.map(key));
+    const stale = baseline.filter((entry) => !live.has(key(entry)));
+    expect(stale.map(key)).toEqual([]);
+  });
+
+  it('every baseline row carries a reason a reader can act on', () => {
+    const thin = baseline.filter((entry) => entry.reason.trim().length < 40);
+    expect(thin.map((entry) => `${entry.tool}/${entry.axis}`)).toEqual([]);
+  });
+
+  // ── Named regressions, so a re-break says which finding came back ────────
+  const advertisedKeysOf = (name: string): readonly string[] => {
+    const tool = V01_TOOLS.find((t) => t.name === name);
+    if (tool === undefined) throw new Error(`${name} missing from roster`);
+    const schema = tool.inputSchema as {
+      readonly properties?: Readonly<Record<string, unknown>>;
+    };
+    return Object.keys(schema.properties ?? {}).sort();
+  };
+
+  it('sfi.order_of_execution advertises the per-event pagination it built', () => {
+    // FAIL-BEFORE: advertised exactly {objectApiName}. `events`/`event`/
+    // `includeInactive`/`limit`/`offset`/`cursor` were accepted and unreachable.
+    for (const knob of ['events', 'event', 'includeInactive', 'limit', 'offset', 'cursor']) {
+      expect(advertisedKeysOf('sfi.order_of_execution')).toContain(knob);
+    }
+    const schema = V01_TOOLS.find((t) => t.name === 'sfi.order_of_execution')
+      ?.inputSchema as { readonly additionalProperties?: unknown };
+    expect(schema.additionalProperties).toBe(false);
+  });
+
+  it('sfi.what_happens_on_save advertises the re-query its own output names', () => {
+    // The response says "re-query with includeInactive: true for the full list".
+    // FAIL-BEFORE: that re-query was unconstructible from the advertised schema.
+    expect(advertisedKeysOf('sfi.what_happens_on_save')).toContain('includeInactive');
+    expect(advertisedKeysOf('sfi.what_happens_on_save')).toContain('phase');
+  });
+
+  it('sfi.find_hardcoded_values advertises excludeTestClasses and its scope keys', () => {
+    for (const knob of ['excludeTestClasses', 'componentId', 'nameContains']) {
+      expect(advertisedKeysOf('sfi.find_hardcoded_values')).toContain(knob);
+    }
+  });
+
+  it('sfi.lifecycle_process advertises the RecordType scoping axis', () => {
+    // Unadvertised, a caller asking a record-type-scoped question silently got
+    // the UNSCOPED answer — the scope decides which automation is excluded.
+    for (const knob of ['objectId', 'recordType', 'recordTypeId', 'businessProcess']) {
+      expect(advertisedKeysOf('sfi.lifecycle_process')).toContain(knob);
     }
   });
 });

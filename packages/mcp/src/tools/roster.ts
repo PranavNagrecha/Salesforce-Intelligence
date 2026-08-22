@@ -32,6 +32,11 @@ import { rosterDeclaredOnlyDisclosure } from './declared-only-disclosure.js';
 import { SECTION_NAMES as FIELD_360_SECTION_NAMES } from './field-360.js';
 import { COMPONENT_TYPES } from './list-components.js';
 import { OBJECT_360_SECTIONS } from './object-360.js';
+// The `phase` filter on both SOE tools is the SAME tuple the handlers walk.
+// Spread from the constant rather than hand-listed: eleven phase strings copied
+// twice is exactly the drift shape this file keeps getting caught by, and
+// `soe-payload-bounds.ts` is an import-free leaf so the edge is free.
+import { AUTOMATION_PHASES } from './soe-payload-bounds.js';
 // STALE-CHECK-DESCRIPTION-UNDERSTATES-COVERAGE: the two staleness tools'
 // descriptions hand-listed 6 of the 15 checked types and rotted when the set
 // widened. Interpolate the constant the handler actually loops over so the
@@ -365,6 +370,10 @@ const GET_COMPONENT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
     id: { type: 'string', minLength: 1 },
     componentId: { type: 'string', minLength: 1 },
     maxBodyBytes: { type: 'integer', minimum: 0, maximum: 30000 },
+    // ADVERTISED-VS-ENFORCED PARITY: the concept-reasoning opt-out is a real
+    // knob on the Zod schema; unadvertised it was unreachable from a
+    // schema-driven host, which is the same as not shipping it.
+    includeConceptReasoning: { type: 'boolean' },
   },
   required: ['id'],
 });
@@ -1584,7 +1593,12 @@ const TRACE_DEBUG_LOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
     maxDepth: { type: 'number', minimum: 0, maximum: 50 },
     includeTimeline: { type: 'boolean' },
   },
-  required: ['logText'],
+  // `logText` is NOT required of a caller: the four aliases above are merged
+  // onto it by the tool's preprocess, so `{log: '...'}` is a complete request.
+  // Advertising it as required refused the alias call the aliases exist for.
+  // (`sfi.explain_debug_log` carries the identical over-claim and is baselined
+  // in advertised-schema-parity-baseline.json — it predates this branch; this
+  // tool shipped ON this branch, so it is fixed here.)
 });
 
 /**
@@ -1635,6 +1649,10 @@ const GUEST_EXPOSURE_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
       cursor: { type: 'string', minLength: 1 },
+      // ADVERTISED-VS-ENFORCED PARITY: the orphan-findings list pages on its
+      // OWN offset, independent of `offset`. Unadvertised, the second list's
+      // tail was unreachable however the caller paged the first.
+      orphanOffset: { type: 'number', minimum: 0 },
     },
   });
 
@@ -1659,6 +1677,9 @@ const COMMUNITY_CATALOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       siteApiName: { type: 'string', minLength: 1 },
       objectApiName: { type: 'string', minLength: 1 },
     },
+    // Zod is `.strict()` here — advertise the refusal, so a host knows an
+    // unrecognised key is REJECTED rather than silently dropped.
+    additionalProperties: false,
   });
 
 const WHY_CANT_USER_SEE_RECORD_INPUT_SCHEMA: Readonly<
@@ -1931,15 +1952,34 @@ const LIFECYCLE_PROCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       objectApiName: { type: 'string', minLength: 1 },
+      // `objectId` is merged onto `objectApiName` by the tool's alias
+      // preprocess. Its Zod declaration carries a comment calling it an
+      // "ADVERTISED ALIAS" — which was false until this entry existed.
+      objectId: { type: 'string', minLength: 1 },
       field: { type: 'string', minLength: 1 },
       value: { type: 'string', minLength: 1 },
       event: { type: 'string', enum: ['insert', 'update'] },
+      // The RecordType scoping axis: it DECIDES which automation is excluded
+      // (anything positively gated to record types outside the scope), so a
+      // caller that could not name it silently received the UNSCOPED answer to
+      // a scoped question.
+      recordType: { type: 'string', minLength: 1 },
+      recordTypeId: { type: 'string', minLength: 1 },
+      businessProcess: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
-    required: ['objectApiName'],
+    // `objectApiName` is no longer listed as required: now that `objectId` is
+    // advertised, EITHER names the object (the preprocess merges the alias onto
+    // the canonical key), so demanding `objectApiName` would refuse the very
+    // alias call the line above exists to enable. A call naming neither is
+    // refused by the validator with a message that says which to pass.
+    // The Zod schema is `.strict()`: an unrecognised key is REFUSED (with a
+    // message naming the accepted set), never ignored. Advertise that, so a
+    // host knows a typo will be rejected rather than silently dropped.
+    additionalProperties: false,
   });
 
 /**
@@ -1963,6 +2003,8 @@ const ACTION_CHAIN_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.free
     limit: { type: 'integer', minimum: 1, maximum: 25 },
   },
   required: ['action'],
+  // Zod is `.strict()` here — advertise the refusal.
+  additionalProperties: false,
 });
 
 /**
@@ -2081,13 +2123,18 @@ const SAFE_TO_DELETE_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       fieldId: { type: 'string', minLength: 1 },
+      // Interchangeable with `fieldId`; the Zod refine accepts EITHER.
+      componentId: { type: 'string', minLength: 1 },
       // Finding #35: 'proposal' emits a LOCAL destructiveChanges.xml for the field.
       format: { type: 'string', enum: ['json', 'checklist', 'proposal'] },
       // CR-CAP-L5: opt-in live population cross-check on a `safe` verdict.
       liveEnabled: { type: 'boolean' },
       orgAlias: { type: 'string', minLength: 1 },
     },
-    required: ['fieldId'],
+    // No key is individually required: `fieldId` OR `componentId` satisfies the
+    // handler, and advertising `required: ['fieldId']` made a host refuse the
+    // `componentId`-only call the tool serves. The one-of rule is enforced as a
+    // NAMED `invalid-query` that says which argument to pass.
   });
 
 /**
@@ -2263,8 +2310,18 @@ const OBJECT_ACCESS_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       componentId: { type: 'string', minLength: 1 },
+      // The L2 alias set the router and sibling tools actually pass.
+      objectApiName: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
+      // Disclosure-only: other permission sets named in a user-intersection
+      // question, echoed back so the answer states what it did NOT union.
+      relatedPermissionSetIds: {
+        type: 'array',
+        items: { type: 'string', minLength: 1 },
+      },
     },
-    required: ['componentId'],
+    // One of `componentId` / `objectApiName` / `objectId` — enforced as a named
+    // `invalid-query`, so no single key is `required` here.
   });
 
 /**
@@ -2289,6 +2346,8 @@ const OBJECT_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       maxRowsPerSection: { type: 'integer', minimum: 1, maximum: 100 },
     },
+    // Zod is `.strict()` here — advertise the refusal.
+    additionalProperties: false,
   });
 
 /**
@@ -2337,6 +2396,8 @@ const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       fieldId: { type: 'string', minLength: 1 },
+      // Interchangeable with `fieldId`; the Zod refine accepts EITHER.
+      componentId: { type: 'string', minLength: 1 },
       includeSections: {
         type: 'array',
         items: {
@@ -2351,8 +2412,10 @@ const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       maxRowsPerSection: { type: 'integer', minimum: 1, maximum: 200 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
+      includeConceptReasoning: { type: 'boolean' },
     },
-    required: ['fieldId'],
+    // `fieldId` OR `componentId` — see the safe_to_delete_field note; naming
+    // one of them `required` made a host refuse the other call shape.
   });
 
 /**
@@ -2486,23 +2549,47 @@ const LAST_MODIFIED_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.what_happens_on_save`. Mirrors
- * `whatHappensOnSaveInputSchema`. The `event` enum is duplicated from
- * the Zod schema in `what-happens-on-save.ts` — the source of truth
- * for the enum lives in the Zod validator and drift between Zod and
- * this schema is a code-review concern.
+ * `whatHappensOnSaveInputSchema`.
+ *
+ * It advertised three keys while the validator accepted nine and had become
+ * `.strict()`. The gap was not cosmetic: the response tells the reader to
+ * "re-query with includeInactive: true for the full list" — a re-query no
+ * schema-driven host could construct, because `includeInactive` was not
+ * advertised. `phase` was likewise the documented recovery path for a phase
+ * truncated out of the full view, and equally unreachable. Parity across ALL
+ * of it is now asserted by `advertised-schema-parity.test.ts`.
  */
 const WHAT_HAPPENS_ON_SAVE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
       objectApiName: { type: 'string', minLength: 1 },
+      // The L2 alias set: name the object the way the router or a sibling tool
+      // would. Declared on the validator precisely so `.strict()` cannot reject
+      // the alias call — so they belong here too.
+      object: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
       event: {
         type: 'string',
         enum: ['insert', 'update', 'upsert', 'delete', 'undelete'],
       },
       recordTypeId: { type: 'string', minLength: 1 },
+      // Single-phase filter — the recovery path when a phase is truncated out
+      // of the full view.
+      phase: { type: 'string', enum: [...AUTOMATION_PHASES] },
+      includeConceptReasoning: { type: 'boolean' },
+      // The knob the response's own truncation disclosure names.
+      includeInactive: { type: 'boolean' },
     },
-    required: ['objectApiName', 'event'],
+    // `event` is the only key the validator requires; the object is named by
+    // ANY of the four selectors above, refused as a NAMED `invalid-query` when
+    // none is given. Advertising `objectApiName` as required made a host refuse
+    // the `componentId`/`objectId` call shapes the tool serves.
+    required: ['event'],
+    // Zod is `.strict()`: an unrecognised key is REFUSED with a message naming
+    // the accepted set, never ignored.
+    additionalProperties: false,
   });
 
 /**
@@ -2529,19 +2616,47 @@ const WHY_FIELD_CHANGED_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.order_of_execution`. Mirrors
- * `orderOfExecutionInputSchema`. The schema takes a single
- * `objectApiName` (non-empty string); the tool emits a per-event
- * tree over the four supported DML events (insert / update / delete
- * / undelete; upsert is excluded as a client-side composition of
- * insert + update).
+ * `orderOfExecutionInputSchema`. The tool emits a per-event tree over the four
+ * supported DML events (insert / update / delete / undelete; upsert is excluded
+ * as a client-side composition of insert + update).
+ *
+ * This entry advertised ONE key while the validator accepted eleven and had
+ * become `.strict()`. Six of the eleven — `events`, `event`, `includeInactive`,
+ * `limit`, `offset`, `cursor` — were the per-event pagination and scoping built
+ * for this tool, and every one of them was unreachable from a host that
+ * validates arguments before sending them. `sfi.describe_analysis` serves this
+ * object verbatim, so the understatement propagated to the gateway too.
  */
 const ORDER_OF_EXECUTION_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
       objectApiName: { type: 'string', minLength: 1 },
+      // The L2 alias set, declared on the validator so `.strict()` cannot
+      // reject the alias call.
+      object: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      phase: { type: 'string', enum: [...AUTOMATION_PHASES] },
+      // Narrow the composition to these DML events (defaults to all four).
+      events: {
+        type: 'array',
+        items: { type: 'string', enum: ['insert', 'update', 'delete', 'undelete'] },
+        minItems: 1,
+      },
+      // Scalar alias for a one-element `events`.
+      event: { type: 'string', enum: ['insert', 'update', 'delete', 'undelete'] },
+      includeInactive: { type: 'boolean' },
+      // PER EVENT, not across the four — see `paging.note` on the response.
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
-    required: ['objectApiName'],
+    // No key is individually required: the object is named by any ONE of the
+    // four selectors, and a call naming none is refused as a NAMED
+    // `invalid-query` that says which argument to pass.
+    additionalProperties: false,
   });
 
 /**
@@ -2730,6 +2845,7 @@ const EXPLAIN_APEX_METHOD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       classApiName: { type: 'string', minLength: 1 },
       methodName: { type: 'string', minLength: 1 },
+      includeConceptReasoning: { type: 'boolean' },
     },
     required: ['classApiName'],
   });
@@ -3206,6 +3322,14 @@ const FIND_HARDCODED_VALUES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         type: 'string',
         enum: ['id', 'email', 'username', 'url', 'sandbox-data'],
       },
+      // FIND-HARDCODED-VALUES-IGNORES-SCOPE: the caller scope the handler
+      // honours and echoes back as `appliedScope`. Unadvertised, an org-wide
+      // scan was the only reachable call.
+      componentId: { type: 'string', minLength: 1 },
+      nameContains: { type: 'string', minLength: 1 },
+      // The description already tells the reader to "pass excludeTestClasses:
+      // true to scan production only" — advertise the knob that sentence names.
+      excludeTestClasses: { type: 'boolean' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
@@ -4110,7 +4234,17 @@ const FIND_HARDCODED_VALUES_ANYWHERE_INPUT_SCHEMA: Readonly<
       type: 'array',
       items: {
         type: 'string',
-        enum: ['apex', 'formula', 'validation-rule', 'workflow-rule'],
+        // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL: the last two
+        // shipped on the validator and the handler but never here, so the two
+        // scopes added to close a blind spot were themselves unrequestable.
+        enum: [
+          'apex',
+          'formula',
+          'validation-rule',
+          'workflow-rule',
+          'restriction-rule',
+          'custom-label',
+        ],
       },
     },
     limit: { type: 'integer', minimum: 1, maximum: 500 },

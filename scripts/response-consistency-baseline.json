@@ -72,11 +72,15 @@
       "sfi.generate_data_dictionary",
       "sfi.guest_exposure_report",
       "sfi.history_tracking_gaps",
+      "sfi.lifecycle_process",
+      "sfi.object_access_audit",
+      "sfi.order_of_execution",
       "sfi.pii_inventory",
       "sfi.process_builder_migration_candidates",
       "sfi.recordtype_availability",
       "sfi.tab_availability",
-      "sfi.unused_fields_deep"
+      "sfi.unused_fields_deep",
+      "sfi.what_happens_on_save"
     ],
     "targetId": [
       "sfi.find_apex_usages",
@@ -89,6 +93,7 @@
     ],
     "recordTypeId": [
       "sfi.layout_for_user",
+      "sfi.lifecycle_process",
       "sfi.what_happens_on_save"
     ],
     "permissionSetId": [

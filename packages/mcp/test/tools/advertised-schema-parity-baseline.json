@@ -1,0 +1,176 @@
+{
+  "note": [
+    "Known, DEFERRED advertised-vs-enforced input-schema disagreements.",
+    "Read by test/tools/advertised-schema-parity.test.ts. Every entry must match a LIVE violation exactly:",
+    "  - a violation with no entry FAILS the gate (new drift),",
+    "  - an entry with no violation FAILS the gate (stale baseline - delete the row),",
+    "  - a violation whose fingerprint CHANGED fails too, because the fingerprint names the exact keys.",
+    "That makes this file a ratchet: it can only be shortened by fixing things, and widening a known drift re-fails.",
+    "Add a row by hand, with a reason that says what is unreachable and why the repair is deferred. Never regenerate it wholesale.",
+    "Every row below was verified present at merge-base 5bd377f6 - none was introduced by the batch this file shipped with."
+  ],
+  "entries": [
+    {
+      "tool": "sfi.get_component",
+      "axis": "required",
+      "fingerprint": "enforced=[] advertised=[id]",
+      "reason": "PRE-EXISTING over-claim, surfaced only once the `required` axis started MEASURING requiredness by removal instead of reading `.isOptional()`: `id` is advertised as required while the `componentId` alias satisfies it through the preprocess, so a strict host refuses the `{componentId}` call the tool serves. One-line repair (drop `required`), deferred because it predates this batch and `sfi.get_component` is a core-profile tool whose call shape a lot of prompt text assumes."
+    },
+    {
+      "tool": "sfi.list_components",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[recordTriggered,status,triggerObject] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING at merge-base 5bd377f6. Three Flow-specific narrowing filters the validator accepts and the handler honours. Unadvertised they are unreachable from a schema-driven host, which forces a full-roster listing plus client-side filtering for the exact question they exist to answer. Deferred: this review was scoped to the drift THIS batch introduced; the advertised `type` enum on the same tool is already the subject of its own guard and the two should be corrected together."
+    },
+    {
+      "tool": "sfi.search_flow_metadata",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[summarize,triggerObject] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `summarize` (return a digest instead of full matches) and `triggerObject` are accepted and honoured, never advertised. Deferred as pre-existing; nothing else about this tool's advertisement is wrong (`query` really is required \u2014 the removal probe confirms the validator refuses a call without it), so this is a two-line additive repair whenever the tool is next opened."
+    },
+    {
+      "tool": "sfi.live_report_usage",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[folderName,nameContains] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `folderName` / `nameContains` narrow the live query and are silently unreachable. Deferred with the `.strict()` entry for the same tool."
+    },
+    {
+      "tool": "sfi.live_report_usage",
+      "axis": "additionalProperties",
+      "fingerprint": "zod=.strict() advertised=(absent)",
+      "reason": "PRE-EXISTING. The validator is `.strict()` (an unrecognised key is REFUSED) and the advertisement does not say so, so a host cannot know a typo will be rejected rather than ignored. All three live-plane tools in this file share the omission and should be corrected in one pass over `live-plane.ts`'s roster entries."
+    },
+    {
+      "tool": "sfi.live_folder_access",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[nameContains] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `nameContains` narrows the folder scan and is unadvertised. Deferred with the sibling live-plane entries."
+    },
+    {
+      "tool": "sfi.live_folder_access",
+      "axis": "additionalProperties",
+      "fingerprint": "zod=.strict() advertised=(absent)",
+      "reason": "PRE-EXISTING `.strict()` validator with no `additionalProperties: false` in the advertisement. Same omission as the two sibling live-plane tools."
+    },
+    {
+      "tool": "sfi.live_email_template_usage",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[folderName,nameContains] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `folderName` / `nameContains` are accepted and unadvertised, exactly as on `sfi.live_report_usage`."
+    },
+    {
+      "tool": "sfi.live_email_template_usage",
+      "axis": "additionalProperties",
+      "fingerprint": "zod=.strict() advertised=(absent)",
+      "reason": "PRE-EXISTING `.strict()` validator with no `additionalProperties: false` in the advertisement. Same omission as the two sibling live-plane tools."
+    },
+    {
+      "tool": "sfi.why_cant_user_see_record",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[objectApiName] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `objectApiName` is accepted (it scopes the sharing question to one object) and unadvertised."
+    },
+    {
+      "tool": "sfi.why_cant_user_see_record",
+      "axis": "required",
+      "fingerprint": "enforced(shape)=[userContext] advertised=[componentId,userContext]",
+      "reason": "PRE-EXISTING. Note the `enforced(shape)` marker: this is the one tool whose FULL advertised key set does not itself parse, so requiredness could not be measured by removal and the gate fell back to the Zod shape. The advertisement demands `componentId` that the validator treats as optional. Untangling it means first making the advertised key set self-consistent (see the `properties` entry for the same tool), which is why it is deferred rather than patched."
+    },
+    {
+      "tool": "sfi.lightning_pages",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[object,objectApiName,objectId,profile,profileApiName,profileId,profileName] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING, and the largest single gap outside the batch: SEVEN accepted keys unadvertised (`object`/`objectApiName`/`objectId` plus the whole `profile*` family). A host can therefore only ask the componentId-shaped question, never the object- or profile-scoped one the handler implements."
+    },
+    {
+      "tool": "sfi.list_view_sharing",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[groupId,nameContains,object,objectApiName,objectId,sharedTo,sharedToId,sharedWithRoleApiName] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. EIGHT accepted keys unadvertised \u2014 the object aliases plus the entire shared-with axis (`sharedTo`, `sharedToId`, `sharedWithRoleApiName`, `groupId`, `nameContains`). The shared-with keys decide WHICH sharing rows come back, so a caller that cannot name them silently receives the unfiltered answer."
+    },
+    {
+      "tool": "sfi.layout_assignments",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[object,objectApiName,objectId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. The three object aliases (`object`/`objectApiName`/`objectId`) are accepted and unadvertised."
+    },
+    {
+      "tool": "sfi.integration_map",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[componentId,object,objectApiName,objectId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `componentId` and the three object aliases are accepted and unadvertised, so the org-wide map is the only reachable call."
+    },
+    {
+      "tool": "sfi.event_subscribers",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[eventApiName] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `eventApiName` (name the platform event by api name rather than by id) is accepted and unadvertised."
+    },
+    {
+      "tool": "sfi.explain_field",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[componentId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `componentId` is interchangeable with `fieldId` at the validator and unadvertised."
+    },
+    {
+      "tool": "sfi.apex_test_coverage",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[apexClassId,apiName,classId,className,componentId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. FIVE accepted class selectors (`apexClassId`, `apiName`, `classId`, `className`, `componentId`) unadvertised, so the per-class mode is unreachable and only the org-wide mode can be requested."
+    },
+    {
+      "tool": "sfi.automation_collisions",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[componentId,objectApiName,objectId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `componentId` / `objectApiName` / `objectId` are accepted and unadvertised."
+    },
+    {
+      "tool": "sfi.field_access_audit",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[componentId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `componentId` is interchangeable with `fieldId` at the validator and unadvertised."
+    },
+    {
+      "tool": "sfi.unused_fields_deep",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[staticOnly] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `staticOnly` (skip the dynamic-usage pass) is accepted and unadvertised."
+    },
+    {
+      "tool": "sfi.tech_debt_score",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[componentId,object,objectApiName,objectId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `componentId` plus the three object aliases are accepted and unadvertised, so only the org-wide score is reachable."
+    },
+    {
+      "tool": "sfi.governor_limit_risks",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[apiName,classApiName,componentId] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `apiName` / `classApiName` / `componentId` scope the scan to one class and are unadvertised."
+    },
+    {
+      "tool": "sfi.generate_sharing_summary",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[componentId,objectApiName] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING. `componentId` / `objectApiName` scope the generated document to one object and are unadvertised."
+    },
+    {
+      "tool": "sfi.cdc_subscribers",
+      "axis": "properties",
+      "fingerprint": "enforced-not-advertised=[objectApiName] advertised-not-reachable=[]",
+      "reason": "PRE-EXISTING, and on a HIDDEN tool: `sfi.cdc_subscribers` is a back-compat alias folded into `sfi.event_topology` and is excluded from `tools/list` entirely, so no host reads this schema. Kept in the gate rather than exempted \u2014 a hidden alias is still dispatchable and `sfi.run_analysis` still serves its schema \u2014 but ranked below every advertised tool for repair."
+    },
+    {
+      "tool": "sfi.explain_error",
+      "axis": "required",
+      "fingerprint": "enforced=[] advertised=[errorText]",
+      "reason": "PRE-EXISTING over-claim of the same shape: `errorText` advertised as required while `error` / `message` / `errorMessage` / `text` each satisfy it through the preprocess. The aliases exist BECAUSE hosts guess those names, so the advertisement refuses exactly the call the design anticipates. Deferred as pre-existing; `sfi.trace_debug_log` carries the identical shape and IS fixed in this commit because it shipped on this branch."
+    },
+    {
+      "tool": "sfi.explain_debug_log",
+      "axis": "required",
+      "fingerprint": "enforced=[] advertised=[logText]",
+      "reason": "PRE-EXISTING over-claim: `logText` advertised as required while `debugLog` / `log` / `text` / `content` satisfy it through the preprocess. Identical to the `sfi.trace_debug_log` defect fixed in this commit; left baselined because this tool predates the branch and the pair should be corrected together with a look at whether the two schemas should be one constant."
+    }
+  ]
+}

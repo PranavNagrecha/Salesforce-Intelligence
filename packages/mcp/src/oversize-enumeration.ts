@@ -42,6 +42,12 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   //     `handler-capped` below instead. CR-22 added an opaque `cursor` to the
   //     B1 batch (get_edges, find_apex_usages, find_formula_references,
   //     pii_inventory, crud_fls_audit, test_coverage_gaps). ---
+  // Was `handler-capped`, "limit caps but no resume". Both halves went stale in
+  // the commit that gave this tool `offset` plus `totalCount`/`hasMore`/
+  // `nextOffset` (and said so in its description). The row is read by the
+  // release gate to decide whether a dropped tail is reachable, and it was
+  // lying in the direction that SUPPRESSES the probe requirement.
+  'sfi.search_components': { bound: 'paginated', note: 'limit + offset; totalCount/hasMore/nextOffset published on every response' },
   'sfi.list_components': { bound: 'paginated' },
   'sfi.get_edges': { bound: 'paginated', note: 'default limit 200 + byte trim + CR-22 cursor' },
   'sfi.find_apex_usages': { bound: 'paginated', note: 'offset + CR-22 cursor' },
@@ -81,7 +87,6 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   //     CR-22: the B0 audit-strengthening surfaced these as mislabeled (they
   //     were tagged `paginated` but expose only `limit`); reclassified here so
   //     the real-schema gate passes truthfully. ---
-  'sfi.search_components': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   'sfi.automation_collisions': { bound: 'handler-capped', note: 'limit + byte-budget truncator on both findings lists; narrow the object or raise limit, no cursor (R6-15)' },
   'sfi.review_change': { bound: 'handler-capped', note: 'limit + most-dangerous-first ordering; narrow the changeset or raise limit, no cursor (R6-16)' },
   'sfi.ai_exposure_report': { bound: 'handler-capped', note: 'limit + byte-budget truncator on surfaces + piiExposures; narrow by objectApiName or raise limit, no cursor (R6-13)' },
@@ -125,7 +130,9 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.object_access_audit': { bound: 'global-response-budget' },
   'sfi.field_access_audit': { bound: 'global-response-budget' },
   'sfi.recordtype_availability': { bound: 'global-response-budget' },
-  'sfi.order_of_execution': { bound: 'global-response-budget' },
+  // Per-event pagination (limit/offset PER EVENT + a CR-22 cursor) is now
+  // advertised, so this is no longer merely budget-bound.
+  'sfi.order_of_execution': { bound: 'paginated', note: 'limit/offset apply PER EVENT + CR-22 cursor; summary.totalSteps stays whole-composition' },
   'sfi.what_happens_on_save': { bound: 'global-response-budget' },
   'sfi.explain_field': { bound: 'global-response-budget' },
   'sfi.find_component_usages': { bound: 'global-response-budget' },
@@ -245,11 +252,32 @@ export const analyzeOversizeEnumeration = (
           `Add a cursor (CR-22) or reclassify as \`handler-capped\`.`,
       });
     }
-    if (
-      (entry.bound === 'graph-payload-budget' || entry.bound === 'handler-capped') &&
-      hasLimitProperty(tool)
-    ) {
-      // Having limit is fine; bound tag is what we audit.
+    // THE CONVERSE, and the reason `sfi.search_components` sat mislabeled for a
+    // whole release: this branch used to be EMPTY, so the audit could only
+    // catch a `paginated` row that was really a truncator — never a
+    // `handler-capped` row that had quietly grown a resume knob. A row that
+    // understates reachability is the more dangerous direction, because the
+    // release gate reads it to decide whether the dropped tail needs a probe.
+    if (entry.bound === 'handler-capped' && hasResumeKnob(tool)) {
+      violations.push({
+        tool: name,
+        message:
+          `${name} is inventoried as handler-capped but ADVERTISES a resume knob ` +
+          `(\`offset\` or \`cursor\`) — the dropped tail is reachable, so the row ` +
+          `understates the tool. Reclassify as \`paginated\`.`,
+      });
+    }
+    // Same shape one tier down: `global-response-budget` means "no caller limit
+    // knob, the envelope budget is the only bound". A `limit` property
+    // contradicts that outright.
+    if (entry.bound === 'global-response-budget' && hasLimitProperty(tool)) {
+      violations.push({
+        tool: name,
+        message:
+          `${name} is inventoried as global-response-budget but advertises a ` +
+          `\`limit\` — that tag means the envelope budget is the ONLY bound. ` +
+          `Reclassify as \`paginated\` (with a resume knob) or \`handler-capped\`.`,
+      });
     }
     if (!highFanoutProbes.has(name)) {
       violations.push({
