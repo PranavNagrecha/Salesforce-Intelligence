@@ -271,7 +271,7 @@ API name up front:
 
 | Tool                                 | Input                                                | Output                                                  | Purpose                                                                 |
 | ------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `sfi.search_components`              | query text, optional type filter, limit              | ranked list of canonical component IDs with snippets    | Free-text search across the vault (resolver-backed on zero results).    |
+| `sfi.search_components`              | query text, optional type filter, `limit` / `offset` | ranked component IDs with snippets, plus `totalCount` / `hasMore` / `nextOffset` | Free-text LEXICAL substring search across the vault, paged against the true post-filter total (resolver-backed on zero results). |
 | `sfi.get_component`                  | canonical component ID                               | the full Markdown body of one component file           | Fetch a vault file by ID.                                               |
 | `sfi.list_components`                | type filter, parent filter, pagination cursor        | paginated list of IDs of that type                      | Enumerate components by type (e.g., all CustomFields on Account).       |
 | `sfi.get_edges`                      | node ID, optional edge-type filter, direction        | list of edges incident to that node, with confidence    | Walk relationships out of or into one component.                        |
@@ -279,7 +279,7 @@ API name up front:
 | `sfi.search_apex_source`             | regex or literal query                               | matched files and line snippets                         | Grep across raw Apex class and trigger source under `org-kb/source/`.   |
 | `sfi.search_flow_metadata`           | regex or literal query                               | matched Flow XML files with line snippets               | Grep across raw Flow XML under `org-kb/source/`.                        |
 | `sfi.get_manifest`                   | (none)                                               | the contents of `org-kb/meta/manifest.json`             | Inspect refresh time, hashes, component counts, version.                |
-| `sfi.health_check`                   | (none)                                               | `{ok|stale|missing}` plus reason                        | Diagnostic. Tells the caller whether the vault is usable right now.     |
+| `sfi.health_check`                   | (none)                                               | `status`: `healthy` / `degraded` / `unhealthy`, plus `checks` / `issues` / `freshness` | Diagnostic. Tells the caller whether the vault is usable right now.     |
 | `sfi.interpret`                      | canonical component ID, optional `concepts` / `ruleIds` filters | cited structural-implication claims (`interpretations[]` with `groundedIn` + claim confidence) + `trust` block | Join the Concept Model against the component's vault slice — deterministic, offline reasoning (no LLM, no live read). |
 
 `sfi.interpret` is the reasoning tool: it fires the curated Concept Model

@@ -240,8 +240,8 @@ that two active before-save flows on one object run in an **undefined order**, o
 that an `@AuraEnabled` method is an entry point where Apex does not auto-enforce
 field-level security. SfIntelligence answers those with a small second graph.
 
-Alongside the org's grounded vault, the product ships a **Concept Model**: **142**
-org-independent, curated concepts and **193** rules that encode general Salesforce
+Alongside the org's grounded vault, the product ships a **Concept Model**: **143**
+org-independent, curated concepts and **195** rules that encode general Salesforce
 truth — save-order phases, relationship semantics, sharing posture, code-shape
 signals. No org data lives in it; the org enters reasoning **only** through the
 grounded slice at query time. The `sfi.interpret` tool **joins** the two: it

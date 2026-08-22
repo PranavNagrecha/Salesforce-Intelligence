@@ -217,9 +217,22 @@ CustomField id, returns:
   confidence) and `semanticCategory` (`identifier` | `status` |
   `amount` | `date` | `reference` | `descriptor` | `unknown`,
   always `heuristic` confidence).
-- **Usage frequency** — asymmetric `readsFrom` vs `writesTo` edge
-  counts; reveals scratch-field patterns (high writes + zero
-  reads = output of an integration nobody reads).
+- **Usage frequency** — asymmetric read vs write EDGE counts.
+  `incomingReads` counts every inbound edge that CONSUMES the field's
+  value: `readsFrom` (Apex, Flow, condition contexts) **and**
+  `references` (formulas, validation rules, list views, report types,
+  Lightning pages, quick actions, web links). It is an edge count, not
+  a referrer count, so it legitimately differs from
+  `find_formula_references`'s `totalCount`. `readsByEdgeType` gives
+  the per-type breakdown, `countedEdgeTypes` names the vocabulary, and
+  `excludedByEdgeType` publishes the inbound edges seen and rejected
+  (`usedInLayout` is placement, `grantedBy` is permission, `parentOf`
+  is structure). Quote the verbatim `usageFrequency.note`.
+  High writes + low reads suggests a scratch/integration-output
+  pattern — but `incomingReads: 0` is NOT proof of disuse, and the
+  tool attaches a boundary saying so. Never render a zero here as
+  "nobody reads this field"; render it as "no consuming edge is
+  modelled in this vault".
 - **Top-3 similar fields** — by label/apiName token overlap.
 
 Default invocation:

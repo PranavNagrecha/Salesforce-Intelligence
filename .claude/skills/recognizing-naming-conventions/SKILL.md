@@ -70,19 +70,35 @@ The MCP tool is **`sfi.get_naming_convention_report`**. Input:
 { "scope": "CustomField:Account.*" }
 ```
 
-Two valid `scope` values:
+Three valid `scope` values:
 
 - **`'all'`** (or omit `scope`) — analyze every parent object that
   meets the 5-field minimum. Use when the user asks generally.
-- **`'CustomField:{ObjectApiName}.*'`** — narrow to one parent. Use
-  when the user names a specific object.
+- **`'CustomField:{ObjectApiName}'`** and
+  **`'CustomField:{ObjectApiName}.*'`** — equivalent; both narrow to
+  one parent. Use when the user names a specific object.
 
 Anything else returns `invalid-query`.
 
-The response is `{ observations: PatternObservation[] }`. Each
-observation has `scope`, `statement` (human-readable summary),
+The response is `{ observations: PatternObservation[], analyzed, note? }`.
+Each observation has `scope`, `statement` (human-readable summary),
 `evidence: { matching, total, examples[] }` (up to 5 examples), and
 `confidence: 'heuristic'` (always — the recognizer never asserts).
+
+`analyzed` carries the DENOMINATORS, and they are what make an empty
+`observations` list readable:
+
+- `objectsWithCustomFields` / `objectsBelowMinimumGroupSize` /
+  `minimumGroupSize` — how many objects were in scope and how many
+  emitted nothing because they sit under the minimum.
+- `standardFieldsExcluded` — standard fields dropped before grouping
+  WITHIN the analyzed scope, and `standardFieldsExcludedOrgWide` the
+  org-wide figure. They differ on a scoped call by design; never
+  quote the org-wide number as the scoped one.
+- `scopedObjectCustomFieldCount` — the scoped object's custom-field
+  count, `null` on a `scope: 'all'` call.
+
+`note` is present on a scoped call that produced nothing; quote it.
 
 ## The 5-field minimum
 

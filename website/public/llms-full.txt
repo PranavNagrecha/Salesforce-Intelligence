@@ -40,7 +40,7 @@ Key facts for accurate citation:
 - [Glossary](https://sfi.auditforce.cloud/glossary): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
 - [Capabilities](https://sfi.auditforce.cloud/capabilities): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
 - [All tools](https://sfi.auditforce.cloud/tools): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
-- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~8,900 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
+- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~9,300 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
 - [Getting started](https://sfi.auditforce.cloud/getting-started): install, register the MCP server, run the first read-only retrieve.
 - [Configuration](https://sfi.auditforce.cloud/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
 - [FAQ](https://sfi.auditforce.cloud/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
@@ -153,7 +153,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.process_builder_migration_candidates`  -  List active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simp...
 - `sfi.code_quality_audit`  -  General-purpose code-quality entry point.
 - `sfi.governor_limit_risks`  -  Apex-specific narrowing for governor-limit-relevant patterns - the performance/scale subset of the quality catalog.
-- `sfi.test_coverage_gaps`  -  (1) `properties.isTest === true` identifies test classes (excluded from the scan), (2) BFS over incoming `callsApex` edges (capped at depth 3) collects the test c...
+- `sfi.test_coverage_gaps`  -  (1) `properties.isTest === true` identifies test classes (excluded from the scan), (2) BFS over incoming USAGE edges (capped at depth 3; every edge type but `pare...
 - `sfi.test_coverage_for_method`  -  Deep code tool: given an `ApexClass:` or `ApexTrigger:` id (accepted interchangeably as `classApiName`, `componentId`, or `apiName` - a bare name or the canonical...
 - `sfi.meaningful_test_audit`  -  Lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score.
 
@@ -182,7 +182,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 ### Documentation generators (10)
 
 - `sfi.generate_fleet_report`  -  The "state of my orgs" digest: ONE GeneratedDocument composed across EVERY vault in the multi-vault registry, so you get a single artifact instead of running sfi....
-- `sfi.get_naming_convention_report`  -  Return the naming-convention pattern observations, optionally scoped to a glob.
+- `sfi.get_naming_convention_report`  -  Return the naming-convention pattern observations, optionally scoped to one object (`scope: 'CustomField:{Object}'` or `'CustomField:{Object}.*'`; omit or pass `'...
 - `sfi.org_overview`  -  Return a structured org-tour snapshot - the buyer-priority #9 headline answer for the new-to-this-org persona.
 - `sfi.domain_clusters`  -  Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm.
 - `sfi.generate_data_dictionary`  -  Given a CustomObject (the `objectId` accepts either the canonical id `CustomObject:{ApiName}` or a bare object api name like `Account`, coerced to the id - consis...

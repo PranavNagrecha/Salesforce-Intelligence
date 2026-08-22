@@ -117,7 +117,7 @@ you got there.
 ## When already loaded
 
 This skill is **session-scoped** — fire once per session. After the
-two calls succeeded:
+call succeeded:
 
 - Do not re-fire on subsequent Salesforce vocabulary in the same
   session. Do not re-call `get_manifest` to "refresh" the in-memory
@@ -134,10 +134,10 @@ Salesforce-vocabulary message may re-fire this skill.
 | Rationalization | Reality |
 |---|---|
 | "I'll print a quick 'context loaded' note so the user knows I'm ready." | No. The warm-up is invisible by design. Telling the user about it is noise. The answer to their next question is the only visible signal. |
-| "I'll pre-load every type, not just CustomObject, to be thorough." | One call is the warm-up budget. `CustomObject` covers ~80% of follow-up questions. Other types load on demand from the answering skill. |
+| "I'll pre-load every type, not just CustomObject, to be thorough." | One call is the warm-up budget — `sfi.org_card` already carries the per-type scale counts. Other types load on demand from the answering skill. |
 | "The user might ask about Apex, so I'll pre-grep the Apex source too." | `sfi.search_apex_source` is not cheap and not always needed. Don't pre-grep. Wait for the question to specify what to grep for. |
 | "The user typed `/sfi-status`; I'll fire too because they mentioned the vault." | `pre-flight-checks` is the skill for that. It calls `get_manifest` itself as Probe 2. Double-firing is redundant. |
-| "The user only mentioned 'object' in passing; that's not really a Salesforce question." | The skill is supposed to be aggressive about firing on vocabulary. False positives are cheap (two MCP calls); false negatives cost the user a slower next turn. Err toward firing. |
+| "The user only mentioned 'object' in passing; that's not really a Salesforce question." | The skill is supposed to be aggressive about firing on vocabulary. False positives are cheap (one cached MCP call); false negatives cost the user a slower next turn. Err toward firing. |
 | "I'll fire even when there's no Salesforce vocabulary, just in case." | No. Without vocabulary, the user is on a different topic. Firing wastes the warm-up on context that won't be used. |
 | "`get_manifest` failed; I'll show the user the error." | This skill is silent. Forward the failure to the next skill that runs (almost certainly `using-sf-intelligence` or `pre-flight-checks`); they have the right surface for error reporting. |
 
@@ -153,9 +153,9 @@ Salesforce-vocabulary message may re-fire this skill.
   semantics, record counts). Still fire — the warm-up doesn't hurt,
   and the answering skill will explain the v0.1 boundary. But do not
   expand the pre-load to try to compensate.
-- **You catch yourself wanting to add a third call** ("let me also
+- **You catch yourself wanting to add a second call** ("let me also
   pre-load CustomField..."). Stop. The whole-vault warm-up is a v0.2
-  concern. v0.1's budget is two calls.
+  concern. The budget is the ONE `sfi.org_card` call.
 - **The user invoked a slash command and you fired anyway.** Roll
   back: the slash command's skill is the right entry; this pre-loader
   shouldn't be running in parallel.
@@ -172,9 +172,10 @@ to the next skill in the chain), confirm:
       `/sfi-refresh`, or `/sfi-status`.
 - [ ] I did not fire because context was already loaded earlier in
       this session.
-- [ ] I called exactly `sfi.get_manifest` and
-      `sfi.list_components(type: 'CustomObject')` — in that order, no
-      additional calls.
+- [ ] I called exactly `sfi.org_card` with `{}` — one call, no
+      additional calls. (On the `available: false` fallback path only,
+      the older `sfi.get_manifest` +
+      `sfi.list_components(type: 'CustomObject')` pair, in that order.)
 - [ ] I produced no user-visible output from this skill firing. No
       "context loaded" note. No manifest summary. Silence.
 - [ ] If a call failed, I yielded to the next skill rather than

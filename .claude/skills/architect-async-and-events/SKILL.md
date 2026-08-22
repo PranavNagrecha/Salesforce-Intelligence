@@ -510,13 +510,17 @@ destination.
 > the Salesforce UI or external tooling; surface as "schedulable
 > but no detected scheduling call" in the response.
 
-### `sfi.scheduled_job_catalog` — cron-parse-failure fallback (verbatim, per-entry)
+### `sfi.scheduled_job_catalog` — cron is UNAVAILABLE on this plane
 
-> The cron expression `{rawCron}` did not parse cleanly; the raw
-> string is shown verbatim. Salesforce-specific tokens (`L`, `W`,
-> `#`, `LAST_FRIDAY`) are NOT supported by the v2.8 cron parser.
-> Verify the schedule's meaning manually before relying on this
-> entry for refactor decisions.
+There is no cron-parse-failure disclosure, because there is no cron
+parser and no cron producer. `cronExpressions[]` is `[]` and each
+`scheduledByCalls[]` row's `cronExpression` is `null` on every entry
+in every vault — the Apex scanner's `System.schedule(name, cron, new
+X())` regex captures the CLASS NAME and discards the cron argument.
+Say "cron UNAVAILABLE on this plane"; never "this job has no
+schedule", and never quote a cron string this tool did not return.
+The live `CronTrigger` registration is a Tooling-API fact, outside the
+offline vault.
 
 ### `sfi.outbound_message_catalog` — URL-not-probed (verbatim)
 

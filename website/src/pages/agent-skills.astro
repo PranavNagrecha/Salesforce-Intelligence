@@ -47,7 +47,7 @@ const jsonld = [
 
         <h2 id="what-ships">What sf-intelligence provides today</h2>
         <p>sf-intelligence is a read-only MCP server with {siteData.toolCount} tools that answer from a local metadata vault - dependencies, permissions, sharing, Apex, Flows, integrations, and impact analysis. Every answer carries provenance and a confidence tier (<code>declared</code>, <code>parsed</code>, or <code>heuristic</code>), and the default mode is offline and read-only. This is the grounded execution layer a skill would call.</p>
-        <div class="callout"><p><strong>An honest scope note.</strong> sf-intelligence does not ship a downloadable or installable Agent Skills package, and it does not install skills from any skill ecosystem. What it ships is the read-only MCP tool layer described on the <a href="/mcp">MCP page</a> and <a href="/capabilities">capability map</a>. Agent Skills are a complementary layer you can author on top of that; this page explains the division of labor and how you would build one.</p></div>
+        <div class="callout"><p><strong>An honest scope note.</strong> sf-intelligence does not publish a portable Agent Skills package, and it does not install skills from any skill ecosystem. What it ships is the read-only MCP tool layer described on the <a href="/mcp">MCP page</a> and <a href="/capabilities">capability map</a>, plus - for Claude Code users who install it as a plugin - {siteData.skillCount} skills that ride along with that tool layer. Agent Skills are a complementary layer you can author on top of that; this page explains the division of labor and how you would build one.</p></div>
 
         <h2 id="contrast">MCP tools vs Agent Skills</h2>
         <table class="doc-table">

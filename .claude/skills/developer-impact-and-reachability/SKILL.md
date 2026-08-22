@@ -58,12 +58,19 @@ the response so callers can pipeline through a future v2.7.1
 method-scoped resolution — but v2.7 does NOT subset coverage by
 method. Surface this verbatim.
 
-`sfi.method_reachability` and `sfi.test_coverage_for_method` carry a
-`soundness` envelope (`complete` / `blindSpots[]` / `staticCoverage`): when
-the analyzed class uses dynamic Apex they return `complete: false` with a
-`dynamic-apex` blind spot. A reflective caller can make a reachability
-verdict wrong and a test→method mapping incomplete, so treat
-`complete: false` as "verify by reading the source."
+`sfi.method_reachability`, `sfi.call_graph` and
+`sfi.test_coverage_for_method` carry a `soundness` envelope
+(`complete` / `blindSpots[]` / `staticCoverage`) with two blind-spot
+kinds. `dynamic-apex`: the analyzed class uses dynamic Apex, so a
+reflective caller can make a reachability verdict wrong and a
+test→method mapping incomplete. `unwalked-edge-type`: the walk
+traversed a strict SUBSET of the usage edge types, so a component
+reachable only through an un-walked type is absent from the result —
+it carries `walkedEdgeTypes` and `unwalkedEdgeTypes` by name. This is
+why `sfi.call_graph` (a deliberate `callsApex`-only walk) is never
+`complete: true`, while `sfi.method_reachability` (which walks the
+whole usage set) can be. Treat `complete: false` as "verify by reading
+the source", and never present it as a full picture.
 
 The v2.3 composer boundary: **the composers project, not
 predict.** Each what-if composer reads the v2.2-vintage vault state,
@@ -154,14 +161,39 @@ The 16 tools split by question shape. Pick the right entry point.
 Each composer reads the v2.2-vintage vault state, applies its own rule
 set, and returns:
 
-- `findings: WhatIfImpactItem[]` — one entry per affected component.
-- `summary` — per-tool aggregations.
-- `boundaries: string[]` — verbatim disclosure phrases for the tool.
+- `impacts: WhatIfImpactItem[]` — one entry per affected component.
+  (The key is `impacts`, NOT `findings`; no what-if tool emits a
+  `findings` array.)
+- `summary` — per-tool aggregations (the profile composers only).
+- `disclosure: string` — the tool's verbatim boundary paragraph. It is
+  a single string, NOT a `boundaries: string[]`. Surface it verbatim.
 
-Each `WhatIfImpactItem` carries `category`
-(`metadata-blocker` | `code-needs-update` | `integration-touch` |
-`test-class-update` | `invisible-risk` | `configuration-only`),
-`confidence`, `location`, `explanation`, `suggestedAction`.
+Each `WhatIfImpactItem` carries `category`, `componentId`,
+`componentType`, `apiName`, `confidence` and `explanation`. The
+category vocabulary is per tool: the shared six are
+`metadata-blocker` | `code-needs-update` | `integration-touch` |
+`test-class-update` | `invisible-risk` | `configuration-only`, plus
+`input-only` (a dependency the component CONSUMES — deliberately
+excluded from the verdict) and, on `what_if_deactivate_flow`,
+`broken-caller`.
+
+**Two verdict axes, not one.** `what_if_deactivate_flow` and
+`what_if_disable_trigger` return BOTH `structuralVerdict` — what the
+dependency structure says, in practice `safe` / `review` / `risky` /
+`blocking` — and the headline `verdict`. The shared `Verdict` union is
+`safe | review | risky | blocking | unknown | already-inactive`, and
+`already-inactive` is the headline whenever the component does not run
+today, whatever the structure says. It is never downgraded by
+coverage, and it is deliberately NOT folded into `safe`: `safe` means
+"no impacts at all", so reusing it would make an inactive-but-heavily-
+depended-on component read identically to a genuinely inert one.
+`runtimeState`
+{`status`, `currentlyRunning`, `note`} carries the runs-today axis on
+its own, and `currentlyRunning: null` means UNKNOWN — not inactive.
+`entryPoints[]` (where the runtime hands control TO the component) is
+reported separately from `impacts` and is not a dependent.
+`notProvenHarmless` appears exactly when no verdict-bearing impact was
+found; render it with the `safe`.
 
 #### `sfi.what_if_deactivate_flow`
 
@@ -172,13 +204,19 @@ the subflows THIS Flow invokes (`references` / `referenceKind:
 'subflow'`). Each becomes a `WhatIfImpactItem`. **R6-02 — the incoming
 side:** parent Flows that invoke THIS Flow as a subflow are BROKEN
 CALLERS on deactivation, surfaced as a distinct `broken-caller`
-category. Aggregate `verdict`: `safe` (no impacts) / `risky`
-(callsApex only, or broken callers that are all inactive Draft/Obsolete)
-/ `blocking` (record write, trigger, email-send, or subflow-invocation
-impact, OR any broken caller that is an ACTIVE parent Flow — a subflow
-with active parents must not read `safe`). Only `referenceKind:
-'subflow'` incoming edges count as broken callers; a FlexiPage that
-merely embeds the flow is access, not a broken caller.
+category. `structuralVerdict`: `safe` (no verdict-bearing impact) /
+`risky` (callsApex only, or broken callers that are all inactive
+Draft/Obsolete) / `blocking` (record write, trigger, email-send, or
+subflow-invocation impact, OR any broken caller that is an ACTIVE
+parent Flow — a subflow with active parents must not read `safe`).
+`triggersOn` / `listensTo` are NOT impacts: they are the Flow's own
+`entryPoints[]`. The headline `verdict` is `already-inactive` whenever
+the Flow does not run today, whatever the structure says — do not
+report "deactivating this changes nothing" from an inactive Flow's
+empty impact list; report that it is already off and what still
+depends on it. Only `referenceKind: 'subflow'` incoming edges count as
+broken callers; a FlexiPage that merely embeds the flow is access, not
+a broken caller.
 
 ```json
 { "flowId": "Flow:Set_Opportunity_Owner" }
@@ -366,15 +404,29 @@ Direction: `'upstream'` (incoming — who calls me), `'downstream'`
 (outgoing — what do I call), or `'both'`. Default `maxDepth: 3`.
 
 ```json
-{ "classApiName": "ApexClass:OpportunityService", "direction": "both", "maxDepth": 3 }
+{ "rootId": "ApexClass:OpportunityService", "direction": "both", "maxDepth": 3 }
 ```
 
 Class-granularity is the v2.7 honesty boundary. State it.
+
+Input key is **`rootId`** (or the `componentId` alias) — it is
+REQUIRED. There is no `classApiName` alias on this tool, unlike
+`method_reachability` / `explain_apex_method`, so a call naming one is
+an `invalid-query`. `maxDepth` is bounded at **5**; `edgeTypes` widens
+the walk beyond `callsApex`.
 
 The response carries:
 - `nodes[]` — every reached class.
 - `edges[]` — every `callsApex` edge walked.
 - `cycleDetected: boolean` — whether the BFS observed any back-edge.
+- `otherUsageInEdges` {`count`, `byType`} — ALWAYS present. The
+  incoming usage edges this walk did NOT follow. This is what stops
+  `edges: []` reading as "no callers": a `count` of 0 is a CHECKED
+  zero; a non-zero count names exactly what was left unfollowed.
+  Surface it whenever the call list is empty.
+- `soundness` — `complete: false` with an `unwalked-edge-type` blind
+  spot naming the usage edge types (e.g. `references`,
+  `dispatchesAsync`) the default `callsApex`-only walk skipped.
 - `disclosure` — the verbatim class-granularity disclosure.
 
 #### `sfi.downstream_effects`
@@ -401,17 +453,38 @@ granularity is deferred to v2.7.1.
 
 #### `sfi.method_reachability`
 
-Walks upstream `callsApex` from target. Classifies each reached
-upstream node against the entry-point taxonomy:
+Walks upstream **USAGE** edges from the target — every `EdgeType`
+EXCEPT `parentOf` (structural containment) and `grantedBy` (an access
+grant is not a use). It is a DENY-list, not the `['callsApex']`
+allow-list it used to be: an allow-list can never learn about an edge
+type added after it (`dispatchesAsync`, the Apex scanner's
+`references`), and it is wrong in the direction that calls live code
+dead.
+
+ONE walk does both jobs. It classifies each reached node against the
+entry-point taxonomy:
 - `ApexTrigger:*` (any).
 - `ApexClass` with `properties.isRestResource === true`.
 - `ApexClass` with `properties.hasAuraEnabledMethod === true`.
 - `ApexClass` with `properties.hasInvocableMethod === true`.
 - `ApexClass` with any of `properties.isQueueable` /
   `isBatchable` / `isSchedulable`.
+- the ROOT itself when `properties.isTest === true` — the test
+  RUNNER is a test class's entry point. Depth 0 ONLY: a test class
+  UPSTREAM of the root is coverage, not an entry point, so
+  `test-only-reachable` survives.
+- a class reached by a `references` edge from a VisualforcePage /
+  VisualforceComponent / AuraDefinitionBundle — the `controller=`
+  binding, derived from the EDGE rather than a node property.
+- **unproven dynamic registration** — a class whose `superclass` is
+  dotted (another namespace's framework instantiates its own
+  subclasses) or that declares the `Callable` interface. These fire at
+  ANY depth, are floored at `heuristic` confidence, and establish only
+  that the class is BUILT to be invoked from outside this vault —
+  never that the registration is live.
 
-A SEPARATE upstream walk over incoming `callsApex` checks for
-`isTest` nodes — test-only coverage.
+The same walk marks reached `properties.isTest === true` classes as
+test coverage. There is no second walk.
 
 Combined verdict:
 - `entry-point-reachable` — at least one entry point reaches.
@@ -419,10 +492,16 @@ Combined verdict:
   test class does.
 - `likely-dead-code` — neither reaches within the depth cap.
 
-Verbatim disclosure: dynamic dispatch (`Type.forName(...)`) and
-reflective invocation are invisible to the heuristic; a class
-genuinely invoked at runtime via reflection will surface as
-`likely-dead-code`.
+Surface the response's own `disclosure` verbatim rather than
+paraphrasing it. It states the v2.7 class granularity, the depth-3 BFS
+cap, and that dynamic dispatch (`Type.forName`), reflective invocation
+and framework wiring are invisible. Two conditional suffixes matter:
+- on `likely-dead-code` it adds that this is NOT the org's dead-code
+  verdict — `sfi.find_dead_code` runs an additional whole-word source
+  re-check and may downgrade the same class to `uncertain`. Run it
+  before concluding.
+- when the ONLY entry points found are unproven registrations it says
+  so, so a bare `entry-point-reachable` is never read as proof.
 
 #### `sfi.meaningful_test_audit`
 
@@ -442,7 +521,7 @@ are invisible.
 
 ## Honesty axes
 
-### v2.7 class-granularity boundary (verbatim — surface on every reachability response)
+### v2.7 class-granularity boundary (surface on every reachability response — summarised here; quote the response's own `disclosure`)
 
 > v2.7 ships CLASS-level granularity. A call from `ApexClass:A.foo()`
 > to `ApexClass:B.bar()` produces ONE `A → B` `callsApex` edge
@@ -452,15 +531,24 @@ are invisible.
 > reachability, or downstream effects by method. Method-level edge
 > resolution is deferred to v2.7.1.
 
-### v2.7 invisible-dispatch boundary (verbatim — every reachability response)
+### v2.7 invisible-dispatch boundary (surface on every reachability response — the response's own `disclosure` string is the authoritative wording; this is a summary of it, not a quotation)
 
 > Dynamic dispatch (`Type.forName('...').newInstance().method(...)`),
-> reflective invocation, framework wiring (TriggerHandler / fflib
-> base classes), and managed-package callers are INVISIBLE to the
-> graph edges these tools walk. A class genuinely invoked at runtime
-> via one of these mechanisms will surface as `likely-dead-code` or
-> with an empty `coveringTestClasses[]`. Verify before treating as
-> the answer.
+> reflective invocation, same-namespace framework wiring
+> (TriggerHandler / fflib base classes), and managed-package callers
+> are INVISIBLE to the graph edges these tools walk. A class genuinely
+> invoked at runtime via one of these mechanisms will surface as
+> `likely-dead-code` or with an empty `coveringTestClasses[]`. Verify
+> before treating as the answer.
+
+Two dynamic-registration shapes are the exception: a class extending a
+base class from ANOTHER namespace (a dotted `superclass`) and a class
+declaring `Callable` are now recognised as `framework-subclass` /
+`callable-dispatch` entry points at `heuristic` confidence. They keep
+such a class OFF `likely-dead-code` and map it to `uncertain` in
+`sfi.find_dead_code` — but they prove only that the class is BUILT for
+outside invocation, never that the registration is live. Do not read
+either as "reachable"; read it as "not dead, unproven".
 
 ### v2.3 confidence-floor rule
 
@@ -516,49 +604,65 @@ Claude's flow:
 ```json
 {
   "data": {
+    "appliedScope": { "component": "Flow:Set_Opportunity_Owner", "mode": "component" },
+    "flowId": "Flow:Set_Opportunity_Owner",
+    "apiName": "Set_Opportunity_Owner",
+    "status": "Active",
+    "runtimeState": { "status": "Active", "currentlyRunning": true, "note": "…" },
     "verdict": "blocking",
-    "findings": [
-      { "componentId": "CustomObject:Opportunity", "type": "CustomObject", "apiName": "Opportunity", "category": "metadata-blocker", "confidence": "declared", "location": "<triggersOn>", "explanation": "The Flow listens for record-after-save events on Opportunity. Deactivation silences the trigger.", "suggestedAction": "Audit other automation surfaces that fire on Opportunity save to confirm coverage." },
-      { "componentId": "CustomField:Opportunity.Owner", "type": "CustomField", "apiName": "Opportunity.Owner", "category": "metadata-blocker", "confidence": "parsed", "location": "<recordUpdates>", "explanation": "Flow writes to Owner via recordUpdate element 'assign_owner'.", "suggestedAction": "Verify no other automation (Apex, Workflow Rule) writes Owner downstream of save." },
-      { "componentId": "ApexClass:OwnerAssignmentService", "type": "ApexClass", "apiName": "OwnerAssignmentService", "category": "code-needs-update", "confidence": "declared", "location": "<actionCalls>", "explanation": "Flow calls OwnerAssignmentService.assign via Apex action.", "suggestedAction": "Inline the call from Apex or migrate logic to another Flow." }
+    "structuralVerdict": "blocking",
+    "entryPoints": [
+      { "kind": "triggersOn", "componentId": "CustomObject:Opportunity", "note": "Where the runtime hands control TO this Flow — not a dependent." }
+    ],
+    "impacts": [
+      { "componentId": "CustomField:Opportunity.Owner", "componentType": "CustomField", "apiName": "Opportunity.Owner", "category": "metadata-blocker", "confidence": "parsed", "explanation": "Flow writes to Owner via recordUpdate element 'assign_owner'." },
+      { "componentId": "ApexClass:OwnerAssignmentService", "componentType": "ApexClass", "apiName": "OwnerAssignmentService", "category": "code-needs-update", "confidence": "declared", "explanation": "Flow calls OwnerAssignmentService.assign via Apex action." }
     ],
     "firingConditions": [
-      { "conditionId": "ConditionalContext:Flow:Set_Opportunity_Owner.condition-0", "expression": "RecordType.DeveloperName == 'Standard_Opportunity' AND Owner == null", "kind": "criteria", "confidence": "declared" }
+      { "conditionContextId": "ConditionalContext:Flow:Set_Opportunity_Owner.condition-0", "expression": "RecordType.DeveloperName == 'Standard_Opportunity' AND Owner == null" }
     ],
-    "boundaries": [
-      "Deactivation does NOT delete the Flow; its definition remains and a later reactivation restores every effect listed.",
-      "Apex code that conditionally invokes the Flow via Flow.Interview or @InvocableMethod chains is invisible to the heuristic walker."
-    ]
+    "trust": { "…": "…" },
+    "disclosure": "v2.3 what-if analysis is composition over the v2.2 vault state. …"
   }
 }
 ```
 
+Keys to hold onto: it is `impacts`, not `findings`; `disclosure` is
+ONE string, not a `boundaries` array; an impact row carries
+`componentType` and `explanation` (there is no `type`, `location` or
+`suggestedAction`); a firing condition carries `conditionContextId`
+and `expression` and nothing else; and `triggersOn` sits in
+`entryPoints`, not in `impacts`.
+
 4. **Respond:**
 
-> Deactivating `Flow:Set_Opportunity_Owner` — verdict: **blocking**.
-> Three impacts:
+> Deactivating `Flow:Set_Opportunity_Owner` — verdict: **blocking**
+> (structural verdict `blocking`; the Flow is Active, so it runs
+> today). Two impacts:
 >
-> **Metadata blockers (2)**
-> - `CustomObject:Opportunity` — the Flow listens for record-
->   after-save on Opportunity. Deactivation silences this trigger.
->   (`declared`, `<triggersOn>`)
+> **Metadata blockers (1)**
 > - `CustomField:Opportunity.Owner` — the Flow writes Owner via
 >   `recordUpdate` element `assign_owner`. Records saved without
 >   another owner-assignment surface will be created with no
->   Owner. (`parsed`, `<recordUpdates>`)
+>   Owner. (`parsed`)
 >
 > **Code needs update (1)**
 > - `ApexClass:OwnerAssignmentService` — the Flow calls
->   `OwnerAssignmentService.assign` via `<actionCalls>`.
+>   `OwnerAssignmentService.assign` via an Apex action.
 >   Deactivating the Flow means this Apex action is no longer
 >   invoked from this path; if the class is used elsewhere it
->   continues to function. (`declared`, `<actionCalls>`)
+>   continues to function. (`declared`)
+>
+> **Entry point (not an impact)**
+> - `CustomObject:Opportunity` — where the runtime hands control TO
+>   this Flow. Deactivation silences that trigger, but the object is
+>   not something the Flow breaks.
 >
 > **Firing conditions silenced**
 > - `ConditionalContext:Flow:Set_Opportunity_Owner.condition-0`
 >   — `RecordType.DeveloperName == 'Standard_Opportunity' AND
->   Owner == null` (criteria, `declared`). Records matching this
->   condition will no longer be auto-assigned.
+>   Owner == null`. Records matching this condition will no longer
+>   be auto-assigned.
 >
 > Suggested next checks:
 >
@@ -570,18 +674,16 @@ Claude's flow:
 > 2. Verify `OwnerAssignmentService.assign` is not the ONLY
 >    caller of downstream Apex via incoming `callsApex` edges.
 >    Run `sfi.run_analysis` with `{ "name": "sfi.call_graph", "args": { … } }` with
->    `direction: 'downstream', classApiName: 'ApexClass:OwnerAssignmentService'`.
+>    `direction: 'downstream', rootId: 'ApexClass:OwnerAssignmentService'`.
 >
-> Boundaries (verbatim v2.3 disclosure):
->
-> - Deactivation does NOT delete the Flow — its definition
->   remains and a later reactivation restores every effect
->   listed.
-> - Apex code that conditionally invokes the Flow via
->   `Flow.Interview` or `@InvocableMethod` chains is invisible to
->   the heuristic walker. If your org has Apex orchestration that
->   conditionally fires this Flow, the impact list above will
->   miss those callers.
+> Boundaries — quote the response's `disclosure` string VERBATIM
+> (it is one paragraph, not a list). It states that deactivation does
+> NOT delete the Flow, that `input-only` rows are dependencies the
+> Flow consumes rather than downstream effects, that `entryPoints`
+> names where the Flow starts, that an ACTIVE parent Flow's subflow
+> call forces `blocking`, and that Apex invoking the Flow via
+> `Flow.Interview` / `@InvocableMethod` chains and non-metadata launch
+> points (quick actions, buttons, screen-flow entry) remain invisible.
 
 The response leads with the `blocking` verdict, organizes by
 category, cites canonical IDs + edge confidence, surfaces the
@@ -594,11 +696,11 @@ verbatim v2.3 disclosure.
 | Mistake | Why it's wrong |
 |---|---|
 | Subsetting `sfi.test_coverage_for_method` results by the user-supplied `methodName`. | The class-granularity boundary is verbatim: v2.7 does NOT subset by method. The `methodName` is echoed for caller-pipelining only. Surface every covering test class for the target CLASS, with the verbatim disclosure. |
-| Treating a `likely-dead-code` verdict from `sfi.method_reachability` as "this class is safe to delete." | Dynamic dispatch, reflective invocation, framework wiring, and managed-package callers are invisible. The verdict means "no static caller within depth-3"; verify with `sfi.find_code_usages` (broader edge surface) before deletion. |
+| Treating a `likely-dead-code` verdict from `sfi.method_reachability` as "this class is safe to delete." | Dynamic dispatch, reflective invocation, framework wiring, and managed-package callers are invisible. The verdict means "no usage in-edge and no entry-point classifier within depth-3"; verify with `sfi.find_dead_code` (adds a whole-word source re-check that can downgrade the class to `uncertain`) and `sfi.find_code_usages` before deletion. |
 | Surfacing a what-if finding without its `confidence`. | The confidence is the developer's verification axis. A `heuristic` finding is a candidate for false positive; a `declared` finding is metadata-sourced. State both. |
 | Subsetting `sfi.what_if_change_field_type` results to only `metadata-blocker` (hiding `configuration-only`). | The configuration-only findings (layouts, perm-set assignments) are the developer's "fix this before deploy" surface even though they won't break the deploy. Surface them; group by category, don't drop. |
 | Calling `sfi.what_if_remove_picklist_value` against a vault missing v2.0a extraction. | The composer surfaces an error in this case (Flow decisions keyed on the value would be invisible without `firesWhen` edges + `ConditionalContext` nodes). Recover with the v2.0a-not-extracted message; suggest `/sfi-refresh`. |
-| Calling `sfi.call_graph` with `maxDepth: 10`. | The class-granularity boundary collapses methods together; long chains rarely surface useful structure. Default `maxDepth: 3`. Raise it only when the user asks for an exhaustive walk. |
+| Calling `sfi.call_graph` with `maxDepth: 10`. | `maxDepth` is bounded at **5**, so 10 is a rejected `invalid-query`, not a deep walk. The class-granularity boundary collapses methods together anyway; long chains rarely surface useful structure. Default `maxDepth: 3`; raise it to at most 5, and only when the user asks for an exhaustive walk. |
 | Treating `cycleDetected: true` in `sfi.call_graph` as "the architecture is broken." | A queueable class enqueueing itself is the textbook chunking pattern, NOT a bug. Mention the cycle but distinguish self-enqueue from genuine call-graph cycles. |
 | Skipping the dynamic-dispatch boundary on `sfi.test_coverage_for_method` results. | A class genuinely tested via `Type.forName(...)` will surface with an empty `coveringTestClasses[]`. State the boundary even when results are non-empty; the user may have OTHER tests that aren't surfacing. |
 | Recommending a profile split with `sfi.what_if_split_profile` as the deployable answer. | The split tool's greedy heuristic produces a STARTING POINT, not the optimal partition. Surface the per-assignment `reason` so the developer reviews each grant before committing. |

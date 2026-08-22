@@ -541,8 +541,10 @@ Claude's flow:
 >
 > **Important omissions (Q165 verbatim disclosure):**
 >
-> The following categories are NOT extracted in v3.0 and surface
-> as `dataNotAvailable`:
+> Three categories surface in `dataNotAvailable` — `list-view-filters`
+> always, plus `reports` / `dashboards` when that family was not
+> retrieved. Two more are named in `boundaries[]` rather than in the
+> array; both are listed here:
 >
 > - **List-view filters.** The `listViews` section names the list
 >   views whose columns or filter predicates reference
@@ -573,8 +575,9 @@ Claude's flow:
 
 The response leads with shape, surfaces each section with its
 per-section confidence label, names the v2.0a ConditionalContext
-synthetic id verbatim, and APPENDS the Q165 disclosure with the
-five-item `dataNotAvailable` list spelled out.
+synthetic id verbatim, and APPENDS the Q165 disclosure — the
+three-item `dataNotAvailable` array plus the two `boundaries[]`
+omissions — spelled out.
 
 ## Anti-patterns
 

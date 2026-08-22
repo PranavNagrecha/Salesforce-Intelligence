@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-22T04:19:20.448Z",
+  "generatedAt": "2026-08-22T09:37:16.899Z",
   "version": "0.3.1",
   "toolCount": 217,
   "skillCount": 26,
@@ -13,13 +13,13 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 297,
-        "cases": 6174
+        "files": 300,
+        "cases": 6503
       },
       {
         "name": "extractors",
         "files": 87,
-        "cases": 1170
+        "cases": 1181
       },
       {
         "name": "cli",
@@ -29,17 +29,17 @@
       {
         "name": "graph",
         "files": 26,
-        "cases": 338
+        "cases": 349
       },
       {
         "name": "parsers",
         "files": 9,
-        "cases": 236
+        "cases": 240
       },
       {
         "name": "patterns",
         "files": 3,
-        "cases": 158
+        "cases": 163
       },
       {
         "name": "renderers",
@@ -49,7 +49,7 @@
       {
         "name": "vault",
         "files": 11,
-        "cases": 139
+        "cases": 143
       },
       {
         "name": "tooling-api",
@@ -62,10 +62,10 @@
         "cases": 50
       }
     ],
-    "totalCases": 8998,
-    "totalFiles": 498,
+    "totalCases": 9362,
+    "totalFiles": 501,
     "packageCount": 10,
-    "approx": 8900
+    "approx": 9300
   },
   "integrationSuiteCount": 3,
   "gates": [
@@ -90,14 +90,14 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 297,
-      "cases": 6174,
+      "files": 300,
+      "cases": 6503,
       "description": "The 217 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 87,
-      "cases": 1170,
+      "cases": 1181,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
@@ -109,19 +109,19 @@
     {
       "name": "graph",
       "files": 26,
-      "cases": 338,
+      "cases": 349,
       "description": "The DuckDB dependency-graph engine"
     },
     {
       "name": "parsers",
       "files": 9,
-      "cases": 236,
+      "cases": 240,
       "description": "Formula / SOQL / source tokenizers"
     },
     {
       "name": "patterns",
       "files": 3,
-      "cases": 158,
+      "cases": 163,
       "description": "Heuristic recognizers (PII, naming, code quality)"
     },
     {
@@ -133,7 +133,7 @@
     {
       "name": "vault",
       "files": 11,
-      "cases": 139,
+      "cases": 143,
       "description": "Vault layout, manifest, freshness"
     },
     {

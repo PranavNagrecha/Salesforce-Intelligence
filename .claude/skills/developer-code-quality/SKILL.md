@@ -285,11 +285,13 @@ in isolation.
 ### 5. `sfi.test_coverage_gaps` — test-quality narrowing
 
 The three-signal composition: test-class identity
-(`properties.isTest === true`), reachability via incoming
-`callsApex` edges (BFS capped at depth 3), and assertion
-meaningfulness (via the `fake-assertion` rule in the recognizer
-catalog). Classifies each non-test ApexClass into one of three
-verdicts:
+(`properties.isTest === true`), reachability via incoming **USAGE**
+edges (BFS capped at depth 3 — every edge type except `parentOf` and
+`grantedBy`, the same deny-list `method_reachability` and
+`find_dead_code` use; a `callsApex`-only walk called live classes
+uncovered), and assertion meaningfulness (via the `fake-assertion`
+rule in the recognizer catalog). Classifies each non-test ApexClass
+into one of three verdicts:
 
 - **`uncovered`** — no test class reaches it within the depth cap.
 - **`fake-coverage`** — every covering test class is flagged with
@@ -318,15 +320,25 @@ Aura / Invocable / Queueable / Batchable / Schedulable / triggers),
 and zero-usage detection. Returns one of three verdicts per
 candidate:
 
-- **`definitely_dead`** — zero non-`parentOf` incoming edges; no
+- **`definitely_dead`** — zero incoming USAGE edges: every edge type
+  except `parentOf` (structural containment) and `grantedBy` (a
+  Profile / PermissionSet access grant — access is not usage). No
   callers, no triggers, no listeners. For CustomField, no incoming
   references at all (no formula refs, no Apex reads/writes, no Flow
   record-ops, no layout placements).
 - **`likely_dead`** — reached only by test classes
   (`isTest === true`) or via heuristic-only edges that may be
   stripped by dynamic SOQL / reflective access.
-- **`uncertain`** — reached by at least one entry point. Suppressed
-  by default; surface with `includeUncertain: true`.
+- **`uncertain`** — three different causes, all suppressed by default
+  and surfaced with `includeUncertain: true`: (a) reached by at least
+  one EXTERNAL entry point; (b) an unproven dynamic registration — a
+  dotted `superclass` (another namespace's framework instantiates its
+  own subclasses) or a declared `Callable` interface, which have zero
+  incoming edges BY CONSTRUCTION and so must never be called dead;
+  (c) a whole-word source re-check found the class named in
+  production Apex through a static-field or type-name usage the
+  parser models as no edge. An Active / Draft / unknown-status Flow
+  is also `uncertain`, never `definitely_dead`.
 
 Default invocation:
 

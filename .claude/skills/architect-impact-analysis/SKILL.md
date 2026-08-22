@@ -58,10 +58,18 @@ cross-method dataflow remain invisible. Apex method bodies are parsed and
 scanned — cite the per-edge confidence tier, and treat a thin Apex result
 as a coverage signal rather than proof of no dependents.
 
-`sfi.get_impact` carries a `soundness` envelope (`complete` / `blindSpots[]`
-/ `staticCoverage`): when any impacted class uses dynamic Apex it returns
-`complete: false` with a `dynamic-apex` blind spot naming those classes.
-Surface it — a `complete: false` impact result is a floor, not a ceiling.
+`sfi.get_impact` carries a `soundness` envelope (`complete` /
+`blindSpots[]` / `staticCoverage`) with two blind-spot kinds:
+`dynamic-apex` (an impacted class uses dynamic SOQL / reflective
+describe / `Type.forName` / untyped JSON — named by id) and, on a
+`CustomField` / `CustomObject` root, `unwalked-referrer-class` — the
+referrer classes that are NOT modeled as incoming edges and so were
+never walked: roll-up source coupling, layout placement, Flow
+decision/filter reads, and tab/app membership. That one is STRUCTURAL,
+so it names no ids; `referrerClasses` names the classes instead.
+Surface both — a `complete: false` impact result is a floor, not a
+ceiling, and on a field root "no referrers found" is "these classes
+were not checked", never a proven "nothing references this".
 
 ## When to fire
 
@@ -276,6 +284,18 @@ tokenizer's output) and enriches each result with the edge's
 `source` and `properties` — including `tokenizedFromField`,
 `formulaLength`, and the specific formula expression that referenced
 the target. The default `limit` is 50; max is 500.
+
+Two honesty rules on this tool. The field must EXIST: an id naming no
+`CustomField` node — a miscased id, a typo, a field the refresh never
+retrieved — is refused with `component-not-found` plus typo-tolerant
+`resolveSuggestions`, so an empty `referencers` list is reserved for a
+real field that genuinely has none. And when the list IS empty, a
+`coverageCaveat` names whichever of the eleven families that produce
+`references` edges into a field (CustomField formulas, ValidationRule,
+ListView, ReportType, FlexiPage, QuickAction, WebLink,
+ApprovalProcess, MatchingRule, CustomMetadataRecord, Index) the vault
+did not fully retrieve. Render it: that zero reads "not checked in
+those families", never a proven "none".
 
 Use this tool *in addition to* `sfi.get_impact`, not instead of it.
 `get_impact` walks every edge type; `find_formula_references`

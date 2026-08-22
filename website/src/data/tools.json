@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-22T04:19:20.448Z",
+  "generatedAt": "2026-08-22T09:37:16.899Z",
   "toolCount": 217,
   "sections": [
     {
@@ -324,7 +324,7 @@
         },
         {
           "name": "sfi.test_coverage_gaps",
-          "description": "(1) `properties.isTest === true` identifies test classes (excluded from the scan), (2) BFS over incoming `callsApex` edges (capped at depth 3) collects the test c..."
+          "description": "(1) `properties.isTest === true` identifies test classes (excluded from the scan), (2) BFS over incoming USAGE edges (capped at depth 3; every edge type but `pare..."
         },
         {
           "name": "sfi.test_coverage_for_method",
@@ -419,7 +419,7 @@
         },
         {
           "name": "sfi.get_naming_convention_report",
-          "description": "Return the naming-convention pattern observations, optionally scoped to a glob."
+          "description": "Return the naming-convention pattern observations, optionally scoped to one object (`scope: 'CustomField:{Object}'` or `'CustomField:{Object}.*'`; omit or pass `'..."
         },
         {
           "name": "sfi.org_overview",

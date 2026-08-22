@@ -158,14 +158,18 @@ changed since the vault was built, so a rebuild is due. The org itself may
 have changed since the last retrieve as well — stale answers presented as
 current are worse than no answer, so re-refresh when freshness matters.
 
-## The three slash commands
+## The five slash commands
 
+- `/sfi-onboard` — guided first-run wizard (install check, alias pick,
+  first refresh). The entry point for a brand-new user.
 - `/sfi-init` — set up `org-kb/` and pick a target-org alias. First-time
   setup only.
 - `/sfi-refresh` — re-run `sf project retrieve` against the alias and
   rebuild the vault. Use when the org has changed.
 - `/sfi-status` — print vault freshness, source-tree hash, and component
   counts. Use to confirm the vault is current.
+- `/sfi-field-audit` — dependency-traced deletability verdicts for one
+  object's custom fields, with an adversarial verification pass.
 
 ## When to read other SfIntelligence skills
 

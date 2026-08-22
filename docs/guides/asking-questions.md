@@ -532,7 +532,7 @@ happen silently; you see only question and answer.
 ```
 User: What custom objects do we have?
 
-Claude (silently): sfi.health_check → ok
+Claude (silently): sfi.health_check → status: healthy
 Claude (silently): sfi.list_components({ type: 'CustomObject' })
 
 Claude: Your org has 47 custom objects. The most-referenced are:
@@ -649,7 +649,8 @@ that's a bug. File it with:
 1. The exact question.
 2. Component IDs involved (canonical `Type:Id`).
 3. Output of `/sfi-status`.
-4. Whether `sfi.health_check` returned `ok`.
+4. The `status` `sfi.health_check` returned (`healthy` / `degraded` /
+   `unhealthy`) and, when not `healthy`, its `issues` and `reason`.
 
 MCP tool calls are deterministic against vault state
 ([`../architecture.md`](../architecture.md) §7). Two empty results in

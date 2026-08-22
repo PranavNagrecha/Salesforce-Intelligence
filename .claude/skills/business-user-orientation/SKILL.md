@@ -509,12 +509,17 @@ answer, and **always** include the relevant subset when refusing:
 - **Live state.** Queue depth, recent errors, governor-limit
   consumption, currently-running jobs — none of this is in v1.x.
   The vault is a snapshot at refresh time.
-- **Record types and page-layout assignments by record type.** Not
-  yet covered in v1.x.
-- **UI tabs, apps, quick actions, paths, global value sets,
-  custom labels, static resources.** Not yet covered in v1.x.
-- **Email templates, letterheads, communication sites.** Not yet
-  covered in v1.x.
+- **Record data.** Field values, record counts, who owns what, when a
+  record last changed. The vault holds schema and source, not rows.
+  Route record questions to the opt-in live plane or the UI.
+
+The three families this list used to name as "not yet covered" are all
+MODELED component types today — do not refuse them: record types and
+page-layout assignment by record type (route to
+`admin-page-layout-routing`); UI tabs, apps, quick actions, paths,
+global value sets, custom labels, static resources; and email
+templates, letterheads and communication sites (route to
+`admin-legacy-automation`).
 
 Treat **honest refusal** as a feature, not a failure mode. A
 business user trusts a confident answer; the protection against
@@ -533,7 +538,7 @@ fabricated answers is naming the gap explicitly.
 | Mixing the user's question with another org's conventions. | Each org is private and specific. Even if 95% of orgs use Stage on Opportunity for sales pipeline, *this* org may have customized it. Always read from `properties.description`; never blend with generic Salesforce-product knowledge. |
 | Hiding `unknown` or empty-description outcomes to make the answer look complete. | The user makes a downstream decision (filling out a field, telling a customer an SLA). An incomplete answer presented as complete causes a worse outcome than a complete refusal. Surface the gap. |
 | Citing canonical IDs (`CustomField:Order_Line__c.Product_Name__c`) as the primary answer. | Canonical IDs are admin / architect / developer vocabulary. A business user wants "Product Name" and a one-paragraph explanation. Keep IDs in a footer or hide them unless asked. |
-| Trying to answer "where do I find the Pipeline report" by guessing a Reports folder name. | v1.x doesn't extract Reports. There's no metadata to ground the answer. The honest refusal sends the user to the UI; a guessed path sends them to a 404. |
+| Trying to answer "where do I find the Pipeline report" by guessing a Reports folder name. | Don't guess — but don't refuse outright either. `Report:` nodes ARE persisted (id `Report:{LeafFolder}/{DeveloperName}`), so the folder is recoverable from the id when the report was in the capped, usage-ranked pull. If it was not pulled, say NOT CHECKED — not "no such report" — and send the user to the UI. A guessed path sends them to a 404. |
 
 ## Example interactions
 

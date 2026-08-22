@@ -61,7 +61,7 @@ slash commands.
 
 ## Tool profile (core by default)
 
-The MCP server defaults to **`SFI_TOOL_PROFILE=core`**: only **18** tools are
+The MCP server defaults to **`SFI_TOOL_PROFILE=core`**: only **19** tools are
 advertised and directly invokable (`sfi.resolve`, `sfi.health_check`,
 `sfi.route_question`, `sfi.run_analysis`, `sfi.org_card`, … — see
 `sfi.capabilities`). Every other analysis still exists; it is reached through
@@ -321,8 +321,10 @@ provenance (`offline_snapshot` / `live_org` / `hybrid`) and freshness stamp.
 
 Stop and surface the limit (or ask the user) when:
 
-- `sfi.health_check` returns `missing`/`stale` → ask them to
-  `/sfi-refresh` (or `/sfi-init`).
+- `sfi.health_check` returns `status: 'unhealthy'` (or `'degraded'`, or
+  `freshness.stale: true`) → ask them to `/sfi-refresh` (or `/sfi-init`
+  when `checks.vaultExists` is false). There is no `ok` / `stale` /
+  `missing` status word.
 - `sfi.resolve` returns `none` → offer refresh-or-rephrase; never
   fabricate a match.
 - `sfi.resolve` returns `ambiguous` → ask the clarifying question; don't
@@ -339,7 +341,8 @@ Stop and surface the limit (or ask the user) when:
 
 Before sending a response that touches the org, confirm:
 
-- [ ] Did I (or the session) call `sfi.health_check` and get `ok`?
+- [ ] Did I (or the session) call `sfi.health_check` and get
+      `status: 'healthy'`?
 - [ ] When the user named something informally, did I `sfi.resolve`
       first instead of guessing an ID?
 - [ ] On `ambiguous`, did I ask the user (not silently pick)? On `none`,
