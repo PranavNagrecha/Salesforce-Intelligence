@@ -21,9 +21,8 @@
  * `insert acc;` statement sets `acc.Industry__c` requires dataflow
  * analysis — tracking assignments to the `acc` variable through the
  * method body. The v0.3 apex-scanner does not have this capability,
- * and the v2.3 milestone deliberately defers per
- * `WhatIfSemantics.md` § "Apex create coverage — DELIBERATELY NOT
- * IMPLEMENTED". The boundary disclosure surfaces this verbatim.
+ * and the v2.3 milestone deliberately defers this analysis. The
+ * boundary disclosure surfaces this limitation verbatim.
  *
  * **No-op case.** When the field is already required
  * (`properties.required === true`), the tool returns a `safe` verdict
@@ -141,7 +140,7 @@ const MAKE_REQUIRED_COVERAGE = [
   'ApprovalProcess',
 ] as const;
 
-/** Finding category per WhatIfSemantics.md § "Category assignment rules". */
+/** Finding impact category — assigned based on the type of metadata or code that could be affected. */
 type Category =
   | 'metadata-blocker'
   | 'code-needs-update'
@@ -200,8 +199,8 @@ export interface WhatIfMakeFieldRequiredOutput {
 
 /**
  * The verbatim disclosure surfaced in every response. Encodes the
- * dataflow-analysis boundary per `WhatIfSemantics.md` § "Apex create
- * coverage — DELIBERATELY NOT IMPLEMENTED".
+ * key analysis boundary: Apex insert/update sites are not checked
+ * because doing so requires dataflow analysis to track field assignments.
  */
 const DISCLOSURE =
   "the analysis checks layouts (UI input paths), Flow create paths, and integration write surfaces, and credits declarative populators (Flow / Workflow field-updates / Approval field-updates) that may set the field — noting that conditional writers do not guarantee population, so a populator alone never makes the field safe to require. Apex `insert acc;` sites that may or may not set the field are invisible — determining whether `acc.Industry__c` was assigned before the insert requires dataflow analysis. If your org has Apex create paths, verify the field is set before making required.";

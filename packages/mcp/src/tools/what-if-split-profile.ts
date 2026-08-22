@@ -4,8 +4,9 @@
  * v2.3 R2c — the "what if I split this Profile into several Permission
  * Sets?" surface. Given a Profile id and an ordered array of target
  * PermissionSet ids, walks every grant under the profile and attempts
- * to suggest which target the grant belongs in via a greedy heuristic
- * per WhatIfSemantics.md § "Profile split heuristic".
+ * to suggest which target the grant belongs in via a greedy heuristic:
+ * keyword matching on names, then domain clustering by object names,
+ * then default assignment to the first target.
  *
  * **Assignment heuristic, in order.** For each grant `(settingType,
  * settingId)`:
@@ -40,8 +41,9 @@
  *     scope.
  *
  * **Honesty axis (verbatim, in every response):** see `DISCLOSURE`
- * below. The greedy heuristic is approximate per WhatIfSemantics.md
- * § "Optimal profile partitioning not computed".
+ * below. The greedy heuristic is approximate — computing the truly
+ * optimal partition across all grants is not done; the heuristic is
+ * fail-conservative and requires manual review.
  *
  * Implementation notes:
  *   - The Profile id must start with `Profile:`; non-matching prefixes
@@ -329,8 +331,8 @@ export interface WhatIfSplitProfileOutput {
 
 /**
  * The verbatim disclosure surfaced in every response. Encodes the
- * approximate-heuristic boundary per WhatIfSemantics.md § "Optimal
- * profile partitioning not computed".
+ * approximate-heuristic boundary: optimal profile partitioning is not
+ * computed; the greedy heuristic must be manually reviewed for correctness.
  */
 const DISCLOSURE =
   'v2.3 split clustering is approximate; the greedy keyword-match heuristic is fail-conservative. Review every assignment before applying — grants the heuristic could not place are surfaced in unassignedSettings rather than forced into an inappropriate target. Tab visibilities, record-type visibilities and application visibilities ARE split: a PermissionSet carries <tabSettings>, <recordTypeVisibilities> and <applicationVisibilities>, and the tab enum is translated from the Profile spelling (DefaultOn -> Visible, DefaultOff -> Available). A permission set is ADDITIVE, so settings that only a Profile can express — layout assignments, Hidden tabs, an explicitly-not-visible record type or app, and the default-record-type / default-app designations — are listed in nonTransferableSettings and MUST stay on the Profile, which therefore still exists after this split.';

@@ -48,9 +48,9 @@
  *   - `risky`: only code-needs-update.
  *   - `blocking`: any metadata-blocker.
  *
- * **Boundary disclosure.** Surfaces the verbatim phrase noting that
- * Apex variable-based picklist comparisons are invisible to the static
- * recognizer (per `WhatIfSemantics.md` § "Apex string-literal detection").
+ * **Boundary disclosure.** Surfaces the key limitation: Apex
+ * variable-based picklist comparisons are invisible to the static
+ * recognizer — only string-literal patterns in source code are detected.
  */
 
 import type {
@@ -98,7 +98,7 @@ const PICKLIST_TYPES = new Set<string>([
 /** Compatibility verdicts the tool emits. */
 type Compatibility = 'breaking' | 'review';
 
-/** `WhatIfImpactItem.category` per WhatIfSemantics.md. */
+/** Impact category assigned based on the type of metadata or code affected. */
 type Category =
   | 'metadata-blocker'
   | 'code-needs-update'
@@ -163,8 +163,8 @@ const notCheckedBoundary = (value: string): string =>
 
 /**
  * The verbatim disclosure surfaced in every response. Encodes the
- * v2.0a / v0.3 dynamic-Apex boundary per `WhatIfSemantics.md` §
- * "Apex string-literal detection".
+ * v2.0a / v0.3 boundary: Apex code recognition is limited to static
+ * string literals; dynamic Apex and variable-based comparisons are invisible.
  */
 const DISCLOSURE =
   "Apex code referencing the picklist value as a string literal is recognized only for static literals. Variable-based picklist comparisons (`if (account.Industry__c == myVar)`), dynamic SOQL strings, and reflective field access via `obj.get('FieldName')` are invisible to the recognizer; review dynamic comparisons separately before removing the value. Flow record-create/update steps that assign this value to the field as a literal (e.g. `<stringValue>Completed</stringValue>`) ARE detected; Flow steps that assign the value indirectly via a variable, formula, or merge field (`<elementReference>`) are NOT statically resolvable and are not matched — review those flows manually.";
@@ -176,8 +176,8 @@ const DISCLOSURE =
  *     MultiselectPicklist type enforcement happens at handler time
  *     (so the error envelope is typed) rather than via Zod refine.
  *   - `value`: required, non-empty string. The picklist value's API
- *     name (case-sensitive literal users would put in formulas /
- *     code), per `WhatIfSemantics.md`.
+ *     name (case-sensitive literal matching what appears in formulas
+ *     and source code).
  */
 export const whatIfRemovePicklistValueInputSchema = z.object({
   fieldId: z.string().min(1),
