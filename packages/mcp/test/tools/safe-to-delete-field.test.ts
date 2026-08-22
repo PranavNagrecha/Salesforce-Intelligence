@@ -2239,6 +2239,8 @@ describe('safeToDeleteFieldHandler — cross-tool parity with field_360', () => 
   const STD_PROFILE = 'Profile:Admin';
   // Folded report usage as a bare BOOLEAN — no name list, no truncation total.
   const BOOL_REPORT_FIELD = 'CustomField:Txn__c.Bool_Report__c';
+  // Folded report usage WITH the capped name list — the evidence-present case.
+  const NAMED_REPORT_FIELD = 'CustomField:Txn__c.Named_Report__c';
 
   beforeAll(async () => {
     xDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-std-parity-'));
@@ -2277,6 +2279,16 @@ describe('safeToDeleteFieldHandler — cross-tool parity with field_360', () => 
           apiName: 'Bool_Report__c',
           parentId: OBJ,
           properties: { dataType: 'Text', usedInReport: true },
+        }),
+        makeNode({
+          id: NAMED_REPORT_FIELD,
+          apiName: 'Named_Report__c',
+          parentId: OBJ,
+          properties: {
+            dataType: 'Text',
+            usedInReport: true,
+            usedInReports: ['Ops_Reports/Capped', 'Sales_Reports/Pipeline'],
+          },
         }),
       ],
       edges: [
@@ -2385,6 +2397,91 @@ describe('safeToDeleteFieldHandler — cross-tool parity with field_360', () => 
         (l) => l.includes('LOWER BOUND') && l.includes('NEVER "zero reports"'),
       ),
     ).toBe(true);
+  });
+
+  // ===========================================================================
+  // REPORT-USAGE-EVIDENCE — every value in `reportUsage` is readable as CHECKED
+  // or UNCHECKED.
+  //
+  // FAIL-BEFORE (measured on the stale reference vault, which holds ZERO Report
+  // and ZERO Dashboard nodes and no coverage row for either family):
+  //
+  //   {"usedInReport": true, "reportNames": [], "usedInDashboard": false, "dashboardNames": []}
+  //
+  // `true` asserted off a legacy stamp with no evidence behind it; `[]` reading
+  // as "zero reports" when it means "names not captured"; and a `false` for a
+  // family nothing ever looked at. A `true` with an empty evidence list is the
+  // same defect as a `0` with no coverage caveat, pointing the other way.
+  // ===========================================================================
+  it('names that are NOT in the vault are `null` with a stated reason, never an empty list', async () => {
+    const result = await safeToDeleteFieldHandler(xCtx, { fieldId: BOOL_REPORT_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ru = result.value.data.reportUsage;
+    expect(ru).toBeDefined();
+    expect(ru?.usedInReport).toBe(true);
+    // WAS `[]`.
+    expect(ru?.reportNames).toBeNull();
+    expect(ru?.evidenceNote).toContain('NEVER "zero reports"');
+    expect(ru?.evidenceNote).toContain('sfi refresh --no-pull');
+  });
+
+  it('a `false` beside an empty list is emitted ONLY when the family was actually retrieved', async () => {
+    // FIXTURE_MANIFEST covers Report and Dashboard, so "no dashboard stamp"
+    // here is a CHECKED absence and the empty name list is a CHECKED empty.
+    const result = await safeToDeleteFieldHandler(xCtx, { fieldId: BOOL_REPORT_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ru = result.value.data.reportUsage;
+    expect(ru?.usedInDashboard).toBe(false);
+    expect(ru?.dashboardNames).toEqual([]);
+    expect(ru?.evidenceNote).toContain('WERE retrieved into this vault');
+  });
+
+  it('on a vault that never retrieved reports, an absent stamp is `null`, not `false`', async () => {
+    // The real stale-vault shape: no Report/Dashboard coverage rows at all.
+    const noAnalytics: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: (FIXTURE_MANIFEST.coverage ?? []).filter(
+        (c) => c.type !== 'Report' && c.type !== 'Dashboard',
+      ),
+    };
+    const result = await safeToDeleteFieldHandler(
+      { ...xCtx, manifest: noAnalytics },
+      { fieldId: BOOL_REPORT_FIELD },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ru = result.value.data.reportUsage;
+    expect(ru?.usedInReport).toBe(true);
+    // WAS `false` — for a family this vault never looked at.
+    expect(ru?.usedInDashboard).toBeNull();
+    expect(ru?.dashboardNames).toBeNull();
+    expect(ru?.reportNames).toBeNull();
+    expect(ru?.evidenceNote).toContain('NOT retrieved into this vault');
+    expect(ru?.evidenceNote).toContain('NOT CHECKED');
+    expect(ru?.evidenceNote).toContain('sfi refresh --with-reports');
+  });
+
+  it('when the fold DID capture names, they are produced as evidence', async () => {
+    const result = await safeToDeleteFieldHandler(xCtx, { fieldId: NAMED_REPORT_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ru = result.value.data.reportUsage;
+    expect(ru?.usedInReport).toBe(true);
+    expect(ru?.reportNames).toEqual(['Ops_Reports/Capped', 'Sales_Reports/Pipeline']);
+    // Names present ⇒ no "names not captured" clause.
+    expect(ru?.evidenceNote).not.toContain('NEVER "zero reports"');
+    // …and the delete-proposal evidence still NAMES them.
+    const proposal = await safeToDeleteFieldHandler(xCtx, {
+      fieldId: NAMED_REPORT_FIELD,
+      format: 'proposal',
+    });
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) return;
+    expect(JSON.stringify(proposal.value.data.proposal)).toContain(
+      'Sales_Reports/Pipeline',
+    );
   });
 
   it('accepts the same `<Object>.<Field>` short form sfi.field_360 accepts', async () => {

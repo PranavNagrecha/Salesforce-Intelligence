@@ -116,7 +116,6 @@ import {
   listEdgesForNodes,
   listNodesByIds,
   resolveComponents,
-  searchNodes,
 } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
@@ -129,6 +128,7 @@ import {
   type CoverageCaveat,
   GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
 } from './coverage-trust.js';
+import { objectIdCaseVariants } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
@@ -149,14 +149,6 @@ const MAX_ROWS_PER_SECTION_CAP = 100;
 
 /** Chunk size for the referrer-node lookup, so one `IN (...)` never gets pathological. */
 const REFERRER_LOOKUP_BATCH = 400;
-
-/**
- * Window for the case-insensitive object lookup. `searchNodes` orders exact
- * then prefix matches first, so a case variant of the requested name is inside
- * this window on any realistic org; a miss falls through to `component-not-
- * found` WITH near-miss names rather than to a silently different object.
- */
-const OBJECT_SEARCH_LIMIT = 50;
 
 /**
  * Self-imposed serialized-byte ceiling, set BELOW the dispatcher's 40 000-byte
@@ -692,20 +684,14 @@ const caseInsensitiveObjectIds = async (
   ctx: Context,
   apiName: string,
 ): Promise<Result<readonly ComponentId[], McpError>> => {
-  const hits = await searchNodes(ctx.graph, apiName, {
-    types: ['CustomObject'],
-    limit: OBJECT_SEARCH_LIMIT,
-  });
-  if (!hits.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${hits.error.message}` });
-  }
-  const folded = apiName.toLowerCase();
-  return ok(
-    hits.value
-      .map((h) => h.id)
-      .filter((id) => id.slice(CUSTOM_OBJECT_PREFIX.length).toLowerCase() === folded)
-      .sort(byIdAsc) as readonly ComponentId[],
-  );
+  // The LOOKUP now lives in `input-aliases.ts` — the same one the rest of the
+  // object-scoped surface folds case through — so this tool and the shared
+  // resolver cannot disagree about which ids are case variants of a name. What
+  // stays local is the DECISION: object_360 re-runs its whole gather against
+  // the corrected id, which the shared canonicalizer (an id rewrite) does not.
+  const variants = await objectIdCaseVariants(ctx.graph, apiName);
+  if (!variants.ok) return err(variants.error);
+  return ok([...variants.value].sort(byIdAsc) as readonly ComponentId[]);
 };
 
 /**

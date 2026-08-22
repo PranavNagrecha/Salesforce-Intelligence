@@ -147,7 +147,7 @@ import {
   CONCEPT_RESERVATION_MAX_BYTES,
   type ConceptReasoningEnvelope,
 } from './concept-reasoning.js';
-import { resolveObjectAlias } from './input-aliases.js';
+import { resolveObjectAliasInVault } from './input-aliases.js';
 import {
   groundStepConditions,
   type RefGroundableStep,
@@ -1146,7 +1146,11 @@ export const whatHappensOnSaveHandler = async (
 ): Promise<Result<McpResponse<WhatHappensOnSaveOutput>, McpError>> => {
   // L2 Alias OS: resolve the object from any of objectApiName / object /
   // objectId / CustomObject: componentId. Disagreeing aliases -> invalid-query.
-  const scopeResult = resolveObjectAlias(rawInput);
+  // `...InVault` additionally folds CASE against the vault's own ids, because
+  // Salesforce api names are case-insensitive and `route_question("what runs
+  // when I save a contact?")` binds the lower-case form. The id echoed below is
+  // the VAULT's spelling, never the caller's.
+  const scopeResult = await resolveObjectAliasInVault(ctx.graph, rawInput);
   if (!scopeResult.ok) return err(scopeResult.error);
   if (scopeResult.value === null) {
     return err({

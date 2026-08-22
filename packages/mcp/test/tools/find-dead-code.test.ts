@@ -20,8 +20,8 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
-  isCallableDispatch,
-  isFrameworkSubclass,
+  isAsyncDispatchRegistration,
+  isUnprovenRegistration,
   NOT_USAGE_EDGE_TYPES,
   USAGE_EDGE_TYPES,
 } from '../../src/tools/apex-reachability.js';
@@ -910,15 +910,22 @@ describe('findDeadCodeHandler — coverage caveat (P13-STAGED-absence-battery)',
 });
 
 // =============================================================================
-// Dead-queueable detection: a class that `implements Queueable` is NOT live by
-// virtue of implementing the interface — it must be ENQUEUED by user Apex. A
-// Queueable/Batchable/Schedulable enqueued from at least one production
-// (non-@isTest) dispatch site is live (uncertain); enqueued only from @isTest
-// code is likely_dead (test dispatch is rolled back at runtime); never enqueued
-// is definitely_dead. A `!Test.isRunningTest()`-guarded enqueue in a NON-test
-// class still counts as a production path (the guard only suppresses during
-// tests). Mirrors the production-vs-test split scheduled_job_catalog already
-// makes for Schedulable classes.
+// Async-dispatch (Queueable / Batchable / Schedulable) verdicts.
+//
+// This block used to pin `likely_dead` for @isTest-only dispatch and
+// `definitely_dead` for no dispatch at all, on the stated reason that such a
+// class "must be enqueued/executed/scheduled by user Apex". That reason is
+// FALSE on the platform: an admin scheduling a class through Setup > Schedule
+// Apex creates a `CronTrigger` RECORD, and CronTrigger is data, not metadata —
+// never retrieved, no node, no edge, no refresh can close the gap — and
+// enqueueJob / executeBatch run from anonymous Apex too. Measured org-wide, 16
+// of the 18 classes this tool called `likely_dead` were Schedulable or
+// Batchable.
+//
+// The invariant those tests guarded — that implementing the interface is not
+// itself liveness, and that production dispatch is distinguishable from
+// @isTest-only dispatch — is KEPT: it now lives in `reasoning` and in the
+// suppression, not in a confident dead verdict.
 // =============================================================================
 describe('findDeadCodeHandler — dead async-dispatch (Queueable) detection', () => {
   let qDir: string;
@@ -978,6 +985,16 @@ describe('findDeadCodeHandler — dead async-dispatch (Queueable) detection', ()
           apiName: 'RestEndpoint',
           properties: { isTest: false, isRestResource: true },
         }),
+        // CONTROL, the other direction: a PLAIN class — no interfaces, no
+        // superclass, no incoming edges — must still be found dead. Sits in
+        // this fixture on purpose, so the async amnesty and the dead-code
+        // detection are asserted against the same graph.
+        makeNode({
+          id: 'ApexClass:PlainOrphanUtil',
+          type: 'ApexClass',
+          apiName: 'PlainOrphanUtil',
+          properties: { isTest: false },
+        }),
       ],
       edges: [
         // DispatcherHelper -> LiveQueueable : production async dispatch.
@@ -1029,23 +1046,57 @@ describe('findDeadCodeHandler — dead async-dispatch (Queueable) detection', ()
     ).toBeUndefined();
   });
 
-  it('a Queueable enqueued ONLY from an @isTest class is likely_dead', async () => {
-    const r = await findDeadCodeHandler(qCtx, {});
+  it('a Queueable enqueued ONLY from an @isTest class is uncertain, never likely_dead', async () => {
+    // WAS `likely_dead`. A class whose only VISIBLE dispatch is a test can
+    // still be the thing an admin scheduled in Setup, and that registration is
+    // a CronTrigger record no metadata walk sees. The observation is kept —
+    // `reachedByTestClassOnly` still true, and the reasoning says which
+    // dispatch sites ARE visible — only the confident verdict is gone.
+    const r = await findDeadCodeHandler(qCtx, { includeUncertain: true });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const c = r.value.data.candidates.find(
       (x) => x.componentId === 'ApexClass:TestOnlyQueueable',
     );
-    expect(c?.verdict).toBe('likely_dead');
+    expect(c?.verdict).toBe('uncertain');
     expect(c?.reachedByTestClassOnly).toBe(true);
+    expect(c?.reasoning).toContain('@isTest classes');
+    expect(c?.reasoning).toContain('CronTrigger');
+    // …and it is WITHHELD from the default listing rather than reported dead.
+    const rDefault = await findDeadCodeHandler(qCtx, {});
+    expect(rDefault.ok).toBe(true);
+    if (!rDefault.ok) return;
+    expect(
+      rDefault.value.data.candidates.find(
+        (x) => x.componentId === 'ApexClass:TestOnlyQueueable',
+      ),
+    ).toBeUndefined();
   });
 
-  it('a Queueable that is never enqueued anywhere is definitely_dead', async () => {
-    const r = await findDeadCodeHandler(qCtx, {});
+  it('a Queueable that is never enqueued anywhere is uncertain, never definitely_dead', async () => {
+    // WAS `definitely_dead` — "the textbook dead-queueable signature". It is
+    // also the exact signature of a Queueable enqueued from anonymous Apex or a
+    // Batchable started by a scheduled job, neither of which is metadata.
+    const r = await findDeadCodeHandler(qCtx, { includeUncertain: true });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const c = r.value.data.candidates.find(
       (x) => x.componentId === 'ApexClass:OrphanQueueable',
+    );
+    expect(c?.verdict).toBe('uncertain');
+    expect(c?.incomingEdgeCount).toBe(0);
+    expect(c?.reasoning).toContain('No dispatch site of any kind is visible');
+    expect(c?.reasoning).toContain('NOT evidence of death');
+  });
+
+  it('CONTROL: a plain class with no interfaces and no in-edges is STILL definitely_dead', async () => {
+    // The async amnesty must not become a blanket amnesty. If this flips, the
+    // tool has stopped finding dead code and the fix has gone too wide.
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'ApexClass:PlainOrphanUtil',
     );
     expect(c?.verdict).toBe('definitely_dead');
     expect(c?.incomingEdgeCount).toBe(0);
@@ -1062,13 +1113,27 @@ describe('findDeadCodeHandler — dead async-dispatch (Queueable) detection', ()
     ).toBeUndefined();
   });
 
-  it('surfaces the async-dispatch dead-code disclosure when a queueable is flagged', async () => {
+  it('discloses the async-dispatch rule — and the CronTrigger reason — even on the DEFAULT call that lists none of them', async () => {
+    // The default call withholds every async row, so this boundary is the only
+    // thing telling a reader the tool looked at them. It must ride on the
+    // response whether or not any async class is LISTED.
     const r = await findDeadCodeHandler(qCtx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const joined = r.value.data.boundaries.join(' ');
-    expect(joined).toContain('async-dispatch dead-code');
+    expect(joined).toContain(
+      'async-dispatch (Queueable/Batchable/Schedulable) is NEVER reported dead on metadata evidence alone',
+    );
+    expect(joined).toContain('CronTrigger');
+    expect(joined).toContain('DATA, not metadata');
+    expect(joined).toContain('NO refresh can close that gap');
     expect(joined).toContain('!Test.isRunningTest()');
+    // No async class is listed at all on this call.
+    expect(
+      r.value.data.candidates.filter((c) =>
+        c.reasoning.startsWith('async-dispatch class'),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -1549,6 +1614,10 @@ describe('find_dead_code — unproven dynamic registration is uncertain, never d
       { id: 'ApexClass:PlainOrphanHelper', props: { isTest: false } },
       { id: 'ApexClass:LocalBaseSubclass', props: { isTest: false, superclass: 'LocalBase' } },
       { id: 'ApexClass:ComparableImpl', props: { isTest: false, implements: ['Comparable'] } },
+      // The three async-dispatch shapes now carried by the SAME rule.
+      { id: 'ApexClass:NightlyRollupSchedule', props: { isTest: false, isSchedulable: true, implements: ['Schedulable'] } },
+      { id: 'ApexClass:ArchiveSweepBatch', props: { isTest: false, isBatchable: true, implements: ['Database.Batchable<SObject>'] } },
+      { id: 'ApexClass:NotifyQueueJob', props: { isTest: false, isQueueable: true, implements: ['Queueable'] } },
     ];
     const seed: ExtractionResult = {
       nodes: nodes.map((n) => makeNode({ type: 'ApexClass', id: n.id, apiName: n.id.split(':')[1] as string, properties: n.props })),
@@ -1563,11 +1632,165 @@ describe('find_dead_code — unproven dynamic registration is uncertain, never d
     );
     for (const n of nodes) {
       const node = makeNode({ type: 'ApexClass', id: n.id, apiName: n.id.split(':')[1] as string, properties: n.props });
-      const tsSays = isFrameworkSubclass(node) || isCallableDispatch(node);
+      // ONE predicate, not a re-derivation: `isUnprovenRegistration` is the
+      // TS face of the CTE's `is_unproven_registration` column.
+      const tsSays = isUnprovenRegistration(node);
       expect(
         sqlSaysUncertain.has(n.id as never),
         `${n.id}: TS predicate says ${tsSays}, SQL cascade says ${sqlSaysUncertain.has(n.id as never)}`,
       ).toBe(tsSays);
     }
+  });
+
+  it('REUSE GUARD: async dispatch rides the SAME unproven-registration rule, not a second one', async () => {
+    // `isAsyncDispatchRegistration` must be reachable THROUGH the shared
+    // predicate. If someone re-forks a parallel classifier for async classes,
+    // one of these two halves stops agreeing with the other.
+    const sched = makeNode({
+      type: 'ApexClass',
+      id: 'ApexClass:NightlyRollupSchedule',
+      apiName: 'NightlyRollupSchedule',
+      properties: { isTest: false, isSchedulable: true },
+    });
+    expect(isAsyncDispatchRegistration(sched)).toBe(true);
+    expect(isUnprovenRegistration(sched)).toBe(true);
+    const plain = makeNode({
+      type: 'ApexClass',
+      id: 'ApexClass:PlainOrphanHelper',
+      apiName: 'PlainOrphanHelper',
+      properties: { isTest: false },
+    });
+    expect(isAsyncDispatchRegistration(plain)).toBe(false);
+    expect(isUnprovenRegistration(plain)).toBe(false);
+  });
+});
+
+// =============================================================================
+// F9 — the tallies describe the FULL classified set; the LISTING is filtered,
+// and the response says so.
+//
+// Pre-fix, `byVerdict` was computed after the `includeUncertain` filter had
+// already dropped rows, so a default org-wide call reported
+// `{definitely_dead: 0, likely_dead: 18, uncertain: 0}` while 91 uncertain
+// candidates had been classified and withheld — an UNCHECKED zero in the one
+// bucket that answers "is there anything you are not showing me".
+// =============================================================================
+describe('find_dead_code — byVerdict tallies the FULL set, `suppressed` names the filter', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-fdc-tally-'));
+    const opened = await openGraph(join(dir, 'fdc.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const st = opened.value;
+    const imported = await importExtractionResults(st, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const out = await run({ vaultRoot: dir, manifest: MANIFEST, graph: st } as Context);
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  /** One plain dead class + three classes that can only ever be `uncertain`. */
+  const seedMixed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:PlainOrphanHelper',
+        apiName: 'PlainOrphanHelper',
+        properties: { isTest: false },
+      }),
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:NightlyRollupSchedule',
+        apiName: 'NightlyRollupSchedule',
+        properties: { isTest: false, isSchedulable: true },
+      }),
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:ArchiveSweepBatch',
+        apiName: 'ArchiveSweepBatch',
+        properties: { isTest: false, isBatchable: true },
+      }),
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:WidgetAddressHelper',
+        apiName: 'WidgetAddressHelper',
+        properties: { isTest: false, implements: ['Callable'] },
+      }),
+    ],
+    edges: [],
+  };
+
+  it('the DEFAULT call counts the withheld uncertain rows instead of reporting `uncertain: 0`', async () => {
+    const r = await withStore(seedMixed, (c) =>
+      findDeadCodeHandler(c, { types: ['ApexClass'], limit: 500 }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix this read `uncertain: 0` with `totalCount: 1`.
+    expect(d.byVerdict).toEqual({
+      definitely_dead: 1,
+      likely_dead: 0,
+      uncertain: 3,
+    });
+    expect(d.byType).toEqual({ ApexClass: 4 });
+    // The LISTING is still filtered — one row, the genuinely dead one.
+    expect(d.totalCount).toBe(1);
+    expect(d.candidates.map((c) => c.componentId)).toEqual([
+      'ApexClass:PlainOrphanHelper',
+    ]);
+    expect(d.suppressed.includeUncertain).toBe(false);
+    expect(d.suppressed.uncertainWithheld).toBe(3);
+    expect(d.suppressed.note).toContain('tally the FULL candidate set');
+    expect(d.suppressed.note).toContain('withheld from the listing');
+  });
+
+  it('`includeUncertain: true` lists everything and says nothing was withheld', async () => {
+    const r = await withStore(seedMixed, (c) =>
+      findDeadCodeHandler(c, {
+        types: ['ApexClass'],
+        includeUncertain: true,
+        limit: 500,
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.byVerdict).toEqual({
+      definitely_dead: 1,
+      likely_dead: 0,
+      uncertain: 3,
+    });
+    expect(d.totalCount).toBe(4);
+    expect(d.suppressed.includeUncertain).toBe(true);
+    expect(d.suppressed.uncertainWithheld).toBe(0);
+    expect(d.suppressed.note).toContain('nothing was withheld');
+  });
+
+  it('a zero in `uncertainWithheld` is CHECKED: no uncertain rows existed to withhold', async () => {
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({
+            type: 'ApexClass',
+            id: 'ApexClass:PlainOrphanHelper',
+            apiName: 'PlainOrphanHelper',
+            properties: { isTest: false },
+          }),
+        ],
+        edges: [],
+      },
+      (c) => findDeadCodeHandler(c, { types: ['ApexClass'], limit: 500 }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.byVerdict.uncertain).toBe(0);
+    expect(d.suppressed.uncertainWithheld).toBe(0);
+    expect(d.suppressed.includeUncertain).toBe(false);
+    expect(d.suppressed.note).toContain('CHECKED zero');
   });
 });

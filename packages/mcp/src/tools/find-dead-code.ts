@@ -33,19 +33,29 @@
  *     stripped by dynamic SOQL / reflective access. The v2.7
  *     `method_reachability` `test-only-reachable` verdict cascades
  *     here.
- *     An ASYNC-DISPATCH class (Queueable / Batchable / Schedulable)
- *     that is never enqueued/executed/scheduled is `definitely_dead`,
- *     and one dispatched only from `@isTest` code is `likely_dead` —
- *     implementing the interface does NOT make it live; only a
- *     production dispatch site does. A production enqueue guarded only
- *     by `!Test.isRunningTest()` still counts as a live production path.
+ *     An ASYNC-DISPATCH class (Queueable / Batchable / Schedulable) is
+ *     NEVER `likely_dead` and never `definitely_dead` — see `uncertain`.
  *   - `uncertain`: reached by at least one EXTERNAL entry point (REST
  *     resource, AuraEnabled, InvocableMethod, or ApexTrigger — the
- *     platform invokes these directly), an async-dispatch class with a
- *     production dispatch site — OR an Active / Draft / unknown-status Flow,
- *     which is its OWN entry point (R2-12). Surfaced for completeness in
- *     the result set when `includeUncertain: true`; suppressed by
- *     default.
+ *     platform invokes these directly), an ASYNC-DISPATCH class of any
+ *     kind, a class registered dynamically (framework subclass /
+ *     `Callable`) — OR an Active / Draft / unknown-status Flow, which is
+ *     its OWN entry point (R2-12). Surfaced for completeness in the
+ *     result set when `includeUncertain: true`; suppressed by default,
+ *     and the `suppressed` block says how many rows that removed.
+ *
+ *     Every Queueable / Batchable / Schedulable class lands here because
+ *     its registration need not exist in metadata at all: an admin who
+ *     schedules a class through Setup > Schedule Apex creates a
+ *     `CronTrigger` RECORD, and CronTrigger is DATA, not metadata — never
+ *     retrieved, no node, no edge, and no refresh can close that gap.
+ *     `System.enqueueJob` / `Database.executeBatch` run from anonymous
+ *     Apex just as well. So an absent dispatch site is the EXPECTED
+ *     reading for a live scheduled job. What the vault CAN see is still
+ *     reported in `reasoning`: a production (non-`@isTest`) dispatch site
+ *     — including one guarded only by `!Test.isRunningTest()` — means
+ *     live at runtime; @isTest-only or absent dispatch is stated as "no
+ *     production dispatch site is VISIBLE in this vault".
  *
  * **Entry-point taxonomy** (matches `method-reachability.ts`):
  *   - `ApexTrigger`: triggers ARE entry points.
@@ -53,7 +63,8 @@
  *   - `ApexClass` with `hasAuraEnabledMethod: true`.
  *   - `ApexClass` with `hasInvocableMethod: true`.
  *   - `ApexClass` with `isQueueable: true` / `isBatchable: true` /
- *     `isSchedulable: true`.
+ *     `isSchedulable: true` — an UNPROVEN registration (see `uncertain`),
+ *     never a confident dead verdict.
  *
  * **Filter by type:** optional `types` narrows the dead-code scan to
  * one or more ComponentTypes. Default is `['ApexClass', 'ApexTrigger',
@@ -61,11 +72,16 @@
  *
  * **Honesty axis (v2.7 inherited):** dynamic dispatch
  * (`Type.forName(...)`), reflective invocation, framework wiring
- * (TriggerHandler / fflib base classes), and managed-package callers
- * are INVISIBLE to the graph edges this tool walks. A class genuinely
- * invoked at runtime via one of these mechanisms will surface as
- * `definitely_dead` or `likely_dead`. The `boundaries` array surfaces
- * the verbatim disclosure.
+ * (TriggerHandler / fflib base classes), managed-package callers, and
+ * every registration that lives in DATA rather than metadata — a
+ * `CronTrigger` record written by Setup > Schedule Apex, a Custom
+ * Metadata dispatch row, anonymous Apex — are INVISIBLE to the graph
+ * edges this tool walks, and no refresh changes that. A class genuinely
+ * invoked at runtime via one of these mechanisms has zero incoming edges
+ * by construction. The recognisable shapes are routed to `uncertain`
+ * (async dispatch, framework subclass, `Callable`); the rest can still
+ * surface as `definitely_dead` or `likely_dead`. The `boundaries` array
+ * surfaces the verbatim disclosure.
  *
  * **Performance (v3.2):** the original implementation issued one
  * `listEdges` plus one `getNodeById` per incoming edge — an N+1
@@ -94,6 +110,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  ASYNC_DISPATCH_PROPERTY_KEYS,
   CALLABLE_INTERFACE,
   NOT_USAGE_EDGE_TYPES,
   UNPROVEN_REGISTRATION_DISCLOSURE,
@@ -125,7 +142,7 @@ const MANAGED_PACKAGE_DISCLOSURE =
 const FLOW_DISCLOSURE =
   'Flow dead-detection (R2-12): a Flow is flagged definitely_dead ONLY when its status is Obsolete or InvalidDraft. An Active, Draft, or unknown-status Flow is NEVER definitely_dead — Flow graph edges are mostly OUTGOING (triggersOn / listensTo / callsApex / writesTo), so a live flow has ~0 incoming edges by nature and fires on its own trigger/schedule; it surfaces as `uncertain` (suppressed unless includeUncertain). R6-02: subflow invocation (flow-calls-flow) IS now modeled as an incoming `references` edge, so an Obsolete/InvalidDraft flow still invoked by another flow as a subflow now reads `uncertain` (it has a live dependent), not definitely_dead — delete the referencing flow first. The still-invisible path is Apex `Flow.Interview` invocation and non-metadata launch points; verify a flow before deleting it.';
 const ASYNC_DISPATCH_DISCLOSURE =
-  'async-dispatch dead-code (Queueable/Batchable/Schedulable): a class that "implements Queueable" is NOT automatically live — it must be enqueued/executed/scheduled by user Apex. A class with a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class) is treated as live; a class dispatched ONLY from @isTest code surfaces as likely_dead (test dispatch is rolled back at runtime) and one never dispatched as definitely_dead. A production enqueue guarded only by `!Test.isRunningTest()` STILL counts as a live production path. Blind spots: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers are invisible — verify before deleting.';
+  'async-dispatch (Queueable/Batchable/Schedulable) is NEVER reported dead on metadata evidence alone. The dispatch that starts such a class does not have to exist in metadata: an admin who schedules a class through Setup > Schedule Apex creates a `CronTrigger` RECORD, and CronTrigger is DATA, not metadata — it is never retrieved into the vault, mints no node and no edge, and NO refresh can close that gap; `System.enqueueJob` / `Database.executeBatch` / `System.schedule` run from ANONYMOUS Apex (Developer Console, deployment script) just as well. So an absent dispatch site is the EXPECTED reading for a live scheduled job, not evidence against it, and these classes are reported `uncertain` — suppressed unless includeUncertain — never `definitely_dead` and never `likely_dead`. What the vault CAN say is reported in `reasoning`: a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class, including one guarded only by `!Test.isRunningTest()`) means the class is live at runtime; @isTest-only dispatch and no dispatch at all are both stated as "no production dispatch site is VISIBLE in this vault", which is not the same claim as "none exists". Further blind spots on the visible side: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers. Confirm the job in Setup > Scheduled Jobs / Apex Jobs before deleting anything here.';
 const CUSTOM_FIELD_DISCLOSURE =
   'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
 /**
@@ -244,13 +261,43 @@ export interface FindDeadCodeOutput {
     readonly mode: 'all' | 'component' | 'object';
   };
   readonly candidates: readonly DeadCodeCandidate[];
+  /**
+   * How many candidates are LISTED — i.e. the length of the filtered set
+   * `candidates` pages through. NOT the size of the classified set when
+   * `includeUncertain` is false; `byVerdict` carries that, and `suppressed`
+   * states the difference.
+   */
   readonly totalCount: number;
+  /**
+   * Verdict tally across the FULL classified candidate set, INCLUDING rows the
+   * `includeUncertain` filter withheld from `candidates`.
+   *
+   * It used to tally the post-filter list, so a default call reported
+   * `uncertain: 0` while 91 uncertain rows had been classified and dropped —
+   * an UNCHECKED zero in the exact bucket a reader consults to ask "did this
+   * tool consider anything it is not telling me about". `suppressed` names the
+   * gap between this tally and `totalCount`.
+   */
   readonly byVerdict: Readonly<{
     definitely_dead: number;
     likely_dead: number;
     uncertain: number;
   }>;
+  /** Component-type tally across the FULL classified set, on the same basis as `byVerdict`. */
   readonly byType: Readonly<Record<string, number>>;
+  /**
+   * What the `includeUncertain` filter withheld from `candidates`. ALWAYS
+   * present, so `uncertainWithheld: 0` is readable as CHECKED — the scan
+   * classified no uncertain rows — rather than as an absent field.
+   */
+  readonly suppressed: {
+    /** The filter actually applied (a component-scoped call forces it true). */
+    readonly includeUncertain: boolean;
+    /** Uncertain candidates classified but NOT listed. `0` when nothing was withheld. */
+    readonly uncertainWithheld: number;
+    /** Verbatim sentence stating the relationship between the tallies and the listing. */
+    readonly note: string;
+  };
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
   /**
@@ -446,6 +493,10 @@ export const UNPROVEN_REGISTRATION_SQL = `             COALESCE(
                type = 'ApexClass' AND (
                  COALESCE(json_extract_string(properties_json, '$.superclass') LIKE '%.%', FALSE)
                  OR COALESCE(json_extract_string(properties_json, '$.implements') LIKE '%"${CALLABLE_INTERFACE}"%', FALSE)
+${ASYNC_DISPATCH_PROPERTY_KEYS.map(
+  (k) =>
+    `                 OR COALESCE(json_extract_string(properties_json, '$.${k}') = 'true', FALSE)`,
+).join('\n')}
                ),
                FALSE)`;
 
@@ -812,30 +863,42 @@ export const findDeadCodeHandler = async (
       reasoning =
         'Flow fires on its own trigger and is active (or Draft/unknown status); not dead despite no incoming references';
     } else if (asyncDispatchEntry && !externalEntryPoint) {
-      // Async-dispatch class (Queueable / Batchable / Schedulable). Unlike an
-      // external entry point, the platform does NOT invoke it on its own — user
-      // Apex must enqueue/executeBatch/schedule it. So it is only LIVE when a
-      // PRODUCTION dispatch site exists. A class dispatched only from @isTest code
-      // (test dispatch rolls back) — or never dispatched at all — is dead code.
-      // A `!Test.isRunningTest()`-guarded enqueue in a non-test class still counts
-      // as production (the guard suppresses the call only during test runs).
-      if (hasProductionDispatch || hasEntryPointReach) {
-        verdict = 'uncertain';
-        reasoning = hasProductionDispatch
-          ? 'async-dispatch class (Queueable/Batchable/Schedulable) enqueued from at least one production (non-@isTest) dispatch site; live at runtime'
-          : 'async-dispatch class reached by a production entry-point caller';
-      } else if (incomingCount === 0) {
-        verdict = 'definitely_dead';
+      // ASYNC-DISPATCH CLASS (Queueable / Batchable / Schedulable) — ALWAYS
+      // `uncertain`, never a confident dead verdict.
+      //
+      // The previous cascade sent these straight to definitely_dead /
+      // likely_dead on the claim that such a class "must be enqueued /
+      // executed / scheduled by user Apex". That claim is FALSE on the
+      // platform. An admin scheduling a class through Setup > Schedule Apex
+      // creates a `CronTrigger` record; CronTrigger is DATA, not metadata, so
+      // it is never retrieved, never becomes a node, and mints no edge. The
+      // same goes for `System.enqueueJob` / `Database.executeBatch` from
+      // ANONYMOUS Apex. A metadata walk therefore CANNOT see the registration,
+      // and its absence is the expected reading for a live scheduled job.
+      // Measured org-wide: 16 of 18 `likely_dead` classes were exactly this.
+      //
+      // This is the same tier, and the same mechanism, as the other unproven
+      // registrations (`is_unproven_registration` — which now covers these
+      // three flags too, so the SQL and TS predicates stay pinned together).
+      // What the vault CAN observe is kept, in `reasoning`.
+      verdict = 'uncertain';
+      if (hasProductionDispatch) {
         reasoning =
-          'async-dispatch class (Queueable/Batchable/Schedulable) that is never enqueued/executed/scheduled anywhere in the vault; dead — it cannot be exercised at runtime';
-      } else if (!hasNonTestReach) {
-        verdict = 'likely_dead';
-        reasoning =
-          'async-dispatch class enqueued ONLY from @isTest code (test dispatch is rolled back at runtime); no production dispatch site';
+          'async-dispatch class (Queueable/Batchable/Schedulable) enqueued from at least one production (non-@isTest) dispatch site; live at runtime';
+      } else if (hasEntryPointReach) {
+        reasoning = 'async-dispatch class reached by a production entry-point caller';
       } else {
-        verdict = 'uncertain';
+        const visible =
+          incomingCount === 0
+            ? 'No dispatch site of any kind is visible in this vault'
+            : !hasNonTestReach
+              ? 'The only dispatch sites visible in this vault are @isTest classes (test dispatch is rolled back at runtime)'
+              : 'It has non-test inbound references but no recognized production dispatch site';
         reasoning =
-          'async-dispatch class with non-test inbound references but no recognized production dispatch site';
+          `async-dispatch class (Queueable/Batchable/Schedulable). ${visible} — which is NOT evidence of death: ` +
+          'Setup > Schedule Apex registers a class as a `CronTrigger` RECORD (data, never metadata: never retrieved, ' +
+          'mints no edge, and no refresh can close that gap), and enqueue/executeBatch also run from anonymous Apex. ' +
+          'Not proven live either — check Setup > Scheduled Jobs / Apex Jobs before deleting.';
       }
     } else if (ownEntryPoint || hasEntryPointReach) {
       verdict = 'uncertain';
@@ -872,8 +935,12 @@ export const findDeadCodeHandler = async (
         'reached by non-test components but no recognized entry point';
     }
 
-    if (verdict === 'uncertain' && !includeUncertain) continue;
-
+    // NO SUPPRESSION HERE. `candidates` is the FULL candidate set — the set
+    // `byVerdict` / `byType` are documented to tally. The `includeUncertain`
+    // filter is applied ONCE, further down, to the LISTED slice only. Filtering
+    // here is what made the default response report `uncertain: 0` while
+    // withholding 91 uncertain rows: an UNCHECKED zero in the one bucket a
+    // reader consults to decide whether the tool looked.
     candidates.push({
       componentId: row.id as ComponentId,
       componentType: row.type as ComponentType,
@@ -940,17 +1007,42 @@ export const findDeadCodeHandler = async (
           : c,
       );
       staticUsageDowngrades = staticallyUsed.size;
-      // Uncertain is suppressed unless includeUncertain, so a class with real
-      // static usage never reads as dead. Mirror the in-loop suppression.
-      if (!includeUncertain) {
-        candidates = candidates.filter(
-          (c) => !staticallyUsed.has(c.componentId),
-        );
-      }
+      // The downgrade to `uncertain` is all that is needed: the ONE
+      // `includeUncertain` filter below removes it from the listing, and the
+      // tallies keep counting it. Filtering it out a second time here is what
+      // made a statically-used class vanish from `byVerdict` as well as from
+      // the list.
     }
   }
 
   candidates.sort(compareCandidates);
+
+  // ---- TALLY THE FULL SET, THEN FILTER THE LISTING -----------------------
+  // `byVerdict` / `byType` describe every candidate the scan classified,
+  // whether or not it is listed. `listed` is what pagination walks.
+  const byVerdict = {
+    definitely_dead: 0,
+    likely_dead: 0,
+    uncertain: 0,
+  };
+  const byType: Record<string, number> = {};
+  for (const c of candidates) {
+    byVerdict[c.verdict] += 1;
+    byType[c.componentType] = (byType[c.componentType] ?? 0) + 1;
+  }
+  const listed = includeUncertain
+    ? candidates
+    : candidates.filter((c) => c.verdict !== 'uncertain');
+  const uncertainWithheld = candidates.length - listed.length;
+  const suppressed: FindDeadCodeOutput['suppressed'] = {
+    includeUncertain,
+    uncertainWithheld,
+    note: includeUncertain
+      ? '`includeUncertain` is true, so nothing was withheld: `candidates`, `totalCount`, `byVerdict` and `byType` all describe the same full candidate set.'
+      : uncertainWithheld > 0
+        ? `\`byVerdict\` and \`byType\` tally the FULL candidate set; \`candidates\` and \`totalCount\` do NOT. ${uncertainWithheld} \`uncertain\` row(s) were classified and then withheld from the listing because \`includeUncertain\` is false. Re-run with \`includeUncertain: true\` to read them — they are the rows whose emptiness is expected rather than damning (dynamic registration, async dispatch, active Flows, static-type usage), so a short list here is not a clean bill of health.`
+        : '`includeUncertain` is false, but the scan classified no `uncertain` candidates, so nothing was withheld — `uncertain: 0` here is a CHECKED zero, not a hidden bucket.',
+  };
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers every NARROWING arg — includeUncertain (it filters
@@ -976,7 +1068,7 @@ export const findDeadCodeHandler = async (
     offset = decoded.value.o;
   }
 
-  const paged = paginateLegacy(candidates, {
+  const paged = paginateLegacy(listed, {
     offset,
     limit,
     keyOf: (c) => c.componentId,
@@ -992,17 +1084,6 @@ export const findDeadCodeHandler = async (
   // Paged when truncated OR resumed past 0; only then do we add paging fields,
   // so a whole-fits no-cursor response stays byte-identical to pre-CR-22.
   const isPaged = truncated || offset > 0;
-
-  const byVerdict = {
-    definitely_dead: 0,
-    likely_dead: 0,
-    uncertain: 0,
-  };
-  const byType: Record<string, number> = {};
-  for (const c of candidates) {
-    byVerdict[c.verdict] += 1;
-    byType[c.componentType] = (byType[c.componentType] ?? 0) + 1;
-  }
 
   const boundaries: string[] = [DEAD_CODE_DISCLOSURE];
   // R2-12: whenever Flow is in scope, disclose the status-gated Flow rule
@@ -1064,7 +1145,7 @@ export const findDeadCodeHandler = async (
   // — flag those candidates as a static-analysis blind spot, never silently.
   const soundness = await soundnessFromIds(
     ctx.graph,
-    candidates.map((c) => c.componentId),
+    listed.map((c) => c.componentId),
   );
 
   // Dead-code is an absence claim about CALLERS: incomplete coverage of any
@@ -1080,9 +1161,10 @@ export const findDeadCodeHandler = async (
     data: {
       appliedScope,
       candidates: slice,
-      totalCount: candidates.length,
+      totalCount: listed.length,
       byVerdict,
       byType,
+      suppressed,
       boundaries,
       truncated,
       ...(isPaged ? { limit, offset } : {}),
