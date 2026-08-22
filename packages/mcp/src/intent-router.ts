@@ -564,6 +564,13 @@ const OBJECT_360_NON_NAMES: ReadonlySet<string> = new Set([
 const OBJECT_BRIEF_FRAME =
   String.raw`(?!.*\bthis\s+objects?\b[^?!]{0,250}\b(?:automations?|profiles?|delete|remove|retire|where\s+is\s+it\s+used)\b)`;
 
+/**
+ * Refuse an Apex-reviewer question that names a DIFFERENT subject, unless it
+ * also names Apex explicitly. Reads as: "not (a competing subject noun with no
+ * apex/class/trigger token anywhere)".
+ */
+const APEX_REVIEW_SUBJECT_GUARD = String.raw`(?!(?=[^?!]*\b(?:flows?|permission\s+sets?|validation\s+rules?|lwc|lightning\s+(?:web\s+)?components?|aura|layouts?|profiles?|reports?|dashboards?|page\s+layouts?|integrations?|the\s+org|our\s+org|this\s+org)\b)(?![^?!]*\b(?:apex|class|classes|trigger|triggers)\b))`;
+
 const deriveObject360Args = (
   q: string,
   question?: string,
@@ -5127,14 +5134,32 @@ const RULES: readonly Rule[] = [
       // the `review-change` deploy-gate asks (which name a PR / changeset and
       // are claimed by an earlier rule anyway).
       /\b(?:code\s+review|review)\b[^.?!]{0,40}\b(?:apex\s+class|apex\s+trigger|this\s+class|this\s+trigger|the\s+\w+\s+class)\b/,
-      /\bwhat\s+would\s+a\s+(?:reviewer|senior|code\s+reviewer)\b/,
-      /\breview\b[^.?!]{0,40}\blike\s+a\s+(?:senior|experienced|good)\b/,
+      // COMPETING-SUBJECT GUARD (review finding). The comment above already
+      // claimed these were "anchored on an APEX target"; two were not, and the
+      // reviewer measured eight questions about OTHER subjects landing on an
+      // Apex tool: "what would a reviewer flag in our Flows?", "what would a
+      // senior admin say about our permission sets?", "review our validation
+      // rules like a senior consultant would", "review the org like a senior
+      // architect would". None is a sibling gold row, which is why 658 router
+      // tests and a 2,104-utterance sweep were both clean — the tool proposed
+      // was simply wrong.
+      //
+      // A POSITIVE apex anchor cannot work here: `normalize()` lowercases the
+      // question before any pattern runs, so a bare class name ("what would a
+      // reviewer flag in WidgetService") is indistinguishable from an English
+      // word. The discriminator is therefore the presence of a DIFFERENT
+      // subject noun — and the guard yields to an explicit apex/class/trigger
+      // token, so "what would a reviewer flag in this org's apex classes"
+      // still lands here.
+      new RegExp(`^${APEX_REVIEW_SUBJECT_GUARD}[^?!]*\\bwhat\\s+would\\s+a\\s+(?:reviewer|senior|code\\s+reviewer)\\b`),
+      new RegExp(`^${APEX_REVIEW_SUBJECT_GUARD}[^?!]*\\breview\\b[^.?!]{0,40}\\blike\\s+a\\s+(?:senior|experienced|good)\\b`),
       // "anatomy of" — vocabulary no other rule uses.
       /\banatomy\b[^.?!]{0,40}\b(?:class|trigger|apex)\b/,
       // "where does <X> query / do DML / call out" — a SITE question (line
       // numbers), distinct from governor-risks' loop sweep, which sits earlier
       // and keeps every "in a loop" phrasing.
-      /\bwhere\s+does\b[^.?!]{0,50}\b(?:soql|quer(?:y|ies|ying)|dml|callouts?)\b/,
+      // Same guard: "where does this FLOW do DML?" is not an Apex question.
+      new RegExp(`^${APEX_REVIEW_SUBJECT_GUARD}[^?!]*\\bwhere\\s+does\\b[^.?!]{0,50}\\b(?:soql|quer(?:y|ies|ying)|dml|callouts?)\\b`),
     ],
   },
   {
