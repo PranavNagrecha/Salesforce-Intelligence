@@ -50,10 +50,9 @@ import type { Context } from '../server.js';
 
 import { declaredOnlyDependencyDisclosure } from './declared-only-disclosure.js';
 import {
-  mergeInputAliases,
+  resolveContainerAlias,
   resolveFieldAlias,
   toObjectApiName,
-  toProfileOrPermSetId,
 } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
@@ -176,6 +175,17 @@ const userAbilityInputBaseSchema = z.object({
   // (never a bare Zod "componentId: Required"). A canonical `componentId` call
   // is byte-identical to before.
   componentId: z.string().min(1).optional(),
+  // The container alias keys are DECLARED here so `z.object` does not strip
+  // them before the handler sees them — `resolveContainerAlias` reconciles them
+  // in the handler, where a named `invalid-query` is actually reachable.
+  // Coercion is per key BY THE KEY'S OWN NAME: a `profile*` key can only name a
+  // Profile, a `permissionSet*` key only a PermissionSet.
+  profileId: z.string().min(1).optional(),
+  profileApiName: z.string().min(1).optional(),
+  profileName: z.string().min(1).optional(),
+  permissionSetId: z.string().min(1).optional(),
+  permissionSetApiName: z.string().min(1).optional(),
+  permissionSetName: z.string().min(1).optional(),
   // USER-ABILITY-REJECTS-FIELD-SCOPE: optional FIELD scope — "can {profile}
   // edit {Object}.{field}?". Pass `fieldId` (`CustomField:Object.Field` or bare
   // `Object.Field`) OR `fieldApiName` + `objectApiName`. When present the handler
@@ -194,41 +204,18 @@ const userAbilityInputBaseSchema = z.object({
   cursor: z.string().min(1).optional(),
 });
 
-export const userAbilityInputSchema = z.preprocess((raw) => {
-  // USER-ABILITY-REJECTS-FIELD-SCOPE (narrowed residual): accept the natural
-  // `profileApiName` / `permissionSetApiName` selectors (and the `profileId` /
-  // `permissionSetId` id aliases) alongside the canonical `componentId` — the
-  // container is the ability SUBJECT, resolved to its `Profile:` / `PermissionSet:`
-  // prefix (canonical `componentId` wins). Mirrors `tab_availability`, so a host
-  // that route→`user_ability`s a "can {profile} edit {Object}.{field}?" question
-  // and passes the profile by its NATURAL name no longer hard-fails.
-  const merged = mergeInputAliases(raw, [
-    {
-      canonical: 'componentId',
-      aliases: ['profileId', 'profileApiName', 'permissionSetId', 'permissionSetApiName'],
-    },
-  ]);
-  if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
-    const o = merged as Record<string, unknown>;
-    const id = typeof o.componentId === 'string' ? o.componentId : '';
-    // Only coerce a BARE granter name (no `Type:` prefix — Salesforce API names
-    // never contain a colon) up to a canonical Profile/PermissionSet id. An id
-    // that already carries a component-type prefix (`CustomObject:…`, and even
-    // the already-canonical `Profile:`/`PermissionSet:` forms) contains a `:`, so
-    // it is LEFT UNTOUCHED — a non-granter id then falls through to the handler's
-    // Profile/PermissionSet prefix check and is rejected with `invalid-query`,
-    // instead of being silently rewritten to `Profile:CustomObject:…` and 404-ing
-    // as a phantom Profile. Mirrors `tab_availability`.
-    if (id.length > 0 && !id.includes(':')) {
-      const rawObj = raw as Record<string, unknown>;
-      const fromPs =
-        typeof rawObj.permissionSetId === 'string' ||
-        typeof rawObj.permissionSetApiName === 'string';
-      o.componentId = fromPs ? `PermissionSet:${id}` : toProfileOrPermSetId(id);
-    }
-  }
-  return merged;
-}, userAbilityInputBaseSchema);
+/**
+ * The container selectors are reconciled in the HANDLER by
+ * `resolveContainerAlias`, not here.
+ *
+ * The `z.preprocess` + `mergeInputAliases` step this replaces could not refuse:
+ * it took the VALUE from one key and the PREFIX from the mere PRESENCE of
+ * another, so `{ profileApiName: 'X', permissionSetApiName: 'Y' }` answered
+ * about `PermissionSet:X` — a THIRD component neither selector named. A
+ * preprocess step structurally cannot emit a named `invalid-query` (throwing
+ * yields a bare Zod error), which is why the refusal moved to the handler.
+ */
+export const userAbilityInputSchema = userAbilityInputBaseSchema;
 
 export type UserAbilityInput = z.infer<typeof userAbilityInputSchema>;
 
@@ -269,11 +256,18 @@ export interface UserAbilityOutput {
     readonly customPermissions: number;
   };
   /**
-   * USER-ABILITY-REJECTS-FIELD-SCOPE: echoes the FIELD scope ACTUALLY applied.
-   * Present ONLY when the caller passed a `fieldId` / `fieldApiName` field
-   * scope; a bare ability-inventory call omits it (byte-identical).
+   * Echoes the scope ACTUALLY applied.
+   *
+   * `container` is ALWAYS present — a caller who passed a bare `profileApiName`
+   * deserves to see which canonical id it became, and the scope-honesty rule
+   * asks for the echo on every resolved natural selector, not only on the axis
+   * that happens to be optional. `field` is present ONLY when the caller passed
+   * a `fieldId` / `fieldApiName` field scope.
    */
-  readonly appliedScope?: { readonly field: string };
+  readonly appliedScope: {
+    readonly container: string;
+    readonly field?: string;
+  };
   /**
    * The container's field-level security on the scoped field. Present ONLY on a
    * field-scoped call. `readable` / `editable` are the declared FLS grants
@@ -307,27 +301,22 @@ export const userAbilityHandler = async (
   ctx: Context,
   input: UserAbilityInput,
 ): Promise<Result<McpResponse<UserAbilityOutput>, McpError>> => {
-  // USER-ABILITY-REJECTS-FIELD-SCOPE (narrowed residual): a call that resolved
-  // to NO container (no `componentId` and no `profileApiName` / `permissionSetApiName`
-  // / `profileId` / `permissionSetId` selector for the preprocess to merge) is
-  // refused with a NAMED `invalid-query`, never a bare Zod "componentId: Required"
-  // and never a silent field-only inventory.
-  if (input.componentId === undefined || input.componentId.length === 0) {
+  // The ONE shared container normalizer. A call that names NO container is a
+  // NAMED `invalid-query` (never a bare Zod "componentId: Required"); selectors
+  // that name DIFFERENT containers are REFUSED naming both, never silently
+  // picked; and a value carrying some other `Type:` prefix passes through
+  // unchanged so the wrong-type check below produces its precise message.
+  const containerResult = resolveContainerAlias(input);
+  if (!containerResult.ok) return err(containerResult.error);
+  const container = containerResult.value as { componentId: string };
+  if (!GRANTER_PREFIXES.some((p) => container.componentId.startsWith(p))) {
     return err({
       kind: 'invalid-query',
-      message:
-        'name the profile or permission set — pass `componentId` (`Profile:X` / `PermissionSet:X`) or the natural `profileApiName` / `permissionSetApiName` selector',
+      message: `componentId must be a Profile: or PermissionSet: id; got '${container.componentId}'`,
       path: 'componentId',
     });
   }
-  if (!GRANTER_PREFIXES.some((p) => input.componentId!.startsWith(p))) {
-    return err({
-      kind: 'invalid-query',
-      message: `componentId must be a Profile: or PermissionSet: id; got '${input.componentId}'`,
-      path: 'componentId',
-    });
-  }
-  const componentId = input.componentId as ComponentId;
+  const componentId = container.componentId as ComponentId;
 
   const nodeResult = await getNodeById(ctx.graph, componentId);
   if (!nodeResult.ok) {
@@ -476,7 +465,7 @@ export const userAbilityHandler = async (
   // refreshed vault) is rejected with `invalid-query`. The field scope binds the
   // fingerprint too, so a field-scoped cursor cannot resume an unscoped call.
   const fingerprint = argsFingerprint({
-    componentId: input.componentId,
+    componentId,
     ...(fieldAccess !== null ? { field: fieldAccess.field } : {}),
   });
   let offset = input.offset ?? 0;
@@ -524,7 +513,10 @@ export const userAbilityHandler = async (
       },
       actionPermissions,
       customPermissions,
-      ...(fieldAccess !== null ? { appliedScope: { field: fieldAccess.field } } : {}),
+      appliedScope: {
+        container: componentId,
+        ...(fieldAccess !== null ? { field: fieldAccess.field } : {}),
+      },
       ...(fieldAccess !== null
         ? { fieldAccess: { field: fieldAccess.field, readable: fieldAccess.readable, editable: fieldAccess.editable } }
         : {}),

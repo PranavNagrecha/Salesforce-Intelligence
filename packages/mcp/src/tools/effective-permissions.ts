@@ -104,7 +104,11 @@ import {
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
-import { mergeInputAliases, resolveObjectAlias } from './input-aliases.js';
+import {
+  mergeInputAliases,
+  resolveContainerAlias,
+  resolveObjectAlias,
+} from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -141,6 +145,14 @@ export type ObjectFlag = ObjectPermissionFlag;
 const effectivePermissionsInputBaseSchema = z
   .object({
     profileId: z.string().min(1).optional(),
+    // DECLARED (not merely merged) so `z.object` does not strip them before the
+    // handler sees them: `resolveContainerAlias` reconciles the profile-axis
+    // selectors there and REFUSES when two of them name different containers,
+    // rather than the preprocess silently keeping the canonical one. The
+    // `permissionSetIds` ARRAY is a separate axis — several containers are
+    // legitimate there — and is deliberately not folded into the resolver.
+    profileApiName: z.string().min(1).optional(),
+    profileName: z.string().min(1).optional(),
     permissionSetIds: z.array(z.string().min(1)).optional(),
     // EFFECTIVE-PERMISSIONS-IGNORES-OBJECT-AND-PROFILEAPINAME: optional OBJECT
     // scope — "effective permissions for {profile} ON {object}?". Any one of
@@ -382,16 +394,25 @@ export interface EffectivePermissionsOutput {
   readonly confidence: 'declared';
   readonly disclosures: readonly string[];
   /**
-   * Echoes the OBJECT scope ACTUALLY applied. Present ONLY when the caller
-   * passed an `object` / `objectApiName` / `objectId` selector — a bare
-   * profile/permission-set call omits it so the response stays byte-identical to
-   * the pre-scope shape. When present, `objectPermissions`, `summary.objects` /
+   * Echoes the scope ACTUALLY applied, on either or both axes. Present when a
+   * profile selector resolved (`container`) or an object selector was passed
+   * (`object`); absent entirely on a `permissionSetIds`-only, object-less call.
+   *
+   * `object` narrows `objectPermissions`, `summary.objects` /
    * `summary.fieldsWithFls` / `summary.recordTypeVisibilities`, and
-   * `recordTypeVisibilities` are narrowed to `object`; `systemPermissions` /
-   * `customPermissions` / `apexClasses` are container-wide (not object-specific)
-   * and are unchanged.
+   * `recordTypeVisibilities`; `systemPermissions` / `customPermissions` /
+   * `apexClasses` are container-wide (not object-specific) and are unchanged.
    */
-  readonly appliedScope?: { readonly object: string };
+  readonly appliedScope?: {
+    /**
+     * The profile-axis container the answer is ACTUALLY about, echoed whenever
+     * a profile selector resolved — a caller who passed a bare `profileApiName`
+     * deserves to see which canonical id it became. Absent on a
+     * `permissionSetIds`-only call (that axis is the array, not this one).
+     */
+    readonly container?: string;
+    readonly object?: string;
+  };
   /**
    * CR-22 opaque continuation token, present ONLY on a truncated page (the
    * designated list overflowed `limit` or the byte budget). Echo it back as
@@ -888,8 +909,17 @@ export const effectivePermissionsHandler = async (
   // permission-set id is coerced to a `PermissionSet:` id, but the caller may
   // legitimately pass a `PermissionSetGroup:` id there — coercePrefix leaves a
   // typed prefix unchanged, so that flows through as a PSG.
+  //
+  // The profile axis goes through the ONE shared container normalizer first:
+  // `{profileApiName: 'A', profileId: 'Profile:B'}` used to answer about B and
+  // silently drop A. It is `required: false` here because a call naming only
+  // `permissionSetIds` is legitimate; the base schema's `.refine` already
+  // enforces "at least one container".
+  const containerResult = resolveContainerAlias(input, { required: false });
+  if (!containerResult.ok) return err(containerResult.error);
+  const profileContainer = containerResult.value;
   const rawContainers: string[] = [];
-  if (input.profileId !== undefined) rawContainers.push(coercePrefix(input.profileId, ['Profile:']));
+  if (profileContainer !== null) rawContainers.push(profileContainer.componentId);
   if (input.permissionSetIds !== undefined) {
     for (const id of input.permissionSetIds) rawContainers.push(coercePrefix(id, ['PermissionSet:']));
   }
@@ -1318,7 +1348,14 @@ export const effectivePermissionsHandler = async (
         customPermissions: customPermissions.length,
         recordTypeVisibilities: finalRecordTypeVisibilities.length,
       },
-      ...(scopedObject !== null ? { appliedScope: { object: scopedObject.object } } : {}),
+      ...(scopedObject !== null || profileContainer !== null
+        ? {
+            appliedScope: {
+              ...(profileContainer !== null ? { container: profileContainer.componentId } : {}),
+              ...(scopedObject !== null ? { object: scopedObject.object } : {}),
+            },
+          }
+        : {}),
       limit,
       offset,
       hasMore,

@@ -588,8 +588,29 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     if (!viaAlias.ok || !viaCanonical.ok) return;
     // The alias path is byte-identical to the canonical profileId path.
     expect(JSON.stringify(viaAlias.value.data)).toBe(JSON.stringify(viaCanonical.value.data));
-    // And no appliedScope on a no-object call.
-    expect('appliedScope' in viaAlias.value.data).toBe(false);
+    // And the OBJECT axis stays unscoped on a no-object call. The CONTAINER
+    // axis now echoes what the bare `profileApiName` actually resolved to,
+    // which is the point of the scope-honesty rule.
+    expect(viaAlias.value.data.appliedScope).toEqual({ container: 'Profile:Sales' });
+    expect(viaAlias.value.data.appliedScope?.object).toBeUndefined();
+  });
+
+  it('DISAGREEING profile selectors are REFUSED, not silently won by profileId', async () => {
+    // Pre-fix `mergeInputAliases` kept the canonical `profileId` and dropped the
+    // `profileApiName` on the floor, answering about a container the caller
+    // also named something else.
+    const r = await effectivePermissionsHandler(
+      ctx,
+      effectivePermissionsInputSchema.parse({
+        profileId: 'Profile:Sales',
+        profileApiName: 'Other',
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Profile:Sales');
+    expect(r.error.message).toContain('Profile:Other');
   });
 
   it('objectApiName narrows objectPermissions + FLS count + record types to it, echoes appliedScope', async () => {
@@ -604,7 +625,7 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     expect(scoped.ok).toBe(true);
     if (!scoped.ok) return;
     const d = scoped.value.data;
-    expect(d.appliedScope).toEqual({ object: 'Account' });
+    expect(d.appliedScope).toEqual({ container: 'Profile:Sales', object: 'Account' });
     // Only the Account object row — NOT a multi-object dump.
     expect(d.objectPermissions.map((o) => o.object)).toEqual(['Account']);
     expect(d.summary.objects).toBe(1);
@@ -631,7 +652,7 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     expect(scoped.ok).toBe(true);
     if (!scoped.ok) return;
     const d = scoped.value.data;
-    expect(d.appliedScope).toEqual({ object: 'Deal__c' });
+    expect(d.appliedScope).toEqual({ container: 'Profile:Sales', object: 'Deal__c' });
     // Object CRUD empty (no object grant on Deal__c) but record types present.
     expect(d.objectPermissions).toEqual([]);
     expect(d.recordTypeVisibilities.map((rt) => rt.recordType).sort()).toEqual([
@@ -657,14 +678,18 @@ describe('effectivePermissionsHandler — object + profileApiName scope (guard)'
     expect(scoped.error.message).toContain('Ghost__c');
   });
 
-  it('a bare (no-object) call is byte-identical to before — no appliedScope key', async () => {
+  it('a bare (no-object) call reports NO object scope — only the container echo', async () => {
+    // Written for the OBJECT axis: a call that named no object must not report
+    // one, and must not narrow anything. Both hold. Narrowed rather than
+    // deleted now that the container axis echoes.
     const bare = await effectivePermissionsHandler(ctx, {
       profileId: 'Profile:Sales',
       permissionSetIds: ['PermissionSet:DealEditor'],
     });
     expect(bare.ok).toBe(true);
     if (!bare.ok) return;
-    expect('appliedScope' in bare.value.data).toBe(false);
+    expect(bare.value.data.appliedScope).toEqual({ container: 'Profile:Sales' });
+    expect(bare.value.data.appliedScope?.object).toBeUndefined();
     // Unscoped union still shows both objects' worth of surfaces intact.
     expect(bare.value.data.summary.objects).toBe(1); // Account (the only granted object)
     expect(bare.value.data.recordTypeVisibilities.length).toBeGreaterThan(0);

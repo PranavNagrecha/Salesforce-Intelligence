@@ -13,6 +13,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { resolveContainerAlias } from '../../src/tools/input-aliases.js';
 import { userAbilityHandler, userAbilityInputSchema } from '../../src/tools/user-ability.js';
 
 const MANIFEST: VaultManifest = {
@@ -167,7 +168,10 @@ describe('userAbilityHandler — field scope (guard)', () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.appliedScope).toEqual({ field: 'CustomField:Contact.Email' });
+    expect(r.value.data.appliedScope).toEqual({
+      container: 'Profile:FieldEditor',
+      field: 'CustomField:Contact.Email',
+    });
     expect(r.value.data.fieldAccess).toEqual({
       field: 'CustomField:Contact.Email',
       readable: true,
@@ -242,11 +246,16 @@ describe('userAbilityHandler — field scope (guard)', () => {
     expect(r.error.message).toContain('objectApiName');
   });
 
-  it('a call WITHOUT a field scope is byte-identical — no appliedScope / fieldAccess keys', async () => {
+  it('a call WITHOUT a field scope reports NO field scope — only the container echo', async () => {
+    // This pin was written for the FIELD axis: a call that named no field must
+    // not report one, and must not grow a fieldAccess block. Both hold. What
+    // changed is that the CONTAINER axis now echoes unconditionally, so the
+    // assertion is narrowed to the axis it is about rather than deleted.
     const r = await userAbilityHandler(ctx, { componentId: 'Profile:Sales' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect('appliedScope' in r.value.data).toBe(false);
+    expect(r.value.data.appliedScope).toEqual({ container: 'Profile:Sales' });
+    expect(r.value.data.appliedScope.field).toBeUndefined();
     expect('fieldAccess' in r.value.data).toBe(false);
   });
 });
@@ -263,27 +272,40 @@ describe('userAbilityHandler — field scope (guard)', () => {
 // =============================================================================
 describe('userAbilityInputSchema — profileApiName / permissionSetApiName selector', () => {
   it('coerces a bare profileApiName / permissionSetApiName / id alias to the container prefix', () => {
-    expect(userAbilityInputSchema.parse({ profileApiName: 'StandardUser' }).componentId).toBe(
-      'Profile:StandardUser',
-    );
-    expect(userAbilityInputSchema.parse({ permissionSetApiName: 'FlowRunner' }).componentId).toBe(
-      'PermissionSet:FlowRunner',
-    );
-    expect(userAbilityInputSchema.parse({ profileId: 'StandardUser' }).componentId).toBe(
-      'Profile:StandardUser',
-    );
-    expect(userAbilityInputSchema.parse({ permissionSetId: 'FlowRunner' }).componentId).toBe(
-      'PermissionSet:FlowRunner',
-    );
+    // The COERCION moved out of the schema's z.preprocess and into the
+    // handler's `resolveContainerAlias`, because a preprocess step cannot emit
+    // a named invalid-query and this axis now has to refuse. The coercion
+    // invariant is unchanged; it is asserted at its new site. Crucially, the
+    // prefix now comes from EACH KEY'S OWN NAME rather than from the presence
+    // of a sibling key.
+    const idOf = (raw: Record<string, unknown>): string => {
+      const r = resolveContainerAlias(userAbilityInputSchema.parse(raw));
+      if (!r.ok) throw new Error(`unexpected refusal: ${r.error.message}`);
+      return (r.value as { componentId: string }).componentId;
+    };
+    expect(idOf({ profileApiName: 'StandardUser' })).toBe('Profile:StandardUser');
+    expect(idOf({ permissionSetApiName: 'FlowRunner' })).toBe('PermissionSet:FlowRunner');
+    expect(idOf({ profileId: 'StandardUser' })).toBe('Profile:StandardUser');
+    expect(idOf({ permissionSetId: 'FlowRunner' })).toBe('PermissionSet:FlowRunner');
     // An already-canonical componentId is left untouched.
-    expect(userAbilityInputSchema.parse({ componentId: 'Profile:Sales' }).componentId).toBe(
-      'Profile:Sales',
+    expect(idOf({ componentId: 'Profile:Sales' })).toBe('Profile:Sales');
+    // Agreeing selectors collapse to one candidate and still resolve.
+    expect(idOf({ componentId: 'Profile:Sales', profileApiName: 'Sales' })).toBe('Profile:Sales');
+  });
+
+  it('a DISAGREEING componentId + alias is REFUSED, not silently won by componentId', async () => {
+    // Pre-fix this answered about `Profile:Sales` and dropped `Other` silently.
+    // CLAUDE.md states the required behaviour verbatim: when the selectors
+    // disagree the tool refuses with a named `invalid-query`.
+    const r = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({ componentId: 'Profile:Sales', profileApiName: 'Other' }),
     );
-    // Canonical componentId WINS over a disagreeing alias (never silently overwritten).
-    expect(
-      userAbilityInputSchema.parse({ componentId: 'Profile:Sales', profileApiName: 'Other' })
-        .componentId,
-    ).toBe('Profile:Sales');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Profile:Sales');
+    expect(r.error.message).toContain('Profile:Other');
   });
 
   it('{ profileApiName } ≡ { componentId: Profile:X } (byte-identical data)', async () => {
@@ -312,7 +334,10 @@ describe('userAbilityInputSchema — profileApiName / permissionSetApiName selec
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.componentId).toBe('Profile:FieldEditor');
-    expect(r.value.data.appliedScope).toEqual({ field: 'CustomField:Contact.Email' });
+    expect(r.value.data.appliedScope).toEqual({
+      container: 'Profile:FieldEditor',
+      field: 'CustomField:Contact.Email',
+    });
     expect(r.value.data.fieldAccess).toEqual({
       field: 'CustomField:Contact.Email',
       readable: true,
@@ -420,5 +445,96 @@ describe('userAbilityHandler — CR-22 continuation cursor', () => {
     });
     expect(replay.ok).toBe(false); if (replay.ok) return;
     expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
+// =============================================================================
+// FIX 5 shape 3 — the worst of the three, reproduced end to end.
+//
+// A vault where the SAME api name exists as both a Profile and a PermissionSet.
+// Pre-fix, `{ profileApiName: 'X', permissionSetApiName: 'Y' }` took the VALUE
+// from profileApiName and the PREFIX from the mere PRESENCE of
+// permissionSetApiName, so the tool answered about `PermissionSet:X` — a THIRD
+// component neither selector named — and the answer differs materially
+// (`loginRestrictions.applies` flips between a Profile and a PermissionSet).
+// =============================================================================
+
+const collisionSeed: ExtractionResult = {
+  nodes: [
+    node({
+      id: 'Profile:Ambiguous_Name',
+      type: 'Profile',
+      apiName: 'Ambiguous_Name',
+      properties: {
+        loginHoursDefined: true,
+        loginIpRanges: [{ startAddress: '10.0.0.1', endAddress: '10.0.0.9' }],
+      },
+    }),
+    node({
+      id: 'PermissionSet:Ambiguous_Name',
+      type: 'PermissionSet',
+      apiName: 'Ambiguous_Name',
+      properties: { userPermissions: ['RunReports'] },
+    }),
+    node({ id: 'PermissionSet:Distinct_Set', type: 'PermissionSet', apiName: 'Distinct_Set' }),
+  ],
+  edges: [],
+};
+
+describe('userAbilityHandler — disagreeing container selectors (FIX 5 shape 3)', () => {
+  let colDir: string;
+  let colStore: GraphStore;
+  let colCtx: Context;
+
+  beforeAll(async () => {
+    colDir = mkdtempSync(join(tmpdir(), 'sfi-ua-collision-'));
+    const o = await openGraph(join(colDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    colStore = o.value;
+    const i = await importExtractionResults(colStore, [collisionSeed]);
+    if (!i.ok) throw new Error(i.error.message);
+    colCtx = { vaultRoot: colDir, manifest: MANIFEST, graph: colStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(colStore);
+    rmSync(colDir, { recursive: true, force: true });
+  });
+
+  it('refuses instead of answering about a THIRD component neither selector named', async () => {
+    const r = await userAbilityHandler(
+      colCtx,
+      userAbilityInputSchema.parse({
+        profileApiName: 'Ambiguous_Name',
+        permissionSetApiName: 'Distinct_Set',
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    // Both ids the caller actually named are in the message…
+    expect(r.error.message).toContain('Profile:Ambiguous_Name');
+    expect(r.error.message).toContain('PermissionSet:Distinct_Set');
+    // …and the third component the old preprocess would have answered about is
+    // nowhere in the response.
+    expect(r.error.message).not.toContain('PermissionSet:Ambiguous_Name');
+  });
+
+  it('either selector ALONE still answers, and the two answers differ materially', async () => {
+    const asProfile = await userAbilityHandler(
+      colCtx,
+      userAbilityInputSchema.parse({ profileApiName: 'Ambiguous_Name' }),
+    );
+    const asPermSet = await userAbilityHandler(
+      colCtx,
+      userAbilityInputSchema.parse({ permissionSetApiName: 'Ambiguous_Name' }),
+    );
+    expect(asProfile.ok && asPermSet.ok).toBe(true);
+    if (!asProfile.ok || !asPermSet.ok) return;
+    expect(asProfile.value.data.appliedScope.container).toBe('Profile:Ambiguous_Name');
+    expect(asPermSet.value.data.appliedScope.container).toBe('PermissionSet:Ambiguous_Name');
+    // This is why picking one silently was never acceptable.
+    expect(asProfile.value.data.loginRestrictions.applies).toBe(true);
+    expect(asPermSet.value.data.loginRestrictions.applies).toBe(false);
   });
 });

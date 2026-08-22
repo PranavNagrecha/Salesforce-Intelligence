@@ -28,11 +28,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import {
-  mergeInputAliases,
-  resolveObjectAlias,
-  toProfileOrPermSetId,
-} from './input-aliases.js';
+import { resolveContainerAlias, resolveObjectAlias } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const GRANTER_PREFIXES = ['Profile:', 'PermissionSet:'] as const;
@@ -43,7 +39,19 @@ const MAX_LIMIT = 500;
 const AVAILABLE_VISIBILITIES = new Set(['DefaultOn', 'DefaultOff', 'Visible', 'Available']);
 
 const tabAvailabilityInputBaseSchema = z.object({
-  componentId: z.string().min(1),
+  // OPTIONAL at the schema level — the natural container selectors below are
+  // reconciled by `resolveContainerAlias` in the HANDLER, which refuses a call
+  // naming no container with a NAMED `invalid-query` rather than a bare Zod
+  // "componentId: Required".
+  componentId: z.string().min(1).optional(),
+  // DECLARED so `z.object` does not strip them before the handler sees them.
+  // Coercion is per key BY THE KEY'S OWN NAME.
+  profileId: z.string().min(1).optional(),
+  profileApiName: z.string().min(1).optional(),
+  profileName: z.string().min(1).optional(),
+  permissionSetId: z.string().min(1).optional(),
+  permissionSetApiName: z.string().min(1).optional(),
+  permissionSetName: z.string().min(1).optional(),
   // TAB-AVAILABILITY-REJECTS-PROFILEAPINAME: optional OBJECT scope — "is {object}'s
   // tab available to {profile}?". The handler narrows the tab list to the object's
   // tab (by Salesforce tab-naming convention) and echoes `appliedScope`.
@@ -58,40 +66,17 @@ const tabAvailabilityInputBaseSchema = z.object({
   cursor: z.string().min(1).optional(),
 });
 
-export const tabAvailabilityInputSchema = z.preprocess((raw) => {
-  // TAB-AVAILABILITY-REJECTS-PROFILEAPINAME: accept the natural `profileApiName`
-  // / `permissionSetApiName` selectors alongside the prior `profileId` /
-  // `permissionSetId` aliases — the container is the visibility SUBJECT, resolved
-  // to its `Profile:` / `PermissionSet:` prefix (canonical `componentId` wins).
-  const merged = mergeInputAliases(raw, [
-    {
-      canonical: 'componentId',
-      aliases: ['profileId', 'profileApiName', 'permissionSetId', 'permissionSetApiName'],
-    },
-  ]);
-  if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
-    const o = merged as Record<string, unknown>;
-    const id = typeof o.componentId === 'string' ? o.componentId : '';
-    // TAB-AVAILABILITY-PREFIXES-NON-PROFILE-AS-PROFILE: only coerce a BARE
-    // granter name (no `Type:` prefix — Salesforce API names never contain a
-    // colon) up to a canonical Profile/PermissionSet id. An id that already
-    // carries a component-type prefix (`CustomTab:standard-Case`,
-    // `CustomObject:…`, and even the already-canonical `Profile:`/
-    // `PermissionSet:` forms) contains a `:`, so it is LEFT UNTOUCHED — a
-    // non-granter id then falls through to the handler's Profile/PermissionSet
-    // prefix check and is rejected with `invalid-query`, instead of being
-    // silently rewritten to `Profile:CustomTab:standard-Case` and 404-ing as a
-    // phantom Profile. Mirrors `app_access`'s prefix validation.
-    if (id.length > 0 && !id.includes(':')) {
-      const rawObj = raw as Record<string, unknown>;
-      const fromPs =
-        typeof rawObj.permissionSetId === 'string' ||
-        typeof rawObj.permissionSetApiName === 'string';
-      o.componentId = fromPs ? `PermissionSet:${id}` : toProfileOrPermSetId(id);
-    }
-  }
-  return merged;
-}, tabAvailabilityInputBaseSchema);
+/**
+ * The container selectors are reconciled in the HANDLER by
+ * `resolveContainerAlias`, not in a `z.preprocess` step.
+ *
+ * The preprocess this replaces carried the same defect `user_ability` did: it
+ * took the VALUE from one key and the PREFIX from the mere PRESENCE of another,
+ * so `{ profileApiName: 'X', permissionSetApiName: 'Y' }` answered about
+ * `PermissionSet:X`, a third component neither selector named. Preprocess
+ * cannot emit a named `invalid-query`, so the refusal belongs in the handler.
+ */
+export const tabAvailabilityInputSchema = tabAvailabilityInputBaseSchema;
 
 export type TabAvailabilityInput = z.infer<typeof tabAvailabilityInputSchema>;
 
@@ -116,9 +101,16 @@ export interface TabAvailabilityOutput {
    * by Salesforce tab-naming convention); an object with no matching tab is an
    * honest empty, never the full-profile tab dump.
    */
-  readonly appliedScope?: {
-    readonly componentId: string;
-    readonly object: string;
+  readonly appliedScope: {
+    /**
+     * The container the answer is ACTUALLY about, always present — a caller who
+     * passed a bare `profileApiName` deserves to see which canonical id it
+     * became.
+     */
+    readonly container: string;
+    /** Historical alias for `container`; emitted on the object-scoped path. */
+    readonly componentId?: string;
+    readonly object?: string;
   };
   readonly tabs: readonly TabVisibilityRow[];
   readonly summary: {
@@ -151,14 +143,22 @@ export const tabAvailabilityHandler = async (
   ctx: Context,
   input: TabAvailabilityInput,
 ): Promise<Result<McpResponse<TabAvailabilityOutput>, McpError>> => {
-  if (!GRANTER_PREFIXES.some((p) => input.componentId.startsWith(p))) {
+  // The ONE shared container normalizer — same refusal grammar as
+  // `user_ability` and `profile_security`. No container named → NAMED
+  // `invalid-query`; selectors naming DIFFERENT containers → refused naming
+  // both, never a silent pick; a wrong `Type:` prefix passes through unchanged
+  // so the check below produces its precise message.
+  const containerResult = resolveContainerAlias(input);
+  if (!containerResult.ok) return err(containerResult.error);
+  const container = containerResult.value as { componentId: string };
+  if (!GRANTER_PREFIXES.some((p) => container.componentId.startsWith(p))) {
     return err({
       kind: 'invalid-query',
-      message: `componentId must be a Profile: or PermissionSet: id; got '${input.componentId}'`,
+      message: `componentId must be a Profile: or PermissionSet: id; got '${container.componentId}'`,
       path: 'componentId',
     });
   }
-  const componentId = input.componentId as ComponentId;
+  const componentId = container.componentId as ComponentId;
 
   const nodeResult = await getNodeById(ctx.graph, componentId);
   if (!nodeResult.ok) {
@@ -233,7 +233,7 @@ export const tabAvailabilityHandler = async (
   // refreshed vault) is rejected with `invalid-query`. The object scope is part
   // of the fingerprint so a scoped cursor cannot resume the unscoped list.
   const fingerprint = argsFingerprint({
-    componentId: input.componentId,
+    componentId,
     ...(scopedObject !== null ? { object: scopedObject.object } : {}),
   });
   let offset = input.offset ?? 0;
@@ -282,9 +282,10 @@ export const tabAvailabilityHandler = async (
       componentId,
       granterType: node.type === 'PermissionSet' ? 'PermissionSet' : 'Profile',
       granterLabel: node.label ?? node.apiName,
-      ...(scopedObject !== null
-        ? { appliedScope: { componentId, object: scopedObject.object } }
-        : {}),
+      appliedScope: {
+        container: componentId,
+        ...(scopedObject !== null ? { componentId, object: scopedObject.object } : {}),
+      },
       tabs: page,
       summary: { total, available, hidden: total - available },
       limit,
