@@ -92,6 +92,29 @@ if (!pkgEntry) {
   );
 }
 
+// --- 1b. Claude Code plugin surfaces (.claude-plugin/) ---
+// Neither file was checked here until 0.3.1, and marketplace.json had drifted
+// to 0.2.5 — two releases stale — while every other surface read 0.3.1. It is
+// the version a plugin marketplace advertises, so the drift was outward-facing
+// and silent. plugin.json was only correct because someone bumped it by hand.
+for (const [file, paths] of [
+  ['.claude-plugin/plugin.json', [(d) => d.version]],
+  [
+    '.claude-plugin/marketplace.json',
+    [(d) => d.metadata?.version, ...[0, 1, 2].map((i) => (d) => d.plugins?.[i]?.version)],
+  ],
+]) {
+  if (!existsSync(file)) continue;
+  const doc = readJson(file);
+  paths.forEach((get, i) => {
+    const v = get(doc);
+    if (v === undefined) return; // absent slot (e.g. only one plugin) is not a drift
+    if (v !== expected) {
+      errors.push(`${file} version#${i}=${v} !== expected ${expected}`);
+    }
+  });
+}
+
 // --- 2. SERVER_VERSION resolve (shipped path) ---
 const buildSrc = readText('packages/cli/build.mjs');
 if (!/SFI_BUILD_VERSION\s*:\s*JSON\.stringify\(\s*pkg\.version/.test(buildSrc)) {
