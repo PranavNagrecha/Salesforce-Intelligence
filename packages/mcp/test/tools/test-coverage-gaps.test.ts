@@ -580,3 +580,114 @@ describe('testCoverageGapsHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', ()
     );
   });
 });
+
+// =============================================================================
+// D-1 — coverage is a USAGE walk, not a `callsApex` walk. Measured on this org,
+// 20 of the 46 classes reported `uncovered` had an incoming edge from an
+// @isTest class; 11 of those were `dispatchesAsync` at `declared` confidence —
+// a batch class enqueued by its own test with `Database.executeBatch`.
+// =============================================================================
+describe('testCoverageGapsHandler — coverage through non-callsApex usage edges', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-tcg-usage-'));
+    const opened = await openGraph(join(dir, 'tcg.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const st = opened.value;
+    const imported = await importExtractionResults(st, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const out = await run({ vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: st } as Context);
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  const FAKE = [
+    { rule: 'fake-assertion', severity: 'medium', location: 'line 12', explanation: 'tautology', confidence: 'heuristic' },
+  ];
+
+  /**
+   * NightlyPurgeJobTest --dispatchesAsync(declared, executeBatch)--> NightlyPurgeJob.
+   * The test carries a fake assertion so the class is a REPORTED gap either way;
+   * what changes is whether it is reported as `uncovered` (nothing reaches it)
+   * or as a coverage-quality gap (a test does reach it).
+   */
+  const seedAsyncCoverage: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:NightlyPurgeJob', apiName: 'NightlyPurgeJob', properties: { isTest: false, isBatchable: true, qualityIssues: [] } }),
+      makeNode({ id: 'ApexClass:NightlyPurgeJobTest', apiName: 'NightlyPurgeJobTest', properties: { isTest: true, qualityIssues: FAKE } }),
+    ],
+    edges: [
+      makeEdge({
+        fromId: 'ApexClass:NightlyPurgeJobTest',
+        toId: 'ApexClass:NightlyPurgeJob',
+        edgeType: 'dispatchesAsync',
+        confidence: 'declared',
+        properties: { dispatchMechanism: 'executeBatch' },
+      }),
+    ],
+  };
+
+  it('a class enqueued by its own test via dispatchesAsync is NOT uncovered', async () => {
+    const r = await withStore(seedAsyncCoverage, (c) => testCoverageGapsHandler(c, {}));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const gap = r.value.data.gaps.find((g) => g.componentId === 'ApexClass:NightlyPurgeJob');
+    expect(gap).toBeDefined();
+    expect(gap?.coverageStatus).not.toBe('uncovered');
+    expect(gap?.coveringTestClassIds).toContain('ApexClass:NightlyPurgeJobTest');
+  });
+
+  it('the covering entry carries the EVIDENCE — declared confidence via dispatchesAsync', async () => {
+    const r = await withStore(seedAsyncCoverage, (c) => testCoverageGapsHandler(c, {}));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const gap = r.value.data.gaps.find((g) => g.componentId === 'ApexClass:NightlyPurgeJob');
+    const cover = gap?.coveringTestClasses.find((t) => t.id === 'ApexClass:NightlyPurgeJobTest');
+    expect(cover?.confidence).toBe('declared');
+    expect(cover?.viaEdgeTypes).toEqual(['dispatchesAsync']);
+    expect(cover?.depth).toBe(1);
+  });
+
+  it('an uncovered verdict names the edge types it WALKED, so the absence is checked', async () => {
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({ id: 'ApexClass:OrphanHelper', apiName: 'OrphanHelper', properties: { isTest: false, qualityIssues: [] } }),
+          makeNode({ id: 'ApexClass:UnrelatedTest', apiName: 'UnrelatedTest', properties: { isTest: true, qualityIssues: FAKE } }),
+        ],
+        edges: [],
+      },
+      (c) => testCoverageGapsHandler(c, {}),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const gap = r.value.data.gaps.find((g) => g.componentId === 'ApexClass:OrphanHelper');
+    expect(gap?.coverageStatus).toBe('uncovered');
+    expect(gap?.walkedEdgeTypes).toContain('dispatchesAsync');
+    expect(gap?.walkedEdgeTypes).not.toContain('grantedBy');
+    expect(gap?.recommendedAction).toContain('through any usage edge within depth 3');
+    expect(gap?.recommendedAction).not.toContain('via callsApex');
+  });
+
+  it('a grantedBy edge from a test class is NOT coverage — access is not usage', async () => {
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({ id: 'ApexClass:OrphanHelper', apiName: 'OrphanHelper', properties: { isTest: false, qualityIssues: [] } }),
+          makeNode({ id: 'ApexClass:GrantingTest', apiName: 'GrantingTest', properties: { isTest: true, qualityIssues: FAKE } }),
+        ],
+        edges: [
+          makeEdge({ fromId: 'ApexClass:GrantingTest', toId: 'ApexClass:OrphanHelper', edgeType: 'grantedBy', confidence: 'declared' }),
+        ],
+      },
+      (c) => testCoverageGapsHandler(c, {}),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const gap = r.value.data.gaps.find((g) => g.componentId === 'ApexClass:OrphanHelper');
+    expect(gap?.coverageStatus).toBe('uncovered');
+  });
+});

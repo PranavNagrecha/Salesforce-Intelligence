@@ -71,17 +71,20 @@
 
 import type {
   ComponentId,
+  ConfidenceLevel,
+  EdgeType,
   McpError,
   McpResponse,
   Node,
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { USAGE_EDGE_TYPES, walkUpstreamUsage } from './apex-reachability.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import {
   buildUnscannedNodesNote,
@@ -120,6 +123,17 @@ const MEANINGFUL_ASSERTION_DISCLOSURE =
 
 const DYNAMIC_DISPATCH_DISCLOSURE =
   'reachability via callsApex does NOT cover dynamic dispatch (Type.forName) or reflective invocation. A class genuinely tested via dynamic dispatch will surface as uncovered by this heuristic.';
+
+/**
+ * TEST-COVERAGE-UNCOVERED-RECOMMENDATION. Verbatim product copy; do not reword.
+ * Names the edge types actually walked, so "uncovered" is readable as a checked
+ * absence rather than an unbounded one.
+ */
+const UNCOVERED_RECOMMENDATION =
+  `No test class reaches this class through any usage edge within depth ${MAX_COVERAGE_DEPTH} ` +
+  `(walked: ${USAGE_EDGE_TYPES.join(', ')}). Coverage via dynamic dispatch (Type.forName) or a ` +
+  `chain longer than ${MAX_COVERAGE_DEPTH} hops is still invisible — confirm against a real test ` +
+  'run before writing a new test.';
 
 const DEPTH_CAP_DISCLOSURE =
   `the coverage BFS is capped at depth ${MAX_COVERAGE_DEPTH}; coverage chains longer than ${MAX_COVERAGE_DEPTH} hops surface as uncovered even when they exist.`;
@@ -166,12 +180,39 @@ export interface FakeAssertionLocation {
 }
 
 /** One per-class entry in the response. */
+/**
+ * One test class that reaches the audited class, with the evidence behind the
+ * reach. `confidence` and `viaEdgeTypes` exist so a caller can see that a
+ * "covering" test reaches the class through a `declared` `dispatchesAsync`
+ * (`Database.executeBatch`) rather than a direct call — the same claim, but a
+ * reader can now weigh it.
+ */
+export interface CoveringTestClass {
+  readonly id: ComponentId;
+  /** Shortest-path hop count from the audited class. */
+  readonly depth: number;
+  /** D-2: the WEAKEST per-edge confidence along that path. */
+  readonly confidence: ConfidenceLevel;
+  /** The edge types traversed on that path, de-duplicated and sorted. */
+  readonly viaEdgeTypes: readonly EdgeType[];
+}
+
 export interface TestCoverageGapEntry {
   readonly componentId: ComponentId;
   readonly apiName: string;
   readonly coverageStatus: CoverageStatus;
-  /** Test classes reaching this class via callsApex (sorted ASC). */
+  /** Test classes reaching this class through a usage edge (sorted ASC). */
   readonly coveringTestClassIds: readonly ComponentId[];
+  /**
+   * The same reaches, with per-reach depth / confidence / edge types. Parallel
+   * to `coveringTestClassIds` and in the same order.
+   */
+  readonly coveringTestClasses: readonly CoveringTestClass[];
+  /**
+   * The edge types the coverage walk traversed. Present on every entry so an
+   * `uncovered` verdict is readable as a CHECKED absence.
+   */
+  readonly walkedEdgeTypes: readonly EdgeType[];
   /** Locations of `fake-assertion` findings in the covering test classes. */
   readonly fakeAssertions: readonly FakeAssertionLocation[];
   /** Per-status human-readable recommendation. */
@@ -264,32 +305,31 @@ const collectCoveringTestClasses = async (
   ctx: Context,
   targetId: ComponentId,
   testClassIds: ReadonlySet<ComponentId>,
-): Promise<Result<readonly ComponentId[], string>> => {
-  const visited = new Set<ComponentId>();
-  const covering = new Set<ComponentId>();
-  let frontier: ComponentId[] = [targetId];
-  visited.add(targetId);
-  for (let depth = 0; depth < MAX_COVERAGE_DEPTH; depth += 1) {
-    const next: ComponentId[] = [];
-    for (const id of frontier) {
-      const r = await listEdges(ctx.graph, id, {
-        direction: 'in',
-        edgeType: 'callsApex',
-      });
-      if (!r.ok) return err(r.error.message);
-      for (const edge of r.value) {
-        if (visited.has(edge.fromId)) continue;
-        visited.add(edge.fromId);
-        if (testClassIds.has(edge.fromId)) {
-          covering.add(edge.fromId);
-        }
-        next.push(edge.fromId);
-      }
-    }
-    if (next.length === 0) break;
-    frontier = next;
+): Promise<Result<readonly CoveringTestClass[], string>> => {
+  // The shared usage walk (D-1): every edge type EXCEPT `parentOf` and
+  // `grantedBy`, not `callsApex` alone. Measured on this org, 20 of the 46
+  // classes reported `uncovered` had an incoming edge from an @isTest class,
+  // 11 of them a `declared` `dispatchesAsync` — a batch class enqueued by its
+  // own test. It also replaces the per-frontier-node `listEdges` N+1 with one
+  // query per DEPTH LEVEL.
+  const walk = await walkUpstreamUsage(ctx, targetId, {
+    maxDepth: MAX_COVERAGE_DEPTH,
+    edgeTypes: USAGE_EDGE_TYPES,
+  });
+  if (!walk.ok) return err(walk.error);
+  const covering: CoveringTestClass[] = [];
+  for (const [id, hit] of walk.value) {
+    if (id === targetId) continue;
+    if (!testClassIds.has(id)) continue;
+    covering.push({
+      id,
+      depth: hit.depth,
+      confidence: hit.confidence,
+      viaEdgeTypes: hit.viaEdgeTypes,
+    });
   }
-  return ok([...covering].sort());
+  covering.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return ok(covering);
 };
 
 /** Per-status recommendation text surfaced verbatim. */
@@ -298,7 +338,7 @@ const recommendationFor = (
   coveringCount: number,
 ): string => {
   if (status === 'uncovered') {
-    return 'no test class reaches this class via callsApex within depth 3. Add a test class that exercises the class via direct or transitive invocation. The recognizer cannot see dynamic dispatch — if the class is exercised via Type.forName(...), it may already have runtime coverage.';
+    return UNCOVERED_RECOMMENDATION;
   }
   if (status === 'fake-coverage') {
     return `${coveringCount} test class(es) reach this class but every reaching test has at least one fake-assertion finding (tautology, self-equals, or literal-equals shape). Replace the fake assertions with System.assertEquals(expected, actual) using distinct expected/actual tokens, or assert on observable side effects.`;
@@ -410,6 +450,8 @@ export const testCoverageGapsHandler = async (
         apiName: node.apiName,
         coverageStatus: 'uncovered',
         coveringTestClassIds: [],
+        coveringTestClasses: [],
+        walkedEdgeTypes: USAGE_EDGE_TYPES,
         fakeAssertions: [],
         recommendedAction: recommendationFor('uncovered', 0),
       });
@@ -420,10 +462,10 @@ export const testCoverageGapsHandler = async (
     // "clean". The status follows from the partition.
     const withFakes: { id: ComponentId; locations: readonly string[] }[] = [];
     let cleanCount = 0;
-    for (const testId of covering) {
-      const locs = testFakeAssertionsByClass.get(testId);
+    for (const t of covering) {
+      const locs = testFakeAssertionsByClass.get(t.id);
       if (locs !== undefined && locs.length > 0) {
-        withFakes.push({ id: testId, locations: locs });
+        withFakes.push({ id: t.id, locations: locs });
       } else {
         cleanCount += 1;
       }
@@ -456,7 +498,9 @@ export const testCoverageGapsHandler = async (
       componentId: node.id,
       apiName: node.apiName,
       coverageStatus: status,
-      coveringTestClassIds: covering,
+      coveringTestClassIds: covering.map((t) => t.id),
+      coveringTestClasses: covering,
+      walkedEdgeTypes: USAGE_EDGE_TYPES,
       fakeAssertions,
       recommendedAction: recommendationFor(status, covering.length),
     });

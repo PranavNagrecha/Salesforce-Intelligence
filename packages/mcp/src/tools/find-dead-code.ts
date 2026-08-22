@@ -93,6 +93,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { NOT_USAGE_EDGE_TYPES } from './apex-reachability.js';
 import { buildCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
 import {
   firstNonEmpty,
@@ -397,6 +398,17 @@ interface DeadCodeRow {
  *     incoming edges; `BOOL_OR` collapses the per-edge classifier
  *     to the per-candidate booleans the JS cascade consumes.
  */
+/**
+ * The `edge_type` exclusions the dead-code CTE applies, GENERATED from
+ * {@link NOT_USAGE_EDGE_TYPES}. Exported so a drift test can prove the SQL and
+ * the shared TS constant are the same set rather than merely similar — a
+ * hand-copied list is the exact drift that let `edgeTypes: ['callsApex']`
+ * survive two new edge types.
+ */
+export const NON_USAGE_EDGE_EXCLUSION_SQL = NOT_USAGE_EDGE_TYPES.map(
+  (t) => `        AND e.edge_type <> '${t}'`,
+).join('\n');
+
 const fetchDeadCodeRows = async (
   store: GraphStore,
   types: readonly ComponentType[],
@@ -510,15 +522,18 @@ const fetchDeadCodeRows = async (
       FROM edges e
       LEFT JOIN nodes r ON r.id = e.from_id
       WHERE e.to_id IN (SELECT id FROM candidates)
-        AND e.edge_type <> 'parentOf'
-        -- grantedBy = a Profile / PermissionSet ACCESS grant (Apex class access,
-        -- field FLS). Access is not USAGE: a class nobody calls or a field
+        -- The non-usage exclusions are GENERATED from NOT_USAGE_EDGE_TYPES, the
+        -- same constant method_reachability / test_coverage_gaps / call_graph
+        -- walk against, so the four tools cannot drift apart about what "used"
+        -- means. parentOf is structural containment; grantedBy is a Profile /
+        -- PermissionSet ACCESS grant (Apex class access, field
+        -- FLS) and access is not USAGE — a class nobody calls or a field
         -- nothing references is dead even when profiles grant access to it.
         -- Counting grants as reach hid test-only classes (reached only by their
         -- own test + profile grants) as uncertain, and kept grant-only-but-unused
         -- components out of definitely_dead. Same access-vs-usage split the
         -- field / what-if tools make.
-        AND e.edge_type <> 'grantedBy'
+${NON_USAGE_EDGE_EXCLUSION_SQL}
     )
     SELECT c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point,
            c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics,

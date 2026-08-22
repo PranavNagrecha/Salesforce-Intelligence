@@ -2,9 +2,11 @@
  * Handler for the `sfi.method_reachability` MCP tool.
  *
  * Answers "is this class reachable from an entry point — or is it
- * likely dead code?". Walks upstream `callsApex` edges from
- * `classApiName` and inspects each reached node for entry-point
- * classifiers:
+ * likely dead code?". Walks upstream USAGE edges from `classApiName`
+ * (every edge type except `parentOf` and `grantedBy` — see
+ * `apex-reachability.ts` D-1; `callsApex` alone could never learn about
+ * `dispatchesAsync` or the Apex scanner's `references`) and inspects each
+ * reached node for entry-point classifiers:
  *
  *   - `ApexTrigger` (any) — triggers are themselves entry points.
  *   - `ApexClass` with `properties.isRestResource === true` — REST
@@ -17,10 +19,19 @@
  *     `properties.isBatchable` / `properties.isSchedulable` — async
  *     dispatch entry points (the scheduler / queueable system calls
  *     them, not user Apex).
+ *   - the ROOT itself with `properties.isTest === true` — the TEST RUNNER is
+ *     its entry point. Nothing calls a test class, which is why the
+ *     `callsApex`-only walk read almost every test class as dead code.
+ *     `find_dead_code` has always said so verbatim. This fires at depth 0
+ *     ONLY: a test class UPSTREAM of the root is coverage, not an entry
+ *     point, and stays in `reachingTestClasses` so `test-only-reachable`
+ *     survives.
+ *   - a class reached by a `references` edge from a VisualforcePage /
+ *     VisualforceComponent / AuraDefinitionBundle — the `controller=`
+ *     binding, an edge-derived kind rather than a node property.
  *
- * A SEPARATE upstream walk over INCOMING `callsApex` edges checks
- * for ApexClass nodes with `properties.isTest === true` — test
- * coverage. The combined verdict:
+ * The same walk classifies reached ApexClass nodes with
+ * `properties.isTest === true` as test coverage. The combined verdict:
  *
  *   - `entry-point-reachable`: at least one reached upstream is an
  *     entry point (per the classifier set above).
@@ -35,9 +46,9 @@
  * `likely-dead-code`. The disclosure surfaces this verbatim.
  *
  * Implementation notes:
- *   - One BFS walks upstream `callsApex` edges from the target,
- *     bounded by the v2.1 depth-3 cap. Visited set is global; cycles
- *     are detected automatically.
+ *   - One BFS walks upstream USAGE edges from the target, bounded by
+ *     the v2.1 depth-3 cap. Visited set is global; cycles are detected
+ *     automatically.
  *   - The walk visits each id at most once. Cycles do not loop.
  *   - The root itself is also checked for entry-point classifiers
  *     (a class can be both the input AND its own entry point).
@@ -45,24 +56,28 @@
 
 import type {
   ComponentId,
+  ConfidenceLevel,
+  EdgeType,
   McpError,
   McpResponse,
-  Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  getNodeById,
-  listEdgesForNodes,
-  listNodesByIds,
-} from '@sf-intelligence/graph';
+import { getNodeById, listNodesByIds } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  entryKindsFor,
+  isTestClassNode,
+  USAGE_EDGE_TYPES,
+  walkUpstreamUsage,
+  type EntryPointKind,
+} from './apex-reachability.js';
 import { coercePrefix } from './coerce-id.js';
 import { firstNonEmpty } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
-import { soundnessFromIds, type Soundness } from './soundness.js';
+import { soundnessForReachabilityWalk, type Soundness } from './soundness.js';
 
 /** BFS depth cap. Matches `sfi.test_coverage_gaps`. */
 const REACHABILITY_BFS_DEPTH = 3;
@@ -76,18 +91,25 @@ const REACHABILITY_DISCLOSURE =
   'v2.7 method_reachability ships CLASS granularity (method-level promised in v2.7.1). Dynamic dispatch (Type.forName) and reflective invocation are invisible — a class genuinely invoked at runtime via reflection or framework wiring will surface as likely-dead-code. Trigger framework base classes (TriggerHandler, fflib) may be partially invisible. BFS is capped at depth 3.';
 
 /**
- * Entry-point kinds the upstream walk recognises. Each value
- * indicates "the class reaches at least one of these kinds at
- * runtime".
+ * Attached ONLY to a residual `likely-dead-code` verdict. This tool walks graph
+ * edges; `find_dead_code` additionally greps production source for static-field
+ * and type-name usages that are never modelled as an inbound edge, and
+ * downgrades what it finds. Verbatim product copy; do not reword.
  */
-export type EntryPointKind =
-  | 'apex-trigger'
-  | 'rest-resource'
-  | 'aura-enabled'
-  | 'invocable'
-  | 'queueable'
-  | 'batchable'
-  | 'schedulable';
+const LIKELY_DEAD_CODE_CROSS_REFERENCE =
+  'likely-dead-code here means NO usage in-edge and NO entry-point classifier within depth 3. ' +
+  'It is NOT the org\'s dead-code verdict: sfi.find_dead_code runs an additional whole-word ' +
+  'source grep for static-field and type-name references that are never modelled as an inbound ' +
+  'edge, and downgrades a class it finds to uncertain. Run sfi.find_dead_code on this class ' +
+  'before treating it as dead.';
+
+/**
+ * Entry-point kinds the upstream walk recognises. Each value indicates "the
+ * class reaches at least one of these kinds at runtime". Defined ONCE in
+ * `apex-reachability.ts` and re-exported here for the tools that imported it
+ * from this module.
+ */
+export type { EntryPointKind };
 
 /** Reachability verdict. */
 export type ReachabilityVerdict =
@@ -168,6 +190,15 @@ export interface EntryPointHit {
   readonly kind: EntryPointKind;
   /** The shortest-path BFS depth at which the entry point was reached. */
   readonly depth: number;
+  /**
+   * D-2: the WEAKEST per-edge confidence along the shortest path to this hit.
+   * `declared` at depth 0 (no edge was traversed). A `declared` Visualforce
+   * `controller=` binding and a `heuristic` type-name scan are BOTH `references`
+   * edges and must not be conflated — this is the field that separates them.
+   */
+  readonly confidence: ConfidenceLevel;
+  /** The edge types traversed on that path, de-duplicated and sorted. */
+  readonly viaEdgeTypes: readonly EdgeType[];
 }
 
 /** One test class that reaches the target. */
@@ -175,6 +206,10 @@ export interface ReachingTestClass {
   readonly id: ComponentId;
   readonly apiName: string;
   readonly depth: number;
+  /** D-2: the weakest per-edge confidence along the path from this test class. */
+  readonly confidence: ConfidenceLevel;
+  /** The edge types traversed on that path, de-duplicated and sorted. */
+  readonly viaEdgeTypes: readonly EdgeType[];
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -193,75 +228,22 @@ export interface MethodReachabilityOutput {
   readonly verdict: ReachabilityVerdict;
   readonly entryPoints: readonly EntryPointHit[];
   readonly reachingTestClasses: readonly ReachingTestClass[];
-  /** Static-analysis blind spots: `complete: false` when the analyzed class uses dynamic Apex. */
+  /**
+   * The edge types this walk actually traversed. Emitted on EVERY response, so
+   * an empty `entryPoints` is readable as "checked these types and found none"
+   * rather than an unbounded absence claim.
+   */
+  readonly walkedEdgeTypes: readonly EdgeType[];
+  /**
+   * Static-analysis blind spots. `complete: false` when a class on a reach path
+   * uses dynamic Apex, or when the walk covered less than the full usage set.
+   */
   readonly soundness: Soundness;
   readonly disclosure: string;
 }
 
 const isApexCallable = (id: string): boolean =>
   id.startsWith(APEX_CLASS_PREFIX) || id.startsWith(APEX_TRIGGER_PREFIX);
-
-const isTestClass = (node: Node): boolean =>
-  node.properties['isTest'] === true;
-
-/**
- * Categorise a single node into the set of entry-point kinds it
- * exposes. A class with multiple classifiers (e.g., both REST and
- * Aura) emits multiple hit entries — one per kind — so the caller
- * can render the full surface.
- */
-const entryKindsFor = (node: Node): readonly EntryPointKind[] => {
-  const kinds: EntryPointKind[] = [];
-  if (node.type === 'ApexTrigger') kinds.push('apex-trigger');
-  if (node.properties['isRestResource'] === true) kinds.push('rest-resource');
-  if (node.properties['hasAuraEnabledMethod'] === true)
-    kinds.push('aura-enabled');
-  if (node.properties['hasInvocableMethod'] === true) kinds.push('invocable');
-  if (node.properties['isQueueable'] === true) kinds.push('queueable');
-  if (node.properties['isBatchable'] === true) kinds.push('batchable');
-  if (node.properties['isSchedulable'] === true) kinds.push('schedulable');
-  return kinds;
-};
-
-/**
- * BFS upstream from `targetId` over INCOMING `callsApex` edges.
- * Returns the map of discovered id → depth (the shortest-path hop
- * count from the root).
- */
-const upstreamWalk = async (
-  ctx: Context,
-  targetId: ComponentId,
-  maxDepth: number,
-): Promise<Result<Map<ComponentId, number>, string>> => {
-  const discovered = new Map<ComponentId, number>();
-  discovered.set(targetId, 0);
-  let frontier: ComponentId[] = [targetId];
-  for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
-    const next: ComponentId[] = [];
-    // ONE batched fetch of the WHOLE frontier's INCOMING `callsApex` edges,
-    // replacing the per-frontier-node `listEdges` N+1 (~frontier-width serial
-    // DuckDB queries per hop). Iterating `frontier` in order and reading each
-    // node's bucket (sorted by the FULL (to_id, edge_type, from_id, source)
-    // order — the same order `listEdges` returned, and here to_id + edge_type
-    // are fixed per bucket) reproduces the exact `discovered` insertion order
-    // and next-frontier order. Query count is now one per DEPTH LEVEL,
-    // independent of frontier WIDTH.
-    const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
-      direction: 'in',
-      edgeTypes: ['callsApex'],
-    });
-    if (!edgeBatch.ok) return err(edgeBatch.error.message);
-    for (const id of frontier) {
-      for (const edge of edgeBatch.value.get(id) ?? []) {
-        if (discovered.has(edge.fromId)) continue;
-        discovered.set(edge.fromId, depth + 1);
-        next.push(edge.fromId);
-      }
-    }
-    frontier = next;
-  }
-  return ok(discovered);
-};
 
 const compareEntryHits = (a: EntryPointHit, b: EntryPointHit): number => {
   if (a.depth !== b.depth) return a.depth - b.depth;
@@ -318,11 +300,10 @@ export const methodReachabilityHandler = async (
     });
   }
 
-  const walkRes = await upstreamWalk(
-    ctx,
-    targetId,
-    REACHABILITY_BFS_DEPTH,
-  );
+  const walkRes = await walkUpstreamUsage(ctx, targetId, {
+    maxDepth: REACHABILITY_BFS_DEPTH,
+    edgeTypes: USAGE_EDGE_TYPES,
+  });
   if (!walkRes.ok) {
     return err({
       kind: 'internal',
@@ -349,16 +330,36 @@ export const methodReachabilityHandler = async (
   }
   const nodeById = new Map(nodesRes.value.map((n) => [n.id, n]));
 
-  for (const [id, depth] of walkRes.value) {
+  for (const [id, hit] of walkRes.value) {
     const node = nodeById.get(id);
     if (node === undefined) continue;
+    const { depth, confidence, viaEdgeTypes } = hit;
 
-    for (const kind of entryKindsFor(node)) {
-      entryPoints.push({ id: node.id, apiName: node.apiName, kind, depth });
+    const kinds: EntryPointKind[] = [...entryKindsFor(node, { isRoot: id === targetId })];
+    // `ui-controller` is derived from the IN-EDGE (a VisualforcePage /
+    // VisualforceComponent / Aura bundle whose markup names this class as its
+    // `controller=`), not from any node property, so the walk supplies it.
+    if (hit.viaUiControllerBinding) kinds.push('ui-controller');
+    for (const kind of kinds) {
+      entryPoints.push({
+        id: node.id,
+        apiName: node.apiName,
+        kind,
+        depth,
+        confidence,
+        viaEdgeTypes,
+      });
     }
-    // Test classes reaching this target (excluding the root itself).
-    if (id !== targetId && isTestClass(node)) {
-      reachingTests.push({ id: node.id, apiName: node.apiName, depth });
+    // Test classes reaching this target (excluding the root itself, so a test
+    // class never lists itself as its own coverage).
+    if (id !== targetId && isTestClassNode(node)) {
+      reachingTests.push({
+        id: node.id,
+        apiName: node.apiName,
+        depth,
+        confidence,
+        viaEdgeTypes,
+      });
     }
   }
 
@@ -377,9 +378,21 @@ export const methodReachabilityHandler = async (
     verdict = 'likely-dead-code';
   }
 
-  // Reachability of a method whose class uses dynamic Apex may be wrong (a
-  // reflective caller is invisible) — surface that as a machine-readable blind spot.
-  const soundness = await soundnessFromIds(ctx.graph, [targetId]);
+  // Soundness is DERIVED from the walk, so it can never again report
+  // `complete: true` over an un-walked edge type. The dynamic-Apex check WIDENS
+  // from "the root class" to "every class on a reach path" — a REFLECTIVE
+  // CALLER is what makes a reachability walk unsound, and the caller is not the
+  // root.
+  const soundness = soundnessForReachabilityWalk(
+    nodesRes.value,
+    USAGE_EDGE_TYPES,
+    USAGE_EDGE_TYPES,
+  );
+
+  const disclosure =
+    verdict === 'likely-dead-code'
+      ? `${REACHABILITY_DISCLOSURE} ${LIKELY_DEAD_CODE_CROSS_REFERENCE}`
+      : REACHABILITY_DISCLOSURE;
 
   return ok({
     data: {
@@ -388,8 +401,9 @@ export const methodReachabilityHandler = async (
       verdict,
       entryPoints,
       reachingTestClasses: reachingTests,
+      walkedEdgeTypes: USAGE_EDGE_TYPES,
       soundness,
-      disclosure: REACHABILITY_DISCLOSURE,
+      disclosure,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

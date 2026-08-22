@@ -10,6 +10,7 @@ import type {
   Node,
   VaultManifest,
 } from '@sf-intelligence/contracts';
+import { EDGE_TYPES } from '@sf-intelligence/contracts';
 import {
   closeGraph,
   importExtractionResults,
@@ -19,8 +20,13 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
+  NOT_USAGE_EDGE_TYPES,
+  USAGE_EDGE_TYPES,
+} from '../../src/tools/apex-reachability.js';
+import {
   findDeadCodeHandler,
   findDeadCodeInputSchema,
+  NON_USAGE_EDGE_EXCLUSION_SQL,
 } from '../../src/tools/find-dead-code.js';
 
 const MANIFEST: VaultManifest = {
@@ -1413,5 +1419,36 @@ describe('findDeadCodeHandler — classApiName / apiName alias (guard)', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
+  });
+});
+
+// =============================================================================
+// DRIFT GUARD. `find_dead_code`'s single CTE is a measured ~7x speedup over a
+// per-node TS walk, so the IMPLEMENTATION stays split from the shared walker —
+// but the DEFINITION of "usage" must not. This is the test that stops the next
+// allow-list: `edgeTypes: ['callsApex']` survived two new edge types
+// (`dispatchesAsync` in v1.5, the Apex-scanner `references`) precisely because
+// nothing tied it to a single source.
+// =============================================================================
+describe('find_dead_code — non-usage edge-type drift guard', () => {
+  it('the CTE exclusions are GENERATED from NOT_USAGE_EDGE_TYPES, one per member and no others', () => {
+    const lines = NON_USAGE_EDGE_EXCLUSION_SQL.split('\n').filter((l) => l.trim().length > 0);
+    expect(lines).toHaveLength(NOT_USAGE_EDGE_TYPES.length);
+    for (const t of NOT_USAGE_EDGE_TYPES) {
+      expect(NON_USAGE_EDGE_EXCLUSION_SQL).toContain(`AND e.edge_type <> '${t}'`);
+    }
+    // No exclusion for anything that IS usage — that would be the allow-list
+    // creeping back in through the SQL side.
+    for (const t of USAGE_EDGE_TYPES) {
+      expect(NON_USAGE_EDGE_EXCLUSION_SQL).not.toContain(`<> '${t}'`);
+    }
+  });
+
+  it('USAGE_EDGE_TYPES and NOT_USAGE_EDGE_TYPES partition the contracts EDGE_TYPES tuple exactly', () => {
+    // Derivation, not a hand-copied list: a new EdgeType added to contracts
+    // lands in USAGE_EDGE_TYPES automatically and is wrong in the SAFE
+    // direction (counted as usage) rather than silently calling code dead.
+    expect([...USAGE_EDGE_TYPES, ...NOT_USAGE_EDGE_TYPES].sort()).toEqual([...EDGE_TYPES].sort());
+    expect(USAGE_EDGE_TYPES.filter((t) => (NOT_USAGE_EDGE_TYPES as readonly string[]).includes(t))).toEqual([]);
   });
 });
