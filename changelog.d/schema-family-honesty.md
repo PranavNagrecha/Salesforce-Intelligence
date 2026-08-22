@@ -138,3 +138,14 @@
   OPTIONAL (omitted, not `null`, when the key is absent on that side), and
   `presence` is new. `compare_vaults` has its own copy of the type and is
   untouched.
+
+- **`sfi.field_lineage` has the knobs its own oversize advice named.** The
+  generic oversize message told callers to narrow with `limit` / `offset` /
+  `cursor` — knobs this tool did not have — so a hub field's lineage was simply
+  unanswerable. It now pages one designated `section`
+  (`upstream.sources` | `downstream.effects`) with `limit` (default 200, max
+  500) / `offset` / `cursor`, and publishes `upstream.sourceCount` /
+  `downstream.effectCount` as TRUE pre-page totals. Paging keys are emitted
+  ONLY when the response is actually paged, so an in-budget answer is
+  byte-identical. Naming a section the requested `direction` did not produce is
+  a named `invalid-query`; the DEFAULT falls back to the section that exists.

@@ -61,6 +61,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
@@ -76,6 +77,12 @@ import type { Context } from '../server.js';
 import { FIELD_360_Q165_DISCLOSURE } from './field-360.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { mergeInputAliases } from './input-aliases.js';
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+} from './page-cursor.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
@@ -105,12 +112,32 @@ const DIRECTION_VALUES = ['upstream', 'downstream', 'both'] as const;
  *   - `includeFieldsOfTruth`: optional boolean. Defaults to true.
  *   - `includeFiresWhen`: optional boolean. Defaults to true.
  */
+/** The two pageable list sections. `section` names which one a page advances. */
+export const FIELD_LINEAGE_SECTIONS = [
+  'upstream.sources',
+  'downstream.effects',
+] as const;
+
+/** Inclusive upper bound on `limit`. */
+const FIELD_LINEAGE_MAX_LIMIT = 500;
+/** Default page size when the caller does not pass `limit`. */
+const FIELD_LINEAGE_DEFAULT_LIMIT = 200;
+
 const fieldLineageInputBaseSchema = z.object({
   fieldId: z.string().min(1),
   direction: z.enum(DIRECTION_VALUES).optional().default('both'),
   maxDepth: z.number().int().min(1).max(HARD_CAP_MAX_DEPTH).optional(),
   includeFieldsOfTruth: z.boolean().optional(),
   includeFiresWhen: z.boolean().optional(),
+  /**
+   * Real narrowing knobs. Before these existed the oversize advice named
+   * `limit` / `offset` / `cursor` — knobs this tool did not have — and a hub
+   * field's lineage was simply unanswerable.
+   */
+  limit: z.number().int().min(1).max(FIELD_LINEAGE_MAX_LIMIT).optional(),
+  offset: z.number().int().nonnegative().optional(),
+  cursor: z.string().min(1).optional(),
+  section: z.enum(FIELD_LINEAGE_SECTIONS).optional(),
 });
 
 export const fieldLineageInputSchema = z.preprocess(
@@ -176,6 +203,11 @@ export interface DownstreamEffect {
 /** Upstream payload. */
 export interface UpstreamPayload {
   readonly sources: readonly UpstreamSource[];
+  /**
+   * TRUE total before paging. `sources.length` is a PAGE length once this
+   * response is paged, so a caller that read it as a total would be wrong.
+   */
+  readonly sourceCount: number;
   readonly truncatedAtDepth: number | null;
   readonly sourceOfTruthCount: number;
   /**
@@ -213,6 +245,8 @@ export interface UpstreamPayload {
 /** Downstream payload. */
 export interface DownstreamPayload {
   readonly effects: readonly DownstreamEffect[];
+  /** TRUE total before paging. See {@link UpstreamPayload.sourceCount}. */
+  readonly effectCount: number;
   readonly truncatedAtDepth: number | null;
 }
 
@@ -226,6 +260,20 @@ export interface FieldLineageOutput {
   readonly boundaries: readonly string[];
   readonly dataNotAvailable: readonly string[];
   readonly cyclesDetected: boolean;
+  /**
+   * Paging keys are emitted ONLY when the response is actually paged
+   * (`hasMore`, or `offset > 0`), so an in-budget answer stays byte-identical —
+   * the convention `find_semantic_field` already uses.
+   */
+  readonly section?: (typeof FIELD_LINEAGE_SECTIONS)[number];
+  readonly limit?: number;
+  readonly offset?: number;
+  readonly hasMore?: boolean;
+  readonly nextOffset?: number | null;
+  readonly nextCursor?: string;
+  readonly pageInfo?: PageInfo;
+  /** Verbatim; present only when the designated section was truncated. */
+  readonly note?: string;
 }
 
 /**
@@ -843,6 +891,7 @@ export const fieldLineageHandler = async (
     };
     upstreamPayload = {
       sources: r.value.sources,
+      sourceCount: r.value.sources.length,
       truncatedAtDepth: r.value.truncated ? maxDepth : null,
       sourceOfTruthCount: r.value.sources.filter((s) => s.isSourceOfTruth)
         .length,
@@ -856,6 +905,7 @@ export const fieldLineageHandler = async (
     if (r.value.cycles) cyclesDetected = true;
     downstreamPayload = {
       effects: r.value.effects,
+      effectCount: r.value.effects.length,
       truncatedAtDepth: r.value.truncated ? maxDepth : null,
     };
   }
@@ -930,18 +980,149 @@ export const fieldLineageHandler = async (
     dataNotAvailable.push('dashboards');
   }
 
+  // ---- Paging (FIX 8 Half B) -------------------------------------------
+  // `paginateSection` pages ONE designated list and returns `otherSections`
+  // carrying the un-paged lists' TRUE totals, which is exactly this payload's
+  // shape. The section defaults to `downstream.effects`, falling back to the
+  // section that EXISTS when `direction` omitted it — a default must not
+  // refuse. Only an explicitly NAMED missing section is refused.
+  const availableSections: PageableSection<UpstreamSource | DownstreamEffect>[] =
+    [];
+  if (upstreamPayload !== undefined) {
+    availableSections.push({
+      listId: 'upstream.sources',
+      items: upstreamPayload.sources,
+    });
+  }
+  if (downstreamPayload !== undefined) {
+    availableSections.push({
+      listId: 'downstream.effects',
+      items: downstreamPayload.effects,
+    });
+  }
+
+  const fingerprint = argsFingerprint({
+    fieldId,
+    direction: input.direction,
+    maxDepth,
+    includeFieldsOfTruth: includeSoT,
+    includeFiresWhen,
+  });
+  const binding = {
+    tool: 'sfi.field_lineage',
+    vaultHash: ctx.manifest.sourceTreeHash,
+    argsFingerprint: fingerprint,
+  };
+
+  let offset = input.offset ?? 0;
+  let requestedSection = input.section;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, binding);
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    // HANDLER CONTRACT: re-bind the designated section from the cursor.
+    const listId = decoded.value.listId;
+    if (listId !== undefined) {
+      requestedSection = listId as (typeof FIELD_LINEAGE_SECTIONS)[number];
+    }
+  }
+
+  if (
+    requestedSection !== undefined &&
+    !availableSections.some((sec) => sec.listId === requestedSection)
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: `section '${requestedSection}' is not present in this response: direction='${input.direction}' produced only ${availableSections
+        .map((sec) => `'${sec.listId}'`)
+        .join(', ')}. Pass a section this direction carries, or widen \`direction\`.`,
+      path: 'section',
+    });
+  }
+
+  const designated =
+    requestedSection ??
+    (availableSections.some((sec) => sec.listId === 'downstream.effects')
+      ? 'downstream.effects'
+      : (availableSections[0]?.listId as
+          | (typeof FIELD_LINEAGE_SECTIONS)[number]
+          | undefined));
+
+  let pagedUpstream = upstreamPayload;
+  let pagedDownstream = downstreamPayload;
+  let pagingKeys: Record<string, unknown> = {};
+
+  if (designated !== undefined) {
+    const limit = input.limit ?? FIELD_LINEAGE_DEFAULT_LIMIT;
+    const paged = paginateSection(availableSections, designated, {
+      offset,
+      limit,
+      binding,
+    });
+    if (!paged.ok) return err(paged.error);
+    const { items, pageInfo } = paged.value;
+    const emit = pageInfo.hasMore || offset > 0;
+    if (emit) {
+      if (designated === 'upstream.sources' && pagedUpstream !== undefined) {
+        pagedUpstream = {
+          ...pagedUpstream,
+          sources: items as readonly UpstreamSource[],
+        };
+      } else if (
+        designated === 'downstream.effects' &&
+        pagedDownstream !== undefined
+      ) {
+        pagedDownstream = {
+          ...pagedDownstream,
+          effects: items as readonly DownstreamEffect[],
+        };
+      }
+      const other = paged.value.otherSections
+        .map(
+          (sec) =>
+            `\`${sec.listId === 'upstream.sources' ? 'upstream.sourceCount' : 'downstream.effectCount'}\` reports the other section's total, which this page does not include`,
+        )
+        .join('; ');
+      const totalKey =
+        designated === 'upstream.sources'
+          ? 'upstream.sourceCount'
+          : 'downstream.effectCount';
+      pagingKeys = {
+        section: designated,
+        limit,
+        offset,
+        hasMore: pageInfo.hasMore,
+        nextOffset: pageInfo.hasMore ? offset + items.length : null,
+        ...(pageInfo.nextCursor !== null
+          ? { nextCursor: pageInfo.nextCursor }
+          : {}),
+        pageInfo,
+        ...(pageInfo.hasMore
+          ? {
+              note: `Showing ${items.length} of ${pageInfo.totalCount} \`${designated}\` row(s) (offset=${offset}). MORE remain — advance with offset=${
+                offset + items.length
+              } or echo \`nextCursor\`. \`${totalKey}\` is the TRUE total${
+                other === '' ? '' : `; ${other}`
+              }.`,
+            }
+          : {}),
+      };
+    }
+  }
+
   return ok({
     data: {
       fieldId,
       direction: input.direction,
       maxDepth,
-      ...(upstreamPayload !== undefined && { upstream: upstreamPayload }),
-      ...(downstreamPayload !== undefined && {
-        downstream: downstreamPayload,
+      ...(pagedUpstream !== undefined && { upstream: pagedUpstream }),
+      ...(pagedDownstream !== undefined && {
+        downstream: pagedDownstream,
       }),
       boundaries,
       dataNotAvailable,
       cyclesDetected,
+      ...pagingKeys,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
