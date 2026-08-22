@@ -19,7 +19,9 @@ import {
 
 import type { Context } from '../../src/server.js';
 import { runTool } from '../../src/tools/index.js';
+import { SOE_UNGROUNDED_REFS_NOTE } from '../../src/tools/order-of-execution.js';
 import {
+  computeFilteredPhaseOmission,
   computePhasesOmitted,
   tallyPhaseCounts,
   whatHappensOnSaveHandler,
@@ -122,6 +124,14 @@ const fullSeed: ExtractionResult = {
         fieldRefs: ['CustomField:FullObj.Industry'],
         synthesized: false,
       },
+    }),
+    // FIX 15 (3): the field the condition names must EXIST for its id to be
+    // citable. Without this node the ref is honestly reported as ungrounded.
+    makeNode({
+      id: 'CustomField:FullObj.Industry',
+      type: 'CustomField',
+      apiName: 'Industry',
+      parentId: FULL_OBJ,
     }),
     makeNode({
       id: FULL_TRIGGER,
@@ -1159,6 +1169,158 @@ const receiverGuardSeed: ExtractionResult = {
   ],
 };
 
+
+// =============================================================================
+// Seed (FIX 3): BUDGET ALLOCATION. `WidgetOrder__c` carries 40 INACTIVE Flows
+// with long api names (the roster that used to be the largest top-level array,
+// restated a second time as `inactiveHeadline` prose) plus 30 ACTIVE
+// validation rules with real firing conditions (the answer the caller asked
+// for). Every name here is invented.
+//
+// The measurement the tests make is a RATIO, never a byte count: how much of
+// the payload goes to the automation that RUNS.
+// =============================================================================
+
+const BUDGET_OBJ = 'CustomObject:WidgetOrder__c';
+const BUDGET_INACTIVE_COUNT = 40;
+const BUDGET_ACTIVE_COUNT = 30;
+/** ~300 chars — a real firing condition, the payload the caller wants. */
+const BUDGET_EXPRESSION =
+  'AND(NOT(ISBLANK(TEXT(Stage__c))), Quantity__c > 0, NOT(ISPICKVAL(Stage__c, "Cancelled")), '.repeat(3) +
+  'TRUE)';
+
+const budgetInactiveFlow = (i: number): { node: Node; edge: Edge } => {
+  const n = String(i).padStart(2, '0');
+  const apiName = `WidgetOrder_Retired_Fulfilment_Path_Legacy_Variant_${n}`;
+  const id = `Flow:${apiName}`;
+  return {
+    node: makeNode({
+      id,
+      type: 'Flow',
+      apiName,
+      properties: { status: i % 2 === 0 ? 'Draft' : 'Obsolete' },
+    }),
+    edge: makeEdge({
+      fromId: id,
+      toId: BUDGET_OBJ,
+      edgeType: 'triggersOn',
+      properties: { recordTriggerType: 'CreateAndUpdate', triggerType: 'RecordAfterSave' },
+    }),
+  };
+};
+
+const budgetActiveVr = (i: number): { nodes: Node[]; edges: Edge[] } => {
+  const n = String(i).padStart(2, '0');
+  const vrId = `ValidationRule:WidgetOrder__c.Guard_${n}`;
+  const condId = `ConditionalContext:${vrId}.condition-0`;
+  return {
+    nodes: [
+      makeNode({
+        id: vrId,
+        type: 'ValidationRule',
+        apiName: `WidgetOrder__c.Guard_${n}`,
+        parentId: BUDGET_OBJ,
+        properties: { active: true, errorMessage: `Guard_${n} rejected this order.`, errorDisplayField: null },
+      }),
+      makeNode({
+        id: condId,
+        type: 'ConditionalContext',
+        apiName: `${vrId}.condition-0`,
+        parentId: vrId,
+        properties: {
+          kind: 'formula',
+          expression: BUDGET_EXPRESSION,
+          fieldRefs: ['CustomField:WidgetOrder__c.Stage__c'],
+          synthesized: false,
+        },
+      }),
+    ],
+    edges: [
+      makeEdge({ fromId: BUDGET_OBJ, toId: vrId, edgeType: 'parentOf' }),
+      makeEdge({ fromId: vrId, toId: condId, edgeType: 'firesWhen', confidence: 'parsed' }),
+    ],
+  };
+};
+
+const budgetInactiveFlows = Array.from({ length: BUDGET_INACTIVE_COUNT }, (_, i) =>
+  budgetInactiveFlow(i),
+);
+const budgetActiveVrs = Array.from({ length: BUDGET_ACTIVE_COUNT }, (_, i) =>
+  budgetActiveVr(i),
+);
+
+const budgetAllocationSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: BUDGET_OBJ, apiName: 'WidgetOrder__c', properties: { sharingModel: 'Private' } }),
+    ...budgetInactiveFlows.map((f) => f.node),
+    ...budgetActiveVrs.flatMap((v) => v.nodes),
+  ],
+  edges: [
+    ...budgetInactiveFlows.map((f) => f.edge),
+    ...budgetActiveVrs.flatMap((v) => v.edges),
+  ],
+};
+
+
+// =============================================================================
+// Seed (FIX 15 part 3): GROUNDED vs UNGROUNDED condition references.
+// `Invoice__c` has ONE validation rule whose ConditionalContext records four
+// `fieldRefs`, exactly one of which names a real node. The other three are the
+// three shapes the extractor genuinely produces. Every name here is invented.
+// =============================================================================
+
+const INV_OBJ = 'CustomObject:Invoice__c';
+const INV_VR = 'ValidationRule:Invoice__c.TotalGuard';
+const INV_VR_COND = 'ConditionalContext:ValidationRule:Invoice__c.TotalGuard.condition-0';
+/** Grounded: the node exists below. */
+const INV_REF_GROUNDED = 'CustomField:Invoice__c.Total__c';
+/** Object IS vaulted, field was not retrieved -> `not-in-vault`. */
+const INV_REF_NOT_IN_VAULT = 'CustomField:Invoice__c.Name';
+/** Leading segment is a RELATIONSHIP name -> `relationship-traversal`. */
+const INV_REF_TRAVERSAL = 'CustomField:Payer__r.Email__c';
+/** Leading segment names no vaulted object -> `not-a-field-reference`. */
+const INV_REF_NOT_A_FIELD = 'CustomField:Get_Invoice_Records.Amount';
+
+const groundingSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: INV_OBJ, apiName: 'Invoice__c', properties: { sharingModel: 'Private' } }),
+    makeNode({
+      id: INV_REF_GROUNDED,
+      type: 'CustomField',
+      apiName: 'Total__c',
+      parentId: INV_OBJ,
+    }),
+    makeNode({
+      id: INV_VR,
+      type: 'ValidationRule',
+      apiName: 'Invoice__c.TotalGuard',
+      parentId: INV_OBJ,
+      properties: { active: true, errorMessage: 'Total is inconsistent.', errorDisplayField: null },
+    }),
+    makeNode({
+      id: INV_VR_COND,
+      type: 'ConditionalContext',
+      apiName: 'ValidationRule:Invoice__c.TotalGuard.condition-0',
+      parentId: INV_VR,
+      properties: {
+        kind: 'formula',
+        expression: 'Total__c <> Payer__r.Email__c',
+        fieldRefs: [
+          INV_REF_GROUNDED,
+          INV_REF_NOT_IN_VAULT,
+          INV_REF_TRAVERSAL,
+          INV_REF_NOT_A_FIELD,
+        ],
+        synthesized: false,
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: INV_OBJ, toId: INV_VR, edgeType: 'parentOf' }),
+    makeEdge({ fromId: INV_VR, toId: INV_VR_COND, edgeType: 'firesWhen', confidence: 'parsed' }),
+  ],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-whos-'));
   const dbPath = join(tempDir, 'whos.db');
@@ -1182,6 +1344,8 @@ beforeAll(async () => {
     truncSaveSeed,
     saveHeavySeed,
     receiverGuardSeed,
+    budgetAllocationSeed,
+    groundingSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -1273,9 +1437,14 @@ describe('whatHappensOnSaveHandler', () => {
   });
 
   it('excludes Draft and Obsolete Flows from SOE and discloses them as inactive', async () => {
+    // INVARIANT (unchanged): a Draft/Obsolete Flow is EXCLUDED from `soe` and
+    // DISCLOSED, never silently dropped. What moved (FIX 3) is only WHERE the
+    // roster lives: the full array is now opt-in behind `includeInactive`,
+    // while the always-present `inactiveSummary` proves the check happened.
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'InactiveObj',
       event: 'update',
+      includeInactive: true,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -1283,6 +1452,8 @@ describe('whatHappensOnSaveHandler', () => {
       .filter((s) => s.componentType === 'Flow')
       .map((s) => s.componentId);
     expect(flowIds).toEqual([INACTIVE_ACTIVE_FLOW]);
+    expect(result.value.data.inactiveSummary.total).toBe(2);
+    expect(result.value.data.inactiveSummary.included).toBe(true);
     expect(result.value.data.inactiveConfigured).toEqual([
       {
         componentId: INACTIVE_DRAFT_FLOW,
@@ -1419,7 +1590,16 @@ describe('whatHappensOnSaveHandler', () => {
     expect(validation).toBeDefined();
     expect(validation?.conditional?.conditionContextId).toBe(FULL_VR_COND);
     expect(validation?.conditional?.expression).toBe('ISBLANK(Industry)');
+    // INVARIANT (unchanged): the condition's extracted field reference is
+    // surfaced. FIX 15 (3) STRENGTHENED it — `fieldRefs` is now grounded-only,
+    // so this id is guaranteed to name a real node and to be safe to cite.
     expect(validation?.conditional?.fieldRefs).toHaveLength(1);
+    expect(validation?.conditional?.refGrounding).toEqual({
+      checked: true,
+      grounded: 1,
+      ungrounded: 0,
+    });
+    expect(validation?.conditional?.ungroundedRefs).toBeUndefined();
 
     const workflow = soe.find((s) => s.phase === 'post-save-workflows');
     expect(workflow?.conditional?.conditionContextId).toBe(FULL_WORKFLOW_COND);
@@ -1682,11 +1862,16 @@ describe('whatHappensOnSaveHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { summary, inactiveConfigured } = result.value.data;
+    const { summary, inactiveSummary } = result.value.data;
     expect(summary.phaseCounts['post-save-flows']).toBe(1);
     expect(summary.activeComponents).toBe(1);
-    // The two inactive flows are accounted for separately (the delta source).
-    expect(inactiveConfigured?.length).toBe(2);
+    // INVARIANT (unchanged): the two inactive flows are accounted for
+    // separately — they are the deactivation-delta source. FIX 3 moved the
+    // default carrier of that count from the `inactiveConfigured` ARRAY to the
+    // always-present `inactiveSummary.total`; the count itself is the invariant.
+    expect(inactiveSummary.total).toBe(2);
+    expect(inactiveSummary.byType['Flow']).toBe(2);
+    expect(inactiveSummary.included).toBe(false);
   });
 
   it('per-phase counts are all zero (and activeComponents is 0) for an automation-free object', async () => {
@@ -1733,6 +1918,10 @@ describe('whatHappensOnSaveHandler', () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'StdObj',
       event: 'insert',
+      // INVARIANT (unchanged): the Inactive trigger is excluded from the
+      // active steps AND disclosed with its reason. FIX 3 made the roster
+      // opt-in, so the disclosure half of the invariant is requested here.
+      includeInactive: true,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -1764,6 +1953,9 @@ describe('whatHappensOnSaveHandler', () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'StdObj',
       event: 'update',
+      // INVARIANT (unchanged): both the inactive trigger and the obsolete flow
+      // are disclosed. FIX 3 made the roster opt-in — request it.
+      includeInactive: true,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -1782,6 +1974,9 @@ describe('whatHappensOnSaveHandler', () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'StdObj',
       event: 'update',
+      // INVARIANT (unchanged): the reason string is `status: Inactive`. FIX 3
+      // made the roster that carries it opt-in — request it.
+      includeInactive: true,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -1800,6 +1995,10 @@ describe('whatHappensOnSaveHandler', () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'DupObj',
       event: 'insert',
+      // INVARIANT (unchanged): the inactive DuplicateRule is excluded from the
+      // phase AND disclosed with `isActive: false`. FIX 3 made the roster
+      // opt-in — request it.
+      includeInactive: true,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -2467,5 +2666,307 @@ describe('whatHappensOnSaveHandler — bounded graph queries', () => {
     expect(large.nodeQueries).toBe(small.nodeQueries);
     expect(large.edgeQueries).toBe(small.edgeQueries);
     expect(large.nodeQueries).toBeLessThan(60);
+  });
+});
+
+describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer', () => {
+  const bytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
+
+  it('FAIL-BEFORE/PASS-AFTER: the answer gets the majority of the payload, and the count is still CHECKED', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // RATIO, never an absolute byte count. Before the fix `inactiveConfigured`
+    // + `inactiveHeadline` restated the same 40 names twice and pushed the
+    // answer the caller asked for under half of its own response.
+    expect(bytes(d.soe) / bytes(d)).toBeGreaterThan(0.5);
+    // The prose restatement of the array is gone entirely.
+    expect('inactiveHeadline' in d).toBe(false);
+    expect('inactiveConfigured' in d).toBe(false);
+    // ...and the roster was still CHECKED and COUNTED — not skipped, not guessed.
+    expect(d.inactiveSummary.total).toBe(BUDGET_INACTIVE_COUNT);
+    expect(d.inactiveSummary.byType['Flow']).toBe(BUDGET_INACTIVE_COUNT);
+    expect(d.inactiveSummary.included).toBe(false);
+  });
+
+  it('a ZERO-inactive object still emits inactiveSummary — a CHECKED zero, not an absent block', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Before the fix the whole block was omitted when the roster was empty,
+    // which reads as UNCHECKED. Present-with-zero is the fix.
+    expect(d.inactiveSummary).toBeDefined();
+    expect(d.inactiveSummary.total).toBe(0);
+    expect(d.inactiveSummary.byType).toEqual({});
+    expect(d.inactiveSummary.note).toContain('CHECKED and counted, not skipped');
+  });
+
+  it('includeInactive: true restores the full roster, same shape and same sort', async () => {
+    const withRoster = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      includeInactive: true,
+    });
+    expect(withRoster.ok).toBe(true);
+    if (!withRoster.ok) return;
+    const roster = withRoster.value.data.inactiveConfigured ?? [];
+    expect(roster.length).toBe(BUDGET_INACTIVE_COUNT);
+    expect(withRoster.value.data.inactiveSummary.included).toBe(true);
+    // Same sort contract as before: ascending componentId.
+    expect(roster.map((i) => i.componentId)).toEqual(
+      [...roster.map((i) => i.componentId)].sort(),
+    );
+    // Same entry shape as before (componentId/componentType/apiName/reason).
+    for (const entry of roster) {
+      expect(Object.keys(entry).sort()).toEqual(
+        ['apiName', 'componentId', 'componentType', 'inactiveReason'],
+      );
+      expect(entry.componentType).toBe('Flow');
+    }
+    // The count never disagrees with the roster it is a summary of.
+    expect(withRoster.value.data.inactiveSummary.total).toBe(roster.length);
+  });
+
+  it('a phase-filtered query turns concept reasoning OFF by default and says why', async () => {
+    const filtered = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+    });
+    expect(filtered.ok).toBe(true);
+    if (!filtered.ok) return;
+    expect(filtered.value.data.conceptReasoning).toBeUndefined();
+    expect(filtered.value.data.disclosure).toContain(
+      'Concept reasoning is off by default on a phase-filtered query so the whole budget goes to the requested phase; pass includeConceptReasoning: true to force it.',
+    );
+    // An explicit request still wins — the default is a default, not a veto.
+    const forced = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+      includeConceptReasoning: true,
+    });
+    expect(forced.ok).toBe(true);
+    if (!forced.ok) return;
+    expect(forced.value.data.disclosure).not.toContain(
+      'Concept reasoning is off by default on a phase-filtered query',
+    );
+  });
+
+  it('phase + includeInactive: the roster stays suppressed and the reason is stated, never half-honoured', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+      includeInactive: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect('inactiveConfigured' in d).toBe(false);
+    expect(d.inactiveSummary.included).toBe(false);
+    // The count is still reported, so the suppression is not a silent drop.
+    expect(d.inactiveSummary.total).toBe(BUDGET_INACTIVE_COUNT);
+    expect(d.inactiveSummary.note).toContain(
+      "An INACTIVE component is in NO phase's firing sequence",
+    );
+  });
+
+  it('FIX 3 (4): the phase-filtered shortfall check RUNS and compares only the requested phase', async () => {
+    // The pure comparison, which the handler no longer skips under a filter.
+    const counts = tallyPhaseCounts([
+      { phase: 'pre-save-validation' },
+      { phase: 'pre-save-validation' },
+      { phase: 'pre-save-validation' },
+      { phase: 'after-triggers' },
+    ]);
+    // Short → named, with the phase's TRUE declared population.
+    expect(computeFilteredPhaseOmission(counts, 'pre-save-validation', 2)).toEqual({
+      phase: 'pre-save-validation',
+      declared: 3,
+      present: 2,
+    });
+    // Whole → nothing claimed.
+    expect(computeFilteredPhaseOmission(counts, 'pre-save-validation', 3)).toBeNull();
+    // A phase the filter deliberately excluded is NOT an omission — that is
+    // the trap a naive un-suppression falls into.
+    expect(computeFilteredPhaseOmission(counts, 'after-triggers', 1)).toBeNull();
+
+    // ...and end-to-end: a whole phase-filtered slice claims no omission, and
+    // never reports the phases the filter left out.
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.soe.length).toBe(BUDGET_ACTIVE_COUNT);
+    expect(r.value.data.phasesOmitted).toBeUndefined();
+  });
+});
+
+describe('whatHappensOnSaveInputSchema — FIX 12: .strict()', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a typo’d key is REFUSED, and the refusal names the real knobs', () => {
+    const parsed = whatHappensOnSaveInputSchema.safeParse({
+      objectApiName: 'MixedObj',
+      event: 'update',
+      phse: 'pre-save-validation',
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.map((i) => i.message).join('; ')).toBe(
+      "Unknown argument 'phse'. This tool accepts: objectApiName, object, objectId, componentId, event, recordTypeId, phase, includeConceptReasoning, includeInactive. Refusing rather than ignoring it — a silently-dropped argument returns a confident answer to a question you did not ask.",
+    );
+  });
+
+  it('every ADVERTISED alias and knob still survives .strict()', () => {
+    for (const raw of [
+      { objectApiName: 'MixedObj', event: 'update' },
+      { object: 'MixedObj', event: 'update' },
+      { objectId: 'CustomObject:MixedObj', event: 'update' },
+      { componentId: 'CustomObject:MixedObj', event: 'update' },
+      { objectApiName: 'MixedObj', event: 'after update' },
+      { objectApiName: 'MixedObj', event: 'update', recordTypeId: 'RecordType:MixedObj.Std' },
+      { objectApiName: 'MixedObj', event: 'update', phase: 'pre-save-validation' },
+      { objectApiName: 'MixedObj', event: 'update', includeConceptReasoning: false },
+      { objectApiName: 'MixedObj', event: 'update', includeInactive: true },
+    ]) {
+      expect(whatHappensOnSaveInputSchema.safeParse(raw).success).toBe(true);
+    }
+  });
+});
+
+describe('whatHappensOnSaveHandler — FIX 15 (3): grounded vs ungrounded condition refs', () => {
+  it('FAIL-BEFORE/PASS-AFTER: only the ref that names a node stays in fieldRefs', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'Invoice__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const step = r.value.data.soe.find((s) => s.componentId === INV_VR);
+    expect(step).toBeDefined();
+    const cond = step?.conditional;
+    expect(cond).toBeDefined();
+    // Before the fix all FOUR refs were republished here as citable component
+    // ids, three of which name nothing in this vault.
+    expect(cond?.fieldRefs).toEqual([INV_REF_GROUNDED]);
+    expect(cond?.refGrounding).toEqual({ checked: true, grounded: 1, ungrounded: 3 });
+    // Nothing is DROPPED — the mentions are kept, just never citable.
+    const ungrounded = cond?.ungroundedRefs ?? [];
+    expect(ungrounded.length).toBe(3);
+    const reasonOf = (raw: string): string | undefined =>
+      ungrounded.find((u) => u.raw === raw)?.reason;
+    expect(reasonOf(INV_REF_NOT_IN_VAULT)).toBe('not-in-vault');
+    expect(reasonOf(INV_REF_TRAVERSAL)).toBe('relationship-traversal');
+    expect(reasonOf(INV_REF_NOT_A_FIELD)).toBe('not-a-field-reference');
+  });
+
+  it('the response carries the verbatim ungrounded-refs disclosure', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'Invoice__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosure).toContain(SOE_UNGROUNDED_REFS_NOTE);
+    expect(SOE_UNGROUNDED_REFS_NOTE).toBe(
+      'These references appear in the condition but name no component in this vault. They are NOT citable component ids — do not present them to the user as such. \'relationship-traversal\' means the leading segment is a relationship name, not an object api name, and no refresh will ever create that component. \'not-in-vault\' means the id is well-formed but the field was not retrieved — a refresh may close it. \'not-a-field-reference\' means the symbol is a Flow element or variable, not a field. An empty fieldRefs alongside a non-empty ungroundedRefs means UNRESOLVED, never "this condition reads nothing".',
+    );
+  });
+
+  it('a condition with NO refs still reports a CHECKED zero, never an unchecked one', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetOrder__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    for (const step of r.value.data.soe) {
+      if (step.conditional === undefined) continue;
+      // Every emitted condition says whether its refs were verified. An empty
+      // `fieldRefs` is only ever readable because this block is there.
+      expect(step.conditional.refGrounding.checked).toBe(true);
+      expect(step.conditional.refGrounding.grounded).toBe(
+        step.conditional.fieldRefs.length,
+      );
+      expect(step.conditional.refGrounding.ungrounded).toBe(
+        (step.conditional.ungroundedRefs ?? []).length,
+      );
+    }
+  });
+
+  it('grounding is ONE batched query: the count does not scale with the condition fan-out', async () => {
+    const seedConditionObject = async (
+      conditionCount: number,
+    ): Promise<{ nodeQueries: number; edgeQueries: number }> => {
+      const dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ground-'));
+      const opened = await openGraph(join(dir, 'g.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const s = opened.value;
+      const nodes: Node[] = [
+        makeNode({ id: 'CustomObject:FanObj__c', apiName: 'FanObj__c' }),
+      ];
+      const edges: Edge[] = [];
+      for (let i = 0; i < conditionCount; i += 1) {
+        const vrId = `ValidationRule:FanObj__c.R${i}`;
+        const condId = `ConditionalContext:${vrId}.condition-0`;
+        nodes.push(
+          makeNode({
+            id: vrId,
+            type: 'ValidationRule',
+            apiName: `FanObj__c.R${i}`,
+            parentId: 'CustomObject:FanObj__c',
+            properties: { active: true, errorMessage: 'no', errorDisplayField: null },
+          }),
+          makeNode({
+            id: condId,
+            type: 'ConditionalContext',
+            apiName: `${vrId}.condition-0`,
+            parentId: vrId,
+            properties: {
+              kind: 'formula',
+              expression: 'x',
+              fieldRefs: [`CustomField:FanObj__c.F${i}__c`],
+              synthesized: false,
+            },
+          }),
+        );
+        edges.push(
+          makeEdge({ fromId: 'CustomObject:FanObj__c', toId: vrId, edgeType: 'parentOf' }),
+          makeEdge({ fromId: vrId, toId: condId, edgeType: 'firesWhen', confidence: 'parsed' }),
+        );
+      }
+      const imported = await importExtractionResults(s, [{ nodes, edges }]);
+      if (!imported.ok) throw new Error(imported.error.message);
+      const fanCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+      const measured = await measureGraphQueries(s, () =>
+        whatHappensOnSaveHandler(fanCtx, { objectApiName: 'FanObj__c', event: 'update' }),
+      );
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+      return { nodeQueries: measured.nodeQueries, edgeQueries: measured.edgeQueries };
+    };
+    const few = await seedConditionObject(3);
+    const many = await seedConditionObject(30);
+    // The composer ALREADY fetches one node per condition
+    // (`surfaceFirstCondition`'s getNodeById — a pre-existing N+1 outside this
+    // fix). The claim under test is that GROUNDING adds a CONSTANT on top of
+    // that, not another per-condition probe: the 3 -> 30 slope must stay at
+    // exactly one node query per condition. A per-condition grounding probe
+    // would double it to 54.
+    expect(many.nodeQueries - few.nodeQueries).toBe(30 - 3);
+    // Grounding issues NO edge query at all, so the edge slope is entirely the
+    // composer's pre-existing per-firer pair and is not the discriminator here.
+    expect(many.edgeQueries).toBeGreaterThan(few.edgeQueries);
   });
 });

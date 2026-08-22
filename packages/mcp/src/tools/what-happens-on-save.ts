@@ -148,6 +148,13 @@ import {
 } from './concept-reasoning.js';
 import { resolveObjectAlias } from './input-aliases.js';
 import {
+  groundStepConditions,
+  type RefGroundableStep,
+  SOE_UNGROUNDED_REFS_NOTE,
+  soeRefGroundingNotCheckedNote,
+  type SoeUngroundedRef,
+} from './order-of-execution.js';
+import {
   type InactiveConfiguredFirer,
   skipInactiveSoeFirer,
   sortedInactiveConfigured,
@@ -237,8 +244,41 @@ type DmlEvent = (typeof ALLOWED_EVENTS)[number];
  *     verbatim; v2.0e does NOT narrow automation by record type
  *     (deferred to v2.0e.1).
  */
+const WHAT_HAPPENS_ON_SAVE_ACCEPTED_KEYS = [
+  'objectApiName',
+  'object',
+  'objectId',
+  'componentId',
+  'event',
+  'recordTypeId',
+  'phase',
+  'includeConceptReasoning',
+  'includeInactive',
+] as const;
+
+/**
+ * FIX 12. `.strict()`'s default text ("Unrecognized key(s) in object") does not
+ * tell a caller what the tool DOES accept, so a typo'd knob reads as a bug in
+ * the tool. This errorMap names the offending key AND the real knob list.
+ * Passed at construction (not to `.strict(message)`, which is static and would
+ * drop the key name) and preserved by the argument-less `.strict()` below.
+ * Byte-for-byte the same helper as `order-of-execution.ts`'s — the two SOE
+ * tools must stay in lockstep.
+ */
+const strictKeyErrorMap =
+  (accepted: readonly string[]): z.ZodErrorMap =>
+  (issue, ctx) => {
+    if (issue.code === z.ZodIssueCode.unrecognized_keys) {
+      return {
+        message: `Unknown argument '${issue.keys.join("', '")}'. This tool accepts: ${accepted.join(', ')}. Refusing rather than ignoring it — a silently-dropped argument returns a confident answer to a question you did not ask.`,
+      };
+    }
+    return { message: ctx.defaultError };
+  };
+
 export const whatHappensOnSaveInputSchema = z
-  .object({
+  .object(
+    {
     objectApiName: z.string().min(1).optional(),
     object: z.string().min(1).optional(),
     objectId: z.string().min(1).optional(),
@@ -262,10 +302,25 @@ export const whatHappensOnSaveInputSchema = z
      * `appliedPhaseFilter`.
      */
     phase: z.enum(AUTOMATION_PHASES).optional(),
-    // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). Its bytes are RESERVED
-    // out of the SOE budget, never bolted on. See `conceptReasoning`.
+    // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT) on the full view and
+    // FALSE on a `phase`-filtered query (a phase call is a RECOVERY call, so
+    // the whole budget goes to the requested phase). An explicit `true` always
+    // wins. Its bytes are RESERVED out of the SOE budget, never bolted on.
     includeConceptReasoning: z.boolean().optional(),
-  })
+    /**
+     * Return the FULL roster of inactive configured automation as
+     * `inactiveConfigured`. Defaults FALSE: the roster is the largest
+     * top-level array on a densely-automated object and it describes the
+     * automation that does NOT run, so by default the byte budget goes to the
+     * automation that DOES. The count is ALWAYS reported in `inactiveSummary`
+     * — a CHECKED zero-equivalent, never a silent omission.
+     */
+    includeInactive: z.boolean().optional(),
+    },
+    { errorMap: strictKeyErrorMap(WHAT_HAPPENS_ON_SAVE_ACCEPTED_KEYS) },
+  )
+  // `.strict()` must precede `.refine()` — a ZodEffects has no `.strict()`.
+  .strict()
   .refine(
     (i) =>
       i.objectApiName !== undefined ||
@@ -292,7 +347,27 @@ export type WhatHappensOnSaveInput = z.infer<typeof whatHappensOnSaveInputSchema
 export interface SoeStepCondition {
   readonly conditionContextId: ComponentId;
   readonly expression: string;
+  /**
+   * GROUNDED ONLY. Every id here names a real node in this vault and is safe
+   * to cite. FIX 15 (3): before this, a ref the extractor recorded but that
+   * named NO component was republished here as a citable component id.
+   */
   readonly fieldRefs: readonly ComponentId[];
+  /**
+   * Refs the condition mentions that do NOT name a component. NEVER citable.
+   * Omitted when every ref grounded. See {@link SOE_UNGROUNDED_REFS_NOTE}.
+   */
+  readonly ungroundedRefs?: readonly SoeUngroundedRef[];
+  /**
+   * So an empty `fieldRefs` is readable as CHECKED. `checked: false` means the
+   * single grounding query FAILED — the counts are then UNCHECKED zeros and
+   * `fieldRefs` is the raw extractor record, not a verified list.
+   */
+  readonly refGrounding: {
+    readonly checked: boolean;
+    readonly grounded: number;
+    readonly ungrounded: number;
+  };
 }
 
 /**
@@ -476,9 +551,19 @@ export interface WhatHappensOnSaveOutput {
   readonly receiverVerification: ApexReceiverVerification;
   /**
    * Automation configured on this object but inactive (Draft/Obsolete Flow,
-   * active:false rule/process). Omitted when empty.
+   * active:false rule/process). Present ONLY when the caller passed
+   * `includeInactive: true` on an un-filtered view — see
+   * {@link SoeInactiveSummary}, which is ALWAYS present and always carries the
+   * count.
    */
   readonly inactiveConfigured?: readonly InactiveConfiguredFirer[];
+  /**
+   * D-3 CHECKED ZERO. ALWAYS present — including `total: 0`, which is the
+   * whole point: an absent block reads as "inactive automation was never
+   * looked at", and a zero-finding response is the shape that most needs to
+   * say what WAS scanned.
+   */
+  readonly inactiveSummary: SoeInactiveSummary;
   /**
    * Phases the returned `soe` does NOT fully represent because byte-budget
    * enforcement dropped trailing steps — each names the phase, its true
@@ -555,6 +640,100 @@ export interface WhatHappensOnSaveOutput {
    */
   readonly conceptReasoning?: ConceptReasoningEnvelope;
 }
+
+/**
+ * FIX 3 (3). Appended after {@link CONCEPT_REASONING_SKIPPED_NOTE} when the
+ * skip was this tool's phase-filter DEFAULT rather than the caller's explicit
+ * `includeConceptReasoning: false` — so a caller never has to guess which of
+ * the two happened.
+ */
+const PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE =
+  'Concept reasoning is off by default on a phase-filtered query so the whole budget goes to the requested phase; pass includeConceptReasoning: true to force it.';
+
+/**
+ * FIX 3 (4). The declared-vs-present check for a PHASE-FILTERED view.
+ * `computePhasesOmitted` compares every phase, which under a filter would
+ * report the deliberately-absent phases as omissions; here only the requested
+ * phase is compared. Returns `null` when the phase is whole.
+ */
+export const computeFilteredPhaseOmission = (
+  phaseCounts: SoePhaseCounts,
+  phase: Exclude<SoePhase, 'save'>,
+  presentCount: number,
+): SoePhaseOmission | null => {
+  const declared = phaseCounts[phase];
+  if (presentCount >= declared) return null;
+  return { phase, declared, present: presentCount };
+};
+
+/** Verbatim shortfall sentence for a truncated phase-filtered call. */
+const filteredPhaseShortfallNote = (omission: SoePhaseOmission): string =>
+  `You asked for the ${omission.phase} phase, which holds ${omission.declared} step(s); ${omission.present} fitted in this response. This is a byte-budget cut, not a smaller phase — narrow further with limit/offset, or pass includeConceptReasoning: false.`;
+
+/**
+ * The ALWAYS-PRESENT census of inactive configured automation on the target
+ * object. It replaces "the `inactiveConfigured` array, omitted when empty" —
+ * a shape in which `total: 0` and "never checked" were indistinguishable.
+ *
+ * `total` proves the check happened; `byType` says what kind; `included` says
+ * whether the full roster rides along; `note` says why not, and how to get it.
+ */
+export interface SoeInactiveSummary {
+  /** How many configured components on this object are INACTIVE. Zero is CHECKED. */
+  readonly total: number;
+  /** Per component type, non-zero entries only, key-sorted. */
+  readonly byType: Readonly<Record<string, number>>;
+  /** True when `inactiveConfigured` carries the full roster in this response. */
+  readonly included: boolean;
+  /** Verbatim explanation — see {@link buildInactiveSummary}. */
+  readonly note: string;
+}
+
+/** Per-`componentType` tally of an inactive roster, key-sorted for stability. */
+const inactiveByType = (
+  firers: readonly InactiveConfiguredFirer[],
+): Readonly<Record<string, number>> => {
+  const counts = new Map<string, number>();
+  for (const f of firers) counts.set(f.componentType, (counts.get(f.componentType) ?? 0) + 1);
+  return Object.fromEntries(
+    [...counts.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+  );
+};
+
+const inactiveOmittedNote = (total: number): string =>
+  `${total} automation components are configured on this object but INACTIVE (Draft / Obsolete Flow, inactive WorkflowRule / ValidationRule) and therefore do not fire on this save. They were CHECKED and counted, not skipped. The roster is omitted by default so the byte budget goes to the automation that actually runs — re-query with includeInactive: true for the full list.`;
+
+const inactiveIncludedNote = (total: number): string =>
+  `${total} automation components are configured on this object but INACTIVE (Draft / Obsolete Flow, inactive WorkflowRule / ValidationRule) and therefore do not fire on this save. They were CHECKED and counted, not skipped. The full roster is in inactiveConfigured because includeInactive: true was passed.`;
+
+/**
+ * Why a `phase`-filtered query never ships the roster: an inactive component
+ * is not in ANY phase's firing sequence, so returning it under a phase filter
+ * would answer a question the caller did not ask. Half-honouring the request
+ * silently would be worse than saying so.
+ */
+const INACTIVE_ROSTER_PHASE_SUPPRESSED_NOTE =
+  "An INACTIVE component is in NO phase's firing sequence, so the roster stays suppressed on a phase-filtered query even when includeInactive: true was passed — re-query without `phase` for the full list.";
+
+/** Build the always-present {@link SoeInactiveSummary}. */
+const buildInactiveSummary = (
+  firers: readonly InactiveConfiguredFirer[],
+  requested: boolean,
+  phaseFiltered: boolean,
+): SoeInactiveSummary => {
+  const included = requested && !phaseFiltered;
+  const total = firers.length;
+  return {
+    total,
+    byType: inactiveByType(firers),
+    included,
+    note: included
+      ? inactiveIncludedNote(total)
+      : phaseFiltered
+        ? `${inactiveOmittedNote(total)} ${INACTIVE_ROSTER_PHASE_SUPPRESSED_NOTE}`
+        : inactiveOmittedNote(total),
+  };
+};
 
 /**
  * Determine whether a WorkflowRule's `triggerType` property matches
@@ -709,6 +888,9 @@ const surfaceFirstCondition = async (
     conditionContextId: conditionNode.id,
     expression: typeof expression === 'string' ? expression : '',
     fieldRefs,
+    // Provisional: `groundStepConditions` runs ONE batched probe over the whole
+    // composition and rewrites this. Until then nothing is claimed.
+    refGrounding: { checked: false, grounded: 0, ungrounded: 0 },
   });
 };
 
@@ -1415,8 +1597,22 @@ export const whatHappensOnSaveHandler = async (
     soe as unknown as ReceiverVerifiableStep[],
   );
 
+  // FIX 15 (3). ONE more batched query partitions every condition's
+  // `fieldRefs` into grounded (citable) and ungrounded (never citable). Runs
+  // over the FULL composition, before `visibleSoe`, so a `phase` filter cannot
+  // change what a condition claims about itself.
+  const refGroundingCensus = await groundStepConditions(
+    ctx.graph,
+    soe as unknown as RefGroundableStep[],
+  );
+
   const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
+  const inactiveSummary = buildInactiveSummary(
+    inactiveConfigured,
+    input.includeInactive === true,
+    input.phase !== undefined,
+  );
   // `phaseCounts` / `activeComponents` are computed from the FULL composition so
   // the summary keeps the whole phase distribution even when the caller narrows
   // `soe` with a `phase` filter.
@@ -1475,6 +1671,7 @@ export const whatHappensOnSaveHandler = async (
     disclosure: string;
     receiverVerification: ApexReceiverVerification;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
+    inactiveSummary: SoeInactiveSummary;
     phasesOmitted?: readonly SoePhaseOmission[];
     appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
     truncated?: boolean;
@@ -1489,12 +1686,12 @@ export const whatHappensOnSaveHandler = async (
     event: input.event,
     recordTypeId: input.recordTypeId ?? null,
     objectModeled,
-    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
-    ...(inactiveConfigured.length > 0
-      ? {
-          inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
-        }
-      : {}),
+    // FIX 3 (1)+(2). `inactiveHeadline` is GONE: it was
+    // `inactiveConfigured.map(apiName).join(', ')` — the same names the array
+    // already carried, restated as prose, for ~11% of the budget and zero new
+    // information. The roster itself is now opt-in; the COUNT is always here.
+    ...(inactiveSummary.included ? { inactiveConfigured } : {}),
+    inactiveSummary,
     ...(input.phase !== undefined ? { appliedPhaseFilter: input.phase } : {}),
     ...(entitlementProcessNotes.length > 0 ? { entitlementProcessNotes } : {}),
     ...(entitlementProcessNotesTruncated ? { entitlementProcessNotesTruncated } : {}),
@@ -1521,6 +1718,17 @@ export const whatHappensOnSaveHandler = async (
     data.disclosure = `${data.disclosure} ${rollupScanTruncationNote()}`;
   }
 
+  // FIX 15 (3). An ungrounded ref must never be presented as a component id,
+  // and a grounding probe that FAILED must never read as a clean partition.
+  if (!refGroundingCensus.checked) {
+    data.disclosure = `${data.disclosure} ${soeRefGroundingNotCheckedNote(refGroundingCensus.reason ?? 'reason not reported')}`;
+  } else if (refGroundingCensus.ungrounded > 0) {
+    data.disclosure = `${data.disclosure} ${refGroundingCensus.ungrounded} condition field reference(s) across this composition are listed under \`conditional.ungroundedRefs\`. ${SOE_UNGROUNDED_REFS_NOTE}`;
+  }
+
+  // Snapshot the grounding counts before the byte pass: its conditional trim
+  // rebuilds a heavy condition from three keys and would otherwise drop them,
+  // leaving an emitted `fieldRefs: []` unreadable.
   // FLOW-ORDER-IS-ALPHABETICAL. Emitted ONLY when at least one phase holds two
   // or more steps — the only shape in which the consecutive `stepIndex` values
   // could be read as a run order. Computed from the FULL pre-truncation
@@ -1558,6 +1766,16 @@ export const whatHappensOnSaveHandler = async (
   // tool. A single-event step list, once its actions/conditionals are slimmed,
   // is small enough that the step COUNT alone never exceeds the budget, so the
   // last-resort step-drop pass is neither needed nor allowed here.
+  //
+  // WHAT THIS PROMISE IS AND IS NOT. It binds THIS layer only: no firing step
+  // is dropped by `enforceSoeByteBudget`. It is NOT a claim that no step can
+  // be lost downstream — the GLOBAL response reducer in `tool-dispatch.ts`
+  // trims the largest `data` array (which is `soe`) when a payload still
+  // exceeds the envelope cap, and this handler does not control that layer.
+  // `reconcileSoePhasesOmittedAfterGlobalTrim` is the backstop that re-stamps
+  // `phasesOmitted` after such a trim; that re-stamp is the one thing that
+  // must never be lost, because it is what stops a shortened `soe` from
+  // silently contradicting `summary.phaseCounts`.
   // REASONING-REACHABILITY — opt-in concept-rule reasoning over the target
   // OBJECT. Built BEFORE the byte-budget pass so its measured size can be
   // RESERVED out of the SOE budget: the SOE budget (40 KB) sits just under the
@@ -1581,9 +1799,18 @@ export const whatHappensOnSaveHandler = async (
   // The block is fitted to CONCEPT_RESERVATION_MAX_BYTES (~2 KB) before it is
   // ever attached, so the SOE budget keeps a fixed, small headroom instead of a
   // moving subtraction.
+  //
+  // FIX 3 (3). A `phase` call is a RECOVERY call, not a reasoning call: the
+  // caller is here because the full view could not hold that phase, so the
+  // whole budget goes to the phase they asked for. An explicit
+  // `includeConceptReasoning: true` still wins.
   let conceptReasoning: ConceptReasoningEnvelope | undefined;
   let conceptReasoningBytes = 0;
-  if (input.includeConceptReasoning !== false) {
+  const conceptReasoningOffByPhaseDefault =
+    input.phase !== undefined && input.includeConceptReasoning === undefined;
+  const wantConceptReasoning =
+    input.includeConceptReasoning ?? input.phase === undefined;
+  if (wantConceptReasoning) {
     const reserved = await buildReservedConceptReasoning(ctx, objectId);
     if (reserved !== null) {
       conceptReasoning = reserved.envelope;
@@ -1596,6 +1823,9 @@ export const whatHappensOnSaveHandler = async (
     }
   } else {
     data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_SKIPPED_NOTE}`;
+    if (conceptReasoningOffByPhaseDefault) {
+      data.disclosure = `${data.disclosure} ${PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE}`;
+    }
   }
 
   const budget = enforceSoeByteBudget(
@@ -1622,13 +1852,19 @@ export const whatHappensOnSaveHandler = async (
     }
   }
 
-  // Honesty invariant (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES): on
-  // the FULL (un-filtered) view, `soe` must fully represent every phase
-  // `phaseCounts` claims. `allowStepDrop: false` above guarantees this here
-  // (no firing step is ever dropped), but we compute the delta anyway so a
-  // truncated payload can never SILENTLY contradict `phaseCounts` — any shortfall
-  // is named in `phasesOmitted` with a pointer to the `phase` filter. On a
-  // phase-filtered call the caller narrowed on purpose, so this is skipped.
+  // Honesty invariant (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES):
+  // `soe` must fully represent every phase `phaseCounts` claims.
+  // `allowStepDrop: false` above guarantees this at THIS layer, but the delta
+  // is computed anyway so a truncated payload can never SILENTLY contradict
+  // `phaseCounts` — any shortfall is named in `phasesOmitted`.
+  //
+  // FIX 3 (4). This runs on a phase-filtered call TOO. A phase filter narrows
+  // WHICH phase is returned; it never authorises returning a PARTIAL phase
+  // silently. This is the recovery path the full view points at, so a
+  // shortfall here is the last place a caller can find out. What changes under
+  // a filter is the COMPARISON, not whether it happens: the other phases are
+  // absent on purpose and are not omissions, so only the requested phase's
+  // declared-vs-present is checked.
   if (input.phase === undefined) {
     const phasesOmitted = computePhasesOmitted(phaseCounts, data.soe);
     if (phasesOmitted.length > 0) {
@@ -1637,6 +1873,17 @@ export const whatHappensOnSaveHandler = async (
         `${data.disclosure} Note: ${phasesOmitted
           .map((p) => `${p.phase} (${p.present}/${p.declared} shown)`)
           .join(', ')} truncated out of the returned sequence — re-query with the \`phase\` filter to see the full roster.`;
+    }
+  } else {
+    const omission = computeFilteredPhaseOmission(
+      phaseCounts,
+      input.phase,
+      data.soe.length,
+    );
+    if (omission !== null) {
+      data.phasesOmitted = [omission];
+      data.truncated = true;
+      data.disclosure = `${data.disclosure} ${filteredPhaseShortfallNote(omission)}`;
     }
   }
 

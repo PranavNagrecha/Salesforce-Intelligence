@@ -19,8 +19,14 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
+  composeSoeForEvents,
+  type OrderOfExecutionOutput,
   orderOfExecutionHandler,
   orderOfExecutionInputSchema,
+  SOE_EVENTS,
+  SOE_UNGROUNDED_REFS_NOTE,
+  type SoeEvent,
+  type SoePerEvent,
 } from '../../src/tools/order-of-execution.js';
 import {
   SOE_MAX_PAYLOAD_BYTES,
@@ -32,6 +38,21 @@ import { measureGraphQueries } from './_graph-query-budget.js';
 
 const utf8Bytes = (value: unknown): number =>
   Buffer.byteLength(JSON.stringify(value), 'utf8');
+
+/**
+ * FIX 12 made `byEvent` PARTIAL: an event the caller did NOT request is
+ * ABSENT rather than present-and-empty, so an empty chain can never be
+ * confused with an uncomposed one. Every assertion below calls the tool with
+ * its default four-event scope, so all four keys must be there — this asserts
+ * that (the invariant the tests were really relying on) and hands back the
+ * total map so the assertions stay readable.
+ */
+const allEvents = (
+  data: OrderOfExecutionOutput,
+): Record<SoeEvent, SoePerEvent> => {
+  for (const event of SOE_EVENTS) expect(data.byEvent[event]).toBeDefined();
+  return data.byEvent as Record<SoeEvent, SoePerEvent>;
+};
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -132,6 +153,14 @@ const mixedSeed: ExtractionResult = {
         fieldRefs: ['CustomField:MixedObj.Status'],
         synthesized: false,
       },
+    }),
+    // FIX 15 (3): the field the condition names must EXIST for its id to be
+    // citable. Without this node the ref is honestly reported as ungrounded.
+    makeNode({
+      id: 'CustomField:MixedObj.Status',
+      type: 'CustomField',
+      apiName: 'Status',
+      parentId: MIXED_OBJ,
     }),
     makeNode({
       id: MIXED_WORKFLOW,
@@ -542,6 +571,93 @@ const receiverGuardSeed: ExtractionResult = {
   ],
 };
 
+
+// =============================================================================
+// Seed (FIX 3): PHASE-FILTERED TRUNCATION + PER-EVENT PAGING.
+// `ShipmentLeg__c` carries 60 ACTIVE validation rules, each with a long,
+// UNTRIMMABLE `errorMessage` plus a long firing condition, and 12 INACTIVE
+// workflow rules. Every name here is invented.
+//
+// Sizing matters: even after the byte enforcer strips every action list and
+// every condition expression, 60 rules x 2 events of error text still blows
+// the 40 KB SOE ceiling, so the LAST-RESORT tail step-drop engages — including
+// on a `phase: 'pre-save-validation'` call, which is precisely the recovery
+// path that used to return a partial phase in silence.
+// =============================================================================
+
+const LEG_OBJ = 'CustomObject:ShipmentLeg__c';
+const LEG_VR_COUNT = 60;
+const LEG_INACTIVE_WF_COUNT = 12;
+const LEG_LONG_ERROR =
+  'This shipment leg cannot be saved: the declared weight, the carrier service level and the destination postal zone are inconsistent with each other. '.repeat(4);
+const LEG_LONG_EXPRESSION =
+  'AND(NOT(ISBLANK(TEXT(Carrier__c))), Weight__c > 0, NOT(ISPICKVAL(Carrier__c, "Unassigned")), '.repeat(3) + 'TRUE)';
+
+const legVr = (i: number): { nodes: Node[]; edges: Edge[] } => {
+  const n = String(i).padStart(2, '0');
+  const vrId = `ValidationRule:ShipmentLeg__c.Check_${n}`;
+  const condId = `ConditionalContext:${vrId}.condition-0`;
+  return {
+    nodes: [
+      makeNode({
+        id: vrId,
+        type: 'ValidationRule',
+        apiName: `ShipmentLeg__c.Check_${n}`,
+        parentId: LEG_OBJ,
+        properties: { active: true, errorMessage: LEG_LONG_ERROR, errorDisplayField: null },
+      }),
+      makeNode({
+        id: condId,
+        type: 'ConditionalContext',
+        apiName: `${vrId}.condition-0`,
+        parentId: vrId,
+        properties: {
+          kind: 'formula',
+          expression: LEG_LONG_EXPRESSION,
+          fieldRefs: ['CustomField:ShipmentLeg__c.Weight__c'],
+          synthesized: false,
+        },
+      }),
+    ],
+    edges: [
+      makeEdge({ fromId: LEG_OBJ, toId: vrId, edgeType: 'parentOf' }),
+      makeEdge({ fromId: vrId, toId: condId, edgeType: 'firesWhen', confidence: 'parsed' }),
+    ],
+  };
+};
+
+const legInactiveWf = (i: number): { node: Node; edge: Edge } => {
+  const n = String(i).padStart(2, '0');
+  const id = `WorkflowRule:ShipmentLeg__c.Retired_Notice_${n}`;
+  return {
+    node: makeNode({
+      id,
+      type: 'WorkflowRule',
+      apiName: `ShipmentLeg__c.Retired_Notice_${n}`,
+      parentId: LEG_OBJ,
+      properties: { triggerType: 'onAllChanges', active: false },
+    }),
+    edge: makeEdge({
+      fromId: id,
+      toId: LEG_OBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'onAllChanges' },
+    }),
+  };
+};
+
+const legVrs = Array.from({ length: LEG_VR_COUNT }, (_, i) => legVr(i));
+const legWfs = Array.from({ length: LEG_INACTIVE_WF_COUNT }, (_, i) => legInactiveWf(i));
+
+const legSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: LEG_OBJ, apiName: 'ShipmentLeg__c', properties: { sharingModel: 'Private' } }),
+    ...legVrs.flatMap((v) => v.nodes),
+    ...legWfs.map((w) => w.node),
+  ],
+  edges: [...legVrs.flatMap((v) => v.edges), ...legWfs.map((w) => w.edge)],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -563,6 +679,7 @@ beforeAll(async () => {
     phantomSeed,
     truncSeed,
     receiverGuardSeed,
+    legSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -587,7 +704,7 @@ describe('orderOfExecutionHandler — truncation phase honesty (WHAT-HAPPENS-ON-
     const data = result.value.data;
     // Precondition: the payload truncated (tail step-drop engaged).
     expect(data.truncated).toBe(true);
-    const insert = data.byEvent.insert;
+    const insert = allEvents(data).insert;
     // The dropped later phases are still CLAIMED by phaseCounts...
     expect(insert.summary.phaseCounts['duplicate-rules']).toBe(1);
     expect(insert.summary.phaseCounts['after-triggers']).toBe(1);
@@ -614,7 +731,7 @@ describe('orderOfExecutionHandler — truncation phase honesty (WHAT-HAPPENS-ON-
     if (!result.ok) return;
     const data = result.value.data;
     expect(data.appliedPhaseFilter).toBe('duplicate-rules');
-    const insert = data.byEvent.insert;
+    const insert = allEvents(data).insert;
     // The narrowed view surfaces the DuplicateRule the full view had to drop.
     expect(insert.soe.map((s) => s.componentId)).toContain(TRUNC_DUP);
     expect(insert.soe.every((s) => s.phase === 'duplicate-rules')).toBe(true);
@@ -669,7 +786,7 @@ describe('orderOfExecutionHandler — one envelope law (ORDER-OF-EXECUTION-OVERS
     const events = ['insert', 'update', 'delete', 'undelete'] as const;
     let anyNonZeroPhaseOmitted = false;
     for (const event of events) {
-      const perEvent = data.byEvent[event];
+      const perEvent = allEvents(data)[event];
       const declared = perEvent.summary.phaseCounts;
       const survived = tallyPhaseCounts(perEvent.soe);
       const named = new Map(
@@ -738,12 +855,18 @@ describe('orderOfExecutionHandler', () => {
       expect(r?.ok).toBe(true);
     }
     if (!canonical?.ok || !byObject?.ok || !byObjectId?.ok || !byComponent?.ok) return;
+    // INVARIANT (unchanged): the resolved object scope is ECHOED, so a host
+    // never has to assume its alias was honoured. FIX 12 added the third
+    // member — the DML events actually composed — for the same reason: an
+    // absent event in `byEvent` must be readable as "not asked for" rather
+    // than "empty".
     expect(canonical.value.data.appliedScope).toEqual({
       componentId: 'CustomObject:OrderObj',
       object: 'OrderObj',
+      events: ['insert', 'update', 'delete', 'undelete'],
     });
     for (const r of [byObject, byObjectId, byComponent]) {
-      expect(r.value.data.byEvent).toEqual(canonical.value.data.byEvent);
+      expect(allEvents(r.value.data)).toEqual(allEvents(canonical.value.data));
       expect(r.value.data.appliedScope).toEqual(canonical.value.data.appliedScope);
     }
   });
@@ -770,11 +893,11 @@ describe('orderOfExecutionHandler', () => {
     if (!full.ok || !filtered.ok) return;
     // Full (un-filtered) view: no phase filter echoed, multiple phases present.
     expect(full.value.data.appliedPhaseFilter).toBeUndefined();
-    const fullInsertPhases = new Set(full.value.data.byEvent.insert.soe.map((s) => s.phase));
+    const fullInsertPhases = new Set(allEvents(full.value.data).insert.soe.map((s) => s.phase));
     expect(fullInsertPhases.size).toBeGreaterThan(2);
     // Filtered view: only the requested phase in soe; full counts retained.
     expect(filtered.value.data.appliedPhaseFilter).toBe('pre-save-validation');
-    const fInsert = filtered.value.data.byEvent.insert;
+    const fInsert = allEvents(filtered.value.data).insert;
     expect(fInsert.soe.every((s) => s.phase === 'pre-save-validation')).toBe(true);
     expect(fInsert.soe.length).toBe(1);
     expect(fInsert.summary.phaseCounts['pre-save-validation']).toBe(1);
@@ -818,7 +941,7 @@ describe('orderOfExecutionHandler', () => {
     expect(result.value.data.disclosure).toContain(
       "object's own metadata definition is not in this vault",
     );
-    expect(result.value.data.byEvent.insert.soe.length).toBeGreaterThan(1);
+    expect(allEvents(result.value.data).insert.soe.length).toBeGreaterThan(1);
   });
 
   it('produces a byEvent map with all four DML events as keys', async () => {
@@ -827,7 +950,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { byEvent } = result.value.data;
+    const byEvent = allEvents(result.value.data);
     expect(Object.keys(byEvent).sort()).toEqual([
       'delete',
       'insert',
@@ -842,7 +965,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { byEvent } = result.value.data;
+    const byEvent = allEvents(result.value.data);
     for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
       expect(byEvent[event].soe.length).toBe(1);
       expect(byEvent[event].soe[0]?.phase).toBe('save');
@@ -854,7 +977,7 @@ describe('orderOfExecutionHandler', () => {
     const result = await orderOfExecutionHandler(ctx, { objectApiName: 'MixedObj' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { byEvent } = result.value.data;
+    const byEvent = allEvents(result.value.data);
     for (const event of ['insert', 'update'] as const) {
       const soe = byEvent[event].soe;
       // The RecordBeforeSave flow is the leading SOE phase, ahead of before-triggers.
@@ -873,7 +996,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { soe } = result.value.data.byEvent.insert;
+    const { soe } = allEvents(result.value.data).insert;
     // ValidationRule should appear, before-insert trigger should appear,
     // CreateAndUpdate flow should appear, onAllChanges workflow should appear.
     const componentIds = soe.map((s) => s.componentId);
@@ -889,7 +1012,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const vrStep = result.value.data.byEvent.insert.soe.find(
+    const vrStep = allEvents(result.value.data).insert.soe.find(
       (s) => s.componentId === MIXED_VR,
     );
     expect(vrStep).toBeDefined();
@@ -906,7 +1029,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { soe } = result.value.data.byEvent.update;
+    const { soe } = allEvents(result.value.data).update;
     const componentIds = soe.map((s) => s.componentId);
     // The trigger has 'after update' so update should include it.
     expect(componentIds).toContain(MIXED_TRIGGER);
@@ -922,7 +1045,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { soe } = result.value.data.byEvent.delete;
+    const { soe } = allEvents(result.value.data).delete;
     const phasesPresent = new Set(soe.map((s) => s.phase));
     expect(phasesPresent.has('pre-save-validation')).toBe(false);
     expect(phasesPresent.has('post-save-workflows')).toBe(false);
@@ -934,7 +1057,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const deleteSoe = result.value.data.byEvent.delete.soe;
+    const deleteSoe = allEvents(result.value.data).delete.soe;
     const flowSteps = deleteSoe.filter((s) => s.phase === 'post-save-flows');
     expect(flowSteps.length).toBe(1);
     expect(flowSteps[0]?.componentId).toBe(DELETE_FLOW);
@@ -946,7 +1069,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const insertSoe = result.value.data.byEvent.insert.soe;
+    const insertSoe = allEvents(result.value.data).insert.soe;
     const flowSteps = insertSoe.filter((s) => s.phase === 'post-save-flows');
     expect(flowSteps.length).toBe(0);
   });
@@ -957,13 +1080,22 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const insertSoe = result.value.data.byEvent.insert.soe;
+    const insertSoe = allEvents(result.value.data).insert.soe;
     const flowStep = insertSoe.find((s) => s.componentId === MIXED_FLOW);
     expect(flowStep?.conditional?.conditionContextId).toBe(MIXED_FLOW_COND);
     expect(flowStep?.conditional?.expression).toBe(
       'MixedObj.Status equals Open',
     );
+    // INVARIANT (unchanged): the condition's extracted field reference is
+    // surfaced. FIX 15 (3) STRENGTHENED it — `fieldRefs` is now grounded-only,
+    // so this id is guaranteed to name a real node and to be safe to cite.
     expect(flowStep?.conditional?.fieldRefs).toHaveLength(1);
+    expect(flowStep?.conditional?.refGrounding).toEqual({
+      checked: true,
+      grounded: 1,
+      ungrounded: 0,
+    });
+    expect(flowStep?.conditional?.ungroundedRefs).toBeUndefined();
   });
 
   it('per-event summary.conditionalSteps matches the number of conditional steps', async () => {
@@ -973,7 +1105,7 @@ describe('orderOfExecutionHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
-      const perEvent = result.value.data.byEvent[event];
+      const perEvent = allEvents(result.value.data)[event];
       const conditionalCount = perEvent.soe.filter(
         (s) => s.conditional !== undefined,
       ).length;
@@ -987,7 +1119,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { byEvent } = result.value.data;
+    const byEvent = allEvents(result.value.data);
 
     // MixedObj on INSERT: a before-save flow, a before-insert trigger, a
     // validation rule, an after-save (CreateAndUpdate) flow, and an
@@ -1029,7 +1161,7 @@ describe('orderOfExecutionHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
-      const s = result.value.data.byEvent[event].summary;
+      const s = allEvents(result.value.data)[event].summary;
       expect(s.activeComponents).toBe(0);
       expect(Object.values(s.phaseCounts).every((c) => c === 0)).toBe(true);
     }
@@ -1097,7 +1229,7 @@ describe('orderOfExecutionHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
-      const { soe } = result.value.data.byEvent[event];
+      const { soe } = allEvents(result.value.data)[event];
       for (let i = 0; i < soe.length; i += 1) {
         expect(soe[i]?.stepIndex).toBe(i);
       }
@@ -1110,7 +1242,7 @@ describe('orderOfExecutionHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { soe } = result.value.data.byEvent.insert;
+    const { soe } = allEvents(result.value.data).insert;
     // OrderObj is the one seed where every post-save phase co-occurs.
     // Assert the EXACT documented Salesforce order of execution: before
     // triggers precede custom validation rules, duplicate rules run after
@@ -1150,7 +1282,7 @@ describe('orderOfExecutionHandler', () => {
     const result = await orderOfExecutionHandler(ctx, { objectApiName: 'OrderObj' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { byEvent } = result.value.data;
+    const byEvent = allEvents(result.value.data);
     expect(byEvent.insert.soe.some((s) => s.phase === 'duplicate-rules')).toBe(true);
     expect(byEvent.update.soe.some((s) => s.phase === 'duplicate-rules')).toBe(true);
     expect(byEvent.delete.soe.some((s) => s.phase === 'duplicate-rules')).toBe(false);
@@ -1163,7 +1295,7 @@ describe('orderOfExecutionHandler', () => {
     const result = await orderOfExecutionHandler(ctx, { objectApiName: 'OrderObj' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { byEvent } = result.value.data;
+    const byEvent = allEvents(result.value.data);
     for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
       const rollupSteps = byEvent[event].soe.filter(
         (s) => s.phase === 'post-save-rollup-recalc',
@@ -1178,7 +1310,7 @@ describe('orderOfExecutionHandler', () => {
     if (!result.ok) return;
     for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
       const phasesPresent = new Set(
-        result.value.data.byEvent[event].soe.map((s) => s.phase),
+        allEvents(result.value.data)[event].soe.map((s) => s.phase),
       );
       expect(phasesPresent.has('duplicate-rules')).toBe(false);
       expect(phasesPresent.has('post-save-rollup-recalc')).toBe(false);
@@ -1201,7 +1333,7 @@ describe('orderOfExecutionHandler — verified Apex field-access receivers', () 
     const result = await orderOfExecutionHandler(ctx, { objectApiName: 'GuardObj' });
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('handler failed');
-    const step = result.value.data.byEvent.insert.soe.find(
+    const step = allEvents(result.value.data).insert.soe.find(
       (s) => s.componentId === 'ApexTrigger:GuardObjTrigger',
     );
     expect(step).toBeDefined();
@@ -1342,5 +1474,362 @@ describe('orderOfExecutionHandler — bounded graph queries', () => {
     // And the constant stays far below the fan-out (a per-child N+1 at N=200
     // would be >=200 node queries across the firer resolutions).
     expect(large.nodeQueries).toBeLessThan(60);
+  });
+});
+
+describe('composeSoeForEvents — the FIX 1 composition seam', () => {
+  it('is behaviour-preserving: an UNDER-BUDGET object composes byte-identically to the handler', async () => {
+    // This is the test that pins the refactor. `order_of_execution` is now
+    // `composeSoeForEvents(SOE_EVENTS) -> build data -> enforce -> attach
+    // honesty`; on an object whose payload never reaches the byte budget the
+    // enforcement pass is a no-op, so the two must agree step for step.
+    const composed = await composeSoeForEvents(ctx, 'MixedObj', SOE_EVENTS);
+    expect(composed.ok).toBe(true);
+    if (!composed.ok) return;
+    const handled = await orderOfExecutionHandler(ctx, { objectApiName: 'MixedObj' });
+    expect(handled.ok).toBe(true);
+    if (!handled.ok) return;
+    // Precondition: nothing was cut, otherwise the comparison proves nothing.
+    expect(handled.value.data.truncated).toBeUndefined();
+    for (const event of SOE_EVENTS) {
+      expect(composed.value.byEvent[event]?.soe).toEqual(
+        allEvents(handled.value.data)[event].soe,
+      );
+      expect(composed.value.byEvent[event]?.summary).toEqual(
+        allEvents(handled.value.data)[event].summary,
+      );
+    }
+    expect(composed.value.objectModeled).toBe(handled.value.data.objectModeled);
+  });
+
+  it('composes ONLY the requested events — a one-event call touches no other event', async () => {
+    const one = await composeSoeForEvents(ctx, 'MixedObj', ['update']);
+    expect(one.ok).toBe(true);
+    if (!one.ok) return;
+    expect(Object.keys(one.value.byEvent)).toEqual(['update']);
+    const all = await composeSoeForEvents(ctx, 'MixedObj', SOE_EVENTS);
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    // The single-event composition is identical to that event's slice of the
+    // four-event one — composing fewer events changes cost, never content.
+    expect(one.value.byEvent.update).toEqual(all.value.byEvent.update);
+  });
+
+  it('returns the UNTRUNCATED composition: totals match the arrays even where the handler must cut', async () => {
+    // TruncObj is the fixture whose four-event handler response engages the
+    // last-resort tail step-drop. The SEAM never enforces, so a consumer that
+    // pages it can still reach every step.
+    const enforced = await orderOfExecutionHandler(ctx, { objectApiName: 'TruncObj' });
+    expect(enforced.ok).toBe(true);
+    if (!enforced.ok) return;
+    expect(enforced.value.data.truncated).toBe(true);
+
+    const composed = await composeSoeForEvents(ctx, 'TruncObj', SOE_EVENTS);
+    expect(composed.ok).toBe(true);
+    if (!composed.ok) return;
+    for (const event of SOE_EVENTS) {
+      const perEvent = composed.value.byEvent[event];
+      expect(perEvent).toBeDefined();
+      if (perEvent === undefined) continue;
+      // The seam's array and its own summary can never disagree.
+      expect(perEvent.soe.length).toBe(perEvent.summary.totalSteps);
+      // ...and it holds at least as much as the enforced response does.
+      expect(perEvent.soe.length).toBeGreaterThanOrEqual(
+        allEvents(enforced.value.data)[event].soe.length,
+      );
+    }
+  });
+
+  it('reuses the shared object admission — an unknown object is component-not-found', async () => {
+    const r = await composeSoeForEvents(ctx, 'NoSuchObject__c', ['update']);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+});
+
+describe('orderOfExecutionHandler — FIX 3: budget allocation, paging, and phase honesty', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a phase-filtered call that loses steps says phasesOmitted', async () => {
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.appliedPhaseFilter).toBe('pre-save-validation');
+    // Precondition: the byte enforcer genuinely cut this filtered slice.
+    const update = allEvents(d).update;
+    expect(update.soe.length).toBeLessThan(LEG_VR_COUNT);
+    // Before the fix `phasesOmitted` was skipped ENTIRELY on a phase-filtered
+    // call ("the caller narrowed on purpose"), so the recovery path the full
+    // view points at returned a PARTIAL phase in silence.
+    expect(update.phasesOmitted).toBeDefined();
+    const omission = (update.phasesOmitted ?? []).find(
+      (p) => p.phase === 'pre-save-validation',
+    );
+    expect(omission).toBeDefined();
+    expect(omission?.declared).toBe(LEG_VR_COUNT);
+    expect(omission?.present).toBe(update.soe.length);
+    expect(d.truncated).toBe(true);
+    expect(d.disclosure).toContain(
+      `You asked for the pre-save-validation phase, which holds ${LEG_VR_COUNT} step(s) on update; ${update.soe.length} fitted in this response. This is a byte-budget cut, not a smaller phase — narrow further with limit/offset.`,
+    );
+  });
+
+  it('a phase-filtered call never reports the phases the filter deliberately left out', async () => {
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'MixedObj',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    for (const event of SOE_EVENTS) {
+      const omitted = allEvents(r.value.data)[event].phasesOmitted ?? [];
+      // Only the requested phase can ever be short; the others are absent on
+      // purpose and are not omissions.
+      for (const p of omitted) expect(p.phase).toBe('pre-save-validation');
+    }
+  });
+
+  it('inactiveSummary is ALWAYS present — including total 0 — and inactiveHeadline is gone', async () => {
+    const busy = await orderOfExecutionHandler(ctx, { objectApiName: 'ShipmentLeg__c' });
+    expect(busy.ok).toBe(true);
+    if (!busy.ok) return;
+    expect(busy.value.data.inactiveSummary.total).toBe(LEG_INACTIVE_WF_COUNT);
+    expect(busy.value.data.inactiveSummary.byType['WorkflowRule']).toBe(
+      LEG_INACTIVE_WF_COUNT,
+    );
+    expect(busy.value.data.inactiveSummary.included).toBe(false);
+    expect('inactiveConfigured' in busy.value.data).toBe(false);
+    expect('inactiveHeadline' in busy.value.data).toBe(false);
+
+    const clean = await orderOfExecutionHandler(ctx, { objectApiName: 'EmptyObj' });
+    expect(clean.ok).toBe(true);
+    if (!clean.ok) return;
+    // A CHECKED zero: the block is present so "none" cannot read as "unlooked".
+    expect(clean.value.data.inactiveSummary.total).toBe(0);
+    expect(clean.value.data.inactiveSummary.byType).toEqual({});
+
+    const withRoster = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      includeInactive: true,
+    });
+    expect(withRoster.ok).toBe(true);
+    if (!withRoster.ok) return;
+    expect(withRoster.value.data.inactiveConfigured?.length).toBe(
+      LEG_INACTIVE_WF_COUNT,
+    );
+    expect(withRoster.value.data.inactiveSummary.included).toBe(true);
+  });
+
+  it('FIX 3 (5): limit/offset page PER EVENT and reconcile against each event total', async () => {
+    const limit = 10;
+    const offset = 5;
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      limit,
+      offset,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.paging).toBeDefined();
+    expect(d.paging?.limit).toBe(limit);
+    expect(d.paging?.offset).toBe(offset);
+    expect(d.paging?.note).toContain('PER EVENT');
+    for (const event of SOE_EVENTS) {
+      const perEvent = allEvents(d)[event];
+      expect(perEvent.soe.length).toBeLessThanOrEqual(limit);
+      if (perEvent.soe.length === 0) {
+        // An offset past the end of THIS event yields an exhausted empty page
+        // — never a wrapped one, and never a claim of steps that are not there.
+        expect(offset).toBeGreaterThanOrEqual(perEvent.summary.totalSteps);
+        continue;
+      }
+      // The page can never claim more than the event's whole composition.
+      expect(offset + perEvent.soe.length).toBeLessThanOrEqual(
+        perEvent.summary.totalSteps,
+      );
+    }
+    // insert/update carry 60 rules + the save step, so both were cut and both
+    // are reported; delete/undelete hold only the save placeholder.
+    expect(d.paging?.byEvent.update?.totalCount).toBe(LEG_VR_COUNT + 1);
+    expect(d.paging?.byEvent.update?.hasMore).toBe(true);
+    expect(typeof d.paging?.nextCursor).toBe('string');
+  });
+
+  it('an UNPAGED call emits no paging block at all (byte-identical to before the knob existed)', async () => {
+    const r = await orderOfExecutionHandler(ctx, { objectApiName: 'MixedObj' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('paging' in r.value.data).toBe(false);
+  });
+
+  it('a cursor minted for one phase scope cannot be replayed against another', async () => {
+    const first = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      limit: 5,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.paging?.nextCursor;
+    expect(typeof cursor).toBe('string');
+    const replay = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      phase: 'pre-save-validation',
+      limit: 5,
+      cursor: cursor as string,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
+describe('orderOfExecutionInputSchema — FIX 12: .strict() and the missing `event` knob', () => {
+  const parseFail = (raw: unknown): string => {
+    const parsed = orderOfExecutionInputSchema.safeParse(raw);
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return '';
+    return parsed.error.issues.map((i) => i.message).join('; ');
+  };
+
+  it('FAIL-BEFORE/PASS-AFTER: a typo’d key is REFUSED, and the refusal names the real knobs', () => {
+    // Before the fix Zod STRIPPED `evnt` and the tool answered the whole
+    // four-event question confidently — an answer to a question nobody asked.
+    const message = parseFail({ objectApiName: 'MixedObj', evnt: 'update' });
+    expect(message).toBe(
+      "Unknown argument 'evnt'. This tool accepts: objectApiName, object, objectId, componentId, phase, event, events, includeInactive, limit, offset, cursor. Refusing rather than ignoring it — a silently-dropped argument returns a confident answer to a question you did not ask.",
+    );
+  });
+
+  it('every ADVERTISED alias still survives .strict()', () => {
+    for (const raw of [
+      { objectApiName: 'MixedObj' },
+      { object: 'MixedObj' },
+      { objectId: 'CustomObject:MixedObj' },
+      { componentId: 'CustomObject:MixedObj' },
+      { objectApiName: 'MixedObj', phase: 'pre-save-validation' as const },
+      { objectApiName: 'MixedObj', event: 'update' as const },
+      { objectApiName: 'MixedObj', events: ['insert' as const, 'update' as const] },
+      { objectApiName: 'MixedObj', includeInactive: true },
+      { objectApiName: 'MixedObj', limit: 10, offset: 5 },
+    ]) {
+      expect(orderOfExecutionInputSchema.safeParse(raw).success).toBe(true);
+    }
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: `event: "update"` composes the update chain ONLY', async () => {
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'MixedObj',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Before the fix `event` was swallowed and all four events came back.
+    expect(Object.keys(d.byEvent)).toEqual(['update']);
+    expect(d.appliedScope.events).toEqual(['update']);
+    // An unrequested event is ABSENT, never present-and-empty — so a caller
+    // can tell "not asked for" from "nothing fires".
+    expect(d.byEvent.insert).toBeUndefined();
+    // ...and it is the same chain the four-event view composes.
+    const all = await orderOfExecutionHandler(ctx, { objectApiName: 'MixedObj' });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    expect(d.byEvent.update).toEqual(all.value.data.byEvent.update);
+  });
+
+  it('`events` accepts a set, is returned in documented SOE order, and deduped', async () => {
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'MixedObj',
+      events: ['update', 'insert', 'update'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.events).toEqual(['insert', 'update']);
+    expect(Object.keys(r.value.data.byEvent).sort()).toEqual(['insert', 'update']);
+  });
+
+  it('disagreeing `event` / `events` are refused, never silently resolved to one', async () => {
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'MixedObj',
+      event: 'update',
+      events: ['insert'],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('disagree');
+  });
+});
+
+describe('orderOfExecutionHandler — FIX 15 (3): the seam partitions condition refs for every consumer', () => {
+  it('an ungrounded ref never appears in fieldRefs, and the response says so', async () => {
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+      limit: 3,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const step = (r.value.data.byEvent.update?.soe ?? []).find(
+      (s) => s.conditional !== undefined,
+    );
+    expect(step).toBeDefined();
+    const cond = step?.conditional;
+    expect(cond).toBeDefined();
+    // `CustomField:ShipmentLeg__c.Weight__c` has no node here, and its object
+    // IS vaulted — so it is `not-in-vault`, recoverable by a refresh.
+    expect(cond?.fieldRefs).toEqual([]);
+    expect(cond?.refGrounding).toEqual({ checked: true, grounded: 0, ungrounded: 1 });
+    expect(cond?.ungroundedRefs).toEqual([
+      { raw: 'CustomField:ShipmentLeg__c.Weight__c', reason: 'not-in-vault' },
+    ]);
+    // An empty fieldRefs must never read as "this condition reads nothing".
+    expect(r.value.data.disclosure).toContain(SOE_UNGROUNDED_REFS_NOTE);
+  });
+
+  it('the grounded partition is produced by the SEAM, so every consumer sees it', async () => {
+    const composed = await composeSoeForEvents(ctx, 'ShipmentLeg__c', ['update']);
+    expect(composed.ok).toBe(true);
+    if (!composed.ok) return;
+    expect(composed.value.refGrounding.checked).toBe(true);
+    expect(composed.value.refGrounding.ungrounded).toBe(LEG_VR_COUNT);
+    expect(composed.value.refGrounding.grounded).toBe(0);
+    for (const step of composed.value.byEvent.update?.soe ?? []) {
+      if (step.conditional === undefined) continue;
+      expect(step.conditional.refGrounding.checked).toBe(true);
+      expect(step.conditional.fieldRefs).toEqual([]);
+      expect(step.conditional.ungroundedRefs?.length).toBe(1);
+    }
+  });
+
+  it('INVARIANT: every emitted conditional carries refGrounding, even after the byte trim', async () => {
+    // `enforceSoeByteBudget`'s conditional pass rebuilds a heavy condition from
+    // the three keys its own `BoundableConditional` knows about, which drops
+    // the grounding census. An emitted `fieldRefs: []` with no census would be
+    // unreadable — "checked and empty" and "rebuilt by the budget" would look
+    // the same. The handler re-stamps the counts; this pins that.
+    const r = await orderOfExecutionHandler(ctx, { objectApiName: 'ShipmentLeg__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.truncated).toBe(true);
+    let trimmed = 0;
+    let seen = 0;
+    for (const event of SOE_EVENTS) {
+      for (const step of r.value.data.byEvent[event]?.soe ?? []) {
+        if (step.conditional === undefined) continue;
+        seen += 1;
+        if (step.conditionalTruncated === true) trimmed += 1;
+        expect(step.conditional.refGrounding).toBeDefined();
+        expect(typeof step.conditional.refGrounding.checked).toBe('boolean');
+      }
+    }
+    // Precondition: the fixture really does exercise the trimmed path.
+    expect(seen).toBeGreaterThan(0);
+    expect(trimmed).toBeGreaterThan(0);
   });
 });

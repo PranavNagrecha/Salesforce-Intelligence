@@ -3,6 +3,7 @@
 import {
   type BoundableStep,
   enforceSoeByteBudget,
+  reconcileSoePhasesOmittedAfterGlobalTrim,
   SOE_MAX_PAYLOAD_BYTES,
   soeTruncationNote,
 } from '../../src/tools/soe-payload-bounds.js';
@@ -213,5 +214,91 @@ describe('enforceSoeByteBudget', () => {
     expect(note).toContain('7');
     expect(note).toMatch(/conditionalTruncated/);
     expect(note).toMatch(/conditionContextId/);
+  });
+});
+
+// =============================================================================
+// THE THIRD SUPPRESSION SITE. FIX 3 (4) removed the `phase`-filter suppression
+// from both HANDLERS, but the global-trim BACKSTOP kept its own copy — so the
+// defect survived in the exact path that exists to catch it: a phase-filtered
+// payload trimmed by the global response budget lost steps with nothing saying
+// so. Two of three sites fixed is not fixed; it is fixed-looking.
+//
+// The old guard's REASONING was right — a phase-filtered `soe` is an
+// intentional subset, so a CROSS-PHASE delta is not an omission. Its ACTION was
+// wrong: it skipped instead of narrowing.
+// =============================================================================
+describe('reconcileSoePhasesOmittedAfterGlobalTrim — phase-filtered payloads', () => {
+  // Every AUTOMATION_PHASES member, so the cross-phase case below is exact.
+  const phaseCounts = {
+    'before-save-flows': 3,
+    'pre-save-triggers': 2,
+    'pre-save-validation': 8,
+    'duplicate-rules': 0,
+    'after-triggers': 4,
+    'post-save-assignment': 0,
+    'post-save-workflows': 0,
+    'post-save-flows': 1,
+    'post-save-approval': 0,
+    'post-save-rollup-recalc': 0,
+    'post-save-async': 0,
+  };
+  /** A payload the GLOBAL budget already tail-trimmed to 5 of the phase's 8. */
+  const trimmedFilteredPayload = () => ({
+    appliedPhaseFilter: 'pre-save-validation',
+    summary: { phaseCounts },
+    soe: Array.from({ length: 5 }, () => ({ phase: 'pre-save-validation' })),
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a globally-trimmed PHASE-FILTERED payload is reconciled, not skipped', () => {
+    const data = trimmedFilteredPayload();
+    const changed = reconcileSoePhasesOmittedAfterGlobalTrim(data);
+    expect(changed).toBe(true);
+    expect((data as Record<string, unknown>)['phasesOmitted']).toEqual([
+      { phase: 'pre-save-validation', declared: 8, present: 5 },
+    ]);
+  });
+
+  it('narrows to the REQUESTED phase — the deliberately-absent phases are not omissions', () => {
+    // The payload holds none of the other phases' steps, on purpose. If the
+    // comparison were cross-phase this would report four spurious omissions.
+    const data = trimmedFilteredPayload();
+    reconcileSoePhasesOmittedAfterGlobalTrim(data);
+    const omitted = (data as Record<string, unknown>)['phasesOmitted'] as readonly {
+      phase: string;
+    }[];
+    expect(omitted.map((o) => o.phase)).toEqual(['pre-save-validation']);
+  });
+
+  it('a WHOLE phase-filtered payload reports nothing and clears a stale marker', () => {
+    const data: Record<string, unknown> = {
+      appliedPhaseFilter: 'before-save-flows',
+      summary: { phaseCounts },
+      soe: Array.from({ length: 3 }, () => ({ phase: 'before-save-flows' })),
+      phasesOmitted: [{ phase: 'before-save-flows', declared: 3, present: 1 }],
+    };
+    reconcileSoePhasesOmittedAfterGlobalTrim(data);
+    expect('phasesOmitted' in data).toBe(false);
+  });
+
+  it('the UNFILTERED cross-phase path is unchanged', () => {
+    const data: Record<string, unknown> = {
+      summary: { phaseCounts },
+      soe: [{ phase: 'pre-save-validation' }, { phase: 'after-triggers' }],
+    };
+    expect(reconcileSoePhasesOmittedAfterGlobalTrim(data)).toBe(true);
+    const omitted = data['phasesOmitted'] as readonly { phase: string }[];
+    // Every phase short of its declared count, as before.
+    // Every phase whose declared count exceeds what survived.
+    expect(omitted.map((o) => o.phase).sort()).toEqual(
+      ['after-triggers', 'before-save-flows', 'post-save-flows', 'pre-save-triggers', 'pre-save-validation'].sort(),
+    );
+  });
+
+  it('a non-SOE payload is still left byte-identical', () => {
+    const data = { appliedPhaseFilter: 'pre-save-validation', soe: 'not-an-array' };
+    const before = JSON.stringify(data);
+    expect(reconcileSoePhasesOmittedAfterGlobalTrim(data)).toBe(false);
+    expect(JSON.stringify(data)).toBe(before);
   });
 });

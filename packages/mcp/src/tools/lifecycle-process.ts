@@ -33,18 +33,75 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { mergeInputAliases, toObjectApiName } from './input-aliases.js';
-import { orderOfExecutionHandler, type SoeStep } from './order-of-execution.js';
+import { composeSoeForEvents, type SoeStep } from './order-of-execution.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
 
+/**
+ * This handler's OWN byte budget for the paged `process` array.
+ *
+ * LIFECYCLE-PROCESS-LAUNDERS-UPSTREAM-TRUNCATION. This tool used to call the
+ * fully-composed, byte-budget-ENFORCED `order_of_execution` response and then
+ * recompute its totals from the survivors — so it asserted `truncated: false`
+ * over a sequence the enforcer had already cut, and could never RETURN the
+ * steps that were cut. It now composes the chain itself
+ * ({@link composeSoeForEvents}, untruncated) and makes the cut HERE, where the
+ * handler owns `limit` / `offset` / `cursor` and can report it.
+ *
+ * Sized like `TEST_COVERAGE_GAPS_PAYLOAD_BUDGET_BYTES` (38 KB) minus the
+ * `coupledAutomation` block this response also carries whole.
+ */
+const LIFECYCLE_PAYLOAD_BUDGET_BYTES = 34_000;
+
 /** A value transition is an update; record creation with a value is an insert. */
 const LIFECYCLE_EVENTS = ['insert', 'update'] as const;
 type LifecycleEvent = (typeof LIFECYCLE_EVENTS)[number];
 
-const lifecycleProcessInputBaseSchema = z.object({
+const LIFECYCLE_PROCESS_ACCEPTED_KEYS = [
+  'objectApiName',
+  'objectId',
+  'field',
+  'value',
+  'event',
+  'recordType',
+  'recordTypeId',
+  'businessProcess',
+  'limit',
+  'offset',
+  'cursor',
+] as const;
+
+/**
+ * FIX 12. `.strict()`'s default text ("Unrecognized key(s) in object") does not
+ * tell a caller what the tool DOES accept, so a typo'd knob reads as a bug in
+ * the tool. This errorMap names the offending key AND the real knob list.
+ * Passed at construction (not to `.strict(message)`, which is static and would
+ * drop the key name) and preserved by the argument-less `.strict()` below.
+ */
+const strictKeyErrorMap =
+  (accepted: readonly string[]): z.ZodErrorMap =>
+  (issue, ctx) => {
+    if (issue.code === z.ZodIssueCode.unrecognized_keys) {
+      return {
+        message: `Unknown argument '${issue.keys.join("', '")}'. This tool accepts: ${accepted.join(', ')}. Refusing rather than ignoring it — a silently-dropped argument returns a confident answer to a question you did not ask.`,
+      };
+    }
+    return { message: ctx.defaultError };
+  };
+
+const lifecycleProcessInputBaseSchema = z.object(
+  {
   objectApiName: z.string().min(1),
+  /**
+   * ADVERTISED ALIAS, declared so `.strict()` cannot reject the very call the
+   * alias merge exists to serve. `mergeInputAliases` COPIES `objectId` into
+   * `objectApiName`; it never DELETES the source key, so an undeclared alias
+   * would be an unrecognized key on an otherwise valid `{objectId: '<Obj>'}`
+   * request. The handler still reads only the canonical `objectApiName`.
+   */
+  objectId: z.string().min(1).optional(),
   field: z.string().min(1).optional(),
   value: z.string().min(1).optional(),
   event: z.enum(LIFECYCLE_EVENTS).optional(),
@@ -66,7 +123,9 @@ const lifecycleProcessInputBaseSchema = z.object({
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
-});
+  },
+  { errorMap: strictKeyErrorMap(LIFECYCLE_PROCESS_ACCEPTED_KEYS) },
+).strict();
 
 /** Zod schema for the `sfi.lifecycle_process` tool input. */
 export const lifecycleProcessInputSchema = z.preprocess((raw) => {
@@ -234,8 +293,18 @@ const annotate = (
 ): LifecycleStep => {
   const cond = step.conditional;
   const expression = cond?.expression;
+  // FIX 15 (3). `conditional.fieldRefs` is now GROUNDED-ONLY: a ref the
+  // condition mentions but that names no node in this vault moves to
+  // `ungroundedRefs`. Coupling must read BOTH. "This condition references the
+  // transition field" is a fact about the CONDITION, not about whether the
+  // field happened to be retrieved — gating it on groundedness would turn an
+  // incomplete vault into a silent `coupledToField: false`, which is exactly
+  // the false-clean answer this tool exists to avoid.
   const coupledToField =
-    fieldId !== null && cond !== undefined && cond.fieldRefs.includes(fieldId as ComponentId);
+    fieldId !== null &&
+    cond !== undefined &&
+    (cond.fieldRefs.includes(fieldId as ComponentId) ||
+      (cond.ungroundedRefs ?? []).some((u) => u.raw === fieldId));
   const coupledToValue =
     value !== null &&
     expression !== undefined &&
@@ -381,11 +450,21 @@ export const lifecycleProcessHandler = async (
   const value = input.value ?? null;
   const fieldId = field !== null ? `CustomField:${object}.${field}` : null;
 
-  // Reuse the tested SOE composition so the chain always agrees with
-  // order_of_execution. It validates the object + emits the per-event chain.
-  const soeResult = await orderOfExecutionHandler(ctx, { objectApiName: object });
-  if (!soeResult.ok) return soeResult;
-  const perEvent = soeResult.value.data.byEvent[event];
+  // Reuse the tested SOE COMPOSITION SEAM so the chain always agrees with
+  // order_of_execution — but take the UNTRUNCATED composition, not that tool's
+  // byte-budget-enforced response. `composeSoeForEvents` runs the same object
+  // admission (`evaluateSoeAdmission` / `soeNotAdmittedMessage`), so an unknown
+  // or not-modeled object surfaces the identical `component-not-found`.
+  // Composing ONE event instead of four also removes ~75% of the graph work.
+  const composed = await composeSoeForEvents(ctx, object, [event]);
+  if (!composed.ok) return err(composed.error);
+  const perEvent = composed.value.byEvent[event];
+  if (perEvent === undefined) {
+    return err({
+      kind: 'internal',
+      message: `SOE composition returned no chain for the \`${event}\` event on \`${object}\``,
+    });
+  }
 
   // Resolve an optional RecordType / BusinessProcess scope. Unknown scopes are
   // rejected with `invalid-query` rather than silently ignored (the
@@ -433,7 +512,12 @@ export const lifecycleProcessHandler = async (
   const fieldCoupledSteps = allSteps.filter((s) => s.coupledToField).length;
   const valueCoupledSteps = allSteps.filter((s) => s.coupledToValue).length;
 
-  const total = allSteps.length;
+  // The TRUE total comes from the composition's own summary, never from the
+  // surviving page — that laundering is the defect this fix closes. The
+  // record-type exclusion is this tool's OWN, deliberate, and disclosed cut, so
+  // it is SUBTRACTED here rather than hidden: `excludedStepCount + totalSteps`
+  // reconciles back to the composition's `summary.totalSteps`.
+  const total = perEvent.summary.totalSteps - rawExcludedStepCount;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
   // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
@@ -462,14 +546,14 @@ export const lifecycleProcessHandler = async (
     offset = decoded.value.o;
   }
 
-  // No per-handler byte budget today (unbounded slice; the global jsonResult
-  // guard is the byte backstop). Keep that by setting an effectively-unbounded
-  // byteBudget so `paginate()` truncates ONLY on `limit` (byte-identical to the
-  // prior open-coded slice — a currently-whole large page is not byte-trimmed).
+  // A REAL per-handler byte budget: this handler, not the global envelope
+  // reducer, decides what is cut and therefore is the layer that can report it.
+  // A page trimmed below `limit` to fit gets the byte-budget disclosure below
+  // and a resumable `nextCursor`; the SEQUENCE stays complete at `total`.
   const paged = paginateLegacy(carriers, {
     offset,
     limit,
-    byteBudget: Number.MAX_SAFE_INTEGER,
+    byteBudget: LIFECYCLE_PAYLOAD_BUDGET_BYTES,
     binding: {
       tool: 'sfi.lifecycle_process',
       vaultHash: ctx.manifest.sourceTreeHash,
@@ -480,7 +564,17 @@ export const lifecycleProcessHandler = async (
   // Strip the internal stepIndex so the emitted page is bare LifecycleStep[].
   const page = paged.items.map((c) => c.step);
   const hasMore = paged.hasMore;
-  const truncated = hasMore || offset > 0;
+  // INVARIANT: `truncated === (process.length + offset < totalSteps)`. It is a
+  // statement about the SEQUENCE ("steps remain past this page"), which is
+  // exactly `hasMore`. A resumed LAST page (offset > 0, nothing left) is not
+  // truncated — but it is still a page, so the pagination disclosure below
+  // fires on `offset > 0` too and the caller is never left thinking a partial
+  // view is the whole chain.
+  const truncated = hasMore;
+  // True when the page was cut BELOW `limit` by this handler's byte budget
+  // rather than by `limit` itself — a case that could not be expressed at all
+  // while the byte budget was effectively unbounded.
+  const byteTrimmedPage = paged.byteTrimmed && page.length < limit;
   const emitCursor = paged.nextCursor !== null;
 
   const description =
@@ -505,12 +599,18 @@ export const lifecycleProcessHandler = async (
     disclosures.push(
       `Scoped to ${appliedScope.kind === 'businessProcess' ? 'business process' : 'record type'} \`${appliedScope.requested}\` (record types: ${appliedScope.resolvedRecordTypes.join(', ')}). ` +
         `Excluded ${appliedScope.excludedStepCount} step(s) whose entry condition positively gates \`RecordType.DeveloperName\` to a record type OUTSIDE this scope. ` +
+        `\`summary.totalSteps\` (${total}) is the POST-exclusion total: ${appliedScope.excludedStepCount} excluded + ${total} returned reconciles to the ${perEvent.summary.totalSteps} step(s) the unscoped composition holds for this event. ` +
         `This is a SAFE, conservative filter: only positive-equality record-type gates are excluded — unconditional automation (which fires for every record type) and negated gates are RETAINED, so a step is never wrongly dropped. RecordType scoping via hard-coded 18-char RecordTypeId literals or record-type logic encoded in a formula this parser does not read is NOT filtered; treat the scoped chain as "everything that can fire for this record type", not a per-record guarantee.`,
     );
   }
-  if (truncated) {
+  if (truncated || offset > 0) {
     disclosures.push(
       `Process paginated: showing steps ${offset}–${offset + page.length} of ${total}. coupledAutomation + summary are complete; page with offset/limit.`,
+    );
+  }
+  if (byteTrimmedPage) {
+    disclosures.push(
+      `Page trimmed to ${page.length} of ${limit} requested steps to stay within this response's byte budget; the sequence is COMPLETE at ${total} steps and the remainder is reachable — advance with the returned nextCursor. This is a page boundary, not a missing step.`,
     );
   }
 
