@@ -28,6 +28,7 @@
     "profileId": [
       "sfi.effective_permissions",
       "sfi.layout_for_user",
+      "sfi.lightning_pages",
       "sfi.live_access_oracle",
       "sfi.profile_security",
       "sfi.recordtype_availability",
@@ -75,6 +76,8 @@
       "sfi.history_tracking_gaps",
       "sfi.layout_assignments",
       "sfi.lifecycle_process",
+      "sfi.lightning_pages",
+      "sfi.list_view_sharing",
       "sfi.object_access_audit",
       "sfi.order_of_execution",
       "sfi.pii_inventory",
@@ -147,6 +150,18 @@
     ],
     "omniUiCardId": [
       "sfi.omniuicard_widget_breakdown"
+    ],
+    "sharedToId": [
+      "sfi.list_view_sharing"
+    ],
+    "groupId": [
+      "sfi.list_view_sharing"
+    ],
+    "classId": [
+      "sfi.apex_test_coverage"
+    ],
+    "apexClassId": [
+      "sfi.apex_test_coverage"
     ]
   }
 }

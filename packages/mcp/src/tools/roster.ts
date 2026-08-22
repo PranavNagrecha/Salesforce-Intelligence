@@ -488,6 +488,12 @@ const LIST_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
     hasInvocableMethod: { type: 'boolean' },
     hasAuraEnabledMethod: { type: 'boolean' },
     isTest: { type: 'boolean' },
+    // Flow metadata: exact match on `properties.triggerObject`.
+    triggerObject: { type: 'string', minLength: 1 },
+    // Flow metadata: exact match on `properties.status` (e.g. Active).
+    status: { type: 'string', minLength: 1 },
+    // Flow metadata: keep only record-triggered flows (`triggerType` starts with Record).
+    recordTriggered: { type: 'boolean' },
     // Description-presence filters. Answer "which <type> have no description".
     // Only meaningful for a type whose extractor captures `<description>`.
     missingDescription: { type: 'boolean' },
@@ -540,8 +546,11 @@ const SEARCH_FLOW_METADATA_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Obj
     query: { type: 'string', minLength: 1 },
     regex: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: 200 },
+    // Flow metadata: exact match on `properties.triggerObject`.
+    triggerObject: { type: 'string', minLength: 1 },
+    // Return a digest instead of full matches.
+    summarize: { type: 'boolean' },
   },
-  required: ['query'],
 });
 
 /**
@@ -1112,8 +1121,11 @@ const LIVE_REPORT_USAGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object
   properties: {
     staleDays: { type: 'integer', minimum: 1, maximum: 3650 },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
+    nameContains: { type: 'string', minLength: 1 },
+    folderName: { type: 'string', minLength: 1 },
     ...LIVE_ENABLED_PROPERTY,
   },
+  additionalProperties: false,
 });
 
 const LIVE_FOLDER_ACCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
@@ -1121,8 +1133,10 @@ const LIVE_FOLDER_ACCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Objec
   properties: {
     folderType: { type: 'string', enum: ['Report', 'Dashboard', 'Email', 'Document', 'all'] },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
+    nameContains: { type: 'string', minLength: 1 },
     ...LIVE_ENABLED_PROPERTY,
   },
+  additionalProperties: false,
 });
 
 const LIVE_EMAIL_TEMPLATE_USAGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
@@ -1130,8 +1144,11 @@ const LIVE_EMAIL_TEMPLATE_USAGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> 
   properties: {
     staleDays: { type: 'integer', minimum: 1, maximum: 3650 },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
+    nameContains: { type: 'string', minLength: 1 },
+    folderName: { type: 'string', minLength: 1 },
     ...LIVE_ENABLED_PROPERTY,
   },
+  additionalProperties: false,
 });
 
 const LIVE_ORG_HEALTH_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
@@ -1504,12 +1521,19 @@ const LIST_VIEW_SHARING_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       componentId: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      objectApiName: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
+      sharedWithRoleApiName: { type: 'string', minLength: 1 },
+      sharedToId: { type: 'string', minLength: 1 },
+      sharedTo: { type: 'string', minLength: 1 },
+      groupId: { type: 'string', minLength: 1 },
+      nameContains: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 120 },
       offset: { type: 'number', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
-    required: ['componentId'],
   });
 
 /**
@@ -1685,6 +1709,7 @@ const WHY_CANT_USER_SEE_RECORD_INPUT_SCHEMA: Readonly<
   type: 'object',
   properties: {
     componentId: { type: 'string', minLength: 1 },
+    objectApiName: { type: 'string', minLength: 1 },
     accessLevel: { type: 'string', enum: ['read', 'edit', 'delete', 'create'] },
     userContext: {
       type: 'object',
@@ -1702,7 +1727,7 @@ const WHY_CANT_USER_SEE_RECORD_INPUT_SCHEMA: Readonly<
       },
     },
   },
-  required: ['componentId', 'userContext'],
+  required: ['userContext'],
 });
 
 /**
@@ -1821,12 +1846,18 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
   type: 'object',
   properties: {
     componentId: { type: 'string', minLength: 1 },
+    object: { type: 'string', minLength: 1 },
+    objectApiName: { type: 'string', minLength: 1 },
+    objectId: { type: 'string', minLength: 1 },
+    profile: { type: 'string', minLength: 1 },
+    profileApiName: { type: 'string', minLength: 1 },
+    profileId: { type: 'string', minLength: 1 },
+    profileName: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 250 },
     offset: { type: 'number', minimum: 0 },
     // CR-22 continuation cursor (object mode): opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
-  required: ['componentId'],
 });
 
 /**
@@ -3301,6 +3332,9 @@ const GOVERNOR_LIMIT_RISKS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      componentId: { type: 'string', minLength: 1 },
+      classApiName: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
@@ -3719,6 +3753,8 @@ const GENERATE_SHARING_SUMMARY_INPUT_SCHEMA: Readonly<
   type: 'object',
   properties: {
     objectFilter: { type: 'string', minLength: 1 },
+    objectApiName: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
   },
 });
 
@@ -4019,6 +4055,7 @@ const CDC_SUBSCRIBERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       sObjectFilter: { type: 'string', minLength: 1 },
+      objectApiName: { type: 'string', minLength: 1 },
     },
   });
 
@@ -4639,6 +4676,11 @@ const APEX_TEST_COVERAGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       classApiName: { type: 'string', minLength: 1 },
       apexClass: { type: 'string', minLength: 1 },
+      className: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      classId: { type: 'string', minLength: 1 },
+      apexClassId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       cursor: { type: 'string', minLength: 1 },
