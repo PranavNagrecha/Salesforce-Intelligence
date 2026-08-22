@@ -2246,42 +2246,99 @@ const TRUNCATE_KEEP_MIN = 10;
 const utf8Bytes = (value: unknown): number =>
   Buffer.byteLength(JSON.stringify(value), 'utf8');
 
+/** A trimmable list found under `data`, with the dotted path that names it. */
+interface TrimCandidate {
+  /** Dotted path relative to `data` — `'matches'` or `'upstream.sources'`. */
+  readonly path: string;
+  /** The object that owns the array, so the trimmed slice can be written back. */
+  readonly owner: Record<string, unknown>;
+  /** The owner key holding the array. */
+  readonly key: string;
+}
+
 /**
- * Pass 1 — truncate the largest top-level arrays under `data` from the tail
- * until the body fits (or nothing further can be dropped). Returns the total
- * dropped element count and the kept length of the largest-trimmed array
- * (for `nextOffset` when the call was offset-shaped).
+ * Collect trimmable arrays under `data`, one level deep.
+ *
+ * The original guard read ONLY `Object.keys(data)`, so a tool that nests its
+ * lists one level down (`data.upstream.sources`, `data.downstream.effects` —
+ * `sfi.field_lineage`) presented the guard with no array at all: nothing was
+ * trimmed and the whole response fell through to the opaque pass-3 `oversize`
+ * error. Descending ONE level into direct child objects of `data` turns that
+ * into a partial answer that can say what it cut.
+ *
+ * The depth is deliberately 1 and must stay 1: an arbitrary-depth trimmer can
+ * mangle a payload's structure in ways no test enumerates.
+ */
+const collectTrimCandidates = (
+  record: Record<string, unknown>,
+): readonly TrimCandidate[] => {
+  const candidates: TrimCandidate[] = [];
+  const trimmable = (v: unknown): boolean =>
+    Array.isArray(v) && (v as readonly unknown[]).length > TRUNCATE_KEEP_MIN;
+  for (const key of Object.keys(record)) {
+    const value = record[key];
+    if (trimmable(value)) {
+      candidates.push({ path: key, owner: record, key });
+      continue;
+    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      continue;
+    }
+    const child = value as Record<string, unknown>;
+    for (const childKey of Object.keys(child)) {
+      if (trimmable(child[childKey])) {
+        candidates.push({
+          path: `${key}.${childKey}`,
+          owner: child,
+          key: childKey,
+        });
+      }
+    }
+  }
+  return candidates;
+};
+
+/**
+ * Pass 1 — truncate the largest arrays under `data` (top level, plus one level
+ * into direct child objects) from the tail until the body fits (or nothing
+ * further can be dropped). Returns the total dropped element count, the kept
+ * length of the largest-trimmed array (for `nextOffset` when the call was
+ * offset-shaped), and the dotted paths that were actually trimmed so the
+ * disclosure can NAME what it cut instead of only counting it.
  */
 const truncateDataArrays = (
   body: Record<string, unknown>,
   cap: number,
-): { dropped: number; keptOfLargest: number | null } => {
+): {
+  dropped: number;
+  keptOfLargest: number | null;
+  truncatedPaths: readonly string[];
+} => {
   const data = body['data'];
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-    return { dropped: 0, keptOfLargest: null };
+    return { dropped: 0, keptOfLargest: null, truncatedPaths: [] };
   }
   const record = data as Record<string, unknown>;
-  const arrays = Object.keys(record)
-    .filter(
-      (k) =>
-        Array.isArray(record[k]) &&
-        (record[k] as readonly unknown[]).length > TRUNCATE_KEEP_MIN,
-    )
-    .sort((a, b) => utf8Bytes(record[b]) - utf8Bytes(record[a]));
+  const candidates = [...collectTrimCandidates(record)].sort(
+    (a, b) => utf8Bytes(b.owner[b.key]) - utf8Bytes(a.owner[a.key]),
+  );
   let dropped = 0;
   let keptOfLargest: number | null = null;
-  for (const key of arrays) {
-    let list = record[key] as unknown[];
+  const truncatedPaths: string[] = [];
+  for (const candidate of candidates) {
+    let list = candidate.owner[candidate.key] as unknown[];
+    const droppedBefore = dropped;
     while (list.length > TRUNCATE_KEEP_MIN && utf8Bytes(body) > cap) {
       const keep = Math.max(TRUNCATE_KEEP_MIN, Math.floor(list.length / 2));
       dropped += list.length - keep;
       list = list.slice(0, keep);
-      record[key] = list;
+      candidate.owner[candidate.key] = list;
     }
+    if (dropped > droppedBefore) truncatedPaths.push(candidate.path);
     if (keptOfLargest === null && dropped > 0) keptOfLargest = list.length;
     if (utf8Bytes(body) <= cap) break;
   }
-  return { dropped, keptOfLargest };
+  return { dropped, keptOfLargest, truncatedPaths };
 };
 
 /** Pass 2 — slim every long string under a node to a head + trim marker. */
@@ -2337,9 +2394,11 @@ const slimDataStrings = (node: unknown): number => {
  * envelope over the budget is rescued by escalating passes — never
  * handed to the client as an opaque rejection:
  *
- *   1. truncate the largest top-level `data` arrays from the tail
- *      (`responseBudget.truncated/droppedCount`, plus `nextOffset` when the
- *      call was offset-shaped);
+ *   1. truncate the largest `data` arrays from the tail — top-level arrays AND
+ *      arrays one level down in a direct child object of `data`, so a tool that
+ *      nests its lists (`data.upstream.sources`) is trimmed rather than
+ *      rejected (`responseBudget.truncated/droppedCount/truncatedPaths`, plus
+ *      `nextOffset` when the call was offset-shaped);
  *   2. slim long strings to a head + `…[+N bytes trimmed]` marker;
  *   3. if it STILL does not fit, a structured `oversize` error naming the
  *      tool's own narrowing knobs (from its input schema).
@@ -2469,7 +2528,10 @@ export const jsonResult = (
   // Reserve room for the responseBudget and estimatedPayloadBytes fields so
   // the check applies to the final serialized envelope, not only its body.
   const reductionCap = Math.max(1, cap - Math.min(1_024, Math.floor(cap / 4)));
-  const { dropped, keptOfLargest } = truncateDataArrays(clone, reductionCap);
+  const { dropped, keptOfLargest, truncatedPaths } = truncateDataArrays(
+    clone,
+    reductionCap,
+  );
   // SOE-omission honesty (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES):
   // when the global tail-truncation just shortened a composed-SOE `data.soe`, a
   // later automation phase `summary.phaseCounts` still claims may have been
@@ -2501,9 +2563,20 @@ export const jsonResult = (
     );
     const emitApproxNextOffset =
       dropped > 0 && offsetShaped && keptOfLargest !== null && !handlerPaginated;
+    // A nested list was reached only because the pass-1 guard now descends one
+    // level. Name it: a reader who sees a shortened `upstream.sources` must be
+    // able to tell WHICH list lost rows, not just that N were dropped.
+    const nestedTrimmed = truncatedPaths.some((p) => p.includes('.'));
+    const nestedNote = nestedTrimmed
+      ? ` Lists trimmed from the tail: ${truncatedPaths.join(
+          ', ',
+        )}. Their published counts are the TRUE totals; the rows shown are a prefix.`
+      : '';
     clone['responseBudget'] = {
       applied: true,
-      ...(dropped > 0 ? { truncated: true, droppedCount: dropped } : {}),
+      ...(dropped > 0
+        ? { truncated: true, droppedCount: dropped, truncatedPaths }
+        : {}),
       ...(emitApproxNextOffset
         ? {
             nextOffset:
@@ -2511,11 +2584,13 @@ export const jsonResult = (
           }
         : {}),
       ...(stringsSlimmed > 0 ? { stringsSlimmed } : {}),
-      note: handlerPaginated
-        ? 'Response exceeded the byte budget and long strings were trimmed; use this tool’s own nextCursor to page (the handler’s pagination is authoritative).'
-        : emitApproxNextOffset
-          ? 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed). The nextOffset is approximate — re-query from it for the dropped tail.'
-          : 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed); the dropped tail cannot be resumed from this response — narrow the query or page with limit/offset for complete rows.',
+      note: `${
+        handlerPaginated
+          ? 'Response exceeded the byte budget and long strings were trimmed; use this tool’s own nextCursor to page (the handler’s pagination is authoritative).'
+          : emitApproxNextOffset
+            ? 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed). The nextOffset is approximate — re-query from it for the dropped tail.'
+            : 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed); the dropped tail cannot be resumed from this response — narrow the query or page with limit/offset for complete rows.'
+      }${nestedNote}`,
     };
     const reduced = toEnvelope(clone);
     if (fits(JSON.stringify(reduced))) return result(reduced);

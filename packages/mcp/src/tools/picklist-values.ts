@@ -20,6 +20,11 @@
  * retained-but-not-selectable; existing records may still hold them.
  */
 
+import type { ComponentId } from '@sf-intelligence/contracts';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
+
+import type { Context } from '../server.js';
+
 /** One normalized picklist value. `label` / `default` carried when present. */
 export interface NormalizedPicklistValue {
   readonly value: string;
@@ -75,4 +80,46 @@ export const normalizePicklistValues = (
     if (normalized !== null) out.push(normalized);
   }
   return out;
+};
+
+
+/**
+ * For a GlobalValueSet-driven picklist (inline values null), follow the
+ * field's outgoing `usesValueSet` edge to the GlobalValueSet node and return
+ * its declared `properties.values` (P14-USAGE-gvs-edge — the edge and the
+ * values both land on vaults refreshed at 0.1.10+). Returns `null` when the
+ * edge or the target node is absent (pre-0.1.10 vault, or the value set was
+ * not retrieved) — the caller falls back to the honesty note, and must NOT
+ * read that `null` as "this field has no values".
+ *
+ * CR-10b: the GlobalValueSet extractor now emits the same H10 object shape
+ * `{value, isActive, label?, default?}` as the CustomField inline picklist
+ * reader, with an honestly-captured `isActive` (a deactivated GVS value is
+ * RETAINED, not filtered — see `global-value-set.ts`). Routing through the
+ * shared `normalizePicklistValues` gets that shape for free AND stays
+ * backward-compatible with a pre-CR-10b vault's bare-string `values` (each
+ * string normalizes to `{value, isActive: true}`), so an un-refreshed vault
+ * degrades to the old behavior instead of returning nothing.
+ *
+ * Lifted here from `explain-field.ts` (where it was private) so
+ * `what_if_remove_picklist_value` can check a caller-supplied value against
+ * the DECLARED value set instead of rendering a destructive verdict for a
+ * value the field does not have. One reader, two callers.
+ */
+export const resolveGlobalValueSetValues = async (
+  ctx: Context,
+  fieldId: ComponentId,
+): Promise<{
+  values: readonly NormalizedPicklistValue[];
+  valueSetId: string;
+} | null> => {
+  const edgesRes = await listEdges(ctx.graph, fieldId, { direction: 'out' });
+  if (!edgesRes.ok) return null;
+  const edge = edgesRes.value.find((e) => e.edgeType === 'usesValueSet');
+  if (edge === undefined) return null;
+  const gvsRes = await getNodeById(ctx.graph, edge.toId);
+  if (!gvsRes.ok || gvsRes.value === null) return null;
+  const normalized = normalizePicklistValues(gvsRes.value.properties['values']);
+  if (normalized === null) return null;
+  return { values: normalized, valueSetId: edge.toId };
 };

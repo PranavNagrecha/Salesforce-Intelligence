@@ -70,7 +70,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listChildren, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listChildren } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -79,7 +79,10 @@ import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { resolveFieldAlias } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
-import { normalizePicklistValues } from './picklist-values.js';
+import {
+  normalizePicklistValues,
+  resolveGlobalValueSetValues,
+} from './picklist-values.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
 /** Canonical id prefix for the CustomField node type. */
@@ -304,38 +307,6 @@ const readFieldPicklistValues = (node: Node): readonly ExplainFieldPicklistValue
     ...(entry.label !== undefined ? { label: entry.label } : {}),
     ...(entry.default !== undefined ? { default: entry.default } : {}),
   }));
-};
-
-/**
- * For a GlobalValueSet-driven picklist (inline values null), follow the
- * field's outgoing `usesValueSet` edge to the GlobalValueSet node and return
- * its declared `properties.values` (P14-USAGE-gvs-edge — the edge and the
- * values both land on vaults refreshed at 0.1.10+). Returns `null` when the
- * edge or the target node is absent (pre-0.1.10 vault, or the value set was
- * not retrieved) — the caller falls back to the honesty note.
- *
- * CR-10b: the GlobalValueSet extractor now emits the same H10 object shape
- * `{value, isActive, label?, default?}` as the CustomField inline picklist
- * reader, with an honestly-captured `isActive` (a deactivated GVS value is
- * RETAINED, not filtered — see `global-value-set.ts`). Routing through the
- * shared `normalizePicklistValues` gets that shape for free AND stays
- * backward-compatible with a pre-CR-10b vault's bare-string `values` (each
- * string normalizes to `{value, isActive: true}`), so an un-refreshed vault
- * degrades to the old behavior instead of returning nothing.
- */
-const resolveGlobalValueSetValues = async (
-  ctx: Context,
-  fieldId: ComponentId,
-): Promise<{ values: readonly ExplainFieldPicklistValue[]; valueSetId: string } | null> => {
-  const edgesRes = await listEdges(ctx.graph, fieldId, { direction: 'out' });
-  if (!edgesRes.ok) return null;
-  const edge = edgesRes.value.find((e) => e.edgeType === 'usesValueSet');
-  if (edge === undefined) return null;
-  const gvsRes = await getNodeById(ctx.graph, edge.toId);
-  if (!gvsRes.ok || gvsRes.value === null) return null;
-  const normalized = normalizePicklistValues(gvsRes.value.properties['values']);
-  if (normalized === null) return null;
-  return { values: normalized, valueSetId: edge.toId };
 };
 
 /**

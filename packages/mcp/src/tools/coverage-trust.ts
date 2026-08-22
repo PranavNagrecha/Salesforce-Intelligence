@@ -792,6 +792,62 @@ export const FORMULA_REFERENCE_REQUIRED_COVERAGE = [
   'ValidationRule',
 ] as const;
 
+/**
+ * The families whose metadata can encode a FIELD VALUE as a literal, so an
+ * absence-based value-change verdict that omits any of them is "not checked".
+ *
+ * ONE list for every value-literal reader. It replaces two hand-copied private
+ * lists that answered the same question and disagreed:
+ * `value-change-audit.ts`'s `VALUE_CHANGE_REQUIRED_COVERAGE` (9 families) and
+ * `what-if-remove-picklist-value.ts`'s `PICKLIST_VALUE_COVERAGE` (10). This is
+ * their union, so both tools now name the same not-checked families for the
+ * same field on the same vault — the drift itself was the defect.
+ *
+ * `DuplicateRule` came from the value-change list only. Keeping it makes the
+ * picklist tool slightly MORE conservative, which is the right direction for a
+ * destructive verdict; dropping it to match would trade honesty for a shorter
+ * list.
+ */
+export const VALUE_LITERAL_READER_COVERAGE = [
+  'CustomField',
+  'ValidationRule',
+  'Flow',
+  'ApexClass',
+  'ApexTrigger',
+  'WorkflowRule',
+  'Layout',
+  'SharingRule',
+  'DuplicateRule',
+  'ConditionalContext',
+  'Report',
+  'Dashboard',
+  'ListView',
+  'FlexiPage',
+] as const;
+
+/**
+ * Inbound edge types that CONSUME a field's value.
+ *
+ * `readsFrom` is code and condition contexts (Apex, Flow); `references` is the
+ * declarative readers — formulas, validation rules, list views, report types,
+ * Lightning pages, quick actions, web links, approval processes, matching
+ * rules, custom-metadata records.
+ *
+ * `usedInLayout` (placement — the field is ON a layout, nothing read its value)
+ * and `grantedBy` (permission — a permission set exposes the field, nothing
+ * read its value) are deliberately EXCLUDED, and so is `parentOf` (structure).
+ * Counting them would inflate "is this field used"; ignoring them silently
+ * would hide that they were seen, which is why the callers publish their counts
+ * separately rather than dropping them.
+ */
+export const FIELD_VALUE_CONSUMING_EDGE_TYPES = [
+  'readsFrom',
+  'references',
+] as const;
+
+/** Inbound edge types that WRITE a field's value. Counterpart to {@link FIELD_VALUE_CONSUMING_EDGE_TYPES}. */
+export const FIELD_VALUE_WRITING_EDGE_TYPES = ['writesTo'] as const;
+
 /** Coverage families that affect flow-deactivation what-if completeness. */
 export const FLOW_DEACTIVATION_REQUIRED_COVERAGE = [
   'Flow',

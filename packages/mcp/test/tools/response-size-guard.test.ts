@@ -488,3 +488,94 @@ describe('runTool defensive throw handling', () => {
     expect(parsed.error.kind).not.toBe('internal');
   });
 });
+
+/**
+ * FIX 8 Half A — the pass-1 guard descends ONE level into direct child objects
+ * of `data`.
+ *
+ * Before this change `truncateDataArrays` read only `Object.keys(data)`, so a
+ * tool that nests its lists (`sfi.field_lineage` puts them at
+ * `data.upstream.sources` / `data.downstream.effects`) presented the guard with
+ * no array to cut: nothing was trimmed and the whole response fell through to
+ * the opaque pass-3 `oversize` error. The class matters more than the instance
+ * — every nested-list tool was in the same hole.
+ */
+describe('jsonResult nested-list truncation (FIX 8 Half A)', () => {
+  it('trims a nested data list instead of falling through to an opaque oversize error', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    const body = {
+      data: {
+        upstream: {
+          sources: Array.from({ length: 1000 }, (_, i) => ({
+            id: `CustomField:Widget_Session__c.Source_${i}__c`,
+            role: 'formula-input',
+          })),
+          sourceCount: 1000,
+        },
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly error?: { readonly kind: string };
+      readonly data?: {
+        readonly upstream: { readonly sources: readonly unknown[] };
+      };
+      readonly responseBudget?: {
+        readonly truncated?: boolean;
+        readonly droppedCount?: number;
+        readonly truncatedPaths?: readonly string[];
+        readonly note?: string;
+      };
+    };
+    // Pre-fix this was `{ error: { kind: 'oversize' } }` with no `data` at all.
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.responseBudget?.truncated).toBe(true);
+    expect(parsed.responseBudget?.truncatedPaths).toEqual([
+      'upstream.sources',
+    ]);
+    expect(parsed.responseBudget?.droppedCount).toBeGreaterThan(0);
+    expect(parsed.responseBudget?.note).toContain(
+      'Lists trimmed from the tail: upstream.sources. Their published counts are the TRUE totals; the rows shown are a prefix.',
+    );
+    expect(parsed.data?.upstream.sources.length).toBeGreaterThan(0);
+    expect(parsed.data?.upstream.sources.length).toBeLessThan(1000);
+  });
+
+  it('is a no-op for an under-budget nested payload', () => {
+    const body = {
+      data: {
+        upstream: { sources: [{ id: 'CustomField:Widget_Session__c.A__c' }] },
+        downstream: { effects: [{ id: 'Flow:Widget_Session_Router' }] },
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: unknown;
+      readonly responseBudget?: unknown;
+    };
+    expect(parsed.data).toEqual(body.data);
+    expect(parsed.responseBudget).toBeUndefined();
+  });
+
+  it('still names a trimmed TOP-LEVEL list without the nested sentence', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    const body = {
+      data: {
+        matches: Array.from({ length: 1000 }, (_, i) => ({
+          id: `CustomField:Widget_Session__c.Flat_${i}__c`,
+        })),
+      },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly responseBudget?: {
+        readonly truncatedPaths?: readonly string[];
+        readonly note?: string;
+      };
+    };
+    expect(parsed.responseBudget?.truncatedPaths).toEqual(['matches']);
+    expect(parsed.responseBudget?.note).not.toContain(
+      'Lists trimmed from the tail',
+    );
+  });
+});
