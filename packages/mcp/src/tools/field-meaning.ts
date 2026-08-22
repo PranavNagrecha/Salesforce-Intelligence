@@ -57,6 +57,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  FIELD_VALUE_CONSUMING_EDGE_TYPES,
+  FIELD_VALUE_WRITING_EDGE_TYPES,
+} from './coverage-trust.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { normalizePicklistValues } from './picklist-values.js';
@@ -91,6 +95,15 @@ const BOUNDARY_SEMANTIC_NAME_PATTERN =
   'Semantic category is name-pattern, not type-semantic — a field named Status__c with type DateTime is still categorized as status by name; check type alongside category.';
 const BOUNDARY_CLASSIFICATION_MISSING =
   'Vocabulary classifier has not run for this vault — sourceOfTruth and semanticCategory both default to unknown. Run `sfi refresh --rebuild-vocabulary` to populate them.';
+/**
+ * Verbatim `usageFrequency.note`. Always present — a reader must be able to
+ * tell what a number counted without reading the source.
+ */
+const USAGE_FREQUENCY_NOTE =
+  '`incomingReads` counts every inbound edge that CONSUMES this field\'s value: `readsFrom` (Apex, Flow, condition contexts) and `references` (formulas, validation rules, list views, report types, Lightning pages, quick actions, web links). `usedInLayout` (placement) and `grantedBy` (permission) are not reads and are excluded — their counts are in `excludedByEdgeType`.';
+/** Extra boundary when `incomingReads` is zero — the zero must read as CHECKED. */
+const BOUNDARY_ZERO_READS =
+  'A zero here means no value-consuming edge was found among the metadata families this vault retrieved. It is not proof the field is unused — reports, dashboards, list-view filters, and dynamic Apex are named in `boundaries` where they are not covered.';
 const BOUNDARY_INACTIVE_PICKLIST_VALUES =
   'This picklist has inactive value(s) (isActive: false) — they are RETAINED but not selectable for new records; existing records may still hold them. They are listed-and-marked, not dropped.';
 
@@ -155,10 +168,37 @@ export interface FieldMeaningPicklistValue {
   readonly isActive: boolean;
 }
 
-/** Asymmetric incoming-edge counts per PLAN-v2.9 §4 output schema. */
+/**
+ * Asymmetric incoming-edge counts per PLAN-v2.9 §4 output schema.
+ *
+ * `incomingReads` counts EVERY inbound edge that consumes the field's value —
+ * not only `readsFrom`. It previously counted `readsFrom` alone, so a field
+ * read by twelve formulas, validation rules and list views reported
+ * `incomingReads: 0`, which is the number an admin deletes a field on. On the
+ * reference vault that was wrong for 2,911 fields.
+ *
+ * `readsByEdgeType` is what lets a caller who wanted the OLD number recover it
+ * exactly (`readsByEdgeType.readsFrom`), and `excludedByEdgeType` shows the
+ * inbound edges that were SEEN and rejected rather than missed.
+ *
+ * This is an EDGE count, not a referrer count: one source component can hold
+ * several `references` edges to the same field (the edge PK includes `source`),
+ * so this number and `find_formula_references`'s `totalCount` — which counts
+ * referencers — legitimately differ.
+ */
 export interface FieldMeaningUsageFrequency {
+  /** `readsFrom` + `references` — every inbound edge consuming the value. */
   readonly incomingReads: number;
+  /** `writesTo`. Unchanged. */
   readonly incomingWrites: number;
+  /** Per-edge-type breakdown of what `incomingReads` summed. */
+  readonly readsByEdgeType: Readonly<Record<string, number>>;
+  /** The edge-type vocabulary `incomingReads` counted, in order. */
+  readonly countedEdgeTypes: readonly string[];
+  /** Inbound edge types seen and deliberately NOT counted as reads. */
+  readonly excludedByEdgeType: Readonly<Record<string, number>>;
+  /** Verbatim; always present. States what was counted and what was not. */
+  readonly note: string;
 }
 
 /**
@@ -429,24 +469,55 @@ const findSimilarFields = async (
   return ok(scored.slice(0, SIMILAR_FIELDS_LIMIT));
 };
 
-/** Count incoming `readsFrom` and `writesTo` edges separately. */
+/**
+ * Bucket every inbound edge against the shared value-consuming vocabulary.
+ *
+ * ONE unfiltered `listEdges` replaces the two filtered calls this used to make.
+ * `listEdges` applies NO limit, so the bucket counts are exact and cannot
+ * silently truncate; fan-in per CustomField on the reference vault peaks at 184
+ * with a mean of 8.5, so one query for two is a net win.
+ *
+ * The vocabulary lives in `coverage-trust.ts`
+ * ({@link FIELD_VALUE_CONSUMING_EDGE_TYPES} /
+ * {@link FIELD_VALUE_WRITING_EDGE_TYPES}) rather than being implicit in what
+ * this function did not ask for. `field_lineage` and `find_field_anywhere`
+ * already walk all inbound edges and agree with it — this is the tool that
+ * disagreed.
+ */
 const countUsage = async (
   ctx: Context,
   fieldId: ComponentId,
 ): Promise<Result<FieldMeaningUsageFrequency, string>> => {
-  const readsResult = await listEdges(ctx.graph, fieldId, {
+  const inboundResult = await listEdges(ctx.graph, fieldId, {
     direction: 'in',
-    edgeType: 'readsFrom',
   });
-  if (!readsResult.ok) return err(readsResult.error.message);
-  const writesResult = await listEdges(ctx.graph, fieldId, {
-    direction: 'in',
-    edgeType: 'writesTo',
-  });
-  if (!writesResult.ok) return err(writesResult.error.message);
+  if (!inboundResult.ok) return err(inboundResult.error.message);
+
+  const readsByEdgeType: Record<string, number> = {};
+  const excludedByEdgeType: Record<string, number> = {};
+  let incomingReads = 0;
+  let incomingWrites = 0;
+  for (const edge of inboundResult.value) {
+    const type = edge.edgeType;
+    if ((FIELD_VALUE_CONSUMING_EDGE_TYPES as readonly string[]).includes(type)) {
+      incomingReads += 1;
+      readsByEdgeType[type] = (readsByEdgeType[type] ?? 0) + 1;
+      continue;
+    }
+    if ((FIELD_VALUE_WRITING_EDGE_TYPES as readonly string[]).includes(type)) {
+      incomingWrites += 1;
+      continue;
+    }
+    excludedByEdgeType[type] = (excludedByEdgeType[type] ?? 0) + 1;
+  }
+
   return ok({
-    incomingReads: readsResult.value.length,
-    incomingWrites: writesResult.value.length,
+    incomingReads,
+    incomingWrites,
+    readsByEdgeType,
+    countedEdgeTypes: [...FIELD_VALUE_CONSUMING_EDGE_TYPES],
+    excludedByEdgeType,
+    note: USAGE_FREQUENCY_NOTE,
   });
 };
 
@@ -537,6 +608,9 @@ export const fieldMeaningHandler = async (
   }
   if (picklistValues !== null && picklistValues.some((v) => !v.isActive)) {
     boundaries.push(BOUNDARY_INACTIVE_PICKLIST_VALUES);
+  }
+  if (usageResult.value.incomingReads === 0) {
+    boundaries.push(BOUNDARY_ZERO_READS);
   }
 
   return ok({

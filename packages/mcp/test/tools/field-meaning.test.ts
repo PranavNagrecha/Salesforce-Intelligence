@@ -71,6 +71,15 @@ const PRE_V29_FIELD = 'CustomField:Account.Old_Field__c';
 const INACTIVE_PICKLIST_FIELD = 'CustomField:Account.Stage__c';
 const APEX_READER = 'ApexClass:AccountReader';
 const APEX_WRITER = 'ApexClass:AccountWriter';
+// FIX 5 — value-consuming edge vocabulary fixture.
+const DECLARATIVE_FIELD = 'CustomField:Account.Duration_Minutes__c';
+const ORPHAN_FIELD = 'CustomField:Account.Orphan_Marker__c';
+const FORMULA_FIELD = 'CustomField:Account.Duration_Hours__c';
+const DECLARATIVE_VR = 'ValidationRule:Account.Duration_Positive';
+const DECLARATIVE_LIST_VIEW = 'ListView:Account.Long_Sessions';
+const LAYOUT_A = 'Layout:Account-Sales Layout';
+const LAYOUT_B = 'Layout:Account-Service Layout';
+const PERM_SET = 'PermissionSet:Widget_Session_Editor';
 
 const seed: ExtractionResult = {
   nodes: [
@@ -157,6 +166,49 @@ const seed: ExtractionResult = {
     }),
     makeNode({ id: APEX_READER, type: 'ApexClass', apiName: 'AccountReader' }),
     makeNode({ id: APEX_WRITER, type: 'ApexClass', apiName: 'AccountWriter' }),
+    // FIX 5 fixture — a field consumed ONLY by declarative `references`
+    // edges, plus the inbound edge types that must be seen and excluded.
+    makeNode({
+      id: DECLARATIVE_FIELD,
+      apiName: 'Duration_Minutes__c',
+      label: 'Duration Minutes',
+      parentId: ACCOUNT_OBJ,
+    }),
+    makeNode({
+      id: ORPHAN_FIELD,
+      apiName: 'Orphan_Marker__c',
+      label: 'Orphan Marker',
+      parentId: ACCOUNT_OBJ,
+    }),
+    makeNode({
+      id: FORMULA_FIELD,
+      apiName: 'Duration_Hours__c',
+      label: 'Duration Hours',
+      parentId: ACCOUNT_OBJ,
+    }),
+    makeNode({
+      id: DECLARATIVE_VR,
+      type: 'ValidationRule',
+      apiName: 'Duration_Positive',
+      parentId: ACCOUNT_OBJ,
+    }),
+    makeNode({
+      id: DECLARATIVE_LIST_VIEW,
+      type: 'ListView',
+      apiName: 'Long_Sessions',
+      parentId: ACCOUNT_OBJ,
+    }),
+    makeNode({ id: LAYOUT_A, type: 'Layout', apiName: 'Account-Sales Layout' }),
+    makeNode({
+      id: LAYOUT_B,
+      type: 'Layout',
+      apiName: 'Account-Service Layout',
+    }),
+    makeNode({
+      id: PERM_SET,
+      type: 'PermissionSet',
+      apiName: 'Widget_Session_Editor',
+    }),
   ],
   edges: [
     // Two readers + one writer => asymmetric usage.
@@ -177,6 +229,56 @@ const seed: ExtractionResult = {
       toId: ACCOUNT_INDUSTRY,
       edgeType: 'writesTo',
       confidence: 'heuristic',
+    }),
+    // FIX 5: three value-CONSUMING `references` edges and ZERO `readsFrom`.
+    makeEdge({
+      fromId: FORMULA_FIELD,
+      toId: DECLARATIVE_FIELD,
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+    }),
+    makeEdge({
+      fromId: DECLARATIVE_VR,
+      toId: DECLARATIVE_FIELD,
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+    }),
+    makeEdge({
+      fromId: DECLARATIVE_LIST_VIEW,
+      toId: DECLARATIVE_FIELD,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: 'extractor:list-view',
+    }),
+    // Seen and EXCLUDED: placement and permission are not reads.
+    makeEdge({
+      fromId: LAYOUT_A,
+      toId: DECLARATIVE_FIELD,
+      edgeType: 'usedInLayout',
+    }),
+    makeEdge({
+      fromId: LAYOUT_B,
+      toId: DECLARATIVE_FIELD,
+      edgeType: 'usedInLayout',
+    }),
+    makeEdge({
+      fromId: PERM_SET,
+      toId: DECLARATIVE_FIELD,
+      edgeType: 'grantedBy',
+    }),
+    makeEdge({
+      fromId: APEX_WRITER,
+      toId: DECLARATIVE_FIELD,
+      edgeType: 'writesTo',
+      confidence: 'heuristic',
+    }),
+    // FIX 5 zero case: structure only.
+    makeEdge({
+      fromId: ACCOUNT_OBJ,
+      toId: ORPHAN_FIELD,
+      edgeType: 'parentOf',
     }),
   ],
 };
@@ -270,11 +372,15 @@ describe('fieldMeaningHandler', () => {
       { value: 'Banking', label: 'Banking', isActive: true },
       { value: 'Tech', label: 'Tech', isActive: true },
     ]);
-    // Asymmetric usage: 2 reads, 1 write.
-    expect(data.usageFrequency).toEqual({
-      incomingReads: 2,
-      incomingWrites: 1,
-    });
+    // Asymmetric usage: 2 reads, 1 write. FIX 5 widened the shape — the two
+    // counts are unchanged here because this field's readers are `readsFrom`.
+    expect(data.usageFrequency.incomingReads).toBe(2);
+    expect(data.usageFrequency.incomingWrites).toBe(1);
+    expect(data.usageFrequency.readsByEdgeType).toEqual({ readsFrom: 2 });
+    expect(data.usageFrequency.countedEdgeTypes).toEqual([
+      'readsFrom',
+      'references',
+    ]);
     // Classifications projected from properties.
     expect(data.sourceOfTruth).toEqual({
       value: 'manual',
@@ -443,6 +549,75 @@ describe('fieldMeaningHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
     expect(result.value.vaultState.refreshedAt).toBe(
       '2026-05-27T14:33:08Z',
+    );
+  });
+});
+
+/**
+ * FIX 5 — `incomingReads` counts every edge that CONSUMES the field's value.
+ *
+ * It used to count `readsFrom` alone, so a field read by formulas, validation
+ * rules and list views reported `incomingReads: 0` — the number an admin
+ * deletes a field on. On the reference vault that was wrong for 2,911 fields.
+ */
+describe('fieldMeaningHandler — value-consuming edge vocabulary (FIX 5)', () => {
+  it('counts declarative `references` edges as reads', async () => {
+    const result = await fieldMeaningHandler(ctx, {
+      fieldId: DECLARATIVE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const usage = result.value.data.usageFrequency;
+    // Pre-fix: 0 — the three referencers were invisible.
+    expect(usage.incomingReads).toBe(3);
+    expect(usage.readsByEdgeType).toEqual({ references: 3 });
+    expect(usage.countedEdgeTypes).toEqual(['readsFrom', 'references']);
+  });
+
+  it('publishes the inbound edges it SAW and rejected, rather than dropping them', async () => {
+    const result = await fieldMeaningHandler(ctx, {
+      fieldId: DECLARATIVE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const usage = result.value.data.usageFrequency;
+    expect(usage.incomingReads).toBe(3);
+    expect(usage.excludedByEdgeType).toEqual({
+      usedInLayout: 2,
+      grantedBy: 1,
+    });
+  });
+
+  it('leaves incomingWrites on `writesTo` alone', async () => {
+    const result = await fieldMeaningHandler(ctx, {
+      fieldId: DECLARATIVE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.usageFrequency.incomingWrites).toBe(1);
+  });
+
+  it('carries the verbatim note on every response', async () => {
+    const result = await fieldMeaningHandler(ctx, {
+      fieldId: DECLARATIVE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.usageFrequency.note).toBe(
+      "`incomingReads` counts every inbound edge that CONSUMES this field's value: `readsFrom` (Apex, Flow, condition contexts) and `references` (formulas, validation rules, list views, report types, Lightning pages, quick actions, web links). `usedInLayout` (placement) and `grantedBy` (permission) are not reads and are excluded — their counts are in `excludedByEdgeType`.",
+    );
+  });
+
+  it('makes a genuine zero readable as CHECKED', async () => {
+    const result = await fieldMeaningHandler(ctx, { fieldId: ORPHAN_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.usageFrequency.incomingReads).toBe(0);
+    expect(data.usageFrequency.readsByEdgeType).toEqual({});
+    expect(data.usageFrequency.excludedByEdgeType).toEqual({ parentOf: 1 });
+    expect(data.boundaries).toContain(
+      'A zero here means no value-consuming edge was found among the metadata families this vault retrieved. It is not proof the field is unused — reports, dashboards, list-view filters, and dynamic Apex are named in `boundaries` where they are not covered.',
     );
   });
 });

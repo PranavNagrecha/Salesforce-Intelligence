@@ -27,3 +27,18 @@
   whole response fell through to an opaque `oversize` error. It now descends one
   level and names the dotted paths it trimmed in `responseBudget.truncatedPaths`.
   Only payloads that were ALREADY over budget change; nothing under budget moves.
+
+- **`sfi.field_meaning` counts every edge that consumes the field's value.**
+  `usageFrequency.incomingReads` counted `readsFrom` alone, so a field read by
+  formulas, validation rules and list views reported `0` — the number an admin
+  deletes a field on. On the reference vault that was wrong for 2,911 fields.
+  It now counts `readsFrom` + `references`, publishes the per-type breakdown in
+  `readsByEdgeType` (so the old number is recoverable exactly), names the
+  vocabulary in `countedEdgeTypes`, and publishes the inbound edges it saw and
+  rejected in `excludedByEdgeType` — `usedInLayout` is placement, `grantedBy` is
+  permission, `parentOf` is structure. A verbatim `note` states all of it, and
+  `incomingReads: 0` now adds a boundary saying the zero is not proof of disuse.
+
+  **Behaviour change for callers:** `incomingReads` is larger for most fields.
+  It is an EDGE count, not a referrer count, so it legitimately differs from
+  `find_formula_references`'s `totalCount`.
