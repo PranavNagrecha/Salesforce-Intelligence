@@ -444,3 +444,92 @@ describe('lookupRecordInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+/**
+ * FIX 12 — the scope-echo contract.
+ *
+ * The non-strict input schema STRIPPED `objectApiName`, so a caller who scoped
+ * the question to the wrong object got a confident answer about a different
+ * one. CLAUDE.md's scope-honesty rule already specified the behaviour; this
+ * tool did not implement it.
+ */
+describe('lookupRecordHandler — scope honesty (FIX 12)', () => {
+  it('refuses a WRONG objectApiName instead of answering about another object', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: MARKETO_DEFAULT_ID,
+      objectApiName: 'Clinical_Instruction__mdt',
+    });
+    // Pre-fix: a successful answer — the key was silently dropped.
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toBe(
+      '`objectApiName` names `Clinical_Instruction__mdt`, but record `CustomMetadataRecord:Marketo_Api_Setting__mdt.Default` belongs to `Marketo_Api_Setting__mdt`. Pass the matching object api name, or omit `objectApiName` — the record id already determines the scope.',
+    );
+  });
+
+  it('accepts a MATCHING objectApiName and echoes appliedScope', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: MARKETO_DEFAULT_ID,
+      objectApiName: 'Marketo_Api_Setting__mdt',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.appliedScope).toEqual({
+      objectApiName: 'Marketo_Api_Setting__mdt',
+      source: 'objectApiName',
+    });
+  });
+
+  it('treats a case-only difference as AGREEMENT and echoes canonical casing', async () => {
+    // Salesforce api names are case-insensitive; refusing on case would be a
+    // new false negative.
+    const result = await lookupRecordHandler(ctx, {
+      recordId: MARKETO_DEFAULT_ID,
+      objectApiName: 'marketo_api_setting__MDT',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.appliedScope.objectApiName).toBe(
+      'Marketo_Api_Setting__mdt',
+    );
+  });
+
+  it('derives appliedScope from the record id when no selector is passed', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: MARKETO_DEFAULT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.appliedScope).toEqual({
+      objectApiName: 'Marketo_Api_Setting__mdt',
+      source: 'recordId',
+    });
+  });
+
+  it('refuses an unrecognized argument rather than ignoring it', () => {
+    const parsed = lookupRecordInputSchema.safeParse({
+      recordId: MARKETO_DEFAULT_ID,
+      objectApiName2: 'Whatever__mdt',
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues[0]?.message).toBe(
+      'Unrecognized argument(s): `objectApiName2`. `sfi.lookup_record` accepts: recordId, objectApiName. A mistyped argument is refused rather than ignored, so the answer is never about a question you did not ask.',
+    );
+  });
+
+  it('refuses disagreeing objectApiName / typeApiName selectors', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: MARKETO_DEFAULT_ID,
+      objectApiName: 'Marketo_Api_Setting__mdt',
+      typeApiName: 'Clinical_Instruction__mdt',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain(
+      'object selectors name different targets',
+    );
+  });
+});

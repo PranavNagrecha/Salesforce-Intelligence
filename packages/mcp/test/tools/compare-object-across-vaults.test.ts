@@ -245,15 +245,22 @@ describe('compareObjectAcrossVaultsHandler', () => {
       vaultA: 'acme-prod',
       vaultB: 'acme-sandbox',
     });
+    // The crash-class guard still holds: a one-sided property returns ok.
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const drift = r.value.data.shapeModifiedFields.find(
-      (f) => f.fieldApiName === 'Discount__c',
+    // FIX 10 CORRECTION: vault A carries `helpText` on ZERO of its CustomField
+    // nodes, so this is an EXTRACTOR-COVERAGE gap in A, not org drift. It is
+    // reported as such instead of as a drift row the reader would act on.
+    const helpTextDrift = r.value.data.shapeModifiedFields
+      .find((f) => f.fieldApiName === 'Discount__c')
+      ?.drift?.find((d) => d.propertyPath === 'helpText');
+    expect(helpTextDrift).toBeUndefined();
+    const gap = r.value.data.propertyCoverageGaps.find(
+      (g) => g.propertyPath === 'helpText',
     );
-    const helpTextDrift = drift?.drift?.find((d) => d.propertyPath === 'helpText');
-    expect(helpTextDrift).toBeDefined();
-    expect(helpTextDrift?.valueA).toBeUndefined();
-    expect(helpTextDrift?.valueB).toBe('Enter the discount amount');
+    expect(gap).toBeDefined();
+    expect(gap?.presentIn).toBe('B');
+    expect(gap?.absentSideNodes.withProperty).toBe(0);
   });
 
   it('surfaces added fields from vaultB only', async () => {
@@ -658,5 +665,198 @@ describe('compareObjectAcrossVaultsHandler — edgeDrift ROW cap (R7-W10)', () =
     expect(edgeDrift.summary.edgesAddedCount).toBe(ROW_COUNT);
     expect(edgeDrift.truncated).toBe(true);
     expect(edgeDrift.disclosure).toMatch(/capped/);
+  });
+});
+
+/**
+ * FIX 10 — tell an EXTRACTOR gap from real org drift, then say which.
+ *
+ * `collectDrift` emitted a row whenever the canonical JSON differed, which is
+ * true when a key is merely MISSING on one side. Comparing a current vault
+ * against one built by an older builder manufactured a drift row per object for
+ * every property that builder never wrote — up to 129 false rows on the
+ * reference pair. A one-query property-presence census settles it.
+ */
+describe('compareObjectAcrossVaultsHandler — extractor gap vs org drift (FIX 10)', () => {
+  let gapRoot: string;
+  let gapStoreA: GraphStore;
+  let gapStoreB: GraphStore;
+  let gapCtx: Context;
+
+  beforeAll(async () => {
+    gapRoot = await mkdtemp(join(tmpdir(), 'sfi-fix10-census-'));
+    const pathA = join(gapRoot, 'fresh');
+    const pathB = join(gapRoot, 'stale');
+    await mkdir(join(pathA, 'graph'), { recursive: true });
+    await mkdir(join(pathB, 'graph'), { recursive: true });
+    await saveManifest(pathA, FIXTURE_MANIFEST);
+    await saveManifest(pathB, FIXTURE_MANIFEST);
+
+    const openedA = await openGraph(vaultPaths(pathA).graphDb);
+    if (!openedA.ok) throw new Error(openedA.error.message);
+    gapStoreA = openedA.value;
+    const openedB = await openGraph(vaultPaths(pathB).graphDb);
+    if (!openedB.ok) throw new Error(openedB.error.message);
+    gapStoreB = openedB.value;
+
+    const obj = (apiName: string, props: Record<string, unknown>): Node =>
+      makeNode({ id: `CustomObject:${apiName}`, apiName, properties: props });
+    const fld = (
+      object: string,
+      apiName: string,
+      props: Record<string, unknown>,
+    ): Node =>
+      makeNode({
+        id: `CustomField:${object}.${apiName}`,
+        type: 'CustomField',
+        apiName,
+        parentId: `CustomObject:${object}`,
+        properties: props,
+      });
+
+    // A (fresh builder): every object carries `externalSharingModel`, and the
+    // compared field carries `complianceGroup`.
+    await importExtractionResults(gapStoreA, [
+      {
+        nodes: [
+          obj('Widget_Session__c', {
+            sharingModel: 'Private',
+            externalSharingModel: 'Private',
+            recordCount: 3,
+          }),
+          obj('Widget_Ledger__c', { externalSharingModel: 'Private' }),
+          obj('Widget_Asset__c', {
+            externalSharingModel: 'Private',
+            sharingModel: 'Private',
+          }),
+          fld('Widget_Session__c', 'Duration__c', {
+            dataType: 'Number',
+            complianceGroup: 'PII',
+          }),
+          // A second field carrying `soleSideKey`, so B's census for it is > 0
+          // only when B genuinely emits it (it does not).
+          fld('Widget_Session__c', 'Other__c', { dataType: 'Text' }),
+        ],
+        edges: [],
+      },
+    ]);
+
+    // B (older builder): NO object carries `externalSharingModel` at all, and
+    // no field carries `complianceGroup`. But B DOES emit `sharingModel` on
+    // two of three objects — including one it omits on the compared object —
+    // so that key must stay REAL drift.
+    await importExtractionResults(gapStoreB, [
+      {
+        nodes: [
+          obj('Widget_Session__c', { recordCount: 3 }),
+          obj('Widget_Ledger__c', { sharingModel: 'Private' }),
+          obj('Widget_Asset__c', { sharingModel: 'ReadWrite' }),
+          fld('Widget_Session__c', 'Duration__c', { dataType: 'Number' }),
+          fld('Widget_Session__c', 'Other__c', { dataType: 'Text' }),
+        ],
+        edges: [],
+      },
+    ]);
+
+    await registerVault(gapRoot, 'fresh-vault', pathA);
+    await registerVault(gapRoot, 'stale-vault', pathB);
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = gapRoot;
+    gapCtx = {
+      vaultRoot: pathA,
+      manifest: FIXTURE_MANIFEST,
+      graph: gapStoreA,
+    };
+  });
+
+  afterAll(async () => {
+    delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    await closeGraph(gapStoreA);
+    await closeGraph(gapStoreB);
+    await rm(gapRoot, { recursive: true, force: true });
+  });
+
+  it('moves a builder-never-wrote-it property OUT of objectLevelDrift', async () => {
+    const r = await compareObjectAcrossVaultsHandler(gapCtx, {
+      objectApiName: 'Widget_Session__c',
+      vaultA: 'fresh-vault',
+      vaultB: 'stale-vault',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix: a drift row {propertyPath: 'externalSharingModel', valueA: 'Private'}.
+    expect(
+      r.value.data.objectLevelDrift.map((d) => d.propertyPath),
+    ).not.toContain('externalSharingModel');
+    const gap = r.value.data.propertyCoverageGaps.find(
+      (g) => g.propertyPath === 'externalSharingModel',
+    );
+    expect(gap).toBeDefined();
+    expect(gap?.presentIn).toBe('A');
+    expect(gap?.presentSideNodes).toEqual({ withProperty: 3, total: 3 });
+    expect(gap?.absentSideNodes).toEqual({ withProperty: 0, total: 3 });
+    expect(gap?.message).toBe(
+      "`externalSharingModel` is carried by 3 of 3 `CustomObject` node(s) in fresh-vault and by 0 of 3 in stale-vault. That is an EXTRACTOR-COVERAGE gap in stale-vault, not org drift: stale-vault's builder never wrote this property, so whether the two orgs agree on it CANNOT be determined from these vaults. Re-refresh stale-vault with a current builder to compare it.",
+    );
+  });
+
+  it('keeps a census-CONFIRMED one-sided absence as real drift', async () => {
+    const r = await compareObjectAcrossVaultsHandler(gapCtx, {
+      objectApiName: 'Widget_Session__c',
+      vaultA: 'fresh-vault',
+      vaultB: 'stale-vault',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const row = r.value.data.objectLevelDrift.find(
+      (d) => d.propertyPath === 'sharingModel',
+    );
+    expect(row).toBeDefined();
+    expect(row?.presence).toBe('absent-in-b');
+    expect(row?.valueA).toBe('Private');
+    expect(row?.note).toBe(
+      "`sharingModel` is present on this object in fresh-vault and absent in stale-vault. stale-vault's vault DOES carry `sharingModel` on 2 of 3 `CustomObject` node(s), so its builder emits the property — the absence here is a real difference.",
+    );
+    expect(
+      r.value.data.propertyCoverageGaps.map((g) => g.propertyPath),
+    ).not.toContain('sharingModel');
+  });
+
+  it('reports a real VALUE difference as presence: both, with no gap row', async () => {
+    const r = await compareObjectAcrossVaultsHandler(gapCtx, {
+      objectApiName: 'Widget_Asset__c',
+      vaultA: 'fresh-vault',
+      vaultB: 'stale-vault',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const row = r.value.data.objectLevelDrift.find(
+      (d) => d.propertyPath === 'sharingModel',
+    );
+    expect(row).toEqual({
+      propertyPath: 'sharingModel',
+      presence: 'both',
+      valueA: 'Private',
+      valueB: 'ReadWrite',
+    });
+    expect(
+      r.value.data.propertyCoverageGaps.map((g) => g.propertyPath),
+    ).not.toContain('sharingModel');
+  });
+
+  it('applies the same classification to FIELD-level drift', async () => {
+    const r = await compareObjectAcrossVaultsHandler(gapCtx, {
+      objectApiName: 'Widget_Session__c',
+      vaultA: 'fresh-vault',
+      vaultB: 'stale-vault',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const gap = r.value.data.propertyCoverageGaps.find(
+      (g) => g.propertyPath === 'complianceGroup',
+    );
+    expect(gap).toBeDefined();
+    expect(gap?.presentSideNodes.total).toBe(2);
+    expect(gap?.absentSideNodes).toEqual({ withProperty: 0, total: 2 });
+    expect(gap?.message).toContain('`CustomField` node(s)');
   });
 });

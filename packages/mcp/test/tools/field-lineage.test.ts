@@ -986,3 +986,124 @@ describe('fieldLineageHandler — R7-W2 before-save $Record field write', () => 
     expect(flow?.targetFields).toEqual(['Widget__c.Combined_Name__c']);
   });
 });
+
+/**
+ * FIX 8 Half B — real narrowing knobs.
+ *
+ * The oversize advice named `limit` / `offset` / `cursor` — knobs this tool did
+ * not have — so a hub field's lineage was simply unanswerable. `sourceCount` /
+ * `effectCount` are mandatory rather than optional: `effects.length` is a PAGE
+ * length once paged, and a host narrating it as a total is then wrong.
+ */
+describe('fieldLineageHandler — pagination (FIX 8 Half B)', () => {
+  let hubDir: string;
+  let hubStore: GraphStore;
+  let hubCtx: Context;
+  const HUB_FIELD = 'CustomField:Widget_Session__c.Status__c';
+
+  beforeAll(async () => {
+    hubDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-lineage-hub-'));
+    const opened = await openGraph(join(hubDir, 'hub.db'));
+    if (!opened.ok) throw new Error('openGraph hub failed');
+    hubStore = opened.value;
+    const nodes: Node[] = [
+      makeNode({ id: HUB_FIELD, type: 'CustomField', apiName: 'Status__c' }),
+    ];
+    const edges: Edge[] = [];
+    // 400 downstream readers — comfortably over the default page size.
+    for (let i = 0; i < 400; i += 1) {
+      const reader = `ApexClass:Widget_Reader_${i}`;
+      nodes.push(makeNode({ id: reader, type: 'ApexClass', apiName: `Widget_Reader_${i}` }));
+      edges.push(
+        makeEdge({ fromId: reader, toId: HUB_FIELD, edgeType: 'readsFrom' }),
+      );
+    }
+    const imp = await importExtractionResults(hubStore, [{ nodes, edges }]);
+    if (!imp.ok) throw new Error('import hub failed');
+    hubCtx = {
+      vaultRoot: hubDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: hubStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(hubStore);
+    rmSync(hubDir, { recursive: true, force: true });
+  });
+
+  it('pages downstream effects and publishes the TRUE total', async () => {
+    const r = await fieldLineageHandler(hubCtx, {
+      fieldId: HUB_FIELD,
+      direction: 'downstream',
+      limit: 50,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    expect(data.downstream?.effects.length).toBe(50);
+    expect(data.downstream?.effectCount).toBe(400);
+    expect(data.hasMore).toBe(true);
+    expect(data.nextOffset).toBe(50);
+    expect(data.section).toBe('downstream.effects');
+    expect(data.note).toBe(
+      'Showing 50 of 400 `downstream.effects` row(s) (offset=0). MORE remain — advance with offset=50 or echo `nextCursor`. `downstream.effectCount` is the TRUE total.',
+    );
+  });
+
+  it('resumes from nextCursor with no overlap and no gap', async () => {
+    const page1 = await fieldLineageHandler(hubCtx, {
+      fieldId: HUB_FIELD,
+      direction: 'downstream',
+      limit: 50,
+    });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) return;
+    const cursor = page1.value.data.nextCursor;
+    expect(cursor).toBeDefined();
+    const page2 = await fieldLineageHandler(hubCtx, {
+      fieldId: HUB_FIELD,
+      direction: 'downstream',
+      limit: 50,
+      cursor: cursor as string,
+    });
+    expect(page2.ok).toBe(true);
+    if (!page2.ok) return;
+    const ids1 = (page1.value.data.downstream?.effects ?? []).map(
+      (e) => e.effectId,
+    );
+    const ids2 = (page2.value.data.downstream?.effects ?? []).map(
+      (e) => e.effectId,
+    );
+    expect(ids2.length).toBe(50);
+    expect(ids1.some((id) => ids2.includes(id))).toBe(false);
+    expect(page2.value.data.offset).toBe(50);
+  });
+
+  it('emits NO paging keys when the whole list fits', async () => {
+    const r = await fieldLineageHandler(upstreamCtx, {
+      fieldId: 'CustomField:Account.Earnings__c',
+      direction: 'both',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data as unknown as Record<string, unknown>;
+    expect(data['section']).toBeUndefined();
+    expect(data['limit']).toBeUndefined();
+    expect(data['hasMore']).toBeUndefined();
+    expect(data['note']).toBeUndefined();
+    expect(data['nextCursor']).toBeUndefined();
+  });
+
+  it('refuses a NAMED section this direction did not produce', async () => {
+    const r = await fieldLineageHandler(hubCtx, {
+      fieldId: HUB_FIELD,
+      direction: 'upstream',
+      section: 'downstream.effects',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain("section 'downstream.effects'");
+  });
+});

@@ -140,9 +140,13 @@ export const resolveToFieldOrSuggest = async (
       ? 'No CustomField nodes were found for this object in the vault (they may not have been retrieved — run `sfi refresh` to populate).'
       : `Pass one of the ${fieldCount} field id(s) listed in \`fieldIds\` to this tool.`;
 
+  // The list below is EVERY `CustomField` child, standard fields included — it
+  // is deliberately unfiltered, because a caller who passed an object id may
+  // legitimately want a standard field. Calling them all "custom field(s)" was
+  // the same false label FIX 2 removes from the naming-convention report.
   const message =
     `You passed an object id ('${raw}') instead of a field id. ` +
-    `Here are the ${fieldCount} custom field(s) on ${objectApiName}. ` +
+    `Here are the ${fieldCount} field(s) SfIntelligence holds for ${objectApiName} (custom and standard). ` +
     listSnippet +
     ` Each entry in \`fieldIds\` uses the canonical \`${CUSTOM_FIELD_PREFIX}{Object}.{Field}\` format.`;
 

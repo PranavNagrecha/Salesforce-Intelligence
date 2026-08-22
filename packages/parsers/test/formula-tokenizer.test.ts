@@ -242,3 +242,42 @@ describe('tokenizeFormula determinism', () => {
     expect(a).toEqual(b);
   });
 });
+
+/**
+ * FIX 11 — the tokenizer emits the literal TEXT it already read.
+ *
+ * `stringLiteralCount` / `numericLiteralCount` stay exactly as they were (the
+ * only fields the pre-existing tests assert), so back-compat is free.
+ */
+describe('tokenizeFormula — literal values (FIX 11)', () => {
+  it('emits numeric literals as raw source text in source order', () => {
+    const r = tokenizeFormula('IF(Amount__c > 2000, 2000, 1)');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.numericLiterals).toEqual(['2000', '2000', '1']);
+    expect(r.value.numericLiteralCount).toBe(3);
+  });
+
+  it('emits string literals with quotes stripped', () => {
+    const r = tokenizeFormula("TEXT(Status__c) = 'Completed'");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.stringLiterals).toEqual(['Completed']);
+    expect(r.value.stringLiteralCount).toBe(1);
+  });
+
+  it("unescapes the doubled-quote form ('it''s' -> it's)", () => {
+    const r = tokenizeFormula("IF(TRUE, 'it''s', 'no')");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.stringLiterals).toEqual(["it's", 'no']);
+  });
+
+  it('never counts a literal inside a comment', () => {
+    const r = tokenizeFormula("/* 999 'hidden' */ Amount__c + 1");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.stringLiterals).toEqual([]);
+    expect(r.value.numericLiterals).toEqual(['1']);
+  });
+});

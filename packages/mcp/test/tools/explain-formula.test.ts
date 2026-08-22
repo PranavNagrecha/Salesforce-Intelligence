@@ -27,10 +27,11 @@ const FIXTURE_MANIFEST: VaultManifest = {
   sourceTreeHash: 'sha256:fixture',
 };
 
-// The handler does no graph queries — a Context with an open graph
-// store is still required for the McpResponse envelope's vaultState,
-// but no seed is needed. We open an empty store and close it at
-// teardown.
+// FIX 3 / FIX 13: the handler now ASKS the graph rather than guessing, so the
+// fixture must hold the field nodes the formulas reference. A single-segment
+// reference whose node is absent is reported `not-in-vault` instead of getting
+// a minted id — which is the whole point — so a positive control needs a real
+// node behind it.
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -43,6 +44,48 @@ beforeAll(async () => {
     throw new Error(`openGraph failed: ${opened.error.message}`);
   }
   store = opened.value;
+  const seeded = await importExtractionResults(store, [
+    {
+      nodes: [
+        makeFieldNode({ id: 'CustomField:Account.Industry__c' }),
+        makeFieldNode({ id: 'CustomField:Account.Status__c' }),
+        makeFieldNode({ id: 'CustomField:Opportunity.Discount__c' }),
+        makeFieldNode({ id: 'CustomField:Lead.Discount__c' }),
+        makeFieldNode({ id: 'CustomField:User.Email' }),
+        makeFieldNode({
+          id: 'CustomField:Contact.Advisor_Email__c',
+          properties: { formula: 'Advisor__r.Email', dataType: 'Text' },
+        }),
+        makeFieldNode({
+          id: 'CustomField:Contact.Stale_Advisor_Email__c',
+          properties: { formula: 'Advisor__r.Email', dataType: 'Text' },
+        }),
+        makeFieldNode({
+          id: 'CustomField:Account.Ghost_Holder__c',
+          properties: { formula: 'Ghost__c', dataType: 'Text' },
+        }),
+      ],
+      edges: [
+        // The refresh's relationship-resolver output. `traversalPath` is
+        // byte-identical to the tokenizer's `ref.path` — that exact match is
+        // what makes the join deterministic instead of heuristic.
+        {
+          fromId: 'CustomField:Contact.Advisor_Email__c',
+          toId: 'CustomField:User.Email',
+          edgeType: 'references',
+          confidence: 'parsed',
+          source: 'relationship-resolver',
+          properties: {
+            referenceKind: 'formulaRelationshipTraversal',
+            traversalPath: 'Advisor__r.Email',
+          },
+        },
+      ],
+    },
+  ]);
+  if (!seeded.ok) {
+    throw new Error(`seed import failed: ${seeded.error.message}`);
+  }
   ctx = {
     vaultRoot: tempDir,
     manifest: FIXTURE_MANIFEST,
@@ -469,5 +512,141 @@ describe('explainFormulaHandler — fieldId path (FLD-03)', () => {
       (r) => r.path === 'Discount__c',
     );
     expect(discountRef?.toId).toBe('CustomField:Lead.Discount__c');
+  });
+});
+
+/**
+ * FIX 11 — `explain_formula` emits the literal values the tokenizer already
+ * had. Three `{value: null}` rows told the reader there were three numeric
+ * literals while refusing to say what any of them were.
+ */
+describe('explainFormulaHandler — literal values (FIX 11)', () => {
+  it('emits numeric literal VALUES, not null placeholders', async () => {
+    const result = await explainFormulaHandler(ctx, {
+      formulaExpression: 'IF(Amount__c > 2000, 2000, 1)',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.literals).toEqual([
+      { value: 2000, type: 'number' },
+      { value: 2000, type: 'number' },
+      { value: 1, type: 'number' },
+    ]);
+  });
+
+  it('emits string literal text with quotes stripped', async () => {
+    const result = await explainFormulaHandler(ctx, {
+      formulaExpression: "TEXT(Status__c) = 'Completed'",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.data.literals.filter((l) => l.type === 'string'),
+    ).toEqual([{ value: 'Completed', type: 'string' }]);
+  });
+
+  it("unescapes the doubled-quote form ('it''s' -> it's)", async () => {
+    const result = await explainFormulaHandler(ctx, {
+      formulaExpression: "IF(TRUE, 'it''s', 'no')",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.data.literals
+        .filter((l) => l.type === 'string')
+        .map((l) => l.value),
+    ).toEqual(["it's", 'no']);
+  });
+});
+
+/**
+ * FIX 3 + FIX 13 — the resolver ASKS the graph instead of guessing.
+ *
+ * Both defects were the same defect. A dotted path returned a bare
+ * `toId: null` even when the refresh had already resolved the relationship
+ * hop; a single segment minted `CustomField:{parent}.{path}` without ever
+ * checking that node existed. Every `toId` now names a real node or is `null`
+ * with a stated reason.
+ */
+describe('explainFormulaHandler — relationship + existence resolution (FIX 3/13)', () => {
+  it('reads the resolved relationship edge instead of returning a bare null', async () => {
+    const result = await explainFormulaHandler(ctx, {
+      fieldId: 'CustomField:Contact.Advisor_Email__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ref = result.value.data.fieldReferences.find(
+      (r) => r.path === 'Advisor__r.Email',
+    );
+    // Pre-fix: { toId: null, kind: 'relationship' } — the edge was ignored.
+    expect(ref?.toId).toBe('CustomField:User.Email');
+    expect(ref?.resolution).toBe('resolved');
+    expect(ref?.confidence).toBe('parsed');
+    expect(ref?.kind).toBe('relationship');
+    expect(ref?.note).toBeUndefined();
+  });
+
+  it('reports relationship-unresolved on a STALE-shaped vault with no resolver edges', async () => {
+    // The load-bearing case: a builder-0.1.11 vault emits ZERO
+    // relationship-resolver edges. The fix must READ the map, never assume it
+    // is populated — so an empty map has to degrade honestly.
+    const result = await explainFormulaHandler(ctx, {
+      fieldId: 'CustomField:Contact.Stale_Advisor_Email__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ref = result.value.data.fieldReferences.find(
+      (r) => r.path === 'Advisor__r.Email',
+    );
+    expect(ref?.toId).toBeNull();
+    expect(ref?.resolution).toBe('relationship-unresolved');
+    expect(ref?.note).toBe(
+      'This reference traverses the relationship `Advisor__r`. This vault holds no resolved target for it — the relationship-to-object mapping is produced by the refresh, and this vault\'s refresh did not produce one for this path. The field it lands on is NOT KNOWN; it is not "none".',
+    );
+  });
+
+  it('never mints an id that names no node (FIX 13)', async () => {
+    const result = await explainFormulaHandler(ctx, {
+      fieldId: 'CustomField:Account.Ghost_Holder__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ref = result.value.data.fieldReferences.find(
+      (r) => r.path === 'Ghost__c',
+    );
+    // Pre-fix: { toId: 'CustomField:Account.Ghost__c' } — an id naming nothing.
+    expect(ref?.toId).toBeNull();
+    expect(ref?.resolution).toBe('not-in-vault');
+    expect(ref?.candidateId).toBe('CustomField:Account.Ghost__c');
+    expect(ref?.note).toBe(
+      '`CustomField:Account.Ghost__c` is the id this single-segment reference would resolve to, but no node with that id exists in this vault. The field may be a standard field the Metadata API does not emit separately, or it may not have been retrieved. This is NOT proof the field is absent from the org.',
+    );
+  });
+
+  it('resolves a single segment whose node DOES exist', async () => {
+    const result = await explainFormulaHandler(ctx, {
+      formulaExpression: 'ISBLANK(Industry__c)',
+      parentObjectApiName: 'Account',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ref = result.value.data.fieldReferences[0];
+    expect(ref?.toId).toBe('CustomField:Account.Industry__c');
+    expect(ref?.resolution).toBe('resolved');
+    expect(ref?.confidence).toBe('declared');
+  });
+
+  it('reports no-parent-scope when nothing scopes a single segment', async () => {
+    const result = await explainFormulaHandler(ctx, {
+      formulaExpression: 'ISBLANK(Industry__c)',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ref = result.value.data.fieldReferences[0];
+    expect(ref?.toId).toBeNull();
+    expect(ref?.resolution).toBe('no-parent-scope');
+    expect(ref?.note).toBe(
+      'No `parentObjectApiName` was supplied and no `fieldId` was passed, so this single-segment reference cannot be scoped to an object. Pass `fieldId` or `parentObjectApiName` for a canonical id.',
+    );
   });
 });

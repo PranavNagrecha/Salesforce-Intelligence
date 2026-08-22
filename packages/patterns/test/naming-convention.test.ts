@@ -12,7 +12,10 @@ import {
   openGraph,
 } from '@sf-intelligence/graph';
 
-import { recognizeNamingConventions } from '../src/naming-convention.js';
+import {
+  analyzeNamingConventions,
+  recognizeNamingConventions,
+} from '../src/naming-convention.js';
 
 // Each scenario gets its own DB file under a shared tmpdir so recognizer
 // outputs don't bleed across scenarios.
@@ -335,5 +338,104 @@ describe('recognizeNamingConventions: scope filter', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-scope');
+  });
+});
+
+/**
+ * FIX 2 — a naming convention is a statement about names THIS ORG chose.
+ *
+ * The recognizer grouped EVERY `CustomField` node, standard fields included.
+ * Standard field names are Salesforce's, so including them did not merely add
+ * noise: on the reference vault it produced 22 observations about objects with
+ * ZERO custom fields, and inverted the reported convention on three more.
+ */
+describe('analyzeNamingConventions: standard fields are excluded (FIX 2)', () => {
+  let store: GraphStore;
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('emits NOTHING for an object with only standard fields', async () => {
+    store = await seedStore('fix2-standard-only.db', [
+      parentObject('Asset'),
+      field('Asset', 'AccountId'),
+      field('Asset', 'AssetLevel'),
+      field('Asset', 'City'),
+      field('Asset', 'ContactId'),
+      field('Asset', 'Description'),
+      field('Asset', 'InstallDate'),
+      field('Asset', 'Price'),
+      field('Asset', 'SerialNumber'),
+    ]);
+    const r = await analyzeNamingConventions(store);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix: 'Custom fields on Asset use PascalCase naming (8 of 8 fields)'.
+    expect(r.value.observations).toEqual([]);
+    expect(r.value.analyzed.standardFieldsExcluded).toBe(8);
+    expect(r.value.analyzed.objectsWithCustomFields).toBe(0);
+  });
+});
+
+describe('analyzeNamingConventions: the standard majority no longer inverts the answer (FIX 2)', () => {
+  let store: GraphStore;
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('does not report PascalCase when only the STANDARD fields are PascalCase', async () => {
+    const nodes: Node[] = [parentObject('Widget_Session__c')];
+    // 6 custom fields of MIXED casing — no convention among the org's own names.
+    for (const name of [
+      'session_start__c',
+      'SessionEnd__c',
+      'duration_minutes__c',
+      'HostName__c',
+      'attendee_count__c',
+      'RoomCode__c',
+    ]) {
+      nodes.push(field('Widget_Session__c', name));
+    }
+    // 20 standard PascalCase fields that used to drown them out.
+    for (let i = 0; i < 20; i += 1) {
+      nodes.push(field('Widget_Session__c', `StandardField${i}`));
+    }
+    store = await seedStore('fix2-inversion.db', nodes);
+    const r = await analyzeNamingConventions(store);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.observations.some((o) => o.statement.includes('PascalCase')),
+    ).toBe(false);
+    expect(r.value.analyzed.standardFieldsExcluded).toBe(20);
+  });
+});
+
+describe('analyzeNamingConventions: positive control (FIX 2)', () => {
+  let store: GraphStore;
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('reports a real custom-field prefix with a CUSTOM-ONLY denominator', async () => {
+    const nodes: Node[] = [parentObject('Widget_Ledger__c')];
+    for (let i = 0; i < 10; i += 1) {
+      nodes.push(field('Widget_Ledger__c', `Led_Amount${i}__c`));
+    }
+    for (let i = 0; i < 20; i += 1) {
+      nodes.push(field('Widget_Ledger__c', `StandardField${i}`));
+    }
+    store = await seedStore('fix2-positive.db', nodes);
+    const r = await analyzeNamingConventions(store);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const prefix = r.value.observations.find((o) =>
+      o.statement.includes('prefix'),
+    );
+    expect(prefix).toBeDefined();
+    // Pre-fix the denominator was 30 — the reported ratio described a
+    // population two-thirds of which the org did not name.
+    expect(prefix?.evidence.total).toBe(10);
+    expect(prefix?.evidence.matching).toBe(10);
   });
 });

@@ -65,14 +65,23 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
-import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { type CoverageCaveat, type Verdict } from './coverage-trust.js';
+import {
+  buildCoverageCaveat,
+  VALUE_LITERAL_READER_COVERAGE,
+  type CoverageCaveat,
+  type Verdict,
+} from './coverage-trust.js';
 import { readFieldDataType } from './field-properties.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { detectPicklistLiteralMismatch } from './picklist-literal-check.js';
+import {
+  normalizePicklistValues,
+  resolveGlobalValueSetValues,
+} from './picklist-values.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -88,20 +97,6 @@ const PICKLIST_TYPES = new Set<string>([
 
 /** Compatibility verdicts the tool emits. */
 type Compatibility = 'breaking' | 'review';
-
-const PICKLIST_VALUE_COVERAGE = [
-  'CustomField',
-  'ValidationRule',
-  'Flow',
-  'ApexClass',
-  'ApexTrigger',
-  'WorkflowRule',
-  'ConditionalContext',
-  'Report',
-  'Dashboard',
-  'ListView',
-  'FlexiPage',
-] as const;
 
 /** `WhatIfImpactItem.category` per WhatIfSemantics.md. */
 type Category =
@@ -133,7 +128,38 @@ export interface WhatIfRemovePicklistValueOutput {
   readonly coverageCaveat?: CoverageCaveat;
   readonly trust: TrustSummary;
   readonly disclosure: string;
+  /**
+   * Whether the value the caller named is actually ON this field.
+   *
+   * `not-checked` means the vault could not resolve the value set at all — it
+   * is NOT a synonym for "the value is fine". A destructive verdict whose
+   * subject was never verified has to say so.
+   */
+  readonly valueState: 'active' | 'inactive' | 'not-checked';
+  /** The declared value set; `null` when `valueState` is `not-checked`. */
+  readonly declaredValues: readonly string[] | null;
+  /** Verbatim `valueState`-driven disclosures. Absent when `active`. */
+  readonly boundaries?: readonly string[];
 }
+
+/**
+ * Verbatim boundary for a value that is already deactivated. The scan STILL
+ * runs — deactivating and deleting are different operations with different
+ * blast radii, and the caller asked about the delete.
+ */
+const inactiveValueBoundary = (value: string): string =>
+  `\`${value}\` is already INACTIVE on this field: it cannot be selected on new records, but existing records may still hold it. Removing it from the value set is a metadata delete, not a deactivation — the impact below is the impact of the DELETE.`;
+
+/**
+ * The field's api name for the refusal message. Falls back to the canonical id
+ * so the sentence never contains an empty backtick pair.
+ */
+const readFieldApiName = (node: Node, fieldId: ComponentId): string =>
+  node.apiName.length > 0 ? node.apiName : fieldId;
+
+/** Verbatim boundary when the vault cannot resolve the value set at all. */
+const notCheckedBoundary = (value: string): string =>
+  `This field's value set is not inline in the vault — commonly a GlobalValueSet reference this refresh did not resolve. Whether \`${value}\` is a declared value was NOT CHECKED, and the impact scan below assumes it exists. Confirm the value in Setup before acting.`;
 
 /**
  * The verbatim disclosure surfaced in every response. Encodes the
@@ -142,20 +168,6 @@ export interface WhatIfRemovePicklistValueOutput {
  */
 const DISCLOSURE =
   "Apex code referencing the picklist value as a string literal is recognized only for static literals. Variable-based picklist comparisons (`if (account.Industry__c == myVar)`), dynamic SOQL strings, and reflective field access via `obj.get('FieldName')` are invisible to the recognizer; review dynamic comparisons separately before removing the value. Flow record-create/update steps that assign this value to the field as a literal (e.g. `<stringValue>Completed</stringValue>`) ARE detected; Flow steps that assign the value indirectly via a variable, formula, or merge field (`<elementReference>`) are NOT statically resolvable and are not matched — review those flows manually.";
-
-const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
-  const coverage = summarizeCoverage(ctx.manifest, PICKLIST_VALUE_COVERAGE);
-  if (coverage.status === 'complete') return undefined;
-  const missingCoverage = coverage.missingCoverage.length > 0
-    ? coverage.missingCoverage
-    : [...PICKLIST_VALUE_COVERAGE];
-  return {
-    status: coverage.status === 'partial' ? 'partial' : 'unknown',
-    missingCoverage,
-    message:
-      `Picklist-value removal impact is incomplete because the vault lacks coverage for: ${missingCoverage.join(', ')}. Absence of references in those families means "not checked", not "safe".`,
-  };
-};
 
 /**
  * Zod schema for the `sfi.what_if_remove_picklist_value` tool input.
@@ -408,6 +420,60 @@ export const whatIfRemovePicklistValueHandler = async (
   }
 
   const value = input.value;
+
+  // VALUE EXISTENCE GATE. This is a destructive-verdict tool: a typo'd value
+  // used to return a `review` verdict byte-identical to a real value's, and
+  // the caller's next action is a metadata delete. Resolve the DECLARED value
+  // set first — inline, else the field's GlobalValueSet edge.
+  const inlineValues = normalizePicklistValues(
+    nodeResult.value.properties['picklistValues'],
+  );
+  const resolvedValues =
+    inlineValues ?? (await resolveGlobalValueSetValues(ctx, fieldId))?.values ?? null;
+
+  let valueState: 'active' | 'inactive' | 'not-checked';
+  let declaredValues: readonly string[] | null;
+  const boundaries: string[] = [];
+  if (resolvedValues === null) {
+    // NOT resolvable. Proceed, but never as though the value was checked.
+    valueState = 'not-checked';
+    declaredValues = null;
+    boundaries.push(notCheckedBoundary(value));
+  } else {
+    const match = resolvedValues.find(
+      (v) => v.value.trim().toLowerCase() === value.trim().toLowerCase(),
+    );
+    if (match === undefined) {
+      // Resolved and NOT present. Refuse — and reuse the sibling's matching +
+      // "did you mean" logic rather than writing a second one. Note that an
+      // empty-but-present value set lands here too (`Declared values: (none)`),
+      // which is correct and different from `not-checked`.
+      const mismatch = detectPicklistLiteralMismatch(
+        readFieldApiName(nodeResult.value, fieldId),
+        [value],
+        resolvedValues,
+      );
+      const declaredList =
+        (mismatch?.definedValues ?? resolvedValues)
+          .map((v) => v.value)
+          .join(', ') || '(none)';
+      const didYouMean =
+        mismatch !== null && mismatch.suggestions.length > 0
+          ? ` Did you mean ${mismatch.suggestions
+              .map((sug) => `'${sug}'`)
+              .join(' / ')}?`
+          : '';
+      return err({
+        kind: 'invalid-query',
+        message: `\`${value}\` is not a declared value on \`${fieldId}\`. Declared values: ${declaredList}.${didYouMean} Pass a declared value, or call \`sfi.explain_field\` on this field to list the value set. No impact scan was run.`,
+        path: 'value',
+      });
+    }
+    valueState = match.isActive ? 'active' : 'inactive';
+    declaredValues = resolvedValues.map((v) => v.value);
+    if (!match.isActive) boundaries.push(inactiveValueBoundary(value));
+  }
+
   const needles = buildValueNeedles(value);
 
   // Walk every incoming edge; for each source node, check whether its
@@ -503,7 +569,14 @@ export const whatIfRemovePicklistValueHandler = async (
 
   const compatibility: Compatibility =
     sortedImpacts.length === 0 ? 'review' : 'breaking';
-  const coverageCaveat = coverageCaveatFor(ctx);
+  // Shares `VALUE_LITERAL_READER_COVERAGE` and `buildCoverageCaveat` with
+  // `value_change_audit` — the two answer the same coverage question about the
+  // same field and must not drift apart again.
+  const coverageCaveat = buildCoverageCaveat(
+    ctx,
+    VALUE_LITERAL_READER_COVERAGE,
+    'Picklist-value removal impact',
+  );
   const rawVerdict = aggregateVerdict(sortedImpacts);
   const verdict = rawVerdict === 'safe' && coverageCaveat !== undefined
     ? 'review'
@@ -517,6 +590,9 @@ export const whatIfRemovePicklistValueHandler = async (
       compatibility,
       impacts: sortedImpacts,
       verdict,
+      valueState,
+      declaredValues,
+      ...(boundaries.length > 0 ? { boundaries } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       trust: {
         provenance: 'offline_snapshot',

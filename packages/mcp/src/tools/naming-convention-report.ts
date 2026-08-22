@@ -12,7 +12,7 @@
 
 import type { McpError, McpResponse, PatternObservation } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { recognizeNamingConventions } from '@sf-intelligence/patterns';
+import { analyzeNamingConventions } from '@sf-intelligence/patterns';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -36,7 +36,35 @@ export type NamingConventionReportInput = z.infer<
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface NamingConventionReportOutput {
   readonly observations: readonly PatternObservation[];
+  /**
+   * What the recognizer LOOKED at. Without it an empty `observations` list is
+   * unreadable: "this object has no convention" and "this object has too few
+   * custom fields to observe one" are different answers.
+   */
+  readonly analyzed: {
+    readonly objectsWithCustomFields: number;
+    readonly objectsBelowMinimumGroupSize: number;
+    readonly minimumGroupSize: number;
+    readonly standardFieldsExcluded: number;
+  };
+  /** Present ONLY when a SCOPED call produced zero observations. Verbatim. */
+  readonly note?: string;
 }
+
+/**
+ * Verbatim note for a scoped call that produced nothing. Standard field names
+ * are Salesforce's, not this org's, so they cannot evidence an org convention —
+ * and an empty list must never be narrated as "no convention here".
+ */
+const emptyScopeNote = (objectApiName: string, customFieldCount: number, minimum: number): string =>
+  `\`${objectApiName}\` has ${customFieldCount} custom field(s) in this vault — fewer than the ${minimum} needed to observe a convention. Standard field names are defined by Salesforce, not by this org, so they are excluded from convention analysis. An empty observation list here means NOT ENOUGH EVIDENCE, never "this object has no convention".`;
+
+/** Extract the object api name from a `CustomField:{Object}[.*]` scope string. */
+const scopedObjectApiName = (scope: string | undefined): string | null => {
+  if (scope === undefined || scope === 'all') return null;
+  const match = /^CustomField:([^.]+)(?:\.\*)?$/.exec(scope);
+  return match === null ? null : (match[1] as string);
+};
 
 /**
  * The `sfi.get_naming_convention_report` MCP tool. Returns the
@@ -59,7 +87,7 @@ export const namingConventionReportHandler = async (
   // returns `Result<readonly PatternObservation[], PatternError>`. We
   // forward the optional `scope` directly under `exactOptionalPropertyTypes`
   // to avoid pinning `scope: undefined` into the options.
-  const result = await recognizeNamingConventions(
+  const result = await analyzeNamingConventions(
     ctx.graph,
     input.scope !== undefined ? { scope: input.scope } : {},
   );
@@ -80,8 +108,28 @@ export const namingConventionReportHandler = async (
     });
   }
 
+  const { observations, analyzed } = result.value;
+  const objectApiName = scopedObjectApiName(input.scope);
+  const note =
+    objectApiName !== null && observations.length === 0
+      ? emptyScopeNote(
+          objectApiName,
+          analyzed.scopedObjectCustomFieldCount ?? 0,
+          analyzed.minimumGroupSize,
+        )
+      : undefined;
+
   return ok({
-    data: { observations: result.value },
+    data: {
+      observations,
+      analyzed: {
+        objectsWithCustomFields: analyzed.objectsWithCustomFields,
+        objectsBelowMinimumGroupSize: analyzed.objectsBelowMinimumGroupSize,
+        minimumGroupSize: analyzed.minimumGroupSize,
+        standardFieldsExcluded: analyzed.standardFieldsExcluded,
+      },
+      ...(note !== undefined ? { note } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

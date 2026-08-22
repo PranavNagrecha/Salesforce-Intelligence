@@ -17,6 +17,8 @@ export type { Result } from '@sf-intelligence/contracts';
 
 export { ok, err } from './result.js';
 
+export { isCustomFieldApiName } from './api-names.js';
+
 export {
   execHelper,
   escapeWindowsArg,

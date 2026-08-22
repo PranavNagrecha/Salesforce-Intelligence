@@ -254,3 +254,60 @@ describe('namingConventionReportHandler: determinism', () => {
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
   });
 });
+
+/**
+ * FIX 2 — a scoped call that finds nothing SAYS SO.
+ *
+ * An empty `observations` list is unreadable on its own: "this object has no
+ * convention" and "this object has too few custom fields to observe one" are
+ * different answers, and only the second is ever true here.
+ */
+describe('namingConventionReportHandler: empty scoped result is disclosed (FIX 2)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const nodes: Node[] = [parentObject('Asset')];
+    // 2 custom fields — under the minimum — plus 8 standard fields that used
+    // to clear the bar all by themselves.
+    nodes.push(field('Asset', 'Warranty_Tier__c'));
+    nodes.push(field('Asset', 'Renewal_Owner__c'));
+    for (const name of [
+      'AccountId',
+      'AssetLevel',
+      'City',
+      'ContactId',
+      'Description',
+      'InstallDate',
+      'Price',
+      'SerialNumber',
+    ]) {
+      nodes.push(field('Asset', name));
+    }
+    const built = await makeCtx('fix2-empty-scope.db', nodes);
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('returns no observations and the verbatim not-enough-evidence note', async () => {
+    const result = await namingConventionReportHandler(ctx, {
+      scope: 'CustomField:Asset.*',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // Pre-fix: a PascalCase observation about the eight STANDARD fields.
+    expect(data.observations).toEqual([]);
+    expect(data.note).toBe(
+      '`Asset` has 2 custom field(s) in this vault — fewer than the 5 needed to observe a convention. Standard field names are defined by Salesforce, not by this org, so they are excluded from convention analysis. An empty observation list here means NOT ENOUGH EVIDENCE, never "this object has no convention".',
+    );
+    expect(data.analyzed.minimumGroupSize).toBe(5);
+    expect(data.analyzed.standardFieldsExcluded).toBe(8);
+    expect(data.analyzed.objectsWithCustomFields).toBe(1);
+    expect(data.analyzed.objectsBelowMinimumGroupSize).toBe(1);
+  });
+});

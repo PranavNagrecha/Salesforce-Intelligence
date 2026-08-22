@@ -447,3 +447,185 @@ describe('fieldMappingBetweenObjectsHandler (single-vault, no registry)', () => 
     ).toBe(true);
   });
 });
+
+/**
+ * FIX 6 — never state a total this tool cannot enumerate.
+ *
+ * With 592-field and 354-field objects the dispatcher silently dropped rows
+ * (222 on the reported run), so the response stated a `fieldCount` its own
+ * rows did not add up to and the caller had no knob to reach the rest.
+ */
+describe('fieldMappingBetweenObjectsHandler — counts + paging (FIX 6)', () => {
+  let bigRoot: string;
+  let bigPath: string;
+  let bigStore: GraphStore;
+  let bigCtx: Context;
+
+  beforeAll(async () => {
+    bigRoot = await mkdtemp(join(tmpdir(), 'sfi-fix6-mapping-'));
+    bigPath = join(bigRoot, 'big-vault');
+    await mkdir(join(bigPath, 'graph'), { recursive: true });
+    await saveManifest(bigPath, FIXTURE_MANIFEST);
+    const opened = await openGraph(vaultPaths(bigPath).graphDb);
+    if (!opened.ok) throw new Error(opened.error.message);
+    bigStore = opened.value;
+
+    const nodes: Node[] = [
+      makeNode({ id: 'CustomObject:Widget_Session__c', apiName: 'Widget_Session__c' }),
+      makeNode({ id: 'CustomObject:Widget_Archive__c', apiName: 'Widget_Archive__c' }),
+    ];
+    // 300 fields on A, 60 on B. The first 60 pair by label; the remaining 240
+    // on A are unpaired — comfortably over the default page size.
+    for (let i = 0; i < 300; i += 1) {
+      nodes.push(
+        makeNode({
+          id: `CustomField:Widget_Session__c.Attr_${i}__c`,
+          type: 'CustomField',
+          apiName: `Attr_${i}__c`,
+          label: `Attr ${i}`,
+          parentId: 'CustomObject:Widget_Session__c',
+          properties: { dataType: 'Text' },
+        }),
+      );
+    }
+    for (let i = 0; i < 60; i += 1) {
+      nodes.push(
+        makeNode({
+          id: `CustomField:Widget_Archive__c.Attr_${i}__c`,
+          type: 'CustomField',
+          apiName: `Attr_${i}__c`,
+          label: `Attr ${i}`,
+          parentId: 'CustomObject:Widget_Archive__c',
+          properties: { dataType: 'Text' },
+        }),
+      );
+    }
+    await importExtractionResults(bigStore, [{ nodes, edges: [] }]);
+    await registerVault(bigRoot, 'big-vault', bigPath);
+    bigCtx = {
+      vaultRoot: bigPath,
+      manifest: FIXTURE_MANIFEST,
+      graph: bigStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(bigStore);
+    await rm(bigRoot, { recursive: true, force: true });
+  });
+
+  it('publishes exact counts and a BALANCED reconciliation', async () => {
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = bigRoot;
+    const r = await fieldMappingBetweenObjectsHandler(bigCtx, {
+      objectA: 'Widget_Session__c',
+      objectB: 'Widget_Archive__c',
+      section: 'unpairedFromA',
+    });
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = rootDir;
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: no `counts`, no `reconciliation`, and no way to know the
+    // unpaired list had been trimmed.
+    expect(d.counts.suggestedPairs + d.counts.unpairedFromA).toBe(
+      d.objectA.fieldCount,
+    );
+    expect(d.counts.suggestedPairs + d.counts.unpairedFromB).toBe(
+      d.objectB.fieldCount,
+    );
+    expect(d.reconciliation.balanced).toBe(true);
+    expect(d.reconciliation.aAccountedFor).toBe(300);
+    expect(d.reconciliation.bAccountedFor).toBe(60);
+  });
+
+  it('pages the designated section and names the true total', async () => {
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = bigRoot;
+    const r = await fieldMappingBetweenObjectsHandler(bigCtx, {
+      objectA: 'Widget_Session__c',
+      objectB: 'Widget_Archive__c',
+      section: 'unpairedFromA',
+      limit: 100,
+    });
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = rootDir;
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.unpairedFromA.length).toBe(100);
+    expect(d.counts.unpairedFromA).toBe(240);
+    expect(d.hasMore).toBe(true);
+    expect(d.nextOffset).toBe(100);
+    expect(d.note).toBe(
+      'Showing 100 of 240 `unpairedFromA` row(s) (offset=0). MORE remain — advance with offset=100 or echo `nextCursor`. `counts` states the TRUE total for every section; this page is a slice of one of them. Change `section` to page a different list.',
+    );
+  });
+
+  it('round-trips a cursor with no overlap and no gap', async () => {
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = bigRoot;
+    const page1 = await fieldMappingBetweenObjectsHandler(bigCtx, {
+      objectA: 'Widget_Session__c',
+      objectB: 'Widget_Archive__c',
+      section: 'unpairedFromA',
+      limit: 100,
+    });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) {
+      process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = rootDir;
+      return;
+    }
+    const page2 = await fieldMappingBetweenObjectsHandler(bigCtx, {
+      objectA: 'Widget_Session__c',
+      objectB: 'Widget_Archive__c',
+      section: 'unpairedFromA',
+      limit: 100,
+      cursor: page1.value.data.nextCursor as string,
+    });
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = rootDir;
+    expect(page2.ok).toBe(true);
+    if (!page2.ok) return;
+    const a = page1.value.data.unpairedFromA;
+    const b = page2.value.data.unpairedFromA;
+    expect(b.length).toBe(100);
+    expect(a.some((x) => b.includes(x))).toBe(false);
+    expect(page2.value.data.offset).toBe(100);
+  });
+
+  it('rejects a cursor minted for a DIFFERENT query', async () => {
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = bigRoot;
+    const page1 = await fieldMappingBetweenObjectsHandler(bigCtx, {
+      objectA: 'Widget_Session__c',
+      objectB: 'Widget_Archive__c',
+      section: 'unpairedFromA',
+      limit: 100,
+    });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) {
+      process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = rootDir;
+      return;
+    }
+    const crossed = await fieldMappingBetweenObjectsHandler(bigCtx, {
+      objectA: 'Widget_Archive__c',
+      objectB: 'Widget_Session__c',
+      section: 'unpairedFromA',
+      cursor: page1.value.data.nextCursor as string,
+    });
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = rootDir;
+    expect(crossed.ok).toBe(false);
+    if (crossed.ok) return;
+    expect(crossed.error.kind).toBe('invalid-query');
+  });
+
+  it('leaves a small pair byte-identical apart from the additive keys', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(ctx, {
+      objectA: 'Lead',
+      objectB: 'Contact',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect(d['hasMore']).toBeUndefined();
+    expect(d['note']).toBeUndefined();
+    expect(d['nextCursor']).toBeUndefined();
+    expect(d['section']).toBeUndefined();
+    expect(r.value.data.reconciliation.balanced).toBe(true);
+  });
+});

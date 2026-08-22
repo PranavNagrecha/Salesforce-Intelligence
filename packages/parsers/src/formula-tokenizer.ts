@@ -74,6 +74,19 @@ export interface TokenizerOutput {
   readonly functionCalls: readonly string[];
   readonly stringLiteralCount: number;
   readonly numericLiteralCount: number;
+  /**
+   * The string literals themselves, in source order, with the surrounding
+   * quotes removed and doubled quotes unescaped (`'it''s'` → `it's`).
+   *
+   * The tokenizer always HELD these — the strip pass has the matched text in
+   * its replace callback — and threw them away, which is why
+   * `sfi.explain_formula` emitted `{value: null}` rows for literals it had
+   * already read. `stringLiteralCount` stays as-is: it is what the existing
+   * tokenizer tests assert, so back-compat is free.
+   */
+  readonly stringLiterals: readonly string[];
+  /** The numeric literals as their RAW source text, in source order. */
+  readonly numericLiterals: readonly string[];
 }
 
 /** Salesforce reserved keyword literals — not field references. */
@@ -210,10 +223,14 @@ export const tokenizeFormula = (
   }
 
   let stringLiteralCount = 0;
+  const stringLiterals: string[] = [];
   const stripped = formula.replace(COMMENT_OR_STRING, (match) => {
     // Count string literals (single- OR double-quoted). Comments start
     // with `/`, so they are never counted.
-    if (match.startsWith("'") || match.startsWith('"')) stringLiteralCount += 1;
+    if (match.startsWith("'") || match.startsWith('"')) {
+      stringLiteralCount += 1;
+      stringLiterals.push(unquoteStringLiteral(match));
+    }
     return blankOut(match);
   });
 
@@ -250,7 +267,7 @@ export const tokenizeFormula = (
     return err(invalidIdentifier);
   }
 
-  const numericLiteralCount = countNumericLiterals(scanReady);
+  const numericLiterals = collectNumericLiterals(scanReady);
   const { references, functionCalls } = extractReferencesAndCalls(scanReady);
 
   return ok({
@@ -258,7 +275,9 @@ export const tokenizeFormula = (
     globalReferences,
     functionCalls,
     stringLiteralCount,
-    numericLiteralCount,
+    numericLiteralCount: numericLiterals.length,
+    stringLiterals,
+    numericLiterals,
   });
 };
 
@@ -402,15 +421,36 @@ const findInvalidIdentifier = (stripped: string): TokenizerError | null => {
   return null;
 };
 
-const countNumericLiterals = (stripped: string): number => {
+/**
+ * Collect the numeric literals as RAW source text, in source order.
+ *
+ * Raw rather than parsed: a literal that overflows `Number` precision must be
+ * emitted as written rather than as a silently wrong number, and the caller is
+ * the one that decides how to present it.
+ */
+const collectNumericLiterals = (stripped: string): readonly string[] => {
   // Match well-formed numerics that aren't part of a larger identifier
   // (the invalid-identifier check above already rejected those mixes).
   NUMERIC_LITERAL.lastIndex = 0;
-  let count = 0;
-  while (NUMERIC_LITERAL.exec(stripped) !== null) {
-    count += 1;
+  const out: string[] = [];
+  for (
+    let match = NUMERIC_LITERAL.exec(stripped);
+    match !== null;
+    match = NUMERIC_LITERAL.exec(stripped)
+  ) {
+    out.push(match[0]);
   }
-  return count;
+  return out;
+};
+
+/**
+ * Strip a matched string literal's surrounding quotes and unescape the
+ * doubled-quote form Salesforce formulas use (`'it''s'` → `it's`).
+ */
+const unquoteStringLiteral = (match: string): string => {
+  const quote = match[0] as string;
+  const inner = match.slice(1, match.length - 1);
+  return inner.split(`${quote}${quote}`).join(quote);
 };
 
 // Find the next non-whitespace character at or after `index`. Returns

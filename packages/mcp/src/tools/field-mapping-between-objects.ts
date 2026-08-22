@@ -51,6 +51,7 @@ import type {
   ComponentId,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { closeGraph, openGraph, type GraphStore } from '@sf-intelligence/graph';
@@ -66,6 +67,25 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+} from './page-cursor.js';
+
+/** The three pageable list sections, in a STABLE order. */
+export const FIELD_MAPPING_SECTIONS = [
+  'suggestedPairs',
+  'unpairedFromA',
+  'unpairedFromB',
+] as const;
+
+/** Inclusive upper bound on `limit`. */
+const FIELD_MAPPING_MAX_LIMIT = 500;
+/** Default page size when the caller does not pass `limit`. */
+const FIELD_MAPPING_DEFAULT_LIMIT = 100;
+
 export const fieldMappingBetweenObjectsInputSchema = z.object({
   /**
    * Optional registered-vault alias. When omitted the tool answers from
@@ -77,6 +97,16 @@ export const fieldMappingBetweenObjectsInputSchema = z.object({
   objectB: z.string().min(1),
   similarityThreshold: z.number().min(0).max(1).optional(),
   includeTypeIncompatible: z.boolean().optional(),
+  /**
+   * Paging knobs. Without them a 592-field object produced a payload the
+   * dispatcher silently trimmed, so the tool stated a total its own rows did
+   * not add up to and the caller had no way to reach the rest.
+   */
+  limit: z.number().int().min(1).max(FIELD_MAPPING_MAX_LIMIT).optional(),
+  offset: z.number().int().nonnegative().optional(),
+  cursor: z.string().min(1).optional(),
+  /** Which list this page advances. The other two still publish their totals. */
+  section: z.enum(FIELD_MAPPING_SECTIONS).optional(),
 });
 
 export type FieldMappingBetweenObjectsInput = z.infer<
@@ -99,7 +129,35 @@ export interface FieldMappingBetweenObjectsOutput {
   readonly suggestedPairs: readonly FieldPair[];
   readonly unpairedFromA: readonly string[];
   readonly unpairedFromB: readonly string[];
+  /**
+   * TRUE totals for all three lists, before paging. A list in this response may
+   * be a PAGE; these are never a page length.
+   */
+  readonly counts: {
+    readonly suggestedPairs: number;
+    readonly unpairedFromA: number;
+    readonly unpairedFromB: number;
+  };
+  /**
+   * `pairs + unpaired === fieldCount` is an INVARIANT of this tool. When it
+   * does not hold, say so loudly rather than printing a total the rows do not
+   * add up to.
+   */
+  readonly reconciliation: {
+    readonly balanced: boolean;
+    readonly aAccountedFor: number;
+    readonly bAccountedFor: number;
+  };
   readonly boundaries: readonly string[];
+  readonly section?: (typeof FIELD_MAPPING_SECTIONS)[number];
+  readonly limit?: number;
+  readonly offset?: number;
+  readonly hasMore?: boolean;
+  readonly nextOffset?: number | null;
+  readonly nextCursor?: string;
+  readonly pageInfo?: PageInfo;
+  /** Verbatim; present only when the designated section was truncated. */
+  readonly note?: string;
 }
 
 interface FieldRow {
@@ -325,6 +383,8 @@ const vaultNotFoundResponse = (
       },
       objectA: { apiName: objectA, fieldCount: 0 },
       objectB: { apiName: objectB, fieldCount: 0 },
+      counts: { suggestedPairs: 0, unpairedFromA: 0, unpairedFromB: 0 },
+      reconciliation: { balanced: true, aAccountedFor: 0, bAccountedFor: 0 },
       suggestedPairs: [],
       unpairedFromA: [],
       unpairedFromB: [],
@@ -445,15 +505,127 @@ export const fieldMappingBetweenObjectsHandler = async (
       .map((f) => f.fieldApiName)
       .sort();
 
+    // ---- Counts + reconciliation ---------------------------------------
+    // These are the TRUE totals for all three lists. Every list below may be
+    // a PAGE; none of their lengths is a total.
+    const counts = {
+      suggestedPairs: suggestedPairs.length,
+      unpairedFromA: unpairedFromA.length,
+      unpairedFromB: unpairedFromB.length,
+    };
+    const aAccountedFor = counts.suggestedPairs + counts.unpairedFromA;
+    const bAccountedFor = counts.suggestedPairs + counts.unpairedFromB;
+    const balanced =
+      aAccountedFor === fieldsA.length && bAccountedFor === fieldsB.length;
+    const reconciliation = { balanced, aAccountedFor, bAccountedFor };
+
+    const reconciliationBoundaries: string[] = [];
+    if (!balanced) {
+      // Should be unreachable once paging lands — it stays as the fail-loud
+      // floor, and its reachability is itself a test.
+      const side =
+        aAccountedFor !== fieldsA.length
+          ? { label: 'objectA', total: fieldsA.length, accounted: aAccountedFor }
+          : { label: 'objectB', total: fieldsB.length, accounted: bAccountedFor };
+      reconciliationBoundaries.push(
+        `This response cannot account for every field: \`${side.label}\` has ${side.total} field(s), and pairs plus unpaired rows total ${side.accounted}. The ${Math.abs(
+          side.total - side.accounted,
+        )}-field difference is a defect in this tool, not a property of the org — do not read the unpaired list as complete.`,
+      );
+    }
+
+    // ---- Paging ---------------------------------------------------------
+    const sections: PageableSection<FieldPair | string>[] = [
+      { listId: 'suggestedPairs', items: suggestedPairs },
+      { listId: 'unpairedFromA', items: unpairedFromA },
+      { listId: 'unpairedFromB', items: unpairedFromB },
+    ];
+    const fingerprint = argsFingerprint({
+      vault: input.vault,
+      objectA: input.objectA,
+      objectB: input.objectB,
+      similarityThreshold: input.similarityThreshold,
+      includeTypeIncompatible: input.includeTypeIncompatible,
+      section: input.section,
+    });
+    const binding = {
+      tool: 'sfi.field_mapping_between_objects',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    };
+    let offset = input.offset ?? 0;
+    let designated: (typeof FIELD_MAPPING_SECTIONS)[number] =
+      input.section ?? 'suggestedPairs';
+    if (input.cursor !== undefined) {
+      const decoded = decodeCursor(input.cursor, binding);
+      if (!decoded.ok) return err(decoded.error);
+      offset = decoded.value.o;
+      // HANDLER CONTRACT: re-bind the section from the cursor, not the args.
+      const listId = decoded.value.listId;
+      if (listId !== undefined) {
+        designated = listId as (typeof FIELD_MAPPING_SECTIONS)[number];
+      }
+    }
+    const limit = input.limit ?? FIELD_MAPPING_DEFAULT_LIMIT;
+    const paged = paginateSection(sections, designated, {
+      offset,
+      limit,
+      binding,
+    });
+    if (!paged.ok) return err(paged.error);
+    const { items, pageInfo } = paged.value;
+    const emitPaging = pageInfo.hasMore || offset > 0;
+    const pagedLists = {
+      suggestedPairs:
+        designated === 'suggestedPairs'
+          ? (items as readonly FieldPair[])
+          : suggestedPairs,
+      unpairedFromA:
+        designated === 'unpairedFromA'
+          ? (items as readonly string[])
+          : unpairedFromA,
+      unpairedFromB:
+        designated === 'unpairedFromB'
+          ? (items as readonly string[])
+          : unpairedFromB,
+    };
+    const pagingKeys: Record<string, unknown> = emitPaging
+      ? {
+          section: designated,
+          limit,
+          offset,
+          hasMore: pageInfo.hasMore,
+          nextOffset: pageInfo.hasMore ? offset + items.length : null,
+          ...(pageInfo.nextCursor !== null
+            ? { nextCursor: pageInfo.nextCursor }
+            : {}),
+          pageInfo,
+          ...(pageInfo.hasMore
+            ? {
+                note: `Showing ${items.length} of ${pageInfo.totalCount} \`${designated}\` row(s) (offset=${offset}). MORE remain — advance with offset=${
+                  offset + items.length
+                } or echo \`nextCursor\`. \`counts\` states the TRUE total for every section; this page is a slice of one of them. Change \`section\` to page a different list.`,
+              }
+            : {}),
+        }
+      : {};
+
     return ok({
       data: {
         vault: vaultRef,
         objectA: { apiName: input.objectA, fieldCount: fieldsA.length },
         objectB: { apiName: input.objectB, fieldCount: fieldsB.length },
-        suggestedPairs,
-        unpairedFromA,
-        unpairedFromB,
-        boundaries: [HEURISTIC_MAPPING_DISCLOSURE, ...extraBoundaries],
+        suggestedPairs: pagedLists.suggestedPairs,
+        unpairedFromA: pagedLists.unpairedFromA,
+        unpairedFromB: pagedLists.unpairedFromB,
+        counts,
+        reconciliation,
+        boundaries: [
+          HEURISTIC_MAPPING_DISCLOSURE,
+          ...extraBoundaries,
+          ...reconciliationBoundaries,
+        ],
+        ...pagingKeys,
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,

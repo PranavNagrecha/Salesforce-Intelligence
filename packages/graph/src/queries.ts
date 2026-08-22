@@ -35,6 +35,16 @@ const NODE_COLUMNS =
 const EDGE_COLUMNS =
   'from_id, to_id, edge_type, confidence, source, properties_json';
 
+/**
+ * Escape a user query for use inside a regular expression.
+ *
+ * The whole-token score tier puts caller input in front of a regex engine for
+ * the first time. Every metacharacter is escaped so a query like `Amount(` is
+ * matched literally rather than throwing or matching something else.
+ */
+const regexEscape = (query: string): string =>
+  query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /** A single result row from `searchNodes`. */
 export interface SearchHit {
   readonly id: ComponentId;
@@ -246,10 +256,25 @@ export interface ListEdgesForNodesOptions {
   readonly edgeTypes?: readonly EdgeType[];
 }
 
-/** Options for `searchNodes`. */
+/** Options for `searchNodes` / `searchNodesPage`. */
 export interface SearchNodesOptions {
   readonly limit?: number;
+  /** Zero-based page offset. Applied in SQL alongside `limit`. */
+  readonly offset?: number;
   readonly types?: readonly ComponentType[];
+}
+
+/**
+ * A page of search hits PLUS the true match count before `limit`/`offset`.
+ *
+ * `hits.length` is a page length. Returning it alone — which is all
+ * `searchNodes` ever did — left the caller unable to tell a complete answer
+ * from a 1.3% sample of 1,931 matches.
+ */
+export interface SearchNodesPage {
+  readonly hits: readonly SearchHit[];
+  /** TRUE total matching the query (post-`types` filter), before paging. */
+  readonly totalCount: number;
 }
 
 type Row = Readonly<Record<string, unknown>>;
@@ -963,26 +988,33 @@ const buildSnippet = (
  *   const r = await searchNodes(store, 'Industry', { limit: 10 });
  *   if (r.ok) for (const hit of r.value) console.log(hit.score, hit.snippet);
  */
-export const searchNodes = async (
+export const searchNodesPage = async (
   store: GraphStore,
   query: string,
   options?: SearchNodesOptions,
-): Promise<Result<readonly SearchHit[], GraphError>> => {
+): Promise<Result<SearchNodesPage, GraphError>> => {
   const limit = options?.limit ?? SEARCH_DEFAULT_LIMIT;
+  const offset = options?.offset ?? 0;
   if (limit > SEARCH_MAX_LIMIT) {
     return err({
       kind: 'query-failed',
       message: `searchNodes: limit exceeds ${SEARCH_MAX_LIMIT}`,
     });
   }
-  if (query.length === 0) return ok([]);
+  if (query.length === 0) return ok({ hits: [], totalCount: 0 });
 
   const pattern = `%${query}%`;
   const prefixPattern = `${query}%`;
-  // 1 exact + 4 score ILIKEs + 3 WHERE ILIKEs in this order.
+  // LIKE patterns are UNCHANGED — a `%` / `_` in a query keeps behaving exactly
+  // as it did, because changing LIKE semantics is not this fix. The new
+  // whole-token tier is the only place caller input reaches a REGEX engine, and
+  // it is escaped for that engine specifically.
+  const tokenPattern = `(^|[^A-Za-z0-9])${regexEscape(query)}([^A-Za-z0-9]|$)`;
+  // 1 exact + 1 prefix + 1 token-regex + 3 score ILIKEs + 3 WHERE ILIKEs.
   const params: DuckDBValue[] = [
     query,
     prefixPattern,
+    tokenPattern,
     pattern,
     pattern,
     pattern,
@@ -995,12 +1027,17 @@ export const searchNodes = async (
     typesClause = ` AND type IN (${options.types.map(() => '?').join(', ')})`;
     params.push(...options.types);
   }
-  params.push(limit);
+  params.push(limit, offset);
 
+  // `COUNT(*) OVER ()` gives the TRUE post-filter match count in the SAME
+  // round-trip and against the SAME WHERE clause — no second query, and no way
+  // for the total to drift from the rows it describes.
   const sql = `SELECT id, api_name, label, properties_json,
+      COUNT(*) OVER () AS total_matches,
       CASE
         WHEN api_name = ? THEN 3.0
         WHEN api_name ILIKE ? THEN 2.8
+        WHEN regexp_matches(lower(api_name), lower(?)) THEN 2.6
         WHEN api_name ILIKE ? THEN 2.5
         WHEN label ILIKE ? THEN 2.0
         WHEN properties_json ILIKE ? THEN 1.0
@@ -1008,26 +1045,44 @@ export const searchNodes = async (
       END AS score
     FROM nodes
     WHERE (api_name ILIKE ? OR label ILIKE ? OR properties_json ILIKE ?)${typesClause}
-    ORDER BY score DESC, api_name ASC
-    LIMIT ?`;
+    ORDER BY score DESC, length(api_name) ASC, api_name ASC
+    LIMIT ? OFFSET ?`;
 
   try {
     const rows = await fetchRows(store, sql, params);
-    return ok(
-      rows.map((r) => ({
-        id: r['id'] as ComponentId,
-        score: Number(r['score']),
-        snippet: buildSnippet(
-          query,
-          r['api_name'] as string,
-          (r['label'] ?? null) as string | null,
-          (r['properties_json'] as string | null) ?? '{}',
-        ),
-      })),
-    );
+    const hits = rows.map((r) => ({
+      id: r['id'] as ComponentId,
+      score: Number(r['score']),
+      snippet: buildSnippet(
+        query,
+        r['api_name'] as string,
+        (r['label'] ?? null) as string | null,
+        (r['properties_json'] as string | null) ?? '{}',
+      ),
+    }));
+    // `total_matches` is constant across the window; an empty page past the
+    // end yields no rows, and a zero total is then correct for THIS page —
+    // callers that need the total on an over-run page re-query at offset 0.
+    const totalCount =
+      rows.length > 0 ? Number(rows[0]?.['total_matches'] ?? 0) : 0;
+    return ok({ hits, totalCount });
   } catch (e) {
     return err(queryFailed('searchNodes', e));
   }
+};
+
+/**
+ * Back-compat projection: the hit list alone, for callers that never wanted
+ * the total (`object_360`'s case-insensitive object-id probe). ONE
+ * implementation, one thin projection.
+ */
+export const searchNodes = async (
+  store: GraphStore,
+  query: string,
+  options?: SearchNodesOptions,
+): Promise<Result<readonly SearchHit[], GraphError>> => {
+  const page = await searchNodesPage(store, query, options);
+  return page.ok ? ok(page.value.hits) : page;
 };
 
 const compareEdges = (a: Edge, b: Edge): number => {

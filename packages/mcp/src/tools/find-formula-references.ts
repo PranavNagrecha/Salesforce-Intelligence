@@ -10,9 +10,10 @@
  * Implementation notes:
  *   - One `listEdges(fieldId, { direction: 'in', edgeType: 'references' })`
  *     call retrieves every candidate edge; `getNodeById` then resolves
- *     each `fromId` to a `Node`. The graph cannot distinguish "field
- *     does not exist" from "field has no incoming references", and
- *     either is a valid empty result.
+ *     each `fromId` to a `Node`. An id that names NO node, or a node
+ *     that is not a CustomField, is REFUSED with `component-not-found`
+ *     (plus typo-tolerant `resolveSuggestions`) — an empty referencer
+ *     list is reserved for a real field that genuinely has none.
  *   - The output's `source` and `properties` come from the EDGE, not
  *     the referencer node. That is the architect's intent: the edge
  *     carries the tokenizer's per-reference metadata
@@ -41,8 +42,10 @@ import {
   type CoverageCaveat,
   FORMULA_REFERENCE_REQUIRED_COVERAGE,
 } from './coverage-trust.js';
+import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { firstNonEmpty } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -66,8 +69,9 @@ const FORMULA_REFS_DEFAULT_LIMIT = 50;
 /**
  * Zod schema for the `sfi.find_formula_references` tool input.
  *
- *   - `fieldId`: the canonical `CustomField:{Object}.{Field}` id. Unknown ids
- *     surface as an empty referencers list, not a Zod-level rejection.
+ *   - `fieldId`: the canonical `CustomField:{Object}.{Field}` id. An id that
+ *     names no CustomField node surfaces as `component-not-found` from the
+ *     handler (with resolve suggestions), not a Zod-level rejection.
  *   - `componentId` / `fieldApiName`: interchangeable field selectors a host
  *     naturally forwards from `sfi.resolve`
  *     (FIND-FORMULA-REFERENCES-REJECTS-COMPONENTID). `componentId` is the
@@ -285,6 +289,36 @@ export const findFormulaReferencesHandler = async (
     return ok(
       suggestionResult.value as unknown as McpResponse<FindFormulaReferencesOutput>,
     );
+  }
+
+  // EXISTENCE GATE. Without it, four distinct causes produced a byte-identical
+  // `{referencers: [], totalCount: 0}` and three of them were lies: a miscased
+  // id, a nonexistent field, a non-CustomField node, and a real field that
+  // genuinely has no formula references. Ask the graph whether the thing being
+  // named exists before answering a zero about it — the same gate nine sibling
+  // field tools already pay for (copied from `field-meaning.ts`).
+  const nodeResult = await getNodeById(ctx.graph, fieldId);
+  if (!nodeResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${nodeResult.error.message}`,
+    });
+  }
+  if (nodeResult.value === null) {
+    return err(
+      await fieldNotFoundError(
+        ctx,
+        fieldId,
+        await phantomAwareNotFoundMessage(ctx, fieldId, 'CustomField'),
+      ),
+    );
+  }
+  if (nodeResult.value.type !== 'CustomField') {
+    return err({
+      kind: 'component-not-found',
+      message: `node ${fieldId} is not a CustomField (type=${nodeResult.value.type})`,
+      path: fieldId,
+    });
   }
 
   const limit = input.limit ?? FORMULA_REFS_DEFAULT_LIMIT;

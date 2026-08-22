@@ -20,8 +20,17 @@ import {
 
 import type { Context } from '../../src/server.js';
 import { valueChangeAuditHandler } from '../../src/tools/value-change-audit.js';
+import { whatIfRemovePicklistValueHandler } from '../../src/tools/what-if-remove-picklist-value.js';
 
-const REQUIRED = ['CustomField', 'ValidationRule', 'Flow', 'ApexClass', 'ApexTrigger', 'WorkflowRule', 'Layout', 'SharingRule', 'DuplicateRule'];
+// FIX 9: ONE shared family list (`VALUE_LITERAL_READER_COVERAGE`) for every
+// value-literal reader. `value_change_audit` and `what_if_remove_picklist_value`
+// answered the same coverage question with two hand-copied lists that
+// disagreed; this is their union.
+const REQUIRED = [
+  'CustomField', 'ValidationRule', 'Flow', 'ApexClass', 'ApexTrigger',
+  'WorkflowRule', 'Layout', 'SharingRule', 'DuplicateRule',
+  'ConditionalContext', 'Report', 'Dashboard', 'ListView', 'FlexiPage',
+];
 const completeCoverage = (types: readonly string[]): readonly CoverageEntry[] =>
   types.map((type) => ({ type, requested: true, retrieved: 1, errored: false, neverModeled: false }));
 
@@ -53,6 +62,9 @@ const seed: ExtractionResult = {
     fld('Alias', { dataType: 'Text' }),                                    // catalog low -> candidate via catalog
     fld('Doubled__c', { dataType: 'Number', formula: 'X * 2' }),           // derived -> NOT candidate
     fld('Notes__c', { dataType: 'LongTextArea' }),                         // plain low -> NOT candidate
+    // FIX 9 cross-tool guard: a real picklist so the SAME manifest can be put
+    // through `what_if_remove_picklist_value` and compared set-for-set.
+    fld('Stage__c', { dataType: 'Picklist', picklistValues: ['Open', 'Closed'] }),
   ],
   edges: [
     makeEdge({ fromId: USER, toId: 'CustomField:User.Username', edgeType: 'parentOf' }),
@@ -61,6 +73,7 @@ const seed: ExtractionResult = {
     makeEdge({ fromId: USER, toId: 'CustomField:User.Alias', edgeType: 'parentOf' }),
     makeEdge({ fromId: USER, toId: 'CustomField:User.Doubled__c', edgeType: 'parentOf' }),
     makeEdge({ fromId: USER, toId: 'CustomField:User.Notes__c', edgeType: 'parentOf' }),
+    makeEdge({ fromId: USER, toId: 'CustomField:User.Stage__c', edgeType: 'parentOf' }),
   ],
 };
 
@@ -86,11 +99,13 @@ describe('valueChangeAuditHandler', () => {
     if (!r.ok) return;
     const d = r.value.data;
     expect(d.autoDetected).toBe(true);
-    expect(d.scannedFieldCount).toBe(6);
+    // 7 fields scanned since the FIX 9 cross-tool guard added `Stage__c`.
+    expect(d.scannedFieldCount).toBe(7);
     const fields = d.rows.map((x) => x.field).sort();
     expect(fields).toEqual(['Alias', 'Code__c', 'Member_ID__c', 'Username']);
     expect(fields).not.toContain('Doubled__c');
     expect(fields).not.toContain('Notes__c');
+    expect(fields).not.toContain('Stage__c');
   });
 
   it('ranks critical first and counts the summary', async () => {
@@ -221,5 +236,70 @@ describe('valueChangeAuditHandler', () => {
       expect(r.value.data.autoDetected).toBe(false);
       expect(r.value.data.rows.map((x) => x.field)).toEqual(['Username']);
     });
+  });
+});
+
+/**
+ * FIX 9 — `value_change_audit` stopped reporting `complete` while its own prose
+ * named uncovered families.
+ *
+ * Its private `VALUE_CHANGE_REQUIRED_COVERAGE` named nine families;
+ * `what_if_remove_picklist_value`'s private `PICKLIST_VALUE_COVERAGE` named a
+ * different ten. Same question, same field, two answers. Both now read the one
+ * shared `VALUE_LITERAL_READER_COVERAGE` through the one shared
+ * `buildCoverageCaveat`.
+ */
+describe('valueChangeAuditHandler — shared value-literal coverage (FIX 9)', () => {
+  const gapManifest = (): VaultManifest =>
+    ({
+      ...FIXTURE_MANIFEST,
+      coverage: REQUIRED.map((type) =>
+        type === 'ListView' || type === 'Report'
+          ? { type, requested: true, retrieved: 0, errored: false, neverModeled: false }
+          : { type, requested: true, retrieved: 1, errored: false, neverModeled: false },
+      ),
+    }) as VaultManifest;
+
+  it('reports partial and names the uncovered families', async () => {
+    const gapCtx: Context = { ...ctx, manifest: gapManifest() };
+    const r = await valueChangeAuditHandler(gapCtx, { object: 'User' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix: `complete`, no caveat — ListView/Report were not in the list.
+    expect(r.value.data.trust.completeness.status).toBe('partial');
+    const caveat = r.value.data.coverageCaveat;
+    expect(caveat).toBeDefined();
+    expect(caveat?.missingCoverage).toContain('ListView');
+    expect(caveat?.missingCoverage).toContain('Report');
+    expect(caveat?.message).toBe(
+      `Value-change audit completeness cannot be confirmed because the vault has incomplete coverage for: ${caveat?.missingCoverage.join(
+        ', ',
+      )}. Treat absence of dependencies in those families as "not checked", not "none".`,
+    );
+  });
+
+  it('keeps `complete` reachable on a fully covered vault', async () => {
+    const r = await valueChangeAuditHandler(ctx, { object: 'User' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.trust.completeness.status).toBe('complete');
+    expect(r.value.data.coverageCaveat).toBeUndefined();
+  });
+
+  it('names the SAME missing families as what_if_remove_picklist_value', async () => {
+    // The finding's actual complaint: two tools, one question, two answers.
+    // This is the regression that stops the lists drifting apart again.
+    const gapCtx: Context = { ...ctx, manifest: gapManifest() };
+    const audit = await valueChangeAuditHandler(gapCtx, { object: 'User' });
+    const picklist = await whatIfRemovePicklistValueHandler(gapCtx, {
+      fieldId: 'CustomField:User.Stage__c',
+      value: 'Open',
+    });
+    expect(audit.ok).toBe(true);
+    expect(picklist.ok).toBe(true);
+    if (!audit.ok || !picklist.ok) return;
+    expect(new Set(picklist.value.data.coverageCaveat?.missingCoverage)).toEqual(
+      new Set(audit.value.data.coverageCaveat?.missingCoverage),
+    );
   });
 });
