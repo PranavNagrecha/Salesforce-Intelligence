@@ -956,8 +956,9 @@ describe('callGraphHandler — an empty edges array is not "no callers"', () => 
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.edges).toHaveLength(5);
-    // Nothing was left unfollowed, so there is nothing to report.
-    expect(r.value.data.otherUsageInEdges).toBeUndefined();
+    // Nothing was left unfollowed. The field is still emitted, as a CHECKED
+    // zero — an absent field would read as "not checked".
+    expect(r.value.data.otherUsageInEdges).toEqual({ count: 0, byType: {} });
     expect(r.value.data.soundness.complete).toBe(true);
   });
 

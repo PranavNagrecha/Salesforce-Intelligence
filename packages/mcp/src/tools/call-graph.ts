@@ -214,10 +214,11 @@ export interface CallGraphOutput {
    * The root's incoming USAGE edges this walk did NOT traverse, with a per-type
    * breakdown. This is the field that stops `edges: []` reading as "no
    * callers": a `count` of 0 is a CHECKED zero, and a non-zero count names
-   * exactly what was left unfollowed. Absent only when the walk already covered
-   * the full usage set (nothing was left out to report).
+   * exactly what was left unfollowed. ALWAYS present — a `count` of 0 next to
+   * `walkedEdgeTypes` is a CHECKED zero, whereas an absent field would be
+   * UNCHECKED-shaped.
    */
-  readonly otherUsageInEdges?: {
+  readonly otherUsageInEdges: {
     readonly count: number;
     readonly byType: Readonly<Record<string, number>>;
   };
@@ -605,7 +606,6 @@ export const callGraphHandler = async (
   if (!unwalkedRes.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${unwalkedRes.error}` });
   }
-  const walkedAll = walkedEdgeTypes.length === USAGE_EDGE_TYPES.length;
   const soundness = soundnessForReachabilityWalk(
     nodesRes.value.raw,
     walkedEdgeTypes,
@@ -621,7 +621,10 @@ export const callGraphHandler = async (
       cycleDetected,
       maxDepthReached,
       walkedEdgeTypes,
-      ...(walkedAll ? {} : { otherUsageInEdges: unwalkedRes.value }),
+      // ALWAYS emitted, including as `{count: 0, byType: {}}`. An absent field
+      // is UNCHECKED-shaped; a zero here alongside walkedEdgeTypes is a CHECKED
+      // zero, which is the whole point of the field.
+      otherUsageInEdges: unwalkedRes.value,
       soundness,
       disclosure: `${CALL_GRAPH_DISCLOSURE} ${CALL_GRAPH_UNWALKED_DISCLOSURE}`,
     },
