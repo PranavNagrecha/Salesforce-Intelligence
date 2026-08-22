@@ -107,9 +107,107 @@ export type CompareObjectAcrossVaultsInput = z.infer<
 
 export interface PropertyDrift {
   readonly propertyPath: string;
-  readonly valueA: unknown;
-  readonly valueB: unknown;
+  /**
+   * Which side(s) actually CARRY the key. A one-sided row used to be reported
+   * identically to a real value difference, so an extractor that never wrote a
+   * property looked like the two orgs disagreeing about it.
+   */
+  readonly presence: 'both' | 'absent-in-a' | 'absent-in-b';
+  /** Omitted — not `null` — when the key is absent on that side. */
+  readonly valueA?: unknown;
+  readonly valueB?: unknown;
+  /** Set when the census could not run, so neither reading is ruled out. */
+  readonly causeUnknown?: true;
+  /** Verbatim; present on every non-`both` row. */
+  readonly note?: string;
 }
+
+/**
+ * A property one vault's BUILDER never wrote. Not org drift — the two orgs
+ * cannot be compared on it at all from these vaults, which is a different
+ * answer and belongs in a different list.
+ */
+export interface PropertyCoverageGap {
+  readonly propertyPath: string;
+  readonly presentIn: 'A' | 'B';
+  readonly presentSideNodes: {
+    readonly withProperty: number;
+    readonly total: number;
+  };
+  readonly absentSideNodes: { readonly withProperty: 0; readonly total: number };
+  /** Verbatim. */
+  readonly message: string;
+}
+
+/** One property-presence census result, or `null` when the query failed. */
+interface PresenceCensus {
+  readonly withProperty: number;
+  readonly total: number;
+}
+
+/** Property keys safe to interpolate into a DuckDB JSON path. */
+const SAFE_PROPERTY_KEY = /^[A-Za-z0-9_]+$/;
+
+/**
+ * Count how many nodes of `nodeType` in this store carry `key` at all.
+ *
+ * This is the discriminator between an EXTRACTOR gap and real org drift: on the
+ * reference pair, `externalSharingModel` is present on 149 of 149 `CustomObject`
+ * nodes in the fresh vault and 0 of 129 in the stale one. One aggregate query
+ * settles it; without it every such key produces a false drift row per object.
+ *
+ * The key comes from vault DATA and is interpolated into a JSON path, so it is
+ * validated against {@link SAFE_PROPERTY_KEY} first. Anything else returns
+ * `null`, which the caller reports as `causeUnknown` — never as a guess.
+ */
+const censusProperty = async (
+  store: GraphStore,
+  nodeType: string,
+  key: string,
+): Promise<PresenceCensus | null> => {
+  if (!SAFE_PROPERTY_KEY.test(key)) return null;
+  try {
+    const reader = await store.connection.runAndReadAll(
+      `SELECT count(*) AS total, count(*) FILTER (WHERE json_extract(properties_json, '$.${key}') IS NOT NULL) AS present FROM nodes WHERE type = ?`,
+      [nodeType] as never[],
+    );
+    const row = reader.getRowObjectsJS()[0] as
+      | { readonly total: unknown; readonly present: unknown }
+      | undefined;
+    if (row === undefined) return null;
+    return { withProperty: Number(row.present), total: Number(row.total) };
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Cached census across the field-level axis: `shapeModifiedFields[].drift`
+ * reuses the same (side, type, key) triples across hundreds of fields, so the
+ * real query count is a handful.
+ */
+const makeCensus = (
+  storeA: GraphStore,
+  storeB: GraphStore,
+): ((
+  side: 'A' | 'B',
+  nodeType: string,
+  key: string,
+) => Promise<PresenceCensus | null>) => {
+  const cache = new Map<string, PresenceCensus | null>();
+  return async (side, nodeType, key) => {
+    const cacheKey = `${side}|${nodeType}|${key}`;
+    const hit = cache.get(cacheKey);
+    if (hit !== undefined || cache.has(cacheKey)) return hit ?? null;
+    const result = await censusProperty(
+      side === 'A' ? storeA : storeB,
+      nodeType,
+      key,
+    );
+    cache.set(cacheKey, result);
+    return result;
+  };
+};
 
 export interface FieldDiff {
   readonly fieldApiName: string;
@@ -125,6 +223,11 @@ export interface CompareObjectAcrossVaultsOutput {
   readonly objectExistsInA: boolean;
   readonly objectExistsInB: boolean;
   readonly objectLevelDrift: readonly PropertyDrift[];
+  /**
+   * Properties one vault's BUILDER never wrote, moved OUT of
+   * `objectLevelDrift` so an extractor gap is never counted as org drift.
+   */
+  readonly propertyCoverageGaps: readonly PropertyCoverageGap[];
   readonly addedFields: readonly FieldDiff[];
   readonly removedFields: readonly FieldDiff[];
   readonly shapeModifiedFields: readonly FieldDiff[];
@@ -224,25 +327,103 @@ const hashProperties = (
   return createHash('sha256').update(canonicalJson(filtered)).digest('hex');
 };
 
-const collectDrift = (
+/**
+ * Compare two property bags and classify every difference THREE ways instead of
+ * one.
+ *
+ * The old implementation emitted a drift row whenever `canonicalJson(va) !==
+ * canonicalJson(vb)`, which is true whenever a key is merely MISSING on one
+ * side. Comparing a 0.3.0 vault against a 0.1.11 one that way manufactures a
+ * drift row per object for every property the older builder never wrote.
+ *
+ *   1. both sides carry the key, values differ     -> real drift
+ *   2. one side only, and that side's builder never
+ *      writes the key anywhere                     -> extractor COVERAGE GAP
+ *   3. one side only, but that side's builder DOES
+ *      write the key elsewhere                     -> real drift, confirmed
+ *
+ * When the census cannot run, the row stays in drift with `causeUnknown` and a
+ * note saying both readings are open. It never silently picks a side.
+ */
+const collectDrift = async (
   a: Readonly<Record<string, unknown>>,
   b: Readonly<Record<string, unknown>>,
   includeVolatile: boolean,
-): PropertyDrift[] => {
+  nodeType: string,
+  census: (
+    side: 'A' | 'B',
+    nodeType: string,
+    key: string,
+  ) => Promise<PresenceCensus | null>,
+  aliasA: string,
+  aliasB: string,
+): Promise<{
+  drift: PropertyDrift[];
+  gaps: PropertyCoverageGap[];
+}> => {
   const keys = new Set<string>([...Object.keys(a), ...Object.keys(b)]);
   const drift: PropertyDrift[] = [];
+  const gaps: PropertyCoverageGap[] = [];
+  const has = (bag: Readonly<Record<string, unknown>>, key: string): boolean =>
+    Object.prototype.hasOwnProperty.call(bag, key) && bag[key] !== undefined;
+
   for (const key of keys) {
     if (!includeVolatile && VOLATILE_PROPERTY_PATHS.has(key)) continue;
-    const va = a[key];
-    const vb = b[key];
-    if (canonicalJson(va) !== canonicalJson(vb)) {
-      drift.push({ propertyPath: key, valueA: va, valueB: vb });
+    const inA = has(a, key);
+    const inB = has(b, key);
+    if (inA && inB) {
+      if (canonicalJson(a[key]) !== canonicalJson(b[key])) {
+        drift.push({
+          propertyPath: key,
+          presence: 'both',
+          valueA: a[key],
+          valueB: b[key],
+        });
+      }
+      continue;
     }
+    if (!inA && !inB) continue;
+
+    const presentSide: 'A' | 'B' = inA ? 'A' : 'B';
+    const absentSide: 'A' | 'B' = inA ? 'B' : 'A';
+    const presentAlias = presentSide === 'A' ? aliasA : aliasB;
+    const absentAlias = absentSide === 'A' ? aliasA : aliasB;
+    const absentCensus = await census(absentSide, nodeType, key);
+    if (absentCensus === null) {
+      drift.push({
+        propertyPath: key,
+        presence: inA ? 'absent-in-b' : 'absent-in-a',
+        ...(inA ? { valueA: a[key] } : { valueB: b[key] }),
+        causeUnknown: true,
+        note: `\`${key}\` is present in ${presentAlias} and absent in ${absentAlias}. This response could not census ${absentAlias} to tell whether ${absentAlias}'s builder omits the property entirely (an extractor gap) or this object genuinely lacks it (real drift). Both readings are open — do not act on this row alone.`,
+      });
+      continue;
+    }
+    if (absentCensus.withProperty === 0) {
+      const presentCensus = await census(presentSide, nodeType, key);
+      const presentCount = presentCensus?.withProperty ?? 0;
+      const presentTotal = presentCensus?.total ?? 0;
+      gaps.push({
+        propertyPath: key,
+        presentIn: presentSide,
+        presentSideNodes: { withProperty: presentCount, total: presentTotal },
+        absentSideNodes: { withProperty: 0, total: absentCensus.total },
+        message: `\`${key}\` is carried by ${presentCount} of ${presentTotal} \`${nodeType}\` node(s) in ${presentAlias} and by 0 of ${absentCensus.total} in ${absentAlias}. That is an EXTRACTOR-COVERAGE gap in ${absentAlias}, not org drift: ${absentAlias}'s builder never wrote this property, so whether the two orgs agree on it CANNOT be determined from these vaults. Re-refresh ${absentAlias} with a current builder to compare it.`,
+      });
+      continue;
+    }
+    drift.push({
+      propertyPath: key,
+      presence: inA ? 'absent-in-b' : 'absent-in-a',
+      ...(inA ? { valueA: a[key] } : { valueB: b[key] }),
+      note: `\`${key}\` is present on this object in ${presentAlias} and absent in ${absentAlias}. ${absentAlias}'s vault DOES carry \`${key}\` on ${absentCensus.withProperty} of ${absentCensus.total} \`${nodeType}\` node(s), so its builder emits the property — the absence here is a real difference.`,
+    });
   }
-  drift.sort((x, y) =>
-    x.propertyPath < y.propertyPath ? -1 : x.propertyPath > y.propertyPath ? 1 : 0,
-  );
-  return drift;
+  const byPath = (x: { propertyPath: string }, y: { propertyPath: string }): number =>
+    x.propertyPath < y.propertyPath ? -1 : x.propertyPath > y.propertyPath ? 1 : 0;
+  drift.sort(byPath);
+  gaps.sort(byPath);
+  return { drift, gaps };
 };
 
 const loadObject = async (
@@ -381,10 +562,24 @@ export const compareObjectAcrossVaultsHandler = async (
       buildExtractorVersionCaveat(pathAResult.value, pathBResult.value, input.vaultA, input.vaultB),
     ]);
 
-    const objectLevelDrift: PropertyDrift[] =
-      objA !== null && objB !== null
-        ? collectDrift(objA.properties, objB.properties, includeVolatile)
-        : [];
+    // Cached across BOTH axes (object-level and every field) — the same
+    // (side, type, key) triples repeat across hundreds of fields.
+    const census = makeCensus(openA.value.store, openB.value.store);
+    const propertyCoverageGaps: PropertyCoverageGap[] = [];
+    const objectLevelDrift: PropertyDrift[] = [];
+    if (objA !== null && objB !== null) {
+      const classified = await collectDrift(
+        objA.properties,
+        objB.properties,
+        includeVolatile,
+        'CustomObject',
+        census,
+        input.vaultA,
+        input.vaultB,
+      );
+      objectLevelDrift.push(...classified.drift);
+      propertyCoverageGaps.push(...classified.gaps);
+    }
 
     const [fieldsA, fieldsB] = await Promise.all([
       objA !== null ? loadFields(openA.value.store, objectId) : Promise.resolve([]),
@@ -428,11 +623,17 @@ export const compareObjectAcrossVaultsHandler = async (
         const hashA = hashProperties(nodeA.properties, includeVolatile);
         const hashB = hashProperties(nodeB.properties, includeVolatile);
         if (hashA !== hashB) {
-          const drift = collectDrift(
+          const classified = await collectDrift(
             nodeA.properties,
             nodeB.properties,
             includeVolatile,
+            'CustomField',
+            census,
+            input.vaultA,
+            input.vaultB,
           );
+          const drift = classified.drift;
+          propertyCoverageGaps.push(...classified.gaps);
           shapeModifiedFields.push({
             fieldApiName: key,
             side: 'both',
@@ -488,6 +689,7 @@ export const compareObjectAcrossVaultsHandler = async (
         objectExistsInA: objA !== null,
         objectExistsInB: objB !== null,
         objectLevelDrift,
+        propertyCoverageGaps,
         addedFields,
         removedFields,
         shapeModifiedFields,

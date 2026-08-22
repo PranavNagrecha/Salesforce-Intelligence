@@ -120,3 +120,21 @@
 
   **Behaviour change for callers:** a host that used to get a verdict for a typo
   now gets a refusal.
+
+- **`sfi.compare_object_across_vaults` tells an extractor gap from org drift.**
+  `collectDrift` emitted a row whenever the canonical JSON differed, which is
+  true when a key is merely MISSING on one side — so comparing a current vault
+  against one built by an older builder manufactured a drift row per object for
+  every property that builder never wrote (up to 129 false rows on the
+  reference pair). A one-query property-presence census now classifies every
+  one-sided difference three ways: an extractor-coverage gap (moved out of
+  `objectLevelDrift` into the new `propertyCoverageGaps[]`, with both sides'
+  counts), a census-confirmed real absence (stays in drift with
+  `presence: 'absent-in-a' | 'absent-in-b'` and a note), or — when the census
+  cannot run — a drift row flagged `causeUnknown: true` saying both readings are
+  open. It never silently picks a side.
+
+  **Behaviour change for callers:** `PropertyDrift.valueA` / `valueB` are now
+  OPTIONAL (omitted, not `null`, when the key is absent on that side), and
+  `presence` is new. `compare_vaults` has its own copy of the type and is
+  untouched.
