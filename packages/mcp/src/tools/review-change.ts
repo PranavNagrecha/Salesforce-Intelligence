@@ -518,7 +518,7 @@ export interface ReviewedComponent {
   readonly apiName: string;
   readonly changeKind: ChangeKind;
   /** Headline severity — one of blocking / risky / review / safe. */
-  readonly verdict: Verdict;
+  readonly verdict: ChangeVerdict;
   /** Human-readable justification for the verdict (names counts + confidence). */
   readonly reason: string;
   /** True when a node exists at this id in the vault. */
@@ -589,7 +589,7 @@ export interface ReviewChangeOutput {
   /** Reviewed components, most-dangerous first, capped at `limit`. */
   readonly reviewed: readonly ReviewedComponent[];
   /** The most severe verdict across the FULL set. */
-  readonly overallVerdict: Verdict;
+  readonly overallVerdict: ChangeVerdict;
   readonly summary: ReviewChangeSummary;
   /** Union of covering tests to run (sorted ASC, capped). */
   readonly selectedTests: readonly ComponentId[];
@@ -629,8 +629,24 @@ export interface ReviewChangeOutput {
   readonly extractorVersionCaveat?: string;
 }
 
+/**
+ * The verdicts `review_change` can actually produce.
+ *
+ * It classifies CHANGE risk from dependency STRUCTURE, so it uses the five
+ * structural words only. `already-inactive` is a RUNTIME-STATE verdict owned by
+ * the `what_if_*` deactivation tools ("this component does not run today"), and
+ * a changeset review has no such axis. Excluding it keeps `VERDICT_RANK` and
+ * the summary tally EXHAUSTIVE BY CONSTRUCTION — the alternative was carrying a
+ * bucket that is permanently zero, which would show up in every caller's
+ * summary as a category this tool never assigns.
+ *
+ * Derived from the shared union with `Exclude`, never re-listed, so a future
+ * member added to `Verdict` is a compile error here rather than a silent gap.
+ */
+type ChangeVerdict = Exclude<Verdict, 'already-inactive'>;
+
 /** Severity rank for the "most dangerous first" sort (lower = worse). */
-const VERDICT_RANK: Readonly<Record<Verdict, number>> = {
+const VERDICT_RANK: Readonly<Record<ChangeVerdict, number>> = {
   blocking: 0,
   risky: 1,
   review: 2,
@@ -952,7 +968,7 @@ const runReviewCore = async (
     // so it keeps its table verdict (mirrors the dead-plane / DuplicateRule
     // honesty). REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE.
     if (change.changeKind !== 'added' && firing !== null) {
-      const target: Verdict = change.changeKind === 'deleted' ? 'blocking' : 'review';
+      const target: ChangeVerdict = change.changeKind === 'deleted' ? 'blocking' : 'review';
       if (VERDICT_RANK[target] < VERDICT_RANK[verdict]) {
         verdict = target;
         reason = buildFiringBindingReason(change.type, change.changeKind, firing);
@@ -996,7 +1012,7 @@ const runReviewCore = async (
     tally[r.verdict] += 1;
     if (!r.inVault && r.changeKind !== 'added') notInVault += 1;
   }
-  const overallVerdict: Verdict = reviewed.reduce<Verdict>(
+  const overallVerdict: ChangeVerdict = reviewed.reduce<ChangeVerdict>(
     (worst, r) => (VERDICT_RANK[r.verdict] < VERDICT_RANK[worst] ? r.verdict : worst),
     'safe',
   );
@@ -1270,7 +1286,7 @@ interface ClassifyInput {
 }
 
 /** The classification table, isolated for the unit test to pin every row. */
-export const classify = (i: ClassifyInput): { verdict: Verdict; reason: string } => {
+export const classify = (i: ClassifyInput): { verdict: ChangeVerdict; reason: string } => {
   const depsPhrase = `${i.dependentCount} direct dependent(s)`;
   const confPhrase = i.weakest !== null ? ` (weakest edge confidence: ${i.weakest})` : '';
 
