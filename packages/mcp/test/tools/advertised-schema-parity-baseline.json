@@ -11,12 +11,6 @@
   ],
   "entries": [
     {
-      "tool": "sfi.get_component",
-      "axis": "required",
-      "fingerprint": "enforced=[] advertised=[id]",
-      "reason": "PRE-EXISTING over-claim, surfaced only once the `required` axis started MEASURING requiredness by removal instead of reading `.isOptional()`: `id` is advertised as required while the `componentId` alias satisfies it through the preprocess, so a strict host refuses the `{componentId}` call the tool serves. One-line repair (drop `required`), deferred because it predates this batch and `sfi.get_component` is a core-profile tool whose call shape a lot of prompt text assumes."
-    },
-    {
       "tool": "sfi.list_components",
       "axis": "properties",
       "fingerprint": "enforced-not-advertised=[recordTriggered,status,triggerObject] advertised-not-reachable=[]",
@@ -26,7 +20,7 @@
       "tool": "sfi.search_flow_metadata",
       "axis": "properties",
       "fingerprint": "enforced-not-advertised=[summarize,triggerObject] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. `summarize` (return a digest instead of full matches) and `triggerObject` are accepted and honoured, never advertised. Deferred as pre-existing; nothing else about this tool's advertisement is wrong (`query` really is required \u2014 the removal probe confirms the validator refuses a call without it), so this is a two-line additive repair whenever the tool is next opened."
+      "reason": "PRE-EXISTING. `summarize` (return a digest instead of full matches) and `triggerObject` are accepted and honoured, never advertised. Deferred as pre-existing; nothing else about this tool's advertisement is wrong (`query` really is required — the removal probe confirms the validator refuses a call without it), so this is a two-line additive repair whenever the tool is next opened."
     },
     {
       "tool": "sfi.live_report_usage",
@@ -86,13 +80,7 @@
       "tool": "sfi.list_view_sharing",
       "axis": "properties",
       "fingerprint": "enforced-not-advertised=[groupId,nameContains,object,objectApiName,objectId,sharedTo,sharedToId,sharedWithRoleApiName] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. EIGHT accepted keys unadvertised \u2014 the object aliases plus the entire shared-with axis (`sharedTo`, `sharedToId`, `sharedWithRoleApiName`, `groupId`, `nameContains`). The shared-with keys decide WHICH sharing rows come back, so a caller that cannot name them silently receives the unfiltered answer."
-    },
-    {
-      "tool": "sfi.layout_assignments",
-      "axis": "properties",
-      "fingerprint": "enforced-not-advertised=[object,objectApiName,objectId] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. The three object aliases (`object`/`objectApiName`/`objectId`) are accepted and unadvertised."
+      "reason": "PRE-EXISTING. EIGHT accepted keys unadvertised — the object aliases plus the entire shared-with axis (`sharedTo`, `sharedToId`, `sharedWithRoleApiName`, `groupId`, `nameContains`). The shared-with keys decide WHICH sharing rows come back, so a caller that cannot name them silently receives the unfiltered answer."
     },
     {
       "tool": "sfi.integration_map",
@@ -101,40 +89,10 @@
       "reason": "PRE-EXISTING. `componentId` and the three object aliases are accepted and unadvertised, so the org-wide map is the only reachable call."
     },
     {
-      "tool": "sfi.event_subscribers",
-      "axis": "properties",
-      "fingerprint": "enforced-not-advertised=[eventApiName] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. `eventApiName` (name the platform event by api name rather than by id) is accepted and unadvertised."
-    },
-    {
-      "tool": "sfi.explain_field",
-      "axis": "properties",
-      "fingerprint": "enforced-not-advertised=[componentId] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. `componentId` is interchangeable with `fieldId` at the validator and unadvertised."
-    },
-    {
       "tool": "sfi.apex_test_coverage",
       "axis": "properties",
       "fingerprint": "enforced-not-advertised=[apexClassId,apiName,classId,className,componentId] advertised-not-reachable=[]",
       "reason": "PRE-EXISTING. FIVE accepted class selectors (`apexClassId`, `apiName`, `classId`, `className`, `componentId`) unadvertised, so the per-class mode is unreachable and only the org-wide mode can be requested."
-    },
-    {
-      "tool": "sfi.automation_collisions",
-      "axis": "properties",
-      "fingerprint": "enforced-not-advertised=[componentId,objectApiName,objectId] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. `componentId` / `objectApiName` / `objectId` are accepted and unadvertised."
-    },
-    {
-      "tool": "sfi.field_access_audit",
-      "axis": "properties",
-      "fingerprint": "enforced-not-advertised=[componentId] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. `componentId` is interchangeable with `fieldId` at the validator and unadvertised."
-    },
-    {
-      "tool": "sfi.unused_fields_deep",
-      "axis": "properties",
-      "fingerprint": "enforced-not-advertised=[staticOnly] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING. `staticOnly` (skip the dynamic-usage pass) is accepted and unadvertised."
     },
     {
       "tool": "sfi.tech_debt_score",
@@ -158,19 +116,7 @@
       "tool": "sfi.cdc_subscribers",
       "axis": "properties",
       "fingerprint": "enforced-not-advertised=[objectApiName] advertised-not-reachable=[]",
-      "reason": "PRE-EXISTING, and on a HIDDEN tool: `sfi.cdc_subscribers` is a back-compat alias folded into `sfi.event_topology` and is excluded from `tools/list` entirely, so no host reads this schema. Kept in the gate rather than exempted \u2014 a hidden alias is still dispatchable and `sfi.run_analysis` still serves its schema \u2014 but ranked below every advertised tool for repair."
-    },
-    {
-      "tool": "sfi.explain_error",
-      "axis": "required",
-      "fingerprint": "enforced=[] advertised=[errorText]",
-      "reason": "PRE-EXISTING over-claim of the same shape: `errorText` advertised as required while `error` / `message` / `errorMessage` / `text` each satisfy it through the preprocess. The aliases exist BECAUSE hosts guess those names, so the advertisement refuses exactly the call the design anticipates. Deferred as pre-existing; `sfi.trace_debug_log` carries the identical shape and IS fixed in this commit because it shipped on this branch."
-    },
-    {
-      "tool": "sfi.explain_debug_log",
-      "axis": "required",
-      "fingerprint": "enforced=[] advertised=[logText]",
-      "reason": "PRE-EXISTING over-claim: `logText` advertised as required while `debugLog` / `log` / `text` / `content` satisfy it through the preprocess. Identical to the `sfi.trace_debug_log` defect fixed in this commit; left baselined because this tool predates the branch and the pair should be corrected together with a look at whether the two schemas should be one constant."
+      "reason": "PRE-EXISTING, and on a HIDDEN tool: `sfi.cdc_subscribers` is a back-compat alias folded into `sfi.event_topology` and is excluded from `tools/list` entirely, so no host reads this schema. Kept in the gate rather than exempted — a hidden alias is still dispatchable and `sfi.run_analysis` still serves its schema — but ranked below every advertised tool for repair."
     }
   ]
 }

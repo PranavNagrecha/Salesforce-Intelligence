@@ -375,7 +375,6 @@ const GET_COMPONENT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
     // schema-driven host, which is the same as not shipping it.
     includeConceptReasoning: { type: 'boolean' },
   },
-  required: ['id'],
 });
 
 /**
@@ -1547,7 +1546,6 @@ const EXPLAIN_ERROR_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
     text: { type: 'string', minLength: 1 },
     object: { type: 'string', minLength: 1 },
   },
-  required: ['errorText'],
 });
 
 /**
@@ -1569,7 +1567,6 @@ const EXPLAIN_DEBUG_LOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object
     content: { type: 'string', minLength: 1 },
     object: { type: 'string', minLength: 1 },
   },
-  required: ['logText'],
 });
 
 /**
@@ -1743,12 +1740,14 @@ const LAYOUT_ASSIGNMENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       componentId: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1, description: 'Object name (alias for object scoping)' },
+      objectApiName: { type: 'string', minLength: 1, description: 'Object API name' },
+      objectId: { type: 'string', minLength: 1, description: 'Object id' },
       limit: { type: 'number', minimum: 1, maximum: 250 },
       offset: { type: 'number', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
-    required: ['componentId'],
   });
 
 /**
@@ -2045,6 +2044,7 @@ const EVENT_SUBSCRIBERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       eventId: { type: 'string', minLength: 1 },
+      eventApiName: { type: 'string', minLength: 1, description: 'Platform Event API name' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
     },
   });
@@ -2104,9 +2104,9 @@ const EXPLAIN_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       fieldId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1, description: 'Field id (alias for fieldId)' },
       includeRecordValues: { type: 'boolean' },
     },
-    required: ['fieldId'],
   });
 
 /**
@@ -2292,12 +2292,12 @@ const FIELD_ACCESS_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       fieldId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1, description: 'Field id (alias for fieldId)' },
       permissionType: {
         type: 'string',
         enum: ['read', 'edit', 'all'],
       },
     },
-    required: ['fieldId'],
   });
 
 /**
@@ -2914,6 +2914,7 @@ const UNUSED_FIELDS_DEEP_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       parentObjectFilter: { type: 'string', minLength: 1 },
       excludeManagedPackage: { type: 'boolean' },
       excludeStandardFields: { type: 'boolean' },
+      staticOnly: { type: 'boolean', description: 'Skip dynamic-usage pass' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       cursor: { type: 'string', minLength: 1 },
@@ -4669,9 +4670,11 @@ const AUTOMATION_COLLISIONS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       object: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1, description: 'CustomObject id (alias for object)' },
+      objectApiName: { type: 'string', minLength: 1, description: 'Object API name' },
+      objectId: { type: 'string', minLength: 1, description: 'Object id' },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
     },
-    required: ['object'],
     additionalProperties: false,
   });
 

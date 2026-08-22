@@ -61,6 +61,7 @@
     ],
     "objectId": [
       "sfi.action_chain",
+      "sfi.automation_collisions",
       "sfi.automation_risk_report",
       "sfi.domain_clusters",
       "sfi.effective_permissions",
@@ -72,6 +73,7 @@
       "sfi.generate_data_dictionary",
       "sfi.guest_exposure_report",
       "sfi.history_tracking_gaps",
+      "sfi.layout_assignments",
       "sfi.lifecycle_process",
       "sfi.object_access_audit",
       "sfi.order_of_execution",
