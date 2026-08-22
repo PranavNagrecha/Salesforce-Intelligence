@@ -19,7 +19,12 @@
  *    plus a named boundary, never a counted zero;
  *  - profiles are counted and NAMED per CRUD verb, separately from permission
  *    sets, so an ascending id list can no longer hide every Profile behind the
- *    `PermissionSet:` prefix;
+ *    `PermissionSet:` prefix — in BOTH grant tiers, including the field-level
+ *    one that was left as a single ascending list and named zero Profiles;
+ *  - a `maxRowsPerSection` the byte budget cannot honour is reported as a
+ *    REFUSAL that prescribes `includeSections`, never the knob just refused;
+ *  - a name that differs only by CASE resolves (api names are case-insensitive)
+ *    and a name that resolves to nothing gets the near-misses NAMED;
  *  - every capped list flips `truncated` and reports its true total;
  *  - the widest object fits the response byte budget at `maxRowsPerSection: 100`;
  *  - empty-because-not-modeled never renders as empty-because-none;
@@ -234,10 +239,26 @@ const wideSeed: ExtractionResult = (() => {
       edges.push(edge({ fromId: rid, toId: fieldId, edgeType: 'references', source: 'enterprise-metadata' }));
     }
   }
-  for (let p = 0; p < 60; p += 1) {
+  // 120 granters (60 Profiles + 60 PermissionSets): enough that `maxRowsPerSection:
+  // 100` cannot be honoured, which is the case the refusal note exists for.
+  for (let p = 0; p < 120; p += 1) {
     const pid = `${p % 2 === 0 ? 'Profile' : 'PermissionSet'}:WideGrant_${String(p).padStart(3, '0')}`;
     nodes.push(node({ id: pid, type: p % 2 === 0 ? 'Profile' : 'PermissionSet', apiName: `WideGrant_${p}` }));
     edges.push(edge({ fromId: pid, toId: WIDE, edgeType: 'grantedBy', properties: { allowCreate: true, allowRead: true, allowEdit: true, allowDelete: false, viewAllRecords: false, modifyAllRecords: false } }));
+    // FIELD-level grants from the SAME granters — the tier the real vault makes
+    // the LARGER of the two. Every `PermissionSet:` id sorts ahead of every
+    // `Profile:` id, so one ascending list capped at anything below 30 named
+    // ZERO Profiles here, exactly as it did on the real vault's widest object.
+    for (let f = 0; f < 8; f += 1) {
+      edges.push(
+        edge({
+          fromId: pid,
+          toId: `CustomField:Wide__c.Field_${String(f).padStart(3, '0')}__c`,
+          edgeType: 'grantedBy',
+          properties: { readable: true, editable: p % 4 === 0 },
+        }),
+      );
+    }
   }
   for (let l = 0; l < 80; l += 1) {
     nodes.push(node({ id: `ListView:Wide__c.LV_${String(l).padStart(3, '0')}`, type: 'ListView', apiName: `LV_${l}`, parentId: WIDE }));
@@ -639,7 +660,7 @@ describe('object360Handler — DEFECT 7: messages that read as English', () => {
     // the old call passed a whole sentence as the `kindLabel` argument, giving
     // "no no object matches `X` in this vault with id X".
     expect(r.error.message).not.toContain('no object matches');
-    expect(r.error.message).toBe('no CustomObject with id CustomObject:NotHere__c');
+    expect(r.error.message).toContain('no CustomObject with id CustomObject:NotHere__c');
   });
 
   it('does not claim "referenced by the edges below" for an object with no edges', async () => {
@@ -809,6 +830,178 @@ describe('object360Handler — honesty surfaces', () => {
     expect(empty.ok).toBe(true);
     if (!empty.ok) return;
     expect(empty.value.data['coverageCaveat']).toBeDefined();
+  });
+});
+
+describe('object360Handler — QA-1: the field tier named zero Profiles', () => {
+  /**
+   * The block's own note claimed the two kinds were "listed SEPARATELY so a
+   * shared ascending id list cannot drop every Profile behind the
+   * `PermissionSet:` prefix" — and the field tier, the LARGER of the two, was
+   * still one ascending list. On the probe vault's widest object that meant 82
+   * granters, 52 of them Profiles, and not one Profile named by a DEFAULT call.
+   */
+  it('names at least one Profile in the DEFAULT call\'s field-level granters', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'Wide__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flg = sectionOf(r.value.data, 'permissions')['fieldLevelGrants'] as Record<string, unknown>;
+    const profiles = flg['profiles'] as Record<string, unknown>;
+    const names = profiles['names'] as readonly string[];
+    expect(names.length).toBeGreaterThan(0);
+    for (const id of names) expect(id).toMatch(/^Profile:/);
+    // and the permission sets are on their own axis, not competing for the cap
+    const permsets = flg['permissionSets'] as Record<string, unknown>;
+    const psNames = permsets['names'] as readonly string[];
+    expect(psNames.length).toBeGreaterThan(0);
+    for (const id of psNames) expect(id).toMatch(/^PermissionSet:/);
+  });
+
+  it('carries per-kind distinct counts that decompose the blended total', async () => {
+    const flg = sectionOf(await widget(), 'permissions')['fieldLevelGrants'] as Record<string, unknown>;
+    const profiles = flg['profiles'] as Record<string, unknown>;
+    const permsets = flg['permissionSets'] as Record<string, unknown>;
+    // Widget__c: ONE field grant, from a Profile, readable only.
+    expect(flg['distinctGranters']).toBe(1);
+    expect(profiles['granters']).toBe(1);
+    expect(profiles['canReadSomeField']).toBe(1);
+    expect(profiles['canEditSomeField']).toBe(0);
+    expect(profiles['names']).toEqual(['Profile:Admin']);
+    // a CHECKED zero on the other axis, and the note says which kind of zero
+    expect(permsets['granters']).toBe(0);
+    expect(permsets['names']).toEqual([]);
+    expect(String(flg['note'])).toContain('Both zeros are CHECKED');
+  });
+
+  it('flips a per-list truncation flag carrying the TRUE total on each axis', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'Wide__c', maxRowsPerSection: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flg = sectionOf(r.value.data, 'permissions')['fieldLevelGrants'] as Record<string, unknown>;
+    for (const kind of ['profiles', 'permissionSets']) {
+      const axis = flg[kind] as Record<string, unknown>;
+      expect(axis['namesTruncated']).toBe(true);
+      expect(axis['namesTotal']).toBe(axis['granters']);
+      expect(Number(axis['namesTotal'])).toBeGreaterThan((axis['names'] as readonly string[]).length);
+    }
+  });
+
+  it('says NOT CHECKED, not zero, when the vault holds no field id for the object', async () => {
+    const local = mkdtempSync(join(tmpdir(), 'sfi-o360-nofields-'));
+    const opened = await openGraph(join(local, 'g.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const bareSeed: ExtractionResult = {
+      nodes: [node({ id: 'CustomObject:Bare__c', type: 'CustomObject', apiName: 'Bare__c' })],
+      edges: [],
+    };
+    expect((await importExtractionResults(opened.value, [bareSeed])).ok).toBe(true);
+    const r = await object360Handler(
+      { vaultRoot: local, manifest: MANIFEST, graph: opened.value },
+      { objectApiName: 'Bare__c' },
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const flg = sectionOf(r.value.data, 'permissions')['fieldLevelGrants'] as Record<string, unknown>;
+      expect(flg['distinctGranters']).toBe(0);
+      expect(String(flg['note'])).toContain('NOTHING WAS CHECKED');
+      expect(String(flg['note'])).not.toContain('Both zeros are CHECKED');
+    }
+    await closeGraph(opened.value);
+    rmSync(local, { recursive: true, force: true });
+  });
+});
+
+describe('object360Handler — QA-2: a refused cap is not re-prescribed', () => {
+  /**
+   * `maxRowsPerSection: 100` stopped ERRORING on the widest object but never
+   * started WORKING: the byte fit refuses it and returns the default response.
+   * The note then told the caller to "Raise `maxRowsPerSection` (max 100)" —
+   * the knob that had just been refused — sending them round a loop that
+   * returns a byte-identical answer.
+   */
+  const refusedNote = async (): Promise<string> => {
+    const r = await object360Handler(ctx, { objectApiName: 'Wide__c', maxRowsPerSection: 100 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return '';
+    const scope = r.value.data['appliedScope'] as Record<string, unknown>;
+    // the fixture must actually refuse the raise, or this test proves nothing
+    expect(scope['maxRowsPerSectionHonoured']).toBe(false);
+    return String(r.value.data['truncationNote']);
+  };
+
+  it('prescribes `includeSections` and NOT another raise of the refused knob', async () => {
+    const note = await refusedNote();
+    expect(note).toContain('includeSections');
+    expect(note).not.toContain('Raise `maxRowsPerSection`');
+    expect(note).toContain('could NOT be honoured');
+    // and it says WHY a higher cap cannot help, rather than leaving the caller
+    // to discover it by re-sending and getting the same bytes back.
+    expect(note).toContain('CANNOT CHANGE THIS RESPONSE');
+  });
+
+  it('names a concrete `includeSections` call before any other remedy', async () => {
+    const note = await refusedNote();
+    expect(note).toContain('"includeSections":[');
+    expect(note).toContain('"objectApiName":"Wide__c"');
+    expect(note.indexOf('includeSections')).toBeLessThan(note.indexOf('truncatedTotal'));
+  });
+
+  it('flags the refusal machine-readably in appliedScope', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'Wide__c', maxRowsPerSection: 100 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const scope = r.value.data['appliedScope'] as Record<string, unknown>;
+    expect(scope['maxRowsPerSectionHonoured']).toBe(false);
+    expect(scope['remedy']).toBe('includeSections');
+    expect(Number(scope['effectiveMaxRowsPerSection'])).toBeLessThan(100);
+    expect(Number(scope['effectiveSampleCap'])).toBeLessThan(25);
+  });
+
+  it('keeps the plain raise-or-narrow note when nothing was refused', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'Widget__c', maxRowsPerSection: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const scope = r.value.data['appliedScope'] as Record<string, unknown>;
+    expect(scope['maxRowsPerSectionHonoured']).toBeUndefined();
+    expect(String(r.value.data['truncationNote'])).toContain('Raise `maxRowsPerSection`');
+  });
+});
+
+describe('object360Handler — QA-3/4: resolution courtesies', () => {
+  it('resolves an api name that differs only by CASE and echoes what it profiled', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'widget__C' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const scope = r.value.data['appliedScope'] as Record<string, unknown>;
+    expect(scope['componentId']).toBe('CustomObject:Widget__c');
+    expect(scope['object']).toBe('Widget__c');
+    expect(scope['resolvedFrom']).toBe('CustomObject:widget__C');
+    expect(String(scope['resolutionNote'])).toContain('CASE-INSENSITIVE');
+    // and the answer is the SAME object's answer, not a thinner one
+    expect(sectionOf(r.value.data, 'owns')['totalComponents']).toBe(10);
+  });
+
+  it('does not add a resolution note when the id was already exact', async () => {
+    const scope = (await widget())['appliedScope'] as Record<string, unknown>;
+    expect(scope['resolvedFrom']).toBeUndefined();
+    expect(scope['resolutionNote']).toBeUndefined();
+  });
+
+  it('names the closest CustomObject names on a component-not-found', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'Widgt__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.message).toContain('Closest CustomObject names in this vault:');
+    expect(r.error.message).toContain('CustomObject:Widget__c');
+  });
+
+  it('offers NO suggestion rather than noise when nothing resembles the name', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'zzqqxx' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message).not.toContain('Closest CustomObject names');
   });
 });
 

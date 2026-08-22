@@ -68,6 +68,23 @@
  * declared in the source XML and never captured by the extractor — always
  * `null` + reason, never a silent absence.
  *
+ * ── BOTH grant tiers name Profiles, not just the object tier ────────────────
+ *
+ * `permissions` carries two blocks: object-level CRUD and field-level grants.
+ * The object block was split into Profile and PermissionSet axes; the field
+ * block — the LARGER of the two by an order of magnitude — was left as one
+ * ascending id list, and since every `PermissionSet:` id sorts ahead of every
+ * `Profile:` id it named ZERO Profiles under the same note that claimed the two
+ * were listed separately. Both blocks now carry per-kind counts, a named sample
+ * of EACH kind and a per-list truncation flag with the true total.
+ *
+ * ── A refused cap is said plainly, and not re-prescribed ────────────────────
+ *
+ * When the byte budget cannot honour the caller's `maxRowsPerSection`, the note
+ * says the raise was REFUSED and prescribes `includeSections` — with a concrete
+ * call — instead of prescribing the knob that was just refused. Re-prescribing
+ * it sent a caller round a loop that returned a byte-identical response.
+ *
  * ── What this tool refuses to fake ──────────────────────────────────────────
  *
  * "When was the last record created", "who owns the most records", "who created
@@ -98,6 +115,8 @@ import {
   listEdges,
   listEdgesForNodes,
   listNodesByIds,
+  resolveComponents,
+  searchNodes,
 } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
@@ -132,6 +151,14 @@ const MAX_ROWS_PER_SECTION_CAP = 100;
 const REFERRER_LOOKUP_BATCH = 400;
 
 /**
+ * Window for the case-insensitive object lookup. `searchNodes` orders exact
+ * then prefix matches first, so a case variant of the requested name is inside
+ * this window on any realistic org; a miss falls through to `component-not-
+ * found` WITH near-miss names rather than to a silently different object.
+ */
+const OBJECT_SEARCH_LIMIT = 50;
+
+/**
  * Self-imposed serialized-byte ceiling, set BELOW the dispatcher's 40 000-byte
  * response budget so the headroom absorbs the transport envelope.
  *
@@ -143,6 +170,13 @@ const REFERRER_LOOKUP_BATCH = 400;
  * data, and it is re-run at successively smaller row caps until the payload
  * fits. Every AGGREGATE is computed over the full set before any cap, so only
  * illustrative row lists shrink and each shrink is disclosed in `truncation[]`.
+ *
+ * Fitting is not the same as HONOURING. On the widest object the ladder bottoms
+ * out below the requested cap, so `maxRowsPerSection: 100` returns the same
+ * bytes as the default: it no longer errors, and it also does not work. That is
+ * disclosed as a REFUSAL (`appliedScope.maxRowsPerSectionHonoured: false`) with
+ * `includeSections` named as the remedy that has budget left — never by
+ * re-prescribing the cap that was just refused.
  */
 const BYTE_BUDGET = 36_000;
 
@@ -627,26 +661,86 @@ interface Gathered {
   readonly referencedDeclaredFieldIds: ReadonlySet<string>;
   readonly unresolvedFieldTargets: ReadonlySet<string>;
   readonly unresolvedFieldEdgeCount: number;
+  /** Field ids (noded + un-noded) whose inbound edges were actually read. */
+  readonly fieldTargetCount: number;
   readonly referrerById: ReadonlyMap<string, Node>;
 }
 
-/**
- * Handler for `sfi.object_360`.
- */
-export const object360Handler = async (
-  ctx: Context,
-  input: Object360Input,
-): Promise<Result<McpResponse<Readonly<Record<string, unknown>>>, McpError>> => {
-  const resolved = resolveObjectId(input);
-  if (!resolved.ok) return err(resolved.error);
-  const objectId = resolved.value;
-  const apiName = objectId.slice(CUSTOM_OBJECT_PREFIX.length);
-  const requestedCap = input.maxRowsPerSection ?? DEFAULT_MAX_ROWS_PER_SECTION;
-  const wanted: ReadonlySet<Object360Section> =
-    input.includeSections === undefined
-      ? new Set(OBJECT_360_SECTIONS)
-      : new Set(input.includeSections);
+/** Nothing landed at all: no node of its own, no inbound edge, no child. */
+const isEmptyGather = (g: Gathered): boolean =>
+  g.objectNode === null && g.objectInbound.length === 0 && g.children.length === 0;
 
+/**
+ * Case-INSENSITIVE object ids matching `apiName`.
+ *
+ * Salesforce api names are case-insensitive — `contact` and `Contact` name the
+ * same object in SOQL, in a formula and in the Setup UI — so a caller who types
+ * the lower-case form is not naming a different object, and answering
+ * `component-not-found` told them the object does not exist. Resolution is
+ * still EXPLICIT: the canonical id that was actually profiled is echoed in
+ * `appliedScope`, and two ids differing only by case are `invalid-query` (a
+ * silently-picked winner is how a reader ends up with an answer about the other
+ * one). `searchNodes` is an indexed ILIKE, so this costs one query and only on
+ * the miss path.
+ */
+const caseInsensitiveObjectIds = async (
+  ctx: Context,
+  apiName: string,
+): Promise<Result<readonly ComponentId[], McpError>> => {
+  const hits = await searchNodes(ctx.graph, apiName, {
+    types: ['CustomObject'],
+    limit: OBJECT_SEARCH_LIMIT,
+  });
+  if (!hits.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${hits.error.message}` });
+  }
+  const folded = apiName.toLowerCase();
+  return ok(
+    hits.value
+      .map((h) => h.id)
+      .filter((id) => id.slice(CUSTOM_OBJECT_PREFIX.length).toLowerCase() === folded)
+      .sort(byIdAsc) as readonly ComponentId[],
+  );
+};
+
+/**
+ * Near-miss object names for a `component-not-found`, so a typo costs one retry
+ * rather than a guess. NAMED, never auto-substituted — `sfi.apex_structure`
+ * offers the same courtesy and this tool did not.
+ *
+ * Two gates, because the resolver always ranks SOMETHING and printing its best
+ * guess for a name that resembles nothing dresses noise up as a suggestion:
+ * `disposition: 'none'` emits NOTHING (measured on the probe vault, a name with
+ * no relation to the org still returns five candidates scoring 0.67-0.77), and
+ * within a real near-miss only candidates close to the BEST one survive, so a
+ * single good match is not padded out to five. When neither gate passes the
+ * message simply ends — the honest answer to "did you mean" when nothing is.
+ */
+const SUGGESTION_RELATIVE_FLOOR = 0.9;
+
+const closestObjectSuggestion = async (ctx: Context, apiName: string): Promise<string> => {
+  const fuzzy = await resolveComponents(ctx.graph, apiName, {
+    types: ['CustomObject'],
+    limit: 5,
+  });
+  if (!fuzzy.ok || fuzzy.value.disposition === 'none') return '';
+  const best = Math.max(...fuzzy.value.candidates.map((c) => c.base), 0);
+  const near = fuzzy.value.candidates.filter((c) => c.base >= best * SUGGESTION_RELATIVE_FLOOR);
+  if (near.length === 0) return '';
+  return ` Closest CustomObject names in this vault: ${near.map((c) => c.id).join(', ')}.`;
+};
+
+/**
+ * Every graph read this tool makes for ONE object id. Split out of the handler
+ * so a case-insensitive retry re-reads against the corrected id instead of
+ * answering about the wrong one. Returns an EMPTY gather (and skips the
+ * field-tier reads) when the id lands on nothing at all.
+ */
+const gatherFor = async (
+  ctx: Context,
+  objectId: ComponentId,
+  apiName: string,
+): Promise<Result<Gathered, McpError>> => {
   const nodeResult = await getNodeById(ctx.graph, objectId);
   if (!nodeResult.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${nodeResult.error.message}` });
@@ -669,12 +763,17 @@ export const object360Handler = async (
   const children = childrenResult.value;
 
   if (objectNode === null && objectInbound.length === 0 && children.length === 0) {
-    return err({
-      kind: 'component-not-found',
-      // `phantomAwareNotFoundMessage` takes a TYPE LABEL, not a sentence:
-      // passing prose produced "no <whole sentence> ... with id <id>".
-      message: await phantomAwareNotFoundMessage(ctx, objectId, 'CustomObject'),
-      path: objectId,
+    return ok({
+      objectNode: null,
+      objectInbound: [],
+      children: [],
+      fieldInboundAll: [],
+      fieldGrantEdges: [],
+      referencedDeclaredFieldIds: new Set<string>(),
+      unresolvedFieldTargets: new Set<string>(),
+      unresolvedFieldEdgeCount: 0,
+      fieldTargetCount: 0,
+      referrerById: new Map<string, Node>(),
     });
   }
 
@@ -753,7 +852,7 @@ export const object360Handler = async (
     for (const n of batchResult.value) referrerById.set(n.id, n);
   }
 
-  const gathered: Gathered = {
+  return ok({
     objectNode,
     objectInbound,
     children,
@@ -762,21 +861,91 @@ export const object360Handler = async (
     referencedDeclaredFieldIds,
     unresolvedFieldTargets,
     unresolvedFieldEdgeCount,
+    fieldTargetCount: fieldTargetIds.length,
     referrerById,
-  };
+  });
+};
+
+/**
+ * Handler for `sfi.object_360`.
+ */
+export const object360Handler = async (
+  ctx: Context,
+  input: Object360Input,
+): Promise<Result<McpResponse<Readonly<Record<string, unknown>>>, McpError>> => {
+  const resolved = resolveObjectId(input);
+  if (!resolved.ok) return err(resolved.error);
+  const requestedId = resolved.value;
+  const requestedApiName = requestedId.slice(CUSTOM_OBJECT_PREFIX.length);
+  const requestedCap = input.maxRowsPerSection ?? DEFAULT_MAX_ROWS_PER_SECTION;
+  const capWasExplicit = input.maxRowsPerSection !== undefined;
+  const wanted: ReadonlySet<Object360Section> =
+    input.includeSections === undefined
+      ? new Set(OBJECT_360_SECTIONS)
+      : new Set(input.includeSections);
+
+  let objectId = requestedId;
+  let apiName = requestedApiName;
+  /** The id the caller passed, when it differed from the one profiled. */
+  let resolvedFrom: string | null = null;
+
+  const first = await gatherFor(ctx, objectId, apiName);
+  if (!first.ok) return err(first.error);
+  let gathered = first.value;
+
+  // CASE-INSENSITIVE RETRY. Only on a total miss, so an exact id never pays for
+  // it and an exactly-cased object is never re-pointed at a case variant.
+  if (isEmptyGather(gathered)) {
+    const variants = await caseInsensitiveObjectIds(ctx, requestedApiName);
+    if (!variants.ok) return err(variants.error);
+    const others = variants.value.filter((id) => id !== requestedId);
+    if (others.length > 1) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          `\`${requestedApiName}\` matches ${others.length} objects in this vault that differ only by CASE ` +
+          `(${others.join(', ')}). Salesforce api names are case-insensitive, so nothing here can pick between ` +
+          `them — pass the exact \`objectId\` you mean. Nothing was profiled.`,
+      });
+    }
+    const only = others[0];
+    if (only !== undefined) {
+      const retry = await gatherFor(ctx, only, only.slice(CUSTOM_OBJECT_PREFIX.length));
+      if (!retry.ok) return err(retry.error);
+      if (!isEmptyGather(retry.value)) {
+        resolvedFrom = requestedId;
+        objectId = only;
+        apiName = only.slice(CUSTOM_OBJECT_PREFIX.length);
+        gathered = retry.value;
+      }
+    }
+  }
+
+  if (isEmptyGather(gathered)) {
+    // `phantomAwareNotFoundMessage` takes a TYPE LABEL, not a sentence: passing
+    // prose produced "no <whole sentence> ... with id <id>". It also ends
+    // without punctuation, so the near-miss names need a sentence break of
+    // their own or they read as part of the id.
+    const missing = await phantomAwareNotFoundMessage(ctx, requestedId, 'CustomObject');
+    const suggestion = await closestObjectSuggestion(ctx, requestedApiName);
+    return err({
+      kind: 'component-not-found',
+      message: `${missing}${missing.endsWith('.') ? '' : '.'}${suggestion}`,
+      path: requestedId,
+    });
+  }
 
   // ── Byte fit: render purely at descending caps until the payload fits ────
   const defaultSampleCap = Math.max(1, Math.floor(requestedCap / 4));
-  let rendered = renderResponse(
-    ctx,
-    objectId,
-    apiName,
-    wanted,
-    gathered,
-    requestedCap,
-    requestedCap,
-    defaultSampleCap,
-  );
+  const render = (cap: number, sample: number): McpResponse<Readonly<Record<string, unknown>>> =>
+    renderResponse(ctx, objectId, apiName, wanted, gathered, {
+      requestedCap,
+      capWasExplicit,
+      effectiveCap: cap,
+      effectiveSampleCap: sample,
+      resolvedFrom,
+    });
+  let rendered = render(requestedCap, defaultSampleCap);
   let bytes = Buffer.byteLength(JSON.stringify(rendered));
   if (bytes > BYTE_BUDGET) {
     let lastCap = requestedCap;
@@ -787,22 +956,27 @@ export const object360Handler = async (
       if (cap >= lastCap && sample >= lastSample) continue;
       lastCap = cap;
       lastSample = sample;
-      rendered = renderResponse(
-        ctx,
-        objectId,
-        apiName,
-        wanted,
-        gathered,
-        requestedCap,
-        cap,
-        sample,
-      );
+      rendered = render(cap, sample);
       bytes = Buffer.byteLength(JSON.stringify(rendered));
       if (bytes <= BYTE_BUDGET) break;
     }
   }
   return ok(rendered);
 };
+
+/** The cap axes one render pass ran at, plus how the object id was resolved. */
+interface RenderScope {
+  /** What the caller asked for (or the default) — echoed in `appliedScope`. */
+  readonly requestedCap: number;
+  /** True when the caller PASSED `maxRowsPerSection`, so a refusal can say so. */
+  readonly capWasExplicit: boolean;
+  /** What the row lists actually used. */
+  readonly effectiveCap: number;
+  /** What the referrer samples actually used. */
+  readonly effectiveSampleCap: number;
+  /** The id the caller passed, when a case-insensitive retry corrected it. */
+  readonly resolvedFrom: string | null;
+}
 
 /**
  * Assemble the response from already-fetched data. PURE — no graph access — so
@@ -817,11 +991,10 @@ const renderResponse = (
   apiName: string,
   wanted: ReadonlySet<Object360Section>,
   g: Gathered,
-  requestedCap: number,
-  effectiveCap: number,
-  effectiveSampleCap: number,
+  scope: RenderScope,
 ): McpResponse<Readonly<Record<string, unknown>>> => {
   const ledger = newLedger();
+  const { requestedCap, effectiveCap, effectiveSampleCap } = scope;
   const cap = effectiveCap;
   /**
    * Per-GROUP sample cap, derived from the per-section cap rather than equal to
@@ -1109,6 +1282,64 @@ const renderResponse = (
     .sort((a, b) => b.granters - a.granters || byIdAsc(a.granterType, b.granterType));
 
   const fieldGranters = new Set(g.fieldGrantEdges.map((e) => e.fromId));
+
+  /**
+   * FIELD-level grants, split on the SAME two axes as `objectCrud` above.
+   *
+   * This block used to be ONE ascending id array. Every `PermissionSet:` id
+   * sorts ahead of every `Profile:` id, so the cap was spent entirely on
+   * permission sets and the response named ZERO Profiles — inside the very
+   * block whose note claimed the two were "listed SEPARATELY". Measured on the
+   * probe vault's widest object: 82 distinct field-level granters, 52 of them
+   * Profiles, none named by a default call, in the LARGER of the two grant
+   * tiers (14 657 edges against 82 object-level ones). "Which profiles will be
+   * affected" is the question this tool exists to answer, so the field tier
+   * gets what the object tier already had: per-kind distinct counts, a named
+   * sample of EACH kind, and a per-list truncation flag carrying the TRUE total.
+   */
+  interface FieldGrantBucket {
+    readonly ids: Set<string>;
+    edges: number;
+    readonly readable: Set<string>;
+    readonly editable: Set<string>;
+  }
+  const fieldGrantsByKind = new Map<string, FieldGrantBucket>();
+  for (const e of g.fieldGrantEdges) {
+    const t = typeOf(e.fromId);
+    let bucket = fieldGrantsByKind.get(t);
+    if (bucket === undefined) {
+      bucket = { ids: new Set(), edges: 0, readable: new Set(), editable: new Set() };
+      fieldGrantsByKind.set(t, bucket);
+    }
+    bucket.ids.add(e.fromId);
+    bucket.edges += 1;
+    if (e.properties['readable'] === true) bucket.readable.add(e.fromId);
+    if (e.properties['editable'] === true) bucket.editable.add(e.fromId);
+  }
+  const buildFieldGrantKind = (
+    kindKey: string,
+    granterType: string,
+  ): Record<string, unknown> => {
+    const bucket = fieldGrantsByKind.get(granterType);
+    const ids = [...(bucket?.ids ?? [])];
+    const capped = ledger.strings(`permissions.fieldLevelGrants.${kindKey}`, ids, cap);
+    return {
+      granters: ids.length,
+      edges: bucket?.edges ?? 0,
+      canReadSomeField: bucket?.readable.size ?? 0,
+      canEditSomeField: bucket?.editable.size ?? 0,
+      names: capped.shown,
+      namesTruncated: capped.truncatedTotal !== undefined,
+      ...(capped.truncatedTotal !== undefined ? { namesTotal: capped.truncatedTotal } : {}),
+    };
+  };
+  const otherFieldGranterTypes = [...fieldGrantsByKind.entries()]
+    .filter(([t]) => t !== 'Profile' && t !== 'PermissionSet')
+    .map(([t, b]) => ({ granterType: t, granters: b.ids.size, edges: b.edges }))
+    .sort((a, b) => b.granters - a.granters || byIdAsc(a.granterType, b.granterType));
+  const fieldGrantProfileCount = fieldGrantsByKind.get('Profile')?.ids.size ?? 0;
+  const fieldGrantPermsetCount = fieldGrantsByKind.get('PermissionSet')?.ids.size ?? 0;
+
   const permissionsSection = {
     objectCrud: {
       profiles: buildCrud('profiles', profileGrants),
@@ -1118,15 +1349,33 @@ const renderResponse = (
     fieldLevelGrants: {
       edges: g.fieldGrantEdges.length,
       distinctGranters: fieldGranters.size,
-      granters: ledger.strings('permissions.fieldLevelGrants.granters', [...fieldGranters], cap)
-        .shown,
+      profiles: buildFieldGrantKind('profiles', 'Profile'),
+      permissionSets: buildFieldGrantKind('permissionSets', 'PermissionSet'),
+      ...(otherFieldGranterTypes.length > 0
+        ? { otherGranterTypes: otherFieldGranterTypes }
+        : {}),
+      note:
+        `${fieldGrantProfileCount} Profile(s) and ${fieldGrantPermsetCount} PermissionSet(s) declare a FIELD ` +
+        `permission on a field of \`${apiName}\`, on SEPARATE axes for the same reason \`objectCrud\` is: a ` +
+        `single ascending id list spends its whole cap on \`PermissionSet:\` (every one sorts ahead of every ` +
+        `\`Profile:\`) and names zero Profiles on exactly the object that has the most of them. ` +
+        `\`canReadSomeField\` / \`canEditSomeField\` count GRANTERS holding that verb on AT LEAST ONE field — ` +
+        `never fields, and never users. The extractor emits an edge only where \`readable\` or \`editable\` is ` +
+        `true, so a granter absent here declares NO field permission on this object; it is not one that was ` +
+        `denied. ` +
+        (g.fieldTargetCount === 0
+          ? `NOTHING WAS CHECKED: this vault holds no field id for this object at all, so read every zero above ` +
+            `as NOT CHECKED, never as "no one has field access".`
+          : `Both zeros are CHECKED: every \`grantedBy\` edge landing on the ${g.fieldTargetCount} field id(s) ` +
+            `this vault holds for the object was read.`),
     },
     note:
       `${profileGrants.size} Profile(s) and ${permsetGrants.size} PermissionSet(s) declare an object permission on ` +
-      `\`${apiName}\`, listed SEPARATELY so a shared ascending id list cannot drop every Profile behind the ` +
-      `\`PermissionSet:\` prefix. These are CONTAINERS, not users — the assignment roster is not in the offline ` +
-      `vault, so no count here is a headcount (\`sfi.live_permset_holders\` answers that live). ` +
-      `PermissionSetGroup-conferred access is NOT expanded here: \`sfi.object_access_audit\` does that.`,
+      `\`${apiName}\`, and ${fieldGrantProfileCount} / ${fieldGrantPermsetCount} respectively declare a ` +
+      `field-level one. BOTH blocks list the two kinds SEPARATELY, so a shared ascending id list cannot drop ` +
+      `every Profile behind the \`PermissionSet:\` prefix. These are CONTAINERS, not users — the assignment ` +
+      `roster is not in the offline vault, so no count here is a headcount (\`sfi.live_permset_holders\` answers ` +
+      `that live). PermissionSetGroup-conferred access is NOT expanded here: \`sfi.object_access_audit\` does that.`,
   };
 
   // ── relationships: related objects, both directions ──────────────────────
@@ -1712,6 +1961,64 @@ const renderResponse = (
   const budgetTrimmed =
     effectiveCap < requestedCap || sampleCap < Math.max(1, Math.floor(requestedCap / 4));
 
+  /**
+   * The remedy that ACTUALLY works when the cap was refused.
+   *
+   * The old note answered a refused `maxRowsPerSection` by prescribing
+   * `maxRowsPerSection` — the knob that had just been refused — so a caller who
+   * followed it got a BYTE-IDENTICAL response and no way to tell the advice had
+   * already failed. `includeSections` is the axis with headroom left: the same
+   * byte budget spent on fewer sections buys the full row lists. Name the
+   * sections that were actually cut hardest, as a call the caller can paste.
+   */
+  const heaviestCutSections = [
+    ...new Set(
+      [...shippedTruncation]
+        .sort((a, b) => b.total - a.total || byIdAsc(a.section, b.section))
+        .map((r) => r.section.split('.')[0] ?? '')
+        .filter((name) => name !== ''),
+    ),
+  ].slice(0, 2);
+  const remedySections =
+    heaviestCutSections.length > 0 ? heaviestCutSections : [...wanted].sort(byIdAsc).slice(0, 1);
+  /**
+   * Narrowing has room left only while the caller is asking for MORE sections
+   * than the remedy would name. Handing back the caller's own call as the
+   * remedy is the same defect this note exists to fix, one axis over — so when
+   * the narrowing axis is exhausted the note says that instead of prescribing.
+   */
+  const narrowingRoomLeft = wanted.size > remedySections.length;
+  const remedyClause = narrowingRoomLeft
+    ? `The remedy with budget left is \`includeSections\`: narrow to the sections you need and the same budget ` +
+      `buys the FULL row lists — e.g. ` +
+      `\`{"objectApiName":"${apiName}","includeSections":["${remedySections.join('","')}"],` +
+      `"maxRowsPerSection":${MAX_ROWS_PER_SECTION_CAP}}\`.`
+    : `\`includeSections\` has no room left either — this response is already narrowed to ` +
+      `${wanted.size} section(s) and the row lists still do not fit. Nothing in this tool widens further; read ` +
+      `the TRUE totals inline and reach for the tool that owns the specific question uncapped ` +
+      `(\`sfi.object_access_audit\` for access, \`sfi.what_happens_on_save\` for automation).`;
+  /**
+   * Stated whenever the requested cap could not be honoured — with or without a
+   * `truncation[]` index, because a caller who filtered every cut list out of
+   * the response still needs to know the cap they passed was refused.
+   */
+  const rowsWereCut = effectiveCap < requestedCap;
+  const refusedCapNote = budgetTrimmed
+    ? `\`maxRowsPerSection: ${requestedCap}\`${scope.capWasExplicit ? '' : ' (the default)'} could NOT be ` +
+      `honoured for \`${apiName}\`: the assembled response did not fit the ${BYTE_BUDGET}-byte budget, so ` +
+      `referrer samples were cut to ${sampleCap}${rowsWereCut ? ` and row lists to ${effectiveCap}` : ''} ` +
+      `(\`appliedScope.effectiveSampleCap\` / \`effectiveMaxRowsPerSection\`). ` +
+      (rowsWereCut
+        ? `RE-SENDING WITH A HIGHER \`maxRowsPerSection\` CANNOT CHANGE THIS RESPONSE: ${requestedCap} was ` +
+          `itself tried and did not fit, and a larger cap only ever adds rows — ${effectiveCap} is the largest ` +
+          `step on the fit ladder that fits. `
+        : '') +
+      `${remedyClause} Every capped list still reports its TRUE total inline ` +
+      `(\`truncatedTotal\` / \`sampleTruncatedTotal\` / \`namesTotal\`), \`truncation[]\` is the rolled-up ` +
+      `index (\`cappedLists\` = lists behind a row), and every AGGREGATE was computed over the FULL set BEFORE ` +
+      `any cap.`
+    : undefined;
+
   return {
     data: {
       appliedScope: {
@@ -1720,7 +2027,20 @@ const renderResponse = (
         sections: [...wanted].sort(byIdAsc),
         maxRowsPerSection: requestedCap,
         ...(budgetTrimmed
-          ? { effectiveMaxRowsPerSection: effectiveCap, effectiveSampleCap: sampleCap }
+          ? {
+              effectiveMaxRowsPerSection: effectiveCap,
+              effectiveSampleCap: sampleCap,
+              maxRowsPerSectionHonoured: false,
+              remedy: 'includeSections',
+            }
+          : {}),
+        ...(scope.resolvedFrom !== null
+          ? {
+              resolvedFrom: scope.resolvedFrom,
+              resolutionNote:
+                `\`${scope.resolvedFrom}\` has no node here; Salesforce api names are CASE-INSENSITIVE, so it ` +
+                `was resolved to \`${objectId}\` — the id every count below is about.`,
+            }
           : {}),
       },
       ...sections,
@@ -1749,19 +2069,16 @@ const renderResponse = (
             truncated: true,
             truncation: shippedTruncation,
             truncationNote:
-              'Every capped list reports its TRUE total inline (`truncatedTotal` / `sampleTruncatedTotal`); ' +
-              '`truncation[]` is the rolled-up index (`cappedLists` = lists behind a row). Every AGGREGATE is ' +
-              'computed over the FULL set BEFORE capping. Raise `maxRowsPerSection` (max 100) or narrow with ' +
-              '`includeSections`.' +
-              (budgetTrimmed
-                ? ` \`maxRowsPerSection: ${requestedCap}\` did not fit this object's byte budget: referrer ` +
-                  `samples were shortened to ${sampleCap} and row lists to ${effectiveCap} ` +
-                  `(\`appliedScope.effectiveSampleCap\` / \`effectiveMaxRowsPerSection\`). Samples shrink FIRST ` +
-                  `because each group still states its exact referrer and edge counts. Every aggregate is ` +
-                  `unaffected; narrow with \`includeSections\` to spend the budget where you need it.`
-                : ''),
+              refusedCapNote ??
+              'Every capped list reports its TRUE total inline (`truncatedTotal` / `sampleTruncatedTotal` / ' +
+                '`namesTotal`); `truncation[]` is the rolled-up index (`cappedLists` = lists behind a row). ' +
+                'Every AGGREGATE is computed over the FULL set BEFORE capping. Raise `maxRowsPerSection` ' +
+                '(max 100) or narrow with `includeSections`.',
           }
-        : { truncated: false }),
+        : {
+            truncated: false,
+            ...(refusedCapNote !== undefined ? { truncationNote: refusedCapNote } : {}),
+          }),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
