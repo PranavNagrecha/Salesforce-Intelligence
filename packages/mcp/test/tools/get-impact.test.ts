@@ -1371,6 +1371,102 @@ describe('getImpactInputSchema', () => {
     expect(real.ok).toBe(true);
   });
 
+  // ===========================================================================
+  // APEX-RECEIVER-VERIFIED (FAIL-BEFORE / PASS-AFTER)
+  //
+  // The lexical guard above only catches a LOWERCASE receiver. A PascalCase one
+  // sailed through, so `CustomField:SomeApexClass.someMember` — an Apex static
+  // the scanner keyed on its textual receiver — was walked as a real field. It
+  // even answered: the inbound `readsFrom` edges are real, so the tool returned
+  // a dependent slice and its own disclosure called the missing definition "a
+  // PHANTOM ... typically a standard or managed-package component" while an
+  // `ApexClass` node of that exact name sat in the vault.
+  // ===========================================================================
+
+  it('refuses a root whose receiver names an APEX TYPE in this vault', async () => {
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:GuardBox', type: 'ApexClass', apiName: 'GuardBox' }),
+        makeNode({ id: 'ApexClass:GuardUser', type: 'ApexClass', apiName: 'GuardUser' }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'ApexClass:GuardUser',
+          toId: 'CustomField:GuardBox.hasRun',
+          edgeType: 'readsFrom',
+          confidence: 'parsed',
+          source: 'apex-ast',
+        }),
+        // A receiver NOTHING here names — a standard SObject this vault did not
+        // retrieve, or an Apex system type. Referenced by a real edge, so the
+        // walk can answer; used by the `receiver-not-in-vault` case below.
+        makeEdge({
+          fromId: 'ApexClass:GuardUser',
+          toId: 'CustomField:NotVaultedHere.Name',
+          edgeType: 'readsFrom',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(store, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+
+    // FAILS BEFORE: `r.ok` was true and the slice named GuardUser as a
+    // dependent of a field that does not exist.
+    const r = await getImpactHandler(ctx, { componentId: 'CustomField:GuardBox.hasRun' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/is not a Salesforce field/);
+    expect(r.error.message).toMatch(/CHECKED against this vault/);
+  });
+
+  it('refuses an Apex DESCRIBE token root', async () => {
+    const r = await getImpactHandler(ctx, { componentId: 'CustomField:Account.fields' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/describe token/);
+  });
+
+  it('ANSWERS a verified real field and says the receiver was checked', async () => {
+    const r = await getImpactHandler(ctx, { componentId: 'CustomField:Account.Industry__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.rootReceiverVerification).toEqual({
+      checked: true,
+      reason: null,
+      verdict: null,
+    });
+    expect(r.value.data.disclosure).toContain('names an SObject node here');
+  });
+
+  it('ANSWERS an unvaulted receiver but refuses to call it a proven field', async () => {
+    // Honesty over recall: this tier genuinely mixes a standard SObject this
+    // vault did not retrieve with an Apex system type, and nothing here
+    // separates them — so it is answered and NAMED, never claimed.
+    const r = await getImpactHandler(ctx, { componentId: 'CustomField:NotVaultedHere.Name' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.rootReceiverVerification).toEqual({
+      checked: true,
+      reason: null,
+      verdict: 'receiver-not-in-vault',
+    });
+    expect(r.value.data.disclosure).toContain('does NOT name an SObject node here');
+    expect(r.value.data.disclosure).toContain('not a confirmed field');
+  });
+
+  it('omits the block entirely for a root with no receiver to check', async () => {
+    const r = await getImpactHandler(ctx, { componentId: 'CustomObject:Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // A `CustomObject:` root has no Apex receiver, and an always-present block
+    // would imply one was checked.
+    expect(r.value.data.rootReceiverVerification).toBeUndefined();
+  });
+
   it('rejects an unknown edge type in the edgeTypes filter', () => {
     const parsed = getImpactInputSchema.safeParse({
       componentId: 'CustomField:Account.Industry__c',

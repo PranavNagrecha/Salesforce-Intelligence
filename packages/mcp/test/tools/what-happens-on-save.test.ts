@@ -1076,6 +1076,89 @@ const saveHeavySeed: ExtractionResult = (() => {
   return { nodes, edges };
 })();
 
+// =============================================================================
+// Seed: APEX-RECEIVER-VERIFIED. A trigger whose Apex scanner edges are keyed on
+// the TEXTUAL receiver. `RecursionGuard` is a real ApexClass NODE here, so
+// `CustomField:RecursionGuard.hasRun` is an Apex STATIC MEMBER, not a field on
+// any object — yet it was emitted as a save-time `readsFrom`/`writesTo` action
+// with a `CustomField:` targetId. The describe token, the `__r` traversal and
+// the unvaulted receiver are the other shapes the lexical test let through; the
+// object's own field is the control that must SURVIVE.
+// =============================================================================
+
+const GUARD_OBJ = 'CustomObject:GuardObj';
+const GUARD_TRIGGER = 'ApexTrigger:GuardObjTrigger';
+const GUARD_APEX_TYPE = 'ApexClass:RecursionGuard';
+
+const receiverGuardSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: GUARD_OBJ, apiName: 'GuardObj' }),
+    makeNode({
+      id: GUARD_TRIGGER,
+      type: 'ApexTrigger',
+      apiName: 'GuardObjTrigger',
+      properties: { triggerObject: 'GuardObj', events: ['before insert'] },
+    }),
+    makeNode({ id: GUARD_APEX_TYPE, type: 'ApexClass', apiName: 'RecursionGuard' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: GUARD_TRIGGER,
+      toId: GUARD_OBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['before insert'] },
+    }),
+    // The control: a real field on the object the trigger fires on. SURVIVES.
+    makeEdge({
+      fromId: GUARD_TRIGGER,
+      toId: 'CustomField:GuardObj.Status__c',
+      edgeType: 'readsFrom',
+      confidence: 'parsed',
+      source: 'apex-ast',
+    }),
+    // The defect: an Apex class STATIC, emitted as a field at `parsed`.
+    makeEdge({
+      fromId: GUARD_TRIGGER,
+      toId: 'CustomField:RecursionGuard.hasRun',
+      edgeType: 'readsFrom',
+      confidence: 'parsed',
+      source: 'apex-ast',
+    }),
+    makeEdge({
+      fromId: GUARD_TRIGGER,
+      toId: 'CustomField:RecursionGuard.hasRun',
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      source: 'apex-ast',
+    }),
+    // An Apex describe token — reads like a field after the dot, is not one.
+    makeEdge({
+      fromId: GUARD_TRIGGER,
+      toId: 'CustomField:GuardObj.fields',
+      edgeType: 'readsFrom',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+    // A relationship traversal — a field on the RELATED object, not this one.
+    makeEdge({
+      fromId: GUARD_TRIGGER,
+      toId: 'CustomField:GuardParent__r.Code__c',
+      edgeType: 'readsFrom',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+    // Nothing here names this receiver: an unretrieved SObject, an Apex system
+    // type, or an inner class — the tier that cannot be told apart.
+    makeEdge({
+      fromId: GUARD_TRIGGER,
+      toId: 'CustomField:UnvaultedThing.Name',
+      edgeType: 'readsFrom',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+  ],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-whos-'));
   const dbPath = join(tempDir, 'whos.db');
@@ -1098,6 +1181,7 @@ beforeAll(async () => {
     entitlementNoteSeed,
     truncSaveSeed,
     saveHeavySeed,
+    receiverGuardSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -1509,10 +1593,30 @@ describe('whatHappensOnSaveHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // The disclosure must be the exact string the spec mandates.
-    expect(result.value.data.disclosure).toBe(
+    // The spec-mandated string must be carried VERBATIM as the PREFIX. It is
+    // asserted as a prefix, not as the whole value, because this tool appends
+    // always-on honesty riders after it (the rollup-scan note, the
+    // concept-reasoning note, and — since APEX-RECEIVER-VERIFIED — the
+    // receiver-verification sentence, which must be said even when it demoted
+    // NOTHING so a clean action list reads as CHECKED rather than unchecked).
+    // Not one byte of the mandated text may change; the assertion below pins
+    // the rider that follows it on this fixture.
+    expect(result.value.data.disclosure.startsWith(
       "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      ),
+    ).toBe(true);
+    // CHECKED-and-nothing-demoted: this fixture's object has no Apex
+    // field-access edge at all, and that zero must READ as checked.
+    expect(result.value.data.disclosure).toContain(
+      'was CHECKED against this vault and each one names an SObject node here',
     );
+    expect(result.value.data.receiverVerification).toEqual({
+      checked: true,
+      reason: null,
+      demoted: {},
+      tokens: [],
+      tokensTruncated: false,
+    });
   });
 
   it('CR-CAP-11b: the time-trigger disclosure sentence is present and makes no firing claim', async () => {
@@ -2160,6 +2264,95 @@ describe('whatHappensOnSaveHandler — phase filter + phase-omission honesty (WH
     });
     // …and the envelope stayed under the wire budget (no opaque rejection).
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(45_000);
+  });
+});
+
+// =============================================================================
+// APEX-RECEIVER-VERIFIED (FAIL-BEFORE / PASS-AFTER)
+//
+// `buildActions` used to decide what was a real save-time action with a LEXICAL
+// test that only caught `this.x` and lowercase locals. Anything that LOOKED
+// like an SObject receiver was emitted with a `CustomField:` targetId no matter
+// what it named — so an Apex class static, a describe token, a `__r` traversal
+// and an unretrieved receiver all read as fields this automation touches, some
+// at `parsed` confidence. Each receiver is now CHECKED against the vault, and
+// what fails the check is DEMOTED and DISCLOSED, never silently dropped.
+// =============================================================================
+
+describe('whatHappensOnSaveHandler — verified Apex field-access receivers', () => {
+  const guardStep = async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'GuardObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('handler failed');
+    const step = result.value.data.soe.find(
+      (s) => s.componentId === 'ApexTrigger:GuardObjTrigger',
+    );
+    expect(step).toBeDefined();
+    return { data: result.value.data, step: step! };
+  };
+
+  it('does not name an Apex class STATIC as a field this save touches', async () => {
+    const { step } = await guardStep();
+    const targets = step.actions.map((a) => a.targetId);
+    // FAILS BEFORE: both edges were emitted verbatim, at `parsed` confidence,
+    // naming a field on a class that has no fields.
+    expect(targets).not.toContain('CustomField:RecursionGuard.hasRun');
+    // The `readsFrom` on the object's OWN field is the control — untouched.
+    expect(targets).toContain('CustomField:GuardObj.Status__c');
+  });
+
+  it('demotes the describe token, the __r traversal and the unvaulted receiver too', async () => {
+    const { step } = await guardStep();
+    const targets = step.actions.map((a) => a.targetId);
+    expect(targets).not.toContain('CustomField:GuardObj.fields');
+    expect(targets).not.toContain('CustomField:GuardParent__r.Code__c');
+    expect(targets).not.toContain('CustomField:UnvaultedThing.Name');
+  });
+
+  it('DISCLOSES every demotion with a typed reason — nothing is dropped silently', async () => {
+    const { data, step } = await guardStep();
+    // FIVE demoted ACTION edges (the read AND the write on the Apex static
+    // both go), but FOUR distinct tokens — the census counts things that are
+    // not components, the step counter counts actions. Both are reported
+    // because they answer different questions.
+    expect(step.unresolvedActionsOmitted).toBe(5);
+    expect(data.receiverVerification.checked).toBe(true);
+    expect(data.receiverVerification.reason).toBe(null);
+    expect(data.receiverVerification.demoted).toEqual({
+      'apex-type-receiver': 1,
+      'describe-token': 1,
+      'relationship-traversal': 1,
+      'receiver-not-in-vault': 1,
+    });
+    // The tokens are RAW — never re-emitted as component ids.
+    expect(data.receiverVerification.tokens).toEqual([
+      { token: 'GuardObj.fields', reason: 'describe-token' },
+      { token: 'GuardParent__r.Code__c', reason: 'relationship-traversal' },
+      { token: 'RecursionGuard.hasRun', reason: 'apex-type-receiver' },
+      { token: 'UnvaultedThing.Name', reason: 'receiver-not-in-vault' },
+    ]);
+    expect(data.receiverVerification.tokensTruncated).toBe(false);
+    expect(data.disclosure).toContain('apex-type-receiver');
+    expect(data.disclosure).toContain('demoted out of `soe[].actions`');
+  });
+
+  it('an object with no Apex field-access edge reads CHECKED, not unchecked', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The zero has to be readable as CHECKED — `demoted: {}` with
+    // `checked: true`, never an absent block a caller must guess about.
+    expect(result.value.data.receiverVerification.checked).toBe(true);
+    expect(result.value.data.receiverVerification.demoted).toEqual({});
+    expect(
+      result.value.data.soe.every((s) => s.unresolvedActionsOmitted === undefined),
+    ).toBe(true);
   });
 });
 
