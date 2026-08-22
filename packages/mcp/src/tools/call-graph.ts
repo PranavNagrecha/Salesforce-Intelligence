@@ -78,8 +78,8 @@ import {
   USAGE_EDGE_TYPES,
 } from './apex-reachability.js';
 import { coercePrefix } from './coerce-id.js';
-import { soundnessForReachabilityWalk, type Soundness } from './soundness.js';
 import { mergeInputAliases } from './input-aliases.js';
+import { soundnessForReachabilityWalk, type Soundness } from './soundness.js';
 
 /** Inclusive upper bound on `maxDepth`. */
 const CALL_GRAPH_MAX_DEPTH = 5;
