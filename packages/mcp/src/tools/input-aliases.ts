@@ -159,7 +159,36 @@ export interface ResolveObjectAliasOptions {
    * `false` → `ok(null)` so a polymorphic tool in reverse mode can proceed.
    */
   readonly required?: boolean;
+  /**
+   * What to do with a `componentId` carrying a prefix that is NOT
+   * `CustomObject:`.
+   *
+   * - `'ignore'` (default) — today's behaviour: the prefix is left alone so the
+   *   tool's OWN reverse branch keeps it (`layout_assignments` reads `Layout:`,
+   *   `lightning_pages` reads `FlexiPage:`, `list_view_sharing` reads
+   *   `ListView:`). Dropping it here is correct for those tools because they
+   *   handle it themselves.
+   * - `'refuse'` — the caller has NO reverse branch, so an unhandled prefix
+   *   would fall through to `ok(null)` and SILENTLY widen the answer to
+   *   org-wide. Refuse with a named `invalid-query` instead.
+   *
+   * Default `'ignore'`, so no existing caller moves a byte.
+   */
+  readonly unhandledPrefix?: 'ignore' | 'refuse';
 }
+
+/**
+ * OBJECT-SCOPE-PREFIX-REFUSAL — verbatim refusal for a `componentId` whose
+ * prefix this tool cannot scope by. Product copy; do not reword.
+ */
+const unhandledPrefixMessage = (cid: string): string => {
+  const type = cid.slice(0, cid.indexOf(':'));
+  return (
+    `componentId '${cid}' is a ${type}: id, and this tool scopes only by OBJECT. It was ` +
+    'NOT applied — pass objectApiName / object / objectId, or a CustomObject: id. ' +
+    'Refusing rather than returning the org-wide report, which would answer a question you did not ask.'
+  );
+};
 
 /**
  * Resolve a single object scope from the interchangeable object identifiers a
@@ -171,7 +200,9 @@ export interface ResolveObjectAliasOptions {
  *
  * Reverse-mode `componentId` prefixes (`Layout:` / `FlexiPage:` / `ListView:`)
  * are NOT object aliases — they are ignored here so the tool's own reverse
- * branch keeps them.
+ * branch keeps them. A tool with NO reverse branch passes
+ * `unhandledPrefix: 'refuse'` so an unhandled prefix becomes a named
+ * `invalid-query` instead of a silent widening to org-wide.
  */
 export const resolveObjectAlias = (
   raw: unknown,
@@ -179,6 +210,7 @@ export const resolveObjectAlias = (
 ): Result<ResolvedObjectScope | null, McpError> => {
   const bareIsObject = opts.bareComponentIdIsObject ?? true;
   const required = opts.required ?? true;
+  const unhandledPrefix = opts.unhandledPrefix ?? 'ignore';
   const src = asRecord(raw);
 
   const candidates: string[] = [];
@@ -190,6 +222,15 @@ export const resolveObjectAlias = (
   if (cid !== undefined) {
     if (cid.startsWith('CustomObject:')) candidates.push(cid);
     else if (bareIsObject && !cid.includes(':')) candidates.push(toCustomObjectId(cid));
+    else if (unhandledPrefix === 'refuse' && cid.includes(':')) {
+      // The caller has no reverse branch for this prefix, so ignoring it would
+      // silently widen the answer to org-wide. Name it and refuse.
+      return err({
+        kind: 'invalid-query',
+        message: unhandledPrefixMessage(cid),
+        path: 'componentId',
+      });
+    }
     // else: a reverse-mode prefix (Layout:/FlexiPage:/ListView:) — not an object alias.
   }
 
@@ -225,10 +266,12 @@ export const resolveObjectAlias = (
 export const resolveExistingObjectScope = async (
   graph: GraphStore,
   raw: unknown,
+  opts: Pick<ResolveObjectAliasOptions, 'unhandledPrefix'> = {},
 ): Promise<Result<ResolvedObjectScope | null, McpError>> => {
   const resolved = resolveObjectAlias(raw, {
     required: false,
     bareComponentIdIsObject: true,
+    ...(opts.unhandledPrefix !== undefined ? { unhandledPrefix: opts.unhandledPrefix } : {}),
   });
   if (!resolved.ok) return resolved;
   if (resolved.value === null) return ok(null);
