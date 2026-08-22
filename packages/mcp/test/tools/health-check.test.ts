@@ -964,3 +964,49 @@ describe('healthCheckHandler: stale assignment-facts advisory (>30d, advisory on
     expect(result.value.data.assignmentData.advisory).toBeNull();
   });
 });
+
+describe('healthCheckHandler: duplicate source paths (DUPLICATE-SOURCE detect+disclose)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-dupsrc-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, {
+      ...baseManifest(realHash),
+      duplicateSourcePaths: {
+        components: 52,
+        conflicting: 52,
+        undeterminedPrecedence: 0,
+        paths: ['source/', 'source/main/default/'],
+        byType: { Profile: 52 },
+        disclosure:
+          "This vault's source tree holds the same components under 2 different roots " +
+          '(source/, source/main/default/) — 52 component(s) were present at more than one path, ' +
+          '52 of them with DIFFERING content.',
+      },
+    });
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  /**
+   * A vault assembled from two retrievals of the same metadata must never
+   * report healthy: a permission revoked in one copy and still present in the
+   * other is exactly the answer this product must not give confidently.
+   */
+  it('refuses to report healthy while components come from more than one source root', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('degraded');
+    expect(result.value.data.issues.join('\n')).toContain('source/main/default/');
+    expect(result.value.data.issues.join('\n')).toContain('DIFFERING content');
+  });
+});

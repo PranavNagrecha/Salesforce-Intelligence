@@ -21,6 +21,19 @@ export {
 } from './import.js';
 export type { ImportCounts } from './import.js';
 export {
+  chooseSourcePath,
+  isDxCanonicalPath,
+  resolveDuplicateSourcePaths,
+  SOURCE_CONFLICT_PROPERTY,
+} from './duplicate-source.js';
+export type {
+  DuplicateSourceResolution,
+  DuplicateSourceSummary,
+  SourceConflictDisclosure,
+  SourcePrecedence,
+} from './duplicate-source.js';
+export { relativizeSourcePath } from './relativize.js';
+export {
   buildRelationshipMaps,
   mintRelationshipTraversalEdges,
   RELATIONSHIP_RESOLVER_SOURCE,

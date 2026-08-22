@@ -108,8 +108,10 @@ import {
   UNRESOLVED_PROFILE_PREFIX,
 } from '@sf-intelligence/extractors';
 import {
+  type DuplicateSourceSummary,
   listEdgesForNodes,
   listNodesByType,
+  resolveDuplicateSourcePaths,
   type GraphStore,
 } from '@sf-intelligence/graph';
 import {
@@ -150,6 +152,16 @@ export interface WalkResult {
   readonly results: readonly ExtractionResult[];
   readonly failures: readonly RefreshExtractionFailure[];
   readonly skippedDirectories: Readonly<Record<string, number>>;
+  /**
+   * Present ONLY when this walk found the same component at more than one
+   * source path — i.e. the vault's `source/` tree holds two copies of the same
+   * retrieval target (a legacy flat tree beside the DX `main/default` tree).
+   * The walk hands back the RESOLVED results (one copy per component, conflicts
+   * flagged); this field is the roll-up the refresh writes to the manifest so
+   * `health_check` and `get_manifest` can say the vault was assembled from more
+   * than one retrieval. Absent on a normal vault.
+   */
+  readonly duplicateSourcePaths?: DuplicateSourceSummary;
   /**
    * P5-incremental-refresh: the per-file extraction cache to persist for the
    * NEXT refresh — one entry per successfully-extracted file, keyed by its
@@ -1829,7 +1841,24 @@ export const walkAndExtract = async (
       failures.push({ path: entry.path, error: outcome.error });
     }
   }
-  return { results, failures, skippedDirectories, cache, reusedCount };
+  // Resolve duplicate source paths BEFORE the results leave the walker, so the
+  // graph import, the change-set diff (`--incremental-graph`) and the vault
+  // renderer all see the SAME single copy per component. Doing it here rather
+  // than only inside `importExtractionResults` matters for the incremental
+  // path: a change-set computed from unresolved results would disagree with an
+  // import that resolved them. The cache above deliberately keeps the RAW
+  // per-file results, so the next refresh re-resolves from scratch.
+  const resolvedDuplicates = resolveDuplicateSourcePaths(results);
+  return {
+    results: resolvedDuplicates.results,
+    failures,
+    skippedDirectories,
+    ...(resolvedDuplicates.summary !== null
+      ? { duplicateSourcePaths: resolvedDuplicates.summary }
+      : {}),
+    cache,
+    reusedCount,
+  };
 };
 
 /** Wrap a renderer's frontmatter + body into the canonical Markdown document. */

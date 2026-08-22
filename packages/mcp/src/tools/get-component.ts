@@ -61,7 +61,7 @@ import type {
   UntrustedOrgText,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, SOURCE_CONFLICT_PROPERTY } from '@sf-intelligence/graph';
 import {
   renderComponentMarkdown,
   serializeFrontmatter,
@@ -200,6 +200,21 @@ export interface GetComponentOutput {
    */
   readonly properties: Readonly<Record<string, unknown>>;
   /**
+   * DUPLICATE-SOURCE disclosure. Present ONLY when this component exists at
+   * more than one path under the vault's `source/` tree AND the copies carry
+   * DIFFERENT content — i.e. two retrievals of the same metadata are sitting
+   * in the vault and disagree about this component. Names every path, which
+   * copy the answer came from, and whether the vault held enough information
+   * to order them.
+   *
+   * Lifted to the top level rather than left inside `properties` on purpose:
+   * the metadata-probe projection drops large property entries to fit its
+   * budget, and this is the one property that must never be the one dropped.
+   * A permission-granting answer about a component carrying this field is NOT
+   * settled — the other copy was not merged in, and may be the newer one.
+   */
+  readonly sourceConflict?: Readonly<Record<string, unknown>>;
+  /**
    * Canonical ids of every component this node has an outgoing edge to,
    * deduplicated and sorted. Lets callers cite real component ids without
    * parsing markdown prose.
@@ -297,6 +312,21 @@ export interface GetComponentOutput {
   /** AUDIT-F8 — description / inlineHelpText from node properties, branded. */
   readonly descriptionOrgText?: UntrustedOrgText;
 }
+
+/**
+ * Lift the import layer's duplicate-source disclosure out of the node's
+ * property bag onto the response's top level. Returns `{}` for the normal case
+ * (one source path, or copies that agree), so an unaffected component's
+ * response is byte-identical to before this field existed.
+ */
+const sourceConflictField = (
+  node: Node,
+): Pick<GetComponentOutput, 'sourceConflict'> => {
+  const conflict = node.properties[SOURCE_CONFLICT_PROPERTY];
+  return typeof conflict === 'object' && conflict !== null
+    ? { sourceConflict: conflict as Readonly<Record<string, unknown>> }
+    : {};
+};
 
 const orgTextFields = (
   node: Node,
@@ -546,6 +576,7 @@ export const getComponentHandler = async (
         omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
         maxBodyBytes,
         metadataOnly: true,
+        ...sourceConflictField(node),
         ...(propProjection.omittedKeys.length > 0
           ? { omittedPropertyKeys: propProjection.omittedKeys }
           : {}),
@@ -613,6 +644,7 @@ export const getComponentHandler = async (
       returnedBodyBytes: boundedBody.returnedBytes,
       omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
       maxBodyBytes,
+      ...sourceConflictField(node),
       ...(annotations !== undefined ? { annotations } : {}),
       ...(conceptReasoning !== null ? { conceptReasoning } : {}),
       ...(conceptNote !== null ? { disclosure: conceptNote } : {}),

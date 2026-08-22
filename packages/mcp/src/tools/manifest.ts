@@ -11,7 +11,7 @@
 
 import type { McpError, McpResponse, VaultManifest } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
-import { readSkippedDirectories } from '@sf-intelligence/vault';
+import { readSkippedDirectories, type ExtendedVaultManifest } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -29,6 +29,14 @@ import type { Context } from '../server.js';
  */
 export interface ManifestOutput extends VaultManifest {
   readonly skippedDirectories: Readonly<Record<string, number>>;
+  /**
+   * DUPLICATE-SOURCE roll-up, passed through from the manifest. Present ONLY
+   * when the vault's `source/` tree holds the same components under more than
+   * one root (two retrievals of the same metadata sitting side by side), which
+   * means some components were assembled from more than one retrieval. Absent
+   * on a normal vault — its absence is the healthy signal.
+   */
+  readonly duplicateSourcePaths?: ExtendedVaultManifest['duplicateSourcePaths'];
 }
 
 /**

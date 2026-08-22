@@ -94,3 +94,61 @@ describe('collectVaultSourceFiles', () => {
     }
   });
 });
+
+describe('collectVaultSourceFiles — duplicated source layouts', () => {
+  /**
+   * A vault that was refreshed once into a flat layout and again into the
+   * Salesforce DX layout, with nothing deleting the first tree, carries every
+   * file twice. Grep-based tools built on this helper then count every match
+   * twice — including a class's own declaration line, which is how "is this
+   * still used anywhere?" reported static evidence for a component whose only
+   * match was itself.
+   */
+  it('returns ONE copy per logical file, preferring the DX layout', async () => {
+    const vault = await makeVault();
+    try {
+      await mkdir(join(vault, 'source', 'classes'), { recursive: true });
+      await mkdir(join(vault, 'source', 'main', 'default', 'classes'), {
+        recursive: true,
+      });
+      await writeFile(
+        join(vault, 'source', 'classes', 'DepotRouter.cls'),
+        'public class DepotRouter { }\n',
+      );
+      await writeFile(
+        join(vault, 'source', 'main', 'default', 'classes', 'DepotRouter.cls'),
+        'public class DepotRouter { }\n',
+      );
+      const files = await collectVaultSourceFiles(vault, { suffixes: ['.cls'] });
+      expect(files.map((f) => f.vaultRelativePath)).toEqual([
+        'source/main/default/classes/DepotRouter.cls',
+      ]);
+    } finally {
+      await rm(vault, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps genuinely different files in the same layout', async () => {
+    const vault = await makeVault();
+    try {
+      await mkdir(join(vault, 'source', 'main', 'default', 'classes'), {
+        recursive: true,
+      });
+      await writeFile(
+        join(vault, 'source', 'main', 'default', 'classes', 'DepotRouter.cls'),
+        'public class DepotRouter { }\n',
+      );
+      await writeFile(
+        join(vault, 'source', 'main', 'default', 'classes', 'DepotAudit.cls'),
+        'public class DepotAudit { }\n',
+      );
+      const files = await collectVaultSourceFiles(vault, { suffixes: ['.cls'] });
+      expect(files.map((f) => f.vaultRelativePath)).toEqual([
+        'source/main/default/classes/DepotAudit.cls',
+        'source/main/default/classes/DepotRouter.cls',
+      ]);
+    } finally {
+      await rm(vault, { recursive: true, force: true });
+    }
+  });
+});
