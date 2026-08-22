@@ -56,3 +56,21 @@
   **Behaviour change for callers:** the caveat message text changed for both
   tools (private format → shared format), and `value_change_audit` now reports
   `partial` on vaults where it used to claim `complete`.
+
+- **`sfi.explain_formula` reads the resolved relationship edge, and never mints
+  an id that names no node.** A dotted path (`Advisor__r.Email`) returned a bare
+  `toId: null` even when the refresh's relationship-resolver had already
+  produced the target — the join key (`properties.traversalPath`) is
+  byte-identical to the tokenizer's `ref.path`, and nothing read it. A
+  single-segment reference minted `CustomField:{parent}.{path}` without ever
+  asking whether that node existed. Both are the same defect: the resolver
+  guessed. Every `toId` now names a real node or is `null` with a `resolution`
+  (`relationship-unresolved` | `not-in-vault` | `no-parent-scope`) and a
+  verbatim note. On a vault whose refresh produced no resolver edges, every
+  dotted path reports `relationship-unresolved` — correct, and pinned by a test.
+
+- **`sfi.explain_formula` emits literal VALUES.** `literals` carried one
+  `{value: null}` row per counted literal — asserting three numeric literals
+  exist while refusing to say what any of them were. The tokenizer already held
+  the text and threw it away. `stringLiteralCount` / `numericLiteralCount` are
+  unchanged.

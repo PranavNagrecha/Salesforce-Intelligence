@@ -75,18 +75,29 @@
  *     `FORMULA_FUNCTIONS` to its output; the signature lookup defaults
  *     to a generic "Salesforce formula function" string if the lookup
  *     misses, but this branch isn't exercised in v2.0f.
- *   - The `parentObjectApiName` axis is OPTIONAL. When absent,
- *     dotted paths resolve verbatim (the same convention every other
- *     v0.2/v2.0a formula-resolution helper uses), but single-segment
- *     refs DO NOT get a `toId` — the renderer sees them as
- *     `{ path: 'Industry__c', toId: null }` and knows to either
- *     prompt the user for context or surface "no parent context"
- *     in the rendered narrative.
+ *   - Every `fieldReferences[].toId` either NAMES A REAL NODE or is `null`
+ *     with a `resolution` and a verbatim `note` saying why. A dotted path is
+ *     joined against the refresh's relationship-resolver edges on
+ *     `properties.traversalPath` (an exact key, not a heuristic); a vault whose
+ *     refresh produced none — builder 0.1.11 has ZERO — reports
+ *     `relationship-unresolved`, which is correct there and must not be
+ *     "fixed". A single segment is probed with `getNodeById` before its id is
+ *     emitted, so the tool no longer mints `CustomField:{parent}.{path}` for a
+ *     field the vault does not hold.
+ *   - The `parentObjectApiName` axis is OPTIONAL. Without it (and without
+ *     `fieldId`) a single-segment reference reports `no-parent-scope`.
  */
 
-import type { ComponentId, McpError, McpResponse, Node } from '@sf-intelligence/contracts';
+import type {
+  ComponentId,
+  ConfidenceLevel,
+  Edge,
+  McpError,
+  McpResponse,
+  Node,
+} from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { tokenizeFormula } from '@sf-intelligence/parsers';
 import { z } from 'zod';
 
@@ -159,21 +170,40 @@ export interface ExplainFormulaFunction {
 }
 
 /**
- * One field-reference entry. `path` is the raw reference text as the
- * tokenizer extracted it (e.g., `'Account.Industry__c'`, `'Status__c'`);
- * `toId` is the canonical CustomField id resolved with the
- * `parentObjectApiName` context, or `null` when no context was
- * supplied for a single-segment reference OR the path traverses a
- * relationship (a first segment ending in `__r`) whose target object
- * the tokenizer can't name. When `toId` is null because the path
- * traverses a relationship, `kind` is `'relationship'` so a renderer
- * can say "traverses relationship Widget_Contact__r"; otherwise `kind`
- * is `'field'`.
+ * One field-reference entry.
+ *
+ * `path` is the raw reference text as the tokenizer extracted it
+ * (`'Advisor__r.Email'`, `'Status__c'`). `toId` is the canonical CustomField
+ * id — and it is now either a canonical id that NAMES A REAL NODE, or `null`
+ * with a `resolution` saying why. It is never a minted id that resolves to
+ * nothing: the old code fabricated `CustomField:{parent}.{path}` for every
+ * single-segment reference without ever asking the graph whether that node
+ * existed, and returned a bare `toId: null` for every dotted path even when
+ * the vault held a resolved target for it.
+ *
+ * `kind` is kept unchanged so existing callers do not break.
  */
 export interface ExplainFormulaFieldReference {
   readonly path: string;
   readonly toId: ComponentId | null;
   readonly kind: 'field' | 'relationship';
+  /**
+   * WHY `toId` is what it is. A `null` `toId` is never bare — a reader must be
+   * able to tell "the vault does not model this relationship hop" from "the
+   * field this would name is not in the vault" from "you gave me no object
+   * scope to resolve against".
+   */
+  readonly resolution:
+    | 'resolved'
+    | 'relationship-unresolved'
+    | 'not-in-vault'
+    | 'no-parent-scope';
+  /** Present only on `resolution: 'resolved'` — the edge/derivation tier. */
+  readonly confidence?: ConfidenceLevel;
+  /** Present only on `resolution: 'not-in-vault'` — the id tried and rejected. */
+  readonly candidateId?: string;
+  /** Present on every non-`resolved` row. Verbatim. */
+  readonly note?: string;
 }
 
 /**
@@ -190,14 +220,17 @@ export interface ExplainFormulaGlobalReference {
 }
 
 /**
- * One literal value the tokenizer counted. `value` is `null` for
- * tokenizer-counted-but-not-extracted entries (v0.2's tokenizer
- * counts both kinds but doesn't surface the values themselves); the
- * `type` field discriminates the literal kind so the renderer can
- * decide what to surface.
+ * One literal value the tokenizer read out of the formula.
+ *
+ * `value` was `unknown` and always `null` — the tokenizer counted both kinds
+ * and threw the text away, so the payload asserted "there are three numeric
+ * literals here" while refusing to say what any of them were. It now carries
+ * the value: a `number` for a numeric literal (or the RAW source text when the
+ * literal overflows `Number` precision, rather than a silently wrong number),
+ * and the unescaped inner text for a string literal.
  */
 export interface ExplainFormulaLiteral {
-  readonly value: unknown;
+  readonly value: number | string;
   readonly type: 'number' | 'string';
 }
 
@@ -314,53 +347,162 @@ const FUNCTION_SIGNATURES: Readonly<Record<string, string>> = Object.freeze({
 const CONDITIONAL_FUNCTIONS = new Set<string>(['IF', 'CASE', 'AND', 'OR', 'NOT']);
 
 /**
- * Resolve a single field-reference path to its canonical CustomField
- * id and classify it. Mirrors the v0.2 formula-references / v2.0a
- * condition-extractor resolution semantics:
- *
- *   - ANY dotted path is a cross-object relationship traversal →
- *     `{ toId: null, kind: 'relationship' }`. The leading segment is a
- *     RELATIONSHIP name (`Owner`, `CreatedBy`, `Widget_Contact__r`, …),
- *     not an object API name, and it routinely differs from the target
- *     object (`Owner` / `CreatedBy` / `LastModifiedBy` / `Manager` →
- *     `User`); a multi-hop path (`CreatedBy.Manager.LastName`) cannot form
- *     a valid two-segment CustomField id at all. Minting
- *     `CustomField:{dotted.path}` produces an id that never resolves, so we
- *     keep the raw path with `toId: null` and tag it so a renderer can say
- *     "traverses relationship …".
- *   - Single-segment paths (`Status__c`) with a `parentObjectApiName`
- *     in scope → `CustomField:{parent}.{path}`, `kind: 'field'`.
- *   - Single-segment paths WITHOUT a parent → `{ toId: null, kind:
- *     'field' }` (no scope; the renderer surfaces the raw path without
- *     a canonical id).
- *
- * Note: `$`-prefixed special variables never reach this function — the
- * tokenizer routes them to its `globalReferences` channel, which the
- * handler surfaces as `globalReferences` separately.
+ * Verbatim notes for each non-`resolved` field-reference outcome. A `null`
+ * `toId` must always carry the reason it is null — "not known" and "none" are
+ * different answers, and only one of them is ever true here.
  */
-const resolveFieldRef = (
-  path: string,
+const relationshipUnresolvedNote = (firstSegment: string): string =>
+  `This reference traverses the relationship \`${firstSegment}\`. This vault holds no resolved target for it — the relationship-to-object mapping is produced by the refresh, and this vault's refresh did not produce one for this path. The field it lands on is NOT KNOWN; it is not "none".`;
+
+const notInVaultNote = (candidateId: string): string =>
+  `\`${candidateId}\` is the id this single-segment reference would resolve to, but no node with that id exists in this vault. The field may be a standard field the Metadata API does not emit separately, or it may not have been retrieved. This is NOT proof the field is absent from the org.`;
+
+const NO_PARENT_SCOPE_NOTE =
+  'No `parentObjectApiName` was supplied and no `fieldId` was passed, so this single-segment reference cannot be scoped to an object. Pass `fieldId` or `parentObjectApiName` for a canonical id.';
+
+/**
+ * Read the OWNING field's outgoing formula-traversal edges into a map keyed by
+ * the traversal path.
+ *
+ * The refresh's relationship-resolver stamps `properties.traversalPath` on each
+ * `references` edge it produces, and that string is BYTE-IDENTICAL to the
+ * tokenizer's `ref.path` (verified across 240 edges / 157 formula fields on the
+ * reference vault). So the join is an exact map lookup — no fuzzy matching, no
+ * re-derivation of the relationship-to-object mapping.
+ *
+ * A vault whose refresh produced no such edges (builder 0.1.11 has ZERO) yields
+ * an EMPTY map, and every dotted path then reports
+ * `relationship-unresolved` — which is exactly correct there. This function
+ * READS the map; it never assumes it is populated.
+ */
+const readTraversalEdges = async (
+  ctx: Context,
+  fieldId: ComponentId,
+): Promise<Map<string, Edge>> => {
+  const map = new Map<string, Edge>();
+  const edgesRes = await listEdges(ctx.graph, fieldId, {
+    direction: 'out',
+    edgeType: 'references',
+  });
+  if (!edgesRes.ok) return map;
+  for (const edge of edgesRes.value) {
+    if (edge.properties['referenceKind'] !== 'formulaRelationshipTraversal') {
+      continue;
+    }
+    const path = edge.properties['traversalPath'];
+    if (typeof path === 'string' && !map.has(path)) map.set(path, edge);
+  }
+  return map;
+};
+
+/**
+ * Build the `fieldReferences` block from the tokenizer's `references` output.
+ *
+ * Two defects are fixed here and they are the same defect: the resolver GUESSED
+ * instead of asking the graph.
+ *
+ *   - A dotted path returned a bare `toId: null` even when the vault held a
+ *     resolved target for it. The refresh's relationship-resolver had already
+ *     done the work; nothing read it.
+ *   - A single segment minted `CustomField:{parent}.{path}` unconditionally —
+ *     a canonical id that frequently names no node at all.
+ *
+ * Every emitted `toId` now either names a real node or is `null` with a
+ * `resolution` and a verbatim `note` saying why.
+ */
+const buildFieldReferences = async (
+  ctx: Context,
+  references: readonly { path: string }[],
   parentObjectApiName: string | undefined,
-): { toId: ComponentId | null; kind: 'field' | 'relationship' } => {
-  if (path.includes('.')) {
-    // ANY dotted path is a cross-object relationship traversal: the leading
-    // segment is a RELATIONSHIP name (Owner, CreatedBy, Widget_Contact__r,
-    // …), not an object API name, and it frequently differs from the target
-    // object (Owner / CreatedBy / LastModifiedBy / Manager → User). We cannot
-    // resolve the relationship→object mapping offline, and a multi-hop path
-    // (`CreatedBy.Manager.LastName`) cannot form a valid two-segment
-    // CustomField id at all. So keep the raw path with toId: null and tag it
-    // 'relationship' — the same honest handling the __r case always used —
-    // rather than minting a `CustomField:…` id that never resolves.
-    return { toId: null, kind: 'relationship' };
+  owningFieldId: ComponentId | undefined,
+): Promise<readonly ExplainFormulaFieldReference[]> => {
+  // One query for the whole formula, or an empty map when the caller passed
+  // only `formulaExpression` (no owning node ⇒ no edges to read).
+  const traversals =
+    owningFieldId === undefined
+      ? new Map<string, Edge>()
+      : await readTraversalEdges(ctx, owningFieldId);
+
+  // Dedupe the minted candidate ids BEFORE probing so a formula repeating the
+  // same single-segment reference costs one `getNodeById`, not N.
+  const seen = new Set<string>();
+  const ordered: { path: string; candidateId?: string }[] = [];
+  for (const ref of references) {
+    if (seen.has(ref.path)) continue;
+    seen.add(ref.path);
+    ordered.push(
+      ref.path.includes('.') || parentObjectApiName === undefined
+        ? { path: ref.path }
+        : {
+            path: ref.path,
+            candidateId: `CustomField:${parentObjectApiName}.${ref.path}`,
+          },
+    );
   }
-  if (parentObjectApiName === undefined) {
-    return { toId: null, kind: 'field' };
+  const existence = new Map<string, boolean>();
+  for (const candidateId of new Set(
+    ordered
+      .map((o) => o.candidateId)
+      .filter((c): c is string => c !== undefined),
+  )) {
+    const node = await getNodeById(ctx.graph, candidateId as ComponentId);
+    existence.set(candidateId, node.ok && node.value !== null);
   }
-  return {
-    toId: `CustomField:${parentObjectApiName}.${path}`,
-    kind: 'field',
-  };
+
+  const out: ExplainFormulaFieldReference[] = [];
+  for (const entry of ordered) {
+    if (entry.path.includes('.')) {
+      const edge = traversals.get(entry.path);
+      if (edge !== undefined) {
+        out.push({
+          path: entry.path,
+          toId: edge.toId,
+          kind: 'relationship',
+          resolution: 'resolved',
+          confidence: edge.confidence,
+        });
+        continue;
+      }
+      const firstSegment = entry.path.slice(0, entry.path.indexOf('.'));
+      out.push({
+        path: entry.path,
+        toId: null,
+        kind: 'relationship',
+        resolution: 'relationship-unresolved',
+        note: relationshipUnresolvedNote(firstSegment),
+      });
+      continue;
+    }
+    if (entry.candidateId === undefined) {
+      out.push({
+        path: entry.path,
+        toId: null,
+        kind: 'field',
+        resolution: 'no-parent-scope',
+        note: NO_PARENT_SCOPE_NOTE,
+      });
+      continue;
+    }
+    if (existence.get(entry.candidateId) === true) {
+      out.push({
+        path: entry.path,
+        toId: entry.candidateId as ComponentId,
+        kind: 'field',
+        resolution: 'resolved',
+        confidence: 'declared',
+      });
+      continue;
+    }
+    out.push({
+      path: entry.path,
+      toId: null,
+      kind: 'field',
+      resolution: 'not-in-vault',
+      candidateId: entry.candidateId,
+      note: notInVaultNote(entry.candidateId),
+    });
+  }
+  return out;
 };
 
 /**
@@ -419,27 +561,6 @@ const buildFunctions = (
 };
 
 /**
- * Build the `fieldReferences` block from the tokenizer's `references`
- * output. Each reference's `path` is the raw text the tokenizer
- * extracted; `toId` is resolved with the `parentObjectApiName`
- * scoping rule.
- */
-const buildFieldReferences = (
-  references: readonly { path: string }[],
-  parentObjectApiName: string | undefined,
-): readonly ExplainFormulaFieldReference[] => {
-  const out: ExplainFormulaFieldReference[] = [];
-  const seen = new Set<string>();
-  for (const ref of references) {
-    if (seen.has(ref.path)) continue;
-    seen.add(ref.path);
-    const { toId, kind } = resolveFieldRef(ref.path, parentObjectApiName);
-    out.push({ path: ref.path, toId, kind });
-  }
-  return out;
-};
-
-/**
  * Build the `globalReferences` block from the tokenizer's
  * `globalReferences` output. Each entry's `path` is the matched
  * `$`-prefixed text; `category` is always `'global'`. Deduplicated by
@@ -459,24 +580,30 @@ const buildGlobalReferences = (
 };
 
 /**
- * Build the `literals` block from the tokenizer's per-kind counts.
- * v0.2's tokenizer only emits counts; the values themselves aren't
- * extracted (extracting them would mean an extra string-recoverable
- * pass over the source). We surface one row per counted literal with
- * `value: null` — the renderer can either omit the per-literal axis
- * or fall back to "N numeric literals, M string literals" from the
- * row counts.
+ * Build the `literals` block from the tokenizer's extracted literal text.
+ *
+ * The emission ORDER is preserved from the old count-based implementation —
+ * all numerics, then all strings — so no existing assertion moves for a reason
+ * unrelated to this fix.
+ *
+ * A numeric literal that does not round-trip through `Number` (precision
+ * overflow) is emitted as its RAW source text with `type: 'number'`: a wrong
+ * number would be worse than a string a reader can see is verbatim.
  */
 const buildLiterals = (
-  numericCount: number,
-  stringCount: number,
+  numericLiterals: readonly string[],
+  stringLiterals: readonly string[],
 ): readonly ExplainFormulaLiteral[] => {
   const out: ExplainFormulaLiteral[] = [];
-  for (let i = 0; i < numericCount; i += 1) {
-    out.push({ value: null, type: 'number' });
+  for (const raw of numericLiterals) {
+    const parsed = Number(raw);
+    out.push({
+      value: Number.isNaN(parsed) ? raw : parsed,
+      type: 'number',
+    });
   }
-  for (let i = 0; i < stringCount; i += 1) {
-    out.push({ value: null, type: 'string' });
+  for (const text of stringLiterals) {
+    out.push({ value: text, type: 'string' });
   }
   return out;
 };
@@ -667,15 +794,14 @@ export const explainFormulaHandler = async (
 
   const tokens = tokenized.value;
   const functions = buildFunctions(tokens.functionCalls);
-  const fieldReferences = buildFieldReferences(
+  const fieldReferences = await buildFieldReferences(
+    ctx,
     tokens.references,
     resolvedParentObjectApiName,
+    input.fieldId as ComponentId | undefined,
   );
   const globalReferences = buildGlobalReferences(tokens.globalReferences);
-  const literals = buildLiterals(
-    tokens.numericLiteralCount,
-    tokens.stringLiteralCount,
-  );
+  const literals = buildLiterals(tokens.numericLiterals, tokens.stringLiterals);
 
   return ok({
     data: {
