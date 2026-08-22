@@ -450,6 +450,53 @@ const fieldRefsFromCriteria = (
 };
 
 /**
+ * FIX 15 (1) — is this ref a RELATIONSHIP TRAVERSAL rather than an
+ * `{Object}.{Field}` pair? Returns the verbatim dotted path to hand to the
+ * import-time relationship resolver, or `null` when the ref is not
+ * relationship-shaped.
+ *
+ * The test is the leading (object) segment: a Salesforce object api name never
+ * ends in `__r` — custom objects end `__c` / `__b` / `__e` / `__x` / `__mdt`,
+ * standard objects carry no suffix at all — so a leading `<Rel>__r` is
+ * unambiguously a relationship spelling, and that is knowable from the STRING
+ * ALONE with no object context. `CustomField:<Rel>__r.<Field>__c` therefore
+ * names no node, and no refresh on any org could ever create it.
+ *
+ * The suffix test is case-INSENSITIVE. A formula / criteria author may type
+ * `Parent__R` (Salesforce api names are matched case-insensitively and the
+ * authored casing is what gets serialised), and `__R` is no more an object
+ * suffix than `__r` is — minting an edge for it would be the same ungrounded id
+ * this fix exists to stop. `buildRelationshipMaps` in
+ * `@sf-intelligence/graph` lower-cases both halves of its lookup key, so a
+ * `__R` path still resolves there.
+ *
+ * This function is the SINGLE definition of "relationship-shaped": both the
+ * edge filter (`isWellFormedFieldId`) and the parking loop call it, so a ref
+ * can never be rejected by one and missed by the other.
+ *
+ * Resolution is deliberately NOT attempted here. `extractConditions` is a pure
+ * per-file function whose only object context is `parentObjectApiName`; it
+ * cannot know which object `<Rel>__r` reaches, because that needs every
+ * object's lookup fields at once. `relationship-refs.ts` is the layer that can
+ * see them, and it consumes what this parks.
+ */
+const relationshipTraversalPathOf = (id: string): string | null => {
+  const prefix = 'CustomField:';
+  if (!id.startsWith(prefix)) return null;
+  const body = id.slice(prefix.length);
+  // A `$`-prefixed global that never resolved is not a traversal from the
+  // parent object — it has no resolution base at all. Left to `fieldRefs`.
+  if (body.length === 0 || body.startsWith('$')) return null;
+  const parts = body.split('.');
+  // `resolveTraversalTarget` needs at least one hop plus a field, and refuses
+  // an empty segment; mirror both so nothing unwalkable is parked.
+  if (parts.length < 2) return null;
+  if (parts.some((part) => part.length === 0)) return null;
+  if (!/__r$/i.test(parts[0]!)) return null;
+  return body;
+};
+
+/**
  * Internal: build one ConditionalContext (node + firesWhen edge +
  * mirror entry) from a normalised condition tuple. Used by
  * `extractConditions` after the per-`kind` normalisation step.
@@ -465,6 +512,7 @@ const buildConditionTriple = (
   parentApiVersion: number | null,
   extraProperties: Readonly<Record<string, unknown>>,
   sourceName: string | null,
+  parentObjectApiName: string | null,
 ): {
   readonly node: Node;
   readonly edge: Edge;
@@ -486,6 +534,42 @@ const buildConditionTriple = (
   // Omitting it for the nameless kinds (criteria / formula / recordtrigger)
   // keeps their node.properties + mirror byte-identical to pre-fix output.
   if (sourceName !== null) nodeProperties['sourceName'] = sourceName;
+  // FIX 15 (1) — park the relationship traversals for the resolver instead of
+  // minting an id that names no node. Mirrors `formulaRelationshipRefs` on a
+  // CustomField: the per-file extractor records the unresolved work, and
+  // `mintRelationshipTraversalEdges` (@sf-intelligence/graph) — the only layer
+  // that can see every object's lookup fields at once — resolves it into a
+  // `readsFrom` onto the REAL `CustomField:` node, or drops it. Never guesses.
+  //
+  // NOTE the parked path is derived from the ref TEXT, not from any
+  // `relationshipName` property: `relationshipName` is the CHILD-side
+  // related-list name and does not match the parent traversal spelling. The
+  // parent spelling (`<Rel>__c` -> `<Rel>__r`) is derived by
+  // `buildRelationshipMaps`; nothing here re-derives it.
+  const unresolvedTraversalRefs: string[] = [];
+  const seenTraversalRefs = new Set<string>();
+  for (const ref of fieldRefs) {
+    const traversalPath = relationshipTraversalPathOf(ref);
+    if (traversalPath === null) continue;
+    if (seenTraversalRefs.has(traversalPath)) continue;
+    seenTraversalRefs.add(traversalPath);
+    unresolvedTraversalRefs.push(traversalPath);
+  }
+  // OMIT-when-empty, exactly like `formulaRelationshipRefs` and `sourceName`:
+  // the overwhelming majority of conditions name no traversal, and an empty
+  // array on every ConditionalContext would churn every rendered vault file.
+  // An absent key here means "this condition mentions no relationship
+  // traversal" — a CHECKED absence, because the check runs unconditionally over
+  // every ref.
+  if (unresolvedTraversalRefs.length > 0) {
+    nodeProperties['unresolvedTraversalRefs'] = unresolvedTraversalRefs;
+    // The resolution base the resolver walks FROM. Emitted as an explicit
+    // `null` — never omitted and never faked to a string — when the firer has
+    // no object context (a Flow with no record context): the base is UNKNOWN,
+    // not empty, and the resolver's `typeof owningObject === 'string'` guard
+    // then correctly mints nothing rather than resolving from a guessed object.
+    nodeProperties['objectApiName'] = parentObjectApiName;
+  }
   const node: Node = {
     id: conditionContextId,
     type: 'ConditionalContext',
@@ -531,18 +615,28 @@ const buildConditionTriple = (
   // that are not fields at all: Flow variables and choices (`AnotherSubmission`,
   // `ChoiceRenameOrDelete`), unresolved globals (`$Record`), and relationship
   // traversals whose target object one file cannot resolve
-  // (`Parent__c.Rel__r.Field__c`). As a PROPERTY those were inert; as EDGES they
+  // (`Parent__c.Rel__r.Field__c`, `<Rel>__r.<Field>__c` — the latter now parked
+  // on `properties.unresolvedTraversalRefs` for the graph-layer resolver rather
+  // than dropped). As a PROPERTY those were inert; as EDGES they
   // mint phantom `CustomField:` targets that pollute the graph and the
   // refresh-time phantom roll-up, and — worse — a bare Flow variable name is
   // classified by the phantom taxonomy as a standard field, carrying a "treat it
   // as a standard field" remedy for something that is not a field.
   //
   // A valid id is exactly `CustomField:{Object}.{Field}`: one dot, both segments
-  // non-empty, no leading `$`. Same resolve-or-drop rule the relationship
+  // non-empty, no leading `$`, and the object segment is an OBJECT api name —
+  // not a relationship spelling. Same resolve-or-drop rule the relationship
   // resolver follows — an edge that cannot be grounded is not minted at all.
   const isWellFormedFieldId = (id: string): boolean => {
     const body = id.startsWith('CustomField:') ? id.slice('CustomField:'.length) : '';
     if (body.length === 0 || body.startsWith('$')) return false;
+    // FIX 15 (1): the object segment must not end in `__r`. A relationship
+    // spelling is knowable from the string alone and is unambiguously not an
+    // object api name, so `CustomField:<Rel>__r.<Field>__c` names no node and
+    // never could. The ref is not lost: it stays verbatim in `fieldRefs` AND is
+    // parked on `properties.unresolvedTraversalRefs` for the graph-layer
+    // resolver, which turns it into a `readsFrom` onto the REAL field.
+    if (relationshipTraversalPathOf(id) !== null) return false;
     const parts = body.split('.');
     return parts.length === 2 && parts[0]!.length > 0 && parts[1]!.length > 0;
   };
@@ -769,6 +863,7 @@ export const extractConditions = (
       parentApiVersion,
       extraProperties,
       sourceName,
+      parentObjectApiName,
     );
     conditionNodes.push(triple.node);
     firesWhenEdges.push(triple.edge);
