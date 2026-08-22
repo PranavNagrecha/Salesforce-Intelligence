@@ -357,18 +357,40 @@ describe('jsonResult SOE phase-omission at the global budget seam', () => {
     });
   });
 
-  it('leaves a phase-filtered SOE payload (appliedPhaseFilter set) unstamped — its soe is an intentional subset', () => {
+  // FIX 3 (4), THIRD SITE. This pinned the global-trim backstop SKIPPING a
+  // phase-filtered payload. The invariant it was really guarding is intact and
+  // still asserted below: a phase-filtered `soe` is an intentional subset, so
+  // the deliberately-absent OTHER phases must never be reported as omissions.
+  //
+  // What was wrong was the ACTION. Skipping meant a phase-filtered payload
+  // trimmed by the GLOBAL budget lost steps with nothing saying so — the defect
+  // surviving in the very path that exists to catch it. A phase filter chooses
+  // WHICH phase comes back; it never consents to getting a partial one
+  // silently. So the comparison NARROWS to the requested phase instead.
+  it('stamps a globally-trimmed phase-filtered SOE payload, scoped to the REQUESTED phase only', () => {
     process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
     const body = {
       data: soeData({ appliedPhaseFilter: 'pre-save-validation' }),
       vaultState: VAULT_STATE,
     };
     const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
-      readonly data: { readonly phasesOmitted?: unknown };
+      readonly data: {
+        readonly phasesOmitted?: readonly {
+          readonly phase: string;
+          readonly declared: number;
+          readonly present: number;
+        }[];
+      };
       readonly responseBudget: { readonly truncated?: boolean };
     };
     expect(parsed.responseBudget.truncated).toBe(true);
-    expect(parsed.data.phasesOmitted).toBeUndefined();
+    const omitted = parsed.data.phasesOmitted ?? [];
+    // THE PRESERVED INVARIANT: only the requested phase is ever named. The
+    // other phases are absent on purpose and are not omissions.
+    expect(omitted.map((o) => o.phase)).toEqual(['pre-save-validation']);
+    // …and the shortfall it names is real.
+    const only = omitted[0];
+    expect(only?.present).toBeLessThan(only?.declared ?? 0);
   });
 
   it('does NOT stamp phasesOmitted on a non-SOE payload that merely has a same-named array (no summary.phaseCounts)', () => {

@@ -67,6 +67,7 @@
       "sfi.endpoint_catalog",
       "sfi.field_cleanup_candidates",
       "sfi.find_dead_code",
+      "sfi.flow_bulkification_audit",
       "sfi.flow_fault_audit",
       "sfi.generate_data_dictionary",
       "sfi.guest_exposure_report",
