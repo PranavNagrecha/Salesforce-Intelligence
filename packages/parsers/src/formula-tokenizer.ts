@@ -175,7 +175,20 @@ const MALFORMED_NUMERIC = /\d+\.\d+\.\d+/;
 
 // A numeric literal as recognized by the tokenizer (for counting and for
 // detecting identifiers-that-start-with-digit). Matches `12`, `12.5`.
-const NUMERIC_LITERAL = /\d+(?:\.\d+)?/g;
+//
+// The identifier-boundary guards are load-bearing. Salesforce API names may
+// contain digits (`Score2024__c`, `Q1_Total__c`), so without them the digits
+// INSIDE a field name were harvested as literals of the formula: the tokenizer
+// reported `IF(ISBLANK(Score2024__c), 0, Score2024__c)` as containing the three
+// literals 2024, 0, 2024, and `IF(Q1_Total__c > 100, 1, 0)` as containing a `1`
+// that appears nowhere in the expression. Consumers counting or listing a
+// formula's constants were shown numbers the author never wrote.
+//
+// The previous comment here asserted that "the invalid-identifier check above
+// already rejected those mixes". It does not, and cannot: a digit inside an
+// otherwise well-formed API name is legal Salesforce, so there is nothing for
+// that check to reject.
+const NUMERIC_LITERAL = /(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])/g;
 
 // Replace non-newline characters in `text` with spaces. Preserves length
 // and line layout so offsets in the original source stay accurate.
@@ -429,8 +442,8 @@ const findInvalidIdentifier = (stripped: string): TokenizerError | null => {
  * the one that decides how to present it.
  */
 const collectNumericLiterals = (stripped: string): readonly string[] => {
-  // Match well-formed numerics that aren't part of a larger identifier
-  // (the invalid-identifier check above already rejected those mixes).
+  // Match well-formed numerics that aren't part of a larger identifier — the
+  // boundary guards on NUMERIC_LITERAL are what enforce that.
   NUMERIC_LITERAL.lastIndex = 0;
   const out: string[] = [];
   for (

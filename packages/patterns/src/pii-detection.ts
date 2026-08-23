@@ -210,6 +210,33 @@ const toWordSegments = (name: string): readonly string[] =>
     .filter((s) => s.length > 0)
     .map((s) => s.toLowerCase());
 
+/**
+ * Name tokens that must match a WHOLE word segment rather than a substring.
+ *
+ * `apiNameLower.includes(token)` is right for a distinctive token like
+ * `postalcode`, and wrong for a short one that is a common English substring.
+ * Every entry below was a measured false positive, not a hypothetical:
+ * `Seating_Capacity__c`, `Electricity_Usage__c`, `Velocity__c`,
+ * `Publicity_Flag__c` and `Toxicity_Level__c` all classified as contact PII
+ * because they contain `city`; `Headphone_Model__c` and `Microphone_Count__c`
+ * because they contain `phone`; `Streetlight_Count__c` because it contains
+ * `street`. A field-access audit that flags an asset's headphone model as
+ * personal data trains the reader to ignore the whole report.
+ *
+ * This is the same remedy `hasRaceSegment` already applies below for the
+ * equally ambiguous `race` (Grace, Trace) — generalized, so the next ambiguous
+ * token is one line here rather than another bespoke branch.
+ *
+ * `telephone` is carried as its own token in the contact list above, because
+ * whole-word `phone` would otherwise stop matching `Telephone__c` — a real
+ * contact field whose single word segment is not `phone`.
+ */
+const WHOLE_WORD_ONLY_TOKENS: ReadonlySet<string> = new Set([
+  'city',
+  'phone',
+  'street',
+]);
+
 /** True when `race` appears as a standalone word segment (not inside Grace/Trace). */
 const hasRaceSegment = (rawApiName: string): boolean =>
   toWordSegments(rawApiName).includes('race');
@@ -407,6 +434,7 @@ const NAME_PATTERNS: readonly NamePattern[] = [
       'email',
       'mobile',
       'phone',
+      'telephone',
       'fax',
       'address',
       'street',
@@ -664,7 +692,10 @@ const matchNamePattern = (
 } | null => {
   for (const rule of NAME_PATTERNS_LOWERCASED) {
     for (const token of rule.tokensLower) {
-      if (apiNameLower.includes(token)) {
+      const matched = WHOLE_WORD_ONLY_TOKENS.has(token)
+        ? toWordSegments(apiNameRaw).includes(token)
+        : apiNameLower.includes(token);
+      if (matched) {
         return {
           classification: rule.classification,
           category: rule.category,

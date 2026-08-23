@@ -566,3 +566,49 @@ describe('detectPiiClassification: confidence axis', () => {
     ).toBe('declared');
   });
 });
+
+/**
+ * Short name tokens matched as substrings produced confident PII verdicts about
+ * fields that hold no personal data at all. These pin both directions: the
+ * ambiguous carriers stay clean, and the real contact fields still classify.
+ */
+describe('detectPiiClassification: whole-word-only tokens', () => {
+  const notPii = (parent: string, apiName: string): void => {
+    const r = detectPiiClassificationWithReason(field(parent, apiName));
+    expect(r.piiClassification, `${apiName} should carry no PII signal`).toBe(
+      'public',
+    );
+  };
+  const isPii = (parent: string, apiName: string): void => {
+    const r = detectPiiClassificationWithReason(field(parent, apiName));
+    expect(r.piiClassification, `${apiName} should still classify as PII`).toBe(
+      'pii',
+    );
+  };
+
+  it('does not classify fields that merely CONTAIN city/phone/street', () => {
+    // Each of these was a measured false positive before the fix.
+    notPii('Session__c', 'Seating_Capacity__c');
+    notPii('Meter__c', 'Electricity_Usage__c');
+    notPii('Shipment__c', 'Velocity__c');
+    notPii('Campaign', 'Publicity_Flag__c');
+    notPii('Sample__c', 'Toxicity_Level__c');
+    notPii('Asset', 'Headphone_Model__c');
+    notPii('Asset', 'Microphone_Count__c');
+    notPii('Route__c', 'Streetlight_Count__c');
+  });
+
+  it('still classifies the contact fields those tokens exist to catch', () => {
+    isPii('Contact', 'Mailing_City__c');
+    isPii('Account', 'BillingCity');
+    isPii('Contact', 'Home_Phone__c');
+    isPii('Contact', 'CellPhone');
+    isPii('Contact', 'Street_Address__c');
+    isPii('Contact', 'MailingStreet');
+  });
+
+  it('keeps Telephone__c classified, which whole-word `phone` alone would drop', () => {
+    // `telephone` is a single word segment, so it is carried as its own token.
+    isPii('Contact', 'Telephone__c');
+  });
+});
