@@ -3,6 +3,8 @@
 import {
   countAssertions,
   detectCodeQualityIssues,
+  isKnownSalesforceIdLiteral,
+  KNOWN_KEY_PREFIXES,
   type QualityIssue,
 } from '../src/code-quality-patterns.js';
 
@@ -1098,5 +1100,47 @@ describe('countAssertions', () => {
 
   it('returns 0 for source with no assertions', () => {
     expect(countAssertions('class T { void m() { Integer i = 0; } }')).toBe(0);
+  });
+});
+
+/**
+ * `isKnownSalesforceIdLiteral` is shared with
+ * `sfi.find_hardcoded_values_anywhere`, which previously carried its own copy of
+ * the rule anchored on a leading `0`. These pin the two properties that copy got
+ * wrong, so a future edit cannot quietly reintroduce either.
+ */
+describe('isKnownSalesforceIdLiteral', () => {
+  const withPrefix = (prefix: string): string => `${prefix}Hs0000ABCDEF`;
+
+  it('accepts every prefix in the allowlist at 15 and 18 characters', () => {
+    for (const prefix of KNOWN_KEY_PREFIXES) {
+      expect(isKnownSalesforceIdLiteral(withPrefix(prefix)), `15-char ${prefix}`).toBe(true);
+      expect(
+        isKnownSalesforceIdLiteral(`${withPrefix(prefix)}AAA`),
+        `18-char ${prefix}`,
+      ).toBe(true);
+    }
+  });
+
+  it('accepts the prefixes that do NOT start with 0 — the whole point of the fix', () => {
+    // A leading-`0` regex made these structurally unmatchable. `a0*` is the
+    // custom-object range, so that bug hid exactly the objects an org built.
+    for (const prefix of ['300', '500', '701', '800', '801', '802', 'a00', 'a03', 'a05']) {
+      expect(KNOWN_KEY_PREFIXES.has(prefix), `${prefix} is in the allowlist`).toBe(true);
+      expect(isKnownSalesforceIdLiteral(withPrefix(prefix)), `${prefix} matches`).toBe(true);
+    }
+  });
+
+  it('rejects an id-shaped string whose prefix is not in the allowlist', () => {
+    // The disclosure promises allowlist filtering; before the fix a leading `0`
+    // was sufficient and this returned as an id.
+    expect(isKnownSalesforceIdLiteral('0zzzzzzzzzzzzzz')).toBe(false);
+    expect(isKnownSalesforceIdLiteral('abcdefghijklmno')).toBe(false);
+  });
+
+  it('rejects anything that is not 15 or 18 characters', () => {
+    expect(isKnownSalesforceIdLiteral('001Hs0000ABCDE')).toBe(false); // 14
+    expect(isKnownSalesforceIdLiteral('001Hs0000ABCDEFA')).toBe(false); // 16
+    expect(isKnownSalesforceIdLiteral('')).toBe(false);
   });
 });

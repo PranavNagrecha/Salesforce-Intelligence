@@ -27,7 +27,12 @@ export type {
   PiiDetectionResult,
   PiiDetectionWithReason,
 } from './pii-detection.js';
-export { countAssertions, detectCodeQualityIssues } from './code-quality-patterns.js';
+export {
+  countAssertions,
+  detectCodeQualityIssues,
+  isKnownSalesforceIdLiteral,
+  KNOWN_KEY_PREFIXES,
+} from './code-quality-patterns.js';
 export type {
   CodeQualityMetadata,
   QualityIssue,

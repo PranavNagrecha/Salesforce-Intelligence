@@ -90,6 +90,10 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import {
+  isKnownSalesforceIdLiteral,
+  KNOWN_KEY_PREFIXES,
+} from '@sf-intelligence/patterns';
 import { collectVaultSourceFiles } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -110,8 +114,24 @@ const DEFAULT_LIMIT = 100;
 
 const FIND_HARDCODED_ANYWHERE_TOOL = 'sfi.find_hardcoded_values_anywhere';
 
-/** Salesforce ID regex per `SemanticSearchSemantics.md` § "Salesforce ID pattern". */
-const SALESFORCE_ID_REGEX = /\b0[0-9a-zA-Z]{14}([0-9a-zA-Z]{3})?\b/g;
+/**
+ * Salesforce ID regex per `SemanticSearchSemantics.md` § "Salesforce ID pattern".
+ *
+ * SHAPE ONLY. The prefix decision belongs to `isKnownSalesforceIdLiteral`, which
+ * is shared with the Apex-side recognizer in `@sf-intelligence/patterns` — see
+ * the filter in {@link scanText}.
+ *
+ * This pattern used to be `/\b0[0-9a-zA-Z]{14}.../` and that leading `0` was a
+ * check that could not fire for 12 of the 35 recognized key prefixes: Case
+ * (`500`), Campaign (`701`), Contract (`800`), Order/OrderItem (`801`/`802`/
+ * `300`), and every custom-object prefix (`a00`-`a05`). A hardcoded custom-object
+ * id in a validation rule — the single most likely thing this tool is asked to
+ * find — was structurally invisible, and the tool reported the resulting zero as
+ * a clean scan. `\b` made it worse: every character of an id is a word
+ * character, so the `0` could only ever anchor at the START of the token, and an
+ * id merely CONTAINING a zero was no help.
+ */
+const SALESFORCE_ID_REGEX = /\b[0-9a-zA-Z]{15}([0-9a-zA-Z]{3})?\b/g;
 /** Email regex per § "Email pattern". */
 const EMAIL_REGEX = /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g;
 /** Date regex (union of ISO/US/EU/SF shapes) per § "Date pattern". */
@@ -212,7 +232,7 @@ const scanApexSourceForEmails = async (
 const NUMERIC_FP_DISCLOSURE =
   'the numeric category has very high false-positive rate — loop counters, array indices, and arithmetic constants all match. The category is suppressed from default searches; opt in explicitly only when looking for specific hardcoded numbers.';
 const ID_FP_DISCLOSURE =
-  'the ID-shape search matches Salesforce-id-shaped strings filtered to a known-key-prefix allowlist (~40 prefixes). Arbitrary 15-character alphanumeric strings outside the allowlist are not returned. Strings shaped like an ID that aren\'t actually IDs (e.g., session keys, hashes) may still match if they happen to start with a known key prefix.';
+  `the ID-shape search matches 15- or 18-character alphanumeric strings filtered to a known-key-prefix allowlist (${KNOWN_KEY_PREFIXES.size} prefixes), the same allowlist the Apex-side hardcoded-id recognizer applies. Arbitrary alphanumeric strings outside the allowlist are not returned. Strings shaped like an ID that aren't actually IDs (e.g., session keys, hashes) may still match if they happen to start with a known key prefix. An id whose object's key prefix is not in that list is NOT reported — the list covers the standard objects and the custom-object range, not every prefix Salesforce issues.`;
 const TEST_CLASS_REFUSAL_DISCLOSURE =
   'matches in `@isTest`-annotated classes may be intentional test fixtures rather than production hardcoded values; verify the context before treating as a bug.';
 /**
@@ -454,6 +474,15 @@ const scanText = (
   const regex = new RegExp(regexForCategory(category).source, 'g');
   let m: RegExpExecArray | null;
   while ((m = regex.exec(text)) !== null) {
+    // The `id` shape regex deliberately matches ANY 15/18-char alphanumeric;
+    // the key-prefix allowlist is what makes it an id rather than a hash. This
+    // is the filter `ID_FP_DISCLOSURE` promises the caller, and it lives here
+    // rather than in the pattern so both halves of the rule stay in one place
+    // and stay shared with the Apex-side recognizer.
+    if (category === 'id' && !isKnownSalesforceIdLiteral(m[0])) {
+      if (m.index === regex.lastIndex) regex.lastIndex += 1;
+      continue;
+    }
     hits.push({
       value: m[0],
       index: m.index,

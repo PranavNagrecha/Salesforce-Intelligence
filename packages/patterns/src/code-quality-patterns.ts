@@ -492,9 +492,22 @@ const detectDmlInLoop = (
 
 // ---------- recognizer 3: hardcoded-id ------------------------------------
 
-// Salesforce key prefixes for the common object types — used to
-// distinguish a real ID literal from any 15-character alphanumeric.
-const KNOWN_KEY_PREFIXES = new Set<string>([
+/**
+ * Salesforce key prefixes for the common object types — used to distinguish a
+ * real ID literal from any 15-character alphanumeric.
+ *
+ * EXPORTED because a second consumer needs the same answer.
+ * `sfi.find_hardcoded_values_anywhere` scans the formula / validation-rule /
+ * workflow-rule / restriction-rule / custom-label corpora for the same
+ * "hardcoded record id" finding this recognizer makes over Apex, and it had
+ * grown its own private copy of the rule that disagreed with this one on both
+ * axes: it required a leading `0` (so it could never see Case `500`, Campaign
+ * `701`, Contract `800`, the legacy Order/OrderItem prefixes, or ANY of the six
+ * custom-object prefixes `a00`-`a05` — 12 of the 35 below), and it applied no
+ * prefix filter at all (so `0zzzzzzzzzzzzzz` came back as an id). One set, one
+ * predicate, so the two corpora cannot drift again.
+ */
+export const KNOWN_KEY_PREFIXES: ReadonlySet<string> = new Set<string>([
   '001', // Account
   '003', // Contact
   '005', // User
@@ -535,6 +548,21 @@ const KNOWN_KEY_PREFIXES = new Set<string>([
 
 const STRING_LITERAL_PATTERN = /'((?:\\[\s\S]|[^'\\])*)'/g;
 const ID_15_OR_18_PATTERN = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
+
+/**
+ * True when `value` is shaped like a Salesforce record id (15 or 18
+ * alphanumeric characters) AND carries a key prefix this codebase recognizes.
+ *
+ * Both halves matter and neither is sufficient. Shape alone matches session
+ * keys, hashes, and any 15-character token; prefix alone is three characters of
+ * a longer string. Callers scanning free text should test whole candidate
+ * tokens against this, never a leading-character shortcut — the prefix that
+ * identifies a CUSTOM object (`a00`-`a05`) does not begin with `0`, so any
+ * regex anchored on `0` silently excludes exactly the objects an org built
+ * itself.
+ */
+export const isKnownSalesforceIdLiteral = (value: string): boolean =>
+  ID_15_OR_18_PATTERN.test(value) && KNOWN_KEY_PREFIXES.has(value.slice(0, 3));
 
 const detectHardcodedIds = (source: string): readonly QualityIssue[] => {
   const issues: QualityIssue[] = [];
