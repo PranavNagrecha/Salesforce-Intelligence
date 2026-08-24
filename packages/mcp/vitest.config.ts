@@ -17,7 +17,13 @@ export default defineConfig({
     // be exceeded, and a vitest-killed DuckDB query aborts the worker (Napi
     // core dump → exit 134) rather than failing softly. Give the graph-backed
     // tests headroom so a slow runner is a slow pass, not a crash.
-    testTimeout: 20000,
+    //
+    // Raised 20s → 45s in 0.3.2 when the Windows job was armed for the first
+    // time: DuckDB is materially slower on a windows-latest runner (the same
+    // effect puts the 10k-node scale import at ~99s against a 90s budget), and
+    // one explain-flow case landed at 23.7s. That is the slow-pass this comment
+    // already anticipated, on a platform that had never actually run.
+    testTimeout: 45000,
     // Same root cause as packages/graph (GRAPH-QUERIES-BEFOREALL-FLAKE):
     // `testTimeout` was raised for the DuckDB-backed suites but `hookTimeout`
     // silently kept vitest's 10s default, so the `beforeAll` that OPENS the
