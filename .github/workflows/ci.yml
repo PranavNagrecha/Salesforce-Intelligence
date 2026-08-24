@@ -186,8 +186,40 @@ jobs:
       - name: Build (all packages)
         run: pnpm -r build
 
-      - name: Unit tests (all packages)
-        run: pnpm -r test
+      # HARD GATE: every package except `graph`. This is what the re-arming
+      # bought — nine packages that were completely untested on Windows now
+      # block a merge, including the exec/path/vault surfaces where the real
+      # Windows defects lived.
+      - name: Unit tests (hard gate — all packages except graph)
+        # PATH filters, not name filters: the repo root and packages/cli are both
+        # named `sf-intelligence`, so a name filter would let the ROOT package
+        # through — and the root's `test` script also runs test:integration,
+        # which needs maintainer vaults and cannot pass on a hosted runner.
+        run: pnpm --filter './packages/*' --filter '!./packages/graph' -r test
+
+      # ADVISORY: `graph` has three PRE-EXISTING Windows problems, none of them
+      # correctness bugs in the product, and all of them needing work in the
+      # graph layer rather than the onboarding path:
+      #
+      #   1. teardown `ENOTEMPTY` — several fixtures rmdir a temp directory
+      #      without closing the DuckDB handle first. Node's rm retries
+      #      (added in 0.3.2) are not enough because the handle is never
+      #      closed, only garbage-collected; the fix is an explicit
+      #      `closeGraph` in those fixtures.
+      #   2. `Cannot open file ... used by another process` — the resolve-index
+      #      persistence test opens a second handle to a database the first
+      #      test still holds. Legal on POSIX, never on Windows.
+      #   3. perf budgets — the 10k-node scale import takes ~99s against a 90s
+      #      budget on a windows-latest runner, and two scoped-prune tests
+      #      exceed the 60s vitest default. DuckDB is simply slower here; the
+      #      budgets were calibrated on POSIX.
+      #
+      # Advisory rather than excluded: the failures stay VISIBLE in the log so
+      # the debt is tracked, instead of being silently filtered the way this
+      # whole job used to be. Promote to the hard gate above once graph is fixed.
+      - name: Unit tests (advisory — graph, see comment)
+        run: pnpm --filter './packages/graph' test
+        continue-on-error: true
 
   # #11: the dev box is macOS and darwin-arm64/darwin-x64 are shipped DuckDB
   # native binaries (@duckdb/node-bindings-darwin-arm64 / -darwin-x64 are
