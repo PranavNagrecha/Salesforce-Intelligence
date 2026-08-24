@@ -104,7 +104,11 @@ for (const [file, paths] of [
     [(d) => d.metadata?.version, ...[0, 1, 2].map((i) => (d) => d.plugins?.[i]?.version)],
   ],
 ]) {
-  if (!existsSync(file)) continue;
+  // `readJson` resolves against the repo root, so this guard must too. A bare
+  // relative `existsSync(file)` passes only when the process happens to be cwd'd
+  // at the root — anywhere else it reports "missing" and `continue` skips the
+  // whole block, so the gate would go GREEN having checked nothing.
+  if (!existsSync(join(root, file))) continue;
   const doc = readJson(file);
   paths.forEach((get, i) => {
     const v = get(doc);
@@ -113,6 +117,40 @@ for (const [file, paths] of [
       errors.push(`${file} version#${i}=${v} !== expected ${expected}`);
     }
   });
+}
+
+// --- 1c. The plugin's npx PIN — the version users actually execute ---
+// `.claude-plugin/plugin.json` registers the MCP server as
+// `npx -y sf-intelligence@X.Y.Z mcp`. That pin, not the manifest's `version`
+// field, decides which build a plugin user's host downloads and runs. They are
+// two independent literals in one file, so a release that bumps `version` and
+// forgets the pin ships a plugin that silently keeps installing the PREVIOUS
+// server — the bug survives the upgrade and the manifest looks correct.
+const pluginRel = '.claude-plugin/plugin.json';
+if (existsSync(join(root, pluginRel))) {
+  const plugin = readJson(pluginRel);
+  const servers = plugin.mcpServers ?? {};
+  for (const [name, entry] of Object.entries(servers)) {
+    const args = Array.isArray(entry?.args) ? entry.args : [];
+    const spec = args.find((a) => typeof a === 'string' && a.startsWith('sf-intelligence@'));
+    if (spec === undefined) {
+      // An UNPINNED entry floats to npm `latest`, which is a different bug:
+      // the plugin stops being reproducible. Flag it rather than pass silently.
+      if (args.includes('sf-intelligence')) {
+        errors.push(
+          `${pluginRel} mcpServers.${name} runs unpinned \`sf-intelligence\` — pin it to @${expected}`,
+        );
+      }
+      continue;
+    }
+    const pinned = spec.slice('sf-intelligence@'.length);
+    if (pinned !== expected) {
+      errors.push(
+        `${pluginRel} mcpServers.${name} pins sf-intelligence@${pinned} !== expected ${expected}` +
+          ' — plugin users would keep running the previous server',
+      );
+    }
+  }
 }
 
 // --- 2. SERVER_VERSION resolve (shipped path) ---
