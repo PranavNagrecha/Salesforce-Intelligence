@@ -12,7 +12,7 @@
 
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 import { loadRegistry } from '@sf-intelligence/vault';
 
@@ -89,7 +89,11 @@ describe('runRegisterVault', () => {
 
   it('resolves relative vault paths against cwd', async () => {
     const root = await makeRoot();
-    const cwd = '/tmp/foo';
+    // `resolve()` renders with the HOST separator, so a literal
+    // '/tmp/foo/my-vault' equality is a POSIX-only assertion. Derive both sides
+    // from node:path so the test asserts the BEHAVIOUR (relative paths resolve
+    // against cwd) rather than one platform's rendering of it.
+    const cwd = resolve(sep, 'tmp', 'foo');
     try {
       const result = await runRegisterVault({
         cwd,
@@ -100,7 +104,7 @@ describe('runRegisterVault', () => {
       });
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.resolvedPath).toBe('/tmp/foo/my-vault');
+      expect(result.value.resolvedPath).toBe(resolve(cwd, 'my-vault'));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

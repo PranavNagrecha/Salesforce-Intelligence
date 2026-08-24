@@ -45,6 +45,7 @@
     "scan:leaks": "node scripts/scan-org-leaks.mjs --strict",
     "scan:leaks:history": "node scripts/scan-org-leaks.mjs --git-history --strict",
     "check:public-interface": "node scripts/check-public-interface.mjs",
+    "check:portability": "node scripts/check-portability.mjs",
     "check:version-consistency": "node scripts/check-version-consistency.mjs",
     "product-surface": "node scripts/product-surface.mjs",
     "product-surface:check": "node scripts/product-surface.mjs --check",

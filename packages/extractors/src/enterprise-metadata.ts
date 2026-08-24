@@ -8,7 +8,7 @@ import type {
   Node,
   Result,
 } from '@sf-intelligence/contracts';
-import { err, ok } from '@sf-intelligence/core';
+import { err, ok, splitPathSegments} from '@sf-intelligence/core';
 
 import {
   deriveComponentApiName,
@@ -285,7 +285,7 @@ const deriveFolderedApiName = (
   folderRoot: 'reports' | 'dashboards',
 ): string => {
   const bare = deriveComponentApiName(filePath, suffix);
-  const segments = filePath.replace(/\\/g, '/').split('/').filter((s) => s.length > 0);
+  const segments = splitPathSegments(filePath);
   const anchor = Math.max(segments.lastIndexOf('unpackaged'), segments.lastIndexOf('source'));
   const anchored = anchor === -1 ? -1 : segments.indexOf(folderRoot, anchor + 1);
   const rootIndex = anchored !== -1 ? anchored : segments.lastIndexOf(folderRoot);

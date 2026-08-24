@@ -20,7 +20,7 @@
 
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 import {
   buildProfileNameMap,
@@ -296,7 +296,11 @@ describe('persistence — absent is NOT empty', () => {
   });
 
   it('writes under meta/ inside the vault (org data never leaves the vault)', () => {
-    expect(profileNameMapPath('/tmp/v')).toBe('/tmp/v/meta/profile-name-map.json');
+    // Derived, not a literal: `join` renders with the host separator, so a
+    // hardcoded forward-slash string asserts POSIX rather than the invariant
+    // (the file lives under meta/ INSIDE the vault).
+    const vault = join(sep, 'tmp', 'v');
+    expect(profileNameMapPath(vault)).toBe(join(vault, 'meta', 'profile-name-map.json'));
   });
 });
 

@@ -1,5 +1,5 @@
 import { mkdir, readdir, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import type {
   ComponentType,
@@ -10,6 +10,7 @@ import type {
   Node,
   Result,
 } from '@sf-intelligence/contracts';
+import { splitPathSegments } from '@sf-intelligence/core';
 import {
   extractApexClass,
   extractApexTrigger,
@@ -107,7 +108,6 @@ import {
   extractWorkflowRule,
   UNRESOLVED_PROFILE_PREFIX,
 } from '@sf-intelligence/extractors';
-import { splitPathSegments } from '@sf-intelligence/core';
 import {
   type DuplicateSourceSummary,
   listEdgesForNodes,

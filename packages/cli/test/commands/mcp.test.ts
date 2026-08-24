@@ -281,7 +281,14 @@ describe('resolveVaultBinding — SFI_VAULT precedence', () => {
  * own SIGTERM→SIGKILL escalation coverage — this test only pins that THIS
  * call site inherits that budget rather than hanging indefinitely.
  */
-describe('defaultListOrgs — SFI_SF_EXEC_TIMEOUT_MS backstop (CR-RV3b)', () => {
+// Skipped ON Windows: the fixture writes a `#!/bin/sh` script, `chmod 0o755`s
+// it, and joins PATH with ':'. None of those exist on Windows — there is no
+// /bin/sh, chmod is a no-op on NTFS, and win32 PATH is ';'-delimited. Writing a
+// .cmd equivalent would test cmd.exe's timeout semantics rather than ours, so
+// the honest move is to skip the SHELL-SCRIPT fixture and keep the timeout
+// contract itself covered by exec-helper's own tests. Previously this whole
+// FILE was excluded from Windows CI for this one test.
+describe.skipIf(process.platform === 'win32')('defaultListOrgs — SFI_SF_EXEC_TIMEOUT_MS backstop (CR-RV3b)', () => {
   const PRIOR_PATH = process.env['PATH'];
 
   afterEach(() => {

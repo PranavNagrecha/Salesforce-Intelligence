@@ -100,7 +100,15 @@ describe('readDemandQueue fold', () => {
   });
 
   it('appends are best-effort: an unwritable root returns false, never throws', async () => {
-    const ok = await appendDemandHit('/dev/null/not-a-dir', 'X', 'automation-critical', 't');
+    // A regular FILE used as a directory: `mkdir` fails on POSIX and win32
+    // alike. The previous fixture was '/dev/null/not-a-dir', which is
+    // POSIX-only — on Windows `mkdir -p C:\\dev\\null\\not-a-dir` SUCCEEDS, the
+    // append succeeds, `true` is returned, the assertion fails, and the runner's
+    // C: drive is left polluted. Constructing the unwritable path makes the test
+    // assert the same invariant on every platform.
+    const blocker = join(vaultRoot, 'not-a-directory');
+    writeFileSync(blocker, 'x', 'utf8');
+    const ok = await appendDemandHit(join(blocker, 'vault'), 'X', 'automation-critical', 't');
     expect(ok).toBe(false);
   });
 });

@@ -103,7 +103,7 @@ import type {
   McpResponse,
   PageInfo,
 } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result, splitPathSegments} from '@sf-intelligence/core';
 import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
@@ -709,7 +709,7 @@ const escapeForRegex = (s: string): string =>
  * self references.
  */
 const sourceFileApiName = (vaultRelativePath: string): string => {
-  const base = vaultRelativePath.split('/').pop() ?? vaultRelativePath;
+  const base = splitPathSegments(vaultRelativePath).at(-1) ?? vaultRelativePath;
   return base.replace(/\.(cls|trigger)$/i, '');
 };
 

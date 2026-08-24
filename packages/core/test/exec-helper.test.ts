@@ -67,7 +67,15 @@ describe('isWindows', () => {
   });
 });
 
-describe('execHelper — win32 branch (cmd.exe assembly, platform stubbed)', () => {
+// Skipped ON Windows, deliberately. These two tests exercise the win32 branch
+// FROM a POSIX host by stubbing `process.platform` and pointing COMSPEC at
+// `/bin/echo` to observe the assembled argv; on a real Windows runner there is
+// no `/bin/echo`, and the COMSPEC-deleted case expects a spawn to fail, which
+// only holds on a host that genuinely has no cmd.exe. On Windows the win32
+// branch is not a simulation — it is the live path, covered by every other
+// `sf` shellout in the suite. Previously these were hidden by a CI-only `-t`
+// negative-lookahead filter, which made the exclusion invisible in the source.
+describe.skipIf(process.platform === 'win32')('execHelper — win32 branch (cmd.exe assembly, platform stubbed)', () => {
   const ORIG_PLATFORM = process.platform;
   const ORIG_COMSPEC = process.env['COMSPEC'];
 

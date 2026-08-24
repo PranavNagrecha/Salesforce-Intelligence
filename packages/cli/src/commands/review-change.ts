@@ -46,7 +46,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result, splitPathSegments} from '@sf-intelligence/core';
 import {
   buildContext,
   dispatchTool,
@@ -171,7 +171,7 @@ const statusToChangeKind = (status: string): ChangeKind => {
 export const deriveComponentFromPath = (
   relPath: string,
 ): { type: string; apiName: string } | null => {
-  const segments = relPath.split('/').filter((s) => s !== '');
+  const segments = splitPathSegments(relPath);
   if (segments.length === 0) return null;
 
   // Bundle short-circuit. `git diff` reports FILES inside an lwc/aura bundle,

@@ -51,7 +51,17 @@ const DEFAULT_VAULT_ROOT = 'org-kb';
  * via cmd.exe; on macOS / Linux it lands in the usual bin dirs. Returned as a
  * function so `process.platform` is read at call time (tests stub it).
  */
-const sfFallbackPaths = (): readonly string[] => {
+/**
+ * Where to look for the `sf` CLI when it is not on PATH — the IDE/MCP case,
+ * where a GUI-launched process inherits the SYSTEM PATH rather than the user's
+ * shell PATH.
+ *
+ * Exported so tests DERIVE the probe path from the production list instead of
+ * hardcoding `/usr/local/bin/sf`. A hardcoded POSIX path made the whole doctor
+ * suite unrunnable on Windows (the mock never matched the win32 branch), which
+ * is why that file was excluded from Windows CI entirely.
+ */
+export const sfFallbackPaths = (): readonly string[] => {
   if (process.platform === 'win32') {
     const appData = process.env['APPDATA'];
     const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';

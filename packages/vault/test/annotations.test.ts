@@ -103,7 +103,15 @@ describe('readAnnotations replay', () => {
   });
 
   it('appends are best-effort: unwritable root returns false, never throws', async () => {
-    expect(await appendAnnotationEvent('/dev/null/not-a-dir', ev({}))).toBe(false);
+    // A regular FILE used as a directory: `mkdir` fails on POSIX and win32
+    // alike. The previous fixture was '/dev/null/not-a-dir', which is
+    // POSIX-only — on Windows `mkdir -p C:\\dev\\null\\not-a-dir` SUCCEEDS, the
+    // append succeeds, `true` is returned, the assertion fails, and the runner's
+    // C: drive is left polluted. Constructing the unwritable path makes the test
+    // assert the same invariant on every platform.
+    const blocker = join(vaultRoot, 'not-a-directory');
+    writeFileSync(blocker, 'x', 'utf8');
+    expect(await appendAnnotationEvent(join(blocker, 'vault'), ev({}))).toBe(false);
   });
 
   it('output is deterministically sorted (componentId, then key)', async () => {

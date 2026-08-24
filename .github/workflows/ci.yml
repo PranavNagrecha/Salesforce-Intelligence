@@ -84,6 +84,13 @@ jobs:
       - name: Public-interface guard (CI/eval reference only in-repo synthetic vaults)
         run: node scripts/check-public-interface.mjs
 
+      # Keeps the hand-rolled path-separator class from regrowing. Three silent
+      # Windows defects came from six spellings of "split a path" held in sync
+      # by comments; a comment cannot be executed, so this is the drift test
+      # that replaces them.
+      - name: Portability guard (no hand-rolled path separators)
+        run: node scripts/check-portability.mjs
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -129,83 +136,38 @@ jobs:
       - name: Scale gate (10k batched import budget)
         run: pnpm eval:scale:import
 
-  # G-5 (0.1.19 finding): the product is npm-distributed to run locally and
-  # the admin base is Windows-heavy, but until now CI only ran on ubuntu-latest
-  # — the Windows `sf.cmd` exec path (packages/core/src/exec-helper.ts) shipped
-  # UNTESTED. This job runs the portable subset of the ubuntu gate above
-  # (checkout → pnpm/node setup → install → build → unit tests) on a real
-  # windows-latest runner. Currently ADVISORY (manual workflow_dispatch only,
-  # see the job below) while platform-only test fragility is hardened. Deliberately
-  # NOT a fold-in via `strategy.matrix`: the ubuntu job's remaining steps
-  # (org-leak git-history scan, public-interface guard, NL routing gate, e2e
-  # MCP smoke, CI vault build, the retrieval/analytical/scale evals) need
-  # maintainer vaults, the `sf` CLI, network access, or bash-scripted secret
-  # handling — none of that is reproducible on a hosted runner, matrix or
-  # not, so a separate minimal job is cleaner than threading
-  # `if: matrix.os == 'ubuntu-latest'` through a dozen steps. Lint is
-  # intentionally skipped here too: `pnpm lint` (ESLint over TypeScript
-  # sources) is OS-independent — the ubuntu job's run already covers it, and
-  # duplicating it on Windows would just burn runner time. duckdb has
-  # prebuilt win32-x64 bindings (`@duckdb/node-bindings-win32-x64` is pinned
-  # in pnpm-lock.yaml), so the native module load is not expected to be a
-  # blocker on this (x64) runner image.
+  # G-5 (0.1.19 finding): the product is npm-distributed to run locally and the
+  # admin base is Windows-heavy, but CI ran only on ubuntu — so the Windows
+  # `sf.cmd` exec path shipped untested. This job runs the portable subset of
+  # the ubuntu gate (checkout -> setup -> install -> build -> unit tests) on a
+  # real windows-latest runner.
   #
-  # Four pre-existing suites hardcode unix-only exec/path assumptions that
-  # only ever ran on a non-Windows CI host, so they never surfaced there —
-  # each is scoped OUT of this job's run rather than soft-passed, and is
-  # flagged as follow-up work to make platform-aware instead of dropped
-  # silently:
-  #   - packages/core/test/exec-helper.test.ts, describe block "execHelper —
-  #     win32 branch (cmd.exe assembly, platform stubbed)" (2 tests): one
-  #     points COMSPEC at `/bin/echo` to observe assembled argv — `/bin/echo`
-  #     does not exist on Windows; the other deletes COMSPEC and expects the
-  #     `cmd.exe` fallback spawn to reject ENOENT, which only holds when the
-  #     REAL host has no `cmd.exe` (a genuine win32 runner always does).
-  #     Excluded via a `-t` negative-lookahead on the full test name — this
-  #     remains the closest surgical (non-file-level) exclusion available for
-  #     the Windows job; verified locally that it skips exactly these 2 tests
-  #     and nothing else in the file.
-  #   - packages/cli/test/commands/mcp.test.ts, "defaultListOrgs —
-  #     SFI_SF_EXEC_TIMEOUT_MS backstop" (1 test): writes a `#!/bin/sh`
-  #     shebang script, `chmod 0o755`s it, and joins PATH with `:` — no
-  #     /bin/sh, chmod is a no-op on NTFS, and win32 PATH uses `;`.
-  #   - packages/cli/test/commands/register-vault.test.ts, "resolves relative
-  #     vault paths against cwd" (1 test): asserts
-  #     `resolve('/tmp/foo', 'my-vault') === '/tmp/foo/my-vault'` — node:path
-  #     resolves to backslash-separated `\tmp\foo\my-vault` on win32, so the
-  #     literal forward-slash equality fails.
-  #   - packages/cli/test/commands/doctor.test.ts, "detects sf installed but
-  #     not on PATH and still runs via the absolute path (B9)" (1 test): its
-  #     mock only recognizes the macOS/Linux fallback probe paths
-  #     (`/usr/local/bin/sf`, `/opt/homebrew/bin/sf`), but the code under
-  #     test (`sfFallbackPaths()`) branches on `process.platform === 'win32'`
-  #     to return real Windows install paths instead, so the mock never sees
-  #     a matching probe on a genuine win32 runner.
-  # vitest 3 still effectively wants one `--exclude` glob in this
-  # pnpm-filtered invocation, so the three cli files are combined via brace expansion; that's
-  # file-level (~35 of 38 cli test files still run on Windows, dropping ~38
-  # of 374 cli-package assertions — the failing assertion in each excluded
-  # file is one test among many otherwise-passing ones in that file). A
-  # follow-up to add `it.skipIf(process.platform === 'win32')` on just the
-  # four specific tests above (rather than excluding whole files here) is
-  # tracked separately so Windows regains that coverage without a fragile
-  # CI-only filter.
+  # ARMED (0.3.2). It was `if: github.event_name == 'workflow_dispatch'` — i.e.
+  # it never ran on push or PR — and additionally excluded four tests and three
+  # whole cli test files. That combination is what allowed three silent Windows
+  # defects to ship at once: EmailTemplates extracting to zero rows, the
+  # `review-change` deploy gate returning `safe` without parsing anything, and
+  # the `~` username redaction never firing. The gate was disarmed at exactly
+  # the files carrying the bugs.
+  #
+  # The exclusions are gone rather than moved: the four platform-fragile tests
+  # are now `describe.skipIf(process.platform === 'win32')` in their own source,
+  # where the skip is visible to the reader, and the rest were rewritten to
+  # DERIVE their expectations from `node:path` instead of hardcoding a POSIX
+  # rendering. A CI-only `-t` filter hides an exclusion; a `skipIf` declares it.
+  #
+  # Deliberately NOT folded into the ubuntu job via `strategy.matrix`: that job's
+  # remaining steps (org-leak history scan, NL routing gate, e2e MCP smoke, CI
+  # vault build, the evals) need maintainer vaults, the `sf` CLI, network access
+  # or bash-scripted secrets — none reproducible on a hosted runner. Lint is
+  # skipped here too: ESLint over TypeScript sources is OS-independent and the
+  # ubuntu job already runs it. duckdb ships prebuilt win32-x64 AND win32-arm64
+  # bindings (both pinned in pnpm-lock.yaml), so the native load is not a blocker.
   windows-build-test:
     runs-on: windows-latest
-    # ADVISORY / MANUAL (temporary): the Windows matrix is brand-new (added in
-    # 0.2.0) and still surfacing platform-only test fragility case by case
-    # (POSIX signal semantics, /dev/null-as-unwritable-path assumptions, path
-    # separators). Job-level `continue-on-error` still leaves a red check-run on
-    # the commit, so instead this job runs ONLY on manual `workflow_dispatch` —
-    # it is SKIPPED on push/PR, keeping main visibly green while the suite is
-    # hardened. Harden by triggering CI manually (Actions -> CI -> Run workflow),
-    # iterating on the Windows failures until green, then RE-ARM as a hard gate:
-    # delete this `if:` so it runs on push again. macOS + ubuntu stay hard gates.
-    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-        # No fetch-depth: 0 here — this job doesn't run the org-leak history
-        # scan, so a shallow checkout is fine and faster.
+        # No fetch-depth: 0 — this job doesn't run the org-leak history scan.
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -224,11 +186,8 @@ jobs:
       - name: Build (all packages)
         run: pnpm -r build
 
-      - name: Unit tests (all packages except cli — excludes the exec-helper win32-branch tests, see job comment)
-        run: pnpm --filter '!sf-intelligence' -r test -t "^(?!.*win32 branch).*$"
-
-      - name: Unit tests (cli package — excludes 3 POSIX-only test files, see job comment)
-        run: pnpm --filter ./packages/cli test --exclude "**/test/commands/{mcp,register-vault,doctor}.test.ts"
+      - name: Unit tests (all packages)
+        run: pnpm -r test
 
   # #11: the dev box is macOS and darwin-arm64/darwin-x64 are shipped DuckDB
   # native binaries (@duckdb/node-bindings-darwin-arm64 / -darwin-x64 are
@@ -247,9 +206,9 @@ jobs:
   # skipped here too, same reasoning as the Windows job: `pnpm lint` is
   # OS-independent and already covered by the ubuntu job.
   #
-  # Unlike Windows, macOS is POSIX — none of the four Windows-only exclusions
-  # documented above apply here, so the full unit-test suite (all packages,
-  # including cli) runs unmodified.
+  # macOS is POSIX, so nothing is platform-skipped here; the full unit-test
+  # suite runs unmodified. As of 0.3.2 the Windows job runs the full suite too —
+  # its platform-specific skips live in the test sources, not in this file.
   macos-build-test:
     runs-on: macos-latest
     steps:

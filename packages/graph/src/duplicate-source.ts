@@ -88,6 +88,7 @@
  */
 
 import type { Edge, ExtractionResult, Node } from '@sf-intelligence/contracts';
+import { splitPathSegments } from '@sf-intelligence/core';
 
 import { relativizeSourcePath } from './relativize.js';
 
@@ -221,7 +222,7 @@ const copyContentKey = (node: Node, incidentEdges: readonly Edge[]): string =>
 
 /** Segment-wise longest common SUFFIX length across every path in a group. */
 const commonSuffixSegments = (paths: readonly string[]): number => {
-  const split = paths.map((p) => p.split('/'));
+  const split = paths.map((p) => splitPathSegments(p));
   const shortest = Math.min(...split.map((s) => s.length));
   let n = 0;
   while (n < shortest) {
@@ -241,7 +242,7 @@ const commonSuffixSegments = (paths: readonly string[]): number => {
 const layoutRoots = (paths: readonly string[]): readonly string[] => {
   const tail = commonSuffixSegments(paths);
   const roots = paths.map((p) => {
-    const segs = p.split('/');
+    const segs = splitPathSegments(p);
     const head = segs.slice(0, Math.max(0, segs.length - tail));
     return head.length === 0 ? '(source tree root)' : `${head.join('/')}/`;
   });

@@ -251,8 +251,13 @@ describe('3.3 OrgId binding enforced at use time', () => {
 });
 
 describe('3.5 consent store file modes', () => {
-  it('writes the consent file as 0600 on POSIX', async () => {
-    if (process.platform === 'win32') return;
+  // `it.skipIf`, not an early `return`: a bare return reports the test as
+  // PASSED, so on Windows this 0600 assertion evaporated behind a green tick —
+  // the reader has no way to tell a satisfied security check from a skipped
+  // one. NTFS has no POSIX mode bits, so skipping is correct; hiding is not.
+  // (`it.skipIf(process.platform === 'win32')` is already the house idiom —
+  // see exec-helper.test.ts, tooling-api/test/auth.test.ts, tools/live-exec.test.ts.)
+  it.skipIf(process.platform === 'win32')('writes the consent file as 0600 on POSIX', async () => {
     await grantLiveConsent('mode-org', {
       orgId: '00D000000000001AAA',
       principalUsername: 'u@x.dev',

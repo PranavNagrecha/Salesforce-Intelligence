@@ -4,7 +4,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runDoctor, formatDoctorReport, type DoctorExec } from '../../src/commands/doctor.js';
+import {
+  formatDoctorReport,
+  runDoctor,
+  sfFallbackPaths,
+  type DoctorExec,
+} from '../../src/commands/doctor.js';
 
 const makeTempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), 'sfi-doctor-'));
 
@@ -85,16 +90,20 @@ describe('runDoctor', () => {
       await mkdir(metaDir, { recursive: true });
       await writeFile(join(metaDir, 'config.json'), JSON.stringify({ targetOrg: 'MyOrg' }), 'utf8');
       // Bare `sf` isn't on PATH (as for an IDE-spawned MCP); only the absolute
-      // /usr/local/bin/sf resolves.
+      // fallback resolves. DERIVED from the production probe list rather than
+      // hardcoded, so this works on every platform — the win32 branch returns
+      // `%ProgramFiles%\\sf\\bin\\sf.cmd` and friends, which a literal
+      // '/usr/local/bin/sf' mock could never match.
+      const resolvedSf = sfFallbackPaths()[0]!;
       const notOnPathStub: DoctorExec = async (binary, args) => {
         if (binary === 'sf' && args.includes('--version')) throw new Error('command not found: sf');
-        if (binary === '/usr/local/bin/sf' && args.includes('--version')) {
+        if (binary === resolvedSf && args.includes('--version')) {
           return { stdout: '@salesforce/cli/2.0.0 darwin' };
         }
         if (args.includes('display')) {
           // org-auth must run via the RESOLVED bare absolute path, not bare `sf`
           // and NOT a quoted path (execFile would ENOENT a quoted binary).
-          expect(binary).toBe('/usr/local/bin/sf');
+          expect(binary).toBe(resolvedSf);
           return {
             stdout: JSON.stringify({
               result: { connectedStatus: 'Connected', username: 'me@org' },

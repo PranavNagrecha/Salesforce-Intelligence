@@ -69,7 +69,12 @@ beforeAll(async () => {
   prevToolProfile = process.env['SFI_TOOL_PROFILE'];
   process.env['SFI_TOOL_PROFILE'] = 'full';
 
-  vaultRoot = mkdtempSync(join(tmpdir(), 'sfi-serve-http-'));
+  // Seeded under HOME, not tmpdir. On macOS/Linux `tmpdir()` is OUTSIDE $HOME,
+  // so the username-redaction assertion below never exercised the redaction at
+  // all — it passed because there was nothing to redact. On Windows tmpdir IS
+  // inside %USERPROFILE%, so the same test would suddenly become real and go
+  // red. Putting the vault under HOME makes it non-vacuous on every platform.
+  vaultRoot = mkdtempSync(join(homedir(), '.sfi-serve-http-test-'));
   mkdirSync(join(vaultRoot, 'meta'), { recursive: true });
   mkdirSync(join(vaultRoot, 'graph'), { recursive: true });
   writeFileSync(

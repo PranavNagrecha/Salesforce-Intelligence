@@ -2,6 +2,7 @@ import { cp, readdir, rm, stat } from 'node:fs/promises';
 import { basename, join, relative, sep } from 'node:path';
 
 import type { ComponentType } from '@sf-intelligence/contracts';
+import { splitPathSegments } from '@sf-intelligence/core';
 
 import { componentTypeFromSourcePath } from './refresh-pipeline.js';
 
@@ -158,13 +159,14 @@ const strippedDxWrapper = (segments: readonly string[]): readonly string[] => {
  * across platforms.
  */
 const comparisonKey = (relPath: string, isDirectory: boolean): string => {
-  const segments = relPath.split(sep);
+  const segments = splitPathSegments(relPath);
   const fileName = segments[segments.length - 1] ?? relPath;
   // A sidecar (`Foo.cls-meta.xml`) never dispatches on its own, so probe with
   // the primary basename; both live in the same directory, so the tail length
   // carries over unchanged.
   const primaryRel = primaryRelPathForSidecar(relPath, fileName);
-  const probeSegments = primaryRel === null ? segments : primaryRel.split(sep);
+  const probeSegments =
+    primaryRel === null ? segments : splitPathSegments(primaryRel);
   const length = dispatchTailLength(probeSegments, isDirectory);
   const tail =
     length === null ? strippedDxWrapper(segments) : segments.slice(segments.length - length);
