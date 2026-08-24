@@ -107,6 +107,7 @@ import {
   extractWorkflowRule,
   UNRESOLVED_PROFILE_PREFIX,
 } from '@sf-intelligence/extractors';
+import { splitPathSegments } from '@sf-intelligence/core';
 import {
   type DuplicateSourceSummary,
   listEdgesForNodes,
@@ -954,10 +955,34 @@ const walkDir = async (currentDir: string, found: WalkedEntry[]): Promise<void> 
   }
 };
 
-/** Path segments of `absPath` relative to `rootDir` (split on the platform separator). */
+/**
+ * Path segments of `absPath` relative to `rootDir`, accepting either separator.
+ *
+ * Two callers with contradictory inputs meet here, which is why the hardcoded
+ * `sep` was wrong in both directions:
+ *
+ *  - the refresh walk passes a native absolute path under a native `rootDir`;
+ *  - `review-change` passes `rootDir: ''` and a path straight out of
+ *    `git diff --name-only`, which emits FORWARD slashes on every platform.
+ *
+ * With `sep === '\\'` the second caller produced ONE segment, so every
+ * `segments.includes('classes' | 'objects' | …)` test missed, every changed
+ * file failed to dispatch to a type, the findings list came back empty, and the
+ * deploy gate printed "Nothing to gate" and exited 0 with
+ * `overallVerdict: 'safe'` — a field deletion with 40 dependents sails through.
+ * A gate that passes because it parsed nothing is worse than one that fails.
+ *
+ * `splitPathSegments` also drops empty segments, which is what makes the
+ * `rootDir: ''` caller work rather than yielding a leading `''`.
+ */
 const relativeSegments = (rootDir: string, absPath: string): readonly string[] => {
-  const rel = absPath.startsWith(`${rootDir}${sep}`) ? absPath.slice(rootDir.length + 1) : absPath;
-  return rel.split(sep);
+  const rootSegments = splitPathSegments(rootDir);
+  const absSegments = splitPathSegments(absPath);
+  const isUnderRoot =
+    rootSegments.length > 0 &&
+    rootSegments.length <= absSegments.length &&
+    rootSegments.every((seg, i) => absSegments[i] === seg);
+  return isUnderRoot ? absSegments.slice(rootSegments.length) : absSegments;
 };
 
 /**

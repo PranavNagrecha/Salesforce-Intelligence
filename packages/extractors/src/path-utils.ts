@@ -1,5 +1,7 @@
 import { basename, dirname, extname } from 'node:path';
 
+import { splitPathSegments } from '@sf-intelligence/core';
+
 /**
  * The shape returned by `deriveNestedObjectAndApiName`.
  */
@@ -34,7 +36,13 @@ export interface EmailTemplatePathParts {
  *   // => 'Account' (suffix absent; falls back to extname stripping)
  */
 export const deriveComponentApiName = (filePath: string, suffix: string): string => {
-  const base = basename(filePath);
+  // NOT `basename()`: `node:path` is bound to the HOST separator, so on a POSIX
+  // host `basename('a\\b\\Welcome.email')` returns the WHOLE string. That is
+  // the same class of bug as the `split('/')` below — a metadata path arrives
+  // with whichever separator the walking platform used, and every derivation
+  // here has to accept both.
+  const segments = splitPathSegments(filePath);
+  const base = segments[segments.length - 1] ?? '';
   if (suffix.length > 0 && base.endsWith(suffix)) {
     return base.slice(0, base.length - suffix.length);
   }
@@ -122,16 +130,12 @@ export const deriveParentApiName = (filePath: string, parentDirLevel: number): s
   if (parentDirLevel < 1) {
     return '';
   }
-  let current = dirname(filePath);
-  for (let step = 1; step < parentDirLevel; step += 1) {
-    const next = dirname(current);
-    if (next === current) {
-      return '';
-    }
-    current = next;
-  }
-  const name = basename(current);
-  if (name.length === 0 || name === '.') {
+  // Segment-wise for the same reason as `deriveComponentApiName`: a native
+  // Windows path must resolve identically on any host. Walking `parentDirLevel`
+  // levels up is an index from the end, with the filename at index 0.
+  const segments = splitPathSegments(filePath);
+  const name = segments[segments.length - 1 - parentDirLevel];
+  if (name === undefined || name.length === 0 || name === '.') {
     return '';
   }
   return name;
@@ -217,15 +221,30 @@ export const deriveEmailTemplateFolderAndName = (
   suffix: string,
 ): EmailTemplatePathParts | null => {
   const templateName = deriveComponentApiName(filePath, suffix);
-  // Walk up from the file's immediate parent collecting segments until
-  // we hit `email`. POSIX-style separators are used because the
-  // sf-intelligence harness normalizes all metadata paths to forward
-  // slashes (Windows paths are normalized at the loader boundary).
-  const dir = dirname(filePath);
-  if (dir === '' || dir === '.' || dir === '/') {
+  // Walk up from the file's immediate parent collecting segments until we hit
+  // `email`.
+  //
+  // This used to read `dir.split('/')` on the claim that "Windows paths are
+  // normalized at the loader boundary". There is no such boundary: the walk
+  // builds `abs` with `join(currentDir, entry.name)` and hands the native path
+  // to the extractor unmodified. On Windows every segment therefore collapsed
+  // into one, `emailIndex` stayed -1, and EVERY EmailTemplate returned null →
+  // `malformed-input` → zero EmailTemplate nodes in the vault, while the
+  // refresh still reported `partial` and carried on. Silent data loss.
+  //
+  // `splitPathSegments` accepts either separator, so the comment is replaced by
+  // a shared helper that cannot drift from its claim.
+  //
+  // Note this no longer routes through `dirname()`. `node:path` is bound to the
+  // HOST flavour, so on a POSIX host `dirname` cannot see a backslash and the
+  // function would still be untestable off-Windows — the coverage gap that let
+  // the original bug ship. Dropping the final segment is the same operation and
+  // is separator-agnostic, so the Windows behaviour is now provable everywhere.
+  const allSegments = splitPathSegments(filePath);
+  if (allSegments.length < 2) {
     return null;
   }
-  const segments = dir.split('/').filter((s) => s.length > 0);
+  const segments = allSegments.slice(0, -1);
   // Find the *last* occurrence of the literal `email` segment; this
   // handles paths that may contain `email` higher up in unusual repo
   // layouts (e.g., a workspace dir named `email-templates`).

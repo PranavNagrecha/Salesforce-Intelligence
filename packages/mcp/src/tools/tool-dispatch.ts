@@ -19,7 +19,7 @@ import {
   type McpError,
   type McpResponse,
 } from '@sf-intelligence/contracts';
-import type { Result } from '@sf-intelligence/core';
+import { collapseHome, type Result } from '@sf-intelligence/core';
 import type { z } from 'zod';
 
 import { auditToolCall } from '../audit.js';
@@ -2087,12 +2087,13 @@ export const dispatchTool = async (
  * a cosmetic. Paths outside HOME (a system tmpdir in tests, a shared mount) are
  * returned as-is: they carry no username.
  */
-const toDisclosedVaultPath = (absPath: string): string => {
-  const home = homedir();
-  return home.length > 0 && (absPath === home || absPath.startsWith(`${home}/`))
-    ? `~${absPath.slice(home.length)}`
-    : absPath;
-};
+const toDisclosedVaultPath = (absPath: string): string =>
+  // `collapseHome` replaces a hand-rolled `startsWith(`${home}/`)`, which never
+  // matched on Windows (`C:\\Users\\alice` + `/`), so the redaction silently
+  // did nothing and every response carried the operator's account name. It also
+  // fixes a case-sensitivity miss (`c:\\users` vs `C:\\Users`) for free, and
+  // maps "the vault IS home" to a bare `~` rather than the absolute path.
+  collapseHome(absPath, homedir());
 
 const stampVaultDisclosure = <T>(
   resp: McpResponse<T>,

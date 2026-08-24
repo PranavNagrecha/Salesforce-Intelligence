@@ -1,6 +1,7 @@
 /// <reference types="vitest/globals" />
 
 import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -145,6 +146,53 @@ describe('computeSourceTreeHash error handling', () => {
       }
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * PINNED DIGEST — the tripwire for the highest-consequence edit in this file.
+ *
+ * `hashFile`'s relative path feeds the digest that becomes
+ * `manifest.sourceTreeHash`. `sfi status` compares that value to decide whether
+ * a vault is current, so ANY byte change here makes every vault on every
+ * machine report stale at once, for a reason no user could diagnose and no
+ * behavioural test would catch — the walk still works, the numbers still add
+ * up, the answer is just silently "your vault is out of date".
+ *
+ * The fixture deliberately includes a filename containing a literal backslash.
+ * That is legal on POSIX and is exactly what an unconditional
+ * `.replace(/\\/g, '/')` would corrupt — the trap that makes `toRelativePosix`
+ * (gated) and `toPosixPath` (unconditional) two different functions.
+ *
+ * If this digest changes, that is not a test to update: it is a decision to
+ * make deliberately, with a vault-invalidation note in the release.
+ */
+describe('computeSourceTreeHash — pinned digest', () => {
+  it('produces a stable digest for a known tree, backslash filename included', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sfi-hash-pinned-'));
+    try {
+      mkdirSync(join(root, 'classes'), { recursive: true });
+      mkdirSync(join(root, 'objects', 'Account', 'fields'), { recursive: true });
+      writeFileSync(join(root, 'classes', 'Foo.cls'), 'public class Foo {}');
+      writeFileSync(
+        join(root, 'objects', 'Account', 'fields', 'X__c.field-meta.xml'),
+        '<x/>',
+      );
+      // Legal on POSIX; corrupted by an unconditional backslash rewrite.
+      if (process.platform !== 'win32') {
+        writeFileSync(join(root, 'od\\d.cls'), 'backslash in a POSIX filename');
+      }
+
+      const result = await computeSourceTreeHash(root);
+      expect(result.ok).toBe(true);
+      if (result.ok && process.platform !== 'win32') {
+        expect(result.value).toBe(
+          '4a2588a5d51b720dd09a5b895961e13a85e080ecc4b455691227f1816e16ba61',
+        );
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join, relative, sep } from 'node:path';
+import { join } from 'node:path';
 
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, toRelativePosix, type Result } from '@sf-intelligence/core';
 
 /**
  * The error variants `computeSourceTreeHash` can return.
@@ -126,9 +126,15 @@ const hashFile = async (
   absolutePath: string,
   hash: ReturnType<typeof createHash>,
 ): Promise<Result<void, HashError>> => {
-  const rawRel = relative(rootDir, absolutePath);
   // Normalize platform separators to `/` so the hash matches across OSes.
-  const relPath = sep === '/' ? rawRel : rawRel.split(sep).join('/');
+  //
+  // GATED, never an unconditional `.replace(/\\/g,'/')`: this string feeds the
+  // digest that becomes `manifest.sourceTreeHash`. A POSIX filename may legally
+  // contain a literal backslash, and rewriting it would change the digest for
+  // every existing vault — which surfaces as `sfi status` reporting a stale
+  // vault, org-wide, for reasons no user could diagnose. `toRelativePosix` is
+  // the gated form; a pinned-digest test in hash.test.ts locks the bytes.
+  const relPath = toRelativePosix(rootDir, absolutePath);
   let bytes;
   try {
     bytes = await readFile(absolutePath);

@@ -27,6 +27,22 @@ export {
   type ExecHelperOptions,
 } from './exec-helper.js';
 
+// Portable path primitives. Every "split a path" / "render a path relative to"
+// in the product routes through here — six hand-rolled spellings across five
+// packages had drifted, and the Windows-only failures were silent (a metadata
+// type extracting to zero rows, a deploy gate passing because it parsed
+// nothing, a username leaking into every response). Guarded by
+// `scripts/check-portability.mjs`.
+export {
+  collapseHome,
+  hasAdjacentSegments,
+  hasAnySegment,
+  PATH_SEPARATORS,
+  splitPathSegments,
+  toPosixPath,
+  toRelativePosix,
+} from './path-portable.js';
+
 export {
   buildVersionCheckCounterPayload,
   checkForUpdate,

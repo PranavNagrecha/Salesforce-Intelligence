@@ -60,7 +60,7 @@ import type {
   Node,
   UntrustedOrgText,
 } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, toRelativePosix, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges, SOURCE_CONFLICT_PROPERTY } from '@sf-intelligence/graph';
 import {
   renderComponentMarkdown,
@@ -677,10 +677,13 @@ const parseParentApiName = (parentId: ComponentId | null): string | null => {
  * contract reports paths relative to the vault so clients can recombine
  * them with whatever root they have on their own filesystem.
  */
-const toRelativePath = (vaultRoot: string, fullPath: string): string => {
-  const prefix = vaultRoot.endsWith('/') ? vaultRoot : `${vaultRoot}/`;
-  return fullPath.startsWith(prefix) ? fullPath.substring(prefix.length) : fullPath;
-};
+const toRelativePath = (vaultRoot: string, fullPath: string): string =>
+  // `fullPath` is `join()`-built, so on Windows it is backslash-separated while
+  // the hand-rolled prefix ended in `/` — the strip never fired and the wire
+  // field carried an ABSOLUTE native path where the contract above promises a
+  // vault-relative one. `toRelativePosix` also renders the separator, so this
+  // field and `component-doc-fallback`'s no longer disagree on Windows.
+  toRelativePosix(vaultRoot, fullPath);
 
 /**
  * Pull the YAML frontmatter and Markdown body out of a renderer-produced

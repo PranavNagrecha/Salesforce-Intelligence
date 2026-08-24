@@ -1963,3 +1963,52 @@ describe('walkAndExtract incremental cache (P5-incremental-refresh)', () => {
     }
   });
 });
+
+/**
+ * Separator portability of the path→type dispatcher.
+ *
+ * `relativeSegments` split on a hardcoded `sep`. That was correct for the
+ * refresh walk (native paths under a native root) and wrong for the OTHER
+ * caller: `sfi review-change` passes `rootDir: ''` and paths straight out of
+ * `git diff --name-only`, which emits forward slashes on EVERY platform.
+ *
+ * With `sep === '\\'` those paths became a single segment, so every
+ * `segments.includes('classes' | 'objects' | …)` test missed, every changed
+ * file dispatched to `null`, the findings list came back empty, and the deploy
+ * gate printed "Nothing to gate" and exited 0 with `overallVerdict: 'safe'`.
+ * A CI gate that passes because it parsed nothing is worse than one that fails.
+ */
+describe('componentTypeFromSourcePath — either separator, and the review-change contract', () => {
+  it('dispatches a git-diff path with an EMPTY root — the review-change caller', () => {
+    // This is the exact call `review-change.ts` makes. It returned null on
+    // Windows, and null findings are dropped before the verdict is computed.
+    expect(
+      componentTypeFromSourcePath('', 'force-app/main/default/classes/Foo.cls', false),
+    ).toBe('ApexClass');
+  });
+
+  it('dispatches a native Windows path under a native root', () => {
+    expect(
+      componentTypeFromSourcePath(
+        'C:\\vault\\source',
+        'C:\\vault\\source\\classes\\Foo.cls',
+        false,
+      ),
+    ).toBe('ApexClass');
+  });
+
+  it('agrees between separators for the same logical path', () => {
+    expect(componentTypeFromSourcePath('', 'objects\\Account\\Account.object-meta.xml', false)).toBe(
+      componentTypeFromSourcePath('', 'objects/Account/Account.object-meta.xml', false),
+    );
+  });
+
+  it('still resolves a bundle directory when the root is a prefix STRING but not a path prefix', () => {
+    // `/vault/source-old` must not be treated as living under `/vault/source`.
+    // The old `startsWith(`${rootDir}${sep}`)` got this right by accident; the
+    // segment-wise form gets it right on purpose.
+    expect(componentTypeFromSourcePath('/vault/source', '/vault/source-old/lwc/orderCard', true)).toBe(
+      'LightningComponentBundle',
+    );
+  });
+});
