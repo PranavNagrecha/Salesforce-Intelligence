@@ -9,7 +9,8 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "crawl-test": "node scripts/crawl-test.mjs"
+    "crawl-test": "node scripts/crawl-test.mjs",
+    "verify-markup": "node scripts/verify-markup.mjs"
   },
   "dependencies": {
     "@astrojs/mdx": "^7.0.2",

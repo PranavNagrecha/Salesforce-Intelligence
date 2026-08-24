@@ -97,7 +97,7 @@ const jsonld = [
 
         <h2 id="trigger-type">How do I tell what triggers a Flow?</h2>
         <p>Two metadata values settle it: <code>processType</code> on the flow, and <code>triggerType</code> inside the <code>start</code> element. "Record-triggered" is not one thing - it is three, with different capabilities and three different positions in the save order.</p>
-        <table>
+        <table class="doc-table">
           <thead><tr><th>Kind</th><th>The metadata tell</th><th>What starts it</th></tr></thead>
           <tbody>
             <tr><td><strong>Record-triggered, before save</strong></td><td><code>triggerType: RecordBeforeSave</code></td><td>A save on the start object. Can set fields on the triggering record with no extra DML.</td></tr>
