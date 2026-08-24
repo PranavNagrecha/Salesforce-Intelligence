@@ -75,11 +75,12 @@ describe('prepareMcp', () => {
     }
   });
 
-  it('makes the no-vault message actionable by naming authed orgs', async () => {
+  it('names authed orgs when a human is watching a terminal', async () => {
     const cwd = await makeTempCwd();
     try {
       const result = await prepareMcp({
         cwd,
+        discloseOrgNames: true,
         listOrgs: async () => ['Acme-Prod', 'Acme-UAT'],
       });
       expect(result.ok).toBe(false);
@@ -90,6 +91,32 @@ describe('prepareMcp', () => {
         expect(result.error.message).toContain('Acme-UAT');
         // Trust posture: never auto-pick / guess an org.
         expect(result.error.message).toContain('never');
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('WITHHOLDS org aliases by default — this message becomes a host log file', async () => {
+    // When an MCP host launches the server, stderr is captured to a file on
+    // disk (Claude Desktop's mcp-server-*.log, Claude Code's debug log). A list
+    // of an organisation's Salesforce org aliases should not persist there just
+    // because the user had not run `sfi init` yet. The count still proves the
+    // `sf` CLI works and a choice exists; the assistant reads the actual names
+    // in-band from `sfi.setup_status`, which is carried on `authedOrgs` below.
+    const cwd = await makeTempCwd();
+    try {
+      const result = await prepareMcp({
+        cwd,
+        listOrgs: async () => ['Acme-Prod', 'Acme-UAT'],
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toContain('2 org(s)');
+        expect(result.error.message).not.toContain('Acme-Prod');
+        expect(result.error.message).not.toContain('Acme-UAT');
+        // Withheld from the LOG, not lost: setup mode still gets the real list.
+        expect(result.error.authedOrgs).toEqual(['Acme-Prod', 'Acme-UAT']);
       }
     } finally {
       await rm(cwd, { recursive: true, force: true });

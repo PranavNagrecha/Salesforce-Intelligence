@@ -74,6 +74,23 @@ export interface PrepareMcpOptions {
   /** Working directory where `org-kb/` is expected. */
   readonly cwd: string;
   /**
+   * Whether the no-vault message may NAME the authenticated orgs, rather than
+   * only counting them.
+   *
+   * The names are genuinely useful — the user has to pick one — but this
+   * message is written to stderr, and when an MCP host launches the server
+   * that stream is a LOG FILE on disk (`mcp-server-sf-intelligence.log` and
+   * friends), where a list of an organisation's Salesforce org aliases then
+   * persists indefinitely. So names are opt-in: the CLI passes `true` only
+   * when stderr is a TTY (a human running `sfi mcp` in a terminal, where the
+   * text is transient). Host-launched servers get the count, and the assistant
+   * reads the full list in-band from `sfi.setup_status` instead — the channel
+   * the person actually asked a question on.
+   *
+   * Defaults to `false`: the conservative branch is the one that ships.
+   */
+  readonly discloseOrgNames?: boolean;
+  /**
    * Explicit vault root, overriding `cwd/org-kb`. Lets a multi-org host bind
    * each project to the right vault (`sfi mcp --vault <path>`) instead of
    * relying on the launch directory — the server cannot know which repo the
@@ -174,14 +191,23 @@ export const prepareMcp = async (
     const orgs = await (opts.listOrgs ?? defaultListOrgs)();
     const where = opts.vaultRoot !== undefined ? ` at ${vaultRoot}` : '';
     const base = `No vault${where}. Run \`sfi init\` followed by \`sfi refresh\`, or point \`sfi mcp --vault <path>\` at an existing org-kb.`;
-    // Make the dead-end actionable: name the authed orgs so the user can pick
-    // one. We deliberately do NOT auto-boot a live-only server against a guessed
-    // default org — with several orgs authed that risks querying the wrong one,
-    // and the product never guesses which org a question is about.
+    // Make the dead-end actionable: say how many orgs are authed so the user
+    // knows the `sf` CLI is working and a choice exists. We deliberately do NOT
+    // auto-boot a live-only server against a guessed default org — with several
+    // orgs authed that risks querying the wrong one, and the product never
+    // guesses which org a question is about.
+    //
+    // The ALIASES are withheld unless `discloseOrgNames` is set, because this
+    // string lands in the host's MCP log file (see the option's doc comment).
+    // The names are not lost: `sfi.setup_status` returns them over MCP, in-band,
+    // to the assistant that was asked for help.
+    const names = opts.discloseOrgNames === true
+      ? `: ${orgs.slice(0, 8).join(', ')}${orgs.length > 8 ? ', …' : ''}`
+      : '';
     const hint =
       orgs.length > 0
-        ? ` You are authenticated to ${orgs.length} org(s): ${orgs.slice(0, 8).join(', ')}` +
-          `${orgs.length > 8 ? ', …' : ''}. Run \`sfi init\` to pick the one you want and build` +
+        ? ` You are authenticated to ${orgs.length} org(s)${names}.` +
+          ` Run \`sfi init\` to pick the one you want and build` +
           ` its knowledge base — live answers attach to a vault's org, so the product never` +
           ` guesses which of your orgs to query.`
         : '';
@@ -308,6 +334,9 @@ export const registerMcpCommand = (program: Command): void => {
       );
       const prepared = await prepareMcp({
         cwd: process.cwd(),
+        // A TTY means a human is watching this scroll past in their own
+        // terminal; anything else means a host is capturing it to a log file.
+        discloseOrgNames: process.stderr.isTTY === true,
         ...(boundVault !== undefined ? { vaultRoot: boundVault } : {}),
       });
       if (!prepared.ok) {
