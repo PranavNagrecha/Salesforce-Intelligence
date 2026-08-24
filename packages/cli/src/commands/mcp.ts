@@ -12,6 +12,7 @@ import {
 import {
   buildContext,
   createServer,
+  createSetupServer,
   shutdown,
   startServer,
   type Context,
@@ -49,6 +50,20 @@ const SHUTDOWN_SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
 export interface McpStartupError {
   readonly kind: 'no-vault' | 'buildContext-failed';
   readonly message: string;
+  /**
+   * Where a vault was looked for. Carried on the ERROR (not just the success
+   * path) because setup mode has to tell the user which directory came up
+   * empty — the single most useful fact when a host launched the server from
+   * a cwd the user never chose.
+   */
+  readonly vaultRoot: string;
+  /**
+   * Org aliases we can name in the setup guidance: every authed org when no
+   * vault exists yet, or just the vault's bound org once one does. Empty when
+   * the `sf` CLI is absent or failed — setup mode then falls back to a
+   * placeholder rather than inventing an alias.
+   */
+  readonly authedOrgs: readonly string[];
 }
 
 /** Probe the authed Salesforce orgs (alias or username). Injectable for tests. */
@@ -170,12 +185,26 @@ export const prepareMcp = async (
           ` its knowledge base — live answers attach to a vault's org, so the product never` +
           ` guesses which of your orgs to query.`
         : '';
-    return err({ kind: 'no-vault', message: base + hint });
+    return err({
+      kind: 'no-vault',
+      message: base + hint,
+      vaultRoot,
+      authedOrgs: orgs,
+    });
   }
 
   const ctxResult = await buildContext(vaultRoot);
   if (!ctxResult.ok) {
-    return err({ kind: 'buildContext-failed', message: ctxResult.error.message });
+    // A config exists, so the org is already chosen — name THAT one in the
+    // setup guidance rather than re-listing every authed org (which would
+    // invite the user to re-bind a repo that is already bound).
+    const boundOrg = await readBoundOrg(paths.config).catch(() => null);
+    return err({
+      kind: 'buildContext-failed',
+      message: ctxResult.error.message,
+      vaultRoot,
+      authedOrgs: boundOrg !== null ? [boundOrg] : [],
+    });
   }
 
   const targetOrg = await readBoundOrg(paths.config);
@@ -282,8 +311,26 @@ export const registerMcpCommand = (program: Command): void => {
         ...(boundVault !== undefined ? { vaultRoot: boundVault } : {}),
       });
       if (!prepared.ok) {
+        // Do NOT exit. An MCP host that loses the server shows the user
+        // "failed to connect" and nothing else — this message goes to stderr,
+        // which is hidden or buried in a log file, so exiting here made the
+        // product's own setup instructions unreachable by the only audience
+        // that needs them. Boot setup mode instead: the chat can then read
+        // `sfi.setup_status` and walk the user through init/refresh. See
+        // packages/mcp/src/setup-server.ts for the full rationale.
         process.stderr.write(`sfi mcp: ${prepared.error.message}\n`);
-        process.exit(1);
+        const setup = createSetupServer({
+          reason:
+            prepared.error.kind === 'no-vault' ? 'no-vault' : 'vault-missing',
+          detail: prepared.error.message,
+          cwd: process.cwd(),
+          expectedVaultRoot: prepared.error.vaultRoot,
+          bindSource,
+          authedOrgs: prepared.error.authedOrgs,
+          version: readCliPackageVersion(),
+        });
+        await startServer(setup);
+        return;
       }
       const { ctx, server, vaultRoot, targetOrg } = prepared.value;
       // Expose the running plugin version to in-process tools. health_check's

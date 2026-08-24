@@ -128,8 +128,47 @@ const vaultRoot = join(projectRoot, 'org-kb');
 const paths = vaultPaths(vaultRoot);
 
 try {
+  // === Stage 0: setup mode — the state EVERY new user starts in ===
+  // A user registers the MCP server and restarts their client long before they
+  // have a vault; the host also picks the server's cwd, so even a correctly
+  // built vault may not be found. `sfi mcp` used to `process.exit(1)` here,
+  // which every host renders as "failed to connect" with the reason stranded on
+  // stderr — invisible to the person in the chat. The server must CONNECT and
+  // explain itself instead. Asserted against the real binary over the real
+  // protocol because that is the only way the exit path is actually exercised.
+  console.log('# setup mode (no vault)');
+  const emptyRoot = mkdtempSync(join(tmpdir(), 'sfi-onboard-empty-'));
+  const setupTransport = new StdioClientTransport({ command: 'node', args: [BIN, 'mcp'], cwd: emptyRoot, stderr: 'pipe' });
+  const setupClient = new Client({ name: 'onboard-smoke-setup', version: '1' }, { capabilities: {} });
+  try {
+    await setupClient.connect(setupTransport);
+    check('sfi mcp CONNECTS with no vault (does not exit)', true);
+
+    const { tools } = await setupClient.listTools();
+    check(
+      'setup mode advertises sfi.setup_status',
+      tools.some((t) => t.name === 'sfi.setup_status'),
+      tools.map((t) => t.name).join(', ').slice(0, 120),
+    );
+
+    const status = await callText(setupClient, 'sfi.setup_status', {});
+    check('setup_status reports setup-required', status.includes('"status":"setup-required"'), status.slice(0, 160));
+    check('setup_status refuses to claim org knowledge', status.includes('"canAnswerOrgQuestions":false'), status.slice(0, 160));
+    check('setup_status names the next command', status.includes('refresh'), status.slice(0, 160));
+
+    // A host that optimistically calls a vault tool must learn WHY and what to
+    // call instead, rather than getting an opaque unknown-tool error.
+    const denied = await callText(setupClient, 'sfi.get_impact', { id: 'CustomObject:Anything__c' });
+    check('vault tools redirect to setup_status', denied.includes('sfi.setup_status'), denied.slice(0, 160));
+  } catch (e) {
+    check('setup mode scenario ran', false, e.message);
+  } finally {
+    await setupClient.close().catch(() => {});
+    rmSync(emptyRoot, { recursive: true, force: true });
+  }
+
   // === Stage 1: sfi init (no org call) ===
-  console.log('# init');
+  console.log('\n# init');
   const init = sfi(['init', '--target-org', 'ci-fixture', '--vault-root', 'org-kb'], projectRoot);
   check('sfi init exits 0', init.status === 0, `status ${init.status}${init.stderr ? ` — ${init.stderr.trim().slice(0, 120)}` : ''}`);
   let configWritten = false;

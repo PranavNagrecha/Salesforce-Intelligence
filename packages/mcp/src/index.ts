@@ -58,6 +58,12 @@ export {
   shutdown,
   startServer,
 } from './server.js';
+// Setup mode: the server that answers when there is NO vault yet. Exported so
+// the CLI can boot it instead of exiting — an MCP host that loses its server
+// shows the user "failed to connect" and nothing else, which made the
+// product's own onboarding instructions unreachable. See setup-server.ts.
+export { createSetupServer, setupStatusPayload } from './setup-server.js';
+export type { SetupReason, SetupState } from './setup-server.js';
 export {
   generateToken,
   loadTokensFile,

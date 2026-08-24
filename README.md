@@ -456,31 +456,74 @@ pointed at the org you want to vault. `npx` fetches everything else.
 
 ### Register the MCP server
 
+Every host launches the same command; each reads a **different config file in a
+different format**. Pick yours — the full per-host, per-platform detail
+(exact paths for macOS and Windows, where the logs are, what to do when it
+doesn't connect) is in **[docs/guides/mcp-hosts.md](./docs/guides/mcp-hosts.md)**.
+
+| Host | Config file | Top-level key |
+|---|---|---|
+| Claude Code | `.mcp.json` (project) or `~/.claude.json` | `mcpServers` |
+| Claude Desktop | `claude_desktop_config.json` | `mcpServers` |
+| Codex | `~/.codex/config.toml` | `[mcp_servers.*]` (TOML) |
+| VS Code + GitHub Copilot | `.vscode/mcp.json` | **`servers`** |
+
 **Claude Code** — from your Salesforce DX repo, add it project-scoped (writes a
 `.mcp.json` at the repo root that your team can commit):
 
 ```sh
-claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp
+claude mcp add --scope project sf-intelligence -- \
+  npx -y sf-intelligence mcp --vault "$PWD/org-kb"
 ```
 
-**Claude Desktop, or any other MCP client** — add this block to the client's MCP
-config (Claude Desktop on macOS lives at
-`~/Library/Application Support/Claude/claude_desktop_config.json`):
+**Claude Desktop** — add this block to the client's MCP config
+(`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows), then quit and reopen
+the app:
 
 ```json
 {
   "mcpServers": {
     "sf-intelligence": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "sf-intelligence", "mcp"]
+      "args": ["-y", "sf-intelligence", "mcp", "--vault", "/abs/path/to/org-kb"]
     }
   }
 }
 ```
 
+**VS Code + GitHub Copilot** — create `.vscode/mcp.json` in your project. Note
+the top-level key is `servers`, **not** `mcpServers`; pasting the Claude block
+here parses fine and registers nothing:
+
+```json
+{
+  "servers": {
+    "sf-intelligence": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "sf-intelligence", "mcp"],
+      "cwd": "${workspaceFolder}",
+      "env": { "SFI_VAULT": "${workspaceFolder}/org-kb" }
+    }
+  }
+}
+```
+
+**Codex** — `codex mcp add sf-intelligence -- npx -y sf-intelligence mcp --vault /abs/path/to/org-kb`,
+or the TOML equivalent in `~/.codex/config.toml`.
+
 Restart the client. The `sfi.*` tools are now available — ask `sfi.capabilities`
 for the live tool map.
+
+> **Always pass an absolute `--vault` path.** The server looks for `./org-kb`
+> relative to *its own* working directory, and most hosts pick that directory
+> for you — Claude Desktop and a user-scope VS Code server never run inside your
+> Salesforce project. `--vault` is what makes the config work anywhere.
+>
+> **Before your first `sfi refresh`** the server starts in **setup mode**: it
+> connects and offers one tool, `sfi.setup_status`, which tells your chat exactly
+> what to run next. That is expected — just ask your assistant to set it up.
 
 > **Tip:** `npm install -g sf-intelligence` puts an `sfi` command on your
 > PATH, so first-run setup is `sfi init` / `sfi refresh` instead of the longer

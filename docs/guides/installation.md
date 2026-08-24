@@ -92,23 +92,32 @@ claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-in
 Use `--scope user` instead to make it available in every project on your
 machine, or `--scope local` (the default) for just this project, private to you.
 
-**Claude Desktop, or any other MCP client** — add this block to the client's MCP
-config (Claude Desktop on macOS lives at
-`~/Library/Application Support/Claude/claude_desktop_config.json`):
+**Claude Desktop** — add this block to the client's MCP config
+(`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
+`%APPDATA%\\Claude\\claude_desktop_config.json` on Windows):
 
 ```json
 {
   "mcpServers": {
     "sf-intelligence": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "sf-intelligence", "mcp"]
+      "args": ["-y", "sf-intelligence", "mcp", "--vault", "/abs/path/to/org-kb"]
     }
   }
 }
 ```
 
-Restart the client.
+Quit and reopen the client (closing the window is not enough).
+
+**Pass an absolute `--vault` path.** The server resolves `./org-kb` against
+*its own* working directory, which the host chooses — Claude Desktop is launched
+from the Dock or Start menu and never runs inside your Salesforce project.
+
+**Using VS Code + GitHub Copilot, or Codex?** Both use a different config file
+*and* a different format — VS Code's top-level key is `servers`, not
+`mcpServers`, and Codex uses TOML. See
+[**mcp-hosts.md**](./mcp-hosts.md) for the exact block for every host on macOS
+and Windows.
 
 > **Cursor (and other IDE MCP clients):** after editing the MCP config you must
 > reload it — Cursor does not pick up `.cursor/mcp.json` changes live. Toggle
@@ -150,8 +159,13 @@ In a session with your MCP client, confirm the server connected and answers:
 - **Claude Code** — run `/mcp`. `sf-intelligence` should be listed as
   connected.
 - **Any client** — ask the model to run the `sfi.health_check` tool. A
-  `healthy` envelope (or `degraded` "no vault" — expected before your first
-  refresh) means the server is wired up correctly.
+  `healthy` envelope means the server is wired up correctly.
+
+Before your first refresh there is no vault yet, so the server starts in
+**setup mode**: it connects and offers a single tool, `sfi.setup_status`, which
+reports where it looked for a vault and the exact commands to build one. Seeing
+only that tool is the expected first state, not a broken install — ask your
+assistant "what do you need from me?" and it will walk you through §4.
 
 If the server isn't listed or won't connect, see the troubleshooting table in §5.
 
@@ -219,7 +233,9 @@ short "what changed this week" report you (or an agent) can read without lifting
 a finger. This is the observability axis: the vault stops being only a Q&A
 surface and starts telling you when something moved.
 
-**cron** — a weekly Monday-morning refresh:
+**cron** (macOS / Linux) — a weekly Monday-morning refresh. On **Windows** use Task Scheduler instead:
+`schtasks /create /tn sfi-refresh /sc weekly /d MON /st 07:00 /tr "cmd /c cd /d C:\\path\\to\\dx-project && npx -y sf-intelligence refresh --target-org my-org-alias"`
+
 
 ```cron
 # Re-pull + rebuild every Monday at 07:00; the pulse, risk-score log, and
@@ -254,6 +270,11 @@ published or written back to the org.
 | `sfi init` reports "no DX project" | You're not in a Salesforce DX project | `cd` into the directory that contains `sfdx-project.json`, then re-run |
 | `sfi refresh` reports "no vault" | `sfi init` hasn't run in this repo yet | Run `sfi init` first; pick a target-org alias when prompted |
 | `sf project retrieve` fails during refresh | `sf` not authenticated, or wrong alias | `sf org login web --alias my-org-alias`, then re-run `sfi refresh --target-org my-org-alias` |
+| Server connects but offers only `sfi.setup_status` | No vault built yet — this is setup mode, working as intended | Run `sfi init` then `sfi refresh` (§4), then restart the client. Ask your chat to run `sfi.setup_status` for the exact commands |
+| Server connects but finds no vault even though you built one | The host launched the server from a directory that isn't your DX repo, so `./org-kb` didn't resolve | Add `--vault <absolute path to org-kb>` to the server's args. `sfi.setup_status` reports the directory it actually used |
+| VS Code: no server in `MCP: List Servers`, no error | `.vscode/mcp.json` uses `mcpServers` (the Claude key) instead of `servers` | Rename the top-level key to `servers`. See [mcp-hosts.md](./mcp-hosts.md) |
+| Windows: `'sfi' is not recognized …` | The CLI isn't installed globally | `npm install -g sf-intelligence`, or call it as `npx -y sf-intelligence <command>` |
+| Windows / macOS GUI apps: `spawn ENOENT` on `npx` | The app was launched from Explorer/Dock and inherited the *system* PATH, not your shell's — so `node`/`npx` aren't visible | Use absolute paths for both: `"command": "<abs path to node>", "args": ["<abs path>/sf-intelligence/bin/sfi.js", "mcp", "--vault", "…"]`. Find them with `where node` / `which node` and `npm root -g` |
 
 If you hit something not on this table, run `sfi doctor` — it checks the `sf`
 CLI, the vault, target-org auth, freshness, and the graph file, and prints an
