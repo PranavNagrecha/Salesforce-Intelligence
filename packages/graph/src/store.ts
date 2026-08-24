@@ -48,15 +48,35 @@ export const isLockConflict = (message: string): boolean => {
  * The actionable message surfaced when {@link isLockConflict} matches. Names
  * the likely culprit (a running MCP server or a concurrent refresh) and the
  * concrete remedy, then appends the underlying DuckDB error for diagnostics.
+ *
+ * The auto-recovery clause is DERIVED from the platform rather than asserted,
+ * because it is only true on POSIX. `sfi refresh` rebuilds into a side file and
+ * renames it over the live database — which POSIX permits while another process
+ * holds the old inode open, and Windows does not: the rename fails with
+ * EPERM/EBUSY for as long as a connected MCP server holds a handle. Telling a
+ * Windows user their refresh "handles this AUTOMATICALLY — no restart needed"
+ * sends them to look for a bug somewhere else entirely. Fixing the underlying
+ * swap needs generation-named database files, which is a change well beyond
+ * this message; until then the honest instruction is to close the client.
  */
-export const lockConflictMessage = (path: string, cause: string): string =>
-  `vault database at ${path} is locked by another process — most likely a ` +
-  "running `sfi mcp` server (your IDE's MCP integration) or a concurrent " +
-  '`sfi refresh`. DuckDB allows only one writer at a time. `sfi refresh` ' +
-  'handles this AUTOMATICALLY (it rebuilds into a side file and atomically ' +
-  'swaps it in; an open MCP server picks up the new vault on its next call ' +
-  'via the refresh epoch — no restart needed). Any OTHER writer should stop ' +
-  `the holding process and retry. Underlying error: ${cause}`;
+export const lockConflictMessage = (path: string, cause: string): string => {
+  const remedy =
+    process.platform === 'win32'
+      ? 'On Windows the running server must be stopped first: Windows will not ' +
+        'let `sfi refresh` replace a database file while another process holds ' +
+        'it open, so close your MCP client (or stop `sfi mcp`), re-run the ' +
+        'refresh, then reopen the client and retry.'
+      : '`sfi refresh` handles this AUTOMATICALLY (it rebuilds into a side ' +
+        'file and atomically swaps it in; an open MCP server picks up the new ' +
+        'vault on its next call via the refresh epoch — no restart needed). ' +
+        'Any OTHER writer should stop the holding process and retry.';
+  return (
+    `vault database at ${path} is locked by another process — most likely a ` +
+    "running `sfi mcp` server (your IDE's MCP integration) or a concurrent " +
+    `\`sfi refresh\`. DuckDB allows only one writer at a time. ${remedy} ` +
+    `Underlying error: ${cause}`
+  );
+};
 
 /**
  * Detect a `@duckdb/node-api` native-binding load failure (INFRA-11).

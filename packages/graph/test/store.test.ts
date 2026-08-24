@@ -102,12 +102,24 @@ describe('DuckDB lock-conflict detection (P5-duckdb-lock / B15)', () => {
   });
 
   it('lockConflictMessage names the culprit and the remedy, and carries the cause', () => {
-    const msg = lockConflictMessage('/x/graph.duckdb', REAL_LOCK_ERR);
-    expect(msg).toContain('/x/graph.duckdb');
-    expect(msg).toContain('locked by another process');
-    expect(msg).toContain('sfi mcp'); // names the likely culprit
-    expect(msg).toContain('retry'); // gives the remedy
-    expect(msg).toContain(REAL_LOCK_ERR); // appends the underlying error
+    // Asserted on BOTH platform branches, not just the host's. The remedy text
+    // diverges by platform (POSIX recovers automatically, Windows cannot), and
+    // this contract must hold either way — otherwise the Windows CI runner goes
+    // red on a message the macOS runner is perfectly happy with.
+    const ORIG = process.platform;
+    try {
+      for (const platform of ['darwin', 'win32'] as const) {
+        Object.defineProperty(process, 'platform', { value: platform });
+        const msg = lockConflictMessage('/x/graph.duckdb', REAL_LOCK_ERR);
+        expect(msg).toContain('/x/graph.duckdb');
+        expect(msg).toContain('locked by another process');
+        expect(msg).toContain('sfi mcp'); // names the likely culprit
+        expect(msg).toContain('retry'); // gives the remedy
+        expect(msg).toContain(REAL_LOCK_ERR); // appends the underlying error
+      }
+    } finally {
+      Object.defineProperty(process, 'platform', { value: ORIG });
+    }
   });
 
   it('a non-lock open failure stays `open-failed`, never mislabeled `locked`', async () => {
@@ -155,5 +167,45 @@ describe('DuckDB native-binding detection (INFRA-11)', () => {
   it('probeDuckDBNative succeeds when native bindings are installed', async () => {
     const r = await probeDuckDBNative();
     expect(r.ok).toBe(true);
+  });
+});
+
+/**
+ * The lock-conflict remedy is platform-DERIVED, not asserted.
+ *
+ * `sfi refresh` recovers from this automatically only on POSIX, where a rename
+ * may replace a file another process holds open. On Windows that rename fails
+ * with EPERM/EBUSY for as long as a connected MCP server holds a handle, so
+ * telling a Windows user "no restart needed" sends them hunting for a bug that
+ * is not there. This is the drift test for that claim.
+ */
+describe('lockConflictMessage — the auto-recovery claim is platform-gated', () => {
+  const ORIG = process.platform;
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: ORIG });
+  });
+
+  it('does NOT promise automatic recovery on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const msg = lockConflictMessage('C:\\vault\\graph.duckdb', 'conflicting lock');
+    expect(msg).not.toContain('no restart needed');
+    expect(msg).not.toContain('AUTOMATICALLY');
+    // and tells them what actually works there
+    expect(msg).toContain('close your MCP client');
+  });
+
+  it('keeps the automatic-recovery guidance on POSIX, where it is true', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const msg = lockConflictMessage('/vault/graph.duckdb', 'conflicting lock');
+    expect(msg).toContain('no restart needed');
+  });
+
+  it('names the database and the underlying cause on both platforms', () => {
+    for (const platform of ['win32', 'darwin'] as const) {
+      Object.defineProperty(process, 'platform', { value: platform });
+      const msg = lockConflictMessage('/vault/graph.duckdb', 'conflicting lock: pid 42');
+      expect(msg).toContain('/vault/graph.duckdb');
+      expect(msg).toContain('conflicting lock: pid 42');
+    }
   });
 });

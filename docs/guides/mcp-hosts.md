@@ -254,6 +254,26 @@ Two notes:
 > dot** with `400 … String should match pattern '^[a-zA-Z0-9_-]{1,128}$'`. If
 > that is your error, you are in the CLI, not VS Code agent mode.
 
+## Windows: refreshing while your chat is open
+
+On macOS and Linux you can run `sfi refresh` with the MCP server connected —
+the rebuild swaps in behind it and the next question picks up the new vault.
+
+**On Windows you cannot.** Windows will not let one process replace a file
+another process is holding open, and a connected server holds the vault
+database. The refresh fails with a lock error after doing all the work.
+
+Close your MCP client (or stop `sfi mcp`), run the refresh, then reopen it:
+
+```
+# with the client closed
+npx -y sf-intelligence refresh --target-org my-org-alias
+```
+
+This is a real limitation, not a misconfiguration — the product will tell you so
+rather than claiming it recovered. A scheduled refresh should run when the
+client is not attached.
+
 ## When it does not connect
 
 Work down this list — it is ordered by how often each one is the answer.
