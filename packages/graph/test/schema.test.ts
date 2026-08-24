@@ -27,7 +27,7 @@ beforeAll(async () => {
 afterAll(() => {
   connection.disconnectSync();
   instance.closeSync();
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 // Helper: read all rows from a query as plain JS-typed row objects.

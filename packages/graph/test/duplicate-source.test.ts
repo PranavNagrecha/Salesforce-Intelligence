@@ -29,7 +29,7 @@ afterAll(() => {
     store.connection.disconnectSync();
     store.instance.closeSync();
   }
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const makeStore = async (label: string): Promise<GraphStore> => {

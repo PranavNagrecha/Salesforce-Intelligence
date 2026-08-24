@@ -186,7 +186,7 @@ beforeAll(async () => {
 afterAll(() => {
   store.connection.disconnectSync();
   store.instance.closeSync();
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const ids = (r: Awaited<ReturnType<typeof resolveComponents>>): string[] => {
@@ -359,7 +359,7 @@ describe('resolveComponents — parent-object disambiguation (B1/B2 regression)'
   afterAll(() => {
     pStore.connection.disconnectSync();
     pStore.instance.closeSync();
-    rmSync(pTempDir, { recursive: true, force: true });
+    rmSync(pTempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('ranks the field ON Contact above the Account field merely named Contact_Email (B1)', async () => {
@@ -824,7 +824,7 @@ describe('resolveComponents — parent-object word beats whole-name decoy (B1/B2
   afterAll(() => {
     localStore.connection.disconnectSync();
     localStore.instance.closeSync();
-    rmSync(localDir, { recursive: true, force: true });
+    rmSync(localDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('"Contact Email" ranks the Email field ON Contact above the Account decoy', async () => {
@@ -929,7 +929,7 @@ describe('resolveComponents — parent-object word beats whole-name decoy (B1/B2
 
     connection.disconnectSync();
     instance.closeSync();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });
 
@@ -1009,7 +1009,7 @@ describe('resolveComponents — exact api-name wins over superset-containing riv
   afterAll(() => {
     bug3Store.connection.disconnectSync();
     bug3Store.instance.closeSync();
-    rmSync(bug3Dir, { recursive: true, force: true });
+    rmSync(bug3Dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('(a) unique exact api-name match wins over a more-popular superset rival — bare query', async () => {
@@ -1081,7 +1081,7 @@ describe('nameCoverage (router-v2 P4 option hygiene input)', () => {
 
   afterAll(async () => {
     covStore.connection.closeSync();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('a generic-token graze reports LOW own-name coverage; a full-name hit reports 1', async () => {
@@ -1146,7 +1146,7 @@ describe('resolveComponents — phrase-synonym whole-name exactness (RESOLVE-PHR
   afterAll(() => {
     synStore.connection.disconnectSync();
     synStore.instance.closeSync();
-    rmSync(synDir, { recursive: true, force: true });
+    rmSync(synDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('the ABBREVIATION "SSN" resolves exact to the unique SSN__c field (baseline)', async () => {
@@ -1253,10 +1253,10 @@ describe('resolveComponents — OmniStudio family words type-constrain (never a 
   afterAll(() => {
     uncoveredStore.connection.disconnectSync();
     uncoveredStore.instance.closeSync();
-    rmSync(uncoveredDir, { recursive: true, force: true });
+    rmSync(uncoveredDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     coveredStore.connection.disconnectSync();
     coveredStore.instance.closeSync();
-    rmSync(coveredDir, { recursive: true, force: true });
+    rmSync(coveredDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('"omniscript application" is NOT a confident exact on the Application object when the Omni family is uncovered', async () => {
@@ -1344,7 +1344,7 @@ describe('resolveComponents — a named object is never sliced to a fields-only 
   afterAll(() => {
     objStore.connection.disconnectSync();
     objStore.instance.closeSync();
-    rmSync(objDir, { recursive: true, force: true });
+    rmSync(objDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('surfaces the named object as a candidate even when qualifier fields fill the limit (never fields-only)', async () => {
@@ -1417,7 +1417,7 @@ describe('resolveComponents — a named object is never sliced to a fields-only 
     } finally {
       connection.disconnectSync();
       instance.closeSync();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -1479,7 +1479,7 @@ describe('resolveComponents — a named object is never sliced to a fields-only 
     } finally {
       connection.disconnectSync();
       instance.closeSync();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });
@@ -1521,7 +1521,7 @@ describe('resolveComponents — a type-name token does not silently bind a same-
   afterAll(() => {
     netStore.connection.disconnectSync();
     netStore.instance.closeSync();
-    rmSync(netDir, { recursive: true, force: true });
+    rmSync(netDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('bare "Network" disambiguates across the Network type and the same-named CMDT (no silent CMDT bind)', async () => {
@@ -1574,7 +1574,7 @@ describe('resolveComponents — a type-name token does not silently bind a same-
     } finally {
       connection.disconnectSync();
       instance.closeSync();
-      rmSync(soloDir, { recursive: true, force: true });
+      rmSync(soloDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -1613,7 +1613,7 @@ describe('resolveComponents — a type-name token does not silently bind a same-
     } finally {
       connection.disconnectSync();
       instance.closeSync();
-      rmSync(commDir, { recursive: true, force: true });
+      rmSync(commDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });

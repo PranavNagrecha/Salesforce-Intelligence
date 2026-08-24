@@ -88,7 +88,7 @@ describe('importExtractionResults — path sanitization', () => {
   afterAll(() => {
     store.connection.disconnectSync();
     store.instance.closeSync();
-    rmSync(tempDir, { recursive: true, force: true });
+    rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('persists a vault-relative sourcePath, never the absolute local path', async () => {

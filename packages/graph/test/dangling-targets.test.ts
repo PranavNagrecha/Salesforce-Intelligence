@@ -56,7 +56,7 @@ beforeAll(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-dangling-'));
 });
 afterAll(() => {
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe('danglingTargetSummary', () => {

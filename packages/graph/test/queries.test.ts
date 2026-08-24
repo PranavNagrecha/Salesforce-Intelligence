@@ -171,7 +171,7 @@ beforeAll(async () => {
 afterAll(() => {
   store.connection.disconnectSync();
   store.instance.closeSync();
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe('getNodeById', () => {
@@ -525,7 +525,7 @@ describe('listEdgesForNodes (CR-17 batched listEdges)', () => {
     expect((batched.value.get('ApexClass:A') ?? []).length).toBe(2);
     // B's bucket: just A->B = 1 edge.
     expect((batched.value.get('ApexClass:B') ?? []).length).toBe(1);
-    rmSync(loopDir, { recursive: true, force: true });
+    rmSync(loopDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });
 
@@ -625,7 +625,7 @@ describe('searchNodes', () => {
     if (wrongFlow !== undefined) {
       expect(flowHits[0]!.score).toBeGreaterThan(wrongFlow.score);
     }
-    rmSync(localDir, { recursive: true, force: true });
+    rmSync(localDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('filters by component type when types option is provided', async () => {
@@ -789,7 +789,7 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
   afterAll(() => {
     capStore.connection.disconnectSync();
     capStore.instance.closeSync();
-    rmSync(capDir, { recursive: true, force: true });
+    rmSync(capDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('countNodesByType returns the true total, not the 500-capped page', async () => {
@@ -908,7 +908,7 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     }
     connection.disconnectSync();
     instance.closeSync();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('omits heuristic edges to non-existent nodes from a subgraph by default', async () => {
@@ -1062,7 +1062,7 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
 
     connection.disconnectSync();
     instance.closeSync();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });
 
@@ -1098,7 +1098,7 @@ describe('listNodesByType propertyEquals filter (P4-interface-impl)', () => {
 
   afterAll(async () => {
     await closeGraph(store2);
-    rmSync(dir2, { recursive: true, force: true });
+    rmSync(dir2, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('returns only the nodes whose boolean property is true', async () => {
@@ -1219,7 +1219,7 @@ describe('descriptionPresence filter', () => {
 
   afterAll(async () => {
     await closeGraph(localStore);
-    rmSync(localDir, { recursive: true, force: true });
+    rmSync(localDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("'present' keeps only nodes with a non-empty description", async () => {
@@ -1307,7 +1307,7 @@ describe('parseProperties — C-3 (finding 34) regression', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('CustomObject:Broken'));
     warnSpy.mockRestore();
 
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('degrades a malformed properties_json edge column to {} instead of throwing', async () => {
@@ -1344,7 +1344,7 @@ describe('parseProperties — C-3 (finding 34) regression', () => {
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
 
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });
 
@@ -1412,7 +1412,7 @@ describe('searchNodesPage — exhaustive paging under api_name ties', () => {
 
   afterAll(async () => {
     await closeGraph(tieStore);
-    rmSync(tieDir, { recursive: true, force: true });
+    rmSync(tieDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('FAIL-BEFORE/PASS-AFTER: a walk to exhaustion is the WHOLE set, once each, at every page size', async () => {
