@@ -36,12 +36,27 @@ export interface GraphError {
  * fragments of that text so the caller can surface an ACTIONABLE hint instead
  * of a raw, baffling DuckDB error.
  *
+ * WINDOWS emits a different string entirely. There the collision is not
+ * DuckDB's advisory lock but the OS refusing the open outright:
+ * `IO Error: Cannot open file "...": The process cannot access the file
+ * because it is being used by another process.` Matching only the POSIX
+ * fragments meant a Windows user hit the raw message classified as
+ * `open-failed` — losing the actionable remedy this function exists to unlock,
+ * on the one platform where the remedy differs and matters most. Found by the
+ * Windows CI job on its first real run after being re-armed.
+ *
  * Pure + exported so it can be unit-tested directly against representative
  * DuckDB strings without provoking a real cross-process lock.
  */
 export const isLockConflict = (message: string): boolean => {
   const m = message.toLowerCase();
-  return m.includes('could not set lock') || m.includes('conflicting lock');
+  return (
+    m.includes('could not set lock') ||
+    m.includes('conflicting lock') ||
+    // Windows (ERROR_SHARING_VIOLATION, surfaced through DuckDB's IO Error).
+    m.includes('being used by another process') ||
+    m.includes('sharing violation')
+  );
 };
 
 /**

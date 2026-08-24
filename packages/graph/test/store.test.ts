@@ -209,3 +209,36 @@ describe('lockConflictMessage — the auto-recovery claim is platform-gated', ()
     }
   });
 });
+
+/**
+ * Windows reports a held database file with an OS-level sharing violation, not
+ * DuckDB's advisory-lock wording. Matching only the POSIX fragments classified
+ * that as `open-failed` and handed the user the raw text — on the one platform
+ * where the remedy is different (close the client) and therefore matters most.
+ *
+ * Found by the Windows CI job on its first run after being re-armed, which is
+ * the whole argument for arming it.
+ */
+describe('isLockConflict — the Windows wording counts too', () => {
+  it('matches the Windows sharing-violation text DuckDB surfaces', () => {
+    expect(
+      isLockConflict(
+        'IO Error: Cannot open file "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\x\\graph.duckdb": ' +
+          'The process cannot access the file because it is being used by another process.',
+      ),
+    ).toBe(true);
+  });
+
+  it('still matches the POSIX DuckDB wording', () => {
+    expect(isLockConflict('IO Error: Could not set lock on file "/v/graph.duckdb"')).toBe(true);
+    expect(isLockConflict('Conflicting lock is held in /proc/123')).toBe(true);
+  });
+
+  it('does not match an unrelated IO error', () => {
+    // A missing file or a corrupt header is NOT a lock, and must keep its own
+    // classification — mislabelling it `locked` sends the user to close a
+    // client that was never the problem.
+    expect(isLockConflict('IO Error: No such file or directory')).toBe(false);
+    expect(isLockConflict('Catalog Error: Table with name x does not exist')).toBe(false);
+  });
+});
