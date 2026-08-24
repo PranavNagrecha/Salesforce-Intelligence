@@ -253,7 +253,14 @@ try {
 rmSync(vaultParent, { recursive: true, force: true });
 
 // === Scenario 2: NO vault — graceful, actionable failure ===
-console.log('\n# no vault');
+// The server used to `process.exit(1)` here. That looked like correct
+// fail-closed behaviour, but a dead stdio server is rendered by every MCP host
+// as "failed to connect" with the reason stranded on stderr — a channel the
+// person in the chat cannot see. The vault-less state is the DEFAULT first
+// experience (registered before `sfi init`, or launched by a host from a cwd
+// that is not the DX repo), so the server must CONNECT and explain itself
+// through the protocol instead. It still answers nothing about the org.
+console.log('\n# no vault (setup mode)');
 const emptyDir = mkdtempSync(join(tmpdir(), 'sfi-e2e-empty-'));
 const b = newClient(emptyDir);
 let connected = false;
@@ -261,10 +268,17 @@ try {
   await b.client.connect(b.transport);
   connected = true;
 } catch {
-  /* expected */
+  /* recorded below as a failure — setup mode must connect */
+}
+if (connected) {
+  const { tools } = await b.client.listTools();
+  check('setup mode exposes sfi.setup_status', tools.some((t) => t.name === 'sfi.setup_status'), tools.map((t) => t.name).join(', ').slice(0, 120));
+  const status = (await b.client.callTool({ name: 'sfi.setup_status', arguments: {} })).content?.[0]?.text ?? '';
+  check('setup_status refuses to claim org knowledge', status.includes('"canAnswerOrgQuestions":false'), status.slice(0, 140));
+  check('setup_status names the next command', status.includes('refresh'), status.slice(0, 140));
 }
 await b.client.close().catch(() => {});
-check('server refuses to start without a vault', !connected);
+check('server CONNECTS without a vault (setup mode, not exit 1)', connected);
 check('no-vault message is actionable (mentions `sfi init`)', b.getStderr().includes('sfi init'), b.getStderr().trim().slice(0, 120));
 rmSync(emptyDir, { recursive: true, force: true });
 
