@@ -95,6 +95,26 @@ export const runStatus = async (opts: RunStatusOptions): Promise<StatusOutput> =
 
   const currentSourceHash = hashResult.value;
   if (currentSourceHash === manifest.sourceTreeHash) {
+    // A source-hash match proves the vault matches the SOURCE TREE. It says
+    // nothing about whether that build produced anything usable, and a vault
+    // holding zero components answers every question with nothing. Reporting
+    // "locally consistent" there is technically true and practically a lie —
+    // the state the user is actually in is "this vault cannot answer you".
+    const componentTotal = Object.values(manifest.components).reduce<number>(
+      (sum, n) => sum + (n ?? 0),
+      0,
+    );
+    if (componentTotal === 0) {
+      return {
+        kind: 'fresh',
+        message:
+          'Vault built but modelled 0 components — it cannot answer any question about the org. ' +
+          'The metadata is usually in `force-app/` while the vault reads `org-kb/source/`, or a ' +
+          '`--types` filter excluded everything. Run `sfi doctor` for the specific check.',
+        manifest,
+        currentSourceHash,
+      };
+    }
     return {
       kind: 'fresh',
       message:

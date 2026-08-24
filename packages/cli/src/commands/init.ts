@@ -334,8 +334,19 @@ const handleInit = async (cwd: string, flags: InitCliFlags): Promise<number> => 
 
   const targetOrg = await resolveTargetOrg(flags, interactive);
   if (targetOrg === null) {
+    // Name the default we DID detect, so the remedy is one paste rather than a
+    // hunt through `sf org list`. We still refuse to adopt it unasked.
+    const detected = interactive ? null : await getDefaultOrgAlias();
+    const hint =
+      detected !== null
+        ? ` Your default org is \`${detected}\` — if that is the one you want, run:\n` +
+          `  sfi init --target-org ${detected}\n`
+        : ' Run `sf org list` to see your authenticated orgs.\n';
     process.stderr.write(
-      'sfi init: no --target-org given and no default Salesforce org found. Pass --target-org <alias>.\n',
+      'sfi init: --target-org is required when stdin is not a terminal.' +
+        ' A vault is bound to ONE org and every later answer attaches to that binding,' +
+        ' so the product will not pick one for you.' +
+        hint,
     );
     return 1;
   }
@@ -344,13 +355,24 @@ const handleInit = async (cwd: string, flags: InitCliFlags): Promise<number> => 
 
 /**
  * Resolve the target-org alias from flags, prompting only when interactive.
- * Non-interactively, falls back to the default org alias and returns `null`
- * when none can be determined so the caller can emit an actionable error.
+ *
+ * Non-interactively this FAILS CLOSED rather than adopting the machine's
+ * default org. `sfi init` binds a vault to one org permanently, and every
+ * subsequent answer — including live reads — attaches to that binding. Adopting
+ * a default nobody named is exactly the guess `sfi mcp` refuses to make two
+ * hundred lines away ("live answers attach to a vault's org, so the product
+ * never guesses which of your orgs to query"), and it is silent: `stdin.isTTY`
+ * is false for EVERY script and every MCP host, so the common case was the
+ * unconfirmed one. A user with a sandbox and a production org authenticated
+ * could vault the wrong one and not find out until an answer was wrong.
+ *
+ * Returns `null` when there is nothing to bind to, so the caller emits an
+ * actionable error naming the detected default.
  */
 const resolveTargetOrg = async (flags: InitCliFlags, interactive: boolean): Promise<string | null> => {
   if (flags.targetOrg !== undefined) return flags.targetOrg;
   const detected = await getDefaultOrgAlias();
-  if (!interactive) return detected;
+  if (!interactive) return null;
   // Spread the `default` key conditionally — `exactOptionalPropertyTypes`
   // forbids `default: undefined` on inquirer's InputConfig.
   return input({

@@ -2538,6 +2538,22 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     }
   }
 
+  // Total components actually modelled. Zero means the vault cannot answer any
+  // question about the org, whatever else succeeded.
+  const componentTotal = Object.values(counts.components).reduce<number>(
+    (sum, n) => sum + (n ?? 0),
+    0,
+  );
+  if (componentTotal === 0) {
+    process.stderr.write(
+      'sfi refresh: WARNING — the build modelled 0 components, so this vault cannot answer' +
+        ' any question about the org.\n' +
+        '  Most often the metadata is in `force-app/` but the vault reads `org-kb/source/`,' +
+        ' or a `--types` filter excluded everything.\n' +
+        '  Run `sfi doctor` for the specific check that failed.\n',
+    );
+  }
+
   return {
     // A profile-grant integrity disclosure forces `partial`: the vault built,
     // but its permission graph is untrustworthy — never report clean success.
@@ -2549,14 +2565,26 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     // as a profile-grant disclosure: the vault built, but some components were
     // assembled from two different retrievals of the same metadata, so their
     // permissions/properties are unresolved until the stale tree is removed.
+    // A build that modelled ZERO components is never a success. It used to be:
+    // with no per-file failures the status read `success`, the CLI printed
+    // "Refresh success", `sfi status` reported the vault "locally consistent"
+    // and `sfi quickstart` marked every step done — while the vault answered
+    // every question with nothing. Only `sfi doctor` told the truth. The
+    // realistic way in is a DX repo whose metadata sits in `force-app/` rather
+    // than `org-kb/source/`, which is most of them.
+    //
+    // `partial` rather than `failed`: the pipeline genuinely ran, and the
+    // remedy is the user's (point it at real source, or widen `--types`). The
+    // disclosure below names it so the reason is not left to inference.
     status:
-      walked.failures.length === 0 &&
-      args.retrieveFailures.length === 0 &&
-      profileGrantDisclosure === null &&
-      (walked.duplicateSourcePaths?.conflicting ?? 0) === 0 &&
-      args.reportPull === undefined
-        ? 'success'
-        : 'partial',
+      componentTotal === 0 ||
+      walked.failures.length > 0 ||
+      args.retrieveFailures.length > 0 ||
+      profileGrantDisclosure !== null ||
+      (walked.duplicateSourcePaths?.conflicting ?? 0) > 0 ||
+      args.reportPull !== undefined
+        ? 'partial'
+        : 'success',
     counts,
     skippedDirectories: walked.skippedDirectories,
     ...(walked.duplicateSourcePaths !== undefined

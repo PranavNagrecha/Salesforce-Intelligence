@@ -22,7 +22,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -166,6 +166,59 @@ try {
     await setupClient.close().catch(() => {});
     rmSync(emptyRoot, { recursive: true, force: true });
   }
+
+  // === Stage 0b: `sfi init` must NOT guess an org ===
+  // A vault is bound to ONE org, permanently, and every later answer — live
+  // reads included — attaches to that binding. `stdin.isTTY` is false for every
+  // script and every MCP host, so the non-interactive path IS the common path;
+  // it used to silently adopt the machine's default org with no confirmation.
+  // Asserted through the real binary because the TTY condition only exists in a
+  // real spawn.
+  console.log('\n# init refuses to guess an org');
+  const guessRoot = mkdtempSync(join(tmpdir(), 'sfi-onboard-noorg-'));
+  const noOrg = sfi(['init', '--vault-root', 'org-kb'], guessRoot);
+  check('sfi init without --target-org exits non-zero', noOrg.status !== 0, `status ${noOrg.status}`);
+  check(
+    'and says why, naming the flag',
+    `${noOrg.stderr}`.includes('--target-org'),
+    `${noOrg.stderr}`.trim().slice(0, 160),
+  );
+  check(
+    'and did NOT write a vault config',
+    !existsSync(join(guessRoot, 'org-kb', 'meta', 'config.json')),
+  );
+  rmSync(guessRoot, { recursive: true, force: true });
+
+  // === Stage 0c: a build that modelled nothing must not report success ===
+  // The realistic way in: a DX repo whose metadata lives in `force-app/` while
+  // the vault reads `org-kb/source/`. Extraction yields zero components, and
+  // this used to print "Refresh success", exit 0, and have `sfi status` call
+  // the vault "locally consistent" — while every answer came back empty. Only
+  // `sfi doctor` disagreed. Three surfaces agreeing on a falsehood is worse
+  // than one surface failing.
+  console.log('\n# an empty build is not a success');
+  const emptyBuild = mkdtempSync(join(tmpdir(), 'sfi-onboard-emptybuild-'));
+  const emptyInit = sfi(['init', '--target-org', 'ci-fixture', '--vault-root', 'org-kb'], emptyBuild);
+  check('init succeeded for the empty-build fixture', emptyInit.status === 0, `status ${emptyInit.status}`);
+  // Refresh with an EMPTY org-kb/source tree — nothing to extract.
+  const emptyRefresh = sfi(['refresh', '--no-pull'], emptyBuild);
+  check(
+    'refresh over an empty source tree does NOT exit 0',
+    emptyRefresh.status !== 0,
+    `status ${emptyRefresh.status}`,
+  );
+  check(
+    'and warns that the vault cannot answer anything',
+    `${emptyRefresh.stdout}${emptyRefresh.stderr}`.includes('0 components'),
+    `${emptyRefresh.stderr}`.trim().slice(0, 200),
+  );
+  const emptyStatus = sfi(['status'], emptyBuild);
+  check(
+    'sfi status does not call an empty vault "locally consistent"',
+    !`${emptyStatus.stdout}`.includes('locally consistent'),
+    `${emptyStatus.stdout}`.trim().slice(0, 200),
+  );
+  rmSync(emptyBuild, { recursive: true, force: true });
 
   // === Stage 1: sfi init (no org call) ===
   console.log('\n# init');
