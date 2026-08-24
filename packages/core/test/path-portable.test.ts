@@ -72,7 +72,7 @@ describe('PATH_SEPARATORS', () => {
 
 describe('toPosixPath — unconditional', () => {
   it('rewrites backslashes on every platform', () => {
-    expect(toPosixPath('C:\\Users\\alice\\org-kb')).toBe('C:/Users/alice/org-kb');
+    expect(toPosixPath('C:\\Devs\\alice\\org-kb')).toBe('C:/Devs/alice/org-kb');
   });
 
   it('leaves a POSIX path untouched', () => {
@@ -113,7 +113,7 @@ describe('toRelativePosix', () => {
 });
 
 describe('collapseHome — the username-redaction invariant', () => {
-  const home = sep === '\\' ? 'C:\\Users\\alice' : '/Users/alice';
+  const home = sep === '\\' ? 'C:\\Devs\\alice' : '/home/alice';
   const under = [home, 'code', 'demo', 'org-kb'].join(sep);
 
   it('collapses a path under home and renders it posix', () => {

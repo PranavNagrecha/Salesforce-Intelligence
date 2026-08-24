@@ -23,8 +23,8 @@ import {
 const baseState = (over: Partial<SetupState> = {}): SetupState => ({
   reason: 'no-vault',
   detail: 'No vault. Run `sfi init` followed by `sfi refresh`.',
-  cwd: '/Users/someone/Documents',
-  expectedVaultRoot: '/Users/someone/Documents/org-kb',
+  cwd: '/home/someone/Documents',
+  expectedVaultRoot: '/home/someone/Documents/org-kb',
   bindSource: 'default ./org-kb',
   authedOrgs: ['Acme-Prod', 'Acme-UAT'],
   version: '0.3.2',
@@ -79,7 +79,7 @@ describe('setupStatusPayload', () => {
     const text = (data['nextSteps'] as readonly string[]).join('\n');
     expect(text).toContain('--vault');
     expect(text).toContain('SFI_VAULT');
-    expect(text).toContain('/Users/someone/Documents');
+    expect(text).toContain('/home/someone/Documents');
   });
 
   it('omits the cwd trap when the vault was pinned explicitly', () => {
@@ -94,8 +94,8 @@ describe('setupStatusPayload', () => {
     const data = setupStatusPayload(baseState()).data as Record<string, unknown>;
     const expected =
       process.platform === 'win32'
-        ? "$env:SFI_VAULT = '/Users/someone/Documents/org-kb'"
-        : "export SFI_VAULT='/Users/someone/Documents/org-kb'";
+        ? "$env:SFI_VAULT = '/home/someone/Documents/org-kb'"
+        : "export SFI_VAULT='/home/someone/Documents/org-kb'";
     expect(data['pinVaultExample']).toBe(expected);
   });
 
