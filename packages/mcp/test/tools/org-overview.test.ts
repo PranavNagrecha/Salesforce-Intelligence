@@ -590,3 +590,206 @@ describe('orgOverviewInputSchema', () => {
     expect(orgOverviewInputSchema.safeParse(42).success).toBe(false);
   });
 });
+
+// =============================================================================
+// G2 full-scan honesty. `fetchNodes` took ONE 500-row `listNodesByType` page
+// and the rankings then sliced that to 200 — so "top 10" meant "top 10 of the
+// alphabetically-first 200" and `activeRatio` measured a 500-node sample
+// against a COUNT(*) denominator. `SFI_NODE_SCAN_LIMIT=3` shrinks the scan
+// window so 5 nodes per type exercise multi-window paging.
+// =============================================================================
+
+describe('orgOverviewHandler — full per-type scan (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+  let priorLimit: string | undefined;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-orgoverview-fullscan-'));
+    const opened = await openGraph(join(dir, 'fullscan.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          // Five ApexClasses. The LAST by id (Z_Hot) carries the inbound
+          // callsApex fan-in; B_Big carries the big sourceBytes. Both sort past
+          // the first scan window.
+          ...Array.from({ length: 3 }, (_unused, i) =>
+            makeNode({
+              id: `ApexClass:A_${i}`,
+              type: 'ApexClass',
+              apiName: `A_${i}`,
+              properties: { sourceBytes: 100, lineCount: 5 },
+            }),
+          ),
+          makeNode({
+            id: 'ApexClass:B_Big',
+            type: 'ApexClass',
+            apiName: 'B_Big',
+            properties: { sourceBytes: 999_999, lineCount: 9_999 },
+          }),
+          makeNode({
+            id: 'ApexClass:Z_Hot',
+            type: 'ApexClass',
+            apiName: 'Z_Hot',
+            properties: { sourceBytes: 100, lineCount: 5 },
+          }),
+          // Five Flows; only the first two are Active -> activeRatio 0.4.
+          ...Array.from({ length: 5 }, (_unused, i) =>
+            makeNode({
+              id: `Flow:F_${i}`,
+              type: 'Flow',
+              apiName: `F_${i}`,
+              properties: { status: i < 2 ? 'Active' : 'Draft' },
+            }),
+          ),
+        ],
+        edges: Array.from({ length: 4 }, (_unused, i) =>
+          makeEdge({
+            fromId: `Flow:F_${i}`,
+            toId: 'ApexClass:Z_Hot',
+            edgeType: 'callsApex',
+          }),
+        ),
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    priorLimit = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '3';
+  });
+
+  afterEach(() => {
+    if (priorLimit === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = priorLimit;
+  });
+
+  it('ranks the hot class first even though it sorts past the scan window', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.topApexClasses[0]?.apiName).toBe('Z_Hot');
+    expect(d.topApexClasses[0]?.inboundCalls).toBe(4);
+    expect(d.topApexClasses.length).toBe(5);
+  });
+
+  it('finds the largest class past the scan window', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.largestApexClasses[0]?.apiName).toBe('B_Big');
+    expect(r.value.data.largestApexClasses[0]?.sourceBytes).toBe(999_999);
+  });
+
+  it('computes activeRatio over EVERY automation node, not a scan-window sample', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.componentCounts['Flow']).toBe(5);
+    // 2 Active Flows of (5 Flows + 5 ApexClasses are not automation) = 0.4.
+    expect(d.automationSummary.activeRatio).toBeCloseTo(0.4, 10);
+  });
+});
+
+// =============================================================================
+// The literal repro of the defect, at the REAL caps (no SFI_NODE_SCAN_LIMIT
+// override): `fetchNodes` took one 500-row page and the rankings sliced it to
+// 200. The hot class, the big class and the two Active Flows all sort past
+// position 500 by id ASC, so the old code could not see any of them.
+// =============================================================================
+
+describe('orgOverviewHandler — past the 500-row page boundary (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-orgoverview-over500-'));
+    const opened = await openGraph(join(dir, 'over500.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          ...Array.from({ length: 500 }, (_unused, i) =>
+            makeNode({
+              id: `ApexClass:A_Filler${String(i).padStart(4, '0')}`,
+              type: 'ApexClass',
+              apiName: `A_Filler${i}`,
+              properties: { sourceBytes: 100, lineCount: 5 },
+            }),
+          ),
+          makeNode({
+            id: 'ApexClass:Z_Big',
+            type: 'ApexClass',
+            apiName: 'Z_Big',
+            properties: { sourceBytes: 999_999, lineCount: 9_999 },
+          }),
+          makeNode({
+            id: 'ApexClass:Z_Hot',
+            type: 'ApexClass',
+            apiName: 'Z_Hot',
+            properties: { sourceBytes: 100, lineCount: 5 },
+          }),
+          // 500 Draft Flows then 2 Active ones sorting last -> the old
+          // 500-row page saw ZERO active automations.
+          ...Array.from({ length: 500 }, (_unused, i) =>
+            makeNode({
+              id: `Flow:A_Draft${String(i).padStart(4, '0')}`,
+              type: 'Flow',
+              apiName: `A_Draft${i}`,
+              properties: { status: 'Draft' },
+            }),
+          ),
+          ...Array.from({ length: 2 }, (_unused, i) =>
+            makeNode({
+              id: `Flow:Z_Active${i}`,
+              type: 'Flow',
+              apiName: `Z_Active${i}`,
+              properties: { status: 'Active' },
+            }),
+          ),
+        ],
+        edges: Array.from({ length: 4 }, (_unused, i) =>
+          makeEdge({
+            fromId: `ApexClass:A_Filler${String(i).padStart(4, '0')}`,
+            toId: 'ApexClass:Z_Hot',
+            edgeType: 'callsApex',
+          }),
+        ),
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('ranks and sizes over the whole type, not the first 500/200 by id', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.topApexClasses[0]?.apiName).toBe('Z_Hot');
+    expect(d.topApexClasses[0]?.inboundCalls).toBe(4);
+    expect(d.largestApexClasses[0]?.apiName).toBe('Z_Big');
+    // 2 Active of 502 Flows. The old page measured 500 Drafts -> 0.
+    expect(d.componentCounts['Flow']).toBe(502);
+    expect(d.automationSummary.activeRatio).toBeCloseTo(2 / 502, 10);
+  });
+});

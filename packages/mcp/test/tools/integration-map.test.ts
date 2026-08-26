@@ -428,13 +428,30 @@ describe('integrationMapHandler (full topology)', () => {
     expect(ncIds).toEqual([...ncIds].sort());
   });
 
-  it('respects the per-category limit cap', async () => {
-    // limit=8 -> ceil(8/8)=1 per category. AuthProvider has 7 nodes
-    // (2 topology + 5 many-auth), but the limit caps at 1.
-    const result = await integrationMapHandler(ctx, { filter: 'all', limit: 8 });
+  it('caps RETURNED rows per category at `limit` and discloses the trim', async () => {
+    // G2: `limit` no longer splits a budget eight ways (it used to be
+    // ceil(8/8)=1 per category here). It caps the rows RETURNED per category,
+    // and anything trimmed is named with its TRUE total.
+    const result = await integrationMapHandler(ctx, { filter: 'all', limit: 3 });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.data.authProviders.length).toBeLessThanOrEqual(1);
+    const d = result.value.data;
+    // AuthProvider has 7 nodes (2 topology + 5 many-auth).
+    expect(d.authProviders.length).toBe(3);
+    expect(d.truncatedCategories).toContainEqual({
+      type: 'AuthProvider',
+      returned: 3,
+      total: 7,
+    });
+    expect(d.boundaries.join(' ')).toContain('AuthProvider 3 of 7');
+  });
+
+  it('reports no truncation when every category fits under `limit`', async () => {
+    const result = await integrationMapHandler(ctx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.truncatedCategories).toEqual([]);
+    expect(result.value.data.boundaries).toEqual([]);
   });
 
   it('returns label normalised to a string (empty string when null)', async () => {
@@ -964,5 +981,105 @@ describe('integrationMapInputSchema', () => {
     ]) {
       expect(integrationMapInputSchema.safeParse(scoped).success).toBe(true);
     }
+  });
+});
+
+// =============================================================================
+// G2 full-scan honesty. Each category used to take ONE `listNodesByType` page
+// capped at ceil(limit / 8) = 13 by default — an alphabetical prefix — and the
+// DERIVED fields (martechConnectors, calloutAuthorizationNote) were computed
+// off that prefix. `SFI_NODE_SCAN_LIMIT=3` shrinks the scan window so 5 nodes
+// exercise multi-window paging instead of the 41 QA had to seed.
+// =============================================================================
+
+describe('integrationMapHandler (full category scan — G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+  let priorLimit: string | undefined;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-intmap-fullscan-'));
+    const opened = await openGraph(join(dir, 'fullscan.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          ...Array.from({ length: 4 }, (_unused, i) =>
+            makeNode({
+              id: `RemoteSiteSetting:Site_${i}`,
+              type: 'RemoteSiteSetting',
+              apiName: `Site_${i}`,
+              properties: {
+                url: `https://plain-${i}.example.com`,
+                isActive: true,
+              },
+            }),
+          ),
+          // Sorts LAST by id ASC — past every scan window. This is the only
+          // martech signal in the org.
+          makeNode({
+            id: 'RemoteSiteSetting:ZZ_Marketo',
+            type: 'RemoteSiteSetting',
+            apiName: 'ZZ_Marketo',
+            properties: {
+              url: 'https://x.mktorest.com/rest',
+              isActive: true,
+            },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    priorLimit = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '3';
+  });
+
+  afterEach(() => {
+    if (priorLimit === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = priorLimit;
+  });
+
+  it('detects a martech connector that sorts past the scan window, and discloses the payload trim', async () => {
+    // limit: 8 -> the old per-category budget was ceil(8/8) = 1.
+    const result = await integrationMapHandler(ctx, { limit: 8 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.martechConnectors.map((m) => m.componentId)).toEqual([
+      'RemoteSiteSetting:ZZ_Marketo',
+    ]);
+    // Every one of the 5 fits under limit: 8, so nothing is trimmed.
+    expect(d.remoteSiteSettings.length).toBe(5);
+    expect(d.truncatedCategories).toEqual([]);
+    expect(d.calloutAuthorizationNote).toContain('5 in this org');
+  });
+
+  it('names the true total when the payload IS trimmed', async () => {
+    const result = await integrationMapHandler(ctx, { limit: 2 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.remoteSiteSettings.length).toBe(2);
+    expect(d.truncatedCategories).toContainEqual({
+      type: 'RemoteSiteSetting',
+      returned: 2,
+      total: 5,
+    });
+    // The derived fields still read the COMPLETE set behind the trim.
+    expect(d.martechConnectors.length).toBe(1);
+    expect(d.calloutAuthorizationNote).toContain('5 in this org');
+    expect(d.calloutAuthorizationNote).toContain('ZZ_Marketo');
   });
 });

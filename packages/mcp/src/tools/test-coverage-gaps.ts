@@ -56,14 +56,18 @@
  * least one gap is returned.
  *
  * Implementation notes:
- *   - Walks every `ApexClass` node, filters out `properties.isTest
- *     === true`, then for each remaining class runs an incoming
- *     `callsApex` BFS over the test-class subset.
+ *   - Walks every `ApexClass` node via `scanAllNodesOfTypes` (windows
+ *     the SQL `OFFSET` forward past the 500-row per-page cap), filters
+ *     out `properties.isTest === true`, then for each remaining class
+ *     runs an incoming usage BFS over the test-class subset. The
+ *     corpus is COMPLETE: a test class sorting past position 500 by
+ *     id ASC is now visible to the BFS filter, so it no longer
+ *     produces a false `uncovered` verdict.
  *   - `classFilter` optionally narrows the scan to a specific subset
  *     of ApexClass ids (typically chosen by the user after running
- *     `sfi.code_quality_audit` or similar). Unknown ids in the
- *     filter are silently dropped — the tool reports on classes the
- *     graph actually carries.
+ *     `sfi.code_quality_audit` or similar). Ids the graph carries no
+ *     ApexClass for are reported in `notFoundClassIds` plus a
+ *     boundary — never silently dropped as "clean".
  *   - The `coveringTestClassIds` list emits BFS-reached test class
  *     ids sorted ASC; `fakeAssertions` enumerates the fake-assertion
  *     locations from those test classes (also id-sorted ASC).
@@ -79,7 +83,6 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -91,9 +94,8 @@ import {
   censusQualityScanCoverage,
   type QualityScanTypeCoverage,
 } from './quality-scan-coverage.js';
-
-/** Per-type cap matching `listNodesByType`'s default. */
-const LIST_PAGE_SIZE = 500;
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Inclusive upper bound on `classFilter` array length. */
 const CLASS_FILTER_MAX_SIZE = 500;
@@ -235,6 +237,13 @@ export interface TestCoverageGapsOutput {
    * census at all.
    */
   readonly qualityScanCoverage: readonly QualityScanTypeCoverage[];
+  /**
+   * `classFilter` ids the graph carries no ApexClass for (sorted ASC). Empty
+   * when every filtered id resolved, and absent-shaped only when no filter was
+   * supplied. Without it a typo'd or deleted id returned `gaps: []` /
+   * `totalGapsCount: 0` — indistinguishable from a genuinely clean class.
+   */
+  readonly notFoundClassIds: readonly string[];
   /**
    * Verbatim honesty disclosures. Never empty: the three scanner-behaviour
    * disclosures describe HOW coverage is judged and are true whether or not a
@@ -395,13 +404,15 @@ export const testCoverageGapsHandler = async (
     });
   }
 
-  const classesRes = await listNodesByType(ctx.graph, 'ApexClass', {
-    limit: LIST_PAGE_SIZE,
-  });
-  if (!classesRes.ok) {
+  // Scan EVERY ApexClass (windows the SQL OFFSET past the 500 per-page cap).
+  // The single capped page this replaced both truncated the corpus and produced
+  // false `uncovered` verdicts: `testClassIds` below is built from the SAME
+  // list, so a test class sorting past the page was invisible to the BFS filter.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['ApexClass']);
+  if (!scan.ok) {
     return err({
       kind: 'internal',
-      message: `graph query failed: ${classesRes.error.message}`,
+      message: `graph query failed: ${scan.error.message}`,
     });
   }
 
@@ -415,7 +426,7 @@ export const testCoverageGapsHandler = async (
   // can never produce a `fake-assertion`, so every class it covers is silently
   // classified as adequately covered.
   const testClassNodes: Node[] = [];
-  for (const node of classesRes.value) {
+  for (const node of scan.value.nodes) {
     if (isTestClass(node)) {
       testClassIds.add(node.id);
       testClassNodes.push(node);
@@ -428,11 +439,21 @@ export const testCoverageGapsHandler = async (
     }
   }
 
-  // Optional class filter.
+  // Optional class filter. Applied AFTER the (now complete) scan, so an id the
+  // graph does not carry is a real not-found — not a silently-clean class the
+  // corpus never reached. Named in `notFoundClassIds` + a boundary so
+  // `classFilter: ['ApexClass:Nope']` can no longer read as "no gaps".
   let candidates = nonTestClassNodes;
+  const notFoundClassIds: string[] = [];
   if (input.classFilter !== undefined && input.classFilter.length > 0) {
     const filterSet = new Set<string>(input.classFilter);
     candidates = nonTestClassNodes.filter((n) => filterSet.has(n.id));
+    const known = new Set<string>(testClassIds);
+    for (const n of nonTestClassNodes) known.add(n.id);
+    for (const id of new Set(input.classFilter)) {
+      if (!known.has(id)) notFoundClassIds.push(id);
+    }
+    notFoundClassIds.sort();
   }
 
   const gaps: TestCoverageGapEntry[] = [];
@@ -572,12 +593,25 @@ export const testCoverageGapsHandler = async (
   const unscannedNote = buildUnscannedNodesNote(qualityScanCoverage);
   if (unscannedNote !== undefined) boundaries.push(unscannedNote);
 
+  if (notFoundClassIds.length > 0) {
+    boundaries.push(
+      `${notFoundClassIds.length} classFilter id(s) matched no ApexClass in the vault and were NOT audited: ${notFoundClassIds.join(', ')} (see notFoundClassIds).`,
+    );
+  }
+
+  // Residual full-scan cap (FULL_SCAN_MAX_NODES) — false in the normal case now
+  // that the ApexClass type is walked to exhaustion.
+  if (scan.value.scanIncomplete) {
+    boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
+  }
+
   return ok({
     data: {
       gaps: kept,
       totalGapsCount: sorted.length,
       byStatus,
       qualityScanCoverage,
+      notFoundClassIds,
       boundaries,
       limit,
       offset,

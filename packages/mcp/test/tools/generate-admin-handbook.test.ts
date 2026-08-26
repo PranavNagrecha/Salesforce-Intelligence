@@ -344,3 +344,141 @@ describe('generateAdminHandbookHandler (developer persona variation)', () => {
     expect(codeIdx).toBeLessThan(permIdx);
   });
 });
+
+// =============================================================================
+// G2 full-scan honesty. `fetchNodes` took ONE 500-row `listNodesByType` page
+// with no offset, and `renderRecentChangesSection` then sorted that id-ASC
+// prefix by `lastModifiedDate` DESC — so "most recent" meant "most recent among
+// the alphabetically-first 500". `SFI_NODE_SCAN_LIMIT=3` shrinks the scan
+// window so 5 nodes exercise multi-window paging.
+// =============================================================================
+
+describe('generateAdminHandbookHandler — full per-type scan (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+  let priorLimit: string | undefined;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-handbook-fullscan-'));
+    const opened = await openGraph(join(dir, 'fullscan.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          ...Array.from({ length: 4 }, (_unused, i) =>
+            makeNode({
+              id: `ApexClass:A_${i}`,
+              type: 'ApexClass',
+              apiName: `A_${i}`,
+              lastModifiedDate: '2026-01-01T00:00:00Z',
+              lastModifiedBy: 'someone',
+            }),
+          ),
+          // Sorts LAST by id ASC — past every scan window — and is the MOST
+          // recently modified node in the org.
+          makeNode({
+            id: 'ApexClass:Z_Newest',
+            type: 'ApexClass',
+            apiName: 'Z_Newest',
+            lastModifiedDate: '2026-08-01T00:00:00Z',
+            lastModifiedBy: 'someone',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    priorLimit = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '3';
+  });
+
+  afterEach(() => {
+    if (priorLimit === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = priorLimit;
+  });
+
+  it('heads Recent Changes with the newest node even though it sorts last by id', async () => {
+    const r = await generateAdminHandbookHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    const section = body.slice(body.indexOf('## Recent Changes'));
+    const firstRow = section
+      .split('\n')
+      .find((line) => line.startsWith('| 2026-'));
+    expect(firstRow).toContain('ApexClass:Z_Newest');
+  });
+});
+
+// =============================================================================
+// The literal repro of the defect, at the REAL cap (no SFI_NODE_SCAN_LIMIT
+// override): `fetchNodes` took one 500-row id-ASC page, and Recent Changes
+// sorted THAT by lastModifiedDate DESC — so the org's genuinely newest change
+// was invisible whenever its id sorted past position 500.
+// =============================================================================
+
+describe('generateAdminHandbookHandler — past the 500-row page boundary (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-handbook-over500-'));
+    const opened = await openGraph(join(dir, 'over500.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          ...Array.from({ length: 501 }, (_unused, i) =>
+            makeNode({
+              id: `ApexClass:A_Filler${String(i).padStart(4, '0')}`,
+              type: 'ApexClass',
+              apiName: `A_Filler${i}`,
+              lastModifiedDate: '2026-01-01T00:00:00Z',
+              lastModifiedBy: 'someone',
+            }),
+          ),
+          makeNode({
+            id: 'ApexClass:Z_Newest',
+            type: 'ApexClass',
+            apiName: 'Z_Newest',
+            lastModifiedDate: '2026-08-01T00:00:00Z',
+            lastModifiedBy: 'someone',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('heads Recent Changes with the newest node past position 500 by id', async () => {
+    const r = await generateAdminHandbookHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    const section = body.slice(body.indexOf('## Recent Changes'));
+    const firstRow = section
+      .split('\n')
+      .find((line) => line.startsWith('| 2026-'));
+    expect(firstRow).toContain('ApexClass:Z_Newest');
+  });
+});

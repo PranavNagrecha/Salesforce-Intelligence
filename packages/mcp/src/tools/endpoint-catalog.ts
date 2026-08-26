@@ -38,6 +38,14 @@
  *      `referencedNamedCredentials`.
  *
  * Implementation notes:
+ *   - Every category is scanned to EXHAUSTION (`scanAllNodesOfTypes`
+ *     windows the SQL `OFFSET` past the graph layer's 500-row per-page
+ *     cap), so "every URL" is literal and `summary.totalEndpoints` is a
+ *     true total. Each collector used to take ONE 500-row page, so a
+ *     `@RestResource` sorting past position 500 by id was silently
+ *     absent with nothing in the payload to distinguish it from an
+ *     endpoint that does not exist. `boundaries` discloses the residual
+ *     `FULL_SCAN_MAX_NODES` ceiling and is empty otherwise.
  *   - Each category surfaces a `direction` field (inbound | outbound)
  *     so the renderer can render two sections.
  *   - The catalog is intentionally URL-centric — no edges, no
@@ -62,19 +70,24 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges, listEdgesForNodes } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { firstNonEmpty } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, fullScanTruncationNote } from './scan-cap.js';
 
 /**
- * Hard cap on the per-category scan. Mirrors the
- * `OUTBOUND_MESSAGE_CATALOG_MAX_ENTRIES` ceiling so the v2.8
- * catalog tools share the same blast-radius cap.
+ * What one category collector returns: its entries plus the types whose full
+ * scan stopped at the residual `FULL_SCAN_MAX_NODES` cap (empty in the normal
+ * case — every category is now walked to exhaustion).
  */
-const ENDPOINT_CATALOG_MAX_PER_CATEGORY = 500;
+interface CollectedCategory {
+  readonly entries: readonly EndpointEntry[];
+  readonly incompleteTypes: readonly string[];
+}
 
 /**
  * Zod schema for the `sfi.endpoint_catalog` tool input. Intentionally ORG-WIDE;
@@ -176,6 +189,13 @@ export interface EndpointCatalogOutput {
     readonly outboundCount: number;
   };
   readonly disclosure: string;
+  /**
+   * Scope disclosures for this response. EMPTY in the normal case: every
+   * category is scanned to exhaustion, so `summary.totalEndpoints` is a TRUE
+   * total. Non-empty only when a type hit the residual `FULL_SCAN_MAX_NODES`
+   * ceiling — the one case where "every URL" is still short, and it says so.
+   */
+  readonly boundaries: readonly string[];
 }
 
 /**
@@ -232,36 +252,40 @@ const recoverExternalApiPath = (toId: string): string | null => {
  * `ExternalApi:{kind}/{path}` and surfaces as one entry with the
  * source class plus the path as the URL.
  *
- * Implementation: we walk every ApexClass node and listEdges with
- * direction='out', edgeType='exposes'. This is O(N) over the
- * ApexClass population but bounded by the per-category cap.
+ * Implementation: we walk EVERY ApexClass node (the scan windows the SQL
+ * `OFFSET` past the 500-row per-page cap — a `@RestResource` sorting past
+ * position 500 by id used to be silently absent from an "every URL" catalog)
+ * and batch the `exposes` edges with ONE `listEdgesForNodes` per chunk.
  */
 const collectInboundApis = async (
   ctx: Context,
-): Promise<Result<readonly EndpointEntry[], string>> => {
-  const classesResult = await listNodesByType(ctx.graph, 'ApexClass', {
-    limit: ENDPOINT_CATALOG_MAX_PER_CATEGORY,
-  });
+): Promise<Result<CollectedCategory, string>> => {
+  const classesResult = await scanAllNodesOfTypes(ctx.graph, ['ApexClass']);
   if (!classesResult.ok) return err(classesResult.error.message);
+  const classes = classesResult.value.nodes;
   const entries: EndpointEntry[] = [];
-  for (const node of classesResult.value as readonly Node[]) {
-    const edgesResult = await listEdges(ctx.graph, node.id, {
+  const chunkSize = clampedNodeScanLimit();
+  for (let i = 0; i < classes.length; i += chunkSize) {
+    const ids = classes.slice(i, i + chunkSize).map((n) => n.id);
+    const edgesResult = await listEdgesForNodes(ctx.graph, ids, {
       direction: 'out',
-      edgeType: 'exposes',
+      edgeTypes: ['exposes'],
     });
     if (!edgesResult.ok) return err(edgesResult.error.message);
-    for (const edge of edgesResult.value) {
-      const kind = recoverExternalApiKind(edge.toId);
-      if (kind === null) continue;
-      entries.push({
-        endpointKind: kind,
-        direction: 'inbound',
-        sourceComponentId: edge.fromId,
-        url: recoverExternalApiPath(edge.toId),
-      });
+    for (const id of ids) {
+      for (const edge of edgesResult.value.get(id) ?? []) {
+        const kind = recoverExternalApiKind(edge.toId);
+        if (kind === null) continue;
+        entries.push({
+          endpointKind: kind,
+          direction: 'inbound',
+          sourceComponentId: edge.fromId,
+          url: recoverExternalApiPath(edge.toId),
+        });
+      }
     }
   }
-  return ok(entries);
+  return ok({ entries, incompleteTypes: classesResult.value.incompleteTypes });
 };
 
 /**
@@ -271,19 +295,18 @@ const collectInboundApis = async (
  */
 const collectOutboundMessages = async (
   ctx: Context,
-): Promise<Result<readonly EndpointEntry[], string>> => {
-  const nodesResult = await listNodesByType(ctx.graph, 'OutboundMessage', {
-    limit: ENDPOINT_CATALOG_MAX_PER_CATEGORY,
-  });
+): Promise<Result<CollectedCategory, string>> => {
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, ['OutboundMessage']);
   if (!nodesResult.ok) return err(nodesResult.error.message);
-  return ok(
-    (nodesResult.value as readonly Node[]).map((node) => ({
+  return ok({
+    entries: (nodesResult.value.nodes as readonly Node[]).map((node) => ({
       endpointKind: 'outbound-message' as const,
       direction: 'outbound' as const,
       sourceComponentId: node.id,
       url: readOptionalString(node.properties, 'endpointUrl'),
     })),
-  );
+    incompleteTypes: nodesResult.value.incompleteTypes,
+  });
 };
 
 /**
@@ -295,13 +318,13 @@ const collectOutboundMessages = async (
  */
 const collectExternalDataSources = async (
   ctx: Context,
-): Promise<Result<readonly EndpointEntry[], string>> => {
-  const nodesResult = await listNodesByType(ctx.graph, 'ExternalDataSource', {
-    limit: ENDPOINT_CATALOG_MAX_PER_CATEGORY,
-  });
+): Promise<Result<CollectedCategory, string>> => {
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, [
+    'ExternalDataSource',
+  ]);
   if (!nodesResult.ok) return err(nodesResult.error.message);
-  return ok(
-    (nodesResult.value as readonly Node[]).map((node) => ({
+  return ok({
+    entries: (nodesResult.value.nodes as readonly Node[]).map((node) => ({
       endpointKind: 'external-data-source' as const,
       direction: 'outbound' as const,
       sourceComponentId: node.id,
@@ -309,7 +332,8 @@ const collectExternalDataSources = async (
         readOptionalString(node.properties, 'endpoint') ??
         readOptionalString(node.properties, 'url'),
     })),
-  );
+    incompleteTypes: nodesResult.value.incompleteTypes,
+  });
 };
 
 /**
@@ -319,13 +343,11 @@ const collectExternalDataSources = async (
  */
 const collectNamedCredentials = async (
   ctx: Context,
-): Promise<Result<readonly EndpointEntry[], string>> => {
-  const nodesResult = await listNodesByType(ctx.graph, 'NamedCredential', {
-    limit: ENDPOINT_CATALOG_MAX_PER_CATEGORY,
-  });
+): Promise<Result<CollectedCategory, string>> => {
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, ['NamedCredential']);
   if (!nodesResult.ok) return err(nodesResult.error.message);
   const entries: EndpointEntry[] = [];
-  for (const node of nodesResult.value as readonly Node[]) {
+  for (const node of nodesResult.value.nodes as readonly Node[]) {
     // Inbound `references` edges = anything in the retrieved metadata
     // wired to this credential. A zero count is the grounded basis for
     // `orphaned: true` — so the catalog reports an unreferenced
@@ -347,7 +369,7 @@ const collectNamedCredentials = async (
       orphaned: referenceCount === 0,
     });
   }
-  return ok(entries);
+  return ok({ entries, incompleteTypes: nodesResult.value.incompleteTypes });
 };
 
 /**
@@ -411,15 +433,13 @@ const readRestEndpoints = (
  */
 const collectOmniRestEndpoints = async (
   ctx: Context,
-): Promise<Result<readonly EndpointEntry[], string>> => {
-  const nodesResult = await listNodesByType(
-    ctx.graph,
+): Promise<Result<CollectedCategory, string>> => {
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, [
     'OmniIntegrationProcedure',
-    { limit: ENDPOINT_CATALOG_MAX_PER_CATEGORY },
-  );
+  ]);
   if (!nodesResult.ok) return err(nodesResult.error.message);
   const entries: EndpointEntry[] = [];
-  for (const node of nodesResult.value as readonly Node[]) {
+  for (const node of nodesResult.value.nodes as readonly Node[]) {
     for (const endpoint of readRestEndpoints(node.properties)) {
       entries.push({
         endpointKind: 'omni-rest',
@@ -430,7 +450,7 @@ const collectOmniRestEndpoints = async (
       });
     }
   }
-  return ok(entries);
+  return ok({ entries, incompleteTypes: nodesResult.value.incompleteTypes });
 };
 
 /**
@@ -517,11 +537,24 @@ export const endpointCatalogHandler = async (
     });
   }
 
-  const inbound = [...inboundResult.value].sort(compareEntries);
-  const outboundMsg = [...outboundMsgResult.value].sort(compareEntries);
-  const externalDS = [...externalDSResult.value].sort(compareEntries);
-  const namedCred = [...namedCredResult.value].sort(compareEntries);
-  const omniRest = [...omniRestResult.value].sort(compareEntries);
+  const inbound = [...inboundResult.value.entries].sort(compareEntries);
+  const outboundMsg = [...outboundMsgResult.value.entries].sort(compareEntries);
+  const externalDS = [...externalDSResult.value.entries].sort(compareEntries);
+  const namedCred = [...namedCredResult.value.entries].sort(compareEntries);
+  const omniRest = [...omniRestResult.value.entries].sort(compareEntries);
+
+  // Residual full-scan cap across the five categories. Empty in the normal
+  // case; when it fires, `summary.totalEndpoints` is an undercount and must not
+  // read as a complete tally.
+  const incompleteTypes = [
+    ...inboundResult.value.incompleteTypes,
+    ...outboundMsgResult.value.incompleteTypes,
+    ...externalDSResult.value.incompleteTypes,
+    ...namedCredResult.value.incompleteTypes,
+    ...omniRestResult.value.incompleteTypes,
+  ];
+  const boundaries =
+    incompleteTypes.length > 0 ? [fullScanTruncationNote(incompleteTypes)] : [];
 
   // The distinct, sorted host aliases the OmniStudio callout surface
   // references — surfaced so an architect can reconcile them against the
@@ -552,6 +585,7 @@ export const endpointCatalogHandler = async (
         outboundCount,
       },
       disclosure: ENDPOINT_CATALOG_DISCLOSURE,
+      boundaries,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -32,7 +32,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -46,9 +46,7 @@ import {
   renderFooter,
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
-
-/** Per-type scan cap. Matches the graph layer's `LIST_MAX_LIMIT`. */
-const SCAN_LIMIT = 500;
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 
 /** Top-N cap for the Main Objects and Recent Changes lists. */
 const TOP_N = 10;
@@ -77,30 +75,30 @@ export interface GenerateAdminHandbookOutput {
 }
 
 /**
- * Fetch every node of a single ComponentType, capped at the standard
- * scan limit. Used for the per-section tallies.
+ * Fetch EVERY node of a single ComponentType, windowing the SQL `OFFSET` past
+ * the graph layer's 500-row per-page cap. Used for the per-section lists.
+ * Recent Changes sorts by `lastModifiedDate` DESC over this list, so a single
+ * id-ASC page made it "the most recent among the alphabetically-first 500".
  */
 const fetchNodes = async (
   ctx: Context,
   type: ComponentType,
 ): Promise<Result<readonly Node[], McpError>> => {
-  const result = await listNodesByType(ctx.graph, type, { limit: SCAN_LIMIT });
+  const result = await scanAllNodesOfTypes(ctx.graph, [type]);
   if (!result.ok) {
     return err({
       kind: 'internal',
       message: `graph query failed: ${result.error.message}`,
     });
   }
-  return ok(result.value);
+  return ok(result.value.nodes);
 };
 
 /**
- * Exact COUNT(*) tally for a single ComponentType. The per-section counts
- * MUST come from here, NOT from `fetchNodes(...).value.length` — the latter
- * is bounded by `SCAN_LIMIT` (500) and saturates on a large org (a
- * 1,000-ApexClass org would report 500). The list from `fetchNodes` is still
- * used for the genuine list consumers (Main Objects top-N, Recent Changes
- * candidates), but never as a headline count. Mirrors `org_overview`.
+ * Exact COUNT(*) tally for a single ComponentType. The per-section counts come
+ * from here rather than `fetchNodes(...).value.length`: it is the cheaper
+ * source of truth and it still holds for a type whose full scan stopped at the
+ * residual `FULL_SCAN_MAX_NODES` ceiling. Mirrors `org_overview`.
  */
 const countNodes = async (
   ctx: Context,
@@ -280,8 +278,8 @@ export const generateAdminHandbookHandler = async (
 ): Promise<Result<McpResponse<GenerateAdminHandbookOutput>, McpError>> => {
   const persona = input.personaFocus ?? 'admin';
 
-  // Enumerate every type we tally. The fan-out is bounded — eight
-  // listNodesByType calls — so the response stays fast.
+  // Enumerate every type we tally, each scanned in full (the per-type walk
+  // windows past the 500-row page cap).
   const objectsResult = await fetchNodes(ctx, 'CustomObject');
   if (!objectsResult.ok) return err(objectsResult.error);
   const profilesResult = await fetchNodes(ctx, 'Profile');
@@ -312,9 +310,7 @@ export const generateAdminHandbookHandler = async (
   if (!vfResult.ok) return err(vfResult.error);
 
   // Exact per-type tallies via COUNT(*). The fetchNodes lists above feed the
-  // genuine list consumers (Main Objects top-N, Recent Changes candidates);
-  // every COUNT we render below comes from here so it never saturates at
-  // SCAN_LIMIT on a large org (ApexClass / Flow routinely exceed 500).
+  // genuine list consumers (Main Objects top-N, Recent Changes candidates).
   const objectCount = await countNodes(ctx, 'CustomObject');
   if (!objectCount.ok) return err(objectCount.error);
   const profileCount = await countNodes(ctx, 'Profile');
@@ -476,8 +472,8 @@ export const generateAdminHandbookHandler = async (
     STRUCTURAL_DISCLOSURE,
   ];
 
-  // Component ids: every node enumerated, capped at the standard
-  // scan limit. The id list is the union of every type-list.
+  // Component ids: every node of every type, scanned to exhaustion via
+  // scanAllNodesOfTypes. The id list is the union of every type-list.
   const componentIds: ComponentId[] = [
     ...objects.map((n) => n.id),
     ...profilesResult.value.map((n) => n.id),

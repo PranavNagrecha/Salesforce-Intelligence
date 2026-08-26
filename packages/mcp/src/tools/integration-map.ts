@@ -33,9 +33,9 @@
  * The cascade, in this exact order:
  *
  *   1. **Per-category enumeration** — for each integration ComponentType
- *      in scope (controlled by `filter`), call `listNodesByType` with a
- *      per-category limit derived from the caller's overall `limit` so
- *      the eight category buckets share the cap fairly.
+ *      in scope (controlled by `filter`), walk the type to exhaustion
+ *      via `scanAllNodesOfTypes` (windows the SQL `OFFSET` past the
+ *      500-row per-page cap). Every category is scanned in FULL.
  *
  *   2. **Reference edge collection** — for each integration node in the
  *      result set, list outgoing `references` edges. Include only those
@@ -47,12 +47,20 @@
  *      and the cross-type `references` array by `(fromId, toId, role)`
  *      ASC so the output is stable across runs.
  *
+ *   4. **Payload trim** — LAST, and only after every derived field
+ *      above has read the COMPLETE sets, each bucket is trimmed to
+ *      `limit` rows and `truncatedCategories` names what was dropped
+ *      plus the true total.
+ *
  * Implementation notes:
- *   - The eight integration ComponentTypes share a single per-category
- *     limit (`ceil(limit / 8)`) so the overall result stays under the
- *     caller's cap. Categories the caller scoped out via `filter`
- *     surface as empty arrays — the shape is stable so MCP clients can
- *     access every field without conditional checks.
+ *   - `limit` caps the RETURNED rows per category; it does NOT bound
+ *     the scan. It used to be split eight ways (`ceil(limit / 8)` = 13
+ *     by default), which handed `collectMartechConnectors` and
+ *     `buildCalloutAuthorizationNote` an alphabetical 13-row prefix and
+ *     let them assert a complete authorization surface off it.
+ *     Categories the caller scoped out via `filter` surface as empty
+ *     arrays — the shape is stable so MCP clients can access every
+ *     field without conditional checks.
  *   - `filter='auth'` returns AuthProvider + ConnectedApp (both auth
  *     mechanisms); `filter='sites'` returns RemoteSiteSetting +
  *     CspTrustedSite + NetworkAccess (URL / CSP / IP allowlists);
@@ -78,7 +86,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import {
@@ -90,6 +98,8 @@ import {
 import type { Context } from '../server.js';
 
 import { firstNonEmpty } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the
@@ -99,10 +109,9 @@ import { firstNonEmpty } from './input-aliases.js';
 const INTEGRATION_MAP_MAX_LIMIT = 500;
 
 /**
- * Default `limit` when the caller omits it. Set to 100 because the
- * integration surface tends to be denser than a single component's
- * incoming-edge count — an org with eight surfaces in scope typically
- * wants ~12 per category, which 100 / 8 = 12.5 (rounded up) provides.
+ * Default `limit` when the caller omits it. Caps the RETURNED rows PER
+ * CATEGORY (it is no longer split across the eight categories — every category
+ * is scanned in FULL and `truncatedCategories` discloses any payload trim).
  */
 const INTEGRATION_MAP_DEFAULT_LIMIT = 100;
 
@@ -110,7 +119,7 @@ const INTEGRATION_MAP_DEFAULT_LIMIT = 100;
  * The eight integration ComponentTypes the tool enumerates. Ordered
  * from "trust anchor" (AuthProvider) to "callable surface" (External-
  * Service) so the output reads top-down. The order matters for the
- * `filter` mapping and the per-category limit computation.
+ * `filter` mapping and the bucket ordering.
  */
 const INTEGRATION_TYPES = [
   'AuthProvider',
@@ -319,6 +328,18 @@ export interface MartechConnectorMatch {
   readonly basis: string;
 }
 
+/**
+ * One category whose bucket was trimmed to `limit` for the payload. `total` is
+ * the TRUE count from the full scan, so a caller can tell "13 of 41" from "13".
+ */
+export interface IntegrationMapTruncatedCategory {
+  readonly type: ComponentType;
+  /** Rows actually returned in this response. */
+  readonly returned: number;
+  /** Rows the full scan found for this type. */
+  readonly total: number;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface IntegrationMapOutput {
   /**
@@ -387,6 +408,20 @@ export interface IntegrationMapOutput {
    * coverage-gap claim when the components ARE present.
    */
   readonly calloutAuthorizationNote: string;
+  /**
+   * Categories whose bucket was trimmed to `limit` for the payload, with the
+   * TRUE total from the full scan. EMPTY when nothing was trimmed — the normal
+   * case. Every category is always SCANNED in full, so `martechConnectors`,
+   * `calloutAuthorizationNote` and `references` are computed over the complete
+   * sets even when a bucket here is short.
+   */
+  readonly truncatedCategories: readonly IntegrationMapTruncatedCategory[];
+  /**
+   * Scope disclosures for this response: the payload trim (when
+   * `truncatedCategories` is non-empty) and the residual full-scan cap. Empty
+   * in the normal case — this map is complete.
+   */
+  readonly boundaries: readonly string[];
 }
 
 /** Honest-empty note attached when the integration map has zero components. */
@@ -397,12 +432,29 @@ const INTEGRATION_EMPTY_NOTE =
 const APEX_CALLOUT_DISCLOSURE =
   "This map covers DECLARED integration metadata (AuthProvider / NamedCredential / RemoteSiteSetting / CspTrustedSite / ExternalDataSource / ExternalService / ConnectedApp / NetworkAccess) plus OmniStudio callouts. The individual Apex callsites (`Http.request` / `HttpRequest.setEndpoint`) are not listed as rows here — enumerate them with `sfi.find_code_usages` on `Http`/`HttpRequest` or `sfi.search_apex_source('setEndpoint')`. The TRUST mechanism that AUTHORIZES those callouts IS in this map, however: see `calloutAuthorizationNote` and the RemoteSiteSetting / NamedCredential sections.";
 
+/** Max names enumerated inline in `calloutAuthorizationNote` before the tail is summarised. */
+const MAX_ENUMERATED_NAMES = 20;
+
+/**
+ * Render a name list for the authorization note: the first
+ * {@link MAX_ENUMERATED_NAMES} verbatim, then `… and N more` derived from the
+ * TRUE length. Never presents a slice as the whole list.
+ */
+const enumerateNames = (names: readonly string[]): string =>
+  names.length <= MAX_ENUMERATED_NAMES
+    ? names.join(', ')
+    : `${names.slice(0, MAX_ENUMERATED_NAMES).join(', ')} … and ${names.length - MAX_ENUMERATED_NAMES} more`;
+
 /**
  * Build the grounded `calloutAuthorizationNote` from the components
  * actually present in the map. This is the determinate answer to "which
  * named credential or remote site setting authorizes the outbound
  * callouts" — derived from the retrieved RemoteSiteSetting nodes and the
  * NamedCredential reference/orphan analysis, NOT abstained.
+ *
+ * Takes the COMPLETE per-type sets, never the payload-trimmed buckets: the note
+ * makes positive absence claims ("this map contains no NamedCredentials"), which
+ * a truncated bucket turns into a lie.
  */
 const buildCalloutAuthorizationNote = (
   remoteSiteSettings: readonly IntegrationMapNode[],
@@ -420,16 +472,16 @@ const buildCalloutAuthorizationNote = (
 
   const rssPart =
     rssNames.length > 0
-      ? `Active RemoteSiteSettings authorize outbound HTTP callouts to a hardcoded endpoint URL (an Apex \`Http.request\` to a literal host): ${rssNames.join(', ')}.`
+      ? `Active RemoteSiteSettings authorize outbound HTTP callouts to a hardcoded endpoint URL (an Apex \`Http.request\` to a literal host) — ${rssNames.length} in this org: ${enumerateNames(rssNames)}.`
       : 'This map contains no RemoteSiteSettings, so no hardcoded-URL outbound callout is authorized by a remote site setting.';
 
   const ncPart =
     namedCredentials.length === 0
       ? 'This map contains no NamedCredentials, so no callout addresses a `callout:{alias}` endpoint.'
-      : `NamedCredentials authorize callouts that address \`callout:{alias}\`. Referenced (something in the retrieved metadata is wired to them): ${
-          referencedNcs.length > 0 ? referencedNcs.join(', ') : 'none'
+      : `NamedCredentials authorize callouts that address \`callout:{alias}\` — ${namedCredentials.length} in this org. Referenced (something in the retrieved metadata is wired to them): ${
+          referencedNcs.length > 0 ? enumerateNames(referencedNcs) : 'none'
         }. Orphaned (no modeled reference — present but nothing wires to them): ${
-          orphanedNcs.length > 0 ? orphanedNcs.join(', ') : 'none'
+          orphanedNcs.length > 0 ? enumerateNames(orphanedNcs) : 'none'
         }.`;
 
   return `${rssPart} ${ncPart} To attribute a SPECIFIC class's callout, match its endpoint: a \`callout:{alias}\` literal => the NamedCredential of that alias; a hardcoded \`https://host\` => the RemoteSiteSetting whose URL covers that host.`;
@@ -580,9 +632,10 @@ const readOmniRemoteCallouts = (
  * Remote callouts by `(sourceComponentId, remoteClass)` — and the
  * referenced host aliases are de-duplicated and sorted.
  *
- * Bounded by `perCategoryLimit` (the same cap the eight classic
- * categories share), so a pathological org with thousands of IPs cannot
- * blow the response budget here either.
+ * Scans every OmniIntegrationProcedure (windows past the 500-row per-page cap);
+ * it used to take the same `ceil(limit / 8)` = 13 slice the classic categories
+ * shared, so an org with more than 13 IPs reported an alphabetical prefix of its
+ * callout surface. Residual incompleteness is returned to the caller.
  *
  * Real-vault note: these are EXTRACTION-time properties; an org
  * refreshed before the omni-integration-procedure extractor change
@@ -590,13 +643,18 @@ const readOmniRemoteCallouts = (
  */
 const collectOmniSurface = async (
   ctx: Context,
-  perCategoryLimit: number,
-): Promise<Result<OmniStudioIntegrationSurface, McpError>> => {
-  const nodesResult = await listNodesByType(
-    ctx.graph,
+): Promise<
+  Result<
+    {
+      readonly surface: OmniStudioIntegrationSurface;
+      readonly incompleteTypes: readonly string[];
+    },
+    McpError
+  >
+> => {
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, [
     'OmniIntegrationProcedure',
-    { limit: perCategoryLimit },
-  );
+  ]);
   if (!nodesResult.ok) {
     return err({
       kind: 'internal',
@@ -605,7 +663,7 @@ const collectOmniSurface = async (
   }
   const restCallouts: OmniRestCallout[] = [];
   const remoteCallouts: OmniRemoteCallout[] = [];
-  for (const node of nodesResult.value) {
+  for (const node of nodesResult.value.nodes) {
     restCallouts.push(...readOmniRestCallouts(node.id, node.properties));
     remoteCallouts.push(...readOmniRemoteCallouts(node.id, node.properties));
   }
@@ -638,11 +696,11 @@ const collectOmniSurface = async (
         .filter((nc): nc is string => typeof nc === 'string' && nc.length > 0),
     ),
   ].sort();
-  return ok({ restCallouts, remoteCallouts, referencedNamedCredentials });
+  return ok({
+    surface: { restCallouts, remoteCallouts, referencedNamedCredentials },
+    incompleteTypes: nodesResult.value.incompleteTypes,
+  });
 };
-
-/** Defensive ceiling for the InstalledPackage scan — mirrors `installed_package_catalog`'s own cap; an org with more installed packages than this is unheard of. */
-const MARTECH_PACKAGE_SCAN_LIMIT = 500;
 
 /**
  * Read a node's declared endpoint URL, trying the extractor-canonical
@@ -664,11 +722,11 @@ const readDeclaredEndpoint = (
 /**
  * Detect martech (marketing-technology) connectors (Finding #44) from data
  * this map already has, plus one additional filter-independent scan of
- * `InstalledPackage` nodes (small — a real org has tens, not thousands, of
- * installed packages, mirroring `installed_package_catalog`'s own
- * assumption). NamedCredential / ExternalDataSource endpoint matching reuses
- * whichever of those buckets the caller's `filter` already put in scope — no
- * extra graph query for that half.
+ * `InstalledPackage` nodes (scanned in full). NamedCredential /
+ * ExternalDataSource endpoint matching reuses whichever of those buckets the
+ * caller's `filter` already put in scope — no extra graph query for that half.
+ * Those buckets are the COMPLETE per-type sets, not the payload-trimmed ones:
+ * a connector that sorts past `limit` is still detected.
  *
  * Two independent signal sources, never conflated:
  *   - `InstalledPackage.namespace` against {@link lookupKnownMartechNamespace}
@@ -688,7 +746,15 @@ const collectMartechConnectors = async (
   namedCredentials: readonly IntegrationMapNode[],
   externalDataSources: readonly IntegrationMapNode[],
   remoteSiteSettings: readonly IntegrationMapNode[],
-): Promise<Result<readonly MartechConnectorMatch[], McpError>> => {
+): Promise<
+  Result<
+    {
+      readonly matches: readonly MartechConnectorMatch[];
+      readonly incompleteTypes: readonly string[];
+    },
+    McpError
+  >
+> => {
   const matches: MartechConnectorMatch[] = [];
 
   // Only Active remote sites authorize a callout; an inactive one is dead
@@ -697,16 +763,14 @@ const collectMartechConnectors = async (
     (node) => node.properties['isActive'] === true,
   );
 
-  const pkgResult = await listNodesByType(ctx.graph, 'InstalledPackage', {
-    limit: MARTECH_PACKAGE_SCAN_LIMIT,
-  });
+  const pkgResult = await scanAllNodesOfTypes(ctx.graph, ['InstalledPackage']);
   if (!pkgResult.ok) {
     return err({
       kind: 'internal',
       message: `graph query failed: ${pkgResult.error.message}`,
     });
   }
-  for (const node of pkgResult.value) {
+  for (const node of pkgResult.value.nodes) {
     const rawNamespace = node.properties['namespace'];
     const namespace =
       typeof rawNamespace === 'string' && rawNamespace.length > 0
@@ -758,7 +822,7 @@ const collectMartechConnectors = async (
     if (a.componentId !== b.componentId) return a.componentId < b.componentId ? -1 : 1;
     return a.productName < b.productName ? -1 : a.productName > b.productName ? 1 : 0;
   });
-  return ok(matches);
+  return ok({ matches, incompleteTypes: pkgResult.value.incompleteTypes });
 };
 
 /**
@@ -802,37 +866,33 @@ export const integrationMapHandler = async (
 
   const filter = input.filter ?? 'all';
   const limit = input.limit ?? INTEGRATION_MAP_DEFAULT_LIMIT;
-  // The eight integration ComponentTypes share the cap fairly; the
-  // ceiling division keeps the per-category limit at `>= 1` even when
-  // the caller supplies the smallest allowed `limit` (1).
-  const perCategoryLimit = Math.max(1, Math.ceil(limit / INTEGRATION_TYPES.length));
 
   const inScopeTypes: ReadonlySet<ComponentType> = new Set(
     FILTER_TYPE_MAP[filter] ?? INTEGRATION_TYPES,
   );
 
-  // Stage 1: per-category enumeration. Categories the caller scoped
-  // out via `filter` are populated as empty arrays so the output
+  // Stage 1: per-category enumeration, in FULL. `limit` no longer splits a
+  // budget eight ways — it caps the RETURNED rows per category at Stage 4,
+  // AFTER the derived fields below have read the complete sets. Categories the
+  // caller scoped out via `filter` are populated as empty arrays so the output
   // shape stays stable.
   const buckets = new Map<ComponentType, IntegrationMapNode[]>();
   for (const type of INTEGRATION_TYPES) {
     buckets.set(type, []);
   }
-  for (const type of INTEGRATION_TYPES) {
-    if (!inScopeTypes.has(type)) continue;
-    const result = await listNodesByType(ctx.graph, type, {
-      limit: perCategoryLimit,
+  const scannedTypes = INTEGRATION_TYPES.filter((type) => inScopeTypes.has(type));
+  const scan = await scanAllNodesOfTypes(ctx.graph, scannedTypes);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
     });
-    if (!result.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${result.error.message}`,
-      });
-    }
-    buckets.set(
-      type,
-      result.value.map(toMapNode).sort(compareNodes),
-    );
+  }
+  for (const node of scan.value.nodes) {
+    buckets.get(node.type)?.push(toMapNode(node));
+  }
+  for (const type of scannedTypes) {
+    buckets.get(type)?.sort(compareNodes);
   }
 
   // Stage 1b: orphan analysis for the two trust anchors (NamedCredential
@@ -924,10 +984,12 @@ export const integrationMapHandler = async (
   // response shape stable so MCP clients can read `omniStudio.*`
   // unconditionally.
   let omniStudio = EMPTY_OMNI_SURFACE;
+  const incompleteTypes: string[] = [...scan.value.incompleteTypes];
   if (OMNI_SURFACE_FILTERS.has(filter)) {
-    const omniResult = await collectOmniSurface(ctx, perCategoryLimit);
+    const omniResult = await collectOmniSurface(ctx);
     if (!omniResult.ok) return omniResult;
-    omniStudio = omniResult.value;
+    omniStudio = omniResult.value.surface;
+    incompleteTypes.push(...omniResult.value.incompleteTypes);
   }
 
   // Stage 2c: martech connector detection (Finding #44). Filter-independent
@@ -944,22 +1006,51 @@ export const integrationMapHandler = async (
     buckets.get('RemoteSiteSetting') ?? [],
   );
   if (!martechResult.ok) return martechResult;
-  const martechConnectors = martechResult.value;
+  const martechConnectors = martechResult.value.matches;
+  incompleteTypes.push(...martechResult.value.incompleteTypes);
 
-  // Stage 3: assemble the response. Bucket lookups are guarded with
+  // Stage 3: payload trim — LAST, so every derived field above (martech,
+  // callout authorization, the `references` cascade, the OmniStudio surface)
+  // was computed over the COMPLETE sets. `truncatedCategories` carries the true
+  // total per trimmed category so `13` is never mistakable for `13 of 41`.
+  const truncatedCategories: IntegrationMapTruncatedCategory[] = [];
+  const paged = new Map<ComponentType, IntegrationMapNode[]>();
+  for (const type of INTEGRATION_TYPES) {
+    const full = buckets.get(type) ?? [];
+    if (full.length > limit) {
+      truncatedCategories.push({ type, returned: limit, total: full.length });
+      paged.set(type, full.slice(0, limit));
+    } else {
+      paged.set(type, full);
+    }
+  }
+
+  const boundaries: string[] = [];
+  if (truncatedCategories.length > 0) {
+    boundaries.push(
+      `Returned rows capped at limit=${limit} per category: ${truncatedCategories
+        .map((t) => `${t.type} ${t.returned} of ${t.total}`)
+        .join(', ')}. Every category was SCANNED in full — martechConnectors, calloutAuthorizationNote and references are computed over the complete sets. Raise \`limit\` (max ${INTEGRATION_MAP_MAX_LIMIT}) or narrow with \`filter\` to see the rest.`,
+    );
+  }
+  if (incompleteTypes.length > 0) {
+    boundaries.push(fullScanTruncationNote(incompleteTypes));
+  }
+
+  // Stage 4: assemble the response. Bucket lookups are guarded with
   // `?? []` so a future addition to `INTEGRATION_TYPES` without a
   // matching bucket initialization surfaces as an empty array rather
   // than a runtime error.
   const data: IntegrationMapOutput = {
     appliedScope: { object: null, mode: 'all' },
-    authProviders: buckets.get('AuthProvider') ?? [],
-    namedCredentials: buckets.get('NamedCredential') ?? [],
-    remoteSiteSettings: buckets.get('RemoteSiteSetting') ?? [],
-    cspTrustedSites: buckets.get('CspTrustedSite') ?? [],
-    externalDataSources: buckets.get('ExternalDataSource') ?? [],
-    externalServices: buckets.get('ExternalService') ?? [],
-    connectedApps: buckets.get('ConnectedApp') ?? [],
-    networkAccesses: buckets.get('NetworkAccess') ?? [],
+    authProviders: paged.get('AuthProvider') ?? [],
+    namedCredentials: paged.get('NamedCredential') ?? [],
+    remoteSiteSettings: paged.get('RemoteSiteSetting') ?? [],
+    cspTrustedSites: paged.get('CspTrustedSite') ?? [],
+    externalDataSources: paged.get('ExternalDataSource') ?? [],
+    externalServices: paged.get('ExternalService') ?? [],
+    connectedApps: paged.get('ConnectedApp') ?? [],
+    networkAccesses: paged.get('NetworkAccess') ?? [],
     references,
     omniStudio,
     martechConnectors,
@@ -969,6 +1060,8 @@ export const integrationMapHandler = async (
       buckets.get('RemoteSiteSetting') ?? [],
       buckets.get('NamedCredential') ?? [],
     ),
+    truncatedCategories,
+    boundaries,
   };
   const totalNodes =
     data.authProviders.length +

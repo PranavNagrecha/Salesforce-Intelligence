@@ -11,24 +11,24 @@
  * The tool is a pure composition over existing graph queries — no new
  * extractors, no new ComponentTypes, no new EdgeTypes. It fans out
  * across:
- *   - `listNodesByType` (once per scanned ComponentType, capped to 500
- *     per type to bound the response time) for the in-memory lists the
- *     ranking / automation / largest-class stages reuse.
+ *   - `scanAllNodesOfTypes` (once per scanned ComponentType, walked to
+ *     EXHAUSTION by windowing the SQL `OFFSET` past the graph layer's
+ *     500-row per-page cap) for the in-memory lists the ranking /
+ *     automation / largest-class stages reuse.
  *   - `countNodesByType` (once per scanned ComponentType) for the exact
- *     per-type `componentCounts` — the lists above are capped, the counts
- *     are not, so a >500-of-a-type org reports its true total.
- *   - `listEdges` with `direction: 'in'` (once per top-N candidate to
- *     compute the inbound-reference count).
- *   - `listEdges` with `direction: 'out'` (once per Profile to compute
- *     the grantedBy outbound count as the v1.x proxy for user breadth).
+ *     per-type `componentCounts`.
+ *   - `listEdgesForNodes` (ONE batched query per ranked type, chunked so
+ *     the SQL `IN (...)` list stays bounded) for the inbound-reference,
+ *     inbound-callsApex and outgoing-grantedBy counts.
  *   - `recognizeNamingConventions` (zero-scope call so the response
  *     carries the existing v0.1 naming-pattern observations summary).
  *
- * The cascade is deliberately bounded: every per-type scan caps at the
- * graph layer's 500 limit, so a 10k-CustomField org still resolves in
- * a single round-trip per type. The inbound-reference fan-out is the
- * dominant cost; the response top-N caps at 10 per category so a
- * caller's UI stays compact.
+ * Every ranking is therefore computed over the WHOLE org, not over an
+ * id-ASC prefix. The scans used to stop at the first 500 nodes per type
+ * and the rankings at the first 200, so `topApexClasses` was "the ten
+ * most-called classes among the alphabetically-first 200" and
+ * `automationSummary.activeRatio` measured a 500-node sample against a
+ * `COUNT(*)` denominator — a flatly wrong number with no hedge.
  *
  * **Honesty axis** (per the v2.0g spec): every "top X" ranking in the
  * response is a heuristic proxy. "Top objects by inbound reference
@@ -64,17 +64,15 @@
 import type {
   ComponentId,
   ComponentType,
+  Edge,
+  EdgeType,
   McpError,
   McpResponse,
   Node,
   PatternObservation,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  countNodesByType,
-  listEdges,
-  listNodesByType,
-} from '@sf-intelligence/graph';
+import { countNodesByType, listEdgesForNodes } from '@sf-intelligence/graph';
 import { recognizeNamingConventions } from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
@@ -88,6 +86,8 @@ import {
 import type { Context } from '../server.js';
 
 import { readFactBlock, type FactsBlock } from './facts-block.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * The ComponentTypes the tour enumerates when summarising the org's
@@ -145,25 +145,11 @@ const OVERVIEW_COMPONENT_TYPES = [
   'CustomSettingRecord',
 ] as const satisfies readonly ComponentType[];
 
-/**
- * Per-type page-size cap for the in-memory node LISTS reused by the ranking,
- * automation, and largest-class stages. The graph layer's `listNodesByType`
- * caps at 500, so this is the upper bound per call. NOTE: the headline
- * `componentCounts` do NOT use these lists — they come from `countNodesByType`
- * (an exact `COUNT(*)`), so a >500-of-a-type org reports its true total. What
- * stays bounded by this cap is the `activeRatio` numerator/denominator sample
- * and the top-N / largest-class scans, which read at most the first 500 by id.
- */
-const LIST_PAGE_SIZE = 500;
-
 /** Top-N cap for the ranking categories (`topObjects`, `topApexClasses`, `topProfiles`). */
 const TOP_RANKINGS_LIMIT = 10;
 
 /** Top-N cap for `largestApexClasses`. Tighter than the rankings cap because the field is narrower (size, not relationships). */
 const LARGEST_APEX_CLASSES_LIMIT = 5;
-
-/** Per-instance scan cap used for the inbound-reference fan-out. */
-const RANKING_SCAN_CAP = 200;
 
 /**
  * Migration-candidate bucket thresholds for `legacyDebtIndicators`.
@@ -451,97 +437,86 @@ const isActiveAutomation = (node: Node): boolean => {
 };
 
 /**
- * Run `listNodesByType` for a single type and return the result, or
- * propagate the underlying graph error as a typed `McpError`.
+ * Walk EVERY node of `type` and return the list, or propagate the underlying
+ * graph error as a typed `McpError`. Windows the SQL `OFFSET` past the graph
+ * layer's 500-row per-page cap, so the ranking / automation / largest-class
+ * stages downstream see the whole org rather than an id-ASC prefix.
+ * `incomplete` (the residual `FULL_SCAN_MAX_NODES` ceiling) is returned so the
+ * caller can disclose it.
  */
 const fetchNodes = async (
   ctx: Context,
   type: ComponentType,
-): Promise<Result<readonly Node[], McpError>> => {
-  const result = await listNodesByType(ctx.graph, type, {
-    limit: LIST_PAGE_SIZE,
-  });
+): Promise<
+  Result<
+    { readonly nodes: readonly Node[]; readonly incomplete: boolean },
+    McpError
+  >
+> => {
+  const result = await scanAllNodesOfTypes(ctx.graph, [type]);
   if (!result.ok) {
     return err({
       kind: 'internal',
       message: `graph query failed: ${result.error.message}`,
     });
   }
-  return ok(result.value);
+  return ok({
+    nodes: result.value.nodes,
+    incomplete: result.value.scanIncomplete,
+  });
 };
 
 /**
- * Count incoming non-parentOf edges for a single node. The parentOf
+ * Batched edge counts for a whole ranked type in ~1 query per chunk instead of
+ * one `listEdges` per node. The ids are chunked at `clampedNodeScanLimit()` so
+ * the SQL `IN (...)` list stays bounded no matter how many nodes the full scan
+ * returned. `keep` filters the edges that count (identity by default).
+ */
+const countEdgesForNodes = async (
+  ctx: Context,
+  ids: readonly ComponentId[],
+  options: {
+    readonly direction: 'in' | 'out';
+    readonly edgeTypes?: readonly EdgeType[];
+    readonly keep?: (edge: Edge) => boolean;
+  },
+): Promise<Result<ReadonlyMap<ComponentId, number>, McpError>> => {
+  const counts = new Map<ComponentId, number>();
+  const chunkSize = clampedNodeScanLimit();
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const result = await listEdgesForNodes(ctx.graph, chunk, {
+      direction: options.direction,
+      ...(options.edgeTypes !== undefined
+        ? { edgeTypes: options.edgeTypes }
+        : {}),
+    });
+    if (!result.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${result.error.message}`,
+      });
+    }
+    for (const id of chunk) {
+      const edges = result.value.get(id) ?? [];
+      const keep = options.keep;
+      counts.set(
+        id,
+        keep === undefined ? edges.length : edges.filter(keep).length,
+      );
+    }
+  }
+  return ok(counts);
+};
+
+/**
+ * The `keep` predicate for the inbound-reference ranking. The parentOf
  * containment edge is filtered out because it doesn't represent a
  * "dependency" in the buyer's mental model — a CustomField's
  * containing CustomObject pointing at it does not mean "the object
  * depends on the field"; it means "the field is part of the object".
  */
-const countInboundReferences = async (
-  ctx: Context,
-  id: ComponentId,
-): Promise<Result<number, McpError>> => {
-  const result = await listEdges(ctx.graph, id, { direction: 'in' });
-  if (!result.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${result.error.message}`,
-    });
-  }
-  let count = 0;
-  for (const edge of result.value) {
-    if (edge.edgeType === 'parentOf') continue;
-    count += 1;
-  }
-  return ok(count);
-};
-
-/**
- * Count incoming callsApex edges for a single ApexClass id. The
- * callsApex edge family is emitted by every code-tier extractor
- * (Apex scanner, LWC scanner, Flow walker), so the count surfaces the
- * "hot path" classes regardless of which caller surface invokes
- * them.
- */
-const countInboundCalls = async (
-  ctx: Context,
-  id: ComponentId,
-): Promise<Result<number, McpError>> => {
-  const result = await listEdges(ctx.graph, id, {
-    direction: 'in',
-    edgeType: 'callsApex',
-  });
-  if (!result.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${result.error.message}`,
-    });
-  }
-  return ok(result.value.length);
-};
-
-/**
- * Count outgoing grantedBy edges for a Profile id. The grantedBy edge
- * family connects a Profile (or PermissionSet) to the components it
- * grants access to; the outgoing count is the v1.x proxy for "broad
- * profiles" since user-assignment data isn't extracted.
- */
-const countOutgoingGrants = async (
-  ctx: Context,
-  id: ComponentId,
-): Promise<Result<number, McpError>> => {
-  const result = await listEdges(ctx.graph, id, {
-    direction: 'out',
-    edgeType: 'grantedBy',
-  });
-  if (!result.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${result.error.message}`,
-    });
-  }
-  return ok(result.value.length);
-};
+const isNonParentOfEdge = (edge: Edge): boolean => edge.edgeType !== 'parentOf';
 
 /** Bucket the legacy-debt sum into the three migration-candidate tiers. */
 const bucketMigrationCandidate = (
@@ -590,14 +565,15 @@ export const orgOverviewHandler = async (
   // to avoid re-fetching from the graph.
   const nodesByType = new Map<ComponentType, readonly Node[]>();
   const componentCounts: Record<string, number> = {};
+  const incompleteScanTypes: string[] = [];
   for (const type of OVERVIEW_COMPONENT_TYPES) {
     const result = await fetchNodes(ctx, type);
     if (!result.ok) return err(result.error);
-    nodesByType.set(type, result.value);
-    // Exact tally via COUNT(*), NOT the capped list length. The in-memory list
-    // (bounded by LIST_PAGE_SIZE) still feeds the bounded ranking / automation
-    // / largest-class stages below, but the headline count must not saturate at
-    // the page size — a 1,034-CustomField org was reporting 500.
+    nodesByType.set(type, result.value.nodes);
+    if (result.value.incomplete) incompleteScanTypes.push(type);
+    // Exact tally via COUNT(*). The in-memory list is now the WHOLE type, so
+    // the two agree; the COUNT(*) stays because it is the cheaper source of
+    // truth and covers a type the scan left at its residual cap.
     const countResult = await countNodesByType(ctx.graph, type);
     if (!countResult.ok) {
       return err({
@@ -608,69 +584,60 @@ export const orgOverviewHandler = async (
     componentCounts[type] = countResult.value;
   }
 
-  // Stage 2: top objects by inbound-reference count. Scan up to
-  // RANKING_SCAN_CAP CustomObjects; orgs with more than that surface
-  // a top-10 derived from the first chunk by id ASC (the graph's own
-  // ordering), which is honest but bounded.
-  const customObjects = (nodesByType.get('CustomObject') ?? []).slice(
-    0,
-    RANKING_SCAN_CAP,
+  // Stages 2-4: the three rankings, each over EVERY node of its type (no
+  // id-ASC prefix) via ONE batched `listEdgesForNodes` per chunk instead of a
+  // `listEdges` per node — exact rankings at ~3 queries rather than ~1,400.
+  const customObjects = nodesByType.get('CustomObject') ?? [];
+  const objectCounts = await countEdgesForNodes(
+    ctx,
+    customObjects.map((n) => n.id),
+    { direction: 'in', keep: isNonParentOfEdge },
   );
-  const topObjectsRaw: TopObjectEntry[] = [];
-  for (const node of customObjects) {
-    const countResult = await countInboundReferences(ctx, node.id);
-    if (!countResult.ok) return err(countResult.error);
-    topObjectsRaw.push({
-      id: node.id,
-      apiName: node.apiName,
-      inboundReferences: countResult.value,
-    });
-  }
+  if (!objectCounts.ok) return err(objectCounts.error);
   const topObjects = topN(
-    [...topObjectsRaw].sort(
-      compareRankedDesc<TopObjectEntry>((e) => e.inboundReferences),
-    ),
+    customObjects
+      .map<TopObjectEntry>((node) => ({
+        id: node.id,
+        apiName: node.apiName,
+        inboundReferences: objectCounts.value.get(node.id) ?? 0,
+      }))
+      .sort(compareRankedDesc<TopObjectEntry>((e) => e.inboundReferences)),
     TOP_RANKINGS_LIMIT,
   );
 
-  // Stage 3: top apex classes by inbound callsApex count.
-  const apexClasses = (nodesByType.get('ApexClass') ?? []).slice(
-    0,
-    RANKING_SCAN_CAP,
+  const apexClasses = nodesByType.get('ApexClass') ?? [];
+  const apexCallCounts = await countEdgesForNodes(
+    ctx,
+    apexClasses.map((n) => n.id),
+    { direction: 'in', edgeTypes: ['callsApex'] },
   );
-  const topApexRaw: TopApexClassEntry[] = [];
-  for (const node of apexClasses) {
-    const countResult = await countInboundCalls(ctx, node.id);
-    if (!countResult.ok) return err(countResult.error);
-    topApexRaw.push({
-      id: node.id,
-      apiName: node.apiName,
-      inboundCalls: countResult.value,
-    });
-  }
+  if (!apexCallCounts.ok) return err(apexCallCounts.error);
   const topApexClasses = topN(
-    [...topApexRaw].sort(
-      compareRankedDesc<TopApexClassEntry>((e) => e.inboundCalls),
-    ),
+    apexClasses
+      .map<TopApexClassEntry>((node) => ({
+        id: node.id,
+        apiName: node.apiName,
+        inboundCalls: apexCallCounts.value.get(node.id) ?? 0,
+      }))
+      .sort(compareRankedDesc<TopApexClassEntry>((e) => e.inboundCalls)),
     TOP_RANKINGS_LIMIT,
   );
 
-  // Stage 4: top profiles by outgoing grantedBy count.
-  const profiles = (nodesByType.get('Profile') ?? []).slice(0, RANKING_SCAN_CAP);
-  const topProfilesRaw: TopProfileEntry[] = [];
-  for (const node of profiles) {
-    const countResult = await countOutgoingGrants(ctx, node.id);
-    if (!countResult.ok) return err(countResult.error);
-    topProfilesRaw.push({
-      id: node.id,
-      apiName: node.apiName,
-      grantCount: countResult.value,
-    });
-  }
+  const profiles = nodesByType.get('Profile') ?? [];
+  const grantCounts = await countEdgesForNodes(
+    ctx,
+    profiles.map((n) => n.id),
+    { direction: 'out', edgeTypes: ['grantedBy'] },
+  );
+  if (!grantCounts.ok) return err(grantCounts.error);
   const topProfiles = topN(
-    [...topProfilesRaw].sort(
-      compareRankedDesc<TopProfileEntry>((e) => e.grantCount),
-    ),
+    profiles
+      .map<TopProfileEntry>((node) => ({
+        id: node.id,
+        apiName: node.apiName,
+        grantCount: grantCounts.value.get(node.id) ?? 0,
+      }))
+      .sort(compareRankedDesc<TopProfileEntry>((e) => e.grantCount)),
     TOP_RANKINGS_LIMIT,
   );
 
@@ -845,6 +812,12 @@ export const orgOverviewHandler = async (
         `VisualforcePage, VisualforceComponent) were not retrieved — the frontend ` +
         `and legacy-debt tallies mean "not checked", not "none".`,
     );
+  }
+  // Residual full-scan cap (FULL_SCAN_MAX_NODES). False in the normal case now
+  // that each type is walked to exhaustion; when it fires, the rankings and
+  // activeRatio were computed over a prefix and must say so.
+  if (incompleteScanTypes.length > 0) {
+    boundaries.push(fullScanTruncationNote(incompleteScanTypes));
   }
 
   const data = {

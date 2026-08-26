@@ -774,3 +774,186 @@ describe('testCoverageGapsHandler — FIX 6 clean-scan disclosure', () => {
     );
   });
 });
+
+// =============================================================================
+// G2 full-scan honesty. The corpus fetch was ONE 500-row `listNodesByType` page
+// with no offset — an alphabetical prefix, not a sample. Two failures rode on
+// it: a truncated `totalGapsCount`, and false `uncovered` verdicts, because
+// `testClassIds` was built from the SAME page so a test class sorting past it
+// was invisible to the BFS filter. `SFI_NODE_SCAN_LIMIT=3` shrinks the window
+// so 6 nodes exercise multi-window paging instead of 500+.
+// =============================================================================
+
+describe('testCoverageGapsHandler — full ApexClass scan (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+  let priorLimit: string | undefined;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tcg-fullscan-'));
+    const opened = await openGraph(join(dir, 'fullscan.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          ...Array.from({ length: 5 }, (_unused, i) =>
+            makeNode({
+              id: `ApexClass:A_${i}`,
+              apiName: `A_${i}`,
+              properties: { isTest: false, qualityIssues: [] },
+            }),
+          ),
+          // Sorts LAST by id ASC — past every scan window. Under the old single
+          // page this test class did not exist as far as the BFS filter knew.
+          makeNode({
+            id: 'ApexClass:ZZ_A0Test',
+            apiName: 'ZZ_A0Test',
+            properties: { isTest: true, qualityIssues: [] },
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:ZZ_A0Test',
+            toId: 'ApexClass:A_0',
+            edgeType: 'callsApex',
+          }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    priorLimit = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '3';
+  });
+
+  afterEach(() => {
+    if (priorLimit === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = priorLimit;
+  });
+
+  it('sees a test class sorting past the scan window — no false `uncovered`', async () => {
+    const r = await testCoverageGapsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // A_0 is covered by ZZ_A0Test (clean) -> not a gap at all. Pre-fix it was
+    // reported `uncovered` with a "No test class reaches this class" action.
+    expect(d.gaps.map((g) => g.componentId)).toEqual([
+      'ApexClass:A_1',
+      'ApexClass:A_2',
+      'ApexClass:A_3',
+      'ApexClass:A_4',
+    ]);
+    expect(d.totalGapsCount).toBe(4);
+  });
+
+  it('reports a classFilter id the vault does not carry in notFoundClassIds', async () => {
+    const r = await testCoverageGapsHandler(ctx, {
+      classFilter: ['ApexClass:Nope'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.notFoundClassIds).toEqual(['ApexClass:Nope']);
+    expect(d.gaps).toEqual([]);
+    expect(d.totalGapsCount).toBe(0);
+    expect(d.boundaries.join(' ')).toContain('ApexClass:Nope');
+  });
+
+  it('leaves notFoundClassIds empty for a filter id the vault DOES carry', async () => {
+    const r = await testCoverageGapsHandler(ctx, {
+      classFilter: ['ApexClass:A_1'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.notFoundClassIds).toEqual([]);
+    expect(r.value.data.totalGapsCount).toBe(1);
+  });
+});
+
+// =============================================================================
+// The literal repro of the defect, at the REAL cap (no SFI_NODE_SCAN_LIMIT
+// override). `A_Target` IS covered, but its covering test sorts at id-ASC
+// position 501 — outside the single 500-row page the corpus fetch used to take.
+// `testClassIds` was built from that same page, so the BFS filter could not see
+// the test and the class shipped a `coverageStatus: 'uncovered'` verdict with a
+// recommendedAction asserting a CHECKED absence.
+// =============================================================================
+
+describe('testCoverageGapsHandler — past the 500-row page boundary (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tcg-over500-'));
+    const opened = await openGraph(join(dir, 'over500.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:A_Target',
+            apiName: 'A_Target',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+          makeNode({
+            id: 'ApexClass:A_Uncovered',
+            apiName: 'A_Uncovered',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+          // Filler TEST classes — they keep the BFS fan-out to the two
+          // non-test classes while pushing the real covering test past 500.
+          ...Array.from({ length: 500 }, (_unused, i) =>
+            makeNode({
+              id: `ApexClass:M_Test${String(i).padStart(4, '0')}`,
+              apiName: `M_Test${i}`,
+              properties: { isTest: true, qualityIssues: [] },
+            }),
+          ),
+          makeNode({
+            id: 'ApexClass:Z_TargetTest',
+            apiName: 'Z_TargetTest',
+            properties: { isTest: true, qualityIssues: [] },
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:Z_TargetTest',
+            toId: 'ApexClass:A_Target',
+            edgeType: 'callsApex',
+          }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does NOT report a class as uncovered when its test sorts past position 500', async () => {
+    const r = await testCoverageGapsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: both classes came back `uncovered`, totalGapsCount 2.
+    expect(d.gaps.map((g) => g.componentId)).toEqual(['ApexClass:A_Uncovered']);
+    expect(d.totalGapsCount).toBe(1);
+    expect(d.byStatus.uncovered).toBe(1);
+  });
+});

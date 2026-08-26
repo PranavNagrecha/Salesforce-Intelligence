@@ -566,3 +566,147 @@ describe('endpointCatalogInputSchema', () => {
     ).toBe(true);
   });
 });
+
+// =============================================================================
+// G2 full-scan honesty. Every collector took ONE 500-row `listNodesByType` page
+// with no offset, so a `@RestResource` sorting past that prefix was silently
+// absent and `summary.totalEndpoints` under-reported with nothing in the
+// payload to say so. `SFI_NODE_SCAN_LIMIT=3` shrinks the scan window so 5 nodes
+// exercise multi-window paging instead of the 602 QA had to seed.
+// =============================================================================
+
+describe('endpointCatalogHandler — full per-category scan (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+  let priorLimit: string | undefined;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-endpoint-fullscan-'));
+    const opened = await openGraph(join(dir, 'fullscan.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({ id: 'ApexClass:A_Early', apiName: 'A_Early' }),
+          ...Array.from({ length: 3 }, (_unused, i) =>
+            makeNode({ id: `ApexClass:Filler_${i}`, apiName: `Filler_${i}` }),
+          ),
+          // Sorts LAST by id ASC — past every scan window.
+          makeNode({ id: 'ApexClass:Z_Webhook', apiName: 'Z_Webhook' }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:A_Early',
+            toId: 'ExternalApi:rest//services/apexrest/early',
+            edgeType: 'exposes',
+          }),
+          makeEdge({
+            fromId: 'ApexClass:Z_Webhook',
+            toId: 'ExternalApi:rest//services/apexrest/webhook',
+            edgeType: 'exposes',
+          }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    priorLimit = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '3';
+  });
+
+  afterEach(() => {
+    if (priorLimit === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = priorLimit;
+  });
+
+  it('surfaces an endpoint on a class sorting past the scan window', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.inboundApis.map((e) => e.url).sort()).toEqual([
+      '/services/apexrest/early',
+      '/services/apexrest/webhook',
+    ]);
+    // Pre-fix this was 1 — the webhook was invisible and indistinguishable
+    // from an endpoint that does not exist.
+    expect(d.summary.totalEndpoints).toBe(2);
+    expect(d.summary.inboundCount).toBe(2);
+    expect(d.boundaries).toEqual([]);
+  });
+});
+
+// =============================================================================
+// The literal repro of the defect, at the REAL cap (SFI_NODE_SCAN_LIMIT is not
+// set here, so the window is the graph layer's 500). The old collector issued
+// one `listNodesByType(..., { limit: 500 })` with no offset, so the endpoint on
+// the 502nd class by id ASC was silently absent and `totalEndpoints` said 1.
+// =============================================================================
+
+describe('endpointCatalogHandler — past the 500-row page boundary (G2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-endpoint-over500-'));
+    const opened = await openGraph(join(dir, 'over500.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({ id: 'ApexClass:AaaEarlyRest', apiName: 'AaaEarlyRest' }),
+          ...Array.from({ length: 501 }, (_unused, i) =>
+            makeNode({
+              id: `ApexClass:Filler${String(i).padStart(4, '0')}`,
+              apiName: `Filler${i}`,
+            }),
+          ),
+          makeNode({ id: 'ApexClass:ZWebhook', apiName: 'ZWebhook' }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:AaaEarlyRest',
+            toId: 'ExternalApi:rest//services/apexrest/early',
+            edgeType: 'exposes',
+          }),
+          makeEdge({
+            fromId: 'ApexClass:ZWebhook',
+            toId: 'ExternalApi:rest//services/apexrest/webhook',
+            edgeType: 'exposes',
+          }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('finds the endpoint on the class past position 500 by id ASC', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.inboundApis.map((e) => e.url).sort()).toEqual([
+      '/services/apexrest/early',
+      '/services/apexrest/webhook',
+    ]);
+    expect(d.summary.totalEndpoints).toBe(2);
+  });
+});
