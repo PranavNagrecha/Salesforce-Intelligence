@@ -78,6 +78,35 @@ const FRONTEND_SUFFIXES = ['.js', '.html', '.cmp', '.app', '.evt', '.page', '.co
 const FRONTEND_DIR_RE = /\/(lwc|aura|pages|components)\//;
 
 /**
+ * BUNDLE directories — a strict subset of {@link FRONTEND_DIR_RE}, and the
+ * only one that may decide self-match by DIRECTORY.
+ *
+ * These two patterns look interchangeable and are not, which is how one regex
+ * ended up doing both jobs and getting the second one wrong. The distinction is
+ * the on-disk layout:
+ *
+ *   BUNDLE  `lwc/myCmp/myCmp.js`, `aura/MyCmp/MyCmp.cmp` — one directory PER
+ *           component, so a sibling file is the SAME component. Excluding the
+ *           whole directory is correct.
+ *   FLAT    `pages/Foo.page`, `components/Bar.component` — one directory for
+ *           EVERY component of that type, so a sibling file is a DIFFERENT
+ *           component. Excluding the whole directory discards every real
+ *           Visualforce caller in the org.
+ *
+ * `FRONTEND_DIR_RE` must keep listing all four because it also bounds the grep
+ * WALK, where flat directories genuinely belong. Only the self-match test
+ * narrows to bundles.
+ */
+const BUNDLE_DIR_RE = /\/(lwc|aura)\//;
+
+/** File name up to its first dot — `Foo.page` and `Foo.page-meta.xml` share `Foo`. */
+const basenameStem = (p: string): string => {
+  const base = p.slice(p.lastIndexOf('/') + 1);
+  const dot = base.indexOf('.');
+  return dot === -1 ? base : base.slice(0, dot);
+};
+
+/**
  * Per-type blind-spot notes appended when a component of this type has NO
  * static evidence (P14-USAGE-flow-object-boundaries): the generic
  * empty≠absent boundary says absence isn't proof, but each of these families
@@ -236,19 +265,36 @@ const apiNameOf = (id: string): string => {
  * Two shapes of "own definition":
  *   1. A single-file component (ApexClass `.cls`, ApexTrigger `.trigger`) —
  *      the match's path is EXACTLY the node's own `sourcePath`.
- *   2. A bundle component (LWC / Aura / Visualforce) whose `sourcePath` sits
- *      inside a bundle directory — ANY file in that SAME bundle directory is
- *      still the component's own definition (a `.js` controller matching its
- *      own `.html` template's tag name is not a caller either), so the whole
- *      directory is excluded, gated to bundle directories only via
- *      {@link FRONTEND_DIR_RE} so this never over-reaches for a plain
- *      single-file component.
+ *   2. A BUNDLE component (LWC / Aura) whose `sourcePath` sits inside its own
+ *      bundle directory — ANY file in that SAME directory is still the
+ *      component's own definition (a `.js` controller matching its own `.html`
+ *      template's tag name is not a caller either), so the whole directory is
+ *      excluded. Gated via {@link BUNDLE_DIR_RE}, NOT the broader frontend
+ *      pattern.
+ *   3. A FLAT frontend component (Visualforce `pages/` and `components/`) whose
+ *      directory holds EVERY component of its type. Here only the same
+ *      api-name stem is the component's own definition — `Foo.page` and
+ *      `Foo.page-meta.xml` — while `Bar.page` next to it is a different
+ *      component and a legitimate caller.
+ *
+ * Case 3 previously fell into case 2, because one pattern was deciding both
+ * "is this a frontend directory worth grepping" and "is this a bundle". Every
+ * real Visualforce caller was discarded as a self-match and the tool reported
+ * no static evidence — the fix for over-counting had produced an under-count,
+ * in the tool people consult before deleting things.
  */
 const isSelfMatch = (matchPath: string, ownSourcePath: string): boolean => {
   if (matchPath === ownSourcePath) return true;
-  if (!FRONTEND_DIR_RE.test(ownSourcePath)) return false;
   const ownDir = ownSourcePath.slice(0, ownSourcePath.lastIndexOf('/') + 1);
-  return ownDir.length > 0 && matchPath.startsWith(ownDir);
+  if (ownDir.length === 0) return false;
+  if (BUNDLE_DIR_RE.test(ownSourcePath)) return matchPath.startsWith(ownDir);
+  if (FRONTEND_DIR_RE.test(ownSourcePath)) {
+    return (
+      matchPath.startsWith(ownDir) &&
+      basenameStem(matchPath) === basenameStem(ownSourcePath)
+    );
+  }
+  return false;
 };
 
 export const findComponentUsagesHandler = async (

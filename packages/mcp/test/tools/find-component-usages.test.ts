@@ -214,6 +214,21 @@ describe('findComponentUsagesHandler', () => {
         "<!-- import selfWidget from 'c/selfWidget' -->\n",
       );
 
+      // Visualforce is NOT a bundle layout. `pages/` is FLAT — every page in
+      // the org is a sibling in one directory — so "same directory" means
+      // "different component", the exact opposite of what it means under
+      // `lwc/` and `aura/`. CallerPage is a genuine external caller of
+      // SelfPage that happens to live next to it.
+      mkdirSync(join(src, 'pages'), { recursive: true });
+      writeFileSync(
+        join(src, 'pages', 'SelfPage.page'),
+        '<apex:page>SelfPage body</apex:page>\n',
+      );
+      writeFileSync(
+        join(src, 'pages', 'CallerPage.page'),
+        '<apex:page><c:SelfPage /></apex:page>\n',
+      );
+
       await importExtractionResults(store, [{
         nodes: [
           node({ id: 'ApexClass:Orphaned', type: 'ApexClass', apiName: 'Orphaned', sourcePath: 'source/main/default/classes/Orphaned.cls' }),
@@ -221,6 +236,8 @@ describe('findComponentUsagesHandler', () => {
           node({ id: 'ApexClass:Caller', type: 'ApexClass', apiName: 'Caller', sourcePath: 'source/main/default/classes/Caller.cls' }),
           node({ id: 'LightningComponentBundle:selfWidget', type: 'LightningComponentBundle', apiName: 'selfWidget', sourcePath: 'source/main/default/lwc/selfWidget/selfWidget.js' }),
           node({ id: 'LightningComponentBundle:hostWidget', type: 'LightningComponentBundle', apiName: 'hostWidget', sourcePath: 'source/main/default/lwc/hostWidget/hostWidget.html' }),
+          node({ id: 'VisualforcePage:SelfPage', type: 'VisualforcePage', apiName: 'SelfPage', sourcePath: 'source/main/default/pages/SelfPage.page' }),
+          node({ id: 'VisualforcePage:CallerPage', type: 'VisualforcePage', apiName: 'CallerPage', sourcePath: 'source/main/default/pages/CallerPage.page' }),
         ],
         edges: [],
       }]);
@@ -252,6 +269,37 @@ describe('findComponentUsagesHandler', () => {
       expect(paths.every((p) => !p.includes('Used.cls'))).toBe(true);
       expect(paths.some((p) => p.includes('Caller.cls'))).toBe(true);
       expect(d.summary.hasStaticEvidence).toBe(true);
+    });
+
+    /**
+     * FIND-COMPONENT-USAGES-VF-FLAT-DIR — a regression introduced BY the
+     * self-match fix above.
+     *
+     * `FRONTEND_DIR_RE` was doing two unrelated jobs with one pattern: bounding
+     * the frontend grep WALK (where `pages`/`components` belong) and deciding
+     * BUNDLE-ness for self-match exclusion (where they do not). `lwc/` and
+     * `aura/` are genuine bundle layouts — `aura/MyCmp/MyCmp.cmp` — so "same
+     * directory" means "same component". Visualforce is FLAT: every `.page` in
+     * the org is a sibling in one `pages/` directory, so "same directory" means
+     * "a DIFFERENT component".
+     *
+     * The consequence was that every real Visualforce caller was discarded as
+     * a self-match, and the tool reported no static evidence — in the tool
+     * people consult before deleting things. The 0.3.2 fix for over-counting
+     * created an under-count.
+     */
+    it('FAIL-BEFORE/PASS-AFTER: a Visualforce caller in the SAME FLAT pages/ dir is a real referrer, not a self-match', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'VisualforcePage:SelfPage' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const d = r.value.data;
+      const paths = d.grepSupplement.matches.map((m) => m.path);
+      // The caller survives...
+      expect(paths.some((p) => p.includes('CallerPage.page'))).toBe(true);
+      expect(d.summary.hasStaticEvidence).toBe(true);
+      // ...while the page's OWN file is still excluded. Both halves matter:
+      // dropping the flat-directory rule entirely would resurrect the original
+      // self-match bug for Visualforce.
+      expect(paths.every((p) => !p.includes('SelfPage.page'))).toBe(true);
     });
 
     it('excludes a bundle self-reference from a DIFFERENT file in its OWN bundle directory', async () => {
