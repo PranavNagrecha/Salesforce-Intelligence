@@ -35,7 +35,29 @@ const FIXTURE_MANIFEST: VaultManifest = {
   sourceTreeHash: 'sha256:fixture-mr',
 };
 
-const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
+/**
+ * SOUNDNESS-UNSCANNED-READS-AS-CLEAN (fixture side).
+ *
+ * `soundness.ts` now distinguishes three states on an Apex node: carries the
+ * `dynamic-apex` signal, was SCANNED and is clean (`qualityIssues: []`), and
+ * was NEVER SCANNED (no such property). Absence means unscanned, because the
+ * extractor's contract is that the property is always present on a scanned
+ * node — so a result over unscanned Apex can no longer be reported `complete`.
+ *
+ * These fixtures predate that distinction and left `properties` empty, which
+ * now reads as "never scanned" and correctly downgrades coverage. Every test
+ * here means a CLEAN Apex component, so the fixture says so explicitly rather
+ * than the assertions being relaxed. A test that wants the unscanned case sets
+ * `properties` itself and this default steps aside.
+ */
+const withScanDefault = (node: Node): Node =>
+  (node.type === 'ApexClass' || node.type === 'ApexTrigger') &&
+  !('qualityIssues' in (node.properties as Record<string, unknown>))
+    ? { ...node, properties: { ...node.properties, qualityIssues: [] } }
+    : node;
+
+const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node =>
+  withScanDefault({
   type: 'ApexClass',
   apiName: 'Anon',
   label: null,
@@ -46,7 +68,7 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
   apiVersion: null,
   properties: {},
   ...overrides,
-});
+  });
 
 const makeEdge = (
   overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>,
