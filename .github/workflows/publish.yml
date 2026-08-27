@@ -267,15 +267,25 @@ jobs:
       # so it silently rotted: the registry sat at 0.1.26 while npm was at 0.2.5,
       # and downstream MCP directories crawl the registry record, propagating the
       # stale version across the ecosystem. Automating it here is the fix.
-      # NOT job-fatal: `npm publish` above is guarded against re-runs, but the
-      # registry rejects a duplicate version outright. Without this, re-running
-      # a partially-failed publish dies HERE — after npm already has the version
-      # — and never reaches the SBOM or the GitHub release, stranding the very
-      # release this workflow was added to stop cutting by hand. A failure still
-      # shows as a red step; the version-mismatch guard below is a hard exit
-      # because that one means the tag itself is wrong.
+      # This step used to carry `continue-on-error: true`, for a real reason:
+      # `npm publish` above is guarded against re-runs, but the registry rejects
+      # a duplicate version outright, so re-running a partially-failed publish
+      # died HERE — after npm already had the version — and never reached the
+      # SBOM or the GitHub release, stranding the very release this workflow
+      # exists to stop cutting by hand.
+      #
+      # The cost was that EVERY registry failure was swallowed. A green Publish
+      # job could leave the official public record on an older version while npm
+      # said otherwise, and nothing in the run would say so — the discovery
+      # channel rotting silently is precisely the failure mode the registry
+      # entry exists to prevent.
+      #
+      # Both are now satisfied by distinguishing the two cases instead of
+      # blanket-ignoring them: an ALREADY-PUBLISHED version is an idempotent
+      # re-run and exits 0 with a visible notice; anything else is fatal. The
+      # difference between "we already did this" and "this did not work" is
+      # exactly what `continue-on-error` erased.
       - name: Publish to the official MCP Registry (keyless OIDC)
-        continue-on-error: true
         working-directory: packages/cli
         run: |
           VERSION="$(node -p "require('./package.json').version")"
@@ -288,7 +298,27 @@ jobs:
             | tar -xz mcp-publisher
           ./mcp-publisher validate
           ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+
+          set +e
+          OUT="$(./mcp-publisher publish 2>&1)"
+          RC=$?
+          set -e
+          echo "$OUT"
+
+          if [ "$RC" -eq 0 ]; then
+            echo "::notice::MCP Registry: published ${VERSION}."
+            exit 0
+          fi
+
+          # The ONLY tolerated failure: this exact version is already on the
+          # registry, i.e. we are re-running a publish that already got this far.
+          if printf '%s' "$OUT" | grep -qiE 'already exists|already published|duplicate version|version .* exists'; then
+            echo "::notice::MCP Registry already carries ${VERSION} — idempotent re-run, treating as done."
+            exit 0
+          fi
+
+          echo "::error::MCP Registry publish FAILED for ${VERSION} and it was NOT a duplicate-version rejection. npm may already have this version, so the public record is now INCONSISTENT: fix the cause and re-run this workflow, which is safe — a genuine duplicate is tolerated above."
+          exit "$RC"
 
       # AUDIT-F10 / Wave 4: real CycloneDX SBOM via cdxgen (pnpm-aware).
       # Fails the publish job if the artifact is missing/empty — SECURITY.md
