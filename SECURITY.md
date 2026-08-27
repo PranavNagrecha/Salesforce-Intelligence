@@ -4,8 +4,16 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x (current public release) | Yes |
+| 0.3.x (current public release) | Yes |
+| 0.2.x and earlier | No |
 | Pre-0.1 / maintainer-only snapshots | No |
+
+<!-- The first row's minor line is asserted against packages/cli/package.json by
+     `pnpm check:version-consistency`. It read "0.2.x (current public release)"
+     for three releases after 0.3.0 shipped — on the page a security researcher
+     reads first, where a stale supported-versions table reads as an abandoned
+     project. A gate now holds this, not a release checklist. -->
+
 
 Security fixes land on the latest release tag. Pin your install to a tagged
 version in production workflows — see

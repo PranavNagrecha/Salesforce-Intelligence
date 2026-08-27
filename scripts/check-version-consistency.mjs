@@ -153,6 +153,91 @@ if (existsSync(join(root, pluginRel))) {
   }
 }
 
+// --- 1d. The LAUNCH CONTRACT — does the published config bind a vault? ---
+//
+// `resolveVaultBinding()` (packages/cli/src/commands/mcp.ts) resolves
+// `--vault` > `SFI_VAULT` > `./org-kb`. That last fallback is relative to the
+// directory the MCP HOST launched in, and a host is almost never launched
+// inside the user's Salesforce project — so a config that binds neither points
+// the server at a vault that does not exist. The server then starts in setup
+// mode and truthfully reports it has no org, which reads to a first-time user
+// as "this product is broken".
+//
+// Every surface that a stranger can install FROM is checked here. A surface
+// that structurally cannot carry a path is exempt, but the exemption is
+// DECLARED with its reason rather than silently absent — otherwise a future
+// surface that simply forgot would look identical to one that cannot.
+const bindsVault = (args, env) =>
+  (Array.isArray(args) && args.includes('--vault')) ||
+  (env !== undefined && env !== null && Object.keys(env).includes('SFI_VAULT'));
+
+// The registry manifest — the record `mcp-publisher` pushes to the official
+// MCP Registry, and the only channel with evidence of delivering a visitor who
+// was not the maintainer. It declares user inputs rather than passing values,
+// so the binding is an `environmentVariables` declaration the host prompts for.
+const serverRel = 'packages/cli/server.json';
+if (existsSync(join(root, serverRel))) {
+  const manifest = readJson(serverRel);
+  for (const pkg of manifest.packages ?? []) {
+    const declaresVault = (pkg.environmentVariables ?? []).some((e) => e?.name === 'SFI_VAULT');
+    const argVault = (pkg.runtimeArguments ?? []).some(
+      (a) => a?.name === '--vault' || a?.value === '--vault',
+    );
+    if (!declaresVault && !argVault) {
+      errors.push(
+        `${serverRel} package "${pkg.identifier}" declares no vault binding — add an ` +
+          'SFI_VAULT environmentVariables entry (or a --vault runtimeArgument). Without one ' +
+          'the official registry record installs a server pointed at ./org-kb relative to the ' +
+          "host's launch directory, which is not the user's Salesforce project.",
+      );
+    }
+  }
+}
+
+// Claude Code plugin: DECLARED EXEMPTION.
+//
+// A plugin manifest is written once and shipped to every user, so it cannot
+// carry an absolute path, and there is no documented host expansion to build
+// one with — `${workspaceFolder}` is VS Code's own and resolves to nothing
+// outside a workspace file. The honest binding for this surface is therefore
+// setup mode: the server starts, and `sfi.setup_status` names the exact
+// commands. What IS asserted is that the surface still SAYS so, so that a
+// future maintainer who removes the guidance is told.
+if (existsSync(join(root, pluginRel))) {
+  const plugin = readJson(pluginRel);
+  for (const [name, entry] of Object.entries(plugin.mcpServers ?? {})) {
+    if (bindsVault(entry?.args, entry?.env)) continue; // bound explicitly — fine
+    const desc = String(plugin.description ?? '');
+    if (!/setup_status/.test(desc)) {
+      errors.push(
+        `${pluginRel} mcpServers.${name} binds no vault (no --vault, no SFI_VAULT), which is ` +
+          'the documented exemption for a plugin manifest — but then plugin.json\'s own ' +
+          '`description` must point the host at `sfi.setup_status`, so a user whose vault is ' +
+          'not found is told what to run. Add it, or bind a vault explicitly.',
+      );
+    }
+  }
+}
+
+// --- 1e. SECURITY.md supported-versions must track the shipped minor ---
+//
+// It read "0.2.x (current public release)" for three releases after 0.3.0
+// shipped. A stale supported-versions table on the page a security researcher
+// opens first reads as an unmaintained project, and it is the one page where
+// that inference is expensive.
+const minorLine = `${expected.split('.').slice(0, 2).join('.')}.x`;
+if (existsSync(join(root, 'SECURITY.md'))) {
+  const security = readText('SECURITY.md');
+  const row = security.match(/^\|\s*(\d+\.\d+\.x)[^|]*\|\s*Yes\s*\|/m);
+  if (row === null) {
+    errors.push('SECURITY.md has no "| <major>.<minor>.x … | Yes |" supported-versions row');
+  } else if (row[1] !== minorLine) {
+    errors.push(
+      `SECURITY.md declares ${row[1]} supported but the shipped line is ${minorLine}`,
+    );
+  }
+}
+
 // --- 2. SERVER_VERSION resolve (shipped path) ---
 const buildSrc = readText('packages/cli/build.mjs');
 if (!/SFI_BUILD_VERSION\s*:\s*JSON\.stringify\(\s*pkg\.version/.test(buildSrc)) {

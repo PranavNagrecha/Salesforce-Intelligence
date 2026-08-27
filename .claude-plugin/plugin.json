@@ -1,7 +1,7 @@
 {
   "name": "sf-intelligence",
   "version": "0.3.2",
-  "description": "MCP-first, offline-first hybrid knowledge base for a Salesforce org. Resolve-first routing, coverage-aware destructive verdicts, opt-in live read-only plane. Ask sfi.capabilities for the live tool map. Default tool profile is core (incl. sfi.live_consent); non-core analyses run via sfi.run_analysis.",
+  "description": "MCP-first, offline-first hybrid knowledge base for a Salesforce org. Resolve-first routing, coverage-aware destructive verdicts, opt-in live read-only plane. FIRST RUN: this plugin cannot know where your vault lives, so the server binds ./org-kb relative to wherever the host launched — usually not your Salesforce project. If answers come back empty or the org looks missing, call sfi.setup_status: it reports where it looked, which orgs are authenticated, and the exact ordered commands to build a vault. Set SFI_VAULT to an absolute org-kb path to bind it permanently. Ask sfi.capabilities for the live tool map. Default tool profile is core (incl. sfi.live_consent); non-core analyses run via sfi.run_analysis.",
   "author": {
     "name": "sf-intelligence contributors"
   },
