@@ -6,6 +6,7 @@ import {
   collapseHome,
   hasAdjacentSegments,
   hasAnySegment,
+  isPathWithin,
   PATH_SEPARATORS,
   splitPathSegments,
   toPosixPath,
@@ -168,5 +169,57 @@ describe('hasAnySegment — membership', () => {
   it('does not match a partial segment', () => {
     // `lwc` must be a whole segment, not a substring of `my-lwc-thing`.
     expect(hasAnySegment('a/my-lwc-thing/foo.js', ['lwc'])).toBe(false);
+  });
+});
+
+describe('isPathWithin — containment with a real separator boundary', () => {
+  it('treats a path as within itself', () => {
+    expect(isPathWithin('/a/org-kb', '/a/org-kb')).toBe(true);
+  });
+
+  it('matches a nested child, at any depth', () => {
+    expect(isPathWithin('/a/org-kb', '/a/org-kb/shared')).toBe(true);
+    expect(isPathWithin('/a/org-kb', '/a/org-kb/shared/deep/file.json')).toBe(true);
+  });
+
+  it('does NOT match a sibling that merely shares a prefix', () => {
+    // The whole reason this is not `startsWith`: `/a/orgkb` and `/a/org-kb-2`
+    // are different directories that a bare prefix test calls contained.
+    expect(isPathWithin('/a/org', '/a/orgkb')).toBe(false);
+    expect(isPathWithin('/a/org-kb', '/a/org-kb-2')).toBe(false);
+  });
+
+  it('ignores trailing separators on either side', () => {
+    expect(isPathWithin('/a/org-kb/', '/a/org-kb')).toBe(true);
+    expect(isPathWithin('/a/org-kb', '/a/org-kb/')).toBe(true);
+    expect(isPathWithin('/a/org-kb//', '/a/org-kb/shared/')).toBe(true);
+  });
+
+  it('is directional — a parent is not within its child', () => {
+    expect(isPathWithin('/a/org-kb/shared', '/a/org-kb')).toBe(false);
+  });
+
+  it('returns false for unrelated paths', () => {
+    expect(isPathWithin('/a/org-kb', '/tmp/somewhere-else')).toBe(false);
+  });
+
+  it('handles the filesystem root as a parent', () => {
+    expect(isPathWithin('/', '/a')).toBe(true);
+    expect(isPathWithin('/', '/')).toBe(true);
+  });
+
+  it('handles a Windows drive-letter pair on a POSIX host', () => {
+    // Bound to the string, not to `path.sep`: the caller may hold a native
+    // Windows path while the host separator is `/`.
+    expect(isPathWithin('C:\\Proj\\org-kb', 'C:\\Proj\\org-kb\\shared')).toBe(true);
+    expect(isPathWithin('C:\\', 'C:\\Proj')).toBe(true);
+    expect(isPathWithin('C:\\Proj\\org', 'C:\\Proj\\orgkb')).toBe(false);
+    expect(isPathWithin('C:\\Proj', 'D:\\Proj\\org-kb')).toBe(false);
+  });
+
+  it('does NOT case-fold or resolve symlinks — that is the caller\'s job', () => {
+    // Documented boundary: the vault-anonymize rail feeds it canonicalized and
+    // case-folded spellings itself precisely because this stays lexical.
+    expect(isPathWithin('/a/ORG-KB', '/a/org-kb/shared')).toBe(false);
   });
 });

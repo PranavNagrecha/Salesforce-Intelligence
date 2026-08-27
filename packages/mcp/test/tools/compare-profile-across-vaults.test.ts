@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
+  Edge,
   ExtractionResult,
   Node,
   VaultManifest,
@@ -34,6 +35,7 @@ import {
   compareProfileAcrossVaultsHandler,
   compareProfileAcrossVaultsInputSchema,
 } from '../../src/tools/compare-profile-across-vaults.js';
+import { toolLocalPayloadBudgetBytes } from '../../src/tools/response-budget.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -56,6 +58,40 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
   properties: {},
   ...overrides,
 });
+
+const PROFILE_ID = 'Profile:System Administrator';
+const ACCOUNT_ID = 'CustomObject:Account';
+const DISCOUNT_FIELD_ID = 'CustomField:Account.Discount__c';
+const BILLING_CLASS_ID = 'ApexClass:BillingService';
+
+/**
+ * A `grantedBy` edge in the shape the Profile extractor emits: one edge per
+ * `<objectPermissions>` / `<fieldPermissions>` / `<classAccesses>` entry, flags
+ * carried in `properties`.
+ */
+const makeGrantEdge = (
+  toId: string,
+  properties: Readonly<Record<string, unknown>>,
+  fromId: string = PROFILE_ID,
+): Edge => ({
+  fromId,
+  toId,
+  edgeType: 'grantedBy',
+  confidence: 'declared',
+  source: 'test-fixture',
+  properties,
+});
+
+/** The three grant targets, seeded in BOTH vaults so no edge is `targetMissing`. */
+const grantTargetNodes: readonly Node[] = [
+  makeNode({ id: ACCOUNT_ID, type: 'CustomObject', apiName: 'Account' }),
+  makeNode({
+    id: DISCOUNT_FIELD_ID,
+    type: 'CustomField',
+    apiName: 'Account.Discount__c',
+  }),
+  makeNode({ id: BILLING_CLASS_ID, type: 'ApexClass', apiName: 'BillingService' }),
+];
 
 let rootDir: string;
 let vaultAPath: string;
@@ -80,41 +116,74 @@ beforeAll(async () => {
   if (!openedB.ok) throw new Error(openedB.error.message);
   storeB = openedB.value;
 
-  // Vault A — System Administrator with edit:true on Account.Discount__c.
+  // G3-permission-truth: both vaults are seeded the way the REAL Profile
+  // extractor writes a profile — grant COUNTS (+ a plain `string[]` of user
+  // permissions) on the node, and the grants themselves as outgoing `grantedBy`
+  // EDGES. The previous fixture hand-seeded `properties.objectPermissions` /
+  // `.fieldPermissions` / `.apexClassAccesses`, a shape NO extractor produces;
+  // it is why this suite stayed green while the tool reported a fabricated
+  // "0 drift" on every real vault.
+  //
+  // Vault A — editable:true on Account.Discount__c, an Apex class grant, and
+  // the extra `ViewAllData` user permission.
   const seedA: ExtractionResult = {
     nodes: [
+      ...grantTargetNodes,
       makeNode({
-        id: 'Profile:System Administrator',
+        id: PROFILE_ID,
         properties: {
-          fieldPermissions: [
-            { field: 'Account.Discount__c', read: true, edit: true },
-          ],
-          objectPermissions: [
-            { object: 'Account', read: true, edit: true, delete: true },
-          ],
-          userPermissions: [{ userPermission: 'ApiEnabled', enabled: true }],
+          description: null,
+          userLicense: 'Salesforce',
+          custom: false,
+          objectGrantCount: 1,
+          fieldGrantCount: 1,
+          classGrantCount: 1,
+          userPermissions: ['ApiEnabled', 'ViewAllData'],
         },
       }),
     ],
-    edges: [],
+    edges: [
+      makeGrantEdge(ACCOUNT_ID, {
+        allowCreate: false,
+        allowDelete: true,
+        allowEdit: true,
+        allowRead: true,
+        modifyAllRecords: false,
+        viewAllRecords: false,
+      }),
+      makeGrantEdge(DISCOUNT_FIELD_ID, { editable: true, readable: true }),
+      makeGrantEdge(BILLING_CLASS_ID, { enabled: true }),
+    ],
   };
-  // Vault B — same profile with edit:false on Account.Discount__c.
+  // Vault B — same profile: identical object grant, editable:false on
+  // Account.Discount__c, NO Apex class grant, and no `ViewAllData`.
   const seedB: ExtractionResult = {
     nodes: [
+      ...grantTargetNodes,
       makeNode({
-        id: 'Profile:System Administrator',
+        id: PROFILE_ID,
         properties: {
-          fieldPermissions: [
-            { field: 'Account.Discount__c', read: true, edit: false },
-          ],
-          objectPermissions: [
-            { object: 'Account', read: true, edit: true, delete: true },
-          ],
-          userPermissions: [{ userPermission: 'ApiEnabled', enabled: true }],
+          description: null,
+          userLicense: 'Salesforce',
+          custom: false,
+          objectGrantCount: 1,
+          fieldGrantCount: 1,
+          classGrantCount: 0,
+          userPermissions: ['ApiEnabled'],
         },
       }),
     ],
-    edges: [],
+    edges: [
+      makeGrantEdge(ACCOUNT_ID, {
+        allowCreate: false,
+        allowDelete: true,
+        allowEdit: true,
+        allowRead: true,
+        modifyAllRecords: false,
+        viewAllRecords: false,
+      }),
+      makeGrantEdge(DISCOUNT_FIELD_ID, { editable: false, readable: true }),
+    ],
   };
 
   await importExtractionResults(storeA, [seedA]);
@@ -155,11 +224,80 @@ describe('compareProfileAcrossVaultsHandler', () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
+    // The target is the canonical component id — the `grantedBy` edge target,
+    // which is what the grants are actually keyed by.
     const drift = r.value.data.grantDiffs.fieldPermissions.find(
-      (d) => d.targetId === 'Account.Discount__c',
+      (d) => d.targetId === DISCOUNT_FIELD_ID,
     );
     expect(drift).toBeDefined();
     expect(drift?.side).toBe('both');
+  });
+
+  it('G3 — reads object / field / Apex grants from `grantedBy` edges, not absent node properties', async () => {
+    // The defect: the tool read `properties.objectPermissions` /
+    // `.fieldPermissions` / `.apexClassAccesses`, three keys `buildProperties`
+    // never writes, so all three reported a measured-looking 0 on real vaults.
+    const r = await compareProfileAcrossVaultsHandler(ctx, {
+      profileName: 'System Administrator',
+      vaultA: 'acme-prod',
+      vaultB: 'acme-sandbox',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { perCategoryDriftCount, notEvaluatedCategories } = r.value.data.summary;
+    // read↔edit LEVEL drift on the field grant (edge properties compared, not
+    // just grant presence).
+    expect(perCategoryDriftCount['fieldPermissions']).toBe(1);
+    // The Apex class grant exists in A only.
+    expect(perCategoryDriftCount['apexClassAccesses']).toBe(1);
+    expect(
+      r.value.data.grantDiffs.apexClassAccesses.map((d) => [d.targetId, d.side]),
+    ).toEqual([[BILLING_CLASS_ID, 'A']]);
+    // The object grant is byte-identical — a REAL measured zero.
+    expect(perCategoryDriftCount['objectPermissions']).toBe(0);
+    expect(notEvaluatedCategories).not.toContain('objectPermissions');
+    expect(notEvaluatedCategories).not.toContain('fieldPermissions');
+    expect(notEvaluatedCategories).not.toContain('apexClassAccesses');
+  });
+
+  it('G3 — compares `userPermissions` as a plain string[] set difference', async () => {
+    // `extractGrantMap`'s `typeof entry === 'object'` guard dropped every
+    // string, so the map was `{}` and the count was hard-wired to 0.
+    const r = await compareProfileAcrossVaultsHandler(ctx, {
+      profileName: 'System Administrator',
+      vaultA: 'acme-prod',
+      vaultB: 'acme-sandbox',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.perCategoryDriftCount['userPermissions']).toBe(1);
+    expect(
+      r.value.data.grantDiffs.userPermissions.map((d) => [d.targetId, d.side]),
+    ).toEqual([['ViewAllData', 'A']]);
+    expect(r.value.data.summary.notEvaluatedCategories).not.toContain(
+      'userPermissions',
+    );
+    // field(1) + apexClass(1) + userPermissions(1); object contributes 0.
+    expect(r.value.data.summary.totalDriftCount).toBe(3);
+  });
+
+  it('G3 — a small comparison fits the budget and emits NO paging keys', async () => {
+    const r = await compareProfileAcrossVaultsHandler(ctx, {
+      profileName: 'System Administrator',
+      vaultA: 'acme-prod',
+      vaultB: 'acme-sandbox',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.nextCursor).toBeUndefined();
+    expect(r.value.data.pageInfo).toBeUndefined();
+    // `counts` still publishes the true totals, and every row is on this page.
+    expect(r.value.data.counts['fieldPermissions']).toEqual({
+      total: 1,
+      returnedOnThisPage: 1,
+    });
+    expect(r.value.data.reconciliation.balanced).toBe(true);
+    expect(r.value.data.reconciliation.rowsNotOnThisPage).toBe(0);
   });
 
   it('surfaces the profile-edition-rollup disclosure verbatim', async () => {
@@ -231,6 +369,431 @@ describe('compareProfileAcrossVaultsHandler', () => {
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
     expect(r.error.message).toContain("'no-such-vault' is not registered");
+  });
+});
+
+/**
+ * G3 objection-1 acceptance test — UNBOUNDED FANOUT WITH NO ESCAPE HATCH.
+ *
+ * Reading grants from `grantedBy` edges made these arrays real for the first
+ * time. The CTO's measurement against the real vault (read-only, counts only):
+ * the top five Profiles carry 2921 / 2218 / 1701 / 1696 / 1669 `grantedBy`
+ * edges. This suite seeds a fanout of that ORDER and asserts the payload FITS
+ * the DERIVED tool-local budget, that the summary counts stay COMPLETE, and
+ * that the dropped tail is REACHABLE — walking `nextCursor` to exhaustion
+ * reproduces the total exactly, with no gap and no duplicate.
+ *
+ * FANOUT is 900, not the real vault's 2 921. Seeding 2 921 + 200 rows AND
+ * their edges into TWO DuckDB vaults ran the `beforeAll` past vitest's 20 s
+ * hook budget under the shared thread pool — green when this file was run
+ * alone, red on `vitest run`, which is what CI executes. The property under
+ * test is cursor closure over a fanout far larger than one page; 900 rows
+ * still spans multiple pages at every budget this suite uses, so the assertion
+ * is unchanged in kind. The hook budget is stated explicitly below rather than
+ * left to the default, so a future increase fails loudly instead of flaking.
+ */
+describe('compareProfileAcrossVaultsHandler — high grant fanout is paged, not truncated', () => {
+  const FANOUT = 900;
+  /**
+   * A second, smaller profile in the SAME vaults. At `SFI_MAX_RESPONSE_BYTES=6000`
+   * the derived tool-local cap is 3 976 bytes and a page holds ONE row, so
+   * exhausting the 2 921-row profile there would be 2 921 round trips; this one
+   * proves the same closure property in a test-sized number of pages.
+   */
+  const SMALL_FANOUT = 200;
+  let fanRoot: string;
+  let fanStoreA: GraphStore;
+  let fanStoreB: GraphStore;
+  let fanCtx: Context;
+
+  // Seeding two DuckDB vaults is the slowest hook in this package; state the
+  // budget instead of inheriting the 20 s default that this suite once blew.
+  beforeAll(async () => {
+    fanRoot = await mkdtemp(join(tmpdir(), 'sfi-compare-profile-fanout-'));
+    const aPath = join(fanRoot, 'prod');
+    const bPath = join(fanRoot, 'sandbox');
+    await mkdir(join(aPath, 'graph'), { recursive: true });
+    await mkdir(join(bPath, 'graph'), { recursive: true });
+    await saveManifest(aPath, FIXTURE_MANIFEST);
+    await saveManifest(bPath, FIXTURE_MANIFEST);
+    const oa = await openGraph(vaultPaths(aPath).graphDb);
+    if (!oa.ok) throw new Error(oa.error.message);
+    fanStoreA = oa.value;
+    const ob = await openGraph(vaultPaths(bPath).graphDb);
+    if (!ob.ok) throw new Error(ob.error.message);
+    fanStoreB = ob.value;
+
+    // Every field grant is editable in A and read-only in B, so ALL of them
+    // drift ('both' rows) — the worst case for payload size.
+    const fieldIdsFor = (prefix: string, n: number): string[] =>
+      Array.from(
+        { length: n },
+        (_v, i) => `CustomField:Account.${prefix}_${String(i).padStart(5, '0')}__c`,
+      );
+    const bigFieldIds = fieldIdsFor('Fanout', FANOUT);
+    const smallFieldIds = fieldIdsFor('Small', SMALL_FANOUT);
+    const SMALL_PROFILE_ID = 'Profile:Support Agent';
+    const fieldNodes = [...bigFieldIds, ...smallFieldIds].map((id) =>
+      makeNode({ id, type: 'CustomField', apiName: id.slice('CustomField:'.length) }),
+    );
+    const profileNode = (id: string, grants: number): Node =>
+      makeNode({
+        id,
+        apiName: id.slice('Profile:'.length),
+        properties: {
+          userLicense: 'Salesforce',
+          fieldGrantCount: grants,
+          objectGrantCount: 0,
+          classGrantCount: 0,
+          userPermissions: ['ApiEnabled'],
+        },
+      });
+    const seedFor = (editable: boolean): ExtractionResult => ({
+      nodes: [
+        ...fieldNodes,
+        profileNode(PROFILE_ID, FANOUT),
+        profileNode(SMALL_PROFILE_ID, SMALL_FANOUT),
+      ],
+      edges: [
+        ...bigFieldIds.map((id) =>
+          makeGrantEdge(id, { editable, readable: true }),
+        ),
+        ...smallFieldIds.map((id) =>
+          makeGrantEdge(id, { editable, readable: true }, SMALL_PROFILE_ID),
+        ),
+      ],
+    });
+    await importExtractionResults(fanStoreA, [seedFor(true)]);
+    await importExtractionResults(fanStoreB, [seedFor(false)]);
+    await registerVault(fanRoot, 'prod', aPath);
+    await registerVault(fanRoot, 'sandbox', bPath);
+    fanCtx = { vaultRoot: aPath, manifest: FIXTURE_MANIFEST, graph: fanStoreA };
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = fanRoot;
+  }, 60_000);
+
+  afterAll(async () => {
+    delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    await closeGraph(fanStoreA);
+    await closeGraph(fanStoreB);
+    // Windows and a busy macOS runner can both still hold a DuckDB sidecar for
+    // a moment after close, which surfaced here as ENOTEMPTY; retry rather than
+    // fail a passing suite in teardown.
+    await rm(fanRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  const bytesOfData = (data: unknown): number =>
+    Buffer.byteLength(JSON.stringify(data), 'utf8');
+
+  /** Walk `nextCursor` to exhaustion, returning every targetId in page order. */
+  const walkAll = async (
+    profileName: string,
+    expected: number,
+  ): Promise<string[]> => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let guard = 0; guard <= expected; guard += 1) {
+      const r = await compareProfileAcrossVaultsHandler(fanCtx, {
+        profileName,
+        vaultA: 'prod',
+        vaultB: 'sandbox',
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error(r.error.message);
+      // Every page, not just the first, must fit the derived budget.
+      expect(bytesOfData(r.value.data)).toBeLessThanOrEqual(
+        toolLocalPayloadBudgetBytes(),
+      );
+      expect(r.value.data.section).toBe('fieldPermissions');
+      seen.push(...r.value.data.grantDiffs.fieldPermissions.map((d) => d.targetId));
+      const next = r.value.data.nextCursor;
+      if (next === undefined) return seen;
+      cursor = next;
+    }
+    throw new Error('cursor walk did not terminate');
+  };
+
+  it('fits the DERIVED tool-local budget while keeping the drift count COMPLETE', async () => {
+    const r = await compareProfileAcrossVaultsHandler(fanCtx, {
+      profileName: 'System Administrator',
+      vaultA: 'prod',
+      vaultB: 'sandbox',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const budget = toolLocalPayloadBudgetBytes();
+    expect(bytesOfData(r.value.data)).toBeLessThanOrEqual(budget);
+    // The COUNT is the full population (listEdges takes no limit)...
+    expect(r.value.data.summary.perCategoryDriftCount['fieldPermissions']).toBe(
+      FANOUT,
+    );
+    expect(r.value.data.counts['fieldPermissions']?.total).toBe(FANOUT);
+    // ...while the ARRAY is one page of it, and says so.
+    expect(
+      r.value.data.grantDiffs.fieldPermissions.length,
+    ).toBeLessThan(FANOUT);
+    expect(r.value.data.counts['fieldPermissions']?.returnedOnThisPage).toBe(
+      r.value.data.grantDiffs.fieldPermissions.length,
+    );
+    expect(r.value.data.reconciliation.rowsNotOnThisPage).toBeGreaterThan(0);
+    expect(r.value.data.hasMore).toBe(true);
+    expect(typeof r.value.data.nextCursor).toBe('string');
+  });
+
+  it('walking `nextCursor` to exhaustion reproduces the full total — no gap, no duplicate', async () => {
+    const seen = await walkAll('System Administrator', FANOUT);
+    expect(seen.length).toBe(FANOUT);
+    expect(new Set(seen).size).toBe(FANOUT);
+    // Page order is the handler's sorted total order.
+    expect([...seen].sort()).toEqual(seen);
+  });
+
+  it('holds at SFI_MAX_RESPONSE_BYTES=6000 — the budget is DERIVED, not a constant', async () => {
+    const prior = process.env['SFI_MAX_RESPONSE_BYTES'];
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    try {
+      const tight = toolLocalPayloadBudgetBytes();
+      expect(tight).toBeLessThan(6_000);
+      const r = await compareProfileAcrossVaultsHandler(fanCtx, {
+        profileName: 'System Administrator',
+        vaultA: 'prod',
+        vaultB: 'sandbox',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(bytesOfData(r.value.data)).toBeLessThanOrEqual(tight);
+      expect(r.value.data.summary.perCategoryDriftCount['fieldPermissions']).toBe(
+        FANOUT,
+      );
+      // Exhaust the SMALL profile at the tight budget: the walk still closes
+      // on the exact total, only with far more, far smaller pages (at 3 976
+      // bytes the prose boundaries alone leave room for a single row).
+      const seen = await walkAll('Support Agent', SMALL_FANOUT);
+      expect(seen.length).toBe(SMALL_FANOUT);
+      expect(new Set(seen).size).toBe(SMALL_FANOUT);
+    } finally {
+      if (prior === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = prior;
+    }
+  });
+
+  it('a non-designated category is EMPTY on the page and disclosed as such, never as "no drift"', async () => {
+    const r = await compareProfileAcrossVaultsHandler(fanCtx, {
+      profileName: 'System Administrator',
+      vaultA: 'prod',
+      vaultB: 'sandbox',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grantDiffs.objectPermissions).toEqual([]);
+    expect(
+      r.value.data.boundaries.some((s) =>
+        s.includes('that is a paging artifact, NOT "no drift"'),
+      ),
+    ).toBe(true);
+  });
+});
+
+/**
+ * G3 objection-3 acceptance test — THE GATE IS BOTH-SIDES, NOT EITHER-SIDE.
+ *
+ * Vault A is freshly refreshed (grant-count properties + grant edges); vault B
+ * predates them. An OR gate would call the category "extracted" and emit one
+ * fabricated "drift, side A only" row per grant. The BOTH-SIDES gate reports it
+ * as not-evaluated, names the deficient vault, and emits NO rows.
+ */
+describe('compareProfileAcrossVaultsHandler — source present on ONE side only', () => {
+  const ONE_SIDED_GRANTS = 40;
+  let oneRoot: string;
+  let oneStoreA: GraphStore;
+  let oneStoreB: GraphStore;
+  let oneCtx: Context;
+
+  beforeAll(async () => {
+    oneRoot = await mkdtemp(join(tmpdir(), 'sfi-compare-profile-onesided-'));
+    const aPath = join(oneRoot, 'fresh');
+    const bPath = join(oneRoot, 'stale');
+    await mkdir(join(aPath, 'graph'), { recursive: true });
+    await mkdir(join(bPath, 'graph'), { recursive: true });
+    await saveManifest(aPath, FIXTURE_MANIFEST);
+    await saveManifest(bPath, FIXTURE_MANIFEST);
+    const oa = await openGraph(vaultPaths(aPath).graphDb);
+    if (!oa.ok) throw new Error(oa.error.message);
+    oneStoreA = oa.value;
+    const ob = await openGraph(vaultPaths(bPath).graphDb);
+    if (!ob.ok) throw new Error(ob.error.message);
+    oneStoreB = ob.value;
+
+    const fieldIds = Array.from(
+      { length: ONE_SIDED_GRANTS },
+      (_v, i) => `CustomField:Account.Only_${String(i).padStart(3, '0')}__c`,
+    );
+    await importExtractionResults(oneStoreA, [
+      {
+        nodes: [
+          ...fieldIds.map((id) =>
+            makeNode({
+              id,
+              type: 'CustomField',
+              apiName: id.slice('CustomField:'.length),
+            }),
+          ),
+          makeNode({
+            id: PROFILE_ID,
+            properties: {
+              userLicense: 'Salesforce',
+              fieldGrantCount: ONE_SIDED_GRANTS,
+              tabVisibilities: [{ tab: 'Account', visibility: 'DefaultOn' }],
+            },
+          }),
+        ],
+        edges: fieldIds.map((id) =>
+          makeGrantEdge(id, { editable: true, readable: true }),
+        ),
+      } as ExtractionResult,
+    ]);
+    // Vault B: same profile, refreshed BEFORE those properties existed.
+    await importExtractionResults(oneStoreB, [
+      {
+        nodes: [
+          makeNode({
+            id: PROFILE_ID,
+            properties: { userLicense: 'Salesforce', custom: false },
+          }),
+        ],
+        edges: [],
+      } as ExtractionResult,
+    ]);
+    await registerVault(oneRoot, 'fresh', aPath);
+    await registerVault(oneRoot, 'stale', bPath);
+    oneCtx = { vaultRoot: aPath, manifest: FIXTURE_MANIFEST, graph: oneStoreA };
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = oneRoot;
+  });
+
+  afterAll(async () => {
+    delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    await closeGraph(oneStoreA);
+    await closeGraph(oneStoreB);
+    await rm(oneRoot, { recursive: true, force: true });
+  });
+
+  it('reports the category as not-evaluated, names the deficient vault, and emits NO drift rows', async () => {
+    const r = await compareProfileAcrossVaultsHandler(oneCtx, {
+      profileName: 'System Administrator',
+      vaultA: 'fresh',
+      vaultB: 'stale',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { notEvaluatedCategories, perCategoryDriftCount, totalDriftCount } =
+      r.value.data.summary;
+    // FAIL-BEFORE (the rejected OR gate): 40 fabricated "side A only" rows and
+    // `fieldPermissions` absent from notEvaluatedCategories.
+    expect(notEvaluatedCategories).toContain('fieldPermissions');
+    expect(r.value.data.grantDiffs.fieldPermissions).toEqual([]);
+    expect(
+      Object.prototype.hasOwnProperty.call(perCategoryDriftCount, 'fieldPermissions'),
+    ).toBe(false);
+    expect(totalDriftCount).toBe(0);
+    // The pre-existing one-sided `tabVisibilities` hole closes with it.
+    expect(notEvaluatedCategories).toContain('tabVisibilities');
+    expect(r.value.data.grantDiffs.tabVisibilities).toEqual([]);
+    // The boundary NAMES the vault that lacks the source — and ONLY that vault
+    // for this category (vault A does carry `fieldGrantCount`).
+    expect(
+      r.value.data.boundaries.some((b) =>
+        b.includes(
+          "`fieldPermissions` (source `fieldGrantCount`) missing in 'stale'",
+        ),
+      ),
+    ).toBe(true);
+    // A category absent on BOTH sides names both vaults, so the naming is not
+    // a constant string.
+    expect(
+      r.value.data.boundaries.some((b) =>
+        b.includes(
+          "`objectPermissions` (source `objectGrantCount`) missing in 'fresh' and 'stale'",
+        ),
+      ),
+    ).toBe(true);
+  });
+});
+
+/**
+ * G3 — an OLD vault on BOTH sides: no grant-count properties anywhere. Every
+ * category is disclosed as not-evaluated rather than contributing a
+ * measured-looking 0.
+ */
+describe('compareProfileAcrossVaultsHandler — an old vault with no grant-count properties', () => {
+  let oldRoot: string;
+  let oldStoreA: GraphStore;
+  let oldStoreB: GraphStore;
+  let oldCtx: Context;
+
+  beforeAll(async () => {
+    oldRoot = await mkdtemp(join(tmpdir(), 'sfi-old-vault-grants-'));
+    const aPath = join(oldRoot, 'prod');
+    const bPath = join(oldRoot, 'sandbox');
+    await mkdir(join(aPath, 'graph'), { recursive: true });
+    await mkdir(join(bPath, 'graph'), { recursive: true });
+    await saveManifest(aPath, FIXTURE_MANIFEST);
+    await saveManifest(bPath, FIXTURE_MANIFEST);
+    const oa = await openGraph(vaultPaths(aPath).graphDb);
+    if (!oa.ok) throw new Error(oa.error.message);
+    oldStoreA = oa.value;
+    const ob = await openGraph(vaultPaths(bPath).graphDb);
+    if (!ob.ok) throw new Error(ob.error.message);
+    oldStoreB = ob.value;
+    const oldSeed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: PROFILE_ID,
+          properties: { description: null, userLicense: 'Salesforce', custom: false },
+        }),
+      ],
+      edges: [],
+    };
+    await importExtractionResults(oldStoreA, [oldSeed]);
+    await importExtractionResults(oldStoreB, [oldSeed]);
+    await registerVault(oldRoot, 'prod', aPath);
+    await registerVault(oldRoot, 'sandbox', bPath);
+    oldCtx = { vaultRoot: aPath, manifest: FIXTURE_MANIFEST, graph: oldStoreA };
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = oldRoot;
+  });
+
+  afterAll(async () => {
+    delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    await closeGraph(oldStoreA);
+    await closeGraph(oldStoreB);
+    await rm(oldRoot, { recursive: true, force: true });
+  });
+
+  it('discloses every grant category as not-evaluated instead of reporting 0 drift', async () => {
+    const r = await compareProfileAcrossVaultsHandler(oldCtx, {
+      profileName: 'System Administrator',
+      vaultA: 'prod',
+      vaultB: 'sandbox',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { notEvaluatedCategories, perCategoryDriftCount, totalDriftCount } =
+      r.value.data.summary;
+    expect([...notEvaluatedCategories].sort()).toEqual([
+      'apexClassAccesses',
+      'fieldPermissions',
+      'objectPermissions',
+      'tabVisibilities',
+      'userPermissions',
+    ]);
+    // No fabricated zeros: an un-evaluated category has NO count key at all.
+    expect(Object.keys(perCategoryDriftCount)).toEqual([]);
+    expect(Object.keys(r.value.data.counts)).toEqual([]);
+    expect(totalDriftCount).toBe(0);
+    expect(
+      r.value.data.boundaries.some((b) =>
+        b.includes('no grant-source property on this profile'),
+      ),
+    ).toBe(true);
   });
 });
 

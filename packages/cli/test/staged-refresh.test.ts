@@ -7,7 +7,12 @@ import { join } from 'node:path';
 import { openGraph, closeGraph } from '@sf-intelligence/graph';
 import { loadManifest, vaultPaths, type ExtendedVaultManifest } from '@sf-intelligence/vault';
 
-import { runRefresh, type RefreshResult, type RunRefreshOptions } from '../src/commands/refresh.js';
+import {
+  graphSwapFailureMessage,
+  runRefresh,
+  type RefreshResult,
+  type RunRefreshOptions,
+} from '../src/commands/refresh.js';
 import {
   captureSkeletonCounts,
   readStagedState,
@@ -415,4 +420,41 @@ describe('failure injection + convergence (real pipeline, fixture vault)', () =>
       await rm(cwdA, { recursive: true, force: true });
     }
   }, 120_000);
+});
+
+describe('T2 side-build swap failure (G1)', () => {
+  it('stops the run with the swap guidance and leaves t2 UNMARKED so a resume retries it', async () => {
+    const vaultRoot = await seedVaultConfig();
+    const swapMsg = graphSwapFailureMessage(
+      join(vaultRoot, 'graph', 'graph.duckdb'),
+      "Error: EPERM: operation not permitted, rename 'graph.duckdb.rebuild' -> 'graph.duckdb'",
+      true,
+    );
+    const calls: RunRefreshOptions[] = [];
+    // Both `forceSideBuild: true` call sites reach the same swap; T2 is the
+    // one a fresh run hits.
+    const r = await runStagedRefresh({
+      cwd,
+      noPull: true,
+      refreshFn: async (o) => {
+        calls.push(o);
+        return o.forceSideBuild === true
+          ? { ...okResult(), status: 'failed', fatalError: swapMsg }
+          : okResult();
+      },
+      onProgress: () => {},
+    });
+
+    // Returned, not thrown — no raw errno escapes runStagedRefresh.
+    expect(r.result.status).toBe('failed');
+    expect(r.result.fatalError).toBe(swapMsg);
+    expect(r.result.fatalError).toContain('STALE, not broken');
+    expect(r.tiersRun).toEqual(['t0', 't1']);
+    expect(calls.some((o) => o.forceSideBuild === true)).toBe(true);
+
+    // The resume contract: t2 never completed, so it is not skipped next time.
+    const state = await readStagedState(vaultPaths(vaultRoot).meta);
+    expect(state?.completedTiers).toEqual(['t0', 't1']);
+    expect(state?.completedTiers).not.toContain('t2');
+  });
 });

@@ -129,6 +129,37 @@ export const collapseHome = (abs: string, home: string): string => {
 };
 
 /**
+ * True when `child` IS `parent` or lies underneath it — the one correct
+ * spelling of the `abs.startsWith(`${root}/`)` test the module doc names.
+ *
+ * Boundary-aware in both directions, which the hand-rolled form is not:
+ * `/a/orgkb` is NOT within `/a/org` (a bare `startsWith` says it is), and a
+ * trailing separator on either argument is not a difference. EITHER separator
+ * counts as the boundary, on every platform, for the same reason
+ * {@link splitPathSegments} accepts both: the caller may hold a native Windows
+ * path while the host `sep` is `/`.
+ *
+ * Purely lexical — it compares the strings it is GIVEN and does no I/O, so it
+ * neither case-folds nor resolves symlinks. A caller that needs those (a safety
+ * rail deciding whether a write lands inside a directory it must not) is
+ * responsible for feeding it the extra spellings and refusing if ANY of them
+ * reports containment; `packages/cli/src/commands/vault-anonymize.ts` does
+ * exactly that and documents why one of those spellings may never be dropped.
+ *
+ * Both arguments are expected to be absolute and already `resolve()`d; an empty
+ * `parent` therefore contains everything, which is the honest reading of `''`
+ * as a prefix rather than a case worth a silent special-case.
+ */
+export const isPathWithin = (parent: string, child: string): boolean => {
+  const p = parent.replace(/[\\/]+$/, '');
+  const c = child.replace(/[\\/]+$/, '');
+  if (p === c) return true;
+  if (!c.startsWith(p)) return false;
+  const boundary = c.charAt(p.length);
+  return boundary === '/' || boundary === '\\';
+};
+
+/**
  * True when `run` appears as CONSECUTIVE segments of `p`.
  *
  * For shapes where adjacency is the meaning — `main/default` in a Salesforce DX

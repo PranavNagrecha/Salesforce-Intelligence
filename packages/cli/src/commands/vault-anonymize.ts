@@ -33,17 +33,21 @@
  * built and tested here so that follow-up has something to start from.
  *
  * Safety rails: {@link validateOutDir} refuses an `--out` inside the source
- * vault (or a source vault inside `--out`); the source vault is opened
- * READ-ONLY (every write happens under `--out`); {@link residualLeakScan}
+ * vault (or a source vault inside `--out`), testing that containment against
+ * THREE spellings of the same pair — plain `resolve()`, the on-disk canonical
+ * form, and both of those case-folded — and refusing if ANY of them reports
+ * containment in EITHER direction (see {@link containmentSpellings} for why
+ * the plain-`resolve()` family may never be dropped); the source vault is
+ * opened READ-ONLY (every write happens under `--out`); {@link residualLeakScan}
  * re-scans the OUTPUT after the copy and the CLI prints its summary before
  * exiting, so a scrub bug is surfaced rather than silently shipped.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, isPathWithin, ok, type Result } from '@sf-intelligence/core';
 import { vaultPaths } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
@@ -174,18 +178,108 @@ export const collectVaultIdentities = async (
 // =============================================================================
 
 /**
+ * The path as the filesystem actually spells it, for a path that may not exist
+ * yet. `realpathSync.native` case-canonicalizes (plain `realpathSync` does
+ * NOT) but throws on a missing path, and `--out` is normally a directory the
+ * user is about to create — so walk up to the nearest EXISTING ancestor,
+ * canonicalize that, and re-append the typed tail. Falls back to plain
+ * `resolve()` when nothing on the way up can be read (EACCES on an ancestor,
+ * or a path that walks all the way to the root).
+ *
+ * Does I/O, so it cannot live in `core`'s `path-portable` alongside
+ * {@link isPathWithin} — that module's charter is no-I/O.
+ */
+const canonicalizeExisting = (p: string): string => {
+  let current = resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync.native(current), ...[...tail].reverse());
+    } catch {
+      /* not readable / not on disk — try the parent */
+    }
+    const parent = dirname(current);
+    if (parent === current) return resolve(p); // reached the root: nothing to canonicalize
+    tail.push(basename(current));
+    current = parent;
+  }
+};
+
+/**
+ * The same `(a, b)` pair written three ways, for a containment rail that must
+ * fail CLOSED. Each family compares LIKE with LIKE; the caller refuses if any
+ * family reports containment, in either direction, so adding a family can only
+ * tighten the rail.
+ *
+ * F1 — plain `resolve()`. **This family may never be dropped.** It is the only
+ * one that still sees a SYMLINKED vault, which is this repo's own layout
+ * (`org-kb` in the working tree is a symlink to the real vault). With the vault
+ * at `<repo>/org-kb -> /real/vault`, `sfi vault anonymize --out .` from the
+ * repo root gives `out = <repo>` and `src = <repo>/org-kb` — contained, refuse.
+ * Canonicalizing both sides moves `src` to `/real/vault`, destroys the prefix
+ * relation, and turns that refusal into an ALLOW that writes the "shareable"
+ * redacted tree into the directory holding the real unredacted vault.
+ *
+ * F2 — {@link canonicalizeExisting} on both sides. This is the family that
+ * catches CASE drift: `vaultRoot` comes from the stored config while `--out` is
+ * resolved against the current cwd, and both NTFS and default APFS are
+ * case-INSENSITIVE, so `--out c:\proj\org-kb\redacted` against a vault at
+ * `C:\Proj\org-kb` is the same directory and a case-sensitive comparison says
+ * otherwise. It also tightens the symlink case: an `--out` pointing at the
+ * symlink TARGET's parent is caught here.
+ *
+ * F3 — F1 and F2 case-folded. Backstop for what F2 cannot reach:
+ * `realpathSync.native` throwing on an ancestor (the fallback then hands back
+ * the raw `resolve()`, case drift intact), and a case-insensitive MOUNT on a
+ * case-sensitive OS (exFAT/SMB on Linux), which no `process.platform` gate
+ * would catch. Accepted cost, deliberately: on a genuinely case-sensitive
+ * filesystem, two directories differing only in case are refused as if they
+ * were one. For a tool whose entire job is producing a safe-to-share artifact,
+ * that false positive costs the user "pick another directory" while the false
+ * negative writes a redacted-but-actually-real vault INTO the live vault.
+ *
+ * Cross-family pairs are deliberately NOT compared: mixing `canonical(a)` with
+ * `resolve(b)` is the asymmetry that produced the symlink hole above, and on
+ * macOS it would also mis-handle `/var/folders` vs `/private/var/folders`.
+ */
+const containmentSpellings = (a: string, b: string): readonly (readonly [string, string])[] => {
+  const plainA = resolve(a);
+  const plainB = resolve(b);
+  const canonA = canonicalizeExisting(plainA);
+  const canonB = canonicalizeExisting(plainB);
+  return [
+    [plainA, plainB],
+    [canonA, canonB],
+    [plainA.toLowerCase(), plainB.toLowerCase()],
+    [canonA.toLowerCase(), canonB.toLowerCase()],
+  ];
+};
+
+/** True when ANY spelling family says `b` sits inside `a`. Fail-closed by construction. */
+const anySpellingContains = (a: string, b: string): boolean =>
+  containmentSpellings(a, b).some(([pa, pb]) => isPathWithin(pa, pb));
+
+/**
  * Refuse an `--out` that is the source vault, nested inside it, or that
  * CONTAINS the source vault (the reverse mistake — pointing `--out` at an
  * ancestor of `org-kb/`). Either would let the redacted copy overwrite, or
  * be overwritten by, the real vault.
+ *
+ * Containment is tested across all three spelling families described on
+ * {@link containmentSpellings} and refused if ANY of them reports it, so the
+ * case-insensitive filesystems this ships on (NTFS, default APFS) cannot slip
+ * `--out c:\proj\org-kb\redacted` past a vault at `C:\Proj\org-kb`, and the
+ * plain-`resolve()` family keeps the symlinked-vault rail that a
+ * canonicalize-only comparison would have opened.
+ *
+ * Error strings print `resolve(...)` — what the user actually typed — not the
+ * canonical form they never saw.
  */
 export const validateOutDir = (vaultRoot: string, outDir: string): Result<void, string> => {
-  const src = resolve(vaultRoot) + sep;
-  const out = resolve(outDir) + sep;
-  if (out === src || out.startsWith(src)) {
+  if (anySpellingContains(vaultRoot, outDir)) {
     return err(`--out (${resolve(outDir)}) must be OUTSIDE the source vault (${resolve(vaultRoot)}).`);
   }
-  if (src.startsWith(out)) {
+  if (anySpellingContains(outDir, vaultRoot)) {
     return err(
       `--out (${resolve(outDir)}) must not CONTAIN the source vault (${resolve(vaultRoot)}) — pick a sibling or unrelated directory.`,
     );
@@ -453,13 +547,21 @@ export const buildPseudonymMapping = (apiNames: readonly string[]): ReadonlyMap<
   return map;
 };
 
-/** Refuse a mapping-table path that lands inside `--out` — the whole point of the separate file is that the shared copy is NOT reversible without it. */
+/**
+ * Refuse a mapping-table path that lands inside `--out` — the whole point of
+ * the separate file is that the shared copy is NOT reversible without it.
+ *
+ * Same rail, same three spelling families as {@link validateOutDir} (see
+ * {@link containmentSpellings}): a case-folded spelling of `--out`, or a
+ * symlink that lands the mapping table under `--out` on disk, must not be able
+ * to talk this check out of firing. Checked in both directions, because a
+ * `mappingPath` that CONTAINS `--out` puts the owner-only table in a directory
+ * holding the shared copy, which loses the separation just as completely.
+ */
 export const assertMappingPathOutsideOut = (mappingPath: string, outDir: string): void => {
-  const out = resolve(outDir) + sep;
-  const resolvedMappingPath = resolve(mappingPath);
-  if (resolvedMappingPath === resolve(outDir) || (resolvedMappingPath + sep).startsWith(out)) {
+  if (anySpellingContains(outDir, mappingPath) || anySpellingContains(mappingPath, outDir)) {
     throw new Error(
-      `mapping table path (${resolvedMappingPath}) must be OUTSIDE --out (${resolve(outDir)}) — the shared copy must not be reversible without the mapping the owner keeps.`,
+      `mapping table path (${resolve(mappingPath)}) must be OUTSIDE --out (${resolve(outDir)}) — the shared copy must not be reversible without the mapping the owner keeps.`,
     );
   }
 };

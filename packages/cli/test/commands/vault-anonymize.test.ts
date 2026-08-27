@@ -9,7 +9,14 @@
  * out-dir safety, and a source-vault-untouched assertion.
  */
 
-import { existsSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -133,6 +140,160 @@ describe('validateOutDir', () => {
   it('accepts a completely unrelated directory', () => {
     const r = validateOutDir('/a/org-kb', '/tmp/somewhere-else');
     expect(r.ok).toBe(true);
+  });
+});
+
+// The `validateOutDir` block above compares IDENTICAL spellings on both sides,
+// which is why the suite stayed green while both rails failed OPEN on a
+// case-insensitive filesystem. The three suites below pin the two ways a rail
+// can be wrong in opposite directions: too LOOSE (case drift walks past it) and
+// too TIGHT (canonicalizing both sides through realpath stops seeing a
+// SYMLINKED vault). The fix must be both at once, so both are asserted here.
+
+// -----------------------------------------------------------------------------
+// A. The symlinked-vault layout. `realpathSync` resolves symlinks as well as
+// case, so a rail built on canonicalization ALONE flips the reverse check from
+// REFUSE to ALLOW: canonical(out) = `Proj/`, canonical(src) = `/real/vault/`,
+// no prefix relation left to see. Both spellings have to be tested.
+// -----------------------------------------------------------------------------
+describe('validateOutDir — symlinked vault (the rail canonicalization alone destroys)', () => {
+  let root: string;
+  let vault: string; // the SYMLINK, which is how the CLI is handed a vault root
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'sfi-anon-symlink-'));
+    mkdirSync(join(root, 'real', 'vault'), { recursive: true });
+    writeFileSync(join(root, 'real', 'vault', 'config.json'), '{}');
+    mkdirSync(join(root, 'Proj'), { recursive: true });
+    symlinkSync(join(root, 'real', 'vault'), join(root, 'Proj', 'org-kb'), 'dir');
+    vault = join(root, 'Proj', 'org-kb');
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses an --out that CONTAINS the vault symlink (`sfi vault anonymize --out .`)', () => {
+    // THE case. `--out` is the directory holding the symlink; the redacted
+    // "shareable" tree would land next to the real unredacted vault.
+    const r = validateOutDir(vault, join(root, 'Proj'));
+    expect(r.ok).toBe(false);
+  });
+
+  it('refuses an --out nested inside the vault symlink', () => {
+    expect(validateOutDir(vault, join(vault, 'redacted')).ok).toBe(false);
+  });
+
+  it('refuses an --out that contains the symlink TARGET', () => {
+    // Nothing lexical connects `Proj/org-kb` to `real/`; only the canonicalized
+    // family sees this one.
+    expect(validateOutDir(vault, join(root, 'real')).ok).toBe(false);
+  });
+
+  it('still accepts a genuine sibling that does not exist yet', () => {
+    expect(validateOutDir(vault, join(root, 'elsewhere')).ok).toBe(true);
+  });
+
+  it('mirrors all four through assertMappingPathOutsideOut', () => {
+    const mappingUnderVault = join(vault, 'mapping.json');
+    expect(() => assertMappingPathOutsideOut(mappingUnderVault, join(root, 'Proj'))).toThrow(
+      /must be OUTSIDE/,
+    );
+    expect(() =>
+      assertMappingPathOutsideOut(join(vault, 'redacted', 'mapping.json'), join(vault, 'redacted')),
+    ).toThrow(/must be OUTSIDE/);
+    // Resolves to `real/vault/mapping.json`, i.e. inside `--out`.
+    expect(() => assertMappingPathOutsideOut(mappingUnderVault, join(root, 'real'))).toThrow(
+      /must be OUTSIDE/,
+    );
+    expect(() =>
+      assertMappingPathOutsideOut(mappingUnderVault, join(root, 'elsewhere')),
+    ).not.toThrow();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// B. The shape above, stated as the general rule, because it is the layout THIS
+// repo ships: `org-kb` in the working tree is a symlink to the real vault, so
+// `--out .` from the project root is the everyday spelling of the mistake.
+// -----------------------------------------------------------------------------
+describe('validateOutDir — a vault reached through a symlink is still contained by its parent', () => {
+  it('refuses --out = the symlink’s parent directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sfi-anon-repo-shape-'));
+    try {
+      mkdirSync(join(root, 'elsewhere', 'the-real-vault'), { recursive: true });
+      mkdirSync(join(root, 'project'), { recursive: true });
+      symlinkSync(join(root, 'elsewhere', 'the-real-vault'), join(root, 'project', 'org-kb'), 'dir');
+      expect(validateOutDir(join(root, 'project', 'org-kb'), join(root, 'project')).ok).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// -----------------------------------------------------------------------------
+// C. Case divergence — the defect itself. `vaultRoot` comes from the stored
+// config while `--out` is resolved against the current cwd, so the two can
+// differ in CASE, and both NTFS and default APFS are case-INSENSITIVE.
+// -----------------------------------------------------------------------------
+const caseProbeRoot = mkdtempSync(join(tmpdir(), 'sfi-anon-case-'));
+mkdirSync(join(caseProbeRoot, 'Proj', 'org-kb'), { recursive: true });
+/** True on APFS/NTFS; false on a case-sensitive ext4 CI runner. */
+const caseInsensitiveFs = existsSync(join(caseProbeRoot, 'proj', 'ORG-KB'));
+
+afterAll(async () => {
+  await rm(caseProbeRoot, { recursive: true, force: true });
+});
+
+describe('validateOutDir — case-divergent spellings', () => {
+  const vault = join(caseProbeRoot, 'Proj', 'org-kb');
+  const vaultOtherCase = join(caseProbeRoot, 'proj', 'ORG-KB');
+
+  it.skipIf(!caseInsensitiveFs)('refuses an --out that IS the vault in another case', () => {
+    expect(validateOutDir(vault, vaultOtherCase).ok).toBe(false);
+  });
+
+  it.skipIf(!caseInsensitiveFs)('refuses an --out nested in the vault spelled in another case', () => {
+    expect(validateOutDir(vault, join(vaultOtherCase, 'redacted')).ok).toBe(false);
+  });
+
+  it.skipIf(!caseInsensitiveFs)(
+    'refuses a mapping table inside --out spelled in another case',
+    () => {
+      expect(() =>
+        assertMappingPathOutsideOut(join(vaultOtherCase, 'mapping.json'), vault),
+      ).toThrow(/must be OUTSIDE/);
+    },
+  );
+
+  it('still rejects the same-case nesting and equality, and allows a sibling', () => {
+    expect(validateOutDir(vault, join(vault, 'redacted')).ok).toBe(false);
+    expect(validateOutDir(vault, vault).ok).toBe(false);
+    expect(validateOutDir(vault, join(caseProbeRoot, 'redacted-out')).ok).toBe(true);
+    expect(() =>
+      assertMappingPathOutsideOut(join(caseProbeRoot, 'mapping.json'), vault),
+    ).not.toThrow();
+  });
+
+  // The fold-case backstop, asserted UNCONDITIONALLY: these paths do not exist,
+  // so `realpathSync` cannot canonicalize them and the case-folded family is
+  // the only thing left holding the rail. Same situation as EACCES on an
+  // ancestor, or a case-insensitive mount on a case-sensitive OS.
+  it('refuses case-variant containment even where realpath cannot help', () => {
+    expect(validateOutDir('/a/ORG-KB', '/a/org-kb/redacted').ok).toBe(false);
+    expect(validateOutDir('/a/org-kb', '/a/ORG-KB').ok).toBe(false);
+    expect(validateOutDir('/a/org-kb', '/A').ok).toBe(false);
+    expect(() => assertMappingPathOutsideOut('/a/org-kb/mapping.json', '/a/ORG-KB')).toThrow(
+      /must be OUTSIDE/,
+    );
+  });
+
+  // The documented cost of that backstop, pinned so it is a decision and not a
+  // surprise: on a case-SENSITIVE filesystem two directories differing only in
+  // case are refused as if they were one. Refusing costs "pick another
+  // directory"; allowing writes a redacted-but-real vault into the live vault.
+  it('accepts the false positive that costs on a case-sensitive filesystem', () => {
+    expect(validateOutDir('/a/org-kb', '/a/ORG-KB/shared').ok).toBe(false);
   });
 });
 

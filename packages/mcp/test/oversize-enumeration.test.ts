@@ -265,16 +265,14 @@ describe('analyzeOversizeEnumeration', () => {
    *
    * Scoped to the classification axis on purpose. The analyzer ALSO sweeps for
    * tools that declare `limit` while sitting in neither `HIGH_FANOUT_INVENTORY`
-   * nor `LIMIT_TOOL_EXCLUSIONS`, and against the real roster that sweep is
-   * currently non-empty (12 tools at the time of writing: doc_coverage_report,
-   * limit_headroom_report, permission_set_consolidation, security_settings,
-   * action_chain, nonselective_soql, flow_bulkification_audit,
-   * picklist_integrity_scan, event_topology, field_lineage,
-   * field_mapping_between_objects, trace_debug_log). That is a REGISTRATION
-   * backlog, not a classification lie: closing it means adding a real-org
-   * high-fanout probe per tool in the qa harness, which is a different repo and
-   * a different change. Filtered out here so this assertion says exactly what
-   * it means — and named here so it is a known number, not a silent one.
+   * nor `LIMIT_TOOL_EXCLUSIONS`. That is a REGISTRATION backlog, not a
+   * classification lie: closing it means adding a real-org high-fanout probe per
+   * tool in the qa harness, which is a different repo and a different change.
+   * Filtered out here so this assertion says exactly what it means — and PINNED
+   * by the test below so it stays a known number, not a silent one. (The 12-tool
+   * list this comment used to name was closed by the inventory rows added in
+   * `record the probe debt the inventory rows imply`; the sweep is now the one
+   * 0.3.3 entry below.)
    */
   it('every inventory row\'s bound agrees with the REAL advertised schema', () => {
     const { violations } = analyzeOversizeEnumeration(V01_TOOLS, allProbes());
@@ -284,5 +282,22 @@ describe('analyzeOversizeEnumeration', () => {
     // FAIL-BEFORE: sfi.search_components — handler-capped while advertising
     // `offset`; and sfi.order_of_execution once it advertised its page knobs.
     expect(misclassified).toEqual([]);
+  });
+
+  /**
+   * The REGISTRATION backlog, pinned rather than described. `limit` + `cursor`
+   * were added to `sfi.compare_profile_across_vaults` in 0.3.3 (its grant arrays
+   * became real when the tool started reading `grantedBy` edges); registering it
+   * in `HIGH_FANOUT_INVENTORY` would additionally demand a real-org high-fanout
+   * probe, which lives in the QA-harness repo — so it joins this KNOWN backlog
+   * instead of quietly enlarging it.
+   */
+  it('the `declares limit but unregistered` backlog is exactly the known list', () => {
+    const { violations } = analyzeOversizeEnumeration(V01_TOOLS, allProbes());
+    const backlog = violations
+      .filter((v) => v.message.includes('is not in HIGH_FANOUT_INVENTORY'))
+      .map((v) => v.tool)
+      .sort();
+    expect(backlog).toEqual(['sfi.compare_profile_across_vaults']);
   });
 });

@@ -1,6 +1,7 @@
 /// <reference types="vitest/globals" />
 
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,6 +22,9 @@ import {
   countLandedReportMembers,
   formatRefreshSummary,
   formatReportsCapSummary,
+  graphSwapFailureMessage,
+  installSideBuildGraph,
+  isLockedOpenFailure,
   loadVaultConfig,
   manifestMembersForType,
   objectsToExpandManifest,
@@ -1172,5 +1176,242 @@ describe('PLATFORM-ACCESS-ORACLE — Profile label <-> API-name map at refresh',
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  });
+});
+
+// =============================================================================
+// G1 — the side-build swap fails CLOSED, and touches no live-vault file
+// =============================================================================
+
+describe('installSideBuildGraph — forced rename failure', () => {
+  /** A real, permission-forced rename failure needs a non-root POSIX runner. */
+  const canForceEacces = process.platform !== 'win32' && process.getuid?.() !== 0;
+
+  const sha = async (p: string): Promise<string> =>
+    createHash('sha256').update(await readFile(p)).digest('hex');
+
+  /** live db + live WAL + a finished `.rebuild` scratch, production layout. */
+  const seedSwapFixture = async (
+    dir: string,
+  ): Promise<{ readonly live: string; readonly rebuild: string }> => {
+    await mkdir(dir, { recursive: true });
+    const live = join(dir, 'graph.duckdb');
+    const rebuild = `${live}.rebuild`;
+    await writeFile(live, 'PREVIOUS-BUILD-DATABASE', 'utf8');
+    await writeFile(`${live}.wal`, 'COMMITTED-BUT-UNCHECKPOINTED', 'utf8');
+    await writeFile(rebuild, 'REBUILT-GRAPH', 'utf8');
+    await writeFile(`${rebuild}.wal`, 'REBUILT-GRAPH-WAL', 'utf8');
+    return { live, rebuild };
+  };
+
+  it.skipIf(!canForceEacces)(
+    'returns err and leaves the live database AND its WAL byte-identical',
+    async () => {
+      const root = await makeTempCwd();
+      const dir = join(root, 'graph');
+      const { live, rebuild } = await seedSwapFixture(dir);
+      const before = { db: await sha(live), wal: await sha(`${live}.wal`) };
+      try {
+        // Deny writes on the containing directory: rename() fails EACCES, the
+        // POSIX stand-in for the Windows holder that blocks the swap.
+        await chmod(dir, 0o500);
+        const result = await installSideBuildGraph({ liveDbPath: live, rebuildPath: rebuild });
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error).toContain('EACCES');
+        expect(result.error).toContain('was NOT replaced');
+        expect(result.error).toContain('STALE, not broken');
+        expect(result.error).toContain('discarded');
+        expect(result.error).toContain('nothing was published');
+        // The claim the rejected attempt made AFTER deleting the live WAL.
+        expect(result.error).not.toContain('UNCHANGED');
+        // The executable form of the message's central claim.
+        expect(await sha(live)).toBe(before.db);
+        expect(await sha(`${live}.wal`)).toBe(before.wal);
+      } finally {
+        await chmod(dir, 0o700);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!canForceEacces)(
+    'a cleanup that cannot run does not escape the catch (no raw errno reaches the caller)',
+    async () => {
+      const root = await makeTempCwd();
+      const dir = join(root, 'graph');
+      const { live, rebuild } = await seedSwapFixture(dir);
+      try {
+        // The same 0o500 that broke the rename also blocks unlink(), so the
+        // best-effort scratch cleanup throws. It must be swallowed.
+        await chmod(dir, 0o500);
+        const result = await installSideBuildGraph({ liveDbPath: live, rebuildPath: rebuild });
+        expect(result.ok).toBe(false);
+        expect(await pathExists(rebuild)).toBe(true); // honestly still there
+      } finally {
+        await chmod(dir, 0o700);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!canForceEacces)(
+    'cleanup removes ONLY the scratch this process created, never a live-vault file',
+    async () => {
+      const root = await makeTempCwd();
+      const liveDir = join(root, 'live');
+      const scratchDir = join(root, 'scratch');
+      await mkdir(liveDir, { recursive: true });
+      await mkdir(scratchDir, { recursive: true });
+      const live = join(liveDir, 'graph.duckdb');
+      const rebuild = join(scratchDir, 'graph.duckdb.rebuild');
+      await writeFile(live, 'PREVIOUS-BUILD-DATABASE', 'utf8');
+      await writeFile(`${live}.wal`, 'COMMITTED-BUT-UNCHECKPOINTED', 'utf8');
+      await writeFile(rebuild, 'REBUILT-GRAPH', 'utf8');
+      await writeFile(`${rebuild}.wal`, 'REBUILT-GRAPH-WAL', 'utf8');
+      const before = { db: await sha(live), wal: await sha(`${live}.wal`) };
+      try {
+        // Only the DESTINATION directory is locked, so the rename still fails
+        // but the scratch (in a writable directory) is removable.
+        await chmod(liveDir, 0o500);
+        const result = await installSideBuildGraph({ liveDbPath: live, rebuildPath: rebuild });
+        expect(result.ok).toBe(false);
+        expect(await pathExists(rebuild)).toBe(false);
+        expect(await pathExists(`${rebuild}.wal`)).toBe(false);
+        expect(await sha(live)).toBe(before.db);
+        expect(await sha(`${live}.wal`)).toBe(before.wal);
+      } finally {
+        await chmod(liveDir, 0o700);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Platform-independent forced failure (no chmod): a directory as the source
+  // makes rename fail ENOTDIR while the live directory stays writable. This is
+  // the shape in which the rejected attempt DELETED the live WAL and then
+  // reported the vault "UNCHANGED".
+  it('a rename failure in a writable directory still leaves the live WAL in place', async () => {
+    const root = await makeTempCwd();
+    const dir = join(root, 'graph');
+    await mkdir(dir, { recursive: true });
+    const live = join(dir, 'graph.duckdb');
+    const rebuild = `${live}.rebuild`;
+    await writeFile(live, 'PREVIOUS-BUILD-DATABASE', 'utf8');
+    await writeFile(`${live}.wal`, 'COMMITTED-BUT-UNCHECKPOINTED', 'utf8');
+    await mkdir(rebuild);
+    try {
+      const result = await installSideBuildGraph({ liveDbPath: live, rebuildPath: rebuild });
+      expect(result.ok).toBe(false);
+      expect(await pathExists(`${live}.wal`)).toBe(true);
+      expect(await readFile(`${live}.wal`, 'utf8')).toBe('COMMITTED-BUT-UNCHECKPOINTED');
+      expect(await readFile(live, 'utf8')).toBe('PREVIOUS-BUILD-DATABASE');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the success path still swaps the file in', async () => {
+    const root = await makeTempCwd();
+    const dir = join(root, 'graph');
+    const { live, rebuild } = await seedSwapFixture(dir);
+    try {
+      const result = await installSideBuildGraph({ liveDbPath: live, rebuildPath: rebuild });
+      expect(result.ok).toBe(true);
+      expect(await readFile(live, 'utf8')).toBe('REBUILT-GRAPH');
+      expect(await pathExists(rebuild)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('graphSwapFailureMessage', () => {
+  const CAUSE =
+    "Error: EPERM: operation not permitted, rename '/v/org-kb/graph/graph.duckdb.rebuild' -> '/v/org-kb/graph/graph.duckdb'";
+  const msg = graphSwapFailureMessage('/v/org-kb/graph/graph.duckdb', CAUSE, true);
+
+  it('does not claim a discard when the scratch cleanup itself failed', () => {
+    // The permission that broke the rename can break the cleanup too. Saying
+    // "discarded" there names a file the user would then find on disk.
+    const kept = graphSwapFailureMessage('/v/org-kb/graph/graph.duckdb', CAUSE, false);
+    expect(kept).not.toContain('was discarded');
+    expect(kept).toContain('graph.duckdb.rebuild');
+    expect(msg).toContain('discarded');
+  });
+
+  it('names the resolve index as overwritten rather than promising it is safe', () => {
+    // The staleness guard is node-count only, so a same-count index from the
+    // DISCARDED build is accepted and resolves names this vault does not have.
+    expect(msg).toContain('resolve-index.json');
+    expect(msg).not.toContain('never a wrong answer');
+  });
+
+  it('keeps the underlying cause and never names a discarded path as usable', () => {
+    expect(msg).toContain('EPERM: operation not permitted');
+    // The scratch is cleaned, so pointing the user at it would be a lie.
+    expect(msg).not.toContain('.rebuild and will be');
+  });
+
+  // The remedy is DERIVED from the platform, so assert the branch this runner
+  // actually took rather than stubbing `process.platform`.
+  it.skipIf(process.platform !== 'win32')('tells a Windows user to close the MCP client', () => {
+    expect(msg).toContain('close your MCP client');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'tells a POSIX user to stop the holder — never that the refresh recovers automatically',
+    () => {
+      expect(msg).toContain('stop it and re-run the refresh');
+      // `lockConflictMessage`'s POSIX branch says the refresh "handles this
+      // AUTOMATICALLY" — false where that automatic swap is what just failed.
+      expect(msg).not.toContain('AUTOMATICALLY');
+    },
+  );
+});
+
+describe('side-build trigger classification', () => {
+  const locked = (message: string) =>
+    ({ ok: false, error: { kind: 'locked', message } }) as Parameters<
+      typeof isLockedOpenFailure
+    >[0];
+  const openFailed = (message: string) =>
+    ({ ok: false, error: { kind: 'open-failed', message } }) as Parameters<
+      typeof isLockedOpenFailure
+    >[0];
+
+  it('routes on the kind store.ts assigned, not on the message text', () => {
+    // The RAW Windows string, which the replaced regex did not match at all.
+    const windowsRaw =
+      'IO Error: Cannot open file "x": The process cannot access the file because it is being used by another process';
+    expect(/locked|Conflicting lock/i.test(windowsRaw)).toBe(false);
+    expect(isLockedOpenFailure(locked(windowsRaw))).toBe(true);
+  });
+
+  it('does not route a non-lock failure that merely contains the word "locked"', () => {
+    const decoy = 'cannot open graph at /v/g.duckdb: file is locked by the OS installer';
+    expect(/locked|Conflicting lock/i.test(decoy)).toBe(true); // the old rule fired
+    expect(isLockedOpenFailure(openFailed(decoy))).toBe(false);
+  });
+});
+
+describe('G1 source invariants (the CTO objection, pinned)', () => {
+  const src = async (): Promise<string> =>
+    readFile(new URL('../../src/commands/refresh.ts', import.meta.url), 'utf8');
+
+  it('no second copy of the lock classifier survives in refresh.ts', async () => {
+    const text = await src();
+    expect(text).not.toContain('/locked|Conflicting lock/i');
+    expect(text).toContain("error.kind === 'locked'");
+  });
+
+  it('refresh.ts never rm()s a LIVE vault WAL — only the .rebuild scratch it owns', async () => {
+    const text = await src();
+    // The exact line the CTO rejected.
+    expect(text).not.toContain('${paths.graphDb}.wal');
+    // And nothing else interpolates a WAL path that is not our own scratch.
+    const interpolated = [...text.matchAll(/\$\{([A-Za-z.]+)\}\.wal/g)].map((m) => m[1]);
+    expect(interpolated.length).toBeGreaterThan(0);
+    expect([...new Set(interpolated)].sort()).toEqual(['graphTarget', 'rebuildPath']);
   });
 });

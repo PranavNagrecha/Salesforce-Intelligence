@@ -892,6 +892,83 @@ const mutingSeed: ExtractionResult = {
   ],
 };
 
+/**
+ * `Profile:Standard User` — the zero-permission profile the CR-03 precondition
+ * tests query. It is SEEDED (with no grant edges at all) so those tests pin what
+ * they mean to pin: a profile that IS in the vault and genuinely grants nothing,
+ * which is a MEASURED deny. An ABSENT profile is a different answer (`unknown`
+ * — its grants were never read); leaving this node out conflated the two and let
+ * a fabricated deny masquerade as the H1 guarantee.
+ */
+const ZERO_GRANT_PROFILE = 'Profile:Standard User';
+
+const zeroGrantProfileSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: ZERO_GRANT_PROFILE,
+      type: 'Profile',
+      apiName: 'Standard User',
+      properties: { userLicense: 'Salesforce', userPermissions: [] },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed (G3) — THE CTO'S REPRODUCTION. A present profile plus a present
+// PermissionSetGroup that NAMES a member permission set which is not in the
+// vault. Member ids are synthesized from the group's declared `<permissionSets>`
+// bare names, so a managed-package member set is routinely absent; the verdict
+// must stay a MEASURED `restricted` and the absence must be DISCLOSED on the
+// PermissionSetGroup step. The group carries NO muting set on purpose — that is
+// the case the muting-only caveat branch used to swallow.
+// =============================================================================
+
+const PSG_MISS_OBJ = 'CustomObject:PsgMissObj';
+const PSG_MISS_PROFILE = 'Profile:PsgMissProfile';
+const PSG_MISS_PRESENT_SET = 'PermissionSet:PsgMissPresent';
+/** Named by the group, deliberately NOT seeded — the managed-package case. */
+const PSG_MISS_ABSENT_SET = 'PermissionSet:PsgMissAbsent';
+const PSG_MISS_GROUP = 'PermissionSetGroup:PsgMissG';
+
+const psgMemberMissSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: PSG_MISS_OBJ,
+      apiName: 'PsgMissObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: PSG_MISS_PROFILE,
+      type: 'Profile',
+      apiName: 'PsgMissProfile',
+      properties: { userLicense: 'Salesforce', userPermissions: [] },
+    }),
+    makeNode({
+      id: PSG_MISS_PRESENT_SET,
+      type: 'PermissionSet',
+      apiName: 'PsgMissPresent',
+      properties: { userPermissions: [] },
+    }),
+    makeNode({
+      id: PSG_MISS_GROUP,
+      type: 'PermissionSetGroup',
+      apiName: 'PsgMissG',
+      // NO `mutingPermissionSets` — the member-miss disclosure must not depend
+      // on the group having one.
+      properties: { permissionSets: ['PsgMissPresent', 'PsgMissAbsent'] },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: PSG_MISS_GROUP,
+      toId: PSG_MISS_PRESENT_SET,
+      edgeType: 'references',
+      properties: { referenceKind: 'permissionSetGroupMember' },
+    }),
+  ],
+};
+
 // One shared graph store + Context across the suite. All seeds use
 // distinct ids so there's no cross-test interference.
 let tempDir: string;
@@ -1370,6 +1447,8 @@ beforeAll(async () => {
     modifyAllSeed,
     createWithRtSeed,
     createNoRtObjSeed,
+    zeroGrantProfileSeed,
+    psgMemberMissSeed,
     pubReadWithGrantSeed,
     pubRwtWithGrantSeed,
     privateCrudOnlySeed,
@@ -1397,8 +1476,9 @@ afterAll(async () => {
 describe('whyCantUserSeeRecordHandler', () => {
   it('Public-Read OWD does NOT grant visibility without object Read CRUD (object Read is a precondition)', async () => {
     // CR-03 (corrected H1): a Public-Read OWD alone does NOT make a record
-    // visible. `Profile:Standard User` is never seeded and has zero object
-    // permission on READ_OBJ, so the object-Read PRECONDITION (plane A) is
+    // visible. `Profile:Standard User` IS seeded (zeroGrantProfileSeed) and
+    // holds zero object permission on READ_OBJ, so the deny is MEASURED — the
+    // object-Read PRECONDITION (plane A) is
     // unmet and the answer must be `restricted` — NOT the old (wrong) OWD-alone
     // `visible`. Telling a zero-permission user they can see any Public-Read
     // object is a catastrophic wrong access answer; this pins the two-plane
@@ -2824,6 +2904,8 @@ const EXT_AGREE_OBJ = 'CustomObject:ExtAgreeObj';
 const EXT_NO_COLUMN_OBJ = 'CustomObject:ExtNoColumnObj';
 
 const EXTERNAL_PROFILE = 'Profile:Community Login User';
+/** In the vault, internal licence, and holds NO grant edge on any object. */
+const PRESENT_UNGRANTED_PROFILE = 'Profile:Present But Ungranted';
 const INTERNAL_PROFILE = 'Profile:Internal Staff';
 const UNLICENSED_PROFILE = 'Profile:No Licence Profile';
 
@@ -2883,6 +2965,14 @@ const externalOwdAudienceSeed: ExtractionResult = {
       type: 'Profile',
       apiName: 'No Licence Profile',
       properties: {},
+    }),
+    // Present, readable, and grants nothing — the CONTROL for the absent-
+    // container fix: a measured deny must stay `restricted`.
+    makeNode({
+      id: PRESENT_UNGRANTED_PROFILE,
+      type: 'Profile',
+      apiName: 'Present But Ungranted',
+      properties: { userLicense: 'Salesforce', userPermissions: [] },
     }),
   ],
   edges: [
@@ -3027,5 +3117,201 @@ describe('whyCantUserSeeRecordHandler — OWD audience (internal vs external col
     const owd = r.value.data.reasoning[0]!;
     expect(owd.verdict).toBe('unknown');
     expect(owd.reason).toContain('is not in this vault');
+    // The blind spot this test used to have: it asserted only `reasoning[0]`
+    // and never the VERDICT, which was a confident `restricted` off the
+    // object-CRUD hard deny.
+    expect(r.value.data.verdict).toBe('unknown');
+  });
+});
+
+/**
+ * G3 — an absent SUPPLIED Profile / PermissionSet / PermissionSetGroup is
+ * `unknown`, never a hard deny. This tool's failure direction is the dangerous
+ * one (it concludes a user CANNOT act), and a missing container used to be
+ * indistinguishable from one that grants nothing: the object-CRUD precondition
+ * failed on a failed LOOKUP and forced `restricted`, with the absent id named
+ * NOWHERE in the payload on an ordinary object (both OWD columns agreeing).
+ */
+describe('whyCantUserSeeRecordHandler — a supplied container absent from the vault', () => {
+  let absStore: GraphStore;
+  let absDir: string;
+  let absCtx: Context;
+
+  const PHANTOM_PROFILE = 'Profile:Totally_Nonexistent_XYZ';
+
+  beforeAll(async () => {
+    absDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-absent-container-'));
+    const opened = await openGraph(join(absDir, 'absent.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    absStore = opened.value;
+    const imported = await importExtractionResults(absStore, [externalOwdAudienceSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    absCtx = { vaultRoot: absDir, manifest: FIXTURE_MANIFEST, graph: absStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(absStore);
+    rmSync(absDir, { recursive: true, force: true });
+  });
+
+  it('an ordinary object + an absent profile is `unknown` and NAMES the absent id', async () => {
+    // EXT_AGREE_OBJ's two OWD columns agree, so the audience never matters and
+    // the OWD stage's own not-in-vault disclosure never fires — this is the
+    // path where the absent profile appeared nowhere at all in the payload.
+    const r = await whyCantUserSeeRecordHandler(absCtx, {
+      componentId: EXT_AGREE_OBJ,
+      userContext: { profileId: PHANTOM_PROFILE },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('unknown');
+    // No hard deny was recorded, so the honesty axis decided the verdict.
+    expect(r.value.data.hardDenyReason).toBeUndefined();
+    const payload = JSON.stringify(r.value.data);
+    expect(payload).toContain(PHANTOM_PROFILE);
+    expect(payload).toContain('NOT in this vault');
+    const grant = r.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
+    expect(grant?.verdict).toBe('unknown');
+  });
+
+  it('the create path is `unknown` too, not "no object Create permission"', async () => {
+    const r = await whyCantUserSeeRecordHandler(absCtx, {
+      componentId: EXT_AGREE_OBJ,
+      userContext: { profileId: PHANTOM_PROFILE },
+      accessLevel: 'create',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('unknown');
+    const payload = JSON.stringify(r.value.data);
+    expect(payload).toContain(PHANTOM_PROFILE);
+    expect(payload).not.toMatch(
+      /no object Create permission on the supplied granters/i,
+    );
+  });
+
+  it('a supplied `PermissionSetGroup:` id that is not in the vault is `unknown` — it WAS supplied', async () => {
+    const r = await whyCantUserSeeRecordHandler(absCtx, {
+      componentId: EXT_AGREE_OBJ,
+      userContext: {
+        profileId: PRESENT_UNGRANTED_PROFILE,
+        permissionSetIds: ['PermissionSetGroup:No_Such_Group'],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('unknown');
+    const payload = JSON.stringify(r.value.data);
+    expect(payload).toContain('PermissionSetGroup:No_Such_Group');
+    expect(payload).toContain('NOT in this vault');
+  });
+
+  it('CONTROL — a PRESENT profile that genuinely grants nothing is still a `restricted` hard deny', async () => {
+    // The fix must not be a blanket demotion of every deny to `unknown`: a
+    // container that was READ and grants nothing is a measured deny.
+    const r = await whyCantUserSeeRecordHandler(absCtx, {
+      componentId: EXT_AGREE_OBJ,
+      userContext: { profileId: PRESENT_UNGRANTED_PROFILE },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('restricted');
+    expect(r.value.data.hardDenyReason).toContain(
+      'no object Read permission on the supplied profile / permission sets',
+    );
+    expect(JSON.stringify(r.value.data)).not.toContain('NOT in this vault');
+  });
+
+  it('CONTROL — a real granting profile plus an absent permission set is still `visible`', async () => {
+    // The absent container can only ADD access, so a grant that was actually
+    // READ stays determinative.
+    const r = await whyCantUserSeeRecordHandler(absCtx, {
+      componentId: EXT_SPLIT_OBJ,
+      userContext: {
+        profileId: INTERNAL_PROFILE,
+        permissionSetIds: ['PermissionSet:Not_In_Vault_Either'],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('visible');
+  });
+});
+
+/**
+ * G3 — THE CTO'S REPRODUCTION, and the reason attempt 1 was rejected. A present
+ * profile plus a PRESENT PermissionSetGroup that names ONE member permission set
+ * absent from the vault is a common, HEALTHY configuration (member ids are
+ * synthesized from bare `<permissionSets>` names, and managed-package member
+ * sets are routinely not retrieved). It must keep its measured verdict; the
+ * absence is disclosure only.
+ */
+describe('whyCantUserSeeRecordHandler — a PSG member absent from the vault', () => {
+  it("keeps the MEASURED `restricted` verdict — a member miss never buys an `unknown`", async () => {
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PSG_MISS_OBJ,
+      userContext: {
+        profileId: PSG_MISS_PROFILE,
+        permissionSetIds: [PSG_MISS_GROUP],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // FAIL-BEFORE (the rejected diff): 'unknown'.
+    expect(r.value.data.verdict).toBe('restricted');
+    expect(r.value.data.hardDenyReason).toContain(
+      'no object Read permission on the supplied profile / permission sets',
+    );
+  });
+
+  it('DISCLOSES the absent member on the PermissionSetGroup step — even with NO muting set', async () => {
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PSG_MISS_OBJ,
+      userContext: {
+        profileId: PSG_MISS_PROFILE,
+        permissionSetIds: [PSG_MISS_GROUP],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const psg = r.value.data.reasoning.find((s) => s.stage === 'PermissionSetGroup');
+    expect(psg).toBeDefined();
+    // The group carries no muting permission set, so this proves the caveat was
+    // lifted OUT of the `mutingPsgs.length > 0` branch.
+    expect(psg?.reason).not.toContain('muting permission set (');
+    expect(psg?.reason).toContain(PSG_MISS_ABSENT_SET);
+    expect(psg?.reason).toContain('ABSENT from this vault');
+    expect(psg?.reason).toContain('does NOT change the verdict');
+  });
+
+  it('never calls a synthesized member a "supplied container", nor tells the admin to check ids they never passed', async () => {
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PSG_MISS_OBJ,
+      userContext: {
+        profileId: PSG_MISS_PROFILE,
+        permissionSetIds: [PSG_MISS_GROUP],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const payload = JSON.stringify(r.value.data);
+    // FAIL-BEFORE: `supplied container PermissionSet:PsgMissAbsent is NOT in
+    // this vault … or check the ids`.
+    expect(payload).not.toContain('supplied container ' + PSG_MISS_ABSENT_SET);
+    expect(payload).not.toContain('NOT in this vault');
+    expect(payload).not.toContain('check the ids');
+  });
+
+  it('CONTROL — the same object with a bare PRESENT permission set is `restricted` too', async () => {
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PSG_MISS_OBJ,
+      userContext: {
+        profileId: PSG_MISS_PROFILE,
+        permissionSetIds: [PSG_MISS_PRESENT_SET],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('restricted');
   });
 });

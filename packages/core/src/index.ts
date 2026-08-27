@@ -37,6 +37,7 @@ export {
   collapseHome,
   hasAdjacentSegments,
   hasAnySegment,
+  isPathWithin,
   PATH_SEPARATORS,
   splitPathSegments,
   toPosixPath,

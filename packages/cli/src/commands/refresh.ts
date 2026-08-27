@@ -1211,9 +1211,13 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   // P13-WATCH-epoch: when an open MCP server holds the graph file (DuckDB
   // refuses a writer while ANY process holds a handle, read-only included),
   // build into a SIDE file and atomically rename it over the target at the
-  // end — POSIX rename succeeds despite open handles; the server's old
+  // end — on POSIX the rename succeeds despite open handles; the server's old
   // handle keeps the unlinked previous file, and the refresh-epoch bump
   // makes it reopen the NEW file on its next call. No pkill, no restart.
+  // Windows does NOT permit that rename while the handle is open; swapping a
+  // held database there needs generation-named files, which is a bigger design
+  // than this fix. Until then {@link installSideBuildGraph} fails CLOSED with
+  // a message that states exactly which state the vault is left in.
   let graphTarget = paths.graphDb;
   let renameOver = false;
   let storeResult: Awaited<ReturnType<typeof openGraph>>;
@@ -1227,7 +1231,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
     storeResult = await openGraph(graphTarget);
   } else {
     storeResult = await openGraph(graphTarget);
-    if (!storeResult.ok && /locked|Conflicting lock/i.test(storeResult.error.message)) {
+    if (isLockedOpenFailure(storeResult)) {
       graphTarget = `${paths.graphDb}.rebuild`;
       await rm(graphTarget, { force: true });
       await rm(`${graphTarget}.wal`, { force: true });
@@ -1300,8 +1304,16 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   }
 
   // Atomic swap: open server handles keep the old (now-unlinked) file until
-  // their next call notices the epoch bump and reopens this one.
-  await rename(graphTarget, paths.graphDb);
+  // their next call notices the epoch bump and reopens this one. POSIX only —
+  // Windows refuses the rename while a holder has the file open, so this fails
+  // CLOSED with guidance instead of throwing a raw errno out of `bin/sfi.js`.
+  const swapped = await installSideBuildGraph({
+    liveDbPath: paths.graphDb,
+    rebuildPath: graphTarget,
+  });
+  if (!swapped.ok) {
+    return failed(started, swapped.error, walked.failures);
+  }
   const installed = await openGraph(paths.graphDb);
   if (!installed.ok) {
     return failed(started, `open installed side-build: ${installed.error.message}`, walked.failures);
@@ -1338,6 +1350,122 @@ const preserveFactsForSideBuild = async (
     return copied.ok ? ok(copied.value) : err(copied.error.message);
   } finally {
     await closeGraph(live.value);
+  }
+};
+
+/**
+ * Route an open failure to the side build iff `store.ts` CLASSIFIED it as a
+ * lock conflict. Consumes {@link GraphError.kind}, never a second copy of the
+ * rule: this file used to hand-match the words "locked" and "conflicting lock"
+ * against the message, which matched Windows only by accident — the raw DuckDB
+ * string there is "…being used by another process", and the "locked" hit came
+ * from the WRAPPER `lockConflictMessage` prepends. Re-running any string rule
+ * (the exported `isLockConflict` included) over the wrapped message is a
+ * second copy that can drift; `kind` cannot.
+ */
+export const isLockedOpenFailure = (result: Result<GraphStore, GraphError>): boolean =>
+  !result.ok && result.error.kind === 'locked';
+
+/**
+ * Guidance when the side-build swap cannot replace the live database. The
+ * remedy is DERIVED from the platform, not asserted; deliberately NOT
+ * {@link lockConflictMessage}, whose POSIX branch promises the refresh
+ * "handles this AUTOMATICALLY" — the one claim that is false in a context
+ * where that automatic swap is what just failed.
+ *
+ * Every clause is grounded: the rename failed and nothing else wrote the
+ * database, so it was not replaced; the previous build still answers, which
+ * makes it STALE rather than broken; and `buildOnly` returns before the
+ * manifest/render publish, so nothing points at the graph that is gone. It
+ * does NOT claim the vault is unchanged — `persistResolveIndexBestEffort`
+ * already rewrote `graph/resolve-index.json` from the side build (its path is
+ * dirname-based, so both collide in one directory) and the extract cache was
+ * written earlier in the run.
+ *
+ * Two clauses are DERIVED, not asserted, because both were once written as
+ * unconditional truths that a probe falsified:
+ *   - `scratchRemoved` — the cleanup rm can fail for the same reason the
+ *     rename did, and the caller's own test pins that the scratch survives.
+ *     Claiming "discarded" there names a file the user would then find.
+ *   - the resolve index — `resolve-index.json` beside the database was
+ *     rewritten from the DISCARDED build, and its staleness guard compares
+ *     node COUNT only (`packages/graph/src/resolve-index.ts`), so an index
+ *     with the same node count as the live database is ACCEPTED and resolves
+ *     names the live vault does not contain. That hole predates this message,
+ *     but a message that denied it would be the very species of untruth this
+ *     function exists to avoid. It is named as a thing to delete instead.
+ */
+export const graphSwapFailureMessage = (
+  dbPath: string,
+  cause: string,
+  scratchRemoved: boolean,
+): string => {
+  const remedy =
+    process.platform === 'win32'
+      ? 'Windows will not let a refresh replace a database file while another ' +
+        'process holds it open: close your MCP client (or stop `sfi mcp`), ' +
+        're-run the refresh, then reopen the client.'
+      : 'Another process is holding the vault database open — stop it and ' +
+        're-run the refresh.';
+  // The publish claim holds either way — `buildOnly` returns before the
+  // manifest/render step. Only the SCRATCH clause depends on the cleanup.
+  const scratch = scratchRemoved
+    ? 'The rebuilt graph was discarded. '
+    : `The rebuilt graph could not be cleaned up either and is still at ` +
+      `${dbPath}.rebuild — delete it, or the next refresh will. `;
+  return (
+    `could not install the rebuilt graph over ${dbPath}. The vault DATABASE ` +
+    'was NOT replaced — the rename failed and nothing else wrote it, so your ' +
+    'vault still answers, from the PREVIOUS build: it is STALE, not broken. ' +
+    scratch +
+    'Either way nothing was published — no manifest or rendered document ' +
+    'points at it. ' +
+    'One file beside the database WAS overwritten from the discarded build: ' +
+    'its resolve index. That index is checked by node count alone, so it can ' +
+    'be accepted while naming components this vault does not have. Delete ' +
+    `${dirname(dbPath)}/resolve-index.json — it is a cache and is rebuilt on ` +
+    'demand. ' +
+    `${remedy} Underlying error: ${cause}`
+  );
+};
+
+/**
+ * Install a completed side build over the live database.
+ *
+ * EVERY filesystem call here is inside a catch. This path is reached
+ * precisely BECAUSE another process holds the live database open, so an errno
+ * escaping it is the raw dump this function exists to remove.
+ *
+ * It touches NO live-vault file. On failure only `rebuildPath` and its WAL —
+ * scratch this process created — are removed. The live `<db>.wal` is
+ * deliberately left alone: it holds committed-but-uncheckpointed transactions
+ * of the database the failure message promises is intact, its holder still
+ * has it open, and `rm`'s `force` swallows only ENOENT, so removing it would
+ * both corrupt that promise and throw on the platform it was meant to help.
+ */
+export const installSideBuildGraph = async ({
+  liveDbPath,
+  rebuildPath,
+}: {
+  readonly liveDbPath: string;
+  readonly rebuildPath: string;
+}): Promise<Result<void, string>> => {
+  try {
+    await rename(rebuildPath, liveDbPath);
+    return ok(undefined);
+  } catch (cause) {
+    // Tracked, not assumed: the permission that broke the rename can break the
+    // cleanup too, and the message must not claim a discard that did not happen.
+    let scratchRemoved = true;
+    for (const scratch of [rebuildPath, `${rebuildPath}.wal`]) {
+      try {
+        await rm(scratch, { force: true });
+      } catch {
+        // The next run rm()s this scratch before rebuilding; never rethrow here.
+        scratchRemoved = false;
+      }
+    }
+    return err(graphSwapFailureMessage(liveDbPath, String(cause), scratchRemoved));
   }
 };
 

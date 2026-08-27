@@ -45,8 +45,16 @@
  *      PermissionSetGroup member grants but the group's muting permission set
  *      denies is NOT counted (composing the R6-06 shared kernel), so the gate no
  *      longer OVERSTATES access. When a profile or permission set was supplied and
- *      the precondition is NOT met, the handler returns `restricted` (the ONLY
- *      precondition-driven `restricted`) — this kills H1 (zero-perm user on a
+ *      the precondition is NOT met, the handler returns `restricted` — the only
+ *      precondition-driven `restricted`, and ONLY when every supplied container
+ *      was actually readable. If a container the CALLER supplied is absent from
+ *      the vault, the precondition is undecidable and the handler returns
+ *      `unknown` instead, because a deny computed from a container nobody read
+ *      is a fabricated measurement. (A PermissionSetGroup MEMBER that is absent
+ *      does NOT trigger this: members are synthesized from bare names and are
+ *      routinely unextracted, so those misses are disclosed on the
+ *      PermissionSetGroup step and the verdict still resolves.) This kills H1
+ *      (zero-perm user on a
  *      Public-Read OWD), CR-RV6 (Read-only user told they can EDIT a
  *      ReadWriteTransfer OWD object / Edit-only user told they can DELETE a
  *      FullAccess OWD object), and now the muted-CRUD overstatement (a group's
@@ -1142,7 +1150,61 @@ interface MutedObjectAccess {
   readonly presentWithoutData: readonly string[];
   /** Muting ids a group references but that are absent from the vault — cannot subtract. */
   readonly missingMutingIds: readonly string[];
+  /**
+   * CALLER-SUPPLIED container id(s) — the `profileId` / `permissionSetIds`
+   * entries themselves — with NO node in this vault, so their grants could not
+   * be READ at all. An absent container contributes nothing to
+   * `granted`/`wouldGrantRaw`, which is indistinguishable from a container that
+   * genuinely grants nothing; the caller routes that to `unknown` rather than a
+   * categorical deny.
+   *
+   * SUPPLIED ONLY. A PermissionSetGroup MEMBER id is not in here — see
+   * `missingGroupMemberIds`.
+   */
+  readonly missingContainerIds: readonly string[];
+  /**
+   * PermissionSetGroup MEMBER ids with no node in this vault. DISCLOSURE ONLY:
+   * these ids are SYNTHESIZED from the group's declared `<permissionSets>` bare
+   * names (`permission-set-group.ts#expandFromNode` → `toIds`), with no
+   * guarantee a node exists — a managed-package member set makes that the
+   * NORMAL case. Letting a member miss move the verdict made a headline tool
+   * answer "I don't know" for a healthy configuration, so it may only be
+   * reported (on the PermissionSetGroup step, beside `missingMutingIds`).
+   */
+  readonly missingGroupMemberIds: readonly string[];
 }
+
+/** The object-CRUD bit an access level requires, in Salesforce's own wording. */
+const objectLevelLabel = (level: AccessLevel): string =>
+  level === 'read'
+    ? 'Read'
+    : level === 'edit'
+      ? 'Edit'
+      : level === 'delete'
+        ? 'Delete'
+        : 'Create';
+
+/**
+ * The PermissionGrant reason for an UNDECIDABLE object-CRUD gate: a container
+ * the CALLER supplied is not in this vault, so its grants were never read.
+ *
+ * Folding an absent container into "grants nothing" produced a categorical
+ * `restricted` off a failed LOOKUP — this tool's dangerous failure direction,
+ * and one that reproduced for every object and access level on a stale /
+ * `--types`-narrowed vault or a label-vs-API-name mistake. Every sibling
+ * discloses this instead (`effective_permissions`' `missingContainers`,
+ * `user_ability`'s `component-not-found`, `layout_for_user`'s `not-found`);
+ * this is that disclosure, expressed in the existing reasoning chain so the
+ * aggregate lands on `unknown`.
+ *
+ * Names ONLY ids the caller passed — "check the ids" is actionable advice only
+ * for ids the admin actually typed.
+ */
+const missingContainerReason = (
+  ids: readonly string[],
+  level: AccessLevel,
+): string =>
+  `supplied ${ids.length === 1 ? 'container' : 'containers'} ${ids.join(', ')} ${ids.length === 1 ? 'is' : 'are'} NOT in this vault (a stale vault, a \`--types\`-narrowed refresh, or a label-vs-API-name mistake) — their grants cannot be read, so object ${objectLevelLabel(level)} can be neither confirmed nor denied; re-run \`/sfi-refresh\` or check the ids`;
 
 /**
  * Plane A — the operation-aware OBJECT-CRUD PRECONDITION, now MUTING-AWARE
@@ -1176,6 +1238,14 @@ interface MutedObjectAccess {
  * absent CANNOT be subtracted — it is DISCLOSED (`presentWithoutData` /
  * `missingMutingIds`), never silently treated as "mutes nothing" (per R6-06's
  * honesty). Record-type visibility is not mutable and is out of this gate.
+ *
+ * The SAME honesty applies to the containers themselves, but SPLIT by who named
+ * them: a container the CALLER supplied (`profileId`, a `permissionSetIds`
+ * entry, a `PermissionSetGroup:` id that resolves to nothing) with no node in
+ * this vault goes to `missingContainerIds`, which the caller routes to
+ * `unknown`; a PSG MEMBER id — synthesized from the group's declared bare names,
+ * routinely absent for managed-package sets — goes to the disclosure-only
+ * `missingGroupMemberIds` and may NEVER move the verdict.
  *
  * Reads from the RAW (uncoerced-but-still-unfolded) userContext so the group
  * boundary survives — the folded `permissionSetIds` the rest of the cascade uses
@@ -1231,7 +1301,11 @@ const computeMutedObjectAccess = async (
         continue;
       }
       // Not a real PSG node — treat as a phantom direct id (matches nothing),
-      // exactly as the folded flat list would.
+      // exactly as the folded flat list would. It falls through to
+      // `pushDirect`, so it enters `directSeen` and the node-fetch loop below
+      // records it as a SUPPLIED missing container: the caller named it, and
+      // the group's members (hence its grants) are unreadable, which is not the
+      // same as "grants nothing".
     }
     pushDirect(id);
   }
@@ -1255,6 +1329,9 @@ const computeMutedObjectAccess = async (
       mutingApplied: [],
       presentWithoutData: [],
       missingMutingIds: [],
+      // Nothing was supplied, so nothing was looked up and nothing is missing.
+      missingContainerIds: [],
+      missingGroupMemberIds: [],
     });
   }
 
@@ -1279,9 +1356,15 @@ const computeMutedObjectAccess = async (
   const containersToLoad = new Set<string>(directIds);
   for (const g of groups) for (const m of g.memberIds) containersToLoad.add(m);
   // ONE batched fetch of every container node, replacing the per-container
-  // `getNodeById` N+1. A missing id maps to an empty perm set, exactly like the
-  // old null branch; `sysPermsByContainer` is a Map so iteration order is
-  // irrelevant.
+  // `getNodeById` N+1. `sysPermsByContainer` is a Map so iteration order is
+  // irrelevant. A container with NO node maps to an empty perm set for the
+  // union — and is ALSO recorded, because "we could not read this container"
+  // and "this container grants nothing" are different answers and only the
+  // second may produce a deny. WHICH bucket it lands in is decided by
+  // `directSeen` (the caller-supplied ids): a supplied miss can move the
+  // verdict to `unknown`, a PSG-member miss is disclosure only.
+  const missingContainerIds = new Set<string>();
+  const missingGroupMemberIds = new Set<string>();
   const containerNodesResult = await listNodesByIds(
     ctx.graph,
     [...containersToLoad].map((id) => id as ComponentId),
@@ -1296,6 +1379,10 @@ const computeMutedObjectAccess = async (
       if (Array.isArray(perms)) {
         for (const p of SYSTEM_BYPASS_PERMS) if (perms.includes(p)) set.add(p);
       }
+    } else if (directSeen.has(id)) {
+      missingContainerIds.add(id);
+    } else {
+      missingGroupMemberIds.add(id);
     }
     sysPermsByContainer.set(id, set);
   }
@@ -1425,6 +1512,8 @@ const computeMutedObjectAccess = async (
     mutingApplied: [...mutingApplied].sort(),
     presentWithoutData: [...presentWithoutData].sort(),
     missingMutingIds: [...missingMutingIds].sort(),
+    missingContainerIds: [...missingContainerIds].sort(),
+    missingGroupMemberIds: [...missingGroupMemberIds].sort(),
   });
 };
 
@@ -2179,6 +2268,16 @@ const evaluatePermissionSetGroups = async (
       memberCount += expanded.value.memberPermissionSetIds.length;
       if (expanded.value.hasMuting) mutingPsgs.push(psgId);
     }
+    // A member permission set the group NAMES but the vault does not hold. The
+    // id was reconstructed from a bare `<permissionSets>` name, so absence is
+    // routine (managed-package sets are commonly not retrieved) — it is
+    // DISCLOSED here and never allowed to move the verdict. Deliberately OUTSIDE
+    // the muting branch below: a group with no muting set can still name a
+    // member this vault lacks.
+    const memberMiss =
+      netAccess !== null && netAccess.missingGroupMemberIds.length > 0
+        ? ` NOTE: ${netAccess.missingGroupMemberIds.length} member permission set(s) named by an assigned group are ABSENT from this vault (${netAccess.missingGroupMemberIds.join(', ')}) — member ids are reconstructed from each group's declared \`<permissionSets>\` names and a managed-package member set is routinely not retrieved, so this group's contribution may be UNDERSTATED (re-run \`/sfi-refresh\`). This does NOT change the verdict: you supplied the group, not these ids.`
+        : '';
     let caveat = '';
     if (mutingPsgs.length > 0) {
       const refd = [...new Set(mutingPsgs)].sort().join(', ');
@@ -2207,7 +2306,7 @@ const evaluatePermissionSetGroups = async (
       step(
         'PermissionSetGroup',
         'restricted',
-        `${assignedPsgIds.length} assigned permission set group(s) expanded into ${memberCount} member permission set(s), evaluated via the permission-grant cascade above (declared membership).${caveat}`,
+        `${assignedPsgIds.length} assigned permission set group(s) expanded into ${memberCount} member permission set(s), evaluated via the permission-grant cascade above (declared membership).${caveat}${memberMiss}`,
         assignedPsgIds,
       ),
     );
@@ -2290,9 +2389,13 @@ const UNKNOWN_TAIL: readonly AccessReasoningStep[] = Object.freeze([
  * checked by the handler BEFORE this function runs: when a profile or permission
  * set was supplied and the precondition is unmet, the handler returns
  * `restricted` early (the only place a precondition-driven `restricted` is
- * emitted), so this function never sees that case. By the time it runs either
- * (i) object Read is present, or (ii) object perms are undecidable (a
- * role/group-only context with no profile/permset).
+ * emitted), so this function never sees that case. It also returns early with
+ * `unknown` when a CALLER-SUPPLIED container is absent from the vault, so an
+ * unreadable container never reaches this function as a silent deny either.
+ * By the time it runs one of three things holds: (i) object Read is present,
+ * (ii) object perms are undecidable (a role/group-only context with no
+ * profile/permset), or (iii) the supplied containers were all readable and
+ * simply do not grant Read.
  *
  * Therefore the OLD object-CRUD hard gate is GONE: object Read is no longer
  * inferred from `PermissionGrant === 'restricted'`. After the H2 split a
@@ -2641,6 +2744,18 @@ const evaluateCreateAccess = async (
     ? ` — but object Create is MUTED within its permission set group by ${netAccess!.mutedBy.join(', ')} (muting is group-scoped), so this does not confer create`
     : '';
 
+  // The container(s) the CALLER supplied are absent from this vault, so their
+  // Create grants were never read — undecidable, not a deny (same root cause as
+  // the read/edit/delete path, which short-circuits before reaching this
+  // branch). Gated on NOTHING having granted: a container that IS present and
+  // grants Create is determinative, and an absent one can only ADD access. A
+  // PSG MEMBER miss is excluded by construction — it never reaches
+  // `missingContainerIds`.
+  const undecidableContainerIds =
+    netAccess !== null && !netAccess.granted && !netAccess.wouldGrantRaw
+      ? netAccess.missingContainerIds
+      : [];
+
   // 1. Object Create permission (`allowCreate`) or object Modify All. Muting
   // demotes a raw `visible` here to `restricted` (the group's Create grant was
   // removed by its muting set).
@@ -2653,20 +2768,30 @@ const evaluateCreateAccess = async (
   if (!grantResult.ok) return err(grantResult.error);
   const g = grantResult.value;
   const gVerdict: AccessReasoningStep['verdict'] =
-    muted && g.verdict === 'visible' ? 'restricted' : g.verdict;
+    undecidableContainerIds.length > 0
+      ? 'unknown'
+      : muted && g.verdict === 'visible'
+        ? 'restricted'
+        : g.verdict;
   reasoning.push(
-    muted && g.verdict === 'visible'
-      ? {
-          stage: 'PermissionGrant',
-          verdict: 'restricted',
-          reason: `${g.reason} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy (you don't need access to existing records to create one)${mutedSuffix}`,
-          mutedBy: netAccess!.mutedBy,
-        }
-      : step(
+    undecidableContainerIds.length > 0
+      ? step(
           'PermissionGrant',
-          g.verdict,
-          `${g.reason} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy (you don't need access to existing records to create one)`,
-        ),
+          'unknown',
+          `${missingContainerReason(undecidableContainerIds, 'create')} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy`,
+        )
+      : muted && g.verdict === 'visible'
+        ? {
+            stage: 'PermissionGrant',
+            verdict: 'restricted',
+            reason: `${g.reason} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy (you don't need access to existing records to create one)${mutedSuffix}`,
+            mutedBy: netAccess!.mutedBy,
+          }
+        : step(
+            'PermissionGrant',
+            g.verdict,
+            `${g.reason} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy (you don't need access to existing records to create one)`,
+          ),
   );
 
   // 2. Modify All Data god-mode (no restriction-rule caveat for create). Muting
@@ -2700,7 +2825,8 @@ const evaluateCreateAccess = async (
     (netAccess === null || netAccess.granted);
   let verdict: 'visible' | 'restricted' | 'unknown';
   if (!permVisible) {
-    verdict = 'restricted';
+    // An unreadable SUPPLIED container cannot produce a categorical "cannot create".
+    verdict = undecidableContainerIds.length > 0 ? 'unknown' : 'restricted';
   } else if (rt.verdict === 'visible') {
     verdict = 'visible';
   } else if (rt.verdict === 'unknown') {
@@ -2961,6 +3087,12 @@ export const whyCantUserSeeRecordHandler = async (
   // surfaced in `reasoning` for an honest, complete chain — they simply cannot
   // OVERTURN the hard deny. The verdict is forced below, after the cascade.
   let objectCrudHardDenyReason: string | null = null;
+  // The object-CRUD gate could not be DECIDED: a container the CALLER supplied
+  // is absent from this vault, so its grants were never read. Mutually exclusive
+  // with `objectCrudHardDenyReason` — it is the honest `unknown` that replaces
+  // the deny an unreadable container used to produce. NOT reached by a PSG
+  // MEMBER miss, which is disclosure-only (`missingGroupMemberIds`).
+  let objectCrudUnknownReason: string | null = null;
   // R7-W4: muting set(s) that flipped the precondition from a would-be grant to
   // a deny within a PermissionSetGroup. Surfaced on the PermissionGrant hard-deny
   // step + the output so an auditor sees WHICH muting set removed access.
@@ -2988,8 +3120,7 @@ export const whyCantUserSeeRecordHandler = async (
     netAccess = netAccessResult.value;
     if (!netAccess.granted) {
       // RV11: name the CRUD bit actually required for THIS operation, not Read.
-      const levelLabel =
-        level === 'read' ? 'Read' : level === 'edit' ? 'Edit' : 'Delete';
+      const levelLabel = objectLevelLabel(level);
       if (netAccess.wouldGrantRaw && netAccess.mutedBy.length > 0) {
         // R7-W4: the user's group member(s) WOULD grant object ${level}, but the
         // owning PermissionSetGroup's muting set removed it — so the precondition
@@ -2997,6 +3128,20 @@ export const whyCantUserSeeRecordHandler = async (
         // set assigned OUTSIDE the group would have survived.
         objectCrudHardDenyReason = `object ${levelLabel} is MUTED within its permission set group by ${netAccess.mutedBy.join(', ')} — the muting permission set removes object ${levelLabel} from that group's member union, so the object-${levelLabel} precondition for record ${level} is NOT met (muting is group-scoped; a grant from the profile or a permission set assigned outside the group would survive)`;
         mutedByForDeny = netAccess.mutedBy;
+      } else if (
+        netAccess.missingContainerIds.length > 0 &&
+        !netAccess.wouldGrantRaw
+      ) {
+        // NOT a deny: no supplied container granted anything, and at least one
+        // of them is absent from the vault — so the gate failed on a LOOKUP,
+        // not on a read grant set. Leave `objectCrudHardDenyReason` null and
+        // report `unknown` on the PermissionGrant stage instead. (When a
+        // PRESENT container did grant — `wouldGrantRaw` — the absent one can
+        // only ADD access, so the grant stays determinative.)
+        objectCrudUnknownReason = missingContainerReason(
+          netAccess.missingContainerIds,
+          level,
+        );
       } else {
         objectCrudHardDenyReason = `no object ${levelLabel} permission on the supplied profile / permission sets — object ${levelLabel} is a precondition for record ${level}, so no OWD value or sharing grant can make the record ${level === 'read' ? 'visible' : level + 'able'}`;
       }
@@ -3027,12 +3172,18 @@ export const whyCantUserSeeRecordHandler = async (
   // the PermissionGrant stage (the RV11 wording) instead of the generic
   // "no read-or-better grant" reason, so the chain explains the hard deny. R7-W4:
   // when muting caused the deny, attach `mutedBy` so the step names the set.
+  // When the precondition was UNDECIDABLE (an absent SUPPLIED container), the
+  // honest `unknown` step REPLACES the grant step — whose `restricted` reason
+  // would otherwise assert "no grant from supplied granters" about a container
+  // whose grants were never read.
   reasoning.push(
     objectCrudHardDenyReason !== null
       ? mutedByForDeny.length > 0
         ? { stage: 'PermissionGrant', verdict: 'restricted', reason: objectCrudHardDenyReason, mutedBy: mutedByForDeny }
         : step('PermissionGrant', 'restricted', objectCrudHardDenyReason)
-      : grantStepResult.value,
+      : objectCrudUnknownReason !== null
+        ? step('PermissionGrant', 'unknown', objectCrudUnknownReason)
+        : grantStepResult.value,
   );
 
   // Stage 2a: SystemPermission. View All Data / Modify All Data on the profile
@@ -3134,8 +3285,17 @@ export const whyCantUserSeeRecordHandler = async (
   // `unknown` off the tail. The full reasoning chain is still returned so the
   // admin sees every stage that was evaluated (e.g. an attached RestrictionRule)
   // even though none of them changes the verdict.
+  // An UNDECIDABLE precondition is forced the same way, to `unknown`: object
+  // CRUD is a precondition, so a downstream `visible` step (a public OWD, a
+  // sharing-rule match) cannot be trusted while the gate itself is unreadable —
+  // letting `aggregateVerdict` return that `visible` would trade a wrong deny
+  // for a wrong grant.
   const finalVerdict: WhyCantUserSeeRecordOutput['verdict'] =
-    objectCrudHardDenyReason !== null ? 'restricted' : aggregateVerdict(reasoning);
+    objectCrudHardDenyReason !== null
+      ? 'restricted'
+      : objectCrudUnknownReason !== null
+        ? 'unknown'
+        : aggregateVerdict(reasoning);
   // R7-W4: expose the muting set(s) that flipped the precondition (top-level, so
   // a caller need not walk the reasoning chain). Present only on a muted deny.
   const mutedByField =
