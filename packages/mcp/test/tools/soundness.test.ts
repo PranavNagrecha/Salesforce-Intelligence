@@ -74,9 +74,54 @@ describe('soundnessFromNodes', () => {
     expect(Object.keys(s.blindSpots[0] ?? {})).toContain('componentIds');
   });
 
-  it('treats a missing/garbled qualityIssues property as no blind spot (best-effort)', () => {
-    const weird: Node = { ...apexNode('ApexClass:X', []), properties: { qualityIssues: 'not-an-array' } };
-    expect(soundnessFromNodes([weird]).complete).toBe(true);
+  /**
+   * SOUNDNESS-UNSCANNED-READS-AS-CLEAN.
+   *
+   * This block previously asserted that a missing OR garbled `qualityIssues`
+   * produced NO blind spot — "best-effort". Best-effort should mean "does not
+   * crash", and it still does; it must not also mean "assume clean". The
+   * recognizer's contract (`packages/extractors/src/apex-class.ts`) is that the
+   * property is ALWAYS PRESENT on a scanned node, empty array included, so an
+   * absent or unreadable value means the scan did not run — not that it ran and
+   * found nothing.
+   *
+   * The same mistake already shipped against this property once:
+   * QUALITY-SCAN-SKIPS-TRIGGERS records that ApexTriggers carried no
+   * `qualityIssues`, so `crud_fls_audit` answered CLEAN for triggers.
+   */
+  it('FAIL-BEFORE/PASS-AFTER: an Apex node with NO qualityIssues is not-scanned, not clean', () => {
+    const unscanned: Node = { ...apexNode('ApexClass:NeverScanned', []), properties: {} };
+    const s = soundnessFromNodes([unscanned]);
+    expect(s.complete).toBe(false);
+    expect(s.staticCoverage).toBe('partial');
+    expect(s.blindSpots.map((b) => b.kind)).toContain('quality-scan-not-run');
+    expect(s.blindSpots.find((b) => b.kind === 'quality-scan-not-run')?.componentIds).toEqual([
+      'ApexClass:NeverScanned',
+    ]);
+  });
+
+  it('treats a GARBLED qualityIssues as unreadable — degrades, never crashes, never certifies', () => {
+    const weird: Node = {
+      ...apexNode('ApexClass:X', []),
+      properties: { qualityIssues: 'not-an-array' },
+    };
+    // Best-effort still holds in the sense that matters: no throw.
+    expect(() => soundnessFromNodes([weird])).not.toThrow();
+    // But an unreadable signal is not a clean one.
+    expect(soundnessFromNodes([weird]).complete).toBe(false);
+  });
+
+  /**
+   * The over-correction guard. Only the types the recognizer actually runs over
+   * can be "not scanned". A CustomField has no `qualityIssues` and never should,
+   * so flagging its absence would be noise — and noise is how a real disclosure
+   * gets ignored.
+   */
+  it('does NOT flag a non-Apex node that legitimately has no qualityIssues', () => {
+    const field = typedNode('CustomField:Account.Status__c', 'CustomField');
+    const s = soundnessFromNodes([field]);
+    expect(s.complete).toBe(true);
+    expect(s.staticCoverage).toBe('full');
   });
 });
 

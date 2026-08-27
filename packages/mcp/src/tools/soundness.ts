@@ -58,7 +58,11 @@ export interface SoundnessBlindSpot {
    * so a component reachable only through an un-walked type is absent from the
    * result. Extensible.
    */
-  readonly kind: 'dynamic-apex' | 'unwalked-referrer-class' | 'unwalked-edge-type';
+  readonly kind:
+    | 'dynamic-apex'
+    | 'quality-scan-not-run'
+    | 'unwalked-referrer-class'
+    | 'unwalked-edge-type';
   /**
    * Canonical ids carrying the blind spot (e.g. the dynamic-Apex classes).
    * EMPTY for `unwalked-referrer-class`: the blind spot is structural (no edge
@@ -102,6 +106,13 @@ const DYNAMIC_APEX_NOTE =
   'object, field, and type references built at runtime are invisible to static dependency ' +
   'analysis, so this result may be incomplete. Verify the flagged classes by reading the source.';
 
+const QUALITY_SCAN_NOT_RUN_NOTE =
+  'The code-quality recognizer never ran over these Apex components, so the dynamic-Apex signal ' +
+  'is UNKNOWN for them rather than absent. A vault built before the recognizer shipped, or a ' +
+  'refresh that did not retrieve this family, produces exactly this state. Their references may ' +
+  'be built at runtime and invisible to static analysis; this result is NOT proof they are clean. ' +
+  'Re-run `sfi refresh` to populate the signal.';
+
 const UNWALKED_REFERRER_NOTE =
   'This impact analysis follows only referrers modeled as incoming graph edges. Whole classes of ' +
   'referrer are NOT modeled as edges and were therefore NOT walked: roll-up source coupling (a ' +
@@ -125,29 +136,89 @@ const unwalkedReferrerClassesFor = (
     ? UNWALKED_REFERRER_CLASSES
     : [];
 
-/** True when a node carries the persisted `dynamic-apex` quality signal. */
-const nodeHasDynamicApex = (node: Node): boolean => {
+/**
+ * The component types the code-quality recognizer family actually runs over.
+ * Only these can be "not scanned" — a CustomField has no `qualityIssues` and
+ * never should, so treating its absence as a gap would be noise, not honesty.
+ */
+const QUALITY_SCANNED_TYPES: ReadonlySet<ComponentType> = new Set([
+  'ApexClass',
+  'ApexTrigger',
+] as const);
+
+/**
+ * Three states, not two. SOUNDNESS-UNSCANNED-READS-AS-CLEAN.
+ *
+ * The recognizer's contract is that `qualityIssues` is ALWAYS PRESENT on a
+ * scanned node — `packages/extractors/src/apex-class.ts` states it: "the output
+ * is always-present (empty array on the clean path) so consumers can filter by
+ * `qualityIssues.length > 0` without threading an absent-vs-empty distinction."
+ * Absence therefore means the scan did NOT RUN for that node, never that it ran
+ * and found nothing.
+ *
+ * This read was `Array.isArray(raw) ? … : false`, which collapsed those two
+ * into one answer, so a corpus the recognizer never touched produced
+ * `complete: true` / `staticCoverage: 'full'` — in the module whose entire
+ * stated purpose is that "an analysis tool never implies a completeness it
+ * cannot have", and which backs `find_dead_code`, `method_reachability` and
+ * `get_impact`: the tools consulted before deleting things.
+ *
+ * This is not hypothetical drift. The identical mistake already SHIPPED against
+ * this same property: `QUALITY-SCAN-SKIPS-TRIGGERS` in
+ * `packages/extractors/src/apex-trigger.ts` records that every ApexTrigger node
+ * shipped without `qualityIssues`, so `sfi.crud_fls_audit` answered CLEAN for
+ * triggers — "which is exactly where CRUD/FLS bugs live". That consumer was
+ * fixed by making the extractor scan triggers. This consumer was not, and a
+ * pre-recognizer vault reproduces it for every Apex node at once.
+ */
+type QualitySignal = 'dynamic-apex' | 'scanned-clean' | 'not-scanned';
+
+const dynamicApexSignal = (node: Node): QualitySignal => {
   const raw = (node.properties as Record<string, unknown>)['qualityIssues'];
-  if (!Array.isArray(raw)) return false;
+  if (!Array.isArray(raw)) {
+    // Decided by whether the property is CARRIED AT ALL, never by its length —
+    // the same law `absence-disclosure.ts` states for extracted families.
+    return QUALITY_SCANNED_TYPES.has(node.type) ? 'not-scanned' : 'scanned-clean';
+  }
   return raw.some(
     (issue) =>
       issue !== null &&
       typeof issue === 'object' &&
       (issue as { rule?: unknown }).rule === 'dynamic-apex',
-  );
+  )
+    ? 'dynamic-apex'
+    : 'scanned-clean';
 };
 
-/** Build the envelope from the dynamic-Apex class ids already identified. */
-const fromDynamicIds = (dynamicIds: readonly ComponentId[]): Soundness => {
-  if (dynamicIds.length === 0) {
+/**
+ * Build the envelope from the ids already classified. `unscannedIds` are Apex
+ * components carrying NO `qualityIssues` property: the recognizer did not run
+ * for them, so their dynamic-Apex status is unknown and the result cannot be
+ * called complete on their behalf.
+ */
+const fromDynamicIds = (
+  dynamicIds: readonly ComponentId[],
+  unscannedIds: readonly ComponentId[] = [],
+): Soundness => {
+  const blindSpots: SoundnessBlindSpot[] = [];
+  if (dynamicIds.length > 0) {
+    blindSpots.push({
+      kind: 'dynamic-apex',
+      componentIds: [...new Set(dynamicIds)].sort(),
+      note: DYNAMIC_APEX_NOTE,
+    });
+  }
+  if (unscannedIds.length > 0) {
+    blindSpots.push({
+      kind: 'quality-scan-not-run',
+      componentIds: [...new Set(unscannedIds)].sort(),
+      note: QUALITY_SCAN_NOT_RUN_NOTE,
+    });
+  }
+  if (blindSpots.length === 0) {
     return { complete: true, blindSpots: [], staticCoverage: 'full' };
   }
-  const componentIds = [...new Set(dynamicIds)].sort();
-  return {
-    complete: false,
-    blindSpots: [{ kind: 'dynamic-apex', componentIds, note: DYNAMIC_APEX_NOTE }],
-    staticCoverage: 'partial',
-  };
+  return { complete: false, blindSpots, staticCoverage: 'partial' };
 };
 
 /**
@@ -165,10 +236,13 @@ export const soundnessFromDynamicApexIds = (dynamicIds: readonly ComponentId[]):
  */
 export const soundnessFromNodes = (nodes: Iterable<Node>): Soundness => {
   const dynamicIds: ComponentId[] = [];
+  const unscannedIds: ComponentId[] = [];
   for (const node of nodes) {
-    if (nodeHasDynamicApex(node)) dynamicIds.push(node.id);
+    const signal = dynamicApexSignal(node);
+    if (signal === 'dynamic-apex') dynamicIds.push(node.id);
+    else if (signal === 'not-scanned') unscannedIds.push(node.id);
   }
-  return fromDynamicIds(dynamicIds);
+  return fromDynamicIds(dynamicIds, unscannedIds);
 };
 
 /**
@@ -181,13 +255,15 @@ export const soundnessFromIds = async (
   ids: Iterable<ComponentId>,
 ): Promise<Soundness> => {
   const dynamicIds: ComponentId[] = [];
+  const unscannedIds: ComponentId[] = [];
   for (const id of new Set(ids)) {
     const res = await getNodeById(graph, id);
-    if (res.ok && res.value !== null && nodeHasDynamicApex(res.value)) {
-      dynamicIds.push(id);
-    }
+    if (!res.ok || res.value === null) continue;
+    const signal = dynamicApexSignal(res.value);
+    if (signal === 'dynamic-apex') dynamicIds.push(id);
+    else if (signal === 'not-scanned') unscannedIds.push(id);
   }
-  return fromDynamicIds(dynamicIds);
+  return fromDynamicIds(dynamicIds, unscannedIds);
 };
 
 /**
