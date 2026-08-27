@@ -14,6 +14,7 @@ import {
   gatherCandidates,
   getResolveIndex,
   persistResolveIndexArtifact,
+  RESOLVE_INDEX_FORMAT_VERSION,
   resolveIndexPathForGraph,
   serializeResolveIndex,
   tryLoadResolveIndexArtifact,
@@ -95,8 +96,19 @@ describe('resolve index — persistence', () => {
     await writeResolveIndexArtifact(dbPath, built);
     const path = resolveIndexPathForGraph(dbPath);
     const onDisk = JSON.parse(readFileSync(path, 'utf8'));
-    expect(onDisk.version).toBe(1);
+    // 2 since 0.3.3. The bump is not cosmetic: a pre-0.3.3 reader ignores the
+    // unknown `fingerprint` field and would fall back to its node-count-only
+    // guard, which is the defect this release closed. Old readers reject an
+    // unrecognised version outright, so raising the number makes them rebuild
+    // rather than trust an index they have no way to validate.
+    expect(onDisk.version).toBe(RESOLVE_INDEX_FORMAT_VERSION);
+    expect(RESOLVE_INDEX_FORMAT_VERSION).toBeGreaterThanOrEqual(2);
     expect(onDisk.nodeCount).toBe(built.nodeCount);
+    // The identity is what a NEW reader validates against; assert it is
+    // actually written, so a serializer regression cannot ship an artifact
+    // that silently falls back to the count.
+    expect(typeof onDisk.fingerprint).toBe('string');
+    expect(onDisk.fingerprint.length).toBeGreaterThan(0);
   });
 
   it('getResolveIndex loads from disk on a cold store handle', async () => {

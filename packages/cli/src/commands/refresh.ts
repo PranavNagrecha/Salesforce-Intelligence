@@ -1387,13 +1387,22 @@ export const isLockedOpenFailure = (result: Result<GraphStore, GraphError>): boo
  *   - `scratchRemoved` — the cleanup rm can fail for the same reason the
  *     rename did, and the caller's own test pins that the scratch survives.
  *     Claiming "discarded" there names a file the user would then find.
- *   - the resolve index — `resolve-index.json` beside the database was
- *     rewritten from the DISCARDED build, and its staleness guard compares
- *     node COUNT only (`packages/graph/src/resolve-index.ts`), so an index
- *     with the same node count as the live database is ACCEPTED and resolves
- *     names the live vault does not contain. That hole predates this message,
- *     but a message that denied it would be the very species of untruth this
- *     function exists to avoid. It is named as a thing to delete instead.
+ *   - the resolve index — `resolve-index.json` beside the database is STILL
+ *     rewritten from the DISCARDED build (its path is dirname-based, so both
+ *     builds collide in one directory). What changed in 0.3.3 is what happens
+ *     next: the artifact now carries a fingerprint of the graph it was built
+ *     from, and `tryLoadResolveIndexArtifact` rejects one whose fingerprint
+ *     does not match the database it is sitting beside. So the stale index is
+ *     refused and rebuilt on demand rather than trusted.
+ *
+ *     This message previously told the user that the index "is checked by node
+ *     count alone, so it can be accepted while naming components this vault
+ *     does not have", and instructed them to delete it. That was true and
+ *     scrupulous when written. It is now FALSE, which is worse than the
+ *     omission it was fixing — telling someone to hand-delete a file to avoid
+ *     a wrong answer that can no longer occur teaches them the product is
+ *     fragile in a way it is not. The clause states the overwrite and the
+ *     rejection instead, and asks for nothing.
  */
 export const graphSwapFailureMessage = (
   dbPath: string,
@@ -1421,10 +1430,11 @@ export const graphSwapFailureMessage = (
     'Either way nothing was published — no manifest or rendered document ' +
     'points at it. ' +
     'One file beside the database WAS overwritten from the discarded build: ' +
-    'its resolve index. That index is checked by node count alone, so it can ' +
-    'be accepted while naming components this vault does not have. Delete ' +
-    `${dirname(dbPath)}/resolve-index.json — it is a cache and is rebuilt on ` +
-    'demand. ' +
+    `its resolve index (${dirname(dbPath)}/resolve-index.json). No action is ` +
+    'needed — the index carries a fingerprint of the graph it was built from, ' +
+    'so this one does not match the database it now sits beside, and it is ' +
+    'rejected and rebuilt on demand rather than answering from the build that ' +
+    'was thrown away. ' +
     `${remedy} Underlying error: ${cause}`
   );
 };

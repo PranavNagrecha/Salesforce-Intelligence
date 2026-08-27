@@ -53,6 +53,44 @@ const makeEdge = (
   ...overrides,
 });
 
+/**
+ * Create a scratch DuckDB graph for ONE `it` block and register its teardown
+ * with the runner, so the connection AND the instance are released and the
+ * temp directory removed however the test ends.
+ *
+ * WHY THIS EXISTS (Windows CI, ENOTEMPTY). Four blocks in this file used to
+ * open a `DuckDBInstance` inline and then `rmSync` the temp directory as their
+ * last statement, never closing the handle. On POSIX that is invisible:
+ * unlinking a file another descriptor still holds open is legal, so the tests
+ * passed on macOS and Linux for as long as they existed. On Windows an open
+ * handle makes the directory undeletable and teardown dies with ENOTEMPTY —
+ * four of the ten Windows failures were exactly this. `maxRetries: 10` could
+ * never help: nothing was ever going to close the handle, only the garbage
+ * collector might, on no schedule anyone can wait for. Closing the CONNECTION
+ * is not sufficient either — a connection-only close leaves the instance open
+ * and holding the file (`resolve.test.ts:1082` does exactly that and still
+ * fails on Windows), which is why teardown here goes through `closeGraph`.
+ *
+ * It also closes a second, quieter hole those blocks shared on EVERY platform:
+ * cleanup written as the last statement of a test is skipped by any assertion
+ * failure or early `return` above it, so a red test leaked its scratch vault.
+ * `onTestFinished` is registered with the runner rather than written into the
+ * body, so it cannot be jumped over.
+ */
+const withTempGraph = async (prefix: string): Promise<GraphStore> => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const instance = await DuckDBInstance.create(join(dir, 'graph.duckdb'));
+  const connection = await instance.connect();
+  const initResult = await initSchema(connection);
+  expect(initResult.ok).toBe(true);
+  const store: GraphStore = { connection, instance };
+  onTestFinished(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+  return store;
+};
+
 const seed: ExtractionResult = {
   nodes: [
     // 3 CustomObjects.
@@ -168,9 +206,11 @@ beforeAll(async () => {
   }
 });
 
-afterAll(() => {
-  store.connection.disconnectSync();
-  store.instance.closeSync();
+afterAll(async () => {
+  // One way to release a graph handle, everywhere in this file — the
+  // hand-rolled `disconnectSync()` + `closeSync()` pair was the template the
+  // four broken blocks copied and then half-dropped. See `withTempGraph`.
+  await closeGraph(store);
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
@@ -473,13 +513,7 @@ describe('listEdgesForNodes (CR-17 batched listEdges)', () => {
   });
 
   it('direction=both buckets a self-loop once and a both-endpoints edge in both', async () => {
-    const loopDir = mkdtempSync(join(tmpdir(), 'sfi-graph-batch-loop-'));
-    const dbPath = join(loopDir, 'loop.db');
-    const instance = await DuckDBInstance.create(dbPath);
-    const connection = await instance.connect();
-    const initResult = await initSchema(connection);
-    expect(initResult.ok).toBe(true);
-    const localStore: GraphStore = { connection, instance };
+    const localStore = await withTempGraph('sfi-graph-batch-loop-');
     const loopSeed: ExtractionResult = {
       nodes: [
         makeNode({ id: 'ApexClass:A', type: 'ApexClass', apiName: 'A' }),
@@ -525,7 +559,6 @@ describe('listEdgesForNodes (CR-17 batched listEdges)', () => {
     expect((batched.value.get('ApexClass:A') ?? []).length).toBe(2);
     // B's bucket: just A->B = 1 edge.
     expect((batched.value.get('ApexClass:B') ?? []).length).toBe(1);
-    rmSync(loopDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });
 
@@ -603,13 +636,7 @@ describe('searchNodes', () => {
       ],
       edges: [],
     };
-    const localDir = mkdtempSync(join(tmpdir(), 'sfi-graph-search-b22-'));
-    const dbPath = join(localDir, 'b22.db');
-    const instance = await DuckDBInstance.create(dbPath);
-    const connection = await instance.connect();
-    const initResult = await initSchema(connection);
-    expect(initResult.ok).toBe(true);
-    const localStore: GraphStore = { connection, instance };
+    const localStore = await withTempGraph('sfi-graph-search-b22-');
     const imported = await importExtractionResults(localStore, [flowSeed]);
     expect(imported.ok).toBe(true);
     const r = await searchNodes(localStore, 'Application_Status', { limit: 5 });
@@ -625,7 +652,6 @@ describe('searchNodes', () => {
     if (wrongFlow !== undefined) {
       expect(flowHits[0]!.score).toBeGreaterThan(wrongFlow.score);
     }
-    rmSync(localDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('filters by component type when types option is provided', async () => {
@@ -786,9 +812,8 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     if (!imported.ok) throw new Error(imported.error.message);
   });
 
-  afterAll(() => {
-    capStore.connection.disconnectSync();
-    capStore.instance.closeSync();
+  afterAll(async () => {
+    await closeGraph(capStore);
     rmSync(capDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
@@ -859,13 +884,7 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     // regardless of confidence, so FLS/sharing tools disclose the unresolved
     // target instead of implying the field has no grants. (Verified on the real
     // demo vault: 50,415 / 50,415 phantom grant edges carry the flag, 0 without.)
-    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-grant-phantom-'));
-    const instance = await DuckDBInstance.create(join(dir, 'grant.db'));
-    const connection = await instance.connect();
-    const init = await initSchema(connection);
-    expect(init.ok).toBe(true);
-    if (!init.ok) return;
-    const local: GraphStore = { connection, instance };
+    const local = await withTempGraph('sfi-graph-grant-phantom-');
     const imp = await importExtractionResults(local, [
       {
         nodes: [
@@ -906,9 +925,6 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
       const real = out.value.find((e) => e.toId === 'CustomField:Account.Real__c');
       expect(real?.properties['targetMissing']).toBeUndefined();
     }
-    connection.disconnectSync();
-    instance.closeSync();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('omits heuristic edges to non-existent nodes from a subgraph by default', async () => {
@@ -1002,13 +1018,7 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     // synthesizes a stub for EVERY one of them with no cap check, blowing the
     // returned node count past the documented `at most SUBGRAPH_MAX_NODES` bound.
     // The fix must cap the stubbed nodes so the bound holds under includeUnresolved.
-    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-phantom-flood-'));
-    const instance = await DuckDBInstance.create(join(dir, 'flood.db'));
-    const connection = await instance.connect();
-    const init = await initSchema(connection);
-    expect(init.ok).toBe(true);
-    if (!init.ok) return;
-    const floodStore: GraphStore = { connection, instance };
+    const floodStore = await withTempGraph('sfi-graph-phantom-flood-');
 
     // ONE real scanned class with 300 distinct GENUINE phantom callsApex edges
     // (each toId has no node row → import stamps targetMissing → heuristic +
@@ -1059,10 +1069,6 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
       // proving the feature still works rather than being disabled entirely).
       expect(r.value.truncated).toBe(true);
     }
-
-    connection.disconnectSync();
-    instance.closeSync();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });
 
@@ -1274,13 +1280,8 @@ describe('descriptionPresence filter', () => {
  */
 describe('parseProperties — C-3 (finding 34) regression', () => {
   it('degrades a malformed properties_json node column to {} instead of throwing', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-malformed-props-'));
-    const dbPath = join(dir, 'malformed.db');
-    const instance = await DuckDBInstance.create(dbPath);
-    const connection = await instance.connect();
-    const initResult = await initSchema(connection);
-    expect(initResult.ok).toBe(true);
-    const localStore: GraphStore = { connection, instance };
+    const localStore = await withTempGraph('sfi-graph-malformed-props-');
+    const { connection } = localStore;
     const imported = await importExtractionResults(localStore, [
       { nodes: [makeNode({ id: 'CustomObject:Broken', apiName: 'Broken', label: 'Broken' })], edges: [] },
     ]);
@@ -1306,18 +1307,11 @@ describe('parseProperties — C-3 (finding 34) regression', () => {
     // The offending row's id is surfaced, not an anonymous SyntaxError.
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('CustomObject:Broken'));
     warnSpy.mockRestore();
-
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('degrades a malformed properties_json edge column to {} instead of throwing', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-malformed-edge-props-'));
-    const dbPath = join(dir, 'malformed-edge.db');
-    const instance = await DuckDBInstance.create(dbPath);
-    const connection = await instance.connect();
-    const initResult = await initSchema(connection);
-    expect(initResult.ok).toBe(true);
-    const localStore: GraphStore = { connection, instance };
+    const localStore = await withTempGraph('sfi-graph-malformed-edge-props-');
+    const { connection } = localStore;
     const imported = await importExtractionResults(localStore, [
       {
         nodes: [
@@ -1343,8 +1337,6 @@ describe('parseProperties — C-3 (finding 34) regression', () => {
     }
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
-
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });
 
@@ -1482,5 +1474,43 @@ describe('searchNodesPage — exhaustive paging under api_name ties', () => {
     if (!r.ok) return;
     // Every seeded node is a CustomField, so the filtered total is a CHECKED 0.
     expect(r.value.totalCount).toBe(0);
+  });
+});
+
+/**
+ * The teardown fix itself, under test.
+ *
+ * The bug it guards is INVISIBLE on the platform this suite usually runs on:
+ * POSIX lets a test delete a directory whose DuckDB file is still held open, so
+ * a leaked handle produces a green macOS run and an ENOTEMPTY Windows one. What
+ * IS observable everywhere is the handle: a closed `DuckDBInstance` refuses to
+ * hand out another connection, and a merely disconnected one does not. Deleting
+ * the `closeGraph` call from `withTempGraph` — the precise regression that broke
+ * Windows CI — fails the second case below on any platform.
+ *
+ * The two blocks are ordered on purpose: teardown registered with
+ * `onTestFinished` runs when the test that registered it FINISHES, so the
+ * assertion has to live in the next one.
+ */
+describe('withTempGraph — the scratch handle is released, not just abandoned', () => {
+  let escaped: GraphStore | undefined;
+
+  it('hands back a usable store', async () => {
+    const store = await withTempGraph('sfi-graph-teardown-guard-');
+    escaped = store;
+    const imported = await importExtractionResults(store, [
+      { nodes: [makeNode({ id: 'CustomObject:Guard', apiName: 'Guard' })], edges: [] },
+    ]);
+    expect(imported.ok).toBe(true);
+    const r = await getNodeById(store, 'CustomObject:Guard');
+    expect(r.ok).toBe(true);
+  });
+
+  it('closed the INSTANCE (not only the connection) once that test finished', async () => {
+    expect(escaped).toBeDefined();
+    // `disconnectSync()` alone leaves the instance open and still holding the
+    // database file — which is why closing the connection was never enough.
+    // A closed instance rejects with "Failed to connect: instance closed".
+    await expect(escaped!.instance.connect()).rejects.toThrow(/instance closed/i);
   });
 });

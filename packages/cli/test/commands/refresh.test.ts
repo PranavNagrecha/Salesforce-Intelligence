@@ -1340,11 +1340,20 @@ describe('graphSwapFailureMessage', () => {
     expect(msg).toContain('discarded');
   });
 
-  it('names the resolve index as overwritten rather than promising it is safe', () => {
-    // The staleness guard is node-count only, so a same-count index from the
-    // DISCARDED build is accepted and resolves names this vault does not have.
+  it('names the resolve index as overwritten, and no longer asks for a manual delete', () => {
+    // Still overwritten from the discarded build — the path is dirname-based,
+    // so both builds collide in one directory. That fact is unchanged.
     expect(msg).toContain('resolve-index.json');
+    // Never the original untruth: a blanket "this costs a rebuild, never a
+    // wrong answer" was falsified by execution.
     expect(msg).not.toContain('never a wrong answer');
+    // 0.3.3: the artifact now carries a fingerprint of the graph it was built
+    // from, so a stale one is REJECTED rather than accepted on a matching node
+    // count. The message must not keep telling the user to hand-delete a file
+    // to avoid a wrong answer that can no longer happen — a stale remedy
+    // teaches fragility the product does not have.
+    expect(msg).not.toMatch(/Delete .*resolve-index\.json/i);
+    expect(msg).toMatch(/no action is needed/i);
   });
 
   it('keeps the underlying cause and never names a discarded path as usable', () => {
