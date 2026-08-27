@@ -17,6 +17,11 @@
  *   - An `absenceShaped` rule under non-complete coverage is downgraded to a
  *     "not checked" claim with `confidence: 'unknown'` — it NEVER emits a
  *     "none/safe" conclusion the coverage can't support.
+ *   - EVERY claim emitted under non-complete coverage — whatever the rule SHAPE
+ *     — carries the caller's `coverageCaveat`, is capped below `declared`, and
+ *     says IN THE CLAIM TEXT that its citation list is a FLOOR. See
+ *     {@link discloseCoverage}: coverage honesty is applied ONCE, at the
+ *     `interpret` boundary, over whatever the per-shape engine emitted.
  *
  * This module is PURE: no I/O, no clock, no graph query layer. The caller
  * assembles the slice and computes coverage; the engine only reasons over what
@@ -1008,7 +1013,7 @@ const interpretAntiJoin = (
           `for ${rule.concept} was not verified.`,
         groundedIn,
         confidence: 'unknown',
-        coverageCaveat: coverage.caveat,
+        coverageCaveat: null, // filled by `discloseCoverage` (one spelling)
         modelVersion: MODEL_VERSION,
         provenance: 'offline_snapshot',
       },
@@ -1731,7 +1736,6 @@ const whereClauses = (where: WhereClause | readonly WhereClause[]): readonly Whe
 const interpretFirstMatchOrdinal = (
   rule: ConceptRule,
   slice: GroundedSlice,
-  coverage: Coverage,
   rootId: ComponentId,
   agg: RuleAggregate,
 ): Interpretation[] => {
@@ -1806,7 +1810,6 @@ const interpretFirstMatchOrdinal = (
   const broad = ranked[broadIdx]!;
   const citedTargets = [...new Set(starved.map((r) => r.countedId))].sort();
   const groundedIn = [rootId, broad.countedId, ...citedTargets];
-  const coverageCaveat = coverage.status === 'complete' ? null : coverage.caveat;
 
   return [
     {
@@ -1823,7 +1826,10 @@ const interpretFirstMatchOrdinal = (
         broad.edge.confidence,
         ...starved.map((r) => r.edge.confidence),
       ),
-      coverageCaveat,
+      // FIX 4 — a truncated slice under-counts. The caveat + the FLOOR wording +
+      // the confidence cap are applied ONCE by `discloseCoverage`; every emit
+      // path in this module spells it `null` so there is exactly one spelling.
+      coverageCaveat: null,
       modelVersion: MODEL_VERSION,
       provenance: 'offline_snapshot',
     },
@@ -1899,13 +1905,12 @@ const SINGLE_GROUP = 'single-group';
 const interpretAggregate = (
   rule: ConceptRule,
   slice: GroundedSlice,
-  coverage: Coverage,
   rootId: ComponentId | undefined,
 ): Interpretation[] => {
   const agg = rule.bind.aggregate;
   if (agg === undefined || rootId === undefined) return [];
   if (agg.firstMatchOrdinal !== undefined) {
-    return interpretFirstMatchOrdinal(rule, slice, coverage, rootId, agg);
+    return interpretFirstMatchOrdinal(rule, slice, rootId, agg);
   }
 
   const nodesById = new Map<ComponentId, Node>();
@@ -2007,10 +2012,6 @@ const interpretAggregate = (
     }
   }
 
-  // FIX 4 — a truncated slice under-counts; surface the caller's caveat so the
-  // count reads as a floor. `null` under complete coverage (the common case).
-  const coverageCaveat = coverage.status === 'complete' ? null : coverage.caveat;
-
   // The ungrouped (junction) path cites the ROOT first (`{0}` = the junction
   // object), then the sorted counted endpoints (`{1}`/`{2}` = the two masters).
   // The grouped (stacked-flows) path cites the FIRERS first, the root trailing
@@ -2035,7 +2036,9 @@ const interpretAggregate = (
       claim: fill(rule.interpretation, fillIds, { ...named, count: String(group.ids.length) }),
       groundedIn,
       confidence: weakest(rule.maxConfidence, ...group.edgeConfidences),
-      coverageCaveat,
+      // FIX 4 — a truncated slice under-counts, so the count is a FLOOR. Filled
+      // by `discloseCoverage` at the `interpret` boundary (one spelling).
+      coverageCaveat: null,
       modelVersion: MODEL_VERSION,
       provenance: 'offline_snapshot',
     });
@@ -2327,7 +2330,7 @@ const interpretRaw = (
   rootId?: ComponentId,
 ): Interpretation[] => {
   if (rule.bind.join !== undefined) return interpretJoin(rule, slice, rootId);
-  if (rule.bind.aggregate !== undefined) return interpretAggregate(rule, slice, coverage, rootId);
+  if (rule.bind.aggregate !== undefined) return interpretAggregate(rule, slice, rootId);
   if (rule.bind.dualEdge !== undefined) return interpretDualEdge(rule, slice, rootId);
   if (rule.bind.antiJoin !== undefined) return interpretAntiJoin(rule, slice, coverage, rootId);
   if (rule.bind.setDifference !== undefined) return interpretSetDifference(rule, slice, rootId);
@@ -2359,14 +2362,19 @@ const interpretRaw = (
   // (non-absence) rule's job.
   if (rule.absenceShaped && ids.length > 0) return [];
 
+  // NOTE — this branch decides the ABSENCE-vs-presence SHAPE of the claim, and
+  // NOTHING else. Coverage DISCLOSURE (the caveat, the confidence cap, the FLOOR
+  // wording) is NOT decided here: it is applied to EVERY emitted claim, of every
+  // shape, by `discloseCoverage` at the `interpret` boundary. Gating the caveat
+  // on `absenceShaped` here is exactly the defect that let a PRESENCE-shaped
+  // enumerative access claim read `declared` with `coverageCaveat: null` over a
+  // slice truncated at the hub cap.
   let confidence: ConfidenceLevel | 'unknown' = weakest(rule.maxConfidence, ...edgeConfidences);
-  let coverageCaveat: string | null = null;
   let claim: string;
 
   if (rule.absenceShaped && coverage.status !== 'complete') {
     // Absence under partial / unknown coverage MUST NOT assert "none/safe".
     confidence = 'unknown';
-    coverageCaveat = coverage.caveat;
     claim =
       `not checked — coverage is ${coverage.status}; the absence-based conclusion ` +
       `for ${rule.concept} was not verified.`;
@@ -2383,7 +2391,7 @@ const interpretRaw = (
       claim,
       groundedIn: ids,
       confidence,
-      coverageCaveat,
+      coverageCaveat: null, // filled by `discloseCoverage` (one spelling)
       modelVersion: MODEL_VERSION,
       provenance: 'offline_snapshot',
     },
@@ -2447,20 +2455,114 @@ const attachRemediation = (
 };
 
 /**
+ * COVERAGE-DISCLOSURE — the marker every FLOOR-disclosed claim carries. Asserted
+ * by the tests and used as the idempotence guard, so the sentence can never be
+ * pasted on twice.
+ */
+const COVERAGE_FLOOR_MARKER = 'COVERAGE FLOOR';
+
+/**
+ * COVERAGE-DISCLOSURE — the confidence CEILING a claim computed over a slice the
+ * engine could not fully see is held to.
+ *
+ * Why `parsed` and not something else:
+ *   - NOT `declared`. In this engine `declared` means "returned directly by
+ *     Salesforce" — for an ENUMERATIVE claim ("the cited ids are the ENUMERATED
+ *     SET of permission sets/profiles that grant read on this field") that reads
+ *     as CLOSURE over the set. An enumeration read off a slice clipped at the hub
+ *     cap has not earned closure: on the measured anchor it named 807 of 2,659
+ *     readable grants, dropping 81 of 285 parent objects WHOLLY and stopping
+ *     mid-alphabet inside another. A consumer that trusts `declared` and stops
+ *     answers "no, that field is not granted" about a field that simply was
+ *     never loaded — a wrong answer about ACCESS CONTROL.
+ *   - NOT `unknown`. `unknown` is this engine's word for "not checked" (the
+ *     absence-shaped coverage downgrade), it suppresses remediation, and it
+ *     would flatten the whole run's trust rollup. The cited grants here WERE
+ *     observed; calling them unverified destroys the product thesis from the
+ *     other side — absence must stay distinguishable from ignorance, and so must
+ *     observation.
+ *   - NOT `heuristic`. That tier is documented as "may have FALSE POSITIVES".
+ *     Truncation produces false NEGATIVES; nothing cited here is suspect.
+ *
+ * `parsed` — "derived from what we could read" — is the one tier that says
+ * "real, but not the whole picture". It is applied through {@link weakest}, so
+ * it is strictly a CAP: a claim already grounded at `heuristic` is never RAISED.
+ */
+const COVERAGE_CONFIDENCE_CAP: ConfidenceLevel = 'parsed';
+
+/**
+ * COVERAGE-DISCLOSURE — the FLOOR sentence appended to a presence claim emitted
+ * under non-complete coverage.
+ *
+ * It lives in the CLAIM TEXT, not only in `coverageCaveat`, because the claim is
+ * what a host folds into its answer (`sfi.synthesize_answer` carries the claim +
+ * citations). A disclosure that only exists in a sibling field is one the host
+ * can silently drop — and this defect's whole cost was a citation list that read
+ * as complete. The caller's caveat says WHAT was not seen; this says what that
+ * means for the list the reader is looking at.
+ */
+const coverageFloorNote = (coverage: Coverage): string =>
+  ` ${COVERAGE_FLOOR_MARKER} — coverage for this claim is ${coverage.status}, so the cited set is ` +
+  `a FLOOR ("at least these"), NOT the complete set: matching components may be MISSING from the ` +
+  `citation, and an id absent here is NOT evidence that it does not exist. See the coverage caveat ` +
+  `for what was not seen.`;
+
+/**
+ * COVERAGE-DISCLOSURE — the ONE place coverage honesty is applied, over whatever
+ * the per-shape engine emitted. Every emit path in this module spells its
+ * `coverageCaveat` `null`; this pass fills it. That is deliberate: the previous
+ * three hand-written spellings (scalar / first-match-ordinal / aggregate) had
+ * DRIFTED, and the scalar one gated the caveat on `rule.absenceShaped` — a
+ * condition that has nothing to do with whether the slice was clipped — while
+ * eight other emit paths (join, set-difference, property-compare, field-join,
+ * dual-edge, cross-object-cascade, property-equals-endpoint, witness-partition)
+ * hardcoded `null` and never even received the coverage.
+ *
+ * Behaviour:
+ *   - `complete` coverage ⇒ the array is returned UNTOUCHED (byte-identical to
+ *     the pre-fix engine on the common path).
+ *   - a claim already at `confidence: 'unknown'` — the absence-shaped "not
+ *     checked" downgrade — gets the caveat and NOTHING else. It is a statement
+ *     of IGNORANCE, not a floor over observed evidence, so the FLOOR wording
+ *     would be a category error and the cap has nothing to cap.
+ *   - every other claim keeps its claim + citations VERBATIM (the grants were
+ *     observed and are real), gains the FLOOR sentence, and is capped at
+ *     {@link COVERAGE_CONFIDENCE_CAP}.
+ *
+ * Runs BEFORE {@link attachRemediation} so a fix is stamped with the CAPPED
+ * confidence — a remediation can never read stronger than the finding it fixes.
+ */
+const discloseCoverage = (coverage: Coverage, interps: Interpretation[]): Interpretation[] => {
+  if (coverage.status === 'complete') return interps;
+  const floor = coverageFloorNote(coverage);
+  return interps.map((it) => {
+    if (it.confidence === 'unknown') return { ...it, coverageCaveat: coverage.caveat };
+    return {
+      ...it,
+      claim: it.claim.includes(COVERAGE_FLOOR_MARKER) ? it.claim : `${it.claim}${floor}`,
+      confidence: weakest(it.confidence, COVERAGE_CONFIDENCE_CAP),
+      coverageCaveat: coverage.caveat,
+    };
+  });
+};
+
+/**
  * Interpret one {@link ConceptRule} against a grounded slice — the public entry
- * point. Delegates to the pure per-shape engine ({@link interpretRaw}) and then
- * attaches any AUTHORED {@link RuleRemediation} to the emitted claims
- * ({@link attachRemediation}). A rule with no remediation is byte-identical to
- * the pre-remediation engine; a rule with one emits a cited, confidence-tiered,
- * dependency-ordered fix on each claim it fires. Same signature, same
- * determinism.
+ * point. Delegates to the pure per-shape engine ({@link interpretRaw}), applies
+ * coverage honesty to everything it emitted ({@link discloseCoverage}), and then
+ * attaches any AUTHORED {@link RuleRemediation} to the surviving claims
+ * ({@link attachRemediation}). Under `complete` coverage a rule with no
+ * remediation is byte-identical to the pre-remediation engine; a rule with one
+ * emits a cited, confidence-tiered, dependency-ordered fix on each claim it
+ * fires. Same signature, same determinism.
  */
 export const interpret = (
   rule: ConceptRule,
   slice: GroundedSlice,
   coverage: Coverage,
   rootId?: ComponentId,
-): Interpretation[] => attachRemediation(rule, interpretRaw(rule, slice, coverage, rootId));
+): Interpretation[] =>
+  attachRemediation(rule, discloseCoverage(coverage, interpretRaw(rule, slice, coverage, rootId)));
 
 /**
  * EPIC-1 — second-pass chained interpretation.

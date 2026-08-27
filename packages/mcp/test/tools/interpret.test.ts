@@ -47,12 +47,34 @@ import {
 } from '../../src/tools/interpret.js';
 import { dispatchTool } from '../../src/tools/tool-dispatch.js';
 
+// COVERAGE-DISCLOSURE — the rule-firing tests below are about WHICH rule fires,
+// what it CITES, and how its confidence is derived from its matched EDGES. They
+// are NOT about coverage honesty, which has its own describes further down
+// (`adaptCoverage`, `hub-cap truncation e2e`, the WorkflowRule A14 block, the
+// shared-container block), each with its own purpose-built manifest.
+//
+// This fixture used to declare NO coverage rows at all (`components: {}`), so
+// `summarizeCoverage` reported `unknown` for EVERY rule — and the tests still
+// got `declared`, `coverageCaveat: null` claims back, because the engine gated
+// its coverage disclosure on `rule.absenceShaped` rather than on the coverage.
+// That gate is fixed (`discloseCoverage` in knowledge/reason.ts): a presence
+// claim computed under non-complete coverage is now caveated, FLOOR-disclosed
+// and capped below `declared`. So this fixture has to declare the complete vault
+// it always meant to be — otherwise these rule-firing assertions would be
+// re-testing coverage honesty by accident. DERIVED from the shipped rules, so a
+// newly added rule's `dependsOnCoverage` family cannot silently drag the fixture
+// back to `unknown`.
+const FIXTURE_COVERAGE = [
+  ...new Set(CONCEPT_RULES.flatMap((rule) => rule.dependsOnCoverage)),
+].map((type) => ({ type, requested: true, retrieved: 1, errored: false, neverModeled: false }));
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-28T09:12:00Z',
   sourceOrg: 'me@example.com',
   components: {},
   edges: {},
+  coverage: FIXTURE_COVERAGE,
   sourceTreeHash: 'sha256:fixture-interpret',
 };
 
@@ -1368,7 +1390,7 @@ describe('interpretHandler — hub-cap truncation e2e', () => {
     const r = await interpretHandler(tCtx, { componentId: HUB_OBJ, ruleIds: [STATUS_RULE] });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const { sliceTruncated, trust, coverageCaveat, rulesFired } = r.value.data;
+    const { sliceTruncated, trust, coverageCaveat, rulesFired, interpretations } = r.value.data;
     expect(sliceTruncated).toBe(true);
     // Same complete-coverage manifest as the control, but the clipped slice
     // knocks the status DOWN — `complete` can never survive truncation.
@@ -1378,6 +1400,25 @@ describe('interpretHandler — hub-cap truncation e2e', () => {
     expect(coverageCaveat).toContain('truncated');
     // The rule still fires over the clipped slice (presence-shaped, not absence).
     expect(rulesFired).toBeGreaterThanOrEqual(1);
+
+    // COVERAGE-DISCLOSURE e2e — this is where the defect LIVED. The top-level
+    // caveat was already right; the per-interpretation one was not. A PRESENCE
+    // claim enumerated off a slice clipped at the hub cap used to come back at
+    // `declared` with `coverageCaveat: null`, because the engine gated the
+    // disclosure on `rule.absenceShaped`. Asserting only `rulesFired >= 1` is
+    // what let that through end-to-end, so assert what the claim actually SAYS.
+    const fired = interpretations[0];
+    expect(fired).toBeDefined();
+    expect(fired!.coverageCaveat).toBeDefined();
+    expect(fired!.coverageCaveat).toContain('truncated');
+    expect(fired!.confidence).not.toBe('declared');
+    // …and the FLOOR is disclosed in the claim TEXT, so a host that folds only
+    // `claim` into its answer cannot drop the disclosure.
+    expect(fired!.claim).toContain('COVERAGE FLOOR');
+    // Still a claim, not a retraction: the observed automation is named, and the
+    // engine has NOT collapsed an observation into ignorance.
+    expect(fired!.confidence).not.toBe('unknown');
+    expect(fired!.groundedIn.length).toBeGreaterThan(0);
   });
 });
 
