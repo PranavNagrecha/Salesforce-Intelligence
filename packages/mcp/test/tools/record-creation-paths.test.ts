@@ -285,3 +285,51 @@ describe('recordCreationPathsHandler', () => {
     expect(r.value.data.rendered).not.toMatch(/Excluded as inactive/i);
   });
 });
+
+// =============================================================================
+// RECORD-CREATION-PATHS-UNRESOLVED-OBJECT-SCOPE. Pre-fix, `objectId` was glued
+// together from the raw `objectApiName` string with no existence check, so a
+// made-up (or merely wrong-case) object name silently matched zero edges and
+// came back `{creatorCount: 0, triggerCount: 0}` — an UNCHECKED zero
+// indistinguishable from "nothing creates this object". Fixed by routing
+// through the shared `resolveExistingObjectScope` (same helper
+// flow_fault_audit / flow_bulkification_audit use): an unresolvable object
+// refuses, and a real object typed in the wrong case is corrected before
+// anything is queried.
+// =============================================================================
+
+describe('recordCreationPathsHandler — object scope honesty', () => {
+  it('FAIL-BEFORE/PASS-AFTER: refuses an objectApiName absent from the vault, never answering a silent zero', async () => {
+    const r = await recordCreationPathsHandler(ctx, {
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/no object named 'Zzz_Nonexistent_Object_9x7__c'/i);
+  });
+
+  it('a real object typed in the wrong case still answers, corrected to the vault casing', async () => {
+    const lower = await recordCreationPathsHandler(ctx, { objectApiName: 'widget__c' });
+    const exact = await recordCreationPathsHandler(ctx, { objectApiName: 'Widget__c' });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    expect(lower.value.data.objectApiName).toBe('Widget__c');
+    expect(lower.value.data.objectId).toBe(WIDGET);
+    expect(lower.value.data.creatorCount).toBe(exact.value.data.creatorCount);
+    expect(lower.value.data.creators.map((c) => c.sourceId)).toEqual(
+      exact.value.data.creators.map((c) => c.sourceId),
+    );
+  });
+
+  it('a correctly-cased call is byte-identical to the pre-fix shape', async () => {
+    const r = await recordCreationPathsHandler(ctx, { objectApiName: 'Widget__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objectApiName).toBe('Widget__c');
+    expect(r.value.data.objectId).toBe(WIDGET);
+    expect(r.value.data.creatorCount).toBe(1);
+    expect(r.value.data.creators[0]?.sourceId).toBe(CREATOR_FLOW);
+    expect(r.value.data.triggerCount).toBe(1);
+  });
+});

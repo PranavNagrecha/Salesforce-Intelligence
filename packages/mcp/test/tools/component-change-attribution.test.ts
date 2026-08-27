@@ -132,6 +132,17 @@ describe('sfi.component_change_attribution', () => {
           type: 'ApexClass',
           apiName: 'AlphaController',
         }),
+        // COMPONENT-CHANGE-ATTRIBUTION-UNRESOLVED-OBJECT-SCOPE: the base
+        // object node the `objectApiName`-alone tests below scope by. A real
+        // vault retrieves Account's own CustomObject metadata separately from
+        // its fields/validation rules — this fixture previously never needed
+        // that node, but the object-scope existence check the fix adds now
+        // resolves against it.
+        makeNode({
+          id: 'CustomObject:Account',
+          type: 'CustomObject',
+          apiName: 'Account',
+        }),
       ],
       edges: [],
     };
@@ -201,17 +212,6 @@ describe('sfi.component_change_attribution', () => {
     expect(r.value.data.changes.some((c) => c.id === '0Axxx0000001')).toBe(true);
   });
 
-  it('returns available:true with empty changes when nothing correlates', async () => {
-    const r = await componentChangeAttributionHandler(ctx, {
-      objectApiName: 'NonexistentObject__c',
-    });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.available).toBe(true);
-    expect(r.value.data.changes).toEqual([]);
-    expect(r.value.data.totalMatched).toBe(0);
-  });
-
   it('fails closed on unknown componentId', async () => {
     const r = await componentChangeAttributionHandler(ctx, {
       componentId: 'ApexClass:DoesNotExist',
@@ -219,5 +219,84 @@ describe('sfi.component_change_attribution', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
+  });
+
+  // ===========================================================================
+  // COMPONENT-CHANGE-ATTRIBUTION-UNRESOLVED-OBJECT-SCOPE. Pre-fix, an
+  // `objectApiName` supplied ALONE (no `componentId`) was handed straight to
+  // the heuristic needle-builder with no existence check — a made-up object
+  // name silently matched zero SetupAuditTrail rows and came back
+  // `{available: true, changes: [], totalMatched: 0}`, an UNCHECKED zero
+  // indistinguishable from "this real object has no correlated changes".
+  // Fixed by resolving + verifying the CALLER-supplied `objectApiName` via
+  // the shared object-scope resolver — but only on the path that actually
+  // answers with it (AFTER the missing-JSONL early return, which must stay
+  // object-scope-free: see the "missing JSONL" test above, which
+  // deliberately proves that disposition needs no graph node at all).
+  // ===========================================================================
+
+  it('FAIL-BEFORE/PASS-AFTER: refuses an objectApiName absent from the vault, never a silent empty answer', async () => {
+    const r = await componentChangeAttributionHandler(ctx, {
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/no object named 'Zzz_Nonexistent_Object_9x7__c'/i);
+  });
+
+  it('a real object typed in the wrong case still answers, corrected to the vault casing', async () => {
+    const lower = await componentChangeAttributionHandler(ctx, { objectApiName: 'account' });
+    const exact = await componentChangeAttributionHandler(ctx, { objectApiName: 'Account' });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    expect(lower.value.data.objectApiName).toBe('Account');
+    expect(lower.value.data.changes.map((c) => c.id)).toEqual(
+      exact.value.data.changes.map((c) => c.id),
+    );
+  });
+
+  it('a correctly-cased objectApiName-alone call is unaffected (byte-identical to pre-fix)', async () => {
+    const r = await componentChangeAttributionHandler(ctx, { objectApiName: 'Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.available).toBe(true);
+    expect(r.value.data.objectApiName).toBe('Account');
+    expect(r.value.data.changes.some((c) => c.id === '0Axxx0000001')).toBe(true);
+  });
+
+  it('the missing-JSONL disposition still needs no graph node (object scope is unvalidated on that path)', async () => {
+    const emptyRoot = mkdtempSync(join(tmpdir(), 'sfi-attr-empty2-'));
+    try {
+      const opened = await openGraph(join(emptyRoot, 'graph.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const emptyStore = opened.value;
+      try {
+        const emptyCtx: Context = {
+          vaultRoot: emptyRoot,
+          manifest: FIXTURE_MANIFEST,
+          graph: emptyStore,
+        };
+        const r = await componentChangeAttributionHandler(emptyCtx, {
+          objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect(r.value.data.available).toBe(false);
+      } finally {
+        await closeGraph(emptyStore);
+      }
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('a componentId-derived objectApiName (no explicit objectApiName) is unaffected', async () => {
+    const r = await componentChangeAttributionHandler(ctx, {
+      componentId: 'ValidationRule:Account.Status_Required',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objectApiName).toBe('Account');
   });
 });

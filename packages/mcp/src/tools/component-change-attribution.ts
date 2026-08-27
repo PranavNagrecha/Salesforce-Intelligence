@@ -25,6 +25,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveExistingObjectScope } from './input-aliases.js';
+
 /** Same filename the CLI persist pass writes. */
 export const SETUP_AUDIT_TRAIL_FILENAME = 'setup-audit-trail.jsonl';
 
@@ -267,6 +269,29 @@ export const componentChangeAttributionHandler = async (
       kind: 'internal',
       message: `failed to read ${SETUP_AUDIT_TRAIL_FILENAME}: ${cause instanceof Error ? cause.message : String(cause)}`,
     });
+  }
+
+  // COMPONENT-CHANGE-ATTRIBUTION-UNRESOLVED-OBJECT-SCOPE: a CALLER-supplied
+  // `objectApiName` used to be handed straight to the heuristic needle-builder
+  // below with no existence check — a made-up object name silently matched
+  // zero SetupAuditTrail rows and came back `{available: true, changes: [],
+  // totalMatched: 0}`, an UNCHECKED zero indistinguishable from "this real
+  // object has no correlated changes". Resolve + verify it via the shared
+  // object-scope resolver (mirrors flow_fault_audit /
+  // flow_bulkification_audit): an unresolvable object REFUSES, and a real
+  // object typed in the wrong case is corrected to the vault's exact casing
+  // before it is used as a needle. Deliberately placed AFTER the missing-JSONL
+  // early return above: that disposition is honest ("cannot check anything —
+  // the feature was never enabled") regardless of the object's validity, so it
+  // must not require a graph node either. An `objectApiName` DERIVED from a
+  // validated `componentId` (below, when the caller omits `objectApiName`) is
+  // already grounded in real vault data and is left unvalidated here.
+  if (input.objectApiName !== undefined) {
+    const scopeResult = await resolveExistingObjectScope(ctx.graph, {
+      objectApiName: input.objectApiName,
+    });
+    if (!scopeResult.ok) return err(scopeResult.error);
+    if (scopeResult.value !== null) objectApiName = scopeResult.value.object;
   }
 
   const rows = parsePersistedAuditRows(raw);

@@ -99,6 +99,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { familyAbsence } from './action-chain-model.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 
 /** Canonical id prefix for every event entity — Platform Events and Change Events alike. */
 const OBJECT_ID_PREFIX = 'CustomObject:';
@@ -673,23 +674,57 @@ const collectReferencedNotRetrieved = async (
 
 /**
  * Normalize the caller's object narrow into the Change Event apiName it
- * scopes to. Accepts a bare object apiName, the Change Event name itself, or
- * a `CustomObject:` id.
+ * scopes to, AND verify the underlying sObject actually exists in the vault.
+ *
+ * EVENT-TOPOLOGY-UNRESOLVED-OBJECT-SCOPE: this used to be a pure string
+ * transform with no existence check — a made-up (or merely wrong-case)
+ * object name silently produced an empty `cdcEntities` list wrapped in the
+ * "CHECKED zero for THIS OBJECT ONLY" disclosure, indistinguishable from a
+ * real object that simply has no CDC usage. The Change Event itself is NEVER
+ * a retrievable node (see the module JSDoc), so existence is verified
+ * against the BASE entity (`Contact`, not `ContactChangeEvent`) via the
+ * shared `resolveExistingObjectScope` — the same resolver
+ * `flow_fault_audit` / `flow_bulkification_audit` use. An unresolvable
+ * object REFUSES; a real object typed in the wrong case is corrected to the
+ * vault's exact casing before the Change Event name is derived from it.
+ *
+ * Accepts a bare object apiName, the Change Event name itself, or a
+ * `CustomObject:` id.
  */
-const resolveObjectScope = (
+const resolveObjectScope = async (
+  ctx: Context,
   input: EventTopologyInput,
-): { readonly raw: string; readonly changeEventName: string } | null => {
+): Promise<
+  Result<
+    { readonly raw: string; readonly entity: string; readonly changeEventName: string } | null,
+    McpError
+  >
+> => {
   const raw = input.objectApiName ?? input.object;
-  if (raw === undefined) return null;
+  if (raw === undefined) return ok(null);
   const bare = raw.startsWith(OBJECT_ID_PREFIX)
     ? raw.slice(OBJECT_ID_PREFIX.length)
     : raw;
-  return {
+  const entityGuess = isChangeEventApiName(bare) ? changeEventToEntity(bare) : bare;
+  const resolved = await resolveExistingObjectScope(ctx.graph, {
+    objectApiName: entityGuess,
+  });
+  if (!resolved.ok) return resolved;
+  const scope = resolved.value;
+  if (scope === null) {
+    // Unreachable: `entityGuess` is always a non-empty string here, so
+    // `resolveExistingObjectScope` always either resolves or refuses.
+    return err({
+      kind: 'invalid-query',
+      message: `name the object — pass \`objectApiName\` or \`object\``,
+      path: 'objectApiName',
+    });
+  }
+  return ok({
     raw,
-    changeEventName: isChangeEventApiName(bare)
-      ? bare
-      : entityToChangeEvent(bare),
-  };
+    entity: scope.object,
+    changeEventName: entityToChangeEvent(scope.object),
+  });
 };
 
 /**
@@ -709,7 +744,9 @@ export const eventTopologyHandler = async (
 ): Promise<Result<McpResponse<EventTopologyOutput>, McpError>> => {
   const filter = input.filter ?? 'all';
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const scope = resolveObjectScope(input);
+  const scopeResult = await resolveObjectScope(ctx, input);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
 
   const sweep = await sweepObjectNodes(ctx);
   if (!sweep.ok) {
@@ -882,7 +919,7 @@ export const eventTopologyHandler = async (
               memberFamily.resolution === 'verified-none',
             )
           : cdcEmptyForScopeDisclosure(
-              changeEventToEntity(scope.changeEventName),
+              scope.entity,
               memberFamily.basis,
               memberFamily.resolution === 'verified-none',
             ),
@@ -917,7 +954,7 @@ export const eventTopologyHandler = async (
 
   return ok({
     data: {
-      appliedScope: { filter, object: scope?.raw ?? null },
+      appliedScope: { filter, object: scope?.entity ?? null },
       summary: {
         platformEventCount: platformEventEntries.length,
         cdcEnabledEntityCount: cdcEntries.length,

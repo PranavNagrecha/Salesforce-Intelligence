@@ -251,6 +251,22 @@ const phantomSeed: ExtractionResult = {
   ],
 };
 
+// ---------------------------------------------------------------------------
+// Seed E (EVENT-TOPOLOGY-UNRESOLVED-OBJECT-SCOPE): bare base-object nodes for
+// every sObject the `objectApiName` scope tests below narrow by. A real vault
+// retrieves an object's own CustomObject metadata separately from its
+// (never-retrievable) Change Event — the fixtures above never needed that node
+// for the subscriber/CDC-enablement mechanics, but the object-scope existence
+// check the fix adds now resolves against it.
+// ---------------------------------------------------------------------------
+const baseObjectSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: 'CustomObject:Contact', apiName: 'Contact' }),
+    makeNode({ id: 'CustomObject:Account', apiName: 'Account' }),
+  ],
+  edges: [],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -265,6 +281,7 @@ beforeAll(async () => {
     legacyEventSeed,
     cdcSeed,
     phantomSeed,
+    baseObjectSeed,
   ]);
   if (!imported.ok) throw new Error(`import failed: ${imported.error.message}`);
   ctx = { vaultRoot: tempDir, manifest: RETRIEVED_MANIFEST, graph: store };
@@ -467,5 +484,50 @@ describe('event_topology — scope and coverage reporting', () => {
     expect(data.channels.map((c) => c.channelId).sort()).toEqual(
       [CDC_CHANNEL, EVENT_CHANNEL].sort(),
     );
+  });
+});
+
+// =============================================================================
+// EVENT-TOPOLOGY-UNRESOLVED-OBJECT-SCOPE. Pre-fix, `objectApiName` / `object`
+// was normalized into a Change Event name with NO check that the underlying
+// sObject exists — a made-up (or merely wrong-case) object name silently
+// produced an empty `cdcEntities` list dressed as a "CHECKED zero for THIS
+// OBJECT ONLY", indistinguishable from a real object with no CDC usage. Fixed
+// by resolving the base entity through the shared `resolveExistingObjectScope`
+// before deriving the Change Event name.
+// =============================================================================
+
+describe('event_topology — object scope honesty', () => {
+  it('FAIL-BEFORE/PASS-AFTER: refuses an objectApiName absent from the vault, never a silent zero', async () => {
+    const parsed = eventTopologyInputSchema.parse({
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    const result = await eventTopologyHandler(ctx, parsed);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toMatch(/no object named 'Zzz_Nonexistent_Object_9x7__c'/i);
+  });
+
+  it('refuses the same way when the fabricated name is given in ChangeEvent form', async () => {
+    const parsed = eventTopologyInputSchema.parse({
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__cChangeEvent',
+    });
+    const result = await eventTopologyHandler(ctx, parsed);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+  });
+
+  it('a real object typed in the wrong case still answers, corrected to the vault casing', async () => {
+    const data = await run({ objectApiName: 'contact' });
+    expect(data.cdcEntities.map((e) => e.entity)).toEqual(['Contact']);
+    expect(data.appliedScope.object).toBe('Contact');
+  });
+
+  it('BARE CALL: the org-wide (no-scope) path is unaffected by the scope fix', async () => {
+    const data = await run();
+    expect(data.appliedScope).toEqual({ filter: 'all', object: null });
+    expect(data.platformEvents.length).toBeGreaterThan(0);
   });
 });

@@ -21,7 +21,7 @@
  */
 
 import type { Edge, McpError, McpResponse, Node, TrustSummary } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdges, listNodesByIds } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
@@ -30,6 +30,7 @@ import { mdTable } from '../answer-render.js';
 import type { Context } from '../server.js';
 
 import { offlineTrust } from './coverage-trust.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import {
   isActiveSoeFirer,
   recordInactiveSoeFirer,
@@ -106,10 +107,33 @@ export const recordCreationPathsHandler = async (
   ctx: Context,
   input: RecordCreationPathsInput,
 ): Promise<Result<McpResponse<RecordCreationPathsOutput>, McpError>> => {
-  const objectId = input.objectApiName.includes(':')
-    ? input.objectApiName
-    : `CustomObject:${input.objectApiName}`;
-  const objectApiName = objectId.slice(objectId.indexOf(':') + 1);
+  // RECORD-CREATION-PATHS-UNRESOLVED-OBJECT-SCOPE: `objectId` used to be glued
+  // together from the raw `objectApiName` string with no existence check, so a
+  // made-up or wrong-case object name silently matched zero edges and came
+  // back `{creatorCount: 0, triggerCount: 0}` — an UNCHECKED zero a caller
+  // could not tell apart from "nothing creates this object". Resolve + verify
+  // via the shared object-scope resolver instead (the same one
+  // flow_fault_audit / flow_bulkification_audit use): an unresolvable object
+  // REFUSES with a named `invalid-query`, and a real object typed in the
+  // wrong case is corrected to the vault's exact casing before anything is
+  // queried.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input, {
+    unhandledPrefix: 'refuse',
+  });
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
+  if (scope === null) {
+    // Unreachable given `objectApiName` is a required schema field — kept
+    // explicit rather than silently falling through to an org-wide read this
+    // tool has no concept of.
+    return err({
+      kind: 'invalid-query',
+      message: 'name the object — pass `objectApiName`',
+      path: 'objectApiName',
+    });
+  }
+  const objectId = scope.componentId;
+  const objectApiName = scope.object;
   const limit = input.limit ?? 100;
 
   const edgesResult = await listEdges(ctx.graph, objectId, { direction: 'in' });

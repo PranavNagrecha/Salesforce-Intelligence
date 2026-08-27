@@ -79,6 +79,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveExistingObjectScope } from './input-aliases.js';
+
 /**
  * The set of node types that count as valid CDC subscribers — the same
  * three v1.5 R3 producers `event_subscribers` accepts. Other node
@@ -207,6 +209,16 @@ export interface CdcChannelMember {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface CdcSubscribersOutput {
+  /**
+   * Present ONLY on an object-scoped call (CDC-SUBSCRIBERS-UNRESOLVED-OBJECT-
+   * SCOPE) — echoes the base sObject the scan was narrowed to, so a scoped
+   * answer can never be read as org-wide. Absent on the bare call, keeping
+   * that response byte-identical to the pre-fix shape.
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   readonly subscribers: readonly CdcSubscriber[];
   /**
    * CDC channel enablement: the `PlatformEventChannelMember` rows that
@@ -492,7 +504,28 @@ export const cdcSubscribersHandler = async (
 ): Promise<Result<McpResponse<CdcSubscribersOutput>, McpError>> => {
   // Accept `objectApiName` as a synonym for `sObjectFilter` (host alias);
   // `sObjectFilter` wins when both are supplied.
-  const objectFilter = input.sObjectFilter ?? input.objectApiName;
+  const rawObjectFilter = input.sObjectFilter ?? input.objectApiName;
+
+  // CDC-SUBSCRIBERS-UNRESOLVED-OBJECT-SCOPE: the synthetic ChangeEvent id used
+  // to be derived straight from the raw filter string with no check that the
+  // underlying sObject exists — a made-up (or merely wrong-case) object name
+  // silently produced `{totalSubscribers: 0}` with a "nothing referenced"
+  // disclosure that READ like a checked answer but was never grounded in a
+  // real object. Resolve + verify the BASE object (not the ChangeEvent form)
+  // via the shared object-scope resolver before deriving anything: an
+  // unresolvable object REFUSES, and a real object typed in the wrong case is
+  // corrected to the vault's exact casing before the ChangeEvent name is
+  // computed from it.
+  let objectFilter: string | undefined = rawObjectFilter;
+  if (rawObjectFilter !== undefined) {
+    const scopeResult = await resolveExistingObjectScope(ctx.graph, {
+      objectApiName: rawObjectFilter,
+    });
+    if (!scopeResult.ok) return err(scopeResult.error);
+    // Non-null: `rawObjectFilter` is always a non-empty string here.
+    objectFilter = scopeResult.value?.object ?? rawObjectFilter;
+  }
+
   const eventIdsResult = await resolveChangeEventIds(ctx, objectFilter);
   if (!eventIdsResult.ok) {
     return err({
@@ -583,6 +616,12 @@ export const cdcSubscribersHandler = async (
 
   return ok({
     data: {
+      // appliedScope FIRST + only when scoped, so a bare call omits the whole
+      // block (byte-identical to the pre-fix shape) and a scoped one can
+      // never be read as org-wide.
+      ...(objectFilter !== undefined
+        ? { appliedScope: { object: objectFilter, mode: 'component' as const } }
+        : {}),
       subscribers: sorted,
       channelMembers,
       summary: {

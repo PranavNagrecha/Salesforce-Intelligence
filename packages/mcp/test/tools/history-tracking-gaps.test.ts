@@ -261,6 +261,65 @@ describe('historyTrackingGapsHandler', () => {
   });
 });
 
+// =============================================================================
+// HISTORY-TRACKING-GAPS-UNRESOLVED-OBJECT-SCOPE. Pre-fix, `objectApiName` was
+// glued into `CustomObject:{name}` and handed straight to the case-sensitive
+// field-scope filter with no existence check — a made-up (or merely
+// wrong-case) object name silently matched zero fields and came back
+// `{groups: [], summary.totalGapFields: 0}`, an UNCHECKED zero
+// indistinguishable from "every PII field on this object is tracked". Fixed
+// by resolving + verifying the object first via the shared
+// `resolveExistingObjectScope`, falling back to the tool's own pre-existing
+// field-parent signal for the Legacy__c-shaped "object referenced by fields
+// but never itself retrieved" case (which must NOT start refusing).
+// =============================================================================
+
+describe('historyTrackingGapsHandler — object scope honesty', () => {
+  it('FAIL-BEFORE/PASS-AFTER: refuses an objectApiName absent from the vault, never a silent zero', async () => {
+    const result = await historyTrackingGapsHandler(ctx, {
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toMatch(/no object named 'Zzz_Nonexistent_Object_9x7__c'/i);
+  });
+
+  it('a real object typed in the wrong case still answers, corrected to the vault casing', async () => {
+    const lower = await historyTrackingGapsHandler(ctx, { objectApiName: 'contact' });
+    const exact = await historyTrackingGapsHandler(ctx, { objectApiName: 'Contact' });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    expect(lower.value.data.scope).toEqual(exact.value.data.scope);
+    expect(lower.value.data.groups).toEqual(exact.value.data.groups);
+    expect(lower.value.data.scope).toMatchObject({ mode: 'object', objectApiName: 'Contact' });
+  });
+
+  // The Legacy__c shape (a REAL object whose fields were retrieved but whose
+  // own CustomObject metadata was not) must keep answering — it is a
+  // pre-existing, deliberate honesty feature, not the defect this fix closes.
+  // The main describe block above already pins its `objectModeled: false`
+  // behavior in detail; this re-confirms it survives the scope-resolution fix.
+  it('an object referenced only by its fields (never itself retrieved) still answers, not refused', async () => {
+    const result = await historyTrackingGapsHandler(ctx, { objectApiName: 'Legacy__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scope).toEqual({
+      mode: 'object',
+      objectApiName: 'Legacy__c',
+      objectModeled: false,
+      fieldsScanned: 1,
+    });
+  });
+
+  it('BARE CALL: the org-wide (no-scope) path is unaffected by the scope fix', async () => {
+    const result = await historyTrackingGapsHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scope).toEqual({ mode: 'org-wide', fieldsScanned: 5 });
+  });
+});
+
 describe('historyTrackingGapsInputSchema', () => {
   it('accepts an empty input (org-wide default)', () => {
     expect(historyTrackingGapsInputSchema.safeParse({}).success).toBe(true);

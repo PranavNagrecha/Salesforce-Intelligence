@@ -263,6 +263,26 @@ const contactCdcMembershipSeed: ExtractionResult = {
 };
 
 // =============================================================================
+// Seed 5b (CDC-SUBSCRIBERS-UNRESOLVED-OBJECT-SCOPE): bare base-object nodes for
+// every sObject the tests below scope by. A real vault retrieves the object's
+// own CustomObject metadata separately from its (never-retrievable) Change
+// Event — these fixtures previously omitted that node entirely because the
+// subscriber-detection tests didn't need it, but the object-scope existence
+// check now does. `NonExistentObject` / `Zzz_...` are deliberately NOT added
+// here — they must stay absent from every vault in this file.
+// =============================================================================
+
+const baseObjectSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+    makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
+    makeNode({ id: 'CustomObject:Lead', type: 'CustomObject', apiName: 'Lead' }),
+    makeNode({ id: 'CustomObject:Order__c', type: 'CustomObject', apiName: 'Order__c' }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
 // Seed 6: an EVENT channel (channelType 'event') whose member selects a Platform
 // Event (Order_Placed__e), NOT a ChangeEvent. It must NOT surface as a CDC
 // channel member — the CDC discriminator is the ChangeEvent name pattern.
@@ -316,6 +336,7 @@ beforeAll(async () => {
     filteredCdcSeed,
     contactCdcMembershipSeed,
     eventChannelSeed,
+    baseObjectSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -386,15 +407,17 @@ describe('cdcSubscribersHandler', () => {
     expect(d.subscribers.length).toBeGreaterThanOrEqual(4);
   });
 
-  it('returns an empty subscriber list (not error) when the CDC event has no subscribers', async () => {
+  // CDC-SUBSCRIBERS-UNRESOLVED-OBJECT-SCOPE: this used to "answer" a scope
+  // naming an object absent from the vault with a checked-looking empty
+  // result — the exact honesty defect the fix below closes. See the dedicated
+  // "object scope honesty" describe block for the FAIL-BEFORE/PASS-AFTER pin.
+  it('refuses a sObjectFilter absent from the vault (never a silent empty answer)', async () => {
     const result = await cdcSubscribersHandler(ctx, {
       sObjectFilter: 'NonExistentObject',
     });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value.data.subscribers).toEqual([]);
-    expect(result.value.data.summary.totalSubscribers).toBe(0);
-    expect(result.value.data.summary.uniqueChangeEvents).toBe(0);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
   });
 
   it('filters out non-subscriber node types (e.g. CustomField)', async () => {
@@ -575,6 +598,9 @@ const REAL_SHAPE_TRIGGER = 'ApexTrigger:ContactChangeCdcHandler';
  */
 const realShapeCdcSeed: ExtractionResult = {
   nodes: [
+    // The base object node — the object-scope existence check resolves
+    // against THIS, not against the (never-retrievable) ChangeEvent.
+    makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
     makeNode({
       id: REAL_SHAPE_TRIGGER,
       type: 'ApexTrigger',
@@ -665,8 +691,15 @@ describe('cdcSubscribersHandler — real-org shape (ChangeEvent is never a node)
   });
 
   it('a scoped miss says the stream is referenced by nothing, not that CDC was checked and unused', async () => {
+    // Lead is a REAL, modeled object here (unlike a fabricated scope) — it
+    // simply has zero CDC footprint. That is what this test pins: an existing
+    // object with no CDC usage still gets the "nothing referenced" honest
+    // disclosure, distinct from the hard refusal a nonexistent object gets.
     const emptySeed: ExtractionResult = {
-      nodes: [makeNode({ id: 'CustomObject:Account', apiName: 'Account' })],
+      nodes: [
+        makeNode({ id: 'CustomObject:Account', apiName: 'Account' }),
+        makeNode({ id: 'CustomObject:Lead', apiName: 'Lead' }),
+      ],
       edges: [],
     };
     const result = await withCdcStore(emptySeed, (c) =>
@@ -676,5 +709,70 @@ describe('cdcSubscribersHandler — real-org shape (ChangeEvent is never a node)
     if (!result.ok) return;
     expect(result.value.data.disclosure).toContain('LeadChangeEvent');
     expect(result.value.data.disclosure).toMatch(/NOT "CDC checked and unused"/);
+  });
+});
+
+// =============================================================================
+// CDC-SUBSCRIBERS-UNRESOLVED-OBJECT-SCOPE. Pre-fix, `sObjectFilter` /
+// `objectApiName` was glued straight into a synthetic ChangeEvent id with no
+// check that the underlying sObject exists — a made-up (or merely wrong-case)
+// object name silently produced `{totalSubscribers: 0}` with a "nothing
+// referenced" disclosure that READ like a checked answer but was never
+// grounded in a real object. Fixed by resolving the base entity through the
+// shared `resolveExistingObjectScope` before deriving the ChangeEvent name.
+// =============================================================================
+
+describe('cdcSubscribersHandler — object scope honesty', () => {
+  it('FAIL-BEFORE/PASS-AFTER: refuses a sObjectFilter absent from the vault, never a silent zero', async () => {
+    const result = await cdcSubscribersHandler(ctx, {
+      sObjectFilter: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toMatch(/no object named 'Zzz_Nonexistent_Object_9x7__c'/i);
+  });
+
+  it('refuses the same way via the objectApiName alias', async () => {
+    const result = await cdcSubscribersHandler(ctx, {
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+  });
+
+  it('a real object typed in the wrong case still answers, corrected to the vault casing', async () => {
+    const lower = await cdcSubscribersHandler(ctx, { sObjectFilter: 'account' });
+    const exact = await cdcSubscribersHandler(ctx, { sObjectFilter: 'Account' });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    expect(lower.value.data.subscribers.map((s) => s.subscriberId)).toEqual(
+      exact.value.data.subscribers.map((s) => s.subscriberId),
+    );
+    expect(lower.value.data.appliedScope).toEqual({ object: 'Account', mode: 'component' });
+  });
+
+  it('a scoped call echoes appliedScope so the answer cannot be read as org-wide', async () => {
+    const result = await cdcSubscribersHandler(ctx, { sObjectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.appliedScope).toEqual({ object: 'Account', mode: 'component' });
+  });
+
+  it('BARE CALL: the org-wide (no-scope) path carries no appliedScope', async () => {
+    const result = await cdcSubscribersHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect('appliedScope' in result.value.data).toBe(false);
+  });
+
+  it('BARE CALL: the org-wide payload shape is unchanged by the scope fix', async () => {
+    const result = await cdcSubscribersHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.summary.uniqueChangeEvents).toBeGreaterThanOrEqual(2);
+    expect(d.subscribers.length).toBeGreaterThanOrEqual(4);
   });
 });

@@ -85,6 +85,7 @@ import {
   fieldMatchesObjectScope,
   mergeInputAliases,
   parseFieldParentObjectApiName,
+  resolveExistingObjectScope,
   resolveObjectScopeParentId,
   toCustomObjectId,
   toObjectApiName,
@@ -627,7 +628,67 @@ export const historyTrackingGapsHandler = async (
 ): Promise<Result<McpResponse<HistoryTrackingGapsOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  const classified = await classifyHistoryGaps(ctx, input);
+  // HISTORY-TRACKING-GAPS-UNRESOLVED-OBJECT-SCOPE: `objectApiName` used to be
+  // glued into `CustomObject:{name}` and handed straight to the (case-
+  // sensitive) field-scope filter with no existence check — a made-up (or
+  // merely wrong-case) object name silently matched zero fields and came back
+  // `{groups: [], summary.totalGapFields: 0}`, an UNCHECKED zero
+  // indistinguishable from "every PII field on this object is tracked".
+  //
+  // "Exists" for THIS tool is broader than "has a CustomObject: node": a
+  // field can be legitimately scanned for an object whose OWN metadata was
+  // never retrieved (see `objectModeled: false` / the Legacy__c fixture
+  // scenario in the module JSDoc) — that is a deliberate, pre-existing
+  // honesty feature, not the defect this fix closes. So the refuse gate
+  // below checks BOTH signals the tool already computes, and only fires when
+  // NEITHER confirms the object: no modeled CustomObject node AND no
+  // CustomField whose parent resolves to it. A real object typed in the
+  // wrong case is corrected to the vault's exact casing first via the shared
+  // object-scope resolver (which DOES require a CustomObject: node, so it
+  // only ever narrows — never widens — the fallback field-parent probe).
+  let resolvedObjectApiName: string | undefined = input.objectApiName;
+  if (input.objectApiName !== undefined) {
+    const scopeResult = await resolveExistingObjectScope(ctx.graph, {
+      objectApiName: input.objectApiName,
+    });
+    if (scopeResult.ok) {
+      if (scopeResult.value !== null) resolvedObjectApiName = scopeResult.value.object;
+    } else if (scopeResult.error.kind !== 'invalid-query') {
+      return err(scopeResult.error);
+    } else {
+      // No modeled CustomObject: node under any casing. Fall back to the
+      // tool's own pre-existing signal: does any CustomField's parent object
+      // resolve to this name (case-insensitively)?
+      const fieldsProbe = await fetchAllOfType(ctx, 'CustomField');
+      if (!fieldsProbe.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${fieldsProbe.error}` });
+      }
+      const folded = input.objectApiName.toLowerCase();
+      let fieldMatch: string | null = null;
+      for (const f of fieldsProbe.value) {
+        const parentId = resolveParentObjectId(f);
+        if (parentId === null) continue;
+        const bare = toObjectApiName(parentId);
+        if (bare.toLowerCase() === folded) {
+          fieldMatch = bare;
+          break;
+        }
+      }
+      if (fieldMatch === null) {
+        return err({
+          kind: 'invalid-query',
+          message:
+            `no object named '${input.objectApiName}' exists in this vault (no CustomObject ` +
+            'metadata and no CustomField references it); verify the object api name, or run ' +
+            '/sfi-refresh if the vault may be stale',
+          path: 'objectApiName',
+        });
+      }
+      resolvedObjectApiName = fieldMatch;
+    }
+  }
+
+  const classified = await classifyHistoryGaps(ctx, { objectApiName: resolvedObjectApiName });
   if (!classified.ok) return classified;
   const {
     sorted,
@@ -640,7 +701,7 @@ export const historyTrackingGapsHandler = async (
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
   const fingerprint = argsFingerprint({
-    ...(input.objectApiName !== undefined ? { objectApiName: input.objectApiName } : {}),
+    ...(resolvedObjectApiName !== undefined ? { objectApiName: resolvedObjectApiName } : {}),
   });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
@@ -673,11 +734,11 @@ export const historyTrackingGapsHandler = async (
   const anyUnmodeledObject = groups.some((g) => !g.objectModeled);
 
   const scope: HistoryTrackingGapsScope =
-    input.objectApiName !== undefined
+    resolvedObjectApiName !== undefined
       ? {
           mode: 'object',
-          objectApiName: input.objectApiName,
-          objectModeled: [...objectApiNameById.values()].includes(input.objectApiName),
+          objectApiName: resolvedObjectApiName,
+          objectModeled: [...objectApiNameById.values()].includes(resolvedObjectApiName),
           fieldsScanned,
         }
       : { mode: 'org-wide', fieldsScanned };
