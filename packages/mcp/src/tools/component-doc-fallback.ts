@@ -3,9 +3,10 @@
  * renderer left docs on disk (partial refresh / scoped retrieve gap).
  */
 import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import type { ComponentId, ComponentType, Node } from '@sf-intelligence/contracts';
+import { isPathWithin } from '@sf-intelligence/core';
 import { componentPath } from '@sf-intelligence/vault';
 
 /** Parse `ValidationRule:Lead.My_Rule` → parent + apiName. */
@@ -115,13 +116,35 @@ export const tryReadComponentDoc = async (
     vr.parentApiName,
     vr.apiName,
   );
+
+  // COMPONENT-DOC-FALLBACK-TRAVERSAL.
+  //
+  // `componentId` arrives from the CALLER — sfi.get_component passes `input.id`
+  // straight through — and the parse above splits on the first `.` without
+  // rejecting anything, so both segments reach `componentPath`'s `join` as-is.
+  // `ValidationRule:../../../../some/dir.secret` therefore addressed a file
+  // outside the vault entirely, and the old relative-path computation below
+  // (`startsWith(vaultRoot) ? slice : fullPath`) RETURNED THE ABSOLUTE PATH on
+  // exactly the inputs that escaped — so a miss disclosed the host's filesystem
+  // layout even when the read failed.
+  //
+  // Containment is checked structurally rather than by rejecting `..` or a
+  // separator: a deny-list has to anticipate every spelling (`..`, `%2e%2e`,
+  // a nested `a/../..`, a Windows `\`), whereas resolving and asking whether
+  // the result is still inside the vault is decided by the filesystem's own
+  // normalisation. `isPathWithin` is purely LEXICAL — it does no I/O and does
+  // not resolve symlinks — which is what we want here: a symlink inside the
+  // vault pointing out of it must not become a read, and `realpath` would
+  // quietly authorise exactly that.
+  if (!isPathWithin(resolve(vaultRoot), resolve(fullPath))) return null;
+
   try {
     const raw = await readFile(fullPath, 'utf-8');
     const split = splitFrontmatter(raw);
     if (split === null) return null;
-    const rel = fullPath.startsWith(vaultRoot)
-      ? fullPath.slice(vaultRoot.length + 1)
-      : fullPath;
+    // Containment holds, so this always trims. No absolute-path fallback: a
+    // path we would have had to echo whole is one we already refused above.
+    const rel = fullPath.slice(vaultRoot.length + 1);
     return { path: rel, frontmatter: split.frontmatter, body: split.body, type: 'ValidationRule' };
   } catch {
     return null;
