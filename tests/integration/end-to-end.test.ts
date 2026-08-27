@@ -57,6 +57,7 @@ import {
 } from '../../packages/mcp/src/index.js';
 import { vaultPaths } from '../../packages/vault/src/index.js';
 
+import { assertNotStubEnvelope as assertNotStubShared } from './envelope-honesty.js';
 import { FIXTURE_ROOT, FIXTURE_SOURCE } from './fixture-paths.js';
 
 /**
@@ -777,14 +778,23 @@ const parseEnvelope = (content: readonly { type: string; text?: string }[]):
  * `not-implemented` means a tool was registered without a handler;
  * `unknown-tool` means the name was misspelled. Either indicates the
  * v0.1 surface is incomplete.
+ *
+ * DELEGATES to the shared implementation in `envelope-honesty.ts`. The copy
+ * that used to live here compared `body.error` — a STRING — to the two stub
+ * names, so it could only ever fire on the legacy string form; a live handler
+ * returns `error` as an `McpError` OBJECT and slipped straight past it. The
+ * shared version checks both shapes. (Second copies guarded only by a comment
+ * are how this tree grows drift; see `envelope-honesty.ts`.)
+ *
+ * This remains the NARROW gate — it rejects only the two stubs. The honesty
+ * laws that reject a tool whose handler ran and LIED (`{ totalCount: 0 }` for
+ * an object that does not exist, a trimmed page claiming completeness) live in
+ * `tool-honesty-sweep.test.ts`, which derives its roster from `V01_TOOLS`
+ * instead of the hand-written `calls` array below and therefore covers all
+ * 217 tools rather than the 141 listed here.
  */
 const assertNotStubEnvelope = (body: unknown, toolName: string): void => {
-  if (typeof body === 'object' && body !== null && 'error' in body) {
-    const errValue = (body as { error: unknown }).error;
-    if (errValue === 'not-implemented' || errValue === 'unknown-tool') {
-      throw new Error(`tool '${toolName}' returned legacy stub: ${errValue as string}`);
-    }
-  }
+  assertNotStubShared(body, toolName);
 };
 
 /**

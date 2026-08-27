@@ -23,7 +23,7 @@
     "test": "pnpm -r test && pnpm test:integration",
     "test:cli": "pnpm --filter ./packages/cli test",
     "test:integration": "vitest run --config tests/integration/vitest.config.ts",
-    "test:integration:gate": "vitest run --config tests/integration/vitest.config.ts end-to-end.test.ts reference-questions.test.ts deep-smoke.test.ts post-refresh-golden.test.ts snapshot-trend.test.ts",
+    "test:integration:gate": "vitest run --config tests/integration/vitest.config.ts end-to-end.test.ts envelope-honesty.test.ts post-refresh-golden.test.ts snapshot-trend.test.ts",
     "test:golden": "vitest run --config tests/integration/vitest.config.ts post-refresh-golden.test.ts",
     "build": "pnpm -r build",
     "eval": "node eval/run.mjs",

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
@@ -174,5 +174,45 @@ describe('ci.yml — Windows anti-backslide gate', () => {
           'condition>." to the comment above this step.',
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * Sibling invariant, same failure family, different file.
+ *
+ * `test:integration:gate` — the RELEASE gate — named five test files, two of
+ * which (`reference-questions.test.ts`, `deep-smoke.test.ts`) do not exist.
+ * Vitest treats a filter that matches nothing as "nothing to run" for that
+ * name, not as an error: verified live, a run naming one real file and one
+ * imaginary one reports `Test Files 1 passed` and exits 0.
+ *
+ * So the release gate reported GREEN while executing three of the five suites
+ * it claimed. That is the same shape as the Windows job above and as
+ * `scan:leaks` passing without its gitignored config: a gate that cannot fail
+ * because it is not looking at anything. The filenames are a promise; this
+ * asserts the promise is keepable.
+ */
+describe('package.json — the release gate cannot name a suite that does not exist', () => {
+  it('every test file named in test:integration:gate is present on disk', () => {
+    const pkg = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+    ) as { scripts?: Record<string, string> };
+    const script = pkg.scripts?.['test:integration:gate'];
+    expect(script, 'test:integration:gate script is missing').toBeTruthy();
+
+    const named = (script as string).match(/[\w.-]+\.test\.ts/g) ?? [];
+    // A filter list that has silently emptied is the vacuity case: the gate
+    // would run the WHOLE suite (or nothing) and still look deliberate.
+    expect(named.length, 'test:integration:gate names no test files').toBeGreaterThan(0);
+
+    const missing = named.filter(
+      (f) => !existsSync(fileURLToPath(new URL(`../tests/integration/${f}`, import.meta.url))),
+    );
+    expect(
+      missing,
+      `test:integration:gate names ${missing.length} file(s) that do not exist under tests/integration/: ` +
+        `${missing.join(', ')}. Vitest ignores an unmatched filter and still exits 0, so the release gate ` +
+        'would report green while silently skipping them. Fix the name or delete it from the script.',
+    ).toEqual([]);
   });
 });
