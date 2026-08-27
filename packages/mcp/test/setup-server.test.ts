@@ -2,6 +2,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { DOCS_URL, FEEDBACK_ISSUES_URL } from '@sf-intelligence/core';
 
 import {
   createSetupServer,
@@ -88,6 +89,27 @@ describe('setupStatusPayload', () => {
     ).data as Record<string, unknown>;
     const text = (data['nextSteps'] as readonly string[]).join('\n');
     expect(text).not.toContain('resolved `./org-kb`');
+  });
+
+  /**
+   * The failure surface has to offer a way to report the failure.
+   *
+   * This tool is where a stranger lands when the server started and found no
+   * org — the moment a first run is most likely going wrong — and it carried a
+   * docs link and nothing else. The repo has had issues open and unrestricted
+   * since publication and has never received one.
+   *
+   * The second assertion is the point: the URL must be the SAME OBJECT as
+   * `@sf-intelligence/core`'s, not an equal string. `packages/mcp` cannot
+   * import `packages/cli` (cycle), and the cheap way out was a second literal
+   * in the MCP tree — which is this repo's documented root cause. Comparing
+   * against the shared constant is what stops that copy reappearing.
+   */
+  it('offers a feedback channel, derived from the one shared constant', () => {
+    const data = setupStatusPayload(baseState()).data as Record<string, unknown>;
+    const channel = String(data['ifTheseStepsDoNotWork'] ?? '');
+    expect(channel).toContain(FEEDBACK_ISSUES_URL);
+    expect(data['docs']).toBe(DOCS_URL);
   });
 
   it('gives the env-var syntax for the shell the user is actually in', () => {

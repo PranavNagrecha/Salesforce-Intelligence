@@ -73,3 +73,5 @@ export {
   type NetworkPurpose,
   type NetworkRequestContext,
 } from './network-policy.js';
+
+export { DOCS_URL, FEEDBACK_ISSUES_URL } from './product-links.js';

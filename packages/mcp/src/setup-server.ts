@@ -47,6 +47,7 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
+import { DOCS_URL, FEEDBACK_ISSUES_URL } from '@sf-intelligence/core';
 
 /** Why the full server could not start. Mirrors `prepareMcp`'s error kinds. */
 export type SetupReason =
@@ -205,7 +206,23 @@ export const setupStatusPayload = (
     pinVaultExample: isWindows()
       ? `$env:SFI_VAULT = '${state.expectedVaultRoot}'`
       : `export SFI_VAULT='${state.expectedVaultRoot}'`,
-    docs: 'https://sfi.auditforce.cloud',
+    docs: DOCS_URL,
+    /**
+     * The feedback channel, stated where the failure is.
+     *
+     * This is the one tool a stranger reaches when the server started but found
+     * no org — the single moment a first run is most likely to be going wrong.
+     * It offered a docs link and no way to tell anyone that the documented
+     * steps did not work. The repository has had issues open and unrestricted
+     * since publication and has never received one; a feedback path that lives
+     * only in `sfi doctor` and near the end of a 724-line README is a path for
+     * people who already succeeded.
+     *
+     * Deliberately phrased as "these steps did not work" rather than "report a
+     * bug": the common case here is a config the docs got wrong, which is worth
+     * more to fix than it is to a user to diagnose.
+     */
+    ifTheseStepsDoNotWork: `Tell us — the setup path getting something wrong is the likeliest cause: ${FEEDBACK_ISSUES_URL}`,
   },
   provenance: 'setup_mode',
   disclosures: [

@@ -2,11 +2,19 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
+import { FEEDBACK_ISSUES_URL } from '@sf-intelligence/core';
 import { gapLogPath } from '@sf-intelligence/mcp';
 import { Command } from 'commander';
 
-/** Issues channel — surfaced in doctor / README / website so feedback has a home. */
-export const FEEDBACK_ISSUES_URL = 'https://github.com/PranavNagrecha/Salesforce-Intelligence/issues';
+/**
+ * Issues channel — surfaced in doctor / README / website so feedback has a home.
+ *
+ * Re-exported rather than declared: the MCP server needs the same URL for
+ * `sfi.setup_status` and cannot import `cli` (that is a dependency cycle), so
+ * the literal now lives in `@sf-intelligence/core`. Existing importers keep
+ * this name; there is still exactly one string.
+ */
+export { FEEDBACK_ISSUES_URL };
 
 /** Local ratings log. `SFI_FEEDBACK_LOG_PATH` overrides (tests). Local-only. */
 export const feedbackLogPath = (): string =>
