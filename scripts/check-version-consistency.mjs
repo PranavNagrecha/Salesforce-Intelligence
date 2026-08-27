@@ -238,6 +238,37 @@ if (existsSync(join(root, 'SECURITY.md'))) {
   }
 }
 
+// --- 1f. The website's machine-readable version must track the release ---
+//
+// `website/public/llms.txt` is the file AI crawlers and answer engines read to
+// describe this product, and it opens by stating a version. It said
+// "(version 0.3.1)" while 0.3.2 was the published release — so the canonical
+// self-description handed to every model that asked was a release behind.
+//
+// This did not need new tooling: `website/recalibrate.mjs` has always carried
+// the regex that rewrites this exact string. It simply was not run at release
+// time. A step that must be remembered is not a step, so the number is asserted
+// here instead — the release cannot go out disagreeing with itself.
+//
+// Only the VERSION is gated. The other computed figures on that page (tool
+// count, test totals, concept-model size) are DERIVED by recalibrate.mjs from a
+// built tree and cannot be recomputed from inside this script without one;
+// pinning them here would be a second source of truth, which is the failure
+// this repo keeps paying for.
+for (const rel of ['website/public/llms.txt', 'website/public/llms-full.txt']) {
+  if (!existsSync(join(root, rel))) continue;
+  const txt = readText(rel);
+  const stated = txt.match(/\(version (\d+\.\d+\.\d+)\)/);
+  if (stated === null) {
+    errors.push(`${rel} states no "(version X.Y.Z)" — recalibrate.mjs patches it; keep the anchor`);
+  } else if (stated[1] !== expected) {
+    errors.push(
+      `${rel} says "(version ${stated[1]})" but the release is ${expected} — ` +
+        'run `node website/recalibrate.mjs` (it already rewrites this string)',
+    );
+  }
+}
+
 // --- 2. SERVER_VERSION resolve (shipped path) ---
 const buildSrc = readText('packages/cli/build.mjs');
 if (!/SFI_BUILD_VERSION\s*:\s*JSON\.stringify\(\s*pkg\.version/.test(buildSrc)) {
