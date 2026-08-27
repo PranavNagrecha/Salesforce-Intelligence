@@ -152,11 +152,11 @@ const description = "Configure sf-intelligence MCP clients, tool profiles, vault
         </table>
 
         <h2 id="tool-profile">Tool profile (advertised roster)</h2>
-        <p>The default is <code>SFI_TOOL_PROFILE=core</code>: only a <strong>19-schema core roster</strong> is advertised and directly invokable (orientation, resolve/route, universal graph reads, the catalog gateway, and <code>sfi.live_consent</code>). Every other analysis stays reachable with byte-identical output via <code>sfi.run_analysis</code> (or <code>route_question.invoke</code>, which already wraps non-core steps). A direct call to a non-core tool under <code>core</code> is refused. Set <code>full</code> to advertise and directly invoke the entire roster.</p>
+        <p>The default is <code>SFI_TOOL_PROFILE=core</code>: only a <strong>25-schema core roster</strong> is advertised and directly invokable — the spine (orientation, resolve/route, universal graph reads, the catalog gateway, and <code>sfi.live_consent</code>) plus the tools that answer the questions this product advertises. Every other analysis stays reachable with byte-identical output via <code>sfi.run_analysis</code> (or <code>route_question.invoke</code>, which already wraps non-core steps). A direct call to a non-core tool under <code>core</code> is refused. Set <code>full</code> to advertise and directly invoke the entire roster.</p>
         <table class="doc-table">
           <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
           <tbody>
-            <tr><td><code>SFI_TOOL_PROFILE</code></td><td><code>core</code></td><td>Default <code>core</code> advertises/invokes the 19-schema spine (incl. <code>sfi.live_consent</code>); non-core tools run via <code>sfi.run_analysis</code>. Set <code>full</code> for the entire roster. Unknown values fall back to <code>full</code>.</td></tr>
+            <tr><td><code>SFI_TOOL_PROFILE</code></td><td><code>core</code></td><td>Default <code>core</code> advertises/invokes the 25-schema core roster — the spine (incl. <code>sfi.live_consent</code>) plus the advertised-question tools; non-core tools run via <code>sfi.run_analysis</code>. Set <code>full</code> for the entire roster. Unknown values fall back to <code>full</code>.</td></tr>
           </tbody>
         </table>
         <p>Core is already the default — no env var required. Opt into the full roster with <code>"env": {'{'} "SFI_TOOL_PROFILE": "full" {'}'}</code>. See the <a href="/getting-started#install">install guide</a> for the full config block.</p>

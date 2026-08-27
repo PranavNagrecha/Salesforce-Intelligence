@@ -32,7 +32,7 @@
       "environmentVariables": [
         {
           "name": "SFI_VAULT",
-          "description": "Absolute path to the org-kb vault this server should answer from, e.g. /Users/you/my-sfdx-project/org-kb. Set this: without it the server falls back to ./org-kb relative to whatever directory your MCP host happens to launch in, and an MCP host is almost never launched inside your Salesforce project. The server still starts without it and reports what it looked for via sfi.setup_status, but it will have no org to answer about.",
+          "description": "Absolute path to the org-kb vault this server should answer from, e.g. <your-sfdx-project>/org-kb. Set this: without it the server falls back to ./org-kb relative to whatever directory your MCP host happens to launch in, and an MCP host is almost never launched inside your Salesforce project. The server still starts without it and reports what it looked for via sfi.setup_status, but it will have no org to answer about.",
           "isRequired": true,
           "isSecret": false,
           "format": "filepath"
