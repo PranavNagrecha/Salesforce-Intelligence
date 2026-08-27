@@ -84,15 +84,24 @@ jobs:
       - name: Public-interface guard (CI/eval reference only in-repo synthetic vaults)
         run: node scripts/check-public-interface.mjs
 
-      # Keeps the hand-rolled path-separator class from regrowing. Three silent
-      # Windows defects came from six spellings of "split a path" held in sync
-      # by comments; a comment cannot be executed, so this is the drift test
-      # that replaces them.
-      - name: Portability guard (no hand-rolled path separators)
-        run: node scripts/check-portability.mjs
+      # Portability guard (no hand-rolled path separators) moved to the
+      # windows-build-test job in 0.3.3: it guards against a bug class that
+      # is invisible on POSIX (a hand-rolled '/' is correct there by
+      # accident), so it now runs on the platform it actually protects
+      # instead of ubuntu.
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Anti-backslide gate over THIS FILE (ci.yml) itself — see
+      # test/ci-workflow-invariants.test.ts at the repo root for what it
+      # checks and why it lives outside any package. No root-level `test/`
+      # vitest project exists (pnpm-workspace.yaml only lists `packages/*`),
+      # so it is not picked up by `pnpm -r test` or `pnpm test:integration`;
+      # it is invoked directly here instead. Needs only `pnpm install`
+      # (vitest is a root devDependency), not a build.
+      - name: CI workflow invariants (anti-backslide gate)
+        run: pnpm exec vitest run test/ci-workflow-invariants.test.ts
 
       - name: Build (all packages)
         run: pnpm -r build
@@ -163,11 +172,37 @@ jobs:
   # skipped here too: ESLint over TypeScript sources is OS-independent and the
   # ubuntu job already runs it. duckdb ships prebuilt win32-x64 AND win32-arm64
   # bindings (both pinned in pnpm-lock.yaml), so the native load is not a blocker.
+  #
+  # 0.3.3: this job was GREEN over a red log — both unit-test steps below carry
+  # `continue-on-error: true`, so a packages/mcp crash (0xC0000409, see WIN-1)
+  # never turned the check red, and the majority of the MCP tool surface has
+  # never actually executed on Windows. Three fixes: (1) the portability guard
+  # moved in from the ubuntu job, first, before install/build spend any time,
+  # because it protects THIS platform; (2) a third step runs seven packages
+  # that carry no DuckDB dependency and already pass 100% here (core,
+  # tooling-api, renderers, parsers, patterns, vault, extractors — the same
+  # surface that held all three defects this job was created to catch) as a
+  # HARD gate, no continue-on-error; (3) the two remaining advisory steps got
+  # their comments rewritten — the old ones blamed "runner performance" for a
+  # failure that is a native crash, which test/ci-workflow-invariants.test.ts
+  # (repo root) now mechanically forbids: every `continue-on-error: true` in
+  # this file must sit next to a named WIN-<n> blocker with a DoD, and the
+  # hard-gate package list and the continue-on-error count can only grow
+  # stricter, never looser, without that test failing.
   windows-build-test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         # No fetch-depth: 0 — this job doesn't run the org-leak history scan.
+
+      # Moved from the ubuntu build-test job in 0.3.3: this is a plain-text
+      # guard over checked-out .ts sources — no install, no build needed — and
+      # it exists specifically to catch a bug class that is invisible on
+      # ubuntu, where a hand-rolled '/' already happens to be correct by
+      # accident. Runs on the platform it protects, first, before
+      # install/build spend any time.
+      - name: Portability guard (no hand-rolled path separators)
+        run: node scripts/check-portability.mjs
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -186,27 +221,55 @@ jobs:
       - name: Build (all packages)
         run: pnpm -r build
 
-      # ADVISORY, and running on every push — which is the change that matters.
-      # Until 0.3.2 this job was `workflow_dispatch`-only, so Windows was never
-      # exercised at all and three silent defects shipped. It now runs always
-      # and reports, but does not block, because the two things still failing
-      # are RUNNER PERFORMANCE rather than correctness:
+      # HARD GATE — no continue-on-error. These seven packages carry no
+      # DuckDB dependency and already pass 100% on windows-latest per CI run
+      # 32974713874 (core 4, tooling-api 6, renderers 10, parsers 9,
+      # patterns 3, vault 11, extractors 87 — all green, 130 test files, 0
+      # failures). It is also where all three Windows defects fixed in 0.3.2
+      # lived (EmailTemplates extraction, the review-change deploy gate, the
+      # `~` username redaction) — the free, already-proven-safe slice of the
+      # surface, carved out so it blocks on its own instead of riding inside
+      # an advisory step where a packages/mcp crash could mask a regression
+      # here.
+      - name: Unit tests (hard gate — no-DuckDB packages)
+        # PATH filters — see the note on the advisory step below for why a
+        # name filter is unsafe here too.
+        run: pnpm --filter './packages/core' --filter './packages/tooling-api' --filter './packages/renderers' --filter './packages/parsers' --filter './packages/patterns' --filter './packages/vault' --filter './packages/extractors' -r test
+
+      # ADVISORY, and running on every push. Until 0.3.2 this job was
+      # `workflow_dispatch`-only, so Windows was never exercised at all and
+      # three silent defects shipped. It now runs always and reports, but
+      # does not block, because packages/mcp does not fail a test here — it
+      # never gets the chance to:
       #
-      #   - one explain-flow case took 23.7s, then 48s on a re-run, against
-      #     ceilings of 20s then 45s. It is growing, so it is contention, not a
-      #     fixed cost — raising the number again would be chasing it.
-      #   - `graph`: teardown ENOTEMPTY (fixtures rmdir without closing the
-      #     DuckDB handle), a second handle opened to a held database, and the
-      #     10k-node scale import at ~99s against a 90s budget.
+      #   packages/mcp exits with Windows status 3221226505 (0xC0000409,
+      #   __fastfail) mid-run, inside the bounded-graph-query suite behind
+      #   fieldLineageHandler, and prints NO test summary at all — unlike
+      #   every other package this filter covers (core, tooling-api,
+      #   renderers, parsers, patterns, vault, extractors all print
+      #   `Test Files N passed (N)`; see the hard gate above). That is a
+      #   native abort, not slow hardware. 0.3.2's response was to raise
+      #   packages/mcp's testTimeout 20s -> 45s, on the theory that a slower
+      #   runner just needed more headroom. It did not work — CI run
+      #   32974713874 on main still shows the same crash — because a longer
+      #   clock does not change what happens once the query IS killed. 0.3.3
+      #   tried `pool: 'forks'` in packages/mcp/vitest.config.ts (isolate the
+      #   abort to a child process instead of a worker thread sharing the
+      #   parent's failure mode); it measured ~77% slower wall-clock on macOS
+      #   for no observed correctness change and was NOT adopted — see that
+      #   file's comment for the numbers. Unverified on an actual Windows
+      #   runner either way; it may or may not matter there.
       #
-      # Neither is a product bug and both need work in the graph/test layer,
-      # which is a different project from the onboarding path this branch is
-      # about. Advisory rather than excluded, deliberately: the failures stay
+      #   WIN-1  packages/mcp exits 0xC0000409, no test summary.
+      #          DoD: Windows prints `Test Files N passed (N)` with N equal
+      #          to the Linux count.
+      #
+      # Advisory rather than excluded, deliberately: the failure stays
       # VISIBLE in the log so the debt is tracked, instead of being silently
       # filtered the way this whole job used to be.
       #
-      # TO PROMOTE TO A HARD GATE: fix the fixture teardown + the two perf
-      # budgets, then delete the two `continue-on-error` lines below.
+      # TO PROMOTE TO A HARD GATE: close WIN-1, then delete the two
+      # `continue-on-error` lines below (this step and the graph step).
       - name: Unit tests (advisory — all packages except graph)
         # PATH filters, not name filters: the repo root and packages/cli are both
         # named `sf-intelligence`, so a name filter would let the ROOT package
@@ -217,13 +280,15 @@ jobs:
 
       # ADVISORY: `graph` has three PRE-EXISTING Windows problems, none of them
       # correctness bugs in the product, and all of them needing work in the
-      # graph layer rather than the onboarding path:
+      # graph layer rather than the onboarding path. Tracked as WIN-2:
       #
       #   1. teardown `ENOTEMPTY` — several fixtures rmdir a temp directory
       #      without closing the DuckDB handle first. Node's rm retries
       #      (added in 0.3.2) are not enough because the handle is never
       #      closed, only garbage-collected; the fix is an explicit
-      #      `closeGraph` in those fixtures.
+      #      `closeGraph()` in those fixtures. IN PROGRESS on another lane of
+      #      this fix fleet against the four fixture sites — do not duplicate
+      #      that work here.
       #   2. `Cannot open file ... used by another process` — the resolve-index
       #      persistence test opens a second handle to a database the first
       #      test still holds. Legal on POSIX, never on Windows.
@@ -232,9 +297,13 @@ jobs:
       #      exceed the 60s vitest default. DuckDB is simply slower here; the
       #      budgets were calibrated on POSIX.
       #
+      #   WIN-2  no `closeGraph()` releasing the DuckDB instance in graph
+      #          fixtures. DoD: all three items above are fixed and this step
+      #          runs with no `continue-on-error`.
+      #
       # Advisory rather than excluded: the failures stay VISIBLE in the log so
       # the debt is tracked, instead of being silently filtered the way this
-      # whole job used to be. Promote to the hard gate above once graph is fixed.
+      # whole job used to be. Promote to the hard gate above once WIN-2 closes.
       - name: Unit tests (advisory — graph, see comment)
         run: pnpm --filter './packages/graph' test
         continue-on-error: true

@@ -21,6 +21,11 @@ module.exports = {
         'packages/*/vitest.config.ts',
         'scripts/*.ts',
         'tests/integration/*.ts',
+        // Repo-level tests that assert on repo-level FILES rather than on any
+        // package's source — currently the CI-workflow anti-backslide gate,
+        // which parses `.github/workflows/ci.yml`. It belongs to no package
+        // because what it guards belongs to no package.
+        'test/*.test.ts',
       ],
       // typescript-eslint v8 enforces a hard default-project cap of 8 files;
       // 20 entries in allowDefaultProject exceed it, so raise the cap.
