@@ -221,6 +221,30 @@ type ToolDefinitionBase = Omit<
  * dependency, and inlining keeps the advertised schema in lockstep with
  * the Zod validator at code-review time rather than build time.
  */
+/**
+ * AT-LEAST-ONE-OF, ADVERTISED.
+ *
+ * Twenty-two tools accept a selector under several alias spellings — `id` or
+ * `componentId`, `objectApiName` or `objectId` — and REFUSE the empty object,
+ * yet advertised no `required` and no `anyOf`. A schema-driven host reads that
+ * as "every argument is optional", sends a call the handler then refuses with
+ * `invalid-query`, and burns a turn. `sfi.get_component`, the most-called tool
+ * in the roster, was one of them.
+ *
+ * The existing parity gate could not see this class: its `required` axis probes
+ * by removing ONE key at a time from a full input, so with both `id` and
+ * `componentId` present, removing either still parses and the contract measures
+ * as `enforced=[] advertised=[]`. The blind spot was structural, not baselined.
+ * `advertised-schema-parity.ts` now carries an `atLeastOneOf` axis that probes
+ * the EMPTY input — the question a host actually asks — and this helper is the
+ * one spelling of the answer, so twenty-two hand-written `anyOf` arrays cannot
+ * drift apart.
+ */
+const atLeastOneOf = (
+  ...keys: readonly string[]
+): readonly { readonly required: readonly string[] }[] =>
+  keys.map((key) => ({ required: [key] }));
+
 const SEARCH_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
@@ -375,6 +399,7 @@ const GET_COMPONENT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
     // schema-driven host, which is the same as not shipping it.
     includeConceptReasoning: { type: 'boolean' },
   },
+  anyOf: atLeastOneOf('id', 'componentId'),
 });
 
 /**
@@ -558,6 +583,7 @@ const SEARCH_FLOW_METADATA_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Obj
     // Return a digest instead of full matches.
     summarize: { type: 'boolean' },
   },
+  anyOf: atLeastOneOf('query', 'summarize'),
 });
 
 /**
@@ -1515,6 +1541,7 @@ const EFFECTIVE_PERMISSIONS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
+    anyOf: atLeastOneOf('profileId', 'profileApiName', 'profileName', 'permissionSetIds'),
   });
 
 /**
@@ -1541,6 +1568,7 @@ const LIST_VIEW_SHARING_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
+    anyOf: atLeastOneOf('componentId', 'object', 'objectApiName', 'objectId'),
   });
 
 /**
@@ -1577,6 +1605,7 @@ const EXPLAIN_ERROR_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
     text: { type: 'string', minLength: 1 },
     object: { type: 'string', minLength: 1 },
   },
+  anyOf: atLeastOneOf('errorText', 'error', 'message', 'errorMessage', 'text'),
 });
 
 /**
@@ -1598,6 +1627,7 @@ const EXPLAIN_DEBUG_LOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object
     content: { type: 'string', minLength: 1 },
     object: { type: 'string', minLength: 1 },
   },
+  anyOf: atLeastOneOf('logText', 'debugLog', 'log', 'text', 'content'),
 });
 
 /**
@@ -1627,6 +1657,7 @@ const TRACE_DEBUG_LOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
   // (`sfi.explain_debug_log` carries the identical over-claim and is baselined
   // in advertised-schema-parity-baseline.json — it predates this branch; this
   // tool shipped ON this branch, so it is fixed here.)
+  anyOf: atLeastOneOf('logText', 'debugLog', 'log', 'text', 'content'),
 });
 
 /**
@@ -1780,6 +1811,7 @@ const LAYOUT_ASSIGNMENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
+    anyOf: atLeastOneOf('componentId', 'object', 'objectApiName', 'objectId'),
   });
 
 /**
@@ -1865,6 +1897,7 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
     // CR-22 continuation cursor (object mode): opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
+  anyOf: atLeastOneOf('componentId', 'object', 'objectApiName', 'objectId'),
 });
 
 /**
@@ -2017,6 +2050,7 @@ const LIFECYCLE_PROCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     // message naming the accepted set), never ignored. Advertise that, so a
     // host knows a typo will be rejected rather than silently dropped.
     additionalProperties: false,
+    anyOf: atLeastOneOf('objectApiName', 'objectId'),
   });
 
 /**
@@ -2155,6 +2189,7 @@ const EXPLAIN_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       componentId: { type: 'string', minLength: 1, description: 'Field id (alias for fieldId)' },
       includeRecordValues: { type: 'boolean' },
     },
+    anyOf: atLeastOneOf('fieldId', 'componentId'),
   });
 
 /**
@@ -2183,6 +2218,7 @@ const SAFE_TO_DELETE_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     // handler, and advertising `required: ['fieldId']` made a host refuse the
     // `componentId`-only call the tool serves. The one-of rule is enforced as a
     // NAMED `invalid-query` that says which argument to pass.
+    anyOf: atLeastOneOf('fieldId', 'componentId'),
   });
 
 /**
@@ -2346,6 +2382,7 @@ const FIELD_ACCESS_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         enum: ['read', 'edit', 'all'],
       },
     },
+    anyOf: atLeastOneOf('fieldId', 'componentId'),
   });
 
 /**
@@ -2370,6 +2407,7 @@ const OBJECT_ACCESS_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     },
     // One of `componentId` / `objectApiName` / `objectId` — enforced as a named
     // `invalid-query`, so no single key is `required` here.
+    anyOf: atLeastOneOf('componentId', 'objectApiName', 'objectId'),
   });
 
 /**
@@ -2419,6 +2457,7 @@ const RECORDTYPE_AVAILABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       object: { type: 'string', minLength: 1 },
       objectId: { type: 'string', minLength: 1 },
     },
+    anyOf: atLeastOneOf('componentId', 'profileApiName', 'profileId', 'profileName', 'permissionSetApiName', 'permissionSetId', 'objectApiName', 'object', 'objectId'),
   });
 
 /**
@@ -2464,6 +2503,7 @@ const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     },
     // `fieldId` OR `componentId` — see the safe_to_delete_field note; naming
     // one of them `required` made a host refuse the other call shape.
+    anyOf: atLeastOneOf('fieldId', 'componentId'),
   });
 
 /**
@@ -2660,6 +2700,7 @@ const WHY_FIELD_CHANGED_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       objectApiName: { type: 'string', minLength: 1 },
       fieldApiName: { type: 'string', minLength: 1 },
     },
+    anyOf: atLeastOneOf('fieldId', 'componentId', 'objectApiName', 'fieldApiName'),
   });
 
 /**
@@ -2705,6 +2746,7 @@ const ORDER_OF_EXECUTION_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     // four selectors, and a call naming none is refused as a NAMED
     // `invalid-query` that says which argument to pass.
     additionalProperties: false,
+    anyOf: atLeastOneOf('objectApiName', 'object', 'objectId', 'componentId'),
   });
 
 /**
@@ -3207,6 +3249,7 @@ const COMPONENT_CHANGE_ATTRIBUTION_INPUT_SCHEMA: Readonly<Record<string, unknown
         description: 'Max matched SetupAuditTrail rows to return (default 50).',
       },
     },
+    anyOf: atLeastOneOf('componentId', 'objectApiName'),
   });
 
 /** Concrete JSON Schema for `sfi.component_as_of`. Mirrors `componentAsOfInputSchema`. */
@@ -3995,6 +4038,7 @@ const TESTS_FOR_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       type: { type: 'string', minLength: 1 },
       apiName: { type: 'string', minLength: 1 },
     },
+    anyOf: atLeastOneOf('changedComponents', 'componentId'),
   });
 
 /**
@@ -4116,6 +4160,7 @@ const ASYNC_CHAIN_DEPTH_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       rootId: { type: 'string', minLength: 1 },
     },
     minProperties: 1,
+    anyOf: atLeastOneOf('rootApexClassId', 'rootId'),
   });
 
 /**
@@ -4760,6 +4805,7 @@ const AUTOMATION_COLLISIONS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       limit: { type: 'integer', minimum: 1, maximum: 200 },
     },
     additionalProperties: false,
+    anyOf: atLeastOneOf('object', 'componentId', 'objectApiName', 'objectId'),
   });
 
 /**

@@ -277,6 +277,9 @@ interface AdvertisedProperty {
 interface AdvertisedSchema {
   readonly properties?: Readonly<Record<string, AdvertisedProperty>>;
   readonly required?: readonly string[];
+  /** At-least-one-of, as `[{ required: ['id'] }, { required: ['componentId'] }]`. */
+  readonly anyOf?: readonly { readonly required?: readonly string[] }[];
+  readonly oneOf?: readonly { readonly required?: readonly string[] }[];
   readonly additionalProperties?: unknown;
 }
 
@@ -312,6 +315,7 @@ const sampleFor = (property: AdvertisedProperty | undefined): unknown => {
 export type ParityAxis =
   | 'properties'
   | 'required'
+  | 'atLeastOneOf'
   | 'additionalProperties'
   | 'enum';
 
@@ -440,6 +444,49 @@ export const computeParityViolations = (
         tool: tool.name,
         axis: 'required',
         fingerprint: `${fullParses ? 'enforced' : 'enforced(shape)'}=[${list(trulyRequired)}] advertised=[${list(advertisedRequired)}]`,
+      });
+    }
+
+    // --- axis: atLeastOneOf ----------------------------------------------
+    // THE BLIND SPOT THE `required` AXIS ABOVE CANNOT SEE.
+    //
+    // That axis probes by removing ONE key at a time from a full input. When a
+    // selector has aliases — `id` / `componentId`, `objectApiName` / `objectId`
+    // — removing either one still parses, because the other satisfies the
+    // canonical. So an at-least-one-of contract measures `enforced=[]
+    // advertised=[]` and passes, and twenty-two tools advertised "every
+    // argument is optional" while refusing the empty object. `sfi.get_component`
+    // — the most-called tool in the roster — was one of them. The gap was
+    // structural, not baselined: none of the twenty-two appeared in the
+    // baseline file, because no axis ever asked this question.
+    //
+    // The probe is the question a host actually asks: MAY I CALL THIS WITH NO
+    // ARGUMENTS? Nothing else reaches it — the empty input is the only input
+    // that distinguishes "all keys optional" from "one of these is required".
+    //
+    // ONE DIRECTION ONLY, deliberately. Advertising a requirement the Zod
+    // schema does not enforce is NOT flagged: `sfi.find_field_anywhere` leaves
+    // both selectors `.optional()` in Zod and refuses the pair in the HANDLER
+    // with an `invalid-query`, so its advertised `anyOf` describes the real
+    // contract more accurately than its Zod does. A host that obeys that
+    // advertisement never sends a call the server refuses, which is the
+    // property this gate exists to protect. The reverse — advertising that a
+    // refused call is well-formed — is the lie, and is what fires here.
+    const emptyParses = binding.schema.safeParse({}).success;
+    const advertisedBranches = advertised.anyOf ?? advertised.oneOf ?? [];
+    const advertisedAllowsEmpty =
+      advertisedRequired.length === 0 &&
+      !advertisedBranches.some((branch) => (branch.required ?? []).length > 0);
+    if (!emptyParses && advertisedAllowsEmpty) {
+      // Name the keys that WOULD have sufficed, so the fingerprint states the
+      // repair and widening the alias group re-fails the baseline row.
+      const sufficient = advertisedKeys.filter(
+        (key) => binding.schema.safeParse({ [key]: sampleFor(properties[key]) }).success,
+      );
+      violations.push({
+        tool: tool.name,
+        axis: 'atLeastOneOf',
+        fingerprint: `enforced-refuses-{} sufficient=[${list(sufficient)}] advertised-allows-empty`,
       });
     }
 
