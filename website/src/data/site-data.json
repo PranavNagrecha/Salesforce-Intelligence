@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-22T13:53:45.566Z",
+  "generatedAt": "2026-08-27T17:57:01.032Z",
   "version": "0.3.2",
   "toolCount": 217,
   "skillCount": 26,
@@ -13,23 +13,23 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 301,
-        "cases": 6507
+        "files": 308,
+        "cases": 6614
       },
       {
         "name": "extractors",
         "files": 87,
-        "cases": 1181
+        "cases": 1185
       },
       {
         "name": "cli",
         "files": 46,
-        "cases": 493
+        "cases": 521
       },
       {
         "name": "graph",
-        "files": 27,
-        "cases": 363
+        "files": 28,
+        "cases": 382
       },
       {
         "name": "parsers",
@@ -39,7 +39,7 @@
       {
         "name": "patterns",
         "files": 3,
-        "cases": 163
+        "cases": 170
       },
       {
         "name": "renderers",
@@ -49,7 +49,7 @@
       {
         "name": "vault",
         "files": 11,
-        "cases": 145
+        "cases": 150
       },
       {
         "name": "tooling-api",
@@ -58,16 +58,16 @@
       },
       {
         "name": "core",
-        "files": 3,
-        "cases": 50
+        "files": 4,
+        "cases": 81
       }
     ],
-    "totalCases": 9382,
-    "totalFiles": 503,
+    "totalCases": 9583,
+    "totalFiles": 512,
     "packageCount": 10,
-    "approx": 9300
+    "approx": 9500
   },
-  "integrationSuiteCount": 3,
+  "integrationSuiteCount": 5,
   "gates": [
     "Type-check",
     "Lint",
@@ -90,26 +90,26 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 301,
-      "cases": 6507,
+      "files": 308,
+      "cases": 6614,
       "description": "The 217 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 87,
-      "cases": 1181,
+      "cases": 1185,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
       "files": 46,
-      "cases": 493,
+      "cases": 521,
       "description": "The sfi command-line tool"
     },
     {
       "name": "graph",
-      "files": 27,
-      "cases": 363,
+      "files": 28,
+      "cases": 382,
       "description": "The DuckDB dependency-graph engine"
     },
     {
@@ -121,7 +121,7 @@
     {
       "name": "patterns",
       "files": 3,
-      "cases": 163,
+      "cases": 170,
       "description": "Heuristic recognizers (PII, naming, code quality)"
     },
     {
@@ -133,7 +133,7 @@
     {
       "name": "vault",
       "files": 11,
-      "cases": 145,
+      "cases": 150,
       "description": "Vault layout, manifest, freshness"
     },
     {
@@ -144,8 +144,8 @@
     },
     {
       "name": "core",
-      "files": 3,
-      "cases": 50,
+      "files": 4,
+      "cases": 81,
       "description": "core package tests"
     }
   ]
