@@ -15,6 +15,7 @@ import {
 } from '../../src/tools/capabilities.js';
 import { V01_TOOLS } from '../../src/tools/index.js';
 import { routeQuestionInputSchema } from '../../src/tools/route-question.js';
+import { CORE_PROFILE_TOOLS } from '../../src/tools/tool-profile.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -67,7 +68,7 @@ describe('capabilitiesHandler', () => {
     expect(m.tools.advertised).toBe(m.tools.coreProfileSize);
     expect(m.tools.fullAdvertised).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
     expect(m.tools.hidden).toBe(V01_TOOLS.filter((t) => t.hidden).length);
-    expect(m.tools.coreProfileSize).toBe(19);
+    expect(m.tools.coreProfileSize).toBe(CORE_PROFILE_TOOLS.size);
     expect(m.conceptModel.concepts).toBeGreaterThan(0);
     expect(m.conceptModel.rules).toBeGreaterThan(0);
     expect(m.conceptModel.contentHash).toMatch(/^sha256:[0-9a-f]{64}$/);

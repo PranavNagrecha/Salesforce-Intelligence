@@ -15,6 +15,7 @@ import { saveManifest, vaultPaths } from '@sf-intelligence/vault';
 import type { Context } from '../src/server.js';
 import { buildContext, createServer, shutdown } from '../src/server.js';
 import { V01_TOOLS, advertisedTools, dispatchTool, toolProfile } from '../src/tools/index.js';
+import { CORE_PROFILE_TOOLS } from '../src/tools/tool-profile.js';
 
 const sampleManifest = (): VaultManifest => ({
   version: '0.1.0',
@@ -515,7 +516,7 @@ describe('tool profiles (P13-GW-profiles)', () => {
   it('defaults to the CORE roster (AUDIT-F6) — opt into full with SFI_TOOL_PROFILE=full', () => {
     delete process.env['SFI_TOOL_PROFILE'];
     expect(toolProfile()).toBe('core');
-    expect(advertisedTools()).toHaveLength(19);
+    expect(advertisedTools()).toHaveLength(CORE_PROFILE_TOOLS.size);
   });
 
   it('full advertises the entire non-hidden roster', () => {
@@ -524,11 +525,11 @@ describe('tool profiles (P13-GW-profiles)', () => {
     expect(advertisedTools()).toEqual(V01_TOOLS.filter((t) => !t.hidden));
   });
 
-  it('core advertises exactly the 19 core schemas, in V01 order', () => {
+  it('core advertises exactly the core roster, in V01 order', () => {
     process.env['SFI_TOOL_PROFILE'] = 'core';
     expect(toolProfile()).toBe('core');
     const names = advertisedTools().map((t) => t.name);
-    expect(names).toHaveLength(19);
+    expect(names).toHaveLength(CORE_PROFILE_TOOLS.size);
     // V01 order preserved (filter, not re-sort):
     const fullOrder = V01_TOOLS.map((t) => t.name).filter((n) => names.includes(n));
     expect(names).toEqual(fullOrder);

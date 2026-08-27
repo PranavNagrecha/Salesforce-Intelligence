@@ -25,6 +25,7 @@ import {
   looksLikeComponentName,
   routeQuestionHandler,
 } from '../../src/tools/route-question.js';
+import { isDirectlyInvokable } from '../../src/tools/tool-profile.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -541,10 +542,23 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     }
     const primaryIdx = route.tools.findIndex((t) => t !== 'sfi.resolve');
     const primary = invoke?.[primaryIdx];
-    expect(primary?.tool).toBe('sfi.run_analysis');
-    const inner = primary?.args as { readonly name: string; readonly args: Record<string, unknown> };
-    expect(inner.name).toBe(route.tools[primaryIdx]);
-    expect(inner.args).toEqual(route.suggestedArgs ?? {});
+    const routed = route.tools[primaryIdx]!;
+    // Assert the LAW, not the membership. This used to pin
+    // `sfi.run_analysis` because the routed tool happened to be non-core; when
+    // that tool joined the core roster the test failed for the RIGHT behaviour.
+    // A host must get a direct call for a tool it can see in tools/list, and
+    // the gateway envelope only for one it cannot — which is true whichever
+    // side of the roster a given tool sits on today.
+    const expectedArgs = route.suggestedArgs ?? {};
+    if (isDirectlyInvokable(routed, 'core')) {
+      expect(primary?.tool).toBe(routed);
+      expect(primary?.args).toEqual(expectedArgs);
+    } else {
+      expect(primary?.tool).toBe('sfi.run_analysis');
+      const inner = primary?.args as { readonly name: string; readonly args: Record<string, unknown> };
+      expect(inner.name).toBe(routed);
+      expect(inner.args).toEqual(expectedArgs);
+    }
   });
 
   it('keeps core-roster tools as direct calls under core', async () => {
@@ -606,11 +620,19 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
     const primary = resumed.value.data.invoke?.[0];
-    expect(primary?.tool).toBe('sfi.run_analysis');
-    expect(primary?.args).toEqual({
-      name: 'sfi.field_access_audit',
-      args: { fieldId: selection },
-    });
+    // Same law as above: `sfi.field_access_audit` answers an advertised
+    // question and is now directly invokable, so the executable call is the
+    // tool itself rather than a gateway envelope around it.
+    if (isDirectlyInvokable('sfi.field_access_audit', 'core')) {
+      expect(primary?.tool).toBe('sfi.field_access_audit');
+      expect(primary?.args).toEqual({ fieldId: selection });
+    } else {
+      expect(primary?.tool).toBe('sfi.run_analysis');
+      expect(primary?.args).toEqual({
+        name: 'sfi.field_access_audit',
+        args: { fieldId: selection },
+      });
+    }
   });
 
   it('emits executable calls for a mixed inventory and live-storage plan', async () => {
