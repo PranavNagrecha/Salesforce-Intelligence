@@ -101,6 +101,13 @@ export interface HonestyChecks {
   readonly typedAbsence: number;
   readonly pagination: number;
   readonly scopeRefusal: number;
+  /**
+   * Times the scope-refusal law was satisfied by a DECLARED-UNAVAILABLE payload
+   * rather than by a refusal. Counted separately so an exemption can never be
+   * mistaken for the law passing — if this number ever approaches
+   * `scopeRefusal`, the exemption has become the rule and wants re-examining.
+   */
+  readonly scopeRefusalExemptUnavailable?: number;
 }
 
 /** Result of auditing one envelope. */
@@ -700,6 +707,39 @@ export const auditScopeRefusal = (
   }
 
   const data = envelope['data'];
+
+  // CAPABILITY UNAVAILABLE is not the same claim as a clean zero, and this law
+  // must not conflate them.
+  //
+  // A tool whose DATA SOURCE is absent has not answered the scoped question at
+  // all — it has declined for a more specific and more useful reason than
+  // "that object does not exist". `component_change_attribution` returns
+  // `available: false` with a `remedy` when the SetupAuditTrail journal has
+  // never been captured, and that disposition is true whether or not the object
+  // is real. Forcing it to resolve the scope FIRST would replace an accurate
+  // "this capability is switched off, here is how to switch it on" with a less
+  // informative refusal, and would break an existing test that requires the
+  // unavailable disposition to hold with no graph node present.
+  //
+  // VACUITY RISK, stated because this is an exemption and exemptions are how
+  // this class of gate dies: a tool could evade the law by shipping
+  // `available: false` on every response. Three things bound that. It must be
+  // the literal boolean `false`, not merely falsy. It must carry a non-empty
+  // `remedy` — a route back to a real answer, which a tool dodging the check
+  // has no reason to write. And every result list must be EMPTY: a payload
+  // claiming unavailability while shipping rows is contradicting itself and
+  // stays a finding. The exemption is also counted, so it can never look like
+  // the law simply passed.
+  const declaredUnavailable =
+    isObject(data) &&
+    data['available'] === false &&
+    typeof data['remedy'] === 'string' &&
+    data['remedy'].length > 0 &&
+    ![...shippedRowCounts(data).values()].some((n) => n > 0);
+  if (declaredUnavailable) {
+    return { findings: [], checks: { ...checks, scopeRefusalExemptUnavailable: 1 } };
+  }
+
   const rows = isObject(data) ? shippedRowCounts(data) : new Map<string, number>();
   // Diagnostic sub-label only — the finding fires either way. "Fabricated
   // rows" needs a populated list of RECORDS, not a populated list of prose:
