@@ -531,7 +531,7 @@ for the live tool map.
 
 ### Optional: full roster vs compact core
 
-**Default is the 19-tool core roster** (AUDIT-F6; includes `sfi.live_consent`)
+**Default is the 25-tool core roster** (AUDIT-F6; includes `sfi.live_consent`)
 so MCP hosts don't pay a ~250 KB `tools/list` tax. Non-core tools stay
 reachable via `sfi.run_analysis` (byte-identical) and are not directly
 invokable under core. Set `SFI_TOOL_PROFILE=full` (or add

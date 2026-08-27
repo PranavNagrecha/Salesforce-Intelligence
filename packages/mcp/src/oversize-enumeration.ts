@@ -92,7 +92,15 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.ai_exposure_report': { bound: 'handler-capped', note: 'limit + byte-budget truncator on surfaces + piiExposures; narrow by objectApiName or raise limit, no cursor (R6-13)' },
   'sfi.search_apex_source': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   'sfi.search_flow_metadata': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
-  'sfi.query_graph': { bound: 'handler-capped', note: 'structured-query limit hard-capped at QUERY_GRAPH_MAX_LIMIT, no cursor (R7-C4)' },
+  // Was `handler-capped`, "no cursor". Both halves went stale in the commit
+  // that gave this tool `offset` plus `totalCount` / `hasMore` / `nextOffset`.
+  // This row is what the release gate reads to decide whether a dropped tail is
+  // REACHABLE, so leaving it stale would have understated the tool in exactly the
+  // direction that hides a defect — the audit failed on the disagreement, which is
+  // the inventory working. The QUERY_GRAPH_MAX_LIMIT ceiling is still real and is
+  // still disclosed by the handler (`capReached`, `pageableCount`), but a ceiling
+  // is not the same fact as an unreachable tail.
+  'sfi.query_graph': { bound: 'paginated', note: 'limit + offset with nextOffset/totalCount; rows beyond QUERY_GRAPH_MAX_LIMIT stay unreachable and are disclosed as capReached rather than hidden' },
   'sfi.find_code_usages': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.find_field_anywhere': { bound: 'paginated', note: 'nested-section cursor: pages one ComponentType bucket + discloses the rest, rolls forward (CR-22)' },
   'sfi.find_semantic_field': { bound: 'paginated', note: 'top-N slice + CR-22 cursor' },

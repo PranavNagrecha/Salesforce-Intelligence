@@ -22,6 +22,7 @@ import type { LiveCapability } from './live-capability.js';
 import { registerPrompts } from './prompts.js';
 import { registerResources } from './resources.js';
 import { registerTools } from './tools/index.js';
+import { ADVERTISED_QUESTION_TOOLS } from './tools/tool-profile.js';
 
 /**
  * Identifies the MCP server in client-facing handshakes. Bumped in lockstep
@@ -72,9 +73,25 @@ const SERVER_VERSION = resolveServerVersion();
  * per connection, so it states the few rules that change routing and defers
  * the full catalog to `sfi.capabilities`.
  */
+/**
+ * The advertised ANSWER tools, named verbatim in the handshake and DERIVED from
+ * `ADVERTISED_QUESTION_TOOLS` rather than retyped.
+ *
+ * This sentence used to hand-list all nineteen core tools. That is a second copy
+ * of the roster held in step by nothing — the failure this codebase pays for most
+ * often — and it would have gone stale the moment the roster stopped being
+ * hand-picked. A host reads these instructions once per connection and routes
+ * off them, so a stale list here is a host that never calls the tool it needed.
+ */
+const CORE_ANSWER_TOOLS = [
+  ...new Set([...ADVERTISED_QUESTION_TOOLS.values()].flat()),
+]
+  .map((n) => '`' + n + '`')
+  .join(', ');
+
 const SERVER_INSTRUCTIONS = `sf-intelligence is an offline, read-only knowledge base for ONE Salesforce org. It answers questions about that org's metadata — schema, fields, Apex, Flows, permissions & sharing, integrations, OmniStudio — plus dependency/impact analysis and generated documentation, all grounded in the last vault refresh (never the live org).
 
-Default tool profile is \`core\`: \`tools/list\` advertises the core spine — \`sfi.resolve\`, \`sfi.search_components\`, \`sfi.get_component\`, \`sfi.list_components\`, \`sfi.get_edges\`, \`sfi.get_impact\`, \`sfi.effective_permissions\`, \`sfi.order_of_execution\`, \`sfi.org_history\`, \`sfi.health_check\`, \`sfi.org_card\`, \`sfi.route_question\`, \`sfi.synthesize_answer\`, \`sfi.capabilities\`, \`sfi.guidance\`, \`sfi.list_analyses\`, \`sfi.describe_analysis\`, \`sfi.run_analysis\`, and \`sfi.live_consent\`. Every other analysis (including \`sfi.interpret\`) is reached with \`sfi.run_analysis { name: 'sfi.<tool>', args }\` after \`sfi.describe_analysis\` when args are unclear. Opt into the full roster with \`SFI_TOOL_PROFILE=full\`.
+Default tool profile is \`core\`: \`tools/list\` advertises the core roster — the spine (resolve / search / graph reads / routing / capabilities / the catalog gateway / live-consent) PLUS the tools that answer the questions this product advertises, namely ${CORE_ANSWER_TOOLS}. Every other analysis (including \`sfi.interpret\`) is reached with \`sfi.run_analysis { name: 'sfi.<tool>', args }\` after \`sfi.describe_analysis\` when args are unclear. Opt into the full roster with \`SFI_TOOL_PROFILE=full\`.
 
 How to use it well:
 - To orient a fresh session, or to answer "what can you do / what can I ask?", call \`sfi.capabilities\` (no arguments). It returns the categorized capability map, the active profile, and the recommended conversational pattern.

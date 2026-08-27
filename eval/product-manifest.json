@@ -4,7 +4,7 @@
   "protocolVersion": "mcp",
   "tools": {
     "total": 217,
-    "advertised": 19,
+    "advertised": 25,
     "hidden": 5,
     "defaultProfile": "core",
     "activeProfile": "core",
@@ -227,6 +227,7 @@
         "sfi.capabilities",
         "sfi.describe_analysis",
         "sfi.effective_permissions",
+        "sfi.field_access_audit",
         "sfi.get_component",
         "sfi.get_edges",
         "sfi.get_impact",
@@ -238,11 +239,16 @@
         "sfi.order_of_execution",
         "sfi.org_card",
         "sfi.org_history",
+        "sfi.org_overview",
         "sfi.resolve",
         "sfi.route_question",
         "sfi.run_analysis",
+        "sfi.safe_to_delete_field",
         "sfi.search_components",
-        "sfi.synthesize_answer"
+        "sfi.synthesize_answer",
+        "sfi.what_happens_on_save",
+        "sfi.who_can_access_object",
+        "sfi.why_cant_user_see_record"
       ]
     },
     "live": [

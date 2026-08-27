@@ -231,9 +231,18 @@ describe('analyzeOversizeEnumeration', () => {
   });
 
   it('the analyzer itself flags a handler-capped row that grew a resume knob', () => {
+    // The subject is chosen DYNAMICALLY from the inventory rather than named.
+    // This test used to hardcode `sfi.query_graph`, and when that tool legitimately
+    // became `paginated` the analyzer's own self-test broke — the check for
+    // "did a capped row grow a resume knob" was silently coupled to one tool
+    // still being capped. A self-test must not depend on a specific live defect.
+    const subject = Object.keys(HIGH_FANOUT_INVENTORY).find(
+      (n) => HIGH_FANOUT_INVENTORY[n]!.bound === 'handler-capped',
+    );
+    expect(subject, 'inventory has no handler-capped row to exercise the analyzer with').toBeDefined();
     const tools = Object.keys(HIGH_FANOUT_INVENTORY).map((name) => {
       const entry = HIGH_FANOUT_INVENTORY[name]!;
-      if (name === 'sfi.query_graph') return tool(name, ['limit', 'cursor']);
+      if (name === subject) return tool(name, ['limit', 'cursor']);
       const props =
         entry.bound === 'paginated'
           ? ['componentId', 'limit', 'offset']
@@ -243,7 +252,7 @@ describe('analyzeOversizeEnumeration', () => {
       return tool(name, props);
     });
     const { violations } = analyzeOversizeEnumeration(tools, allProbes());
-    const flagged = violations.filter((v) => v.tool === 'sfi.query_graph');
+    const flagged = violations.filter((v) => v.tool === subject);
     expect(flagged).toHaveLength(1);
     expect(flagged[0]!.message).toContain('ADVERTISES a resume knob');
   });

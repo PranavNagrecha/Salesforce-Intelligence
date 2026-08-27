@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
+  CoverageEntry,
   Edge,
   ExtractionResult,
   Node,
@@ -257,6 +258,64 @@ describe('integrationMapHandler (empty graph)', () => {
     // vaultState comes from the manifest.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
+
+  // ===========================================================================
+  // TYPED-ABSENCE-INTEGRATION-MAP. Every one of the arrays asserted above used
+  // to ship as a bare `[]`, and `boundaries` — this codebase's dominant honesty
+  // vocabulary — shipped empty beside them. A caller reading that payload would
+  // have concluded "this org declares no integration surface". On this fixture
+  // the truth is that NOTHING was checked: the manifest carries no coverage row
+  // for any integration family, so it cannot even say the retrieve requested
+  // them.
+  // ===========================================================================
+  it('classifies each empty list on its own evidence, not with one blanket stamp', async () => {
+    const result = await integrationMapHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const absence = result.value.data.absence;
+    expect(absence).toBeDefined();
+    if (absence === undefined) return;
+    expect(absence.status).toBe('not-checked');
+
+    const byPath = new Map(absence.sites.map((site) => [site.path, site]));
+    // The eight category buckets: unconfirmed retrieve, so NOT checked.
+    for (const path of [
+      'authProviders',
+      'namedCredentials',
+      'remoteSiteSettings',
+      'cspTrustedSites',
+      'externalDataSources',
+      'externalServices',
+      'connectedApps',
+      'networkAccesses',
+    ]) {
+      expect(byPath.get(path)?.kind).toBe('family-unconfirmed');
+      expect(byPath.get(path)?.status).toBe('not-checked');
+    }
+    // A DERIVED list gets its own kind — there was no node to walk edges from.
+    expect(byPath.get('references')?.kind).toBe('no-subjects-scanned');
+    // And the self-describing meta-list is genuinely checked-empty: it is
+    // computed in this call from row counts already in hand, so there is no
+    // "not retrieved" reading of it at all. This is the assertion that fails
+    // if the fifteen lists are ever stamped uniformly to make a gate go green.
+    expect(byPath.get('truncatedCategories')?.kind).toBe('checked-empty');
+    expect(byPath.get('truncatedCategories')?.status).toBe('proven-none');
+    expect(new Set(absence.sites.map((site) => site.kind)).size).toBeGreaterThan(1);
+  });
+
+  it('fills `boundaries` with the not-checked verdict instead of shipping it empty', async () => {
+    const result = await integrationMapHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const boundaries = result.value.data.boundaries;
+    expect(boundaries.length).toBeGreaterThan(0);
+    expect(boundaries.join(' ')).toContain('authProviders');
+    // `boundaries` is no longer empty, so it must NOT be listed as an empty
+    // list — the payload may not contradict itself.
+    expect(
+      result.value.data.absence?.sites.some((site) => site.path === 'boundaries'),
+    ).toBe(false);
+  });
 });
 
 describe('integrationMapHandler (full topology)', () => {
@@ -451,7 +510,13 @@ describe('integrationMapHandler (full topology)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.truncatedCategories).toEqual([]);
-    expect(result.value.data.boundaries).toEqual([]);
+    // The assertion here USED to be `boundaries === []`, which only held
+    // because `boundaries` carried the payload-trim sentence and nothing else.
+    // It now also carries the typed-absence verdict, so the trim assertion is
+    // stated directly rather than by proxy: no boundary names a trim or a cap.
+    const boundaries = result.value.data.boundaries;
+    expect(boundaries.some((b) => /Returned rows capped at limit=/.test(b))).toBe(false);
+    expect(boundaries.some((b) => /of 7/.test(b))).toBe(false);
   });
 
   it('returns label normalised to a string (empty string when null)', async () => {
@@ -932,6 +997,303 @@ describe('integrationMapHandler (martech connectors — Finding #44)', () => {
     expect(ids).toContain(RSS_MARKETO_ACTIVE);
     // The NamedCredential match drops out (NC scoped out of 'sites').
     expect(ids).not.toContain(NC_MARKETO_ENDPOINT);
+  });
+});
+
+// =============================================================================
+// TYPED-ABSENCE-INTEGRATION-MAP — the discriminating controls.
+//
+// Each case below produces the SAME empty payload as the case beside it and
+// differs only in the evidence behind it. If the classification stopped
+// discriminating — one blanket marker over fifteen lists — these fail while the
+// honesty gate stays green, which is the point: the gate is an any-of at the
+// payload level and cannot tell a per-list truth from a uniform one.
+// =============================================================================
+
+/** Coverage row shorthand for the controls below. */
+const coverageRow = (
+  type: string,
+  overrides: Partial<CoverageEntry> = {},
+): CoverageEntry => ({
+  type,
+  requested: true,
+  retrieved: 0,
+  errored: false,
+  neverModeled: false,
+  ...overrides,
+});
+
+const CONFIRMED_EMPTY_MANIFEST: VaultManifest = {
+  ...FIXTURE_MANIFEST,
+  components: {},
+  coverage: [
+    'AuthProvider',
+    'NamedCredential',
+    'RemoteSiteSetting',
+    'CspTrustedSite',
+    'ExternalDataSource',
+    'ExternalService',
+    'ConnectedApp',
+    'NetworkAccess',
+    'InstalledPackage',
+    'OmniIntegrationProcedure',
+  ].map((type) => coverageRow(type, { retrieveConfirmed: true })),
+};
+
+describe('integrationMapHandler — typed absence, confirmed-empty org', () => {
+  let dir: string;
+  let emptyStore: GraphStore;
+  let confirmedCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-integration-map-confirmed-'));
+    const opened = await openGraph(join(dir, 'confirmed.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    emptyStore = opened.value;
+    confirmedCtx = {
+      vaultRoot: dir,
+      manifest: CONFIRMED_EMPTY_MANIFEST,
+      graph: emptyStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(emptyStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports proven-none for every bucket when the retrieve is CONFIRMED complete', async () => {
+    // Byte-identical empty payload to the "empty graph" case above. The only
+    // difference is `retrieveConfirmed: true` — the manifest's own signal that
+    // `{requested: true, retrieved: 0}` means the org has none rather than that
+    // the retrieve never landed. The reading must flip.
+    const result = await integrationMapHandler(confirmedCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const absence = result.value.data.absence;
+    expect(absence?.status).toBe('proven-none');
+    expect(
+      absence?.sites.every((site) => site.status === 'proven-none'),
+    ).toBe(true);
+    expect(
+      absence?.sites.find((site) => site.path === 'authProviders')?.kind,
+    ).toBe('checked-empty');
+    // A map with nothing to disclose keeps `boundaries` empty — the not-checked
+    // sentence is earned, never boilerplate.
+    expect(result.value.data.boundaries).toEqual([]);
+    expect(
+      absence?.sites.find((site) => site.path === 'boundaries')?.kind,
+    ).toBe('checked-empty');
+  });
+
+  it('flags a manifest that claims components the graph does not hold', async () => {
+    // The third kind of empty, and the one a caller would most badly misread:
+    // the vault says the retrieve landed 4 NamedCredentials and the graph has
+    // none. That is a VAULT defect, not "this org has no named credentials".
+    const disagreeingCtx: Context = {
+      ...confirmedCtx,
+      manifest: {
+        ...CONFIRMED_EMPTY_MANIFEST,
+        coverage: [
+          coverageRow('NamedCredential', { retrieved: 4 }),
+          ...(CONFIRMED_EMPTY_MANIFEST.coverage ?? []).filter(
+            (row) => row.type !== 'NamedCredential',
+          ),
+        ],
+      },
+    };
+    const result = await integrationMapHandler(disagreeingCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const site = result.value.data.absence?.sites.find(
+      (entry) => entry.path === 'namedCredentials',
+    );
+    expect(site?.kind).toBe('coverage-disagrees');
+    expect(site?.status).toBe('not-checked');
+    expect(site?.reason).toContain('4 NamedCredential');
+    // The other seven buckets are still confirmed-empty: one bad row must not
+    // repaint the whole payload.
+    expect(
+      result.value.data.absence?.sites.find((entry) => entry.path === 'authProviders')?.kind,
+    ).toBe('checked-empty');
+  });
+
+  it('distinguishes a filtered-out category from an unconfirmed one on ONE payload', async () => {
+    // `filter: 'auth'` scans AuthProvider + ConnectedApp and skips the rest.
+    // Both groups come back `[]`, and before this fix they were
+    // indistinguishable — a caller could not tell "this org has no remote
+    // sites" from "you did not ask about remote sites".
+    const result = await integrationMapHandler(confirmedCtx, { filter: 'auth' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byPath = new Map(
+      (result.value.data.absence?.sites ?? []).map((site) => [site.path, site]),
+    );
+    expect(byPath.get('remoteSiteSettings')?.kind).toBe('filtered-out');
+    expect(byPath.get('remoteSiteSettings')?.status).toBe('not-checked');
+    expect(byPath.get('externalDataSources')?.kind).toBe('filtered-out');
+    // In-scope and confirmed: the same payload, a different reading.
+    expect(byPath.get('authProviders')?.kind).toBe('checked-empty');
+    expect(byPath.get('connectedApps')?.kind).toBe('checked-empty');
+    // The OmniStudio surface is out of scope under `filter: 'auth'` too.
+    expect(byPath.get('omniStudio.restCallouts')?.kind).toBe('filtered-out');
+  });
+});
+
+// The `not-extracted` case, and its control. This is the law
+// `absence-disclosure.ts` states — an absence is decided by whether the node
+// carries the property AT ALL, never by an array length — applied to the
+// OmniStudio callout surface. `restEndpoints` / `remoteActions` are spread onto
+// an IP node ONLY when non-empty, so their absence proves nothing;
+// `restEndpointCount` is written unconditionally by the same walk, so ITS
+// absence proves the walk never ran. `examples/demo-vault` is the live case: its
+// IP node carries `restEndpointCount: 0` and no `restEndpoints` key.
+const IP_WALKED = 'OmniIntegrationProcedure:Walked_Clean_1';
+const IP_UNWALKED = 'OmniIntegrationProcedure:Legacy_Unwalked_1';
+
+describe('integrationMapHandler — OmniStudio callout walk sentinel', () => {
+  let dir: string;
+  let ipStore: GraphStore;
+
+  const ctxFor = (): Context => ({
+    vaultRoot: dir,
+    manifest: CONFIRMED_EMPTY_MANIFEST,
+    graph: ipStore,
+  });
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-integration-map-ipsentinel-'));
+    const opened = await openGraph(join(dir, 'ip.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    ipStore = opened.value;
+  });
+
+  afterAll(async () => {
+    await closeGraph(ipStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('an IP carrying the walk sentinel and no callouts is checked-empty', async () => {
+    const imported = await importExtractionResults(ipStore, [
+      {
+        nodes: [
+          makeNode({
+            id: IP_WALKED,
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Walked_Clean_1',
+            // `restEndpointCount: 0` and NO `restEndpoints` array — exactly what
+            // the current extractor writes for an IP with no callouts.
+            properties: { omniProcessType: 'Integration Procedure', restEndpointCount: 0 },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const result = await integrationMapHandler(ctxFor(), {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const site = result.value.data.absence?.sites.find(
+      (entry) => entry.path === 'omniStudio.restCallouts',
+    );
+    expect(site?.kind).toBe('checked-empty');
+    expect(site?.status).toBe('proven-none');
+    expect(site?.reason).toContain('restEndpointCount');
+  });
+
+  it('an IP built before the callout walk is NOT-EXTRACTED, not "declares none"', async () => {
+    const imported = await importExtractionResults(ipStore, [
+      {
+        nodes: [
+          makeNode({
+            id: IP_UNWALKED,
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Legacy_Unwalked_1',
+            // No `restEndpointCount` at all: this node was built by a refresh
+            // whose extractor never walked the action chain.
+            properties: { omniProcessType: 'Integration Procedure' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const result = await integrationMapHandler(ctxFor(), {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byPath = new Map(
+      (result.value.data.absence?.sites ?? []).map((site) => [site.path, site]),
+    );
+    for (const path of [
+      'omniStudio.restCallouts',
+      'omniStudio.remoteCallouts',
+      'omniStudio.referencedNamedCredentials',
+    ]) {
+      expect(byPath.get(path)?.kind).toBe('not-extracted');
+      expect(byPath.get(path)?.status).toBe('not-checked');
+    }
+    // The shared disclosure names the sentinel property and the offending
+    // container, so the reader can see WHICH node was never walked.
+    const reason = byPath.get('omniStudio.restCallouts')?.reason ?? '';
+    expect(reason).toContain('restEndpointCount');
+    expect(reason).toContain(IP_UNWALKED);
+    expect(reason).toContain('NEVER a verified');
+    // ONE unwalked node is enough: the surface cannot be called complete while
+    // any IP in it was never read.
+    expect(reason).toContain('1 container(s)');
+  });
+});
+
+describe('integrationMapHandler — populated lists earn no absence entry', () => {
+  let dir: string;
+  let popStore: GraphStore;
+  let popCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-integration-map-populated-'));
+    const opened = await openGraph(join(dir, 'pop.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    popStore = opened.value;
+    const imported = await importExtractionResults(popStore, [fullTopologySeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    popCtx = {
+      vaultRoot: dir,
+      manifest: CONFIRMED_EMPTY_MANIFEST,
+      graph: popStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(popStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('lists that actually have rows are absent from `absence.sites` entirely', async () => {
+    // The mirror-image failure this fix must not introduce: painting a
+    // not-checked marker onto an answer that DID find something.
+    const result = await integrationMapHandler(popCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.authProviders.length).toBeGreaterThan(0);
+    expect(d.references.length).toBeGreaterThan(0);
+    const paths = new Set((d.absence?.sites ?? []).map((site) => site.path));
+    for (const populated of [
+      'authProviders',
+      'namedCredentials',
+      'remoteSiteSettings',
+      'cspTrustedSites',
+      'externalDataSources',
+      'externalServices',
+      'connectedApps',
+      'networkAccesses',
+      'references',
+    ]) {
+      expect(paths.has(populated)).toBe(false);
+    }
+    // Nothing here is unchecked, so nothing is added to `boundaries` either.
+    expect(d.absence?.status).toBe('proven-none');
+    expect(d.boundaries).toEqual([]);
   });
 });
 

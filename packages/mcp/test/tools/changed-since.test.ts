@@ -376,6 +376,182 @@ describe('changedSinceHandler — fully functional against un-enriched vault', (
   });
 });
 
+// =============================================================================
+// TYPED-ABSENCE-CHANGED-SINCE — `changed: []` and `unenrichedCount: 0` must each
+// say WHICH kind of empty they are.
+//
+// The shipped payload was `{ changed: [], unenrichedCount: N, truncated: false }`.
+// On a vault whose freshness overlay never ran that is a tool with NO dates
+// answering "nothing changed" in the same shape it uses for a completed scan —
+// measured on `examples/demo-vault`, where 110 of 110 scanned nodes carry no
+// `lastModifiedDate`. `unenrichedCount` was the only honesty axis and it is a
+// bare number sitting beside the list it invalidates.
+// =============================================================================
+describe('changedSinceHandler — typed absence', () => {
+  it('a vault with NO freshness data reports not-checked, not "nothing changed"', async () => {
+    const unenrichedDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-changed-since-unenriched-'));
+    const opened = await openGraph(join(unenrichedDir, 'g.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    try {
+      const imported = await importExtractionResults(opened.value, [
+        {
+          nodes: [
+            makeNode({ id: 'ApexClass:NoDateA', type: 'ApexClass', apiName: 'NoDateA' }),
+            makeNode({ id: 'ApexClass:NoDateB', type: 'ApexClass', apiName: 'NoDateB' }),
+          ],
+          edges: [] as readonly Edge[],
+        },
+      ]);
+      if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+      const unenrichedCtx: Context = {
+        vaultRoot: unenrichedDir,
+        manifest: FIXTURE_MANIFEST,
+        graph: opened.value,
+      };
+      const r = await changedSinceHandler(unenrichedCtx, {
+        since: '2000-01-01',
+        types: ['ApexClass'],
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.changed).toEqual([]);
+      expect(r.value.data.unenrichedCount).toBe(2);
+      const absence = r.value.data.absence;
+      expect(absence?.status).toBe('not-checked');
+      const changedSite = absence?.sites.find((site) => site.path === 'changed');
+      expect(changedSite?.kind).toBe('freshness-not-enriched');
+      expect(changedSite?.status).toBe('not-checked');
+      // `unenrichedCount` is 2, not 0 — it is not an absence site and must not
+      // acquire an entry.
+      expect(absence?.sites.map((site) => site.path)).toEqual(['changed']);
+    } finally {
+      await closeGraph(opened.value);
+      rmSync(unenrichedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a completed scan over dated components reports proven-none on BOTH sites', async () => {
+    // Flow:FreshFlow carries a date, so nothing about this type is unenriched
+    // and a boundary in the future is a real finding of nothing.
+    const r = await changedSinceHandler(ctx, { since: '2099-01-01', types: ['Flow'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.changed).toEqual([]);
+    expect(r.value.data.unenrichedCount).toBe(0);
+    const absence = r.value.data.absence;
+    expect(absence?.status).toBe('proven-none');
+    expect(
+      absence?.sites.map((site) => [site.path, site.kind, site.status]),
+    ).toEqual([
+      ['changed', 'checked-empty', 'proven-none'],
+      ['unenrichedCount', 'checked-empty', 'proven-none'],
+    ]);
+  });
+
+  it('a zero unenrichedCount over an EMPTY scan is not-checked, not "fully enriched"', async () => {
+    // The arithmetic trap: no ValidationRule node was scanned, so "0 unenriched"
+    // is a statement about an empty set. Reading it as full enrichment is the
+    // unchecked-zero this family is about.
+    const r = await changedSinceHandler(ctx, {
+      since: '2026-05-01',
+      types: ['ValidationRule'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.unenrichedCount).toBe(0);
+    const absence = r.value.data.absence;
+    expect(absence?.status).toBe('not-checked');
+    expect(
+      absence?.sites.map((site) => [site.path, site.kind]),
+    ).toEqual([
+      ['changed', 'no-nodes-scanned'],
+      ['unenrichedCount', 'no-nodes-scanned'],
+    ]);
+  });
+
+  it('names a requested type whose retrieve the coverage row cannot confirm', async () => {
+    // ConnectedApp contributes no node and the manifest carries no coverage row
+    // proving the retrieve landed it, so a change to a ConnectedApp is
+    // invisible here — the empty list does not bound that type.
+    const r = await changedSinceHandler(ctx, {
+      since: '2099-01-01',
+      types: ['Flow', 'ConnectedApp'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.changed).toEqual([]);
+    const changedSite = r.value.data.absence?.sites.find((site) => site.path === 'changed');
+    expect(changedSite?.kind).toBe('types-not-retrieved');
+    expect(changedSite?.status).toBe('not-checked');
+    expect(changedSite?.reason).toContain('ConnectedApp');
+  });
+
+  it('a `retrieveConfirmed` coverage row turns the same empty answer into proven-none', async () => {
+    // The discriminating control for the test above: identical call, identical
+    // empty payload, and the ONLY difference is the manifest's confirmation
+    // that the ConnectedApp retrieve completed. The classification must move.
+    const confirmedCtx: Context = {
+      vaultRoot: tempDir,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        coverage: [
+          {
+            type: 'ConnectedApp',
+            requested: true,
+            retrieved: 0,
+            errored: false,
+            neverModeled: false,
+            retrieveConfirmed: true,
+          },
+        ],
+      },
+      graph: store,
+    };
+    const r = await changedSinceHandler(confirmedCtx, {
+      since: '2099-01-01',
+      types: ['Flow', 'ConnectedApp'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.changed).toEqual([]);
+    const changedSite = r.value.data.absence?.sites.find((site) => site.path === 'changed');
+    expect(changedSite?.kind).toBe('checked-empty');
+    expect(changedSite?.status).toBe('proven-none');
+  });
+
+  it('an offset PAST the last row says the page is empty, not the result set', async () => {
+    const all = await changedSinceHandler(ctx, { since: '2026-01-01', limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const total = all.value.data.changed.length;
+    expect(total).toBeGreaterThan(0);
+
+    const past = await changedSinceHandler(ctx, {
+      since: '2026-01-01',
+      offset: total + 5,
+    });
+    expect(past.ok).toBe(true);
+    if (!past.ok) return;
+    expect(past.value.data.changed).toEqual([]);
+    const changedSite = past.value.data.absence?.sites.find((site) => site.path === 'changed');
+    expect(changedSite?.kind).toBe('page-past-end');
+    // NOT `not-checked` — the scan ran fine. NOT `proven-none` either: things
+    // did change. `unknown` is the only honest reading of an empty page.
+    expect(changedSite?.status).toBe('unknown');
+    expect(changedSite?.reason).toContain(String(total));
+  });
+
+  it('a populated answer with unenriched nodes carries no absence block', async () => {
+    const r = await changedSinceHandler(ctx, { since: '2026-01-01' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.changed.length).toBeGreaterThan(0);
+    expect(r.value.data.unenrichedCount).toBeGreaterThan(0);
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('absence' in d).toBe(false);
+  });
+});
+
 describe('changedSinceHandler — limit + truncation', () => {
   it('truncates to limit and flips truncated true when matched > limit', async () => {
     const result = await changedSinceHandler(ctx, {

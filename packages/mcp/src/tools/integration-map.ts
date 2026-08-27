@@ -52,6 +52,14 @@
  *      `limit` rows and `truncatedCategories` names what was dropped
  *      plus the true total.
  *
+ *   5. **Typed absence** — every list that came out EMPTY is classified on
+ *      its own evidence into `absence.sites[]`, and the not-checked verdict
+ *      fills `boundaries`. This map ships fifteen lists; before this stage
+ *      each could be a bare `[]` with `boundaries: []` beside it, so
+ *      "you filtered this category out", "the retrieve never landed this
+ *      family", and "scanned, genuinely none" were one answer. See
+ *      {@link IntegrationAbsenceKind}.
+ *
  * Implementation notes:
  *   - `limit` caps the RETURNED rows per category; it does NOT bound
  *     the scan. It used to be split eight ways (`ceil(limit / 8)` = 13
@@ -81,12 +89,14 @@ import type {
   ComponentId,
   ComponentType,
   EdgeType,
+  EvidenceAbsenceV2,
   McpError,
   McpResponse,
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdges } from '@sf-intelligence/graph';
+import { buildCoverageEntries } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import {
@@ -97,6 +107,7 @@ import {
 } from '../known-integration-packages.js';
 import type { Context } from '../server.js';
 
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { firstNonEmpty } from './input-aliases.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
@@ -329,6 +340,73 @@ export interface MartechConnectorMatch {
 }
 
 /**
+ * Which kind of empty ONE empty list in this payload is.
+ * TYPED-ABSENCE-INTEGRATION-MAP.
+ *
+ * This map ships FIFTEEN lists, and before this block every one of them could
+ * be `[]` with nothing to say why. Three genuinely different causes hid behind
+ * the same shape, and a caller reading `namedCredentials: []` had no way to
+ * tell them apart:
+ *
+ *   - `filtered-out` — the caller's own `filter` excluded the category, so it
+ *     was NEVER SCANNED. `filter: 'auth'` returned `remoteSiteSettings: []`
+ *     byte-identically to an org with no remote sites.
+ *   - `family-unconfirmed` — the metadata family's coverage row cannot prove
+ *     the retrieve landed it. `{requested: true, retrieved: 0, errored: false}`
+ *     is byte-identical for "the org has none" and "the retrieve never landed
+ *     it"; only `retrieveConfirmed: true` separates them (see `CoverageEntry`
+ *     in `packages/contracts/src/index.ts`). Covers a staged-`pending` tier, a
+ *     `capped` pull and an errored retrieve too — the reason names which.
+ *   - `family-not-modeled` — this product does not model the family at all.
+ *   - `coverage-disagrees` — the manifest claims N components were retrieved
+ *     and the graph holds none. That is a VAULT defect, not an org fact.
+ *   - `scan-capped` — the full scan hit `FULL_SCAN_MAX_NODES` for this type.
+ *   - `not-extracted` — the nodes ARE in the vault but were built by a refresh
+ *     that never wrote the property this surface reads. Decided by whether the
+ *     node carries the sentinel property AT ALL, never by an array length —
+ *     the law stated in `absence-disclosure.ts`.
+ *   - `no-subjects-scanned` — a DERIVED list (cross-type `references`) that is
+ *     empty because there was nothing to derive it from.
+ *   - `checked-empty` — scanned, derived, and genuinely none. A real finding.
+ */
+export type IntegrationAbsenceKind =
+  | 'filtered-out'
+  | 'family-unconfirmed'
+  | 'family-not-modeled'
+  | 'coverage-disagrees'
+  | 'scan-capped'
+  | 'not-extracted'
+  | 'no-subjects-scanned'
+  | 'checked-empty';
+
+/** One empty list in this payload, with the kind of empty it actually is. */
+export interface IntegrationAbsenceSite {
+  /** Dotted path of the empty list inside `data`. */
+  readonly path: string;
+  readonly kind: IntegrationAbsenceKind;
+  /** The shared `EvidenceAbsenceStatusV2` reading for THIS list. */
+  readonly status: EvidenceAbsenceV2['status'];
+  readonly reason: string;
+}
+
+/**
+ * The typed absence for this payload: one entry per list that is actually
+ * empty, each classified on its own evidence.
+ *
+ * NOT a single blanket stamp. A uniform marker over fifteen lists with three
+ * different causes would satisfy the honesty gate while telling the caller
+ * something false about at least two of them — `truncatedCategories: []` is a
+ * finished, provable "nothing was trimmed", while `namedCredentials: []` on an
+ * unconfirmed retrieve is "never checked", and they must not read the same.
+ *
+ * `status` is the WEAKEST reading across `sites`, so one not-checked list can
+ * never be averaged away by a checked one.
+ */
+export interface IntegrationMapAbsence extends EvidenceAbsenceV2 {
+  readonly sites: readonly IntegrationAbsenceSite[];
+}
+
+/**
  * One category whose bucket was trimmed to `limit` for the payload. `total` is
  * the TRUE count from the full scan, so a caller can tell "13 of 41" from "13".
  */
@@ -418,10 +496,19 @@ export interface IntegrationMapOutput {
   readonly truncatedCategories: readonly IntegrationMapTruncatedCategory[];
   /**
    * Scope disclosures for this response: the payload trim (when
-   * `truncatedCategories` is non-empty) and the residual full-scan cap. Empty
-   * in the normal case — this map is complete.
+   * `truncatedCategories` is non-empty), the residual full-scan cap, and — when
+   * any list in {@link absence} is `not-checked` — the sentence naming which
+   * families this map could NOT see. Empty ONLY when this map really has no
+   * limit to state; an empty `boundaries` beside fourteen unexplained empty
+   * lists was the specific complaint this fix answers.
    */
   readonly boundaries: readonly string[];
+  /**
+   * Present when at least one list in this payload is empty: WHICH kind of
+   * empty each one is, per list. Absent from a payload with no empty list, so a
+   * fully-populated map never acquires a not-checked marker it did not earn.
+   */
+  readonly absence?: IntegrationMapAbsence;
 }
 
 /** Honest-empty note attached when the integration map has zero components. */
@@ -559,6 +646,17 @@ const EMPTY_OMNI_SURFACE: OmniStudioIntegrationSurface = {
 };
 
 /**
+ * The IP node property that proves the callout walk RAN for that node.
+ *
+ * `omni-integration-procedure.ts` writes `restEndpointCount` unconditionally
+ * ("always present (0 when no REST endpoints)") from the same `walkActions`
+ * pass that produces BOTH `restEndpoints` and `remoteActions`, and spreads
+ * those two arrays in only when non-empty. So the arrays' absence is
+ * ambiguous and this count's absence is not: no count, no walk.
+ */
+const OMNI_CALLOUT_SENTINEL = 'restEndpointCount';
+
+/**
  * Read a node's `properties.restEndpoints` (`unknown` at the JSON-backed
  * type level) into typed `OmniRestCallout`s sourced to `nodeId`.
  * Defensive: drops any element missing a non-empty string `path`.
@@ -648,6 +746,14 @@ const collectOmniSurface = async (
     {
       readonly surface: OmniStudioIntegrationSurface;
       readonly incompleteTypes: readonly string[];
+      /** Integration Procedures the scan read, walked or not. */
+      readonly ipNodeCount: number;
+      /**
+       * IP ids whose node carries NO {@link OMNI_CALLOUT_SENTINEL} property —
+       * the callout walk never ran for them, so their contribution of zero
+       * callouts is "not checked", not "declares none".
+       */
+      readonly unwalkedIpIds: readonly ComponentId[];
     },
     McpError
   >
@@ -663,7 +769,20 @@ const collectOmniSurface = async (
   }
   const restCallouts: OmniRestCallout[] = [];
   const remoteCallouts: OmniRemoteCallout[] = [];
+  const unwalkedIpIds: ComponentId[] = [];
   for (const node of nodesResult.value.nodes) {
+    // The absence law from `absence-disclosure.ts`, applied verbatim: decided
+    // by whether the node carries the property AT ALL, never by an array
+    // length. `restEndpoints` / `remoteActions` are spread in ONLY when
+    // non-empty (`omni-integration-procedure.ts`), so their absence proves
+    // nothing — but `restEndpointCount` is written unconditionally by the same
+    // `walkActions` pass that produces both arrays, so its presence is the
+    // sentinel that the walk RAN and its absence is the sentinel that it did
+    // not. The demo vault is the live case: its IP node carries
+    // `restEndpointCount: 0` and no `restEndpoints` key at all.
+    if (!familyWasExtracted(node.properties, OMNI_CALLOUT_SENTINEL)) {
+      unwalkedIpIds.push(node.id);
+    }
     restCallouts.push(...readOmniRestCallouts(node.id, node.properties));
     remoteCallouts.push(...readOmniRemoteCallouts(node.id, node.properties));
   }
@@ -699,6 +818,8 @@ const collectOmniSurface = async (
   return ok({
     surface: { restCallouts, remoteCallouts, referencedNamedCredentials },
     incompleteTypes: nodesResult.value.incompleteTypes,
+    ipNodeCount: nodesResult.value.nodes.length,
+    unwalkedIpIds: unwalkedIpIds.sort(),
   });
 };
 
@@ -751,6 +872,8 @@ const collectMartechConnectors = async (
     {
       readonly matches: readonly MartechConnectorMatch[];
       readonly incompleteTypes: readonly string[];
+      /** InstalledPackage nodes the namespace half actually read. */
+      readonly packageNodeCount: number;
     },
     McpError
   >
@@ -822,7 +945,346 @@ const collectMartechConnectors = async (
     if (a.componentId !== b.componentId) return a.componentId < b.componentId ? -1 : 1;
     return a.productName < b.productName ? -1 : a.productName > b.productName ? 1 : 0;
   });
-  return ok({ matches, incompleteTypes: pkgResult.value.incompleteTypes });
+  return ok({
+    matches,
+    incompleteTypes: pkgResult.value.incompleteTypes,
+    packageNodeCount: pkgResult.value.nodes.length,
+  });
+};
+
+// ---------------------------------------------------------------------------
+// TYPED-ABSENCE-INTEGRATION-MAP — classify each empty list on its own evidence.
+// ---------------------------------------------------------------------------
+
+/**
+ * What one list's emptiness means, before it is bound to a path. Split from
+ * {@link IntegrationAbsenceSite} so a DERIVED list (`references`,
+ * `martechConnectors`) can inherit the weakest state of its inputs without
+ * restating the reason.
+ */
+interface AbsenceState {
+  readonly kind: IntegrationAbsenceKind;
+  readonly status: EvidenceAbsenceV2['status'];
+  readonly reason: string;
+}
+
+/** A checked, provable "none". The only state that is a real finding. */
+const checkedEmpty = (reason: string): AbsenceState => ({
+  kind: 'checked-empty',
+  status: 'proven-none',
+  reason,
+});
+
+/**
+ * Read the manifest's coverage row for one metadata family.
+ *
+ * Adopts the manifest's own `retrieveConfirmed` discriminator rather than
+ * inventing a second one: `CoverageEntry` documents that
+ * `{requested: true, retrieved: 0, errored: false, neverModeled: false}` is
+ * byte-identical for a confirmed-empty org and a retrieve that never landed,
+ * and that only `retrieveConfirmed: true` tells them apart. Everything else —
+ * a missing row, a `pending` staged tier, a `capped` pull, an errored retrieve
+ * — leaves the family UNCONFIRMED, which is not-checked.
+ */
+const familyCoverageState = (ctx: Context, type: ComponentType): AbsenceState => {
+  const row = buildCoverageEntries(ctx.manifest).find((entry) => entry.type === type);
+  if (row === undefined) {
+    return {
+      kind: 'family-unconfirmed',
+      status: 'not-checked',
+      reason: `NOT CHECKED: this vault's manifest carries no coverage row for ${type} at all, so it cannot say whether the retrieve ever requested it.`,
+    };
+  }
+  if (row.neverModeled) {
+    return {
+      kind: 'family-not-modeled',
+      status: 'not-checked',
+      reason: `NOT MODELED: this product does not model ${type}, so its absence from this map means "not analysed", never "none in the org".`,
+    };
+  }
+  if (row.errored) {
+    return {
+      kind: 'family-unconfirmed',
+      status: 'not-checked',
+      reason: `NOT CHECKED: the retrieve for ${type} ERRORED (${row.errorReason ?? 'no reason recorded'}), so nothing of that family reached this vault.`,
+    };
+  }
+  if (row.pending === true) {
+    return {
+      kind: 'family-unconfirmed',
+      status: 'not-checked',
+      reason: `NOT CHECKED: ${type} is PENDING — a staged refresh has not yet reached the tier that retrieves it.`,
+    };
+  }
+  if (row.capped === true) {
+    return {
+      kind: 'family-unconfirmed',
+      status: 'not-checked',
+      reason: `PARTIAL: the ${type} pull was intentionally CAPPED, so this vault holds a bounded subset and an empty bucket does not bound the org.`,
+    };
+  }
+  if (row.retrieved > 0) {
+    return {
+      kind: 'coverage-disagrees',
+      status: 'not-checked',
+      reason: `VAULT DEFECT: the manifest claims ${String(row.retrieved)} ${type} component(s) were retrieved, yet the graph holds none. The import lost them — this empty bucket is a fact about the vault, not the org. Re-run \`/sfi-refresh\`.`,
+    };
+  }
+  if (row.retrieveConfirmed === true) {
+    return checkedEmpty(
+      `CHECKED: the Metadata API confirmed the ${type} retrieve completed and returned zero — the org genuinely declares none.`,
+    );
+  }
+  return {
+    kind: 'family-unconfirmed',
+    status: 'not-checked',
+    reason: `NOT CHECKED: the ${type} coverage row reads requested with 0 retrieved and no \`retrieveConfirmed\` signal, which is byte-identical for "the org has none" and "the retrieve never landed it". Re-run a full \`/sfi-refresh\` to settle it.`,
+  };
+};
+
+/**
+ * The state of ONE of the eight category buckets, whether or not it is empty.
+ * Computed for every type because the derived `references` list inherits the
+ * weakest of them: an edge out of a family that was never scanned is invisible,
+ * so `references: []` cannot be stronger than its weakest input.
+ */
+const bucketState = (
+  ctx: Context,
+  type: ComponentType,
+  inScope: boolean,
+  incompleteTypes: readonly string[],
+  rowsFound: number,
+): AbsenceState => {
+  if (!inScope) {
+    return {
+      kind: 'filtered-out',
+      status: 'not-checked',
+      reason: `NOT CHECKED: \`filter\` excluded ${type} from this call, so it was never scanned. The empty array is shape stability, not a finding — re-call with \`filter: 'all'\`.`,
+    };
+  }
+  if (incompleteTypes.includes(type)) {
+    return {
+      kind: 'scan-capped',
+      status: 'not-checked',
+      reason: `CAPPED: the full scan of ${type} hit its node ceiling, so components past the cap were never read.`,
+    };
+  }
+  if (rowsFound > 0) {
+    return checkedEmpty(`CHECKED: ${String(rowsFound)} ${type} component(s) were scanned in full.`);
+  }
+  return familyCoverageState(ctx, type);
+};
+
+/** Not-checked beats unknown beats proven-none — the weakest reading wins. */
+const weakest = (states: readonly AbsenceState[]): AbsenceState => {
+  const notChecked = states.find((state) => state.status === 'not-checked');
+  if (notChecked !== undefined) return notChecked;
+  const unknown = states.find((state) => state.status === 'unknown');
+  if (unknown !== undefined) return unknown;
+  return states[0] ?? checkedEmpty('CHECKED.');
+};
+
+/** The payload key each category bucket lands under, for the absence paths. */
+const BUCKET_PATHS: Readonly<
+  Record<
+    (typeof INTEGRATION_TYPES)[number],
+    | 'authProviders'
+    | 'namedCredentials'
+    | 'remoteSiteSettings'
+    | 'cspTrustedSites'
+    | 'externalDataSources'
+    | 'externalServices'
+    | 'connectedApps'
+    | 'networkAccesses'
+  >
+> = {
+  AuthProvider: 'authProviders',
+  NamedCredential: 'namedCredentials',
+  RemoteSiteSetting: 'remoteSiteSettings',
+  CspTrustedSite: 'cspTrustedSites',
+  ExternalDataSource: 'externalDataSources',
+  ExternalService: 'externalServices',
+  ConnectedApp: 'connectedApps',
+  NetworkAccess: 'networkAccesses',
+};
+
+/** Everything outside the payload the absence classification needs. */
+interface IntegrationScanFacts {
+  readonly inScopeTypes: ReadonlySet<ComponentType>;
+  readonly incompleteTypes: readonly string[];
+  /** Rows the FULL scan found per type (pre payload trim). */
+  readonly fullCounts: ReadonlyMap<ComponentType, number>;
+  readonly omniInScope: boolean;
+  readonly ipNodeCount: number;
+  readonly unwalkedIpIds: readonly ComponentId[];
+  readonly packageNodeCount: number;
+}
+
+/**
+ * Classify every EMPTY list in this payload, one at a time.
+ *
+ * Emptiness is read off the ASSEMBLED payload, so a list that is populated can
+ * never pick up an entry — the guarantee that a real answer does not acquire a
+ * spurious not-checked marker. Returns `null` when nothing is empty.
+ */
+const buildIntegrationAbsence = (
+  ctx: Context,
+  data: Omit<IntegrationMapOutput, 'absence' | 'boundaries'>,
+  boundaries: string[],
+  facts: IntegrationScanFacts,
+): IntegrationMapAbsence | null => {
+  const sites: IntegrationAbsenceSite[] = [];
+  const add = (path: string, state: AbsenceState): void => {
+    sites.push({ path, kind: state.kind, status: state.status, reason: state.reason });
+  };
+
+  // The eight category buckets, each on its own coverage evidence.
+  const states = new Map<ComponentType, AbsenceState>();
+  for (const type of INTEGRATION_TYPES) {
+    const path = BUCKET_PATHS[type];
+    const state = bucketState(
+      ctx,
+      type,
+      facts.inScopeTypes.has(type),
+      facts.incompleteTypes,
+      facts.fullCounts.get(type) ?? 0,
+    );
+    states.set(type, state);
+    if ((data[path] as readonly unknown[]).length === 0) add(path, state);
+  }
+
+  // `references` is DERIVED from those buckets: an edge out of a family that
+  // was never scanned is invisible to the walk, so this list can never be
+  // stronger than its weakest input.
+  if (data.references.length === 0) {
+    const subjects = [...facts.fullCounts.values()].reduce((sum, n) => sum + n, 0);
+    const inherited = weakest([...states.values()]);
+    add(
+      'references',
+      subjects === 0
+        ? {
+            kind: 'no-subjects-scanned',
+            status: inherited.status,
+            reason:
+              'DERIVED: no integration node was in scope, so there was no node to walk `references` edges out of. ' +
+              `Inherited from the category buckets — ${inherited.reason}`,
+          }
+        : inherited.status === 'proven-none'
+          ? checkedEmpty(
+              `CHECKED: outgoing \`references\` edges were listed for all ${String(subjects)} scanned integration node(s) and none targets another integration component.`,
+            )
+          : {
+              kind: inherited.kind,
+              status: inherited.status,
+              reason: `DERIVED: at least one category feeding this walk is not checked, so an edge into or out of it is invisible here — ${inherited.reason}`,
+            },
+    );
+  }
+
+  // The OmniStudio outbound callout surface.
+  const omniState: AbsenceState = !facts.omniInScope
+    ? {
+        kind: 'filtered-out',
+        status: 'not-checked',
+        reason:
+          "NOT CHECKED: `filter` is scoped to the classic auth / allowlist cut, so OmniIntegrationProcedure callout steps were never read. Re-call with `filter: 'all'`.",
+      }
+    : facts.unwalkedIpIds.length > 0
+      ? {
+          kind: 'not-extracted',
+          status: 'not-checked',
+          reason: notExtractedFamilyDisclosure({
+            subject: 'OmniStudio callout steps',
+            verb: 'walked',
+            pluralSubject: true,
+            sentinelProperty: OMNI_CALLOUT_SENTINEL,
+            containers: [...facts.unwalkedIpIds],
+            surface: '`omniStudio.restCallouts` / `omniStudio.remoteCallouts`',
+            zeroReading: '"these Integration Procedures call out to nothing"',
+          }),
+        }
+      : facts.ipNodeCount === 0
+        ? familyCoverageState(ctx, 'OmniIntegrationProcedure')
+        : checkedEmpty(
+            `CHECKED: all ${String(facts.ipNodeCount)} Integration Procedure(s) carry the \`${OMNI_CALLOUT_SENTINEL}\` walk sentinel and declare no callout step of this kind.`,
+          );
+  if (data.omniStudio.restCallouts.length === 0) add('omniStudio.restCallouts', omniState);
+  if (data.omniStudio.remoteCallouts.length === 0) add('omniStudio.remoteCallouts', omniState);
+  if (data.omniStudio.referencedNamedCredentials.length === 0) {
+    add(
+      'omniStudio.referencedNamedCredentials',
+      data.omniStudio.restCallouts.length > 0
+        ? checkedEmpty(
+            `CHECKED: ${String(data.omniStudio.restCallouts.length)} REST callout(s) were read and none declares a \`callout:{alias}\` named credential.`,
+          )
+        : { ...omniState, reason: `DERIVED from \`restCallouts\` — ${omniState.reason}` },
+    );
+  }
+
+  // Martech detection reads InstalledPackage namespaces plus whichever
+  // NamedCredential / ExternalDataSource / RemoteSiteSetting endpoints the
+  // current filter put in scope, so it inherits the weakest of those four.
+  if (data.martechConnectors.length === 0) {
+    const inherited = weakest([
+      bucketState(ctx, 'InstalledPackage', true, facts.incompleteTypes, facts.packageNodeCount),
+      states.get('NamedCredential') ?? checkedEmpty('CHECKED.'),
+      states.get('ExternalDataSource') ?? checkedEmpty('CHECKED.'),
+      states.get('RemoteSiteSetting') ?? checkedEmpty('CHECKED.'),
+    ]);
+    add(
+      'martechConnectors',
+      inherited.status === 'proven-none'
+        ? checkedEmpty(
+            'CHECKED: every signal this lookup reads (InstalledPackage namespaces, NamedCredential / ExternalDataSource / active RemoteSiteSetting endpoint hosts) was scanned and none matched a known martech vendor. Still "none DETECTED" — the endpoint half is a hostname heuristic; see `martechConnectorDisclosure`.',
+          )
+        : {
+            kind: inherited.kind,
+            status: inherited.status,
+            reason: `DERIVED: a signal source this lookup reads was not checked, so a connector behind it is invisible — ${inherited.reason}`,
+          },
+    );
+  }
+
+  // The two self-describing meta-lists. Both are computed IN THIS PROCESS from
+  // values already in hand, so there is no "not retrieved" reading available
+  // for either: empty means empty, and they must not read like the buckets do.
+  if (data.truncatedCategories.length === 0) {
+    add(
+      'truncatedCategories',
+      checkedEmpty(
+        `CHECKED: every category fitted inside \`limit\`, so no bucket was trimmed. Derived in this call by comparing each full scan's row count against the limit — nothing about the org's metadata is involved.`,
+      ),
+    );
+  }
+  // `boundaries` is settled LAST and by MUTATION, in this order for a reason:
+  // the not-checked verdict over every other list is exactly the sentence this
+  // map's own honesty vocabulary should have been carrying, so it is pushed
+  // here — and only then is `boundaries` itself classified, so the payload can
+  // never claim an empty `boundaries` it no longer has.
+  const unchecked = sites.filter((site) => site.status !== 'proven-none');
+  const note =
+    unchecked.length === 0
+      ? 'Every empty list in this map was reached by a completed scan — each is a real finding of nothing.'
+      : `${String(unchecked.length)} empty list(s) in this map were NOT reached by a completed scan (${unchecked
+          .map((site) => site.path)
+          .join(', ')}). Read \`absence.sites[]\` before treating any of them as "this org has none".`;
+  if (unchecked.length > 0) boundaries.push(note);
+  if (boundaries.length === 0) {
+    add(
+      'boundaries',
+      checkedEmpty(
+        'CHECKED: this response carries no scope caveat — nothing was trimmed, no scan hit its cap, and no list is unchecked. Derived in this call, not retrieved.',
+      ),
+    );
+  }
+
+  if (sites.length === 0) return null;
+  const status = sites.some((site) => site.status === 'not-checked')
+    ? 'not-checked'
+    : sites.some((site) => site.status === 'unknown')
+      ? 'unknown'
+      : 'proven-none';
+  return { status, sites, note };
 };
 
 /**
@@ -985,11 +1447,16 @@ export const integrationMapHandler = async (
   // unconditionally.
   let omniStudio = EMPTY_OMNI_SURFACE;
   const incompleteTypes: string[] = [...scan.value.incompleteTypes];
-  if (OMNI_SURFACE_FILTERS.has(filter)) {
+  const omniInScope = OMNI_SURFACE_FILTERS.has(filter);
+  let ipNodeCount = 0;
+  let unwalkedIpIds: readonly ComponentId[] = [];
+  if (omniInScope) {
     const omniResult = await collectOmniSurface(ctx);
     if (!omniResult.ok) return omniResult;
     omniStudio = omniResult.value.surface;
     incompleteTypes.push(...omniResult.value.incompleteTypes);
+    ipNodeCount = omniResult.value.ipNodeCount;
+    unwalkedIpIds = omniResult.value.unwalkedIpIds;
   }
 
   // Stage 2c: martech connector detection (Finding #44). Filter-independent
@@ -1008,6 +1475,7 @@ export const integrationMapHandler = async (
   if (!martechResult.ok) return martechResult;
   const martechConnectors = martechResult.value.matches;
   incompleteTypes.push(...martechResult.value.incompleteTypes);
+  const packageNodeCount = martechResult.value.packageNodeCount;
 
   // Stage 3: payload trim — LAST, so every derived field above (martech,
   // callout authorization, the `references` cascade, the OmniStudio surface)
@@ -1041,7 +1509,7 @@ export const integrationMapHandler = async (
   // `?? []` so a future addition to `INTEGRATION_TYPES` without a
   // matching bucket initialization surfaces as an empty array rather
   // than a runtime error.
-  const data: IntegrationMapOutput = {
+  const base: Omit<IntegrationMapOutput, 'absence'> = {
     appliedScope: { object: null, mode: 'all' },
     authProviders: paged.get('AuthProvider') ?? [],
     namedCredentials: paged.get('NamedCredential') ?? [],
@@ -1062,6 +1530,33 @@ export const integrationMapHandler = async (
     ),
     truncatedCategories,
     boundaries,
+  };
+
+  // Stage 4b: TYPED-ABSENCE-INTEGRATION-MAP. Classify each EMPTY list on the
+  // assembled payload, then let the not-checked verdict fill `boundaries` —
+  // this map's own honesty vocabulary, which used to ship as `[]` beside
+  // fourteen unexplained empty lists. A reader of the old payload would have
+  // concluded "this org declares no integration surface"; on the demo vault
+  // the truth is that eight of the eight families carry an unconfirmed
+  // retrieve, so nothing had been checked at all.
+  const fullCounts = new Map<ComponentType, number>(
+    INTEGRATION_TYPES.map((type) => [type, (buckets.get(type) ?? []).length]),
+  );
+  // `boundaries` is passed as the live array so the classifier can fill it and
+  // then classify it, in that order — see the comment at that call site.
+  const absence = buildIntegrationAbsence(ctx, base, boundaries, {
+    inScopeTypes,
+    incompleteTypes,
+    fullCounts,
+    omniInScope,
+    ipNodeCount,
+    unwalkedIpIds,
+    packageNodeCount,
+  });
+
+  const data: IntegrationMapOutput = {
+    ...base,
+    ...(absence !== null ? { absence } : {}),
   };
   const totalNodes =
     data.authProviders.length +

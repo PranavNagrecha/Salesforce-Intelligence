@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -301,6 +301,159 @@ describe('searchApexSourceHandler', () => {
     expect(result.value.data.matches[0]!.snippet).toBe(
       "public class Foo { String x = 'banana'; }",
     );
+  });
+});
+
+// =============================================================================
+// TYPED-ABSENCE-SEARCH-APEX — a zero-match search must say WHICH kind of empty
+// it is.
+//
+// Before this block the handler answered a vault with no Apex at all and a vault
+// whose Apex genuinely does not mention the query with the SAME payload:
+// `matches: []`, `truncated: false`, and one fixed `boundaryNote` opening
+// "Searched retrieved Apex .cls and .trigger files under the vault source/
+// tree ... No matches." The second half of that sentence was a lie in the first
+// case, and `truncated: false` could not carry the distinction — it describes
+// the page, and `tests/integration/envelope-honesty.ts` rejects it as an
+// absence marker for exactly that reason.
+// =============================================================================
+describe('searchApexSourceHandler — typed absence', () => {
+  it('a searched-and-clean zero is proven-none and counts the files it read', async () => {
+    const result = await searchApexSourceHandler(ctx, { query: 'ZZZZZ' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const absence = result.value.data.absence;
+    expect(absence).toBeDefined();
+    expect(absence?.kind).toBe('checked-empty');
+    expect(absence?.status).toBe('proven-none');
+    // Derived from the walk, never from `matches.length`: the corpus fixture
+    // writes 3 hand-written classes/triggers + 20 bulk classes.
+    expect(absence?.filesSearched).toBe(23);
+    expect(absence?.filesUnreadable).toEqual([]);
+    // The literal-grep bound survives — a proven-none is still not omniscient.
+    expect(absence?.note).toMatch(/LITERAL GREP/);
+  });
+
+  it('a zero over a vault with NO Apex corpus is not-checked, not proven-none', async () => {
+    const emptyVault = mkdtempSync(join(tmpdir(), 'sfi-mcp-empty-vault-absence-'));
+    try {
+      const emptyCtx: Context = {
+        vaultRoot: emptyVault,
+        manifest: FIXTURE_MANIFEST,
+        graph: store,
+      };
+      const result = await searchApexSourceHandler(emptyCtx, { query: 'anything' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const absence = result.value.data.absence;
+      expect(absence?.kind).toBe('corpus-absent');
+      expect(absence?.status).toBe('not-checked');
+      expect(absence?.filesSearched).toBe(0);
+      // The old fixed note claimed a search that never happened. The note the
+      // handler now emits must NOT say it searched anything.
+      expect(result.value.data.boundaryNote).not.toMatch(/Searched retrieved Apex/);
+      expect(result.value.data.boundaryNote).toMatch(/NOT CHECKED/);
+    } finally {
+      rmSync(emptyVault, { recursive: true, force: true });
+    }
+  });
+
+  it('names the manifest CONTRADICTION when coverage claims Apex the tree does not hold', async () => {
+    // The nastier half of `corpus-absent`: the vault's own manifest says the
+    // retrieve landed Apex, and `source/` holds none. That is a vault defect —
+    // a reader must not take the zero as "the org has no Apex".
+    const emptyVault = mkdtempSync(join(tmpdir(), 'sfi-mcp-apex-coverage-lie-'));
+    try {
+      const claimingCtx: Context = {
+        vaultRoot: emptyVault,
+        manifest: {
+          ...FIXTURE_MANIFEST,
+          coverage: [
+            {
+              type: 'ApexClass',
+              requested: true,
+              retrieved: 2,
+              errored: false,
+              neverModeled: false,
+            },
+          ],
+        },
+        graph: store,
+      };
+      const result = await searchApexSourceHandler(claimingCtx, { query: 'anything' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.absence?.kind).toBe('corpus-absent');
+      expect(result.value.data.absence?.note).toMatch(/CONTRADICTS/);
+      expect(result.value.data.absence?.note).toMatch(/ApexClass 2/);
+    } finally {
+      rmSync(emptyVault, { recursive: true, force: true });
+    }
+  });
+
+  it('a file that cannot be READ is reported as unsearched, not as clean', async () => {
+    const vault = mkdtempSync(join(tmpdir(), 'sfi-mcp-apex-unreadable-'));
+    try {
+      const dir = join(vault, 'source', 'classes');
+      mkdirSync(dir, { recursive: true });
+      const readable = join(dir, 'Readable.cls');
+      const locked = join(dir, 'Locked.cls');
+      writeFileSync(readable, 'public class Readable {}\n');
+      writeFileSync(locked, 'public class Locked {}\n');
+      chmodSync(locked, 0o000);
+
+      // Whether chmod actually blocks the read depends on the uid running the
+      // suite (root ignores the mode bits). Rather than skip — a skipped
+      // honesty test is indistinguishable from a passing one — establish which
+      // world we are in and assert the classification TRACKS it. Both branches
+      // are real assertions.
+      let lockedIsUnreadable: boolean;
+      try {
+        readFileSync(locked, 'utf-8');
+        lockedIsUnreadable = false;
+      } catch {
+        lockedIsUnreadable = true;
+      }
+
+      const unreadableCtx: Context = {
+        vaultRoot: vault,
+        manifest: FIXTURE_MANIFEST,
+        graph: store,
+      };
+      const result = await searchApexSourceHandler(unreadableCtx, { query: 'ZZZZZ' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const absence = result.value.data.absence;
+      expect(absence?.filesSearched).toBe(2);
+      if (lockedIsUnreadable) {
+        expect(absence?.kind).toBe('corpus-partially-read');
+        expect(absence?.status).toBe('not-checked');
+        expect(absence?.filesUnreadable).toEqual(['source/classes/Locked.cls']);
+      } else {
+        expect(absence?.kind).toBe('checked-empty');
+        expect(absence?.status).toBe('proven-none');
+        expect(absence?.filesUnreadable).toEqual([]);
+      }
+    } finally {
+      try {
+        chmodSync(join(vault, 'source', 'classes', 'Locked.cls'), 0o600);
+      } catch {
+        // Best effort — the cleanup below removes the tree either way.
+      }
+      rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  it('a NON-empty result carries no absence marker at all', async () => {
+    // The mirror-image failure: stamping a not-checked marker on an answer that
+    // actually found something would be a new lie, not a fix.
+    const result = await searchApexSourceHandler(ctx, { query: 'banana' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.matches.length).toBeGreaterThan(0);
+    const d = result.value.data as unknown as Record<string, unknown>;
+    expect('absence' in d).toBe(false);
+    expect('boundaryNote' in d).toBe(false);
   });
 });
 

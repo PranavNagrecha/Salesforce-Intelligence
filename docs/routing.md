@@ -45,7 +45,7 @@ returns, for one plain-language question:
 | `route` | **Advisory hint** | The deterministic route: an intent, ordered `route.tools` (with step ids and `dependsOn` edges for compound questions), plane, confidence, `suggestedArgs`, disclosures. A suggestion to inform your pick — never a command. |
 | `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground via `sfi.synthesize_answer`. |
 
-`answers` exists because the default tool profile is `core`, which advertises 19
+`answers` exists because the default tool profile is `core`, which advertises 25
 of 212 tools. For every other candidate the shortlist would otherwise name a tool
 whose description is nowhere in your context, recoverable only by an
 `sfi.describe_analysis` round trip per candidate. The one-liner is the same text

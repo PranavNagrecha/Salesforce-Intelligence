@@ -43,12 +43,12 @@ describe('doc-sync concept-count pin regex', () => {
 describe('doc-sync core-roster size pin', () => {
   it('matches the phrasings used across README / CLAUDE / website / llms', () => {
     const samples = [
-      ['**Default is the 19-tool core roster** (AUDIT-F6)', 19],
-      ['advertises a <strong>19-tool core roster</strong>', 19],
+      ['**Default is the 25-tool core roster** (AUDIT-F6)', 25],
+      ['advertises a <strong>25-tool core roster</strong>', 25],
       ['only a <strong>19-schema core roster</strong> is advertised', 19],
-      ['Default is a 19-tool <code>core</code> roster (token-friendly)', 19],
+      ['Default is a 25-tool <code>core</code> roster (token-friendly)', 25],
       ['default is `core` (19 directly invokable tools).', 19],
-      ['Default advertise/invoke profile is **`core` (19 tools)** including', 19],
+      ['Default advertise/invoke profile is **`core` (25 tools)** including', 25],
       // "spine" phrasing — docs/configuration.md, configuration.astro and
       // tool-profile.ts state the count this way. It was NOT matched before,
       // so a stale 18 in docs/configuration.md passed the gate.

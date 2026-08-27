@@ -17,6 +17,13 @@
  * `changed: []` plus the full `unenrichedCount` so the caller sees
  * the gap explicitly.
  *
+ * That axis was necessary and not sufficient. `unenrichedCount` is a bare
+ * number sitting beside the list it invalidates, and nothing in the payload
+ * said so: `changed: []` on a vault with no dates at all was byte-identical to
+ * a completed scan that found nothing. `absence` (see
+ * {@link ChangedSinceAbsenceKind}) now types each empty site — `changed` and a
+ * zero `unenrichedCount` — so the two readings cannot be confused.
+ *
  * v1.7 covers the six ComponentTypes the R2 dispatch table enriches
  * (ApexClass, ApexTrigger, Flow, Layout, CustomField, ValidationRule);
  * other types may receive freshness enrichment in v1.7+ R3 (ProfileSet,
@@ -40,11 +47,13 @@
 import type {
   ComponentId,
   ComponentType,
+  EvidenceAbsenceV2,
   McpError,
   McpResponse,
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import { buildCoverageEntries } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -196,6 +205,70 @@ export interface ChangedComponent {
   };
 }
 
+/**
+ * Which kind of empty an empty `changed` list (or a zero `unenrichedCount`) is.
+ * TYPED-ABSENCE-CHANGED-SINCE.
+ *
+ *   - `scan-capped` — a type's full scan hit `FULL_SCAN_MAX_NODES`, so nodes
+ *     past the cap were never date-compared.
+ *   - `page-past-end` — the RESULT SET is not empty; this PAGE is. A caller
+ *     resuming a cursor past the last row gets `changed: []` while components
+ *     genuinely did change.
+ *   - `no-nodes-scanned` — the requested types hold no node in this vault at
+ *     all. There was nothing to compare against the boundary.
+ *   - `types-not-retrieved` — at least one requested type contributed zero
+ *     nodes AND its coverage row does not confirm the retrieve landed it. That
+ *     type was never checked, so absence over it is not evidence.
+ *   - `freshness-not-enriched` — nodes WERE scanned but NONE carries a
+ *     `lastModifiedDate`. The freshness overlay (`sfi refresh
+ *     --with-tooling-api`) never ran, so this tool cannot know what changed:
+ *     the empty list is a statement about the VAULT, not about the org.
+ *   - `freshness-partially-enriched` — some scanned nodes carry no date. Any of
+ *     them may have changed since the boundary and would be invisible here.
+ *   - `checked-empty` — every scanned node carried a date, the scan completed,
+ *     and none is at or after the boundary. A real finding of nothing.
+ */
+export type ChangedSinceAbsenceKind =
+  | 'scan-capped'
+  | 'page-past-end'
+  | 'no-nodes-scanned'
+  | 'types-not-retrieved'
+  | 'freshness-not-enriched'
+  | 'freshness-partially-enriched'
+  | 'checked-empty';
+
+/** One empty list / zero count in this payload, and which kind of empty it is. */
+export interface ChangedSinceAbsenceSite {
+  /** Dotted path of the empty site inside `data` (`changed`, `unenrichedCount`). */
+  readonly path: string;
+  readonly kind: ChangedSinceAbsenceKind;
+  /** The shared `EvidenceAbsenceStatusV2` reading for THIS site. */
+  readonly status: EvidenceAbsenceV2['status'];
+  readonly reason: string;
+}
+
+/**
+ * The typed absence attached whenever this payload asserts one.
+ *
+ * WHY: `changed: []` shipped bare. On a vault whose freshness overlay never ran
+ * — the demo vault is one: 110 of 110 scanned nodes carry no
+ * `lastModifiedDate` — the tool CANNOT know what changed, yet it answered
+ * "nothing changed since 2020" in exactly the shape it uses for a real
+ * finding of nothing. `unenrichedCount` was the only honesty axis and it is a
+ * bare number: a reader had to know that a non-zero value invalidates the list
+ * beside it, and nothing said so. `truncated: false` cannot carry the
+ * distinction either — it describes the PAGE (and
+ * `tests/integration/envelope-honesty.ts` deliberately rejects it as an absence
+ * marker).
+ *
+ * Present ONLY when at least one site is actually empty, so a populated answer
+ * never acquires a spurious not-checked marker.
+ */
+export interface ChangedSinceAbsence extends EvidenceAbsenceV2 {
+  /** Per-site classification. Never a single blanket stamp over the payload. */
+  readonly sites: readonly ChangedSinceAbsenceSite[];
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ChangedSinceOutput {
   /** The normalised `since` boundary (ISO 8601 UTC). */
@@ -210,6 +283,12 @@ export interface ChangedSinceOutput {
   readonly unenrichedCount: number;
   /** True when the response slice was trimmed to `limit`. */
   readonly truncated: boolean;
+  /**
+   * Present when this payload asserts an absence (`changed` is empty, or
+   * `unenrichedCount` is zero): WHICH kind of empty each one is. Absent from a
+   * payload that asserts none.
+   */
+  readonly absence?: ChangedSinceAbsence;
   /**
    * Honesty disclosure, present ONLY when a pathological type's full scan hit
    * FULL_SCAN_MAX_NODES (so the enumeration may be incomplete). Absent on a
@@ -308,6 +387,208 @@ const extractLastModifiedDate = (
 };
 
 /**
+ * Requested types that contributed ZERO scanned nodes AND whose coverage row
+ * does not prove the retrieve landed them.
+ *
+ * Adopts the manifest's own `retrieveConfirmed` discriminator (see
+ * `CoverageEntry` in `packages/contracts/src/index.ts`): the row
+ * `{requested: true, retrieved: 0, errored: false, neverModeled: false}` is
+ * byte-identical for "the org genuinely has none" and "the retrieve never
+ * landed it", and only `retrieveConfirmed: true` separates them. A type in this
+ * list was NOT checked, so a change to one of its components is invisible here
+ * — reporting `changed: []` as a finished answer over it would be the
+ * unchecked-zero this whole family is about.
+ *
+ * Types that DID contribute nodes are excluded: whatever coverage claims, the
+ * scan demonstrably read them.
+ */
+const unretrievedTypes = (
+  ctx: Context,
+  types: readonly ComponentType[],
+  scannedByType: ReadonlyMap<ComponentType, number>,
+): readonly ComponentType[] => {
+  const entries = buildCoverageEntries(ctx.manifest);
+  return types.filter((type) => {
+    if ((scannedByType.get(type) ?? 0) > 0) return false;
+    const row = entries.find((entry) => entry.type === type);
+    if (row === undefined) return true;
+    if (row.neverModeled || row.errored) return true;
+    if (row.pending === true || row.capped === true) return true;
+    return row.retrieved === 0 && row.retrieveConfirmed !== true;
+  });
+};
+
+/** How many type names a reason sentence spells out before summarising. */
+const MAX_NAMED_TYPES = 8;
+
+const nameTypes = (types: readonly ComponentType[]): string =>
+  types.length <= MAX_NAMED_TYPES
+    ? types.join(', ')
+    : `${types.slice(0, MAX_NAMED_TYPES).join(', ')} … and ${String(types.length - MAX_NAMED_TYPES)} more`;
+
+/** Inputs the two site classifiers below read. Bundled so neither can drift. */
+interface ScanFacts {
+  /** Nodes the scan actually read across every requested type. */
+  readonly scannedNodes: number;
+  /** Of those, how many carried NO `lastModifiedDate` at all. */
+  readonly unenrichedCount: number;
+  /** Rows matching the boundary BEFORE the output page was cut. */
+  readonly matchedTotal: number;
+  /** True when a type's full scan hit `FULL_SCAN_MAX_NODES`. */
+  readonly scanIncomplete: boolean;
+  readonly incompleteTypes: readonly string[];
+  /** Requested types the coverage row cannot prove were retrieved. */
+  readonly unretrieved: readonly ComponentType[];
+  readonly since: string;
+}
+
+/**
+ * Classify an EMPTY `changed` list. TYPED-ABSENCE-CHANGED-SINCE.
+ *
+ * Ordered most-severe first: a scan that was capped, a page past the end, and a
+ * vault with no freshness data must each win over "checked and clean", because
+ * each of them makes the clean reading unsupportable.
+ */
+const classifyEmptyChanged = (facts: ScanFacts): ChangedSinceAbsenceSite => {
+  if (facts.scanIncomplete) {
+    return {
+      path: 'changed',
+      kind: 'scan-capped',
+      status: 'not-checked',
+      reason:
+        `CAPPED: the full scan hit its node ceiling for ${nameTypes(facts.incompleteTypes as readonly ComponentType[])}, ` +
+        'so components past the cap were never compared against the boundary. This empty list covers only what was scanned.',
+    };
+  }
+  if (facts.matchedTotal > 0) {
+    return {
+      path: 'changed',
+      kind: 'page-past-end',
+      status: 'unknown',
+      reason:
+        `THIS PAGE is empty, the RESULT SET is not: ${String(facts.matchedTotal)} component(s) changed at or after ${facts.since}, ` +
+        'and this offset/cursor lands past the last of them. Read it as the end of the page walk, never as "nothing changed".',
+    };
+  }
+  if (facts.scannedNodes === 0) {
+    return {
+      path: 'changed',
+      kind: 'no-nodes-scanned',
+      status: 'not-checked',
+      reason:
+        'NOT CHECKED: the requested types hold no node in this vault at all, so not one component was compared against the boundary. ' +
+        'Nothing here says whether the org changed.',
+    };
+  }
+  if (facts.unenrichedCount >= facts.scannedNodes) {
+    return {
+      path: 'changed',
+      kind: 'freshness-not-enriched',
+      status: 'not-checked',
+      reason:
+        `NOT CHECKED: all ${String(facts.scannedNodes)} scanned node(s) carry NO lastModifiedDate, so this vault holds no freshness data ` +
+        'to compare against the boundary. The empty list is a fact about the VAULT, not about the org — run ' +
+        '`sfi refresh --with-tooling-api` and ask again.',
+    };
+  }
+  if (facts.unretrieved.length > 0) {
+    return {
+      path: 'changed',
+      kind: 'types-not-retrieved',
+      status: 'not-checked',
+      reason:
+        `NOT CHECKED for ${nameTypes(facts.unretrieved)}: those requested types contributed no node and their coverage row does not ` +
+        'confirm the retrieve landed them (`retrieveConfirmed` unset), so a change to one of their components is invisible here.',
+    };
+  }
+  if (facts.unenrichedCount > 0) {
+    return {
+      path: 'changed',
+      kind: 'freshness-partially-enriched',
+      status: 'not-checked',
+      reason:
+        `PARTIAL: ${String(facts.unenrichedCount)} of ${String(facts.scannedNodes)} scanned node(s) carry no lastModifiedDate. ` +
+        'Any of them may have changed since the boundary and would be absent from this list — the zero covers only the enriched fraction.',
+    };
+  }
+  return {
+    path: 'changed',
+    kind: 'checked-empty',
+    status: 'proven-none',
+    reason:
+      `CHECKED: all ${String(facts.scannedNodes)} scanned node(s) carry a lastModifiedDate, the scan completed, and none is at or after ` +
+      `${facts.since}. A real finding of nothing, bounded by the retrieve that built this vault.`,
+  };
+};
+
+/**
+ * Classify a ZERO `unenrichedCount`.
+ *
+ * "Zero nodes lacked a date" is only meaningful if nodes were scanned at all: a
+ * zero over an empty scan is arithmetic, not evidence, and reads as "fully
+ * enriched" when nothing was enriched.
+ */
+const classifyZeroUnenriched = (facts: ScanFacts): ChangedSinceAbsenceSite => {
+  if (facts.scannedNodes === 0) {
+    return {
+      path: 'unenrichedCount',
+      kind: 'no-nodes-scanned',
+      status: 'not-checked',
+      reason:
+        'NOT CHECKED: zero nodes were scanned, so "0 unenriched" is arithmetic over an empty set — it does NOT mean this vault is ' +
+        'fully freshness-enriched.',
+    };
+  }
+  if (facts.scanIncomplete) {
+    return {
+      path: 'unenrichedCount',
+      kind: 'scan-capped',
+      status: 'not-checked',
+      reason:
+        `CAPPED: the full scan hit its node ceiling for ${nameTypes(facts.incompleteTypes as readonly ComponentType[])}; nodes past the cap ` +
+        'were never inspected, so they are neither counted here nor proven enriched.',
+    };
+  }
+  return {
+    path: 'unenrichedCount',
+    kind: 'checked-empty',
+    status: 'proven-none',
+    reason: `CHECKED: every one of the ${String(facts.scannedNodes)} scanned node(s) carries a lastModifiedDate.`,
+  };
+};
+
+/**
+ * Assemble the payload-level absence block from the per-site classifications.
+ * Returns `null` when nothing in this payload is empty — a populated answer
+ * must NOT acquire a not-checked marker it did not earn.
+ *
+ * `status` is the WEAKEST reading across the sites, so one not-checked site can
+ * never be averaged away by a checked one.
+ */
+const buildChangedSinceAbsence = (
+  changedLength: number,
+  facts: ScanFacts,
+): ChangedSinceAbsence | null => {
+  const sites: ChangedSinceAbsenceSite[] = [];
+  if (changedLength === 0) sites.push(classifyEmptyChanged(facts));
+  if (facts.unenrichedCount === 0) sites.push(classifyZeroUnenriched(facts));
+  if (sites.length === 0) return null;
+  const status = sites.some((site) => site.status === 'not-checked')
+    ? 'not-checked'
+    : sites.some((site) => site.status === 'unknown')
+      ? 'unknown'
+      : 'proven-none';
+  return {
+    status,
+    sites,
+    note:
+      status === 'proven-none'
+        ? 'Every empty value in this payload was reached by a completed scan over dated components.'
+        : 'At least one empty value in this payload was NOT reached by a completed scan — read `sites[]` before treating it as "nothing changed".',
+  };
+};
+
+/**
  * The `sfi.changed_since` handler. Scans the requested types, decides
  * whether each node is past the `since` boundary, and returns the
  * structural answer with the partial-data axis surfaced via
@@ -360,7 +641,12 @@ export const changedSinceHandler = async (
       message: `graph query failed: ${scan.error.message}`,
     });
   }
+  // Per-type scanned counts feed the absence classification below: a requested
+  // type that contributed ZERO nodes was not necessarily checked, and only the
+  // coverage row can say which (see `unretrievedTypes`).
+  const scannedByType = new Map<ComponentType, number>();
   for (const node of scan.value.nodes) {
+    scannedByType.set(node.type, (scannedByType.get(node.type) ?? 0) + 1);
     const date = extractLastModifiedDate(node.lastModifiedDate, node.properties);
     if (date === null) {
       unenrichedCount += 1;
@@ -421,12 +707,28 @@ export const changedSinceHandler = async (
     ? fullScanTruncationNote(scan.value.incompleteTypes)
     : undefined;
 
+  // TYPED-ABSENCE-CHANGED-SINCE. `changed: []` and `unenrichedCount: 0` both
+  // shipped bare. On a vault whose freshness overlay never ran, `changed: []`
+  // was byte-identical to a completed scan that found nothing — so a caller
+  // would have concluded "nothing changed in the org" from a tool that had no
+  // dates to compare. The block below says which kind of empty each site is.
+  const absence = buildChangedSinceAbsence(changed.length, {
+    scannedNodes: scan.value.nodes.length,
+    unenrichedCount,
+    matchedTotal: sorted.length,
+    scanIncomplete: scan.value.scanIncomplete,
+    incompleteTypes: scan.value.incompleteTypes,
+    unretrieved: unretrievedTypes(ctx, types, scannedByType),
+    since,
+  });
+
   return ok({
     data: {
       since,
       changed,
       unenrichedCount,
       truncated,
+      ...(absence !== null ? { absence } : {}),
       ...(isPaged ? { limit, offset } : {}),
       ...(truncated ? { nextOffset: offset + changed.length } : {}),
       ...(emitCursor

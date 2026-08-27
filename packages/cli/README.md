@@ -11,7 +11,7 @@ Requires **Node.js 20+**. `npx -y sf-intelligence …` needs no install; `npm in
 Coming from 0.2.x? Read this first — full detail in
 [CHANGELOG.md](https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/CHANGELOG.md).
 
-- **`SFI_TOOL_PROFILE` now defaults to `core`.** 19 tools are advertised and
+- **`SFI_TOOL_PROFILE` now defaults to `core`.** 25 tools are advertised and
   directly invokable; the rest are reached via
   `sfi.run_analysis { name: 'sfi.<tool>', args }`. `SFI_TOOL_PROFILE=full`
   restores advertise-and-invoke-everything.
@@ -95,7 +95,7 @@ sfi doctor                            # diagnose sf CLI / vault / auth issues
 
 `--target-org` is **required** on `sfi init` whenever stdin isn't a terminal — which includes every MCP host, so always pass it there.
 
-Then ask anything in your MCP client — *"what fields does Account have?"*, *"what breaks if I delete this field?"*, *"why can't this profile see Opportunities?"*, *"give me a tour of this org."*
+Then ask anything in your MCP client — *"what fields does Account have?"*, *"what breaks if I delete this field?"*, *"who can edit Salary__c?"*, *"why can't this profile see Opportunities?"*, *"what happens when I save a Project?"*, *"give me a tour of this org."*
 
 **Connected, but the org looks empty?** Before the first `sfi refresh` finishes, the server boots in setup mode and exposes exactly one tool, `sfi.setup_status` — ask your chat "what do you need from me?" and it will name the exact next command (and where it's looking for the vault).
 

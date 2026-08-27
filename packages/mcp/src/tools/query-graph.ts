@@ -41,6 +41,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   runGraphQuery,
   QUERY_GRAPH_ALLOWED_OPS,
+  QUERY_GRAPH_DEFAULT_LIMIT,
   QUERY_GRAPH_MAX_CONDITIONS,
   QUERY_GRAPH_MAX_IN_VALUES,
   QUERY_GRAPH_MAX_LIMIT,
@@ -53,6 +54,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { slimGraphNodes } from './graph-payload-bounds.js';
+import { paginateLegacy } from './page-cursor.js';
 
 /**
  * Per-response byte budget for the `rows` slice, leaving headroom under the
@@ -60,6 +62,9 @@ import { slimGraphNodes } from './graph-payload-bounds.js';
  * A wide page (fat `properties_json`) is trimmed to fit; mirrors `get_edges`.
  */
 const QUERY_GRAPH_BYTE_BUDGET = 38_000;
+
+/** Tool name the shared pager binds a page to. */
+const QUERY_GRAPH_TOOL = 'sfi.query_graph';
 
 /** A scalar a `value`/`IN`-element may take (mirrors the graph-layer type). */
 const scalarSchema = z.union([z.string(), z.number(), z.boolean()]);
@@ -73,7 +78,14 @@ const scalarSchema = z.union([z.string(), z.number(), z.boolean()]);
  *     (for `=`/`!=`/`LIKE`/`ILIKE`), an array (for `IN`), or omitted (for the
  *     null checks). `column` is validated against the per-table allowlist by
  *     the graph-layer compiler (a bad column earns `invalid-query`).
- *   - `limit`: optional integer, hard-capped at `QUERY_GRAPH_MAX_LIMIT`.
+ *   - `limit`: optional integer PAGE SIZE, hard-capped at `QUERY_GRAPH_MAX_LIMIT`.
+ *   - `offset`: optional zero-based row offset to resume from — echo back the
+ *     `nextOffset` the previous response published. Bounded BELOW
+ *     `QUERY_GRAPH_MAX_LIMIT` because the compiled SELECT carries a hard `LIMIT`
+ *     and no `OFFSET`: the pageable universe is the first `QUERY_GRAPH_MAX_LIMIT`
+ *     rows of the fixed sort, so an offset at or past that cap can never address
+ *     a row and is rejected fail-closed rather than answered with an empty page
+ *     that reads like "nothing matched".
  */
 export const queryGraphInputSchema = z.object({
   select: z.enum(['nodes', 'edges']),
@@ -88,6 +100,7 @@ export const queryGraphInputSchema = z.object({
     .max(QUERY_GRAPH_MAX_CONDITIONS)
     .optional(),
   limit: z.number().int().positive().max(QUERY_GRAPH_MAX_LIMIT).optional(),
+  offset: z.number().int().min(0).max(QUERY_GRAPH_MAX_LIMIT - 1).optional(),
 });
 
 /** Parsed input shape, inferred from `queryGraphInputSchema`. */
@@ -103,10 +116,55 @@ export interface QueryGraphOutput {
   readonly returnedCount: number;
   /** Total rows matching the filters BEFORE the limit. */
   readonly totalCount: number;
-  /** True when more rows matched than were returned (raise `limit` or narrow). */
+  /**
+   * True when more matching rows exist than this response shipped, measured
+   * against the unpaged `count(*)` — NOT against the window the handler
+   * materialised. A remainder hidden by the {@link QUERY_GRAPH_MAX_LIMIT} cap
+   * still sets this, so the payload can never publish a complete answer over
+   * rows it did not deliver.
+   */
   readonly hasMore: boolean;
-  /** The effective, capped limit that was applied. */
+  /** The effective, capped PAGE SIZE that was applied (not the compiled SQL's LIMIT). */
   readonly limit: number;
+  /**
+   * QUERY-GRAPH-NO-RESUME-POINTER.
+   *
+   * On DEFAULT arguments — no `limit`, no filters — this tool reported
+   * `totalCount: 118, returnedCount: 50, hasMore: true, truncated: false` and
+   * shipped no `offset`, no `nextOffset` and no `nextCursor`. It told the
+   * caller 68 more rows existed, called the 50 it sent "not truncated", and
+   * offered no way to reach the rest: the only knob was `limit`, so the ONLY
+   * way to see row 51 was to re-run the whole query with a bigger `limit` and
+   * re-receive rows 1-50. Past `QUERY_GRAPH_MAX_LIMIT` there was no way at all.
+   * A host agent walking the graph therefore either re-fetched everything on
+   * every step or silently analysed the alphabetical head of the result set as
+   * though it were the whole of it.
+   *
+   * `offset` + `nextOffset` close that. `nextOffset` is always
+   * `offset + rows.length` — the rows ACTUALLY shipped, byte-trim included —
+   * so resuming from it neither skips nor repeats a row. It is `null` when this
+   * page ends the reachable set, which INCLUDES the cap case: see
+   * {@link QueryGraphOutput.capReached}, where `hasMore` stays true and this
+   * pointer is honestly absent rather than pointing at a row the compiler
+   * cannot address.
+   */
+  readonly offset: number;
+  /** Offset to pass on the next call, or `null` when no further page is reachable. */
+  readonly nextOffset: number | null;
+  /**
+   * How many of `totalCount` rows this tool can reach AT ALL:
+   * `min(totalCount, QUERY_GRAPH_MAX_LIMIT)`. The compiled SELECT has a hard
+   * `LIMIT` and no `OFFSET`, so the pageable universe is the first
+   * `QUERY_GRAPH_MAX_LIMIT` rows of the fixed sort.
+   */
+  readonly pageableCount: number;
+  /**
+   * True when `totalCount` exceeds `pageableCount` — matching rows exist that
+   * NO `(limit, offset)` pair can address. `note` names the cap and the
+   * remedy (narrow with a `where` filter). Never silently folded into
+   * `hasMore: false`.
+   */
+  readonly capReached: boolean;
   /** The exact compiled SELECT + bound values that ran (so the caller sees it). */
   readonly query: {
     readonly compiledSql: string;
@@ -131,28 +189,6 @@ const DISCLOSURE =
   'who_can_access_object, what_happens_on_save, …) and sfi.synthesize_answer.';
 
 /**
- * Byte-trim a row list to fit `budget`, keeping the deterministic prefix (the
- * rows are already in a stable ORDER BY). Accumulates per-row serialized bytes
- * so it is O(n); always keeps at least one row so the caller gets something.
- */
-const byteTrimRows = <T>(
-  rows: readonly T[],
-  budget: number,
-): { readonly rows: readonly T[]; readonly trimmed: boolean } => {
-  let total = 2; // the enclosing `[]`
-  const kept: T[] = [];
-  for (const row of rows) {
-    const rowBytes = Buffer.byteLength(JSON.stringify(row) ?? 'null', 'utf8') + 1;
-    if (kept.length > 0 && total + rowBytes > budget) {
-      return { rows: kept, trimmed: true };
-    }
-    kept.push(row);
-    total += rowBytes;
-  }
-  return { rows: kept, trimmed: kept.length !== rows.length };
-};
-
-/**
  * The `sfi.query_graph` MCP tool. Compiles a structured query to an allowlisted,
  * parameterized, read-only SELECT and returns the matching rows as stored, with
  * the compiled SQL echoed and a raw-graph-view disclosure. Byte-budgeted so a
@@ -170,6 +206,24 @@ export const queryGraphHandler = async (
   ctx: Context,
   input: QueryGraphInput,
 ): Promise<Result<McpResponse<QueryGraphOutput>, McpError>> => {
+  const limit = input.limit ?? QUERY_GRAPH_DEFAULT_LIMIT;
+  const offset = input.offset ?? 0;
+
+  // The graph-layer compiler emits `... ORDER BY <fixed> LIMIT ?` and has NO
+  // `OFFSET`, so paging happens HERE, over a materialised window.
+  //
+  // The window is `offset + limit + 1` rows: the page itself, plus ONE PROBE
+  // ROW. The probe is what lets the shared pager see that rows remain past this
+  // page without a second query — without it a saturated window is
+  // indistinguishable from an exhausted one, which is exactly the mistake that
+  // publishes `hasMore: false` over rows that were never delivered. The probe
+  // row is never shipped: `paginateLegacy` slices `limit` items.
+  //
+  // The window is capped at `QUERY_GRAPH_MAX_LIMIT` — the compiler rejects a
+  // larger LIMIT and there is no OFFSET to reach past it — so a result set
+  // wider than the cap is disclosed via `capReached`, never silently truncated.
+  const fetchLimit = Math.min(QUERY_GRAPH_MAX_LIMIT, offset + limit + 1);
+
   // Reshape the parsed input into the graph-layer GraphQuery. The `where`
   // conditions are passed through verbatim — the graph-layer compiler owns the
   // column/op allowlist and the fail-closed validation.
@@ -178,7 +232,7 @@ export const queryGraphHandler = async (
     ...(input.where !== undefined
       ? { where: input.where as readonly GraphQueryCondition[] }
       : {}),
-    ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    limit: fetchLimit,
   };
 
   const result = await runGraphQuery(ctx.graph, query);
@@ -192,45 +246,91 @@ export const queryGraphHandler = async (
     return err({ kind: 'internal', message: result.error.message });
   }
 
-  // Byte-bound the slice so it can't trip the ~45 KB MCP response guard. For
-  // nodes, first slim any oversized single property value (Profile/PermissionSet
+  // For nodes, slim any oversized single property value (Profile/PermissionSet
   // grant matrices) to an `{__omitted}` marker — the full node is one
-  // `sfi.get_component` away — then trim rows from the tail to fit the budget.
-  let rows: readonly (Node | Edge)[] = result.value.rows;
-  let slimmedCount = 0;
+  // `sfi.get_component` away — BEFORE paging, so the byte budget below measures
+  // what will actually ship and a fat property costs the page fewer rows.
+  let windowRows: readonly (Node | Edge)[] = result.value.rows;
+  const slimmedIds = new Set<string>();
   if (result.value.select === 'nodes') {
-    const slimmed = slimGraphNodes(result.value.rows as readonly Node[]);
-    rows = slimmed.nodes;
-    slimmedCount = slimmed.slimmedCount;
+    const original = result.value.rows as readonly Node[];
+    const slimmed = slimGraphNodes(original);
+    windowRows = slimmed.nodes;
+    // `slimGraphNodes` returns the SAME object for a node it did not touch, so
+    // reference identity names exactly WHICH rows were slimmed. The note has to
+    // count the slimmed rows that were SHIPPED — counting the whole window
+    // would attribute rows skipped by `offset` to this page.
+    slimmed.nodes.forEach((node, i) => {
+      if (node !== original[i]) slimmedIds.add(node.id);
+    });
   }
-  const trimmed = byteTrimRows(rows, QUERY_GRAPH_BYTE_BUDGET);
-  const returnedCount = trimmed.rows.length;
-  // A byte-trim reduced the visible rows below what the LIMIT selected, so more
-  // remain even if the unpaged total already fit the limit.
-  const hasMore = result.value.hasMore || trimmed.trimmed;
 
+  // ADOPT the shared CR-22 pager: it owns the slice, the byte-trim, the
+  // forward-progress guarantee, `returnedCount` and the `nextOffset` pointer.
+  // The byte-trim it performs replaces this file's own `byteTrimRows`, which was
+  // a second spelling of the same arithmetic with no `nextOffset` attached —
+  // and a page trimmed by one copy while the pointer is computed by another is
+  // precisely how a caller ends up resuming past rows it never received.
+  const paged = paginateLegacy(windowRows, {
+    offset,
+    limit,
+    byteBudget: QUERY_GRAPH_BYTE_BUDGET,
+    binding: { tool: QUERY_GRAPH_TOOL, vaultHash: ctx.manifest.sourceTreeHash },
+  });
+  const rows = paged.items;
+  const returnedCount = rows.length;
+  const totalCount = result.value.totalCount;
+  const pageableCount = Math.min(totalCount, QUERY_GRAPH_MAX_LIMIT);
+  const capReached = totalCount > pageableCount;
+  // `paged.hasMore` only sees the materialised WINDOW; the unpaged `count(*)`
+  // sees the whole result set. Take the count(*) view, so a remainder hidden
+  // behind the hard cap is still reported as "more exist" rather than dressed
+  // up as a complete answer.
+  const hasMore = offset + returnedCount < totalCount;
+  // `paged.nextOffset` is null exactly when the window is exhausted, which at
+  // the cap means the next row is UNADDRESSABLE. Publishing a pointer there
+  // would be worse than publishing none: it would send the caller to an offset
+  // the compiler cannot reach.
+  const nextOffset = paged.nextOffset;
+
+  const slimmedOnPage = rows.filter((row) => slimmedIds.has((row as Node).id)).length;
   const slimNote =
-    slimmedCount > 0
-      ? ` ${slimmedCount} node(s) had an oversized property value summarised to an \`{__omitted}\` marker — fetch the full node with \`sfi.get_component\`.`
+    slimmedOnPage > 0
+      ? ` ${slimmedOnPage} node(s) had an oversized property value summarised to an \`{__omitted}\` marker — fetch the full node with \`sfi.get_component\`.`
       : '';
-  const trimNote = trimmed.trimmed
-    ? `Page byte-trimmed to ${returnedCount} of the ${result.value.returnedCount} row(s) the limit selected, to stay under the ~45 KB MCP response limit. Narrow with a where filter or a smaller limit to see the rest.`
+  const trimNote = paged.byteTrimmed
+    ? `Page byte-trimmed to ${returnedCount} of the ${limit} row(s) the page limit selected, to stay under the ~45 KB MCP response limit.`
     : '';
-  const note = `${trimNote}${slimNote}`.trim();
+  const pageNote =
+    hasMore || offset > 0
+      ? ` Showing rows ${offset}–${offset + returnedCount} of ${totalCount}.${
+          nextOffset === null
+            ? ''
+            : ` Resume with offset=${nextOffset} (same select/where/limit).`
+        }`
+      : '';
+  const capNote = capReached
+    ? ` Only the first ${pageableCount} of ${totalCount} matching row(s) are reachable: the compiled SELECT carries a hard LIMIT of ${QUERY_GRAPH_MAX_LIMIT} and no OFFSET, so no (limit, offset) pair addresses a row beyond it. Narrow with a \`where\` filter to bring the rest into range.`
+    : '';
+  const note = `${trimNote}${pageNote}${capNote}${slimNote}`.trim();
 
   return ok({
     data: {
       select: result.value.select,
-      rows: trimmed.rows,
+      rows,
       returnedCount,
-      totalCount: result.value.totalCount,
+      totalCount,
       hasMore,
-      limit: result.value.limit,
+      limit,
+      offset,
+      nextOffset,
+      pageableCount,
+      capReached,
       query: {
         compiledSql: result.value.compiledSql,
         params: result.value.params,
       },
-      truncated: trimmed.trimmed,
+      truncated: paged.byteTrimmed,
       ...(note.length > 0 ? { note } : {}),
       disclosure: DISCLOSURE,
     },

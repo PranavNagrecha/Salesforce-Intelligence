@@ -1633,6 +1633,25 @@ export const unusedFieldsDeepHandler = async (
     const cleanupDisclosure = `${CLEANUP_SYNTHESIS_DISCLOSURE} Also: ${REPORT_DASHBOARD_USAGE_CAVEAT}`;
     const buildCleanup = (n: number): UnusedFieldsDeepOutput => {
       const slice = liveFields.slice(0, n);
+      // UNUSED-FIELDS-DEEP-CLEANUP-PAGE-TRUNCATION.
+      //
+      // Two different facts, and this branch reported only one of them:
+      //   BYTE trim — rows dropped from THIS page to fit the response budget.
+      //   PAGE truncation — rows the CURSOR did not deliver at all.
+      // `liveFields` is ALREADY the paged slice, so `n < liveFields.length`
+      // can only ever observe the byte trim; the outer `truncated`
+      // (= `paged.hasMore`) was computed and then dropped on the floor.
+      //
+      // The effect: `sfi.field_cleanup_candidates` is a thin alias that always
+      // passes `format: 'cleanup'`, so it could NEVER report page truncation —
+      // measured at 1 of 25 rows shipped with `truncated: false` and no
+      // `nextOffset`, while json/csv/proposal on the identical call correctly
+      // said `truncated: true, nextOffset: 1`. Four constructions of one
+      // payload; the fourth drifted. A caller walking the cursor stopped after
+      // one row believing it had them all — in a tool whose entire job is
+      // listing fields that are candidates for DELETION.
+      const byteTrimmed = n < liveFields.length;
+      const anyTruncation = truncated || byteTrimmed;
       return {
         ...(scope !== null
           ? { appliedScope: { componentId: scope.componentId, object: scope.object } }
@@ -1643,15 +1662,21 @@ export const unusedFieldsDeepHandler = async (
         byParentObject,
         byConfidence,
         boundaries,
-        truncated: n < liveFields.length,
+        truncated: anyTruncation,
         trust,
         disclosure: cleanupDisclosure,
-        ...(n < liveFields.length
+        // The resume pointer describes the rows ACTUALLY shipped, so a cursor
+        // walk cannot skip the ones this page byte-trimmed away.
+        ...(anyTruncation ? { nextOffset: offset + slice.length } : {}),
+        ...(anyTruncation
           ? {
-              note:
-                `Showing ${n} of ${liveFields.length} cleanup candidates on this page — ` +
-                `trimmed to fit the response size limit. Narrow with a lower \`limit\` ` +
-                `or \`objectId\`, or page \`sfi.unused_fields_deep\` for the full detail.`,
+              note: byteTrimmed
+                ? `Showing ${n} of ${liveFields.length} cleanup candidates on this page — ` +
+                  `trimmed to fit the response size limit${truncated ? ', and more pages remain' : ''}. ` +
+                  `Resume from offset ${offset + slice.length}, narrow with a lower \`limit\` ` +
+                  `or \`objectId\`, or page \`sfi.unused_fields_deep\` for the full detail.`
+                : `Showing ${slice.length} of ${sorted.length} cleanup candidates — ` +
+                  `more pages remain. Resume from offset ${offset + slice.length}.`,
             }
           : {}),
       };

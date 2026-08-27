@@ -68,6 +68,7 @@ import {
   toCustomObjectId,
   toObjectApiName,
 } from './input-aliases.js';
+import { paginateLegacy } from './page-cursor.js';
 import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
@@ -76,6 +77,9 @@ import {
   USER_ASSIGNMENT_NOT_IN_VAULT,
   userAssignmentUnavailable,
 } from './vault-assignment-disclosure.js';
+
+/** Tool name the shared pager binds a minted cursor to. */
+const WHO_CAN_ACCESS_OBJECT_TOOL = 'sfi.who_can_access_object';
 
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
 /** CR-CAP-12: a `sharedWith` target that is a Group whose members we expand. */
@@ -242,9 +246,51 @@ export interface WhoCanAccessObjectOutput {
       readonly sample: readonly string[];
     }[];
   };
+  /**
+   * WHO-CAN-ACCESS-NO-RESUME-POINTER — the SECOND HALF of the 0.3.2 fix.
+   *
+   * 0.3.2 repaired this tool's completeness FLAGS after it shipped 109 of 218
+   * real rows reading `hasMore: false` / `truncated: false`. It never added the
+   * pointer those flags imply. The payload that shipped from 0.3.2 to here said
+   * "there are more granters" and then handed the caller nothing to reach them
+   * with: no `nextOffset`, no `nextCursor`, and not even a top-level
+   * `totalCount` to compare the shipped rows against — the row total lived only
+   * inside `summary.total`, one level down, where no generic page reader looks.
+   *
+   * A caller walking that payload — a host agent asking "which profiles will
+   * this change affect?" — saw `hasMore: true` and had to GUESS the next
+   * `offset` from `granters.length`, which is only right when it happens to
+   * equal the applied `limit`; the whole-response byte fit below routinely
+   * ships FEWER rows than the requested limit, so the obvious guess
+   * (`offset + limit`) silently skipped a whole window of profiles. The three
+   * fields below close that: `totalCount` says how many rows exist,
+   * `returnedCount` says how many arrived, and `nextOffset` says exactly where
+   * to resume — all three computed by the shared `paginateLegacy` pager, never
+   * re-spelled here.
+   */
+  readonly totalCount: number;
+  /** Granter rows actually shipped in `granters` on THIS page. */
+  readonly returnedCount: number;
+  /** Page size APPLIED to this response (may be below the requested `limit` — see the byte fit). */
   readonly limit: number;
+  /** Zero-based offset of the first row in `granters`. */
   readonly offset: number;
   readonly hasMore: boolean;
+  /**
+   * Offset to pass on the next call to reach the following page — always
+   * `offset + granters.length`, so it describes the rows ACTUALLY shipped
+   * rather than the rows the limit asked for. `null` when this page ends the
+   * list. No `nextCursor` is emitted: this tool advertises only `limit` and
+   * `offset`, and shipping an opaque token no advertised input accepts would be
+   * a second unusable pointer.
+   */
+  readonly nextOffset: number | null;
+  /**
+   * True when rows remain past this page. Was `hasMore || offset > 0`, which
+   * made the LAST page of a resumed walk publish `truncated: true` alongside
+   * `hasMore: false` — the two completeness axes contradicting each other
+   * (`envelope-honesty.ts` Law 2, P4). It now tracks `hasMore` exactly.
+   */
   readonly truncated: boolean;
   /** True when a grantor/rule scan hit the per-type node cap — the list may be incomplete. */
   readonly scanTruncated: boolean;
@@ -737,9 +783,28 @@ export const whoCanAccessObjectHandler = async (
   // repro after the first pass of this fix and seeing the global guard
   // engage anyway.
   const buildData = (pageLimit: number): WhoCanAccessObjectOutput => {
-    const page = interleaved.slice(offset, offset + pageLimit);
-    const hasMore = offset + page.length < total;
-    const truncated = hasMore || offset > 0;
+    // ADOPT the shared CR-22 pager rather than re-slicing here. It owns the
+    // slice, `totalCount`, `returnedCount`, `hasMore` and the `nextOffset`
+    // pointer in ONE place shared with ~50 other tools, so this tool cannot
+    // drift from them again — a hand-rolled second copy of exactly this
+    // arithmetic is what left the pointer missing for a whole release.
+    //
+    // `byteBudget` is deliberately disabled (`Number.MAX_SAFE_INTEGER`): the
+    // pager's budget measures only the `granters` ARRAY, while this tool fits
+    // the WHOLE `data` payload — fixed fields, summary and blindSpots included —
+    // via the binary search below (WHO-CAN-ACCESS-SILENT-BUDGET-DROP). Letting
+    // both trim would double-trim the page and leave the pointer describing the
+    // pre-trim slice. The outer search varies `pageLimit`; the pager then
+    // recomputes every pointer for the page that actually fits.
+    const paged = paginateLegacy(interleaved, {
+      offset,
+      limit: pageLimit,
+      byteBudget: Number.MAX_SAFE_INTEGER,
+      binding: { tool: WHO_CAN_ACCESS_OBJECT_TOOL, vaultHash: ctx.manifest.sourceTreeHash },
+    });
+    const page = paged.items;
+    const hasMore = paged.hasMore;
+    const truncated = hasMore;
 
     // Per-kind TRUE totals + a named sample of EACH kind, so a kind the page
     // cannot hold is still counted and named rather than silently absent.
@@ -767,7 +832,20 @@ export const whoCanAccessObjectHandler = async (
             )
             .join('; ')}. \`summary.byGranterType\` carries the complete per-kind counts and a named sample of each kind.`
         : '';
-    const pageNote = truncated ? ` Showing granters ${offset}–${offset + page.length} of ${total}; summary holds the complete counts. Page with offset/limit.` : '';
+    // The note fires whenever this response IS a page — including the LAST
+    // page of a resumed walk, where `truncated` is now correctly false but the
+    // caller still needs to know they are looking at a window. It names the
+    // exact resume offset rather than telling the caller to work it out: the
+    // byte fit can ship fewer rows than `limit`, so `offset + limit` is the
+    // wrong guess and was the only guess the old payload allowed.
+    const pageNote =
+      truncated || offset > 0
+        ? ` Showing granters ${offset}–${offset + page.length} of ${paged.totalCount}; summary holds the complete counts. ${
+            paged.nextOffset === null
+              ? 'This is the last page.'
+              : `Resume with offset=${paged.nextOffset} (same limit).`
+          }`
+        : '';
 
     // `fullDataShape.holders` was queried for the FULL requested-limit page;
     // every smaller candidate's container ids are a SUBSET of it (same fixed
@@ -797,9 +875,12 @@ export const whoCanAccessObjectHandler = async (
         sharedRecordsAccess: total - allRecordsAccess,
         byGranterType,
       },
+      totalCount: paged.totalCount,
+      returnedCount: page.length,
       limit: pageLimit,
       offset,
       hasMore,
+      nextOffset: paged.nextOffset,
       truncated,
       scanTruncated,
       confidence: 'declared',

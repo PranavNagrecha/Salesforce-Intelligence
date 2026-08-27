@@ -5,13 +5,23 @@
  * recursively walks `{vaultRoot}/source/` for `.cls` and `.trigger`
  * files (flat or DX-nested under `main/default/`) and grep-searches
  * each file line by line.
+ *
+ * Because the corpus is the filesystem rather than the graph, a zero-match
+ * answer has two completely different causes — the Apex was read and does not
+ * mention the query, or there was no Apex to read. `absence` (see
+ * {@link SearchApexAbsenceKind}) says which, derived from the walk itself
+ * rather than from `matches.length`.
  */
 
 import { readFile } from 'node:fs/promises';
 
-import type { McpError, McpResponse } from '@sf-intelligence/contracts';
+import type {
+  EvidenceAbsenceV2,
+  McpError,
+  McpResponse,
+} from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { collectVaultSourceFiles } from '@sf-intelligence/vault';
+import { buildCoverageEntries, collectVaultSourceFiles } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -40,11 +50,82 @@ export interface SearchApexSourceMatch {
   readonly snippet: string;
 }
 
+/**
+ * Which kind of empty a zero-match search is. TYPED-ABSENCE-SEARCH-APEX.
+ *
+ *   - `corpus-absent` — the walk found NO `.cls` / `.trigger` file at all under
+ *     `{vaultRoot}/source/`. Nothing was grepped, so "no matches" is a statement
+ *     about this VAULT, not about the org's Apex.
+ *   - `corpus-partially-read` — files were found but at least one could not be
+ *     READ. The lines in it were never compared against the query.
+ *   - `result-capped` — the walk stopped at `limit` before exhausting the
+ *     corpus, so the rest of it was never compared.
+ *   - `checked-empty` — every discovered file was read line by line and none
+ *     matched. This is the only kind that is a real finding of nothing, and it
+ *     is still bounded by what a LITERAL grep can see (see `note`).
+ */
+export type SearchApexAbsenceKind =
+  | 'corpus-absent'
+  | 'corpus-partially-read'
+  | 'result-capped'
+  | 'checked-empty';
+
+/**
+ * The typed absence attached to a zero-match search.
+ *
+ * WHY: before this block a zero-match response carried `matches: []`,
+ * `truncated: false` and a single fixed `boundaryNote` whose first sentence was
+ * "Searched retrieved Apex .cls and .trigger files under the vault source/
+ * tree ... No matches." A vault with NO source tree got that same sentence — so
+ * "this org's Apex does not mention X" and "this vault holds no Apex to search"
+ * were the same answer, and the caller would have concluded the former.
+ * `truncated: false` cannot carry the distinction either: it describes the PAGE,
+ * not whether the scan ran (see `tests/integration/envelope-honesty.ts`, which
+ * deliberately REJECTS it as an absence marker).
+ *
+ * `status` is the shared `EvidenceAbsenceStatusV2` vocabulary:
+ * `proven-none` only for `checked-empty`, `not-checked` for the two corpus
+ * gaps, `unknown` for a capped page.
+ */
+export interface SearchApexAbsence extends EvidenceAbsenceV2 {
+  readonly kind: SearchApexAbsenceKind;
+  /** `.cls` / `.trigger` files the walk actually discovered and read. */
+  readonly filesSearched: number;
+  /**
+   * Vault-relative paths that matched the suffix walk but could NOT be read —
+   * their lines were never compared to the query. Empty on the clean path.
+   */
+  readonly filesUnreadable: readonly string[];
+}
+
 export interface SearchApexSourceOutput {
   readonly matches: readonly SearchApexSourceMatch[];
   readonly truncated: boolean;
   /** Present when zero matches — grep-only; graph tools may still find references. */
   readonly boundaryNote?: string;
+  /**
+   * Present when zero matches: WHICH kind of empty this is. A bare `[]` is
+   * indistinguishable from an unretrieved Apex corpus; this says which.
+   */
+  readonly absence?: SearchApexAbsence;
+}
+
+/**
+ * What one {@link grepVaultSource} pass actually did.
+ *
+ * `matches` / `truncated` are the historical fields. `filesAvailable` and
+ * `unreadablePaths` were added so a caller can tell a searched-and-empty result
+ * from one where there was nothing to search or something could not be read —
+ * a zero over an empty corpus is not evidence of anything. Both are derived
+ * from the walk itself, never from `matches.length`.
+ */
+export interface GrepVaultSourceResult {
+  readonly matches: SearchApexSourceMatch[];
+  readonly truncated: boolean;
+  /** Files the suffix walk discovered (after `pathFilter`), read or not. */
+  readonly filesAvailable: number;
+  /** Vault-relative paths whose contents could not be read, so were NOT searched. */
+  readonly unreadablePaths: readonly string[];
 }
 
 /**
@@ -65,7 +146,7 @@ export const grepVaultSource = async (
     readonly suffixes: readonly string[];
     readonly pathFilter?: (vaultRelativePath: string) => boolean;
   },
-): Promise<Result<{ matches: SearchApexSourceMatch[]; truncated: boolean }, McpError>> => {
+): Promise<Result<GrepVaultSourceResult, McpError>> => {
   const matcher = buildMatcher({ query: options.query, regex: options.regex });
   if (!matcher.ok) return matcher;
 
@@ -77,6 +158,7 @@ export const grepVaultSource = async (
     : all;
 
   const matches: SearchApexSourceMatch[] = [];
+  const unreadablePaths: string[] = [];
   let truncated = false;
 
   for (const file of files) {
@@ -90,6 +172,7 @@ export const grepVaultSource = async (
       matcher.value,
       options.limit - matches.length,
     );
+    if (fileMatches.unreadable) unreadablePaths.push(file.vaultRelativePath);
     matches.push(...fileMatches.matches);
     if (fileMatches.truncated) {
       truncated = true;
@@ -97,7 +180,12 @@ export const grepVaultSource = async (
     }
   }
 
-  return ok({ matches, truncated });
+  return ok({
+    matches,
+    truncated,
+    filesAvailable: files.length,
+    unreadablePaths,
+  });
 };
 
 const SEARCH_EMPTY_BOUNDARY =
@@ -125,6 +213,91 @@ const apexSearchNeedles = (query: string): readonly string[] => {
   return [...out];
 };
 
+/**
+ * What the vault's own coverage rows claim about the Apex families, rendered
+ * for the `corpus-absent` reason. The point is to separate the two ways a vault
+ * can hold no Apex source: the org genuinely has none (coverage agrees), or the
+ * retrieve/prune lost it (coverage says N landed, the tree holds 0) — which is
+ * a VAULT defect the caller must not read as an org fact.
+ */
+const apexCoverageClaim = (ctx: Context): string => {
+  const rows = buildCoverageEntries(ctx.manifest).filter(
+    (entry) => entry.type === 'ApexClass' || entry.type === 'ApexTrigger',
+  );
+  if (rows.length === 0) {
+    return 'This vault’s manifest carries no ApexClass / ApexTrigger coverage row at all, so it cannot even say whether Apex was requested.';
+  }
+  const claimed = rows.reduce((sum, entry) => sum + entry.retrieved, 0);
+  if (claimed > 0) {
+    return `The manifest CONTRADICTS the tree: its coverage rows claim ${String(claimed)} retrieved Apex component(s) (${rows
+      .map((entry) => `${entry.type} ${String(entry.retrieved)}`)
+      .join(', ')}) while \`source/\` holds none — the source tree was pruned or never written, so this is a VAULT gap, not an org without Apex.`;
+  }
+  return `The manifest agrees the retrieve landed no Apex (${rows
+    .map((entry) => `${entry.type} ${String(entry.retrieved)}`)
+    .join(', ')}), so there was nothing to grep; that still is not proof the ORG has no Apex — only that this refresh retrieved none.`;
+};
+
+/**
+ * Classify a ZERO-MATCH search. TYPED-ABSENCE-SEARCH-APEX.
+ *
+ * Called only when `matches` is empty: a populated result asserts no absence
+ * and must not acquire a not-checked marker. Ordered most-severe first so a
+ * corpus that was never read can never be reported as "read and clean".
+ */
+const classifyEmptySearch = (
+  ctx: Context,
+  filesSearched: number,
+  filesUnreadable: readonly string[],
+  truncated: boolean,
+): SearchApexAbsence => {
+  if (filesSearched === 0) {
+    return {
+      kind: 'corpus-absent',
+      status: 'not-checked',
+      filesSearched,
+      filesUnreadable,
+      note:
+        'NOT CHECKED: the walk over `{vaultRoot}/source/` found NO `.cls` or `.trigger` file, so not one line was compared against this query. ' +
+        'Zero matches here says nothing about the org’s Apex. ' +
+        `${apexCoverageClaim(ctx)} Run \`/sfi-refresh\` and search again.`,
+    };
+  }
+  if (truncated) {
+    return {
+      kind: 'result-capped',
+      status: 'unknown',
+      filesSearched,
+      filesUnreadable,
+      note:
+        `CAPPED: the walk stopped at the \`limit\` before exhausting the ${String(filesSearched)} Apex file(s) in this vault, ` +
+        'so the remainder was never compared. Raise `limit` before reading this as an absence.',
+    };
+  }
+  if (filesUnreadable.length > 0) {
+    return {
+      kind: 'corpus-partially-read',
+      status: 'not-checked',
+      filesSearched,
+      filesUnreadable,
+      note:
+        `PARTIAL: ${String(filesUnreadable.length)} of ${String(filesSearched)} discovered Apex file(s) could not be read (${filesUnreadable.join(', ')}), ` +
+        'so their lines were never compared against this query. The zero covers only the files that WERE read.',
+    };
+  }
+  return {
+    kind: 'checked-empty',
+    status: 'proven-none',
+    filesSearched,
+    filesUnreadable,
+    note:
+      `CHECKED: all ${String(filesSearched)} \`.cls\` / \`.trigger\` file(s) in this vault were read line by line and none matched. ` +
+      'This is a real finding of nothing FOR A LITERAL GREP — it is still blind to references the source does not spell out ' +
+      '(dynamic SOQL, `Schema.describeSObjects`, `get(fieldName)`, managed-package code). Use `sfi.find_field_anywhere` / ' +
+      '`sfi.find_code_usages` for graph-backed references.',
+  };
+};
+
 export const searchApexSourceHandler = async (
   ctx: Context,
   input: SearchApexSourceInput,
@@ -133,6 +306,12 @@ export const searchApexSourceHandler = async (
 
   const needles = apexSearchNeedles(input.query);
   const matches: SearchApexSourceMatch[] = [];
+  // Every needle greps the SAME corpus, so `filesAvailable` is identical across
+  // passes and the unreadable set is a union rather than a sum. Both are read
+  // off the walk, never inferred from `matches.length` — the whole point is
+  // that the two are independent.
+  let filesSearched = 0;
+  const unreadable = new Set<string>();
   let truncated = false;
   for (const needle of needles) {
     if (matches.length >= limit) break;
@@ -143,6 +322,8 @@ export const searchApexSourceHandler = async (
       suffixes: APEX_SUFFIXES,
     });
     if (!grep.ok) return grep;
+    filesSearched = Math.max(filesSearched, grep.value.filesAvailable);
+    for (const path of grep.value.unreadablePaths) unreadable.add(path);
     for (const hit of grep.value.matches) {
       if (matches.some((m) => m.path === hit.path && m.line === hit.line)) continue;
       matches.push(hit);
@@ -154,11 +335,29 @@ export const searchApexSourceHandler = async (
     truncated = truncated || grep.value.truncated;
   }
 
+  // `boundaryNote` is DERIVED from the classification rather than being a fixed
+  // string, because the fixed string opened with "Searched retrieved Apex .cls
+  // and .trigger files under the vault source/ tree — No matches." A vault
+  // holding no Apex at all got that same sentence, which is the lie this fix
+  // exists to remove: it is only true on the `checked-empty` path.
+  const absence =
+    matches.length === 0
+      ? classifyEmptySearch(ctx, filesSearched, [...unreadable].sort(), truncated)
+      : null;
+
   return ok({
     data: {
       matches,
       truncated,
-      ...(matches.length === 0 ? { boundaryNote: SEARCH_EMPTY_BOUNDARY } : {}),
+      ...(absence !== null
+        ? {
+            boundaryNote:
+              absence.kind === 'checked-empty'
+                ? SEARCH_EMPTY_BOUNDARY
+                : (absence.note ?? SEARCH_EMPTY_BOUNDARY),
+            absence,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -197,12 +396,18 @@ const searchFile = async (
 ): Promise<{
   readonly matches: readonly SearchApexSourceMatch[];
   readonly truncated: boolean;
+  /**
+   * True when the file could not be read. It is NOT a file with zero matches —
+   * its lines were never compared — so the caller must not fold it into a
+   * "searched and found nothing" claim.
+   */
+  readonly unreadable: boolean;
 }> => {
   let raw: string;
   try {
     raw = await readFile(fileAbsPath, 'utf-8');
   } catch {
-    return { matches: [], truncated: false };
+    return { matches: [], truncated: false, unreadable: true };
   }
 
   const lines = raw.split('\n');
@@ -211,7 +416,7 @@ const searchFile = async (
     const lineText = lines[i] ?? '';
     if (!matches(lineText)) continue;
     if (hits.length >= remaining) {
-      return { matches: hits, truncated: true };
+      return { matches: hits, truncated: true, unreadable: false };
     }
     hits.push({
       path: vaultRelativePath,
@@ -219,5 +424,5 @@ const searchFile = async (
       snippet: lineText.trim(),
     });
   }
-  return { matches: hits, truncated: false };
+  return { matches: hits, truncated: false, unreadable: false };
 };

@@ -589,6 +589,60 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
     expect(r.value.data.boundaryNote).toContain('INTERLEAVED');
   });
 
+  /**
+   * The pointer, on the small SKEW fixture and straight off the handler — the
+   * cheap half of the guard. `granters` is a ROUND-ROBIN permutation of the
+   * sorted list, so `nextOffset` has to describe the interleaved order the page
+   * was actually cut from, not the underlying `granterId` sort.
+   */
+  it('a truncated page carries a resume pointer describing the rows it shipped', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: PAGE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.hasMore).toBe(true);
+    // Pre-fix: hasMore said "there is more" and these three fields did not exist.
+    expect(d.totalCount).toBe(d.summary.total);
+    expect(d.returnedCount).toBe(d.granters.length);
+    expect(d.nextOffset).toBe(d.offset + d.granters.length);
+  });
+
+  /**
+   * The exactly-once walk, driven ONLY by the published pointer — no `PAGE`
+   * arithmetic anywhere. A `nextOffset` that is PRESENT BUT WRONG skips or
+   * repeats rows silently, which is worse than one that is missing, so this is
+   * the assertion that matters.
+   */
+  it('a walk driven ONLY by nextOffset enumerates every row exactly once', async () => {
+    const seen: string[] = [];
+    let offset: number | null = 0;
+    let pages = 0;
+    let total = -1;
+    while (offset !== null) {
+      const page = await whoCanAccessObjectHandler(ctx, {
+        componentId: SKEW_OBJ,
+        limit: PAGE,
+        offset,
+      });
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      const d = page.value.data;
+      pages += 1;
+      total = d.summary.total;
+      expect(d.offset).toBe(offset);
+      expect(d.returnedCount).toBe(d.granters.length);
+      if (d.truncated) expect(d.hasMore).toBe(true);
+      for (const g of d.granters) seen.push(`${g.granterId}|${g.via}|${g.sourceRuleId ?? ''}`);
+      if (d.hasMore) expect(d.nextOffset).toBe(offset + d.granters.length);
+      else expect(d.nextOffset).toBeNull();
+      offset = d.nextOffset;
+      expect(pages).toBeLessThan(60);
+    }
+    expect(pages).toBeGreaterThan(1);
+    expect(seen).toHaveLength(total);
+    expect(new Set(seen).size).toBe(total);
+  });
+
   it('paging still enumerates every row exactly once', async () => {
     const all = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: 250 });
     expect(all.ok).toBe(true);
@@ -672,6 +726,10 @@ describe('whoCanAccessObjectHandler — whole-response byte budget', () => {
     readonly truncated: boolean;
     readonly total: number;
     readonly droppedCount: number | undefined;
+    /** WHO-CAN-ACCESS-NO-RESUME-POINTER: read off the SERIALIZED envelope. */
+    readonly totalCount: number | undefined;
+    readonly returnedCount: number | undefined;
+    readonly nextOffset: number | null | undefined;
   }
 
   /** Walk the tool the way a host does: handler → jsonResult envelope → parse. */
@@ -698,6 +756,9 @@ describe('whoCanAccessObjectHandler — whole-response byte budget', () => {
       truncated: data['truncated'] as boolean,
       total: (data['summary'] as { total: number }).total,
       droppedCount: parsed.responseBudget?.droppedCount,
+      totalCount: data['totalCount'] as number | undefined,
+      returnedCount: data['returnedCount'] as number | undefined,
+      nextOffset: data['nextOffset'] as number | null | undefined,
     };
   };
 
@@ -764,6 +825,78 @@ describe('whoCanAccessObjectHandler — whole-response byte budget', () => {
       expect(pages).toBeLessThan(120);
     }
     expect(seen.size).toBe(BUDGET_PERMSET_COUNT);
+  });
+
+  /**
+   * WHO-CAN-ACCESS-NO-RESUME-POINTER — the SECOND HALF of the 0.3.2 fix.
+   *
+   * 0.3.2 repaired this tool's completeness FLAGS (the 109-of-218 rows shipped
+   * under `hasMore: false`). It never added the pointer those flags imply, so
+   * from 0.3.2 to here the payload said `hasMore: true` and gave the caller
+   * nothing to resume from: no `nextOffset`, no `nextCursor`, and no top-level
+   * `totalCount` to compare the shipped rows against.
+   *
+   * A caller had to GUESS, and the only available guess — `offset + limit` — is
+   * WRONG on exactly this fixture, because the whole-response byte fit ships
+   * fewer rows than the requested limit. That is what this test drives: the walk
+   * below never adds `limit` to anything and never reads `granters.length`. It
+   * follows `nextOffset` and nothing else, all the way to `null`.
+   *
+   * It is asserted on the SERIALIZED envelope, not the handler return. Asserting
+   * on the handler return is how the 0.3.2 bug survived its own tests: the
+   * global response guard trims `data` AFTER the handler builds it, so a handler
+   * return that looks honest can still serialize into a lie.
+   *
+   * A present-but-wrong `nextOffset` is worse than a missing one, so the
+   * exactly-once assertion — not the existence check — is the load-bearing one
+   * here.
+   */
+  it('FAIL-BEFORE/PASS-AFTER: a walk driven ONLY by nextOffset reaches every row exactly once', async () => {
+    const seen: string[] = [];
+    const pointers: (number | null | undefined)[] = [];
+    let offset = 0;
+    let pages = 0;
+    let total = -1;
+    for (;;) {
+      const page = await envelopeOf(budgetCtx, { componentId: BUDGET_OBJ, limit: 250, offset });
+      pages += 1;
+      total = page.total;
+
+      // The page-axis counts must describe the rows that ACTUALLY arrived.
+      expect(page.totalCount, `page ${pages}: totalCount missing`).toBe(page.total);
+      expect(page.returnedCount, `page ${pages}: returnedCount`).toBe(page.granters.length);
+      expect(page.offset, `page ${pages}: offset`).toBe(offset);
+      // Law 2, P4: the two completeness axes may not contradict each other.
+      // Pre-fix `truncated` was `hasMore || offset > 0`, so the LAST page of a
+      // resumed walk published `truncated: true` with `hasMore: false`.
+      if (page.truncated) expect(page.hasMore, `page ${pages}: truncated⇒hasMore`).toBe(true);
+
+      for (const g of page.granters) seen.push(`${g.granterId}|${g.via}`);
+      pointers.push(page.nextOffset);
+
+      if (page.hasMore) {
+        // Law 2, P2: nextOffset === offset + the rows shipped. Not
+        // offset + limit — the byte fit routinely ships fewer.
+        expect(page.nextOffset, `page ${pages}: resume pointer`).toBe(
+          offset + page.granters.length,
+        );
+        offset = page.nextOffset as number;
+      } else {
+        expect(page.nextOffset, `page ${pages}: exhausted page must not point on`).toBeNull();
+        break;
+      }
+      expect(pages).toBeLessThan(120);
+    }
+
+    // The walk really did page — a one-page walk would prove nothing.
+    expect(pages).toBeGreaterThan(1);
+    // At least one page shipped FEWER rows than the requested limit, which is
+    // precisely the case where `offset + limit` would have skipped a window.
+    expect(pointers.some((p, i) => p !== null && p !== 250 * (i + 1))).toBe(true);
+
+    expect(total).toBe(BUDGET_PERMSET_COUNT);
+    expect(seen).toHaveLength(BUDGET_PERMSET_COUNT);
+    expect(new Set(seen).size).toBe(BUDGET_PERMSET_COUNT);
   });
 
   it('a small in-budget request is unaffected (no shrink, byte-identical shape)', async () => {
