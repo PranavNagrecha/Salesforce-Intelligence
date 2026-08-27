@@ -97,8 +97,9 @@ import type { Context } from '../server.js';
 import {
   fieldMatchesObjectScope,
   mergeInputAliases,
-  resolveObjectScopeParentId,
+  resolveExistingObjectScope,
   toCustomObjectId,
+  type ResolvedObjectScope,
 } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
@@ -218,6 +219,18 @@ export interface PiiInventorySummary {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface PiiInventoryOutput {
+  /**
+   * PII-INVENTORY-ANSWERS-A-NONEXISTENT-OBJECT: present ONLY on an
+   * object-scoped call — echoes the object the inventory was narrowed to, in
+   * the VAULT's exact casing, so a scoped answer can never be read as the
+   * org-wide one. Absent on a bare call, keeping that response byte-identical
+   * to the pre-fix shape. `mode` is always `component` when present (a bare
+   * call omits the whole block, i.e. the `all` reading).
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   /**
    * The matched fields. Empty (`[]`) when `format: 'csv'` was requested —
    * the same rows are then carried in `csv` instead, so the response does
@@ -407,6 +420,12 @@ interface ClassifiedPiiFields {
   readonly sorted: readonly PiiField[];
   readonly byClassification: Readonly<Record<PiiClassification, number>>;
   readonly byCategory: Readonly<Record<PiiCategory, number>>;
+  /**
+   * The VERIFIED object scope this set was narrowed to, or `null` for a bare
+   * org-wide call. Carries the vault's exact casing, so callers echo an id that
+   * actually exists rather than the one the caller happened to type.
+   */
+  readonly scope: ResolvedObjectScope | null;
 }
 
 /**
@@ -427,7 +446,30 @@ const classifyPiiFields = async (
 ): Promise<Result<ClassifiedPiiFields, McpError>> => {
   const classificationFilter = input.classification ?? 'all';
   const categoryFilter = input.category ?? 'all';
-  const objectScopeParentId = resolveObjectScopeParentId(input);
+
+  // PII-INVENTORY-ANSWERS-A-NONEXISTENT-OBJECT: resolve the optional object
+  // scope AND verify it exists BEFORE scanning, via the same
+  // `resolveExistingObjectScope` `unused_fields_deep` / `flow_fault_audit` /
+  // `flow_bulkification_audit` use.
+  //
+  // What this replaced: `resolveObjectScopeParentId` did a pure STRING coercion
+  // (`X` -> `CustomObject:X`) and `fieldMatchesObjectScope` then string-compared
+  // it against every field's parent. The vault was never asked whether the
+  // object existed. What a user saw: asking "what personal data does
+  // Zzz_Nonexistent__c hold?" returned `{fields: [], summary: {total: 0}}` with
+  // no boundary, no disclosure, nothing — an UNCHECKED zero wearing a CHECKED
+  // zero's clothes. On a PRIVACY question that empty reads as "nothing
+  // sensitive here", about an object the tool never found. The same string
+  // compare also silently zeroed a REAL object typed in the wrong case
+  // (`contact` never equals `Contact`), so an exactly-correct question got the
+  // exactly-wrong "no PII" answer.
+  //
+  // `null` = bare org-wide call (byte-identical response); a resolved scope
+  // narrows the scan and is echoed as `appliedScope`; an absent object is a
+  // named `invalid-query`, never widened back to the org-wide inventory.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
 
   const allFieldsResult = await fetchAllCustomFields(ctx);
   if (!allFieldsResult.ok) {
@@ -506,10 +548,9 @@ const classifyPiiFields = async (
   };
 
   for (const node of allFieldsResult.value) {
-    if (
-      objectScopeParentId !== undefined &&
-      !fieldMatchesObjectScope(node, objectScopeParentId)
-    ) {
+    // Filter on the VAULT's id (`scope.componentId`), not the caller's string,
+    // so a wrong-cased but real object matches the fields it actually owns.
+    if (scope !== null && !fieldMatchesObjectScope(node, scope.componentId)) {
       continue;
     }
     const detection = resolvePii(node);
@@ -539,6 +580,7 @@ const classifyPiiFields = async (
     sorted: [...matched].sort(compareFields),
     byClassification,
     byCategory,
+    scope,
   });
 };
 
@@ -562,7 +604,7 @@ export const piiInventoryHandler = async (
 
   const classified = await classifyPiiFields(ctx, input);
   if (!classified.ok) return classified;
-  const { sorted, byClassification, byCategory } = classified.value;
+  const { sorted, byClassification, byCategory, scope } = classified.value;
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed objectId/classification/category, different
@@ -607,6 +649,11 @@ export const piiInventoryHandler = async (
     refreshedAt: ctx.manifest.refreshedAt,
   };
   const dataWithoutCsv = {
+    // appliedScope FIRST + only when scoped, so a bare call omits the whole
+    // block and its serialized response stays byte-identical to pre-fix.
+    ...(scope !== null
+      ? { appliedScope: { object: scope.componentId, mode: 'component' as const } }
+      : {}),
     fields: input.format === 'csv' ? [] : kept,
     summary: {
       total: sorted.length,

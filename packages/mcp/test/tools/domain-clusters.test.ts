@@ -268,19 +268,24 @@ describe('domainClustersHandler (two disjoint components)', () => {
     }
   });
 
-  it('an objectApiName that resolves to no vault object returns an honest empty + note (never a silent org-wide dump)', async () => {
+  // ESCALATED by DOMAIN-CLUSTERS-ANSWERS-A-NONEXISTENT-OBJECT (0.3.3). This
+  // test used to assert `ok: true` with `clusters: []` + a note. That note said
+  // the object "is absent from the vault, OR is not one of the three
+  // domain-shaped types" — an either/or a reader resolves in the tool's favour,
+  // reading "this object just didn't cluster" off a question about an object
+  // that was never found. An OBJECT alias PROMISES an object, so its absence is
+  // now a named `invalid-query`, matching `unused_fields_deep` /
+  // `flow_fault_audit`. The generic SEED path keeps the note (a seed may
+  // legitimately be an ApexClass or Flow) — see the test below.
+  it('an objectApiName that resolves to no vault object is REFUSED (never an ambiguous empty)', async () => {
     const r = await domainClustersHandler(ctx, {
       minDensity: 0.1,
       objectApiName: 'NotAnObject__c',
     });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.appliedScope).toEqual({
-      seed: 'CustomObject:NotAnObject__c',
-      mode: 'seeded',
-    });
-    expect(r.value.data.clusters).toEqual([]);
-    expect(r.value.data.note).toBeDefined();
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('NotAnObject__c');
   });
 
   it('refuses an objectApiName that conflicts with a seed (never a silent pick)', async () => {
@@ -649,4 +654,106 @@ describe('domainClustersHandler — per-cluster member cap (oversize fix)', () =
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+// =============================================================================
+// UNRESOLVABLE-OBJECT-SCOPE-ANSWERED-ANYWAY (0.3.3). The OBJECT-alias path
+// (`objectApiName` / `object` / `objectId` / `CustomObject:` componentId) took
+// the caller's string on trust: it was coerced to a `CustomObject:` id and
+// looked up among the cluster MEMBERS only. An object absent from the vault
+// therefore returned `clusters: []` plus a note that could not tell the reader
+// WHICH of two very different things happened — "it exists but did not cluster"
+// or "no such object" — and a REAL object typed in the wrong case
+// (`supportcase`) fell into the same empty because member ids are exact-cased.
+//
+// The generic SEED path (`seed` / `seedComponentId` / bare `componentId`) keeps
+// its note: a seed may legitimately be an ApexClass or Flow, which an object
+// resolver cannot verify. Only the OBJECT alias — which PROMISES an object —
+// is verified against the vault.
+// =============================================================================
+describe('domainClustersHandler — object scope existence (honesty)', () => {
+  const ABSENT = 'Zzz_Nonexistent_Object_9x7__c';
+  let store: GraphStore;
+  let ctx: Context;
+
+  const SALES_ACCOUNT = 'CustomObject:SalesAccount';
+  const SUPPORT_CASE = 'CustomObject:SupportCase';
+
+  beforeAll(async () => {
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: SALES_ACCOUNT, type: 'CustomObject', apiName: 'SalesAccount' }),
+        makeNode({ id: 'CustomObject:SalesOpportunity', type: 'CustomObject', apiName: 'SalesOpportunity' }),
+        makeNode({ id: 'ApexClass:SalesService', type: 'ApexClass', apiName: 'SalesService' }),
+        makeNode({ id: SUPPORT_CASE, type: 'CustomObject', apiName: 'SupportCase' }),
+        makeNode({ id: 'ApexClass:SupportCaseService', type: 'ApexClass', apiName: 'SupportCaseService' }),
+        makeNode({ id: 'Flow:SupportCaseRouter', type: 'Flow', apiName: 'SupportCaseRouter' }),
+      ],
+      edges: [
+        makeEdge({ fromId: SALES_ACCOUNT, toId: 'CustomObject:SalesOpportunity', edgeType: 'references' }),
+        makeEdge({ fromId: 'CustomObject:SalesOpportunity', toId: 'ApexClass:SalesService', edgeType: 'references' }),
+        makeEdge({ fromId: 'ApexClass:SalesService', toId: SALES_ACCOUNT, edgeType: 'references' }),
+        makeEdge({ fromId: SUPPORT_CASE, toId: 'ApexClass:SupportCaseService', edgeType: 'references' }),
+        makeEdge({ fromId: 'ApexClass:SupportCaseService', toId: 'Flow:SupportCaseRouter', edgeType: 'references' }),
+        makeEdge({ fromId: 'Flow:SupportCaseRouter', toId: SUPPORT_CASE, edgeType: 'references' }),
+      ],
+    };
+    const built = await makeFreshCtx('object-scope-existence.db', [seed]);
+    store = built.store;
+    ctx = built.ctx;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('REFUSES an objectApiName naming no vault object (never an ambiguous empty)', async () => {
+    const r = await domainClustersHandler(ctx, { minDensity: 0.1, objectApiName: ABSENT });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(ABSENT);
+  });
+
+  it('REFUSES an absent CustomObject: componentId', async () => {
+    const r = await domainClustersHandler(ctx, {
+      minDensity: 0.1,
+      componentId: `CustomObject:${ABSENT}`,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a REAL object in the wrong case still answers (case-insensitive resolution)', async () => {
+    const r = await domainClustersHandler(ctx, { minDensity: 0.1, objectApiName: 'supportcase' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // appliedScope carries the VAULT's exact-cased id, never the caller's.
+    expect(r.value.data.appliedScope).toEqual({ seed: SUPPORT_CASE, mode: 'seeded' });
+    expect(r.value.data.clusters.length).toBe(1);
+    expect(r.value.data.clusters[0]?.members.some((m) => m.id === SUPPORT_CASE)).toBe(true);
+  });
+
+  // The generic SEED path is NOT an object promise — an ApexClass / Flow seed is
+  // legitimate — so it keeps the honest empty + note it already had.
+  it('a bare non-object seed keeps its honest empty + note (not refused)', async () => {
+    const r = await domainClustersHandler(ctx, {
+      minDensity: 0.1,
+      seed: 'CustomObject:NotInAnyDomain__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.clusters).toEqual([]);
+    expect(r.value.data.note).toBeDefined();
+  });
+
+  // Regression guard: the bare org-wide call must stay byte-identical.
+  it('the org-wide call is unchanged (two clusters, no appliedScope)', async () => {
+    const r = await domainClustersHandler(ctx, { minDensity: 0.1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.clusters.length).toBe(2);
+    expect('appliedScope' in r.value.data).toBe(false);
+  });
 });

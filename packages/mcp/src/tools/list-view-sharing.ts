@@ -34,7 +34,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { resolveObjectAlias } from './input-aliases.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanTruncationNote } from './scan-cap.js';
 
@@ -157,6 +157,14 @@ export interface ListViewSharingOutput {
    * filter (== `summary.listViews` when filtered).
    */
   readonly appliedScope: {
+    /**
+     * LIST-VIEW-SHARING-ANSWERS-A-NONEXISTENT-OBJECT: in OBJECT mode, the
+     * canonical `CustomObject:` id the scan was actually run against — always
+     * the VAULT's exact casing, never the caller's string, so the response
+     * never asserts an id that does not exist. `null` in `ListView:` reverse
+     * mode, where the single view's own `componentId` is the scope.
+     */
+    readonly object: string | null;
     readonly sharedToId: string | null;
     readonly nameContains: string | null;
     readonly filtered: boolean;
@@ -294,16 +302,42 @@ export const listViewSharingHandler = async (
   input: ListViewSharingInput,
 ): Promise<Result<McpResponse<ListViewSharingOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
+  const rawComponentIdInput = input.componentId;
 
   // L2 Alias OS: resolve an OBJECT scope from object / objectApiName / objectId
   // or a CustomObject: componentId (a reverse-mode ListView: componentId is NOT
   // an object alias). Disagreeing object aliases -> invalid-query.
-  const objScope = resolveObjectAlias(input, {
-    bareComponentIdIsObject: false,
-    required: false,
-  });
+  //
+  // LIST-VIEW-SHARING-ANSWERS-A-NONEXISTENT-OBJECT: the scope is now VERIFIED
+  // against the vault before the scan, via the same `resolveExistingObjectScope`
+  // `unused_fields_deep` / `flow_fault_audit` / `flow_bulkification_audit` use.
+  //
+  // What this replaced: the sync `resolveObjectAlias` coerced the caller's
+  // string to a `CustomObject:` id and the object branch below handed it
+  // straight to `listNodesByType(..., {parentId})`. An id no vault node owns has
+  // no children, so the query returned zero rows. What a user saw: asking "who
+  // can see Zzz_Nonexistent__c's list views?" came back `listViews: []`,
+  // `summary.sharedWithGroupsRoles: 0`, `distinctTargets: 0` and a boundaryNote
+  // about view-vs-record access — no boundary, no disclosure, nothing naming
+  // the miss. On an ACCESS question that confident empty reads as "nobody can
+  // see it", about an object the tool never found. The unverified parentId also
+  // silently zeroed a REAL object typed in the wrong case (`CustomObject:account`
+  // matches no row), so an exactly-correct question got an exactly-wrong answer.
+  //
+  // A BARE (`:`-free) componentId is still NOT an object alias here — this tool
+  // is polymorphic and its `componentId` carries the `ListView:` reverse mode,
+  // so a bare value keeps falling through to the explicit
+  // "CustomObject: or ListView:" refusal below rather than being invented into
+  // an object. Stripping it from the resolver's view preserves the old
+  // `bareComponentIdIsObject: false` semantics exactly.
+  const bareComponentId =
+    rawComponentIdInput !== undefined && !rawComponentIdInput.includes(':');
+  const objScope = await resolveExistingObjectScope(
+    ctx.graph,
+    bareComponentId ? { ...input, componentId: undefined } : input,
+  );
   if (!objScope.ok) return err(objScope.error);
-  const rawComponentId = input.componentId;
+  const rawComponentId = rawComponentIdInput;
   let resolvedId: string;
   if (objScope.value !== null) {
     // OBJECT mode. A ListView: componentId alongside an object is ambiguous.
@@ -419,6 +453,7 @@ export const listViewSharingHandler = async (
 
   const summary = buildSummary(scopedRows, input.sharedWithRoleApiName);
   const appliedScope: ListViewSharingOutput['appliedScope'] = {
+    object: isObject ? componentId : null,
     sharedToId: sharedToFilter ?? null,
     nameContains: input.nameContains ?? null,
     filtered,

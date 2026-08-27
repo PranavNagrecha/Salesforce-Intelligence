@@ -536,16 +536,24 @@ describe('generateSharingSummaryHandler (phantom CustomObject — B29)', () => {
     expect(doc.boundaries.join('\n')).toContain('targetMissing');
   });
 
-  it('does NOT claim targetMissing for a genuinely-unknown name (no node, no edges)', async () => {
+  // ESCALATED by GENERATE-SHARING-SUMMARY-ANSWERS-A-NONEXISTENT-OBJECT (0.3.3).
+  // This test used to assert `ok: true` with a document whose only trace of the
+  // miss was the body line "_(no CustomObjects matched the filter)_" — the
+  // clean-zero defect itself: a full-looking sharing document, no structured
+  // marker, read by a security reviewer as "this object has no sharing". A name
+  // the vault knows in NEITHER sense (no node, no inbound edges) is now a named
+  // `invalid-query`. Its original point stands and is asserted below: it must
+  // NOT be dressed up as a B29 phantom, which is a different claim.
+  it('a genuinely-unknown name (no node, no edges) is REFUSED, not called a phantom', async () => {
     const result = await generateSharingSummaryHandler(ctx, {
       objectFilter: 'Totally_Unknown__c',
     });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value.data.targetMissing).toBeUndefined();
-    expect(result.value.data.document.body).toContain(
-      'no CustomObjects matched the filter',
-    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('Totally_Unknown__c');
+    // Not a phantom claim: the refusal is about resolution, not retrieval.
+    expect(result.error.message).not.toContain('referenced');
   });
 });
 
@@ -745,5 +753,83 @@ describe('generateSharingSummaryHandler (OBJECT_SCAN_CAP truncation — CR-RV12)
     expect(result.value.data.document.boundaries.join('\n')).not.toContain(
       'Object scan capped',
     );
+  });
+});
+
+// =============================================================================
+// UNRESOLVABLE-OBJECT-SCOPE-ANSWERED-ANYWAY (0.3.3) — the `unused_fields_deep`
+// family, on an ACCESS question.
+//
+// `objectFilter` / `objectApiName` / `componentId` narrowed the scan with a raw
+// STRING COMPARE (`o.apiName === filter`) against the objects already in hand.
+// The vault was never asked whether the named object exists, so an object that
+// is not there matched nothing and the tool emitted a complete-looking sharing
+// document whose only trace of the miss was the body line
+// "_(no CustomObjects matched the filter)_" — no `targetMissing`, no refusal,
+// nothing in the structured payload. A security reviewer reads that document as
+// "this object has no sharing rules and no grants", about an object never found.
+//
+// The same string compare made a REAL object typed in the wrong case
+// (`account`) produce that identical empty document.
+//
+// The B29 PHANTOM case is deliberately preserved: an object with inbound edges
+// but no retrieved definition is a DIFFERENT, answerable question ("referenced,
+// not retrieved") and still returns its `targetMissing` document.
+// =============================================================================
+describe('generateSharingSummaryHandler — object scope existence (honesty)', () => {
+  const ABSENT = 'Zzz_Nonexistent_Object_9x7__c';
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('object-scope-existence.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('REFUSES an objectFilter naming no vault object (never an empty document)', async () => {
+    const r = await generateSharingSummaryHandler(ctx, { objectFilter: ABSENT });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(ABSENT);
+  });
+
+  it('REFUSES the objectApiName and componentId aliases too', async () => {
+    for (const input of [
+      { objectApiName: ABSENT },
+      { componentId: `CustomObject:${ABSENT}` },
+    ]) {
+      const r = await generateSharingSummaryHandler(ctx, input);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.error.kind).toBe('invalid-query');
+    }
+  });
+
+  it('a REAL object in the wrong case still answers (case-insensitive resolution)', async () => {
+    const lower = await generateSharingSummaryHandler(ctx, { objectFilter: 'account' });
+    expect(lower.ok).toBe(true);
+    if (!lower.ok) return;
+    const body = lower.value.data.document.body;
+    // Scoped to the one object, and the echo carries the VAULT's casing.
+    expect(body).toContain('objectFilter: `Account`');
+    expect(body).not.toContain('no CustomObjects matched the filter');
+    expect(body).not.toContain('_(no objectFilter applied)_');
+  });
+
+  // Regression guard: the org-wide (no filter) document must be unchanged.
+  it('the org-wide call is unchanged (no objectFilter applied)', async () => {
+    const r = await generateSharingSummaryHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.document.body).toContain('_(no objectFilter applied)_');
+    expect(r.value.data.targetMissing).toBeUndefined();
   });
 });

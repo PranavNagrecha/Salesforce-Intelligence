@@ -210,6 +210,9 @@ describe('listViewSharingHandler — sharedTo/name filter (LIST-VIEW-SHARING-SIL
     const r = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account' });
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect(r.value.data.appliedScope).toEqual({
+      // LIST-VIEW-SHARING-ANSWERS-A-NONEXISTENT-OBJECT: appliedScope now also
+      // echoes the VERIFIED object the scan actually ran against.
+      object: 'CustomObject:Account',
       sharedToId: null,
       nameContains: null,
       filtered: false,
@@ -230,6 +233,9 @@ describe('listViewSharingHandler — sharedTo/name filter (LIST-VIEW-SHARING-SIL
     expect(d.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.Shared']);
     expect(d.summary.listViews).toBe(1);
     expect(d.appliedScope).toEqual({
+      // LIST-VIEW-SHARING-ANSWERS-A-NONEXISTENT-OBJECT: appliedScope now also
+      // echoes the VERIFIED object the scan actually ran against.
+      object: 'CustomObject:Account',
       sharedToId: 'Role:VP_Sales',
       nameContains: null,
       filtered: true,
@@ -270,6 +276,9 @@ describe('listViewSharingHandler — sharedTo/name filter (LIST-VIEW-SHARING-SIL
     expect(d.listViews).toHaveLength(0);
     expect(d.summary.listViews).toBe(0);
     expect(d.appliedScope).toEqual({
+      // LIST-VIEW-SHARING-ANSWERS-A-NONEXISTENT-OBJECT: appliedScope now also
+      // echoes the VERIFIED object the scan actually ran against.
+      object: 'CustomObject:Account',
       sharedToId: 'Role:Nonexistent',
       nameContains: null,
       filtered: true,
@@ -476,5 +485,71 @@ describe('listViewSharingHandler -- directRoleShareCount honesty', () => {
     // Summary is over ALL 4 list views -- must not under-count.
     expect(r.value.data.summary.directRoleShareCount).toBe(2);
     expect(r.value.data.summary.listViews).toBe(4);
+  });
+});
+
+// =============================================================================
+// UNRESOLVABLE-OBJECT-SCOPE-ANSWERED-ANYWAY (0.3.3) — the `unused_fields_deep`
+// family, on an ACCESS question.
+//
+// Object mode scanned `listNodesByType('ListView', {parentId})` with an id the
+// tool never verified. An object that is not in the vault has no children, so
+// "who can see this object's list views?" came back `listViews: []` with
+// `summary.sharedWithGroupsRoles: 0` and NO absence marker — indistinguishable
+// from an object that genuinely has no shared list views. A confident empty to
+// a who-can-see-this question reads as "nobody can see it".
+//
+// The same unverified id made a REAL object typed in the wrong case return the
+// identical clean zero (`parentId = 'CustomObject:account'` matches no row).
+// =============================================================================
+describe('listViewSharingHandler — object scope existence (honesty)', () => {
+  const ABSENT = 'Zzz_Nonexistent_Object_9x7__c';
+
+  it('REFUSES an objectApiName naming no vault object (never a silent zero)', async () => {
+    const r = await listViewSharingHandler(ctx, { objectApiName: ABSENT });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(ABSENT);
+  });
+
+  it('REFUSES an absent CustomObject: componentId', async () => {
+    const r = await listViewSharingHandler(ctx, {
+      componentId: `CustomObject:${ABSENT}`,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a REAL object in the wrong case still answers (case-insensitive resolution)', async () => {
+    const lower = await listViewSharingHandler(ctx, { objectApiName: 'account' });
+    expect(lower.ok).toBe(true);
+    if (!lower.ok) return;
+    expect(lower.value.data.summary.listViews).toBe(3);
+    // The echo must carry the VAULT's casing, never the caller's — an id that
+    // does not exist must never be asserted back at the reader.
+    expect(lower.value.data.componentId).toBe('CustomObject:Account');
+  });
+
+  // Regression guard: the reverse (ListView:) mode and the canonical object mode
+  // must be untouched by the object-existence check.
+  it('ListView: reverse mode and canonical object mode are unchanged', async () => {
+    const one = await listViewSharingHandler(ctx, {
+      componentId: 'ListView:Account.Shared',
+    });
+    expect(one.ok).toBe(true);
+    if (!one.ok) return;
+    expect(one.value.data.scope).toBe('listView');
+    expect(one.value.data.listViews).toHaveLength(1);
+
+    const obj = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+    });
+    expect(obj.ok).toBe(true);
+    if (!obj.ok) return;
+    expect(obj.value.data.scope).toBe('object');
+    expect(obj.value.data.summary.listViews).toBe(3);
+    expect(obj.value.data.appliedScope.filtered).toBe(false);
   });
 });

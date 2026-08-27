@@ -74,6 +74,7 @@ import {
   renderFooter,
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 
 /** Per-scan cap on the number of objects covered. */
@@ -601,10 +602,53 @@ export const generateSharingSummaryHandler = async (
   // in the Overview / footer — previously `objectApiName` scoped the scan yet the
   // body still claimed "no objectFilter applied", and `componentId` was ignored
   // entirely and answered org-wide.
-  const appliedScope =
+  const requestedScope =
     input.objectFilter ??
     input.objectApiName ??
     objectApiNameFromComponentId(input.componentId);
+
+  // GENERATE-SHARING-SUMMARY-ANSWERS-A-NONEXISTENT-OBJECT: verify the named
+  // object EXISTS before narrowing, via the same `resolveExistingObjectScope`
+  // `unused_fields_deep` / `flow_fault_audit` / `flow_bulkification_audit` use.
+  //
+  // What this replaced: the filter was a raw STRING COMPARE
+  // (`o.apiName === filterName`) against the objects already in hand. The vault
+  // was never asked whether the named object exists. What a user saw: asking
+  // "who can see Zzz_Nonexistent__c?" produced a complete-looking Sharing Model
+  // Summary — Overview, Role Hierarchy, the full boundaries list — whose only
+  // trace of the miss was the body line "_(no CustomObjects matched the
+  // filter)_"; `targetMissing` was absent and the structured payload carried no
+  // marker at all. A security reviewer reads that document as "this object has
+  // no sharing rules and no grants". The same string compare silently produced
+  // that identical empty for a REAL object typed in the wrong case (`account`
+  // never equals `Account`), so an exactly-correct question got an
+  // exactly-wrong access answer.
+  //
+  // `appliedScope` now carries the VAULT's exact casing, so the Overview echo
+  // and the re-run footer name an object that actually exists.
+  let appliedScope = requestedScope;
+  let targetMissing: GenerateSharingSummaryOutput['targetMissing'];
+  if (requestedScope !== undefined) {
+    const scopeResult = await resolveExistingObjectScope(ctx.graph, {
+      objectApiName: requestedScope,
+    });
+    if (scopeResult.ok) {
+      appliedScope =
+        scopeResult.value === null ? undefined : scopeResult.value.object;
+    } else {
+      // B29 is a DIFFERENT and answerable question, so it survives the refusal:
+      // an object with inbound edges but no retrieved definition is a PHANTOM
+      // ("referenced, not retrieved"), not a name that means nothing. Only a
+      // name the vault knows in NEITHER sense is refused. A case-ambiguity
+      // refusal cannot land here: its variants are real nodes, so edges point at
+      // those ids and never at the exact-cased id that failed to resolve.
+      const candidateId = `CustomObject:${requestedScope}` as ComponentId;
+      const inbound = await listEdges(ctx.graph, candidateId, { direction: 'in' });
+      const referencedBy = inbound.ok ? inbound.value.length : 0;
+      if (referencedBy === 0) return err(scopeResult.error);
+      targetMissing = { id: candidateId, referencedBy };
+    }
+  }
 
   // Apply the optional filter.
   let scanObjects = objectsResult.value;
@@ -619,22 +663,6 @@ export const generateSharingSummaryHandler = async (
   const totalMatchingObjects = scanObjects.length;
   const objectScanTruncated = totalMatchingObjects > OBJECT_SCAN_CAP;
   scanObjects = scanObjects.slice(0, OBJECT_SCAN_CAP);
-
-  // B29: a filter that matched no RETRIEVED CustomObject may still name a
-  // PHANTOM — an object referenced by lookups, permission grants, or code whose
-  // own definition was never pulled into the vault (managed package / outside
-  // retrieve scope). Detect it via inbound edges so the answer is an honest
-  // `targetMissing` ("not retrieved"), never a silent "_(no objects matched)_"
-  // that reads as "this object has no sharing".
-  let targetMissing: GenerateSharingSummaryOutput['targetMissing'];
-  if (filterName !== undefined && scanObjects.length === 0) {
-    const candidateId = `CustomObject:${filterName}` as ComponentId;
-    const inbound = await listEdges(ctx.graph, candidateId, { direction: 'in' });
-    const referencedBy = inbound.ok ? inbound.value.length : 0;
-    if (referencedBy > 0) {
-      targetMissing = { id: candidateId, referencedBy };
-    }
-  }
 
   // Build per-object sharing entries.
   const sharingIndex = buildSharingRulesIndex(sharingRulesResult.value);

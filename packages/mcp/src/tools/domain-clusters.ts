@@ -81,7 +81,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { firstNonEmpty, resolveObjectAlias, toCustomObjectId } from './input-aliases.js';
+import { firstNonEmpty, resolveExistingObjectScope, toCustomObjectId } from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -532,6 +532,38 @@ export const domainClustersHandler = async (
   const minDensity = input.minDensity ?? MIN_DENSITY_DEFAULT;
   const limit = input.limit ?? LIMIT_DEFAULT;
 
+  // DOMAIN-CLUSTERS-ANSWERS-A-NONEXISTENT-OBJECT: resolve the optional OBJECT
+  // scope AND verify it exists BEFORE the org-wide scan, via the same
+  // `resolveExistingObjectScope` `unused_fields_deep` / `flow_fault_audit` /
+  // `flow_bulkification_audit` use.
+  //
+  // What this replaced: the sync `resolveObjectAlias` coerced the caller's
+  // string to a `CustomObject:` id and that id was then looked for among the
+  // cluster MEMBERS only — the vault itself was never asked whether the object
+  // exists. What a user saw: `{objectApiName: 'Zzz_Nonexistent__c'}` returned
+  // `clusters: []` under a note that could not distinguish the two very
+  // different things that might have happened — "the object is real but did not
+  // cluster" vs "there is no such object" — so a reader took the first reading
+  // and concluded the object is simply isolated. Exact-cased member ids meant a
+  // REAL object typed in the wrong case (`supportcase`) fell into that same
+  // empty, giving an exactly-correct question the exactly-wrong answer.
+  //
+  // A BARE (`:`-free) componentId stays a GENERIC SEED (matched against
+  // candidates by apiName, so `{componentId: 'MyApexClass'}` still seeds on the
+  // ApexClass): stripping it from the resolver's view preserves the old
+  // `bareComponentIdIsObject: false` semantics exactly. Only an alias that
+  // PROMISES an object — `objectApiName` / `object` / `objectId` / a
+  // `CustomObject:` componentId — is verified, and its absence is refused.
+  const bareComponentId =
+    input.componentId !== undefined && !input.componentId.includes(':');
+  const objectScopeResult = await resolveExistingObjectScope(
+    ctx.graph,
+    bareComponentId ? { ...input, componentId: undefined } : input,
+  );
+  if (!objectScopeResult.ok) return err(objectScopeResult.error);
+  const objectScopeId =
+    objectScopeResult.value === null ? null : objectScopeResult.value.componentId;
+
   // Stage 1: candidate enumeration.
   const nodesResult = await fetchCandidateNodes(ctx);
   if (!nodesResult.ok) return err(nodesResult.error);
@@ -596,16 +628,13 @@ export const domainClustersHandler = async (
 
   // DOMAIN-CLUSTERS-IGNORES-SEED / -OBJECTAPINAME: a seed OR object identifier
   // returns the cluster CONTAINING that node (or honest empty) + `appliedScope`,
-  // not the org-wide dump. `objectApiName` / `object` / `objectId` are honored as a
-  // seed alias — the shared resolver coerces them to a `CustomObject:` id
-  // (`bareComponentIdIsObject: false` keeps a bare `componentId` a generic seed).
-  const objectScope = resolveObjectAlias(input, {
-    required: false,
-    bareComponentIdIsObject: false,
-  });
-  if (!objectScope.ok) return err(objectScope.error);
-  const objectScopeId =
-    objectScope.value === null ? null : objectScope.value.componentId;
+  // not the org-wide dump. The object alias was resolved and VERIFIED at the top
+  // of the handler (`objectScopeId`, carrying the vault's exact casing); the
+  // generic seed is resolved here because it matches against `candidates`.
+  //
+  // The seed keeps its honest-empty-plus-note answer rather than a refusal: a
+  // seed may legitimately name an ApexClass or a Flow, which an OBJECT resolver
+  // has no standing to verify.
   const seedKeyId = resolveSeedId(input, candidates);
   if (
     objectScopeId !== null &&

@@ -749,3 +749,81 @@ describe('pii_inventory — single-pass classification + batched edge lookups (n
     expect(customFieldScans).toBeLessThanOrEqual(2);
   });
 });
+
+// =============================================================================
+// UNRESOLVABLE-OBJECT-SCOPE-ANSWERED-ANYWAY (0.3.3) — the `unused_fields_deep`
+// family 0.3.2 apologised for, in its worst form.
+//
+// `pii_inventory` narrowed by `objectId` / `objectApiName` with a STRING
+// COMPARE (`resolveObjectScopeParentId` + `fieldMatchesObjectScope`) and never
+// asked the vault whether that object exists. An object that is not there
+// matched no field, so "what personal data does this object hold?" came back
+// `{fields: [], summary: {total: 0}}` with NO absence marker at all — an
+// UNCHECKED zero wearing a CHECKED zero's clothes. On a PRIVACY question that
+// empty reads as "nothing sensitive here", about an object never found.
+//
+// The same string compare made a REAL object typed in the wrong case return the
+// identical clean zero (`contact` !== `Contact`).
+// =============================================================================
+describe('piiInventoryHandler — object scope existence (honesty)', () => {
+  const ABSENT = 'Zzz_Nonexistent_Object_9x7__c';
+
+  it('REFUSES an objectApiName naming no vault object (never a silent zero)', async () => {
+    const r = await piiInventoryHandler(ctx, { objectApiName: ABSENT });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(ABSENT);
+  });
+
+  it('REFUSES an absent objectId through the parsed schema (dispatch path)', async () => {
+    const parsed = piiInventoryInputSchema.safeParse({ objectId: ABSENT });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await piiInventoryHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('REFUSES an absent object for the composer entry point too', async () => {
+    const r = await collectPiiInventoryFields(ctx, { objectApiName: ABSENT });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a REAL object in the wrong case still answers (case-insensitive resolution)', async () => {
+    const lower = await piiInventoryHandler(ctx, { objectApiName: 'contact' });
+    const exact = await piiInventoryHandler(ctx, { objectId: 'CustomObject:Contact' });
+    expect(lower.ok).toBe(true);
+    expect(exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    expect(exact.value.data.summary.total).toBeGreaterThan(0);
+    expect(lower.value.data.summary.total).toBe(exact.value.data.summary.total);
+    expect(lower.value.data.fields.map((f) => f.id)).toEqual(
+      exact.value.data.fields.map((f) => f.id),
+    );
+  });
+
+  it('a scoped call echoes appliedScope with the vault’s exact casing', async () => {
+    const r = await piiInventoryHandler(ctx, { objectApiName: 'contact' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Contact',
+      mode: 'component',
+    });
+  });
+
+  // The regression this fix is most likely to cause: the org-wide (no scope)
+  // call must be BYTE-IDENTICAL — no appliedScope key, same counts.
+  it('the org-wide call is unchanged (no appliedScope, full inventory)', async () => {
+    const r = await piiInventoryHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+    expect(r.value.data.summary.total).toBe(15);
+    expect(r.value.data.fields.length).toBe(15);
+  });
+});
