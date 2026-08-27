@@ -105,7 +105,7 @@ import {
   offlineTrust,
   type CoverageCaveat,
 } from './coverage-trust.js';
-import { firstNonEmpty, toObjectApiName } from './input-aliases.js';
+import { firstNonEmpty, resolveExistingObjectScope } from './input-aliases.js';
 import { COMPONENT_TYPES } from './list-components.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit } from './scan-cap.js';
@@ -216,7 +216,10 @@ const DEFAULT_UNUSED_TYPES: readonly ComponentType[] = [
  *     Apex family). Ignored when the array `types` is present.
  *   - `object` / `objectApiName`: optional OBJECT SCOPE — narrow the scan
  *     to the components parented by that object ("unused WebLinks on
- *     Contact"). Echoed in `appliedScope`.
+ *     Contact"). Echoed in `appliedScope`, in the VAULT's casing. The object
+ *     must EXIST: an api name no `CustomObject` node matches is
+ *     `invalid-query`, never the empty list that reads as "nothing here to
+ *     delete" (UNUSED-COMPONENTS-ANSWERS-FOR-NONEXISTENT-OBJECT).
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 100 inside
  *     the handler when omitted.
  */
@@ -244,35 +247,30 @@ export type UnusedComponentsInput = z.infer<
 /** Fast membership set over the scannable ComponentType enum. */
 const COMPONENT_TYPE_SET: ReadonlySet<string> = new Set(COMPONENT_TYPES);
 
-/** The resolved scan scope: the types to walk and the optional object filter. */
+/** The resolved TYPE scan scope: the types to walk. */
 interface ResolvedUnusedScope {
   readonly types: readonly ComponentType[];
-  /** Canonical `CustomObject:{ApiName}` object filter, or null when unscoped. */
-  readonly objectId: string | null;
-  /** Bare object api name for `appliedScope`, or null when unscoped. */
-  readonly object: string | null;
   /** Whether the caller narrowed the type set (array OR singular alias). */
   readonly typesExplicit: boolean;
 }
 
 /**
- * Resolve the scan scope from the (interchangeable) type + object args, NEVER
- * silently stripping one. Precedence for the TYPE axis: an explicit `types`
- * array (even empty — "scan nothing") wins; else a singular `type` /
- * `componentType` / `typeFilter` alias, validated against the scannable enum
- * (unknown → `invalid-query`, so a bad type is a reasoned error, not a silent
- * fall-through to the default Apex family); else the curated default set. The
- * OBJECT axis reads `object` / `objectApiName` (bare or `CustomObject:` form).
+ * Resolve the TYPE scan scope from the (interchangeable) type args, NEVER
+ * silently stripping one. Precedence: an explicit `types` array (even empty —
+ * "scan nothing") wins; else a singular `type` / `componentType` / `typeFilter`
+ * alias, validated against the scannable enum (unknown → `invalid-query`, so a
+ * bad type is a reasoned error, not a silent fall-through to the default Apex
+ * family); else the curated default set.
+ *
+ * The OBJECT axis is resolved SEPARATELY, in the handler, against the graph —
+ * it needs a vault lookup this sync resolver cannot make. See
+ * UNUSED-COMPONENTS-ANSWERS-FOR-NONEXISTENT-OBJECT there.
  */
 const resolveUnusedScope = (
   input: UnusedComponentsInput,
 ): Result<ResolvedUnusedScope, McpError> => {
-  const rawObject = firstNonEmpty(input.object, input.objectApiName);
-  const object = rawObject === undefined ? null : toObjectApiName(rawObject);
-  const objectId = object === null ? null : `CustomObject:${object}`;
-
   if (input.types !== undefined) {
-    return ok({ types: input.types, objectId, object, typesExplicit: true });
+    return ok({ types: input.types, typesExplicit: true });
   }
   const singular = firstNonEmpty(
     input.type,
@@ -289,15 +287,11 @@ const resolveUnusedScope = (
     }
     return ok({
       types: [singular as ComponentType],
-      objectId,
-      object,
       typesExplicit: true,
     });
   }
   return ok({
     types: DEFAULT_UNUSED_TYPES,
-    objectId,
-    object,
     typesExplicit: false,
   });
 };
@@ -782,11 +776,41 @@ export const unusedComponentsHandler = async (
 ): Promise<Result<McpResponse<UnusedComponentsOutput>, McpError>> => {
   const limit = input.limit ?? UNUSED_DEFAULT_LIMIT;
 
-  // Resolve the (interchangeable) type + object scope, NEVER silently stripping
-  // one. An unknown singular `type` is `invalid-query`, not a wrong-family list.
+  // Resolve the (interchangeable) type scope, NEVER silently stripping one. An
+  // unknown singular `type` is `invalid-query`, not a wrong-family list.
   const scopeResult = resolveUnusedScope(input);
   if (!scopeResult.ok) return scopeResult;
-  const { types, objectId, object, typesExplicit } = scopeResult.value;
+  const { types, typesExplicit } = scopeResult.value;
+
+  // UNUSED-COMPONENTS-ANSWERS-FOR-NONEXISTENT-OBJECT: resolve + VERIFY the
+  // object scope against the VAULT before scanning.
+  //
+  // The object axis used to be a pure string coercion — `object` /
+  // `objectApiName` became `CustomObject:{name}` with no lookup. `scanType`
+  // then filtered on `parentId === thatId`, matched nothing, and the tool
+  // returned `{ components: [], byType: { CustomField: 0, … } }` with
+  // `appliedScope.object` echoing the caller's typo back as though it had been
+  // applied. On THIS tool a zero is read as "nothing here to delete", so a
+  // mistyped object name and a genuinely clean object produced the IDENTICAL
+  // payload — the 0.3.2 `unused_fields_deep` shape verbatim: an unchecked zero
+  // wearing a checked zero's clothes. The same coercion also broke the honest
+  // case: `object: 'wIdGeT__C'` returned an empty list for the real
+  // `Widget__c`, because `CustomObject:wIdGeT__C` matched no `parentId`.
+  //
+  // `resolveExistingObjectScope` is the shared resolver (flow_fault_audit,
+  // flow_bulkification_audit, unused_fields_deep, …): `ok(null)` for a bare
+  // org-wide call — byte-identical to before — a vault-cased id when the object
+  // exists, and `invalid-query` naming the object when it does not.
+  const objectScopeResult = await resolveExistingObjectScope(ctx.graph, {
+    object: input.object,
+    objectApiName: input.objectApiName,
+  });
+  if (!objectScopeResult.ok) return err(objectScopeResult.error);
+  // `objectId` filters the scan (`parentId` match); `object` is the bare api
+  // name echoed in `appliedScope` — both in the VAULT's exact casing, never the
+  // caller's.
+  const objectId = objectScopeResult.value?.componentId ?? null;
+  const object = objectScopeResult.value?.object ?? null;
 
   const allUnused: UnusedComponent[] = [];
   const byType: Record<string, number> = {};

@@ -21,6 +21,9 @@
  * **Honesty axis**: all findings are heuristic static analysis over the last
  * refresh; dynamic/reflective code is invisible. Read it as "here's what the
  * org's existing Apex shows", not a guarantee about code you haven't written.
+ * Both scopes are VERIFIED before anything is briefed: an unresolved class is
+ * `component-not-found` and an `objectApiName` no `CustomObject` node matches
+ * is `invalid-query` — never the org-wide briefing under a scoped heading.
  */
 
 import type {
@@ -38,7 +41,11 @@ import type { Context } from '../server.js';
 import { apexTestCoverageHandler } from './apex-test-coverage.js';
 import { crudFlsAuditHandler } from './crud-fls-audit.js';
 import { governorLimitRisksHandler } from './governor-limit-risks.js';
-import { firstNonEmpty, resolveApexClassAlias } from './input-aliases.js';
+import {
+  firstNonEmpty,
+  resolveApexClassAlias,
+  resolveExistingObjectScope,
+} from './input-aliases.js';
 
 export const apexBuildAdvisorInputSchema = z.object({
   // Optional CLASS SCOPE (APEX-BUILD-ADVISOR-IGNORES-CLASS-SCOPE): narrow the
@@ -56,15 +63,24 @@ export type ApexBuildAdvisorInput = z.infer<typeof apexBuildAdvisorInputSchema>;
 
 export interface ApexBuildAdvisorOutput {
   /**
-   * The CLASS SCOPE actually applied. Present ONLY when the caller passed a
-   * `componentId` / `classApiName` / `apiName` scope — an unscoped org-wide call
-   * omits it entirely so its response stays byte-identical to the pre-scope
-   * shape. `component` is the resolved `ApexClass:`/`ApexTrigger:` id; a host
-   * that sees no `appliedScope` MUST treat the briefing as org-wide.
+   * The SCOPE actually applied. Present ONLY when the caller passed a
+   * `componentId` / `classApiName` / `apiName` class scope or an
+   * `objectApiName` object scope — an unscoped org-wide call omits it entirely
+   * so its response stays byte-identical to the pre-scope shape. A host that
+   * sees no `appliedScope` MUST treat the briefing as org-wide.
+   *
+   * `component` is the resolved `ApexClass:`/`ApexTrigger:` id (null when only
+   * an object was named). `object` is the resolved `CustomObject:` id in the
+   * VAULT's exact casing, present only on an object-scoped call — the
+   * `similarLogic` section is the part of the briefing it governs. `mode` names
+   * the axis that narrows the composed sub-scans: `component` whenever a class
+   * scope is in force (it wins, and may carry an `object` alongside it),
+   * `object` when only an object was named.
    */
   readonly appliedScope?: {
     readonly component: string | null;
-    readonly mode: 'component';
+    readonly object?: string;
+    readonly mode: 'component' | 'object';
   };
   readonly governorPitfalls: {
     readonly totalRisks: number;
@@ -186,6 +202,31 @@ export const apexBuildAdvisorHandler = async (
       });
     }
   }
+  // APEX-BUILD-ADVISOR-ANSWERS-FOR-NONEXISTENT-OBJECT: resolve + VERIFY the
+  // optional OBJECT scope on the same footing as the class scope above.
+  //
+  // `objectApiName` used to be concatenated straight into
+  // `CustomObject:{name}` at the `similarLogic` block and handed to
+  // `listEdges` — nothing ever asked the vault whether that object existed,
+  // and no sub-scan was narrowed by it. So "before I write Apex on
+  // Zzz_Nonexistent_Object_9x7__c, what should I watch out for?" returned the
+  // ENTIRE ORG-WIDE briefing — governor pitfalls, test expectations, CRUD/FLS
+  // norms and every recommendation, byte-identical to the bare call — plus
+  // `similarLogic: { apexTouchingObject: [] }`, an unchecked zero that reads
+  // as "no Apex touches this object yet, go ahead". There was no
+  // `appliedScope` naming an object either, so nothing in the payload
+  // disclosed that the object scope had been dropped.
+  //
+  // The shared resolver refuses an api name no `CustomObject:` node matches,
+  // rewrites a wrong-case name to the vault's spelling, and refuses two
+  // objects differing only by case. Only `objectApiName` is read: this tool's
+  // `componentId` is an APEX id (the class scope), never an object alias.
+  const objectScopeResult = await resolveExistingObjectScope(ctx.graph, {
+    objectApiName: input.objectApiName,
+  });
+  if (!objectScopeResult.ok) return err(objectScopeResult.error);
+  const objectScope = objectScopeResult.value;
+
   // The scope argument the composed sub-scans receive: `{}` (org-wide) or the
   // resolved class id. `subject` gives the prose an honest antecedent — the
   // class name when scoped, "the org's Apex" org-wide.
@@ -280,8 +321,8 @@ export const apexBuildAdvisorHandler = async (
 
   // --- similar logic (object-scoped) ---
   let similarLogic: ApexBuildAdvisorOutput['similarLogic'];
-  if (input.objectApiName !== undefined) {
-    const objectId: ComponentId = `CustomObject:${input.objectApiName}`;
+  if (objectScope !== null) {
+    const objectId = objectScope.componentId as ComponentId;
     const edges = await listEdges(ctx.graph, objectId, { direction: 'in' });
     const touching = new Set<ComponentId>();
     if (edges.ok) {
@@ -290,10 +331,12 @@ export const apexBuildAdvisorHandler = async (
       }
     }
     const apexTouchingObject = [...touching].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    similarLogic = { objectApiName: input.objectApiName, apexTouchingObject };
+    // The VAULT's spelling, not the caller's: echoing back `foo__C` would name
+    // an object api name this org does not have.
+    similarLogic = { objectApiName: objectScope.object, apexTouchingObject };
     if (apexTouchingObject.length > 0) {
       recommendations.push(
-        `${apexTouchingObject.length} Apex component(s) already touch ${input.objectApiName} — review them before adding logic so you reuse the existing handler/service instead of duplicating.`,
+        `${apexTouchingObject.length} Apex component(s) already touch ${objectScope.object} — review them before adding logic so you reuse the existing handler/service instead of duplicating.`,
       );
     }
   }
@@ -306,10 +349,18 @@ export const apexBuildAdvisorHandler = async (
 
   return ok({
     data: {
-      // Emit appliedScope ONLY when a class scope was passed, so a bare org-wide
-      // call stays byte-identical to the pre-scope golden.
-      ...(scopeId !== null
-        ? { appliedScope: { component: scopeId, mode: 'component' as const } }
+      // Emit appliedScope ONLY when a class OR object scope was passed, so a
+      // bare org-wide call stays byte-identical to the pre-scope golden. A
+      // class-only scope keeps its exact pre-0.3.3 two-key shape; the `object`
+      // key appears only when an object was named.
+      ...(scopeId !== null || objectScope !== null
+        ? {
+            appliedScope: {
+              component: scopeId,
+              ...(objectScope !== null ? { object: objectScope.componentId } : {}),
+              mode: scopeId !== null ? ('component' as const) : ('object' as const),
+            },
+          }
         : {}),
       governorPitfalls,
       testExpectations,

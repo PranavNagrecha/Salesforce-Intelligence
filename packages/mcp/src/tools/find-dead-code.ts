@@ -119,7 +119,7 @@ import { buildCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
 import {
   firstNonEmpty,
   mergeInputAliases,
-  resolveObjectScopeParentId,
+  resolveExistingObjectScope,
   toApexClassId,
   toCustomObjectId,
 } from './input-aliases.js';
@@ -159,6 +159,36 @@ const UNPROVEN_REGISTRATION_VERDICT_DISCLOSURE =
 const STATIC_TYPE_USAGE_DISCLOSURE =
   'static-type-usage re-check: before an ApexClass is reported definitely_dead its api name is grep-searched (whole-word) across non-test production .cls/.trigger source. A class referenced only via a static-field or type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) — which the parser does NOT model as an inbound graph edge — is downgraded to `uncertain` (suppressed unless includeUncertain) instead of reported dead. Residual blind spots: the grep is line-literal (a class name in a comment or string could over-suppress), and dynamic `Type.forName(\'Other\')` references stay invisible.';
 
+/**
+ * The dead-code types whose nodes carry an OBJECT parent in the graph, and are
+ * therefore reachable by an object scope.
+ *
+ * Read off the extractors, not assumed: `custom-field.ts` sets
+ * `parentId = CustomObject:{object}` on every field it emits, while
+ * `apex-class.ts`, `apex-trigger.ts` and `flow.ts` all emit `parentId: null`
+ * (an Apex trigger's object lives on its outgoing `triggersOn` edge, not on a
+ * parent link, and a Flow's on `properties.triggerObject`). An object-scoped
+ * scan therefore reports NONE of those three families — which is
+ * "not attributable to this object", never "this object has no dead Apex", and
+ * is disclosed as such rather than shipped as a silent zero.
+ */
+const OBJECT_PARENTED_TYPES: ReadonlySet<string> = new Set(['CustomField']);
+
+/**
+ * OBJECT-SCOPE-NARROWING disclosure. Emitted ONLY on an object-scoped call, and
+ * only when the caller asked for a type this scope cannot reach — so the bare
+ * org-wide response keeps its exact pre-0.3.3 boundary list.
+ */
+const objectScopeNarrowingDisclosure = (
+  objectScopeParentId: string,
+  unreachable: readonly string[],
+): string =>
+  `object scope \`${objectScopeParentId}\`: the scan is narrowed to components PARENTED BY that object ` +
+  `(a \`parent_id\` match). ${unreachable.join(', ')} nodes carry no object parent in this vault's graph, ` +
+  'so this object-scoped answer reports none of them — read that as "not attributable to this object", ' +
+  'NEVER as "this object has no dead code of that type". Ask without an object scope for the org-wide ' +
+  'view of those families, or scope one by `componentId`.';
+
 /** Verdict cascade. */
 export type DeadCodeVerdict =
   | 'definitely_dead'
@@ -184,6 +214,15 @@ const findDeadCodeInputBaseSchema = z.object({
   componentId: z.string().min(1).optional(),
   classApiName: z.string().min(1).optional(),
   apiName: z.string().min(1).optional(),
+  /**
+   * Optional OBJECT scope (interchangeable: canonical `CustomObject:{name}` or
+   * a bare api name). Narrows the scan to components PARENTED BY that object —
+   * every scanned type, not just fields — and echoes the vault-cased id as
+   * `appliedScope.object`. The object must EXIST: an api name no
+   * `CustomObject` node matches is `invalid-query`, never a candidate list
+   * (FIND-DEAD-CODE-ANSWERS-FOR-NONEXISTENT-OBJECT). Cannot be combined with
+   * the `componentId` component scope.
+   */
   objectId: z.string().min(1).optional(),
   objectApiName: z.string().min(1).optional(),
   types: z
@@ -253,7 +292,10 @@ export interface FindDeadCodeOutput {
    * Echoes the scope ACTUALLY applied so a host never assumes a `componentId`
    * it passed was silently stripped (the always-org-wide-top-N bug this closes).
    * `component` is the resolved id in component scope (null otherwise); `object`
-   * is the resolved object scope parent id; `mode` names the axis in force.
+   * is the resolved object scope parent id, in the VAULT's exact casing and
+   * proven to exist; `mode` names the axis in force. `mode: 'object'` now means
+   * every listed row is PARENTED BY that object — it used to ship the org-wide
+   * Apex/Flow inventory under the same heading.
    */
   readonly appliedScope: {
     readonly component: string | null;
@@ -518,10 +560,24 @@ const fetchDeadCodeRows = async (
   componentScopeId?: string,
 ): Promise<Result<readonly DeadCodeRow[], string>> => {
   const placeholders = types.map(() => '?').join(', ');
-  const objectScopeClause =
-    objectScopeParentId !== undefined
-      ? `AND (type <> 'CustomField' OR parent_id = ?)`
-      : '';
+  // FIND-DEAD-CODE-OBJECT-SCOPE-APPLIED-TO-FIELDS-ONLY.
+  //
+  // This clause used to read `AND (type <> 'CustomField' OR parent_id = ?)` —
+  // i.e. it kept EVERY non-CustomField row no matter which object was named.
+  // With the default type set that meant an object-scoped call returned the
+  // org's entire dead-Apex and dead-Flow inventory under
+  // `appliedScope: { object: 'CustomObject:X', mode: 'object' }`. Measured on
+  // the demo vault with a scope naming an object that does not exist at all:
+  // `candidates: [{ componentId: 'ApexClass:PaymentService', verdict:
+  // 'likely_dead' }]`, `byType: { ApexClass: 3, ApexTrigger: 1, Flow: 2 }` —
+  // real components, named deletable, attributed to a scope they have nothing
+  // to do with, on the tool an architect consults BEFORE deleting.
+  //
+  // The scope now filters EVERY type by the same `parent_id` match that
+  // `unused_components` uses ("a type with no object parent honestly returns
+  // empty rather than the org-wide list"). See OBJECT_PARENTED_TYPES for which
+  // families that reaches and the disclosure that rides with the narrowing.
+  const objectScopeClause = objectScopeParentId !== undefined ? `AND parent_id = ?` : '';
   // Component scope: narrow the candidate set to the single requested node id.
   const componentScopeClause = componentScopeId !== undefined ? `AND id = ?` : '';
   const sql = `
@@ -757,7 +813,11 @@ export const findDeadCodeHandler = async (
   input: FindDeadCodeInput,
 ): Promise<Result<McpResponse<FindDeadCodeOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const objectScopeParentId = resolveObjectScopeParentId(input);
+  // Whether an object scope was ASKED FOR, before any vault lookup — the
+  // mutually-exclusive-scopes check below is about the shape of the input, so
+  // it must not depend on whether the object turns out to exist.
+  const objectScopeRequested =
+    firstNonEmpty(input.objectId, input.objectApiName) !== undefined;
 
   // Optional COMPONENT scope. When supplied, narrow the scan to that ONE node,
   // pin `types` to its type, and surface its verdict even when `uncertain` (a
@@ -769,8 +829,9 @@ export const findDeadCodeHandler = async (
   // FIND-DEAD-CODE-IGNORES-CLASSAPINAME: resolve the class-name aliases here as
   // well as in the Zod preprocess, so a bare `classApiName` / `apiName` scopes
   // correctly whether the caller pre-parsed the input or handed the handler a
-  // raw object (mirrors how `resolveObjectScopeParentId` reads objectApiName
-  // directly). A bare alias is an ApexClass name → `ApexClass:{name}`.
+  // raw object (mirrors how the object scope below reads objectId /
+  // objectApiName directly). A bare alias is an ApexClass name →
+  // `ApexClass:{name}`.
   const classAlias = firstNonEmpty(input.classApiName, input.apiName);
   const effectiveComponentId =
     firstNonEmpty(input.componentId) ??
@@ -778,7 +839,7 @@ export const findDeadCodeHandler = async (
   const componentScopeResult = resolveComponentScope(effectiveComponentId);
   if (!componentScopeResult.ok) return componentScopeResult;
   const componentScope = componentScopeResult.value;
-  if (componentScope !== null && objectScopeParentId !== undefined) {
+  if (componentScope !== null && objectScopeRequested) {
     return err({
       kind: 'invalid-query',
       message:
@@ -786,6 +847,29 @@ export const findDeadCodeHandler = async (
       path: 'componentId',
     });
   }
+
+  // FIND-DEAD-CODE-ANSWERS-FOR-NONEXISTENT-OBJECT: resolve + VERIFY the object
+  // scope against the vault.
+  //
+  // `resolveObjectScopeParentId` (still the right helper for tools that only
+  // need the canonical spelling) is a pure STRING coercion:
+  // `objectId ?? objectApiName` → `CustomObject:{name}`, no lookup. So a
+  // mistyped object was accepted as a scope, the SQL below filtered on a
+  // `parent_id` no node holds, and — together with the fields-only clause this
+  // change also closes — the tool shipped org-wide Apex/Flow rows labelled
+  // `mode: 'object'` for an object that does not exist. A wrong-CASE but real
+  // object had the mirror-image failure: `CustomObject:pAyMeNt__C` matched no
+  // parent, so a live object's fields silently vanished from a delete list.
+  //
+  // The shared resolver fixes both: vault casing for a real object, a named
+  // `invalid-query` for one that is absent, and `ok(null)` for the bare
+  // org-wide call, whose response stays byte-identical.
+  const objectScopeResult = await resolveExistingObjectScope(ctx.graph, {
+    objectId: input.objectId,
+    objectApiName: input.objectApiName,
+  });
+  if (!objectScopeResult.ok) return err(objectScopeResult.error);
+  const objectScopeParentId = objectScopeResult.value?.componentId;
   if (componentScope !== null) {
     const nodeRes = await getNodeById(ctx.graph, componentScope.id);
     if (!nodeRes.ok) {
@@ -1101,6 +1185,19 @@ export const findDeadCodeHandler = async (
   const isPaged = truncated || offset > 0;
 
   const boundaries: string[] = [DEAD_CODE_DISCLOSURE];
+  // FIND-DEAD-CODE-OBJECT-SCOPE-APPLIED-TO-FIELDS-ONLY: the object scope now
+  // narrows EVERY type, so the families it cannot reach must SAY they were not
+  // reached — otherwise the narrowing would trade one silent zero (org-wide
+  // rows under a scoped heading) for another (no Apex rows, unexplained).
+  // Scoped calls only; a bare call's boundary list is untouched.
+  if (objectScopeParentId !== undefined) {
+    const unreachable = types.filter((t) => !OBJECT_PARENTED_TYPES.has(t));
+    if (unreachable.length > 0) {
+      boundaries.push(
+        objectScopeNarrowingDisclosure(objectScopeParentId, unreachable),
+      );
+    }
+  }
   // R2-12: whenever Flow is in scope, disclose the status-gated Flow rule
   // (active/Draft/unknown flows are never definitely_dead) and the unmodeled
   // subflow-invocation caveat — surfaced regardless of whether any flow landed

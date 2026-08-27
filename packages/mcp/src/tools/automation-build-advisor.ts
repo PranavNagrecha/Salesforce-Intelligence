@@ -17,9 +17,12 @@
  *
  * **Honesty axis**: every listed component is a real vault node. The advisor
  * lists automation that TARGETS the object (not a fabricated save sequence), so
- * it answers honestly even when the object's own definition is not modeled.
- * Conditions are not evaluated; runtime ordering set via Flow Trigger Order and
- * dynamic/reflective invocation are out of scope.
+ * it answers honestly even when the object's own definition is not modeled —
+ * but the object itself must be PROVABLY THERE: an api name with neither a
+ * `CustomObject` node nor a single automation edge is refused
+ * (`invalid-query`), never briefed as `greenfield`. Conditions are not
+ * evaluated; runtime ordering set via Flow Trigger Order and dynamic/reflective
+ * invocation are out of scope.
  */
 
 import type {
@@ -29,7 +32,6 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
-  getNodeById,
   listEdges,
   listEdgesForNodes,
   listNodesByIds,
@@ -38,6 +40,8 @@ import {
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { resolveExistingObjectScope, toCustomObjectId } from './input-aliases.js';
 
 /**
  * Zod schema for the `sfi.automation_build_advisor` tool input.
@@ -85,6 +89,18 @@ export interface AutomationRisk {
 
 export interface AutomationBuildAdvisorOutput {
   readonly mode: 'per-object';
+  /**
+   * The object scope ACTUALLY applied, in canonical `CustomObject:` form.
+   * Present on every per-object briefing (this mode is object-scoped by
+   * definition) and ABSENT from the org-wide `flow-only-objects` mode, whose
+   * payload is unchanged. When the caller spelled the api name in a different
+   * case, this carries the VAULT's spelling — never the caller's, which would
+   * assert a component id no vault holds.
+   */
+  readonly appliedScope: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   readonly objectApiName: string;
   readonly objectModeled: boolean;
   readonly existingAutomation: {
@@ -207,11 +223,45 @@ const perObjectHandler = async (
   ctx: Context,
   objectApiName: string,
 ): Promise<Result<McpResponse<AutomationBuildAdvisorOutput>, McpError>> => {
-  const input = { objectApiName };
-  const objectId: ComponentId = `CustomObject:${input.objectApiName}`;
-
-  const objNode = await getNodeById(ctx.graph, objectId);
-  if (!objNode.ok) return err({ kind: 'internal', message: `graph query failed: ${objNode.error.message}` });
+  // AUTOMATION-BUILD-ADVISOR-ANSWERS-FOR-NONEXISTENT-OBJECT.
+  //
+  // The api name used to be concatenated straight into `CustomObject:{name}`.
+  // `getNodeById` WAS called on it — but a null result only set the
+  // `objectModeled: false` disclosure flag; the handler then answered anyway,
+  // and with no automation to report the risk synthesis fell through to its
+  // `greenfield` branch. A MISTYPED object name therefore came back as:
+  //
+  //   risks:           [{ kind: 'greenfield', … 'No automation currently
+  //                       targets Zzz_Nonexistent_Object_9x7__c in the vault —
+  //                       this is greenfield…' }]
+  //   recommendations: ['Greenfield object: establish the automation pattern
+  //                     now …']
+  //
+  // — a fabricated risk and a fabricated recommendation to start building on
+  // an object that does not exist. A computed flag beside them is a
+  // DISCLOSURE, not a guard.
+  //
+  // `resolveExistingObjectScope` is the shared resolver every object-scoped
+  // tool routes through (flow_fault_audit, flow_bulkification_audit,
+  // unused_fields_deep, …): it rewrites a wrong-case api name to the vault's
+  // exact spelling, refuses two objects differing only by case, and refuses an
+  // api name no `CustomObject:` node matches.
+  //
+  // ONE deliberate exception, which is why the resolver's error is HELD rather
+  // than returned immediately: a STANDARD object (Case) omits `<type>` in its
+  // definition file, so no `CustomObject` node is materialized even though the
+  // object is real and automation targets it. Edge evidence — an incoming
+  // `triggersOn` or an outgoing `parentOf` — proves the object exists just as
+  // well as a node does, so the refusal fires only for a GENUINE phantom: no
+  // node AND no edges. That is exactly the `objectModeled` predicate below,
+  // promoted from a flag the payload carried to the gate it always should
+  // have been.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, { objectApiName });
+  const scope = scopeResult.ok ? scopeResult.value : null;
+  const objectId: ComponentId = (
+    scope !== null ? scope.componentId : toCustomObjectId(objectApiName)
+  ) as ComponentId;
+  const input = { objectApiName: scope !== null ? scope.object : objectApiName };
 
   // Incoming triggersOn edges → record-triggered Flows / ApexTriggers / WorkflowRules.
   const inResult = await listEdges(ctx.graph, objectId, { direction: 'in', edgeType: 'triggersOn' });
@@ -251,12 +301,16 @@ const perObjectHandler = async (
   // A present node means modeled, but a STANDARD object (e.g. Case) legitimately
   // omits <type> in its definition file, so no CustomObject node is materialized
   // even though the object IS modeled. Treat node-present OR incoming automation
-  // OR parented rules as modeled (matching evaluateSoeAdmission); only a genuine
-  // phantom — no node and no edges — stays objectModeled:false. Mis-flagging a
+  // OR parented rules as modeled (matching evaluateSoeAdmission). Mis-flagging a
   // standard object as not-modeled would wrongly disclaim grounded conflict /
   // co-fire analysis on it.
   const objectModeled =
-    objNode.value !== null || inResult.value.length > 0 || outResult.value.length > 0;
+    scope !== null || inResult.value.length > 0 || outResult.value.length > 0;
+  // ...and a genuine phantom — no node AND no edges — is now REFUSED rather
+  // than briefed as greenfield. `scopeResult.error` names the object and tells
+  // the caller to check the api name or refresh; it is only ever unset when
+  // `scope !== null`, which `objectModeled` already covers.
+  if (!objectModeled && !scopeResult.ok) return err(scopeResult.error);
   // ONE batched node fetch for every parentOf child, replacing the per-edge
   // `getNodeById` N+1 (a missing id maps to `undefined`, matching the old
   // `node.value?.type` optional-chaining skip).
@@ -340,6 +394,12 @@ const perObjectHandler = async (
   return ok({
     data: {
       mode: 'per-object',
+      // Echo the scope actually applied (vault casing), so a host can never
+      // read this briefing as org-wide or as being about the caller's spelling.
+      // On the standard-object path this id has no NODE of its own, but it is
+      // the exact id the vault's own `triggersOn` / `parentOf` edges point at —
+      // which is what admitted the object in the first place.
+      appliedScope: { object: objectId, mode: 'component' },
       objectApiName: input.objectApiName,
       objectModeled,
       existingAutomation: { recordTriggeredFlows, apexTriggers, validationRules, workflowRules },

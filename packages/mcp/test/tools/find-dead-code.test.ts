@@ -308,6 +308,112 @@ describe('findDeadCodeHandler', () => {
     ).toBe(true);
   });
 
+  // FIND-DEAD-CODE-ANSWERS-FOR-NONEXISTENT-OBJECT — two defects, one payload.
+  //
+  // (A) `resolveObjectScopeParentId` is a pure string coercion: `objectId` /
+  //     `objectApiName` became `CustomObject:${name}` with NO vault lookup, so
+  //     a mistyped object was accepted as a scope.
+  // (B) the candidate SQL filtered that scope with
+  //     `AND (type <> 'CustomField' OR parent_id = ?)` — i.e. it applied ONLY
+  //     to CustomFields. ApexClass / ApexTrigger / Flow candidates were scanned
+  //     ORG-WIDE and then shipped under `appliedScope.mode: 'object'`.
+  //
+  // Measured on the demo vault before the fix, with
+  // `objectApiName: 'Zzz_Nonexistent_Object_9x7__c'`:
+  //   appliedScope: { object: 'CustomObject:Zzz_Nonexistent_Object_9x7__c',
+  //                   mode: 'object' }
+  //   candidates:   [{ componentId: 'ApexClass:PaymentService',
+  //                    verdict: 'likely_dead', … }]   totalCount: 1
+  //   byType:       { ApexClass: 3, ApexTrigger: 1, Flow: 2 }
+  //
+  // A real class, named `likely_dead`, attributed to an object that does not
+  // exist — on the tool an architect consults BEFORE deleting things.
+  it('an object scope that does not exist is invalid-query, never a candidate row', async () => {
+    const r = await findDeadCodeHandler(ctx, {
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    // Diagnostic first, so a regression prints the fabricated rows.
+    expect(
+      r.ok
+        ? JSON.stringify({
+            appliedScope: r.value.data.appliedScope,
+            candidates: r.value.data.candidates.map((c) => c.componentId),
+            byType: r.value.data.byType,
+          })
+        : 'refused',
+    ).toBe('refused');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Zzz_Nonexistent_Object_9x7__c');
+  });
+
+  it('the canonical `objectId` form is refused for a nonexistent object too', async () => {
+    const r = await findDeadCodeHandler(ctx, {
+      objectId: 'CustomObject:Zzz_Nonexistent_Object_9x7__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a real object in the WRONG CASE still answers, echoing the vault casing', async () => {
+    const r = await findDeadCodeHandler(ctx, {
+      objectApiName: 'pAyMeNt__C',
+      types: ['CustomField'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.object).toBe('CustomObject:Payment__c');
+    expect(
+      r.value.data.candidates.some(
+        (c) => c.componentId === 'CustomField:Payment__c.Orphan__c',
+      ),
+    ).toBe(true);
+  });
+
+  // Defect (B). With the DEFAULT type set (ApexClass, ApexTrigger, Flow,
+  // CustomField) an object-scoped call must not ship a single row that does not
+  // belong to the object. Pre-fix this returned the org's dead Apex and Flows.
+  it('an object scope narrows EVERY type, not just CustomField', async () => {
+    const r = await findDeadCodeHandler(ctx, {
+      objectId: 'CustomObject:Payment__c',
+      includeUncertain: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const foreign = r.value.data.candidates
+      .map((c) => c.componentId)
+      .filter((id) => !id.startsWith('CustomField:Payment__c.'));
+    expect(foreign).toEqual([]);
+    // The tallies describe the SAME narrowed set — not an org-wide count under
+    // a scoped heading.
+    expect(Object.keys(r.value.data.byType)).toEqual(['CustomField']);
+    // The types that were asked for but carry no object parent are DISCLOSED,
+    // so the narrowed answer is not itself an unchecked zero.
+    expect(
+      r.value.data.boundaries.some((b) => b.includes('no object parent')),
+    ).toBe(true);
+  });
+
+  it('the bare org-wide call is unchanged by the object-scope refusal', async () => {
+    const r = await findDeadCodeHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      component: null,
+      object: null,
+      mode: 'all',
+    });
+    // Org-wide rows still present, and no scope-only disclosure leaks in.
+    expect(
+      r.value.data.candidates.some((c) => c.componentId === 'ApexClass:OrphanedHelper'),
+    ).toBe(true);
+    expect(r.value.data.boundaries.some((b) => b.includes('no object parent'))).toBe(
+      false,
+    );
+  });
+
   it('discloses the POST-AST-FLIP CustomField truth: parsed Apex edges, residual blind spots named (P14-USAGE-dead-code-false-positive)', async () => {
     // Stale__c is a CustomField with no inbound edges → flagged definitely_dead.
     // Pre-0.1.9 the disclosure claimed Apex/Flow/SOQL refs were "NOT modeled

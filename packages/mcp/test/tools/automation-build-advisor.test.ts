@@ -116,11 +116,66 @@ describe('automationBuildAdvisorHandler', () => {
     expect(r.value.data.risks.map((x) => x.kind)).toEqual(['greenfield']);
   });
 
-  it('answers (objectModeled=false) even when the object is a genuine phantom (no node, no edges)', async () => {
+  // AUTOMATION-BUILD-ADVISOR-ANSWERS-FOR-NONEXISTENT-OBJECT.
+  //
+  // This case was ASSERTED THE OTHER WAY ROUND until 0.3.3: the old test read
+  // `it('answers (objectModeled=false) even when the object is a genuine
+  // phantom (no node, no edges)')` and expected `r.ok === true`. It pinned the
+  // defect in place. What a user actually saw for a MISTYPED object name:
+  //
+  //   risks:           [{ kind: 'greenfield', severity: 'info',
+  //                       detail: 'No automation currently targets
+  //                       Zzz_Nonexistent_Object_9x7__c in the vault — this is
+  //                       greenfield (or its automation isn't extracted).' }]
+  //   recommendations: ['Greenfield object: establish the automation pattern
+  //                     now (e.g. one record-triggered Flow, or a trigger
+  //                     handler framework) so future builds stay consistent.']
+  //
+  // — one fabricated risk and one fabricated recommendation, inviting the
+  // architect to start building on an object that does not exist. The
+  // `objectModeled: false` flag next to them was a DISCLOSURE, not a guard:
+  // the handler computed it and then answered anyway. An unresolvable scope
+  // must be REFUSED (the 0.3.2 `unused_fields_deep` rule), and this tool's
+  // fabricated ONE is worse than that fix's unchecked zero.
+  it('a genuine phantom object (no node, no edges) is REFUSED, not briefed as greenfield', async () => {
     const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'NotInVault__c' });
+    // Diagnostic first, so a regression failure NAMES the fabricated rows.
+    expect(
+      r.ok && r.value.data.mode === 'per-object'
+        ? JSON.stringify({
+            risks: r.value.data.risks,
+            recommendations: r.value.data.recommendations,
+          })
+        : 'refused',
+    ).toBe('refused');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('NotInVault__c');
+  });
+
+  it('a real object in the WRONG CASE still answers (case-insensitive resolution)', async () => {
+    const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'bUsY__C' });
     expect(r.ok).toBe(true);
     if (!r.ok || r.value.data.mode !== 'per-object') return;
-    expect(r.value.data.objectModeled).toBe(false);
+    // Answered about the vault's Busy__c, and ECHOES the vault's exact casing —
+    // never the caller's, which names a component id no vault holds.
+    expect(r.value.data.objectApiName).toBe('Busy__c');
+    expect(r.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Busy__c',
+      mode: 'component',
+    });
+    expect(r.value.data.existingAutomation.recordTriggeredFlows).toHaveLength(2);
+  });
+
+  it('a scoped call echoes appliedScope so it cannot read as org-wide', async () => {
+    const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'Quiet__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'per-object') return;
+    expect(r.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Quiet__c',
+      mode: 'component',
+    });
   });
 
   it('treats a standard object (no CustomObject node, but automation + parented rules) as modeled', async () => {
@@ -299,6 +354,17 @@ describe('automationBuildAdvisorHandler — flow-only-objects (org-wide gap)', (
     expect(d.summary.orgCustomCount).toBe(4);
     expect(d.summary.masterDetailChildCount).toBe(2);
     expect(d.summary.junctionCount).toBe(1);
+  });
+
+  // The regression the object-scope refusal is most likely to cause: this mode
+  // takes NO object, so it must not acquire a scope resolution, a refusal, or
+  // an `appliedScope` key. Its payload stays byte-identical to pre-0.3.3.
+  it('the org-wide flow-only-objects mode is untouched by the object-scope refusal', async () => {
+    const r = await automationBuildAdvisorHandler(gapCtx, { scope: 'flow-only-objects' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'flow-only-objects') return;
+    expect('appliedScope' in r.value.data).toBe(false);
+    expect(r.value.data.flowOnlyObjects.length).toBe(4);
   });
 });
 

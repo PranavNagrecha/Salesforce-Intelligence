@@ -987,6 +987,62 @@ describe('unusedComponentsHandler — type + object scope (guard)', () => {
     expect(r.value.data.appliedScope.mode).toBe('scoped');
   });
 
+  // UNUSED-COMPONENTS-ANSWERS-FOR-NONEXISTENT-OBJECT. The object axis was a
+  // pure string coercion — `CustomObject:${name}` — never checked against the
+  // vault. The scan then filtered on `parentId === thatId`, matched nothing,
+  // and returned `{ components: [], byType: { …: 0 } }` with
+  // `appliedScope.object` echoing the caller's typo back as if it had been
+  // applied. On THIS tool a zero is read as "nothing to delete here"; a
+  // mistyped object name produced the identical payload to a genuinely clean
+  // object. That is the 0.3.2 `unused_fields_deep` shape verbatim: an
+  // UNCHECKED zero wearing a CHECKED zero's clothes.
+  it('an object that does not exist is invalid-query, never a clean zero', async () => {
+    const r = await unusedComponentsHandler(scopeCtx, {
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    // Diagnostic first, so a regression names the payload that was returned.
+    expect(
+      r.ok
+        ? JSON.stringify({
+            appliedScope: r.value.data.appliedScope,
+            components: r.value.data.components,
+            byType: r.value.data.byType,
+          })
+        : 'refused',
+    ).toBe('refused');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Zzz_Nonexistent_Object_9x7__c');
+  });
+
+  it('the `object` alias refuses a nonexistent object too (both keys checked)', async () => {
+    const r = await unusedComponentsHandler(scopeCtx, {
+      object: 'Zzz_Nonexistent_Object_9x7__c',
+      type: 'WebLink',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a real object in the WRONG CASE still answers (case-insensitive resolution)', async () => {
+    const r = await unusedComponentsHandler(scopeCtx, {
+      type: 'WebLink',
+      object: 'wIdGeT__C',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components.map((c) => c.id)).toEqual([UNUSED_WEBLINK]);
+    // Echoes the VAULT's casing, never the caller's — `appliedScope` must not
+    // assert an object api name the vault does not hold.
+    expect(r.value.data.appliedScope).toEqual({
+      types: ['WebLink'],
+      object: 'Widget__c',
+      mode: 'scoped',
+    });
+  });
+
   it('an unknown singular type is invalid-query (not a silent default-family answer)', async () => {
     const r = await unusedComponentsHandler(scopeCtx, { type: 'Frobnicate' });
     expect(r.ok).toBe(false);

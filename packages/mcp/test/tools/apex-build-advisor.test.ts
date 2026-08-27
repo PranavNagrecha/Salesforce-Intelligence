@@ -111,6 +111,65 @@ describe('apexBuildAdvisorHandler', () => {
 });
 
 // =============================================================================
+// GUARD (APEX-BUILD-ADVISOR-ANSWERS-FOR-NONEXISTENT-OBJECT): `objectApiName`
+// was concatenated straight into `CustomObject:{name}` and used ONLY for a
+// `listEdges` probe. Nothing ever asked the vault whether that object exists,
+// and no sub-scan was narrowed by it — so a MISTYPED object name returned the
+// full ORG-WIDE briefing (governor pitfalls, test expectations, CRUD/FLS norms
+// and every recommendation, byte-identical to the bare call) plus
+// `similarLogic: { objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+// apexTouchingObject: [] }` — an unchecked zero reading as "no Apex touches
+// this object yet". The object scope was IGNORED, not applied; there was no
+// `appliedScope` naming it either, so a host could not tell the answer was
+// org-wide. An unresolvable object scope must be REFUSED.
+describe('apexBuildAdvisorHandler — object scope (guard)', () => {
+  it('an object that does not exist is invalid-query, not an org-wide briefing', async () => {
+    const r = await apexBuildAdvisorHandler(ctx, {
+      objectApiName: 'Zzz_Nonexistent_Object_9x7__c',
+    });
+    // Diagnostic first: on a regression the failure prints the briefing that
+    // was handed back for an object that is not in the vault.
+    expect(
+      r.ok
+        ? JSON.stringify({
+            recommendations: r.value.data.recommendations,
+            similarLogic: r.value.data.similarLogic,
+          })
+        : 'refused',
+    ).toBe('refused');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Zzz_Nonexistent_Object_9x7__c');
+  });
+
+  it('a real object in the WRONG CASE still answers + echoes appliedScope', async () => {
+    const r = await apexBuildAdvisorHandler(ctx, { objectApiName: 'foo__C' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Resolved to the vault's exact casing, and the echo names the object axis
+    // so the briefing cannot be read as org-wide.
+    expect(r.value.data.similarLogic?.objectApiName).toBe('Foo__c');
+    expect(r.value.data.similarLogic?.apexTouchingObject).toContain('ApexClass:SvcA');
+    expect(r.value.data.appliedScope).toEqual({
+      component: null,
+      object: 'CustomObject:Foo__c',
+      mode: 'object',
+    });
+  });
+
+  it('a class scope with no object keeps its exact pre-0.3.3 appliedScope shape', async () => {
+    const r = await apexBuildAdvisorHandler(ctx, { componentId: 'ApexClass:SvcA' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:SvcA',
+      mode: 'component',
+    });
+  });
+});
+
+// =============================================================================
 // GUARD (APEX-BUILD-ADVISOR-IGNORES-CLASS-SCOPE): "apex build advisor for SvcA"
 // passes componentId / classApiName / apiName, but the schema stripped them and
 // every call returned the same org-wide briefing. A class scope must now narrow
