@@ -59,6 +59,7 @@ import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
 import { offlineTrust } from './coverage-trust.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { collectPiiInventoryFields, type PiiField } from './pii-inventory.js';
 import { clampedNodeScanLimit, scanHitCap } from './scan-cap.js';
@@ -153,6 +154,13 @@ export const guestExposureReportInputSchema = z.object({
    * canonical `CustomObject:Contact` id; `componentId: CustomObject:Contact`
    * also resolves here. All resolve to the same scope — pass one. The applied
    * scope is always echoed back as `appliedScope`.
+   *
+   * The named object must EXIST in the vault. An object that does not is a
+   * named `invalid-query`, never a clean empty report — on this tool an empty
+   * report is the security claim "the unauthenticated internet cannot read
+   * this object", and it must never be made about an object that was never
+   * found. Resolution is case-insensitive, and `appliedScope.object` carries
+   * the vault's casing rather than the caller's.
    */
   objectApiName: z.string().min(1).optional(),
   objectId: z.string().min(1).optional(),
@@ -585,34 +593,57 @@ export const guestExposureReportHandler = async (
     });
   }
 
-  // Resolve the optional OBJECT scope from every alias. `objectId` /
-  // `componentId: CustomObject:X` are canonical ids; `objectApiName` is the bare
-  // alias. All narrow to ONE object (bare api names compared); disagreement is
-  // invalid-query. An unsupported arg is never silently stripped.
-  const objectNames = new Set<string>();
-  if (input.objectId !== undefined) {
-    if (!input.objectId.startsWith(OBJECT_PREFIX)) {
-      return err({
-        kind: 'invalid-query',
-        message: `objectId must start with '${OBJECT_PREFIX}' (e.g. '${OBJECT_PREFIX}Contact'); got '${input.objectId}'. Use objectApiName for a bare api name.`,
-        path: 'objectId',
-      });
-    }
-    objectNames.add(input.objectId.slice(OBJECT_PREFIX.length));
-  }
-  if (componentIsObject) {
-    objectNames.add((input.componentId as string).slice(OBJECT_PREFIX.length));
-  }
-  if (input.objectApiName !== undefined) objectNames.add(input.objectApiName);
-  if (objectNames.size > 1) {
+  // `objectId` keeps its OWN prefix contract (a bare api name belongs in
+  // `objectApiName`), checked here so the refusal still carries
+  // `path: 'objectId'` rather than the shared resolver's `objectApiName`.
+  if (input.objectId !== undefined && !input.objectId.startsWith(OBJECT_PREFIX)) {
     return err({
       kind: 'invalid-query',
-      message: `object selectors name different objects (${[...objectNames].join(', ')}); pass one`,
-      path: 'objectApiName',
+      message: `objectId must start with '${OBJECT_PREFIX}' (e.g. '${OBJECT_PREFIX}Contact'); got '${input.objectId}'. Use objectApiName for a bare api name.`,
+      path: 'objectId',
     });
   }
-  const objectScope: string | null =
-    objectNames.size === 1 ? ([...objectNames][0] as string) : null;
+
+  // Resolve the optional OBJECT scope from every alias — `objectId`,
+  // `objectApiName`, and a `CustomObject:` `componentId` — and VERIFY the
+  // object EXISTS, through the one shared `resolveExistingObjectScope` the
+  // `flow_bulkification_audit` / `flow_fault_audit` / `unused_fields_deep`
+  // siblings were migrated onto in 0.3.2. `ok(null)` = no object named, so the
+  // org-wide audit below runs exactly as before; disagreeing aliases are still
+  // `invalid-query`; an object the vault does not hold is now refused.
+  //
+  // GUEST-EXPOSURE-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND — what a user saw
+  // before: the scope was a hand-rolled alias set applied as a plain string
+  // filter over the findings, with nothing asking whether the object existed.
+  // Name an object this vault has never modeled and every filter matched
+  // nothing, so the tool returned the full confident report shape with
+  // `findings: []`, `summary.critical: 0` and a "Scoped to object 'X'"
+  // disclosure. On THIS tool that empty answer is a SECURITY claim — "no, the
+  // unauthenticated internet cannot read this object" — about an object that
+  // was never found, and it is the kind an architect acts on once and never
+  // re-checks. An UNCHECKED zero wearing a CHECKED zero's clothes, exactly as
+  // the 0.3.2 changelog put it for `sfi.unused_fields_deep`. The COMMUNITY
+  // half of this same handler already refused an unresolvable id
+  // (`component-not-found`, below); only the object half was silent.
+  //
+  // A real object in the wrong case is a different thing and still answers:
+  // the resolver rewrites the scope to the vault's exact casing
+  // (case-insensitive RESOLUTION, never case-insensitive IDENTITY — two
+  // objects differing only by case are refused, not silently picked), so
+  // `appliedScope.object` never asserts a spelling the vault does not hold.
+  const objectScopeInput: Record<string, unknown> = {
+    ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
+    ...(input.objectApiName !== undefined ? { objectApiName: input.objectApiName } : {}),
+    // Only a `CustomObject:` componentId is an object alias here; a
+    // `Network:` / `CustomSite:` one is the COMMUNITY axis resolved above and
+    // must not reach an object resolver set to refuse foreign prefixes.
+    ...(componentIsObject ? { componentId: input.componentId } : {}),
+  };
+  const objectScopeResult = await resolveExistingObjectScope(ctx.graph, objectScopeInput, {
+    unhandledPrefix: 'refuse',
+  });
+  if (!objectScopeResult.ok) return err(objectScopeResult.error);
+  const objectScope: string | null = objectScopeResult.value?.object ?? null;
 
   const scopeMode: GuestExposureReportOutput['appliedScope']['mode'] =
     communityId !== undefined && objectScope !== null

@@ -304,3 +304,66 @@ describe('valueChangeAuditHandler — shared value-literal coverage (FIX 9)', ()
     );
   });
 });
+
+// =============================================================================
+// VALUE-CHANGE-AUDIT-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND (0.3.3).
+//
+// The object was resolved by the SYNC `resolveObjectAlias`, which canonicalises
+// the name but never asks the vault whether that object exists. Ask about
+// `Zzz_Nonexistent_Object_9x7__c` and `listObjectFields` returned nothing, so
+// the tool answered `ok` with `scannedFieldCount: 0`, `rows: []` and an
+// all-zero `summary` — indistinguishable from "no field on this object is
+// value-sensitive", i.e. "changing these values breaks nothing". The unchecked
+// zero the 0.3.2 changelog named for `unused_fields_deep`, on a "what will
+// break" tool.
+// =============================================================================
+describe('valueChangeAuditHandler — unresolvable object scope', () => {
+  const PHANTOM = 'Zzz_Nonexistent_Object_9x7__c';
+
+  it('refuses an object that exists nowhere in the vault, never reports an empty audit', async () => {
+    const r = await valueChangeAuditHandler(ctx, { object: PHANTOM });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(PHANTOM);
+  });
+
+  it('refuses the phantom named through objectApiName and through a fieldId parent', async () => {
+    for (const args of [
+      { objectApiName: PHANTOM },
+      { fieldId: `CustomField:${PHANTOM}.Key__c` },
+    ]) {
+      const r = await valueChangeAuditHandler(ctx, args);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+    }
+  });
+
+  it('a REAL object in the wrong case still answers, echoed in the vault casing', async () => {
+    const lower = await valueChangeAuditHandler(ctx, { object: 'user' });
+    const exact = await valueChangeAuditHandler(ctx, { object: 'User' });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    expect(lower.value.data.object).toBe('User');
+    expect(lower.value.data.scannedFieldCount).toBe(exact.value.data.scannedFieldCount);
+    expect(lower.value.data.rows.map((r) => r.field)).toEqual(
+      exact.value.data.rows.map((r) => r.field),
+    );
+  });
+
+  it('REGRESSION: the canonical `{object: "User"}` call is untouched by the existence gate', async () => {
+    const r = await valueChangeAuditHandler(ctx, { object: 'User' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.object).toBe('User');
+    expect(r.value.data.autoDetected).toBe(true);
+    expect(r.value.data.scannedFieldCount).toBe(7);
+    expect(r.value.data.rows.map((x) => x.field).sort()).toEqual([
+      'Alias',
+      'Code__c',
+      'Member_ID__c',
+      'Username',
+    ]);
+  });
+});

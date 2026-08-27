@@ -94,6 +94,16 @@ const seed: ExtractionResult = {
     node('Bot:Order_Support_Bot', 'Bot', 'Order_Support_Bot', {}),
     node('BotVersion:Order_Support_Bot.v1', 'BotVersion', 'Order_Support_Bot.v1', {}),
     node('ApexClass:OrderService', 'ApexClass', 'OrderService', {}),
+    // The parent objects of the modeled fields. A real vault always carries the
+    // CustomObject node beside the CustomField nodes; the fixture omitted them
+    // only because nothing used to look. `objectApiName` now VERIFIES the
+    // object exists before filtering, so leaving them out would make the
+    // object-filter test assert against a vault no refresh can produce.
+    // `Case` is deliberately still absent — `Case.Unmodeled__c` is the
+    // "object not retrieved" case the unknown-classification test needs.
+    node('CustomObject:Contact', 'CustomObject', 'Contact', {}),
+    node('CustomObject:Order__c', 'CustomObject', 'Order__c', {}),
+    node('CustomObject:MessagingSession', 'CustomObject', 'MessagingSession', {}),
     field('Contact.SSN__c', 'Text'),
     field('Contact.Loyalty_Tier__c', 'Text'),
     field('Order__c.Ship_To_SSN__c', 'Text'),
@@ -267,5 +277,62 @@ describe('aiExposureReportHandler — fail closed', () => {
       await closeGraph(emptyStore);
       rmSync(emptyDir, { recursive: true, force: true });
     }
+  });
+});
+
+// =============================================================================
+// AI-EXPOSURE-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND (0.3.3).
+//
+// `objectApiName` was applied as a raw string compare against each exposed
+// field's parsed object (`parts.object !== objectFilter`) with NO check that the
+// object exists. Ask about `Zzz_Nonexistent_Object_9x7__c` and the compare
+// matched nothing, so the tool answered `disposition: 'ai-surface-modeled'`,
+// `surfaces: []`, `piiExposures: []`, `piiFieldsExposed: 0` — a confident
+// SECURITY answer ("nothing on this object is exposed to your org's AI") about
+// an object it never found. The same unchecked zero the 0.3.2 changelog named
+// for `unused_fields_deep`.
+//
+// The raw compare was also case-SENSITIVE, so a real object typed `contact`
+// produced the identical false all-clear.
+// =============================================================================
+describe('aiExposureReportHandler — unresolvable object scope', () => {
+  const PHANTOM = 'Zzz_Nonexistent_Object_9x7__c';
+
+  it('refuses an object that exists nowhere in the vault, never reports "nothing exposed"', async () => {
+    const r = await aiExposureReportHandler(ctx, { objectApiName: PHANTOM });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(PHANTOM);
+  });
+
+  it('refuses the same phantom passed as a CustomObject: id', async () => {
+    const r = await aiExposureReportHandler(ctx, { objectApiName: `CustomObject:${PHANTOM}` });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a REAL object in the wrong case still answers, echoed in the vault casing', async () => {
+    const lower = await aiExposureReportHandler(ctx, { objectApiName: 'contact' });
+    const exact = await aiExposureReportHandler(ctx, { objectApiName: 'Contact' });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    expect(lower.value.data.scope).toEqual({ mode: 'object', objectApiName: 'Contact' });
+    expect(lower.value.data.piiExposures.map((e) => e.fieldId).sort()).toEqual(
+      exact.value.data.piiExposures.map((e) => e.fieldId).sort(),
+    );
+    expect(lower.value.data.piiExposures.length).toBeGreaterThan(0);
+  });
+
+  it('REGRESSION: the bare org-wide call is untouched by the existence gate', async () => {
+    const r = await aiExposureReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.scope).toEqual({ mode: 'org-wide' });
+    expect(d.disposition).toBe('ai-surface-modeled');
+    expect(d.summary.piiFieldsExposed).toBe(2);
+    expect(d.summary.bots).toBe(1);
   });
 });

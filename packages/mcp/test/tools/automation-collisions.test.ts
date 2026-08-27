@@ -70,7 +70,10 @@ const edge = (
 //     a field back on A -> multi-object cycle, depth 2.
 // (e) Clean__c: modeled (node present) but zero automation -> empty
 //     collisions/cycles, no fabrication. NotInVault__c: genuine phantom (no
-//     node, no edges) -> objectModeled false, empty findings, no error.
+//     node, NO edges) -> REFUSED with invalid-query (0.3.3; it used to answer
+//     `objectModeled: false` + empty findings, which reads as "nothing will
+//     break here"). EdgeOnly__c (k): no node but REAL triggersOn edges -> still
+//     answers, because the object IS in the vault.
 // (f) Inactive__c: one inactive Flow + one active Flow write Flag__c ->
 //     collision still listed (2 distinct writers) but activeWriterCount=1,
 //     severity 'medium'. DormantLoop__c: an INACTIVE ApexTrigger self-write
@@ -146,6 +149,17 @@ const seed: ExtractionResult = {
       events: ['after update'],
     }),
     node('Flow:DeleteSelfFlow', 'Flow', { status: 'Active' }),
+    // (k) EdgeOnly__c: DELIBERATELY has NO `CustomObject:` node. Two active
+    // triggers reach it through `triggersOn` alone — the "standard object the
+    // retrieve never pulled, but whose automation it did" case. The existence
+    // gate added in 0.3.3 must NOT refuse this: the object is present in the
+    // vault, as edges. Refusing it would trade one silent wrong answer for a
+    // loud one.
+    node('ApexTrigger:EdgeOnlyTrigger', 'ApexTrigger', {
+      status: 'Active',
+      events: ['before update'],
+    }),
+    node('Flow:EdgeOnlyFlow', 'Flow', { status: 'Active' }),
   ],
   edges: [
     // (a)
@@ -303,6 +317,19 @@ const seed: ExtractionResult = {
     edge('Flow:DeleteSelfFlow', 'CustomField:DeleteSelfLoop__c.Computed__c', 'writesTo', 'parsed', {
       operation: 'recordUpdate',
     }),
+    // (k) two save-path writers on an object with no node of its own.
+    edge('ApexTrigger:EdgeOnlyTrigger', 'CustomObject:EdgeOnly__c', 'triggersOn', 'declared', {}),
+    edge('ApexTrigger:EdgeOnlyTrigger', 'CustomField:EdgeOnly__c.Stage__c', 'writesTo', 'heuristic', {
+      offset: 1,
+      length: 2,
+    }),
+    edge('Flow:EdgeOnlyFlow', 'CustomObject:EdgeOnly__c', 'triggersOn', 'declared', {
+      recordTriggerType: 'Update',
+      triggerType: 'RecordAfterSave',
+    }),
+    edge('Flow:EdgeOnlyFlow', 'CustomField:EdgeOnly__c.Stage__c', 'writesTo', 'parsed', {
+      operation: 'recordUpdate',
+    }),
   ],
 };
 
@@ -434,13 +461,21 @@ describe('automationCollisionsHandler — field-level write collisions', () => {
     expect(r.value.data.cycles).toEqual([]);
   });
 
-  it('(e) a genuine phantom object (no node, no edges) is objectModeled:false with no error', async () => {
+  it('(e) a genuine phantom object (no node, no edges) is REFUSED, not answered', async () => {
+    // ASSERTION INVERTED IN 0.3.3, deliberately. This test used to pin
+    // `ok` + `objectModeled: false` + `collisions: []` + `cycles: []` as the
+    // intended answer for an object the vault has never heard of. It is not:
+    // the payload a caller actually reads is a full collision report with
+    // empty findings and the whole `boundaries` block, and `objectModeled` is
+    // named nowhere in this tool's MCP description, so a host has no reason to
+    // consult it. "There is no such object" and "this object has no automation
+    // fighting itself" came back as the same shape — the unchecked zero
+    // wearing a checked zero's clothes. It is now a named refusal.
     const r = await automationCollisionsHandler(ctx, { object: 'NotInVault__c' });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.objectModeled).toBe(false);
-    expect(r.value.data.collisions).toEqual([]);
-    expect(r.value.data.cycles).toEqual([]);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('NotInVault__c');
   });
 
   it('(f) an inactive writer still surfaces the collision (2 distinct writers), but activeWriterCount reflects reality', async () => {
@@ -623,5 +658,85 @@ describe('automationCollisionsHandler — boundaries and summary', () => {
     if (!r.ok) return;
     expect(r.value.data.summary.automationsScanned).toBe(2);
     expect(r.value.data.summary.fieldsWithMultipleWriters).toBe(1);
+  });
+});
+
+// =============================================================================
+// AUTOMATION-COLLISIONS-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND (0.3.3).
+//
+// The object was resolved by the SYNC `resolveObjectAlias`, which canonicalises
+// the name but never asks the vault whether the object is there. A caller
+// asking "what already fights over this object?" about a name with no node and
+// no automation edge got `ok` + `collisions: []` + `cycles: []` +
+// `automationsScanned: 0` — "nothing will break". The same call in the WRONG
+// CASE (`collide__c`) got the identical false all-clear, because
+// `gatherFirersForObject` builds `CustomObject:${name}` and matches exactly.
+//
+// The gate is deliberately NOT `resolveExistingObjectScope`: this tool can
+// legitimately answer for an object that has no `CustomObject:` node of its own
+// but IS reached by `triggersOn` edges (a standard object whose automation was
+// retrieved and whose own metadata was not). Only an object present in NEITHER
+// place is refused.
+// =============================================================================
+describe('automationCollisionsHandler — unresolvable object scope', () => {
+  const PHANTOM = 'Zzz_Nonexistent_Object_9x7__c';
+
+  it('refuses an object present in neither the nodes nor the automation edges', async () => {
+    const r = await automationCollisionsHandler(ctx, { object: PHANTOM });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(PHANTOM);
+  });
+
+  it('refuses the same phantom named through every alias', async () => {
+    for (const args of [
+      { objectApiName: PHANTOM },
+      { objectId: `CustomObject:${PHANTOM}` },
+      { componentId: `CustomObject:${PHANTOM}` },
+    ]) {
+      const r = await automationCollisionsHandler(ctx, args);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+    }
+  });
+
+  it('a REAL object in the wrong case still answers, echoed in the vault casing', async () => {
+    const lower = await automationCollisionsHandler(ctx, { object: 'collide__c' });
+    const exact = await automationCollisionsHandler(ctx, { object: 'Collide__c' });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    // The echo is the VAULT's casing — `CustomObject:collide__c` is an id this
+    // vault does not hold, so echoing the caller's spelling would assert a
+    // component that does not exist.
+    expect(lower.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:Collide__c',
+      object: 'Collide__c',
+    });
+    expect(lower.value.data.collisions).toEqual(exact.value.data.collisions);
+    expect(lower.value.data.collisions).toHaveLength(1);
+  });
+
+  it('(k) an object reached ONLY by triggersOn edges still answers — the gate is not a node check', async () => {
+    // EdgeOnly__c has no `CustomObject:` node. It DOES have two active save-path
+    // writers on Stage__c, so the collision is real and must be reported.
+    const r = await automationCollisionsHandler(ctx, { object: 'EdgeOnly__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.automationsScanned).toBe(2);
+    expect(d.collisions).toHaveLength(1);
+    expect(d.collisions[0]!.fieldApiName).toBe('Stage__c');
+    // `objectModeled` keeps its "the vault holds this object in SOME form"
+    // meaning — the same one `automation_build_advisor` publishes under the
+    // same key over the same firer set. Narrowing it here would make two
+    // sibling tools disagree about whether one object is modeled.
+    expect(d.objectModeled).toBe(true);
+    // The narrower fact goes where this tool puts its honesty: a boundary
+    // saying the object's OWN metadata was never retrieved.
+    const edgeOnlyBoundary = d.boundaries.find((b) => b.includes('EdgeOnly__c'));
+    expect(edgeOnlyBoundary).toBeDefined();
+    expect(edgeOnlyBoundary).toContain('NO CustomObject node');
   });
 });

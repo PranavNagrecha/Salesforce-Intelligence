@@ -39,7 +39,7 @@ import {
 import {
   firstNonEmpty,
   parseFieldParentObjectApiName,
-  resolveObjectAlias,
+  resolveExistingObjectScope,
   toCustomObjectId,
 } from './input-aliases.js';
 import {
@@ -116,7 +116,11 @@ export const valueChangeAuditInputSchema = z.object({
    * router may instead name the object through the interchangeable selectors
    * below (VALUE-CHANGE-AUDIT-REJECTS-NATURAL-FIELD-ARGS): `objectApiName`, or a
    * `fieldId` (`CustomField:Object.Field`) whose PARENT is the object. The
-   * handler returns a named `invalid-query` when none names an object.
+   * handler returns a named `invalid-query` when none names an object — and
+   * likewise when the named object does not EXIST in the vault, rather than
+   * an empty all-zero audit that reads as "changing these values breaks
+   * nothing". Resolution is case-insensitive; the applied scope is echoed as
+   * the output `object` in the vault's own casing.
    */
   object: z.string().min(1).optional(),
   /** Alias for `object` — the object api name a host naturally reaches for. */
@@ -208,17 +212,37 @@ export const valueChangeAuditHandler = async (
   // pass (VALUE-CHANGE-AUDIT-REJECTS-NATURAL-FIELD-ARGS). Byte-identical when the
   // canonical `{object}` / `{object, fields}` is passed.
   //
-  // Reuse the shared `resolveObjectAlias`: a `CustomField:Object.Field` `fieldId`
-  // names BOTH the object (its parent) and a field, so we feed the derived
-  // parent into the resolver as `objectId` — an explicit `object`/`objectApiName`
+  // Reuse the shared resolver: a `CustomField:Object.Field` `fieldId` names
+  // BOTH the object (its parent) and a field, so we feed the derived parent
+  // into the resolver as `objectId` — an explicit `object`/`objectApiName`
   // that DISAGREES then surfaces as the resolver's conflict `invalid-query`
   // (never a silent strip); agreeing selectors de-dupe to one target.
+  //
+  // VALUE-CHANGE-AUDIT-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND: the resolver is
+  // now the vault-VERIFYING `resolveExistingObjectScope` — the same one
+  // `flow_bulkification_audit` / `flow_fault_audit` / `unused_fields_deep`
+  // were migrated onto in 0.3.2 — not the sync `resolveObjectAlias`, which
+  // canonicalises a name but never asks whether the object is there.
+  //
+  // What a user saw before: name an object this vault has never modeled and
+  // `listObjectFields` found nothing, so the tool returned `ok` with
+  // `scannedFieldCount: 0`, `rows: []` and an all-zero `summary` — a "what
+  // breaks if I change these values?" answer of "nothing", indistinguishable
+  // from the genuine finding that no field on the object is value-sensitive.
+  // An UNCHECKED zero wearing a CHECKED zero's clothes; it is a named
+  // `invalid-query` now. A REAL object in the wrong case is NOT that: the
+  // resolver rewrites it to the vault's exact casing (case-insensitive
+  // RESOLUTION, never case-insensitive IDENTITY), so `user` still audits
+  // `User` and the `object` echo below carries the vault's spelling — which
+  // also fixes the `CustomField:{object}.{field}` ids built from it.
   const rawForObject: Record<string, unknown> = { ...input };
   if (input.fieldId !== undefined && rawForObject['objectId'] === undefined) {
     const parent = parseFieldParentObjectApiName(input.fieldId);
     if (parent !== null) rawForObject['objectId'] = toCustomObjectId(parent);
   }
-  const objScope = resolveObjectAlias(rawForObject);
+  const objScope = await resolveExistingObjectScope(ctx.graph, rawForObject, {
+    unhandledPrefix: 'refuse',
+  });
   if (!objScope.ok) return err(objScope.error);
   if (objScope.value === null) {
     return err({

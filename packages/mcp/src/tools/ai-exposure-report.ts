@@ -64,6 +64,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveExistingObjectScope } from './input-aliases.js';
 import { paginate, argsFingerprint, type PaginateBinding } from './page-cursor.js';
 
 const TOOL_NAME = 'sfi.ai_exposure_report';
@@ -89,6 +90,14 @@ const NO_AI_SURFACE_MESSAGE =
 
 /** Zod schema for the `sfi.ai_exposure_report` tool input. */
 export const aiExposureReportInputSchema = z.object({
+  /**
+   * Optional OBJECT scope — a bare api name (`Contact`) or a `CustomObject:`
+   * id. Omit for the org-wide audit. The named object must EXIST in the vault:
+   * an unresolvable one is a named `invalid-query`, never an empty
+   * "nothing exposed" report (see the handler's scope comment). Resolution is
+   * case-insensitive and the applied scope is echoed as `scope.objectApiName`
+   * in the vault's own casing.
+   */
   objectApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
 });
@@ -245,10 +254,35 @@ export const aiExposureReportHandler = async (
   ctx: Context,
   input: AiExposureReportInput,
 ): Promise<Result<McpResponse<AiExposureReportOutput>, McpError>> => {
-  const objectFilter =
-    input.objectApiName !== undefined
-      ? input.objectApiName.replace(/^CustomObject:/, '')
-      : undefined;
+  // AI-EXPOSURE-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND: resolve and VERIFY the
+  // optional object scope BEFORE scanning, through the same
+  // `resolveExistingObjectScope` the `flow_bulkification_audit` /
+  // `flow_fault_audit` / `unused_fields_deep` siblings were migrated onto in
+  // 0.3.2. `null` = a bare org-wide call, byte-identical to before.
+  //
+  // What the old line did, and why it mattered here: `objectApiName` was
+  // stripped of its `CustomObject:` prefix and then used as a raw string
+  // compare (`parts.object !== objectFilter`). Nothing ever asked the vault
+  // whether that object exists. So a call naming an object this vault has
+  // never modeled matched no field, dropped every surface, and came back
+  // `disposition: 'ai-surface-modeled'` with `surfaces: []`,
+  // `piiExposures: []`, `piiFieldsExposed: 0` — a clean, confident SECURITY
+  // answer ("nothing on this object is reachable by your org's AI") about an
+  // object the tool never found. An architect reads that once and never
+  // re-checks it. That is an UNCHECKED zero wearing a CHECKED zero's clothes,
+  // the same shape the 0.3.2 changelog closed on `sfi.unused_fields_deep`.
+  //
+  // The raw compare was also case-SENSITIVE, so a real object typed `contact`
+  // produced the identical false all-clear. The resolver rewrites a scope to
+  // the vault's exact casing (case-insensitive RESOLUTION, never
+  // case-insensitive IDENTITY — two objects differing only by case are
+  // refused, not silently picked), so `contact` now answers about `Contact`
+  // and `scope.objectApiName` echoes the id the vault actually holds.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input, {
+    unhandledPrefix: 'refuse',
+  });
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const objectFilter = scopeResult.value?.object;
   const scope: AiExposureReportOutput['scope'] =
     objectFilter !== undefined ? { mode: 'object', objectApiName: objectFilter } : { mode: 'org-wide' };
 

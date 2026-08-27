@@ -38,6 +38,12 @@
  * **Honesty axis** (load-bearing, see BOUNDARY_* below):
  *   - Every listed component is a real vault node reached via `triggersOn` /
  *     `writesTo` edges — never a fabricated execution trace.
+ *   - An object the vault holds in NEITHER form (no `CustomObject:` node and
+ *     no `triggersOn` edge) is REFUSED, not answered: on a "what will break"
+ *     tool an empty report reads as "nothing will", so an unchecked zero must
+ *     never wear a checked zero's clothes. An object reached by edges alone
+ *     still answers, with a boundary saying its own metadata was never
+ *     retrieved.
  *   - Field-update / entry CONDITIONS are NOT evaluated: two writers with
  *     mutually exclusive criteria are still listed as a collision.
  *   - Confidence varies per writer (Flow / WorkflowRule field writes are
@@ -76,7 +82,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { isUnresolvedFieldReceiver } from './apex-receiver.js';
-import { resolveObjectAlias } from './input-aliases.js';
+import { resolveObjectAliasInVault } from './input-aliases.js';
 import { argsFingerprint, paginate, type PaginateBinding } from './page-cursor.js';
 import { isActiveSoeFirer } from './soe-active.js';
 
@@ -126,6 +132,12 @@ const pathOfTiming = (timing: WriteTiming): CollisionPath =>
  * `componentId`. Exactly one target must survive resolution — disagreeing
  * aliases are an `invalid-query` (never a silent pick), and the resolved scope
  * is echoed as `appliedScope`.
+ *
+ * The named object must be PRESENT in the vault, as a `CustomObject:` node OR
+ * as the target of at least one `triggersOn` edge. One that is neither is a
+ * named `invalid-query`, because an empty collision report reads as "nothing
+ * here collides". Resolution is case-insensitive and `appliedScope` carries the
+ * vault's own casing.
  */
 export const automationCollisionsInputSchema = z
   .object({
@@ -220,6 +232,19 @@ export interface AutomationCollisionsOutput {
     readonly componentId: string;
     readonly object: string;
   };
+  /**
+   * Whether the vault holds this object in SOME form — a `CustomObject:` node
+   * of its own, or at least one `triggersOn` edge pointing at it. Same meaning
+   * as `automation_build_advisor`'s field of the same name, over the same firer
+   * set, deliberately.
+   *
+   * It is always `true` in a successful response: an object present in NEITHER
+   * form is refused with `invalid-query` before this payload is built, because
+   * an empty collision report reads as "nothing here collides" and must never
+   * be returned for an object that was never found. The narrower case — reached
+   * by edges alone, with the object's own metadata never retrieved — is
+   * disclosed in `boundaries`.
+   */
   readonly objectModeled: boolean;
   readonly collisions: readonly FieldCollision[];
   readonly cycles: readonly RecursionCycle[];
@@ -528,7 +553,31 @@ export const automationCollisionsHandler = async (
 ): Promise<Result<McpResponse<AutomationCollisionsOutput>, McpError>> => {
   // L2 Alias OS: resolve the object from any of object / objectApiName /
   // objectId / CustomObject: componentId. Disagreeing aliases -> invalid-query.
-  const scopeResult = resolveObjectAlias(input);
+  //
+  // `resolveObjectAliasInVault` — resolveObjectAlias + `canonicalizeObjectScope`
+  // — rather than the bare sync resolver, so the id is rewritten to the VAULT's
+  // exact casing. Salesforce api names are case-insensitive, and the sync
+  // resolver built `CustomObject:collide__c` from a lower-cased request, which
+  // `gatherFirersForObject` then matched exactly and found nothing: a real
+  // object typed in the wrong case used to come back as a clean "no collisions
+  // on this object". Two objects differing ONLY by case are refused, never
+  // silently picked (case-insensitive RESOLUTION, never case-insensitive
+  // IDENTITY).
+  //
+  // Deliberately NOT `resolveExistingObjectScope`, the sibling tools' resolver:
+  // it refuses any object with no `CustomObject:` node, and this tool can
+  // legitimately answer for one that has none — a standard object whose
+  // automation the refresh retrieved and whose own metadata it did not is
+  // reachable through `triggersOn` edges alone. `canonicalizeObjectScope`
+  // documents exactly that split ("some answer from edges when the object has
+  // no node of its own"), leaving the existence verdict to the caller. This
+  // tool's verdict is taken below, once BOTH the node lookup and the firer
+  // gather have run.
+  const scopeResult = await resolveObjectAliasInVault(ctx.graph, input, {
+    required: true,
+    bareComponentIdIsObject: true,
+    unhandledPrefix: 'refuse',
+  });
   if (!scopeResult.ok) return err(scopeResult.error);
   if (scopeResult.value === null) {
     return err({
@@ -555,7 +604,50 @@ export const automationCollisionsHandler = async (
     return err({ kind: 'internal', message: `graph query failed: ${firersResult.error}` });
   }
   const firers = firersResult.value;
+
+  // AUTOMATION-COLLISIONS-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND. An object the
+  // vault holds in NEITHER form — no `CustomObject:` node AND no `triggersOn`
+  // edge pointing at it — was not checked, and saying so is the only honest
+  // answer. What a caller saw before: `ok`, `collisions: []`, `cycles: []`,
+  // `automationsScanned: 0` and the full six-item `boundaries` block, i.e. the
+  // confident report shape, in answer to "what already fights over this
+  // object?". On a "what will break" tool an empty answer reads as "nothing
+  // will". The only disclosure was `objectModeled: false`, a flag this tool's
+  // MCP description never mentions, so no host had reason to consult it: "there
+  // is no such object" and "this object's automation does not collide" came
+  // back indistinguishable. That is the UNCHECKED zero wearing a CHECKED zero's
+  // clothes the 0.3.2 changelog closed on `sfi.unused_fields_deep`.
+  //
+  // The gate is edges-OR-node on purpose. Refusing on the node alone would trade
+  // this silent wrong answer for a loud one on every standard object whose
+  // automation was retrieved while its own metadata was not — a real capability
+  // the `objectModeled` flag was written to support.
+  if (objNodeResult.value === null && firers.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `no object named '${objectApiName}' exists in this vault (resolved to ${objectId}): ` +
+        'it has no CustomObject node and no automation triggers on it. Refusing rather than ' +
+        'returning an empty collision report, which reads as "nothing here collides" — verify ' +
+        'the object api name, or run /sfi-refresh if the vault may be stale.',
+      path: 'object',
+    });
+  }
+
+  // Unchanged: "the vault holds this object in SOME form". Past the gate above
+  // it is always true, because its false case is now a refusal — kept, and kept
+  // with this exact meaning, because `automation_build_advisor` publishes the
+  // same `objectModeled` key over the same firer set and was gated the same way
+  // in this release. Narrowing it here to "has a CustomObject node" would make
+  // two sibling tools answer "is this object modeled?" differently about the
+  // same object, which is the drift this repo keeps paying for.
+  //
+  // The narrower fact — the object was reached through its automation's edges
+  // while its OWN metadata was never retrieved — is real and still worth
+  // saying, so it is disclosed in `boundaries` below, where this tool puts its
+  // honesty, rather than by overloading a shared key.
   const objectModeled = objNodeResult.value !== null || firers.length > 0;
+  const objectNodeRetrieved = objNodeResult.value !== null;
 
   // --- Field-level write collisions (same-object writes only) ---
   // Writers are bucketed by (execution PATH, field): a before-delete Flow runs
@@ -641,6 +733,11 @@ export const automationCollisionsHandler = async (
   const cyclesTruncated = cyclesPage.pageInfo.hasMore || cyclesPage.byteTrimmed;
 
   const boundaries: string[] = [...STATIC_BOUNDARIES];
+  if (!objectNodeRetrieved) {
+    boundaries.push(
+      `'${objectApiName}' has NO CustomObject node in this vault — it was reached only through the \`triggersOn\` edges of the automation that fires on it, so its own metadata (fields, sharing model, record types) was not retrieved. The collisions and cycles below are real edges; a field this report does not name may simply be one the vault never modeled. Include the object in the next \`/sfi-refresh\` before reading any absence here as "nothing else writes it".`,
+    );
+  }
   if (cyclesResult.value.exploreCapHit) {
     boundaries.push(
       `The recursion walk hit its defensive ${CYCLE_EXPLORE_CAP}-expansion cap before exhausting every path on this densely-automated object graph — some longer or more branching cycles may exist beyond what is listed.`,

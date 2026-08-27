@@ -1006,3 +1006,68 @@ describe('guestExposureReportHandler — a Network the vault holds is attributab
     expect(disclosure).not.toContain("Confirm each rule's site in Setup");
   });
 });
+
+// =============================================================================
+// GUEST-EXPOSURE-ANSWERS-FOR-AN-OBJECT-IT-NEVER-FOUND (0.3.3).
+//
+// The object scope was collected by a hand-rolled alias set and applied as a
+// STRING FILTER, with no check that the object exists. Ask
+// `{objectApiName: 'Zzz_Nonexistent_Object_9x7__c'}` and every filter matched
+// nothing, so the tool returned `findings: []`, `summary.critical: 0` and the
+// full confident report shape — a SECURITY answer ("no, the unauthenticated
+// internet cannot read this object") about an object it never found. That is
+// the unchecked zero wearing a checked zero's clothes the 0.3.2 changelog
+// named for `unused_fields_deep`, on the highest-stakes surface this tool has.
+// The community half of the same handler ALREADY refused an unresolvable id
+// (`component-not-found`); only the object half was silent.
+//
+// Same case-insensitivity rule as everywhere else: Salesforce api names are
+// case-insensitive, so a real object in the wrong case must still ANSWER.
+// =============================================================================
+describe('guestExposureReportHandler — unresolvable object scope', () => {
+  const PHANTOM = 'Zzz_Nonexistent_Object_9x7__c';
+
+  it('refuses an object that exists nowhere in the vault, never reports "no exposure"', async () => {
+    const r = await guestExposureReportHandler(ctx, { objectApiName: PHANTOM, limit: 200 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(PHANTOM);
+  });
+
+  it('refuses the same phantom named through objectId / componentId', async () => {
+    for (const args of [
+      { objectId: `CustomObject:${PHANTOM}` },
+      { componentId: `CustomObject:${PHANTOM}` },
+    ]) {
+      const r = await guestExposureReportHandler(ctx, args);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+    }
+  });
+
+  it('a REAL object in the wrong case still answers, corrected to the vault casing', async () => {
+    const lower = await guestExposureReportHandler(ctx, { objectApiName: 'case', limit: 200 });
+    const exact = await guestExposureReportHandler(ctx, { objectApiName: 'Case', limit: 200 });
+    expect(lower.ok && exact.ok).toBe(true);
+    if (!lower.ok || !exact.ok) return;
+    // The echo is the VAULT's casing, never the caller's — an appliedScope
+    // naming `CustomObject:case` would assert an id this vault does not hold.
+    expect(lower.value.data.appliedScope).toEqual({ community: null, object: 'Case', mode: 'object' });
+    expect(lower.value.data.findings.map((f) => f.nodeId).sort()).toEqual(
+      exact.value.data.findings.map((f) => f.nodeId).sort(),
+    );
+  });
+
+  it('REGRESSION: the bare org-wide call is untouched by the existence gate', async () => {
+    const r = await guestExposureReportHandler(ctx, { limit: 200 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.appliedScope).toEqual({ community: null, object: null, mode: 'all' });
+    expect(d.findings.some((f) => f.nodeId === 'CustomObject:Case')).toBe(true);
+    expect(d.findings.some((f) => f.nodeId === 'CustomObject:Lead')).toBe(true);
+    expect(d.findings.some((f) => f.kind === 'apex-enabled')).toBe(true);
+  });
+});
