@@ -107,6 +107,14 @@ describe('reconcileSourceDeletions', () => {
       const sourceDir = join(cwd, 'source');
       const authoritativeDir = join(cwd, 'authoritative');
       await writeClass(sourceDir, 'StaleClass');
+      // KeptClass exists on BOTH sides so the deletion below is PARTIAL. This
+      // test is about scope isolation — the Flow must survive a reconcile scoped
+      // to ApexClass — and it should not depend on the vault being wiped whole,
+      // which the total-wipe rail now refuses at every size. Without this the
+      // fixture asserts, incidentally, the data-loss shape the rail exists to
+      // stop. Deleted count is unchanged at 2 (StaleClass's .cls + .cls-meta.xml).
+      await writeClass(sourceDir, 'KeptClass');
+      await writeClass(authoritativeDir, 'KeptClass');
       await mkdir(join(sourceDir, 'main', 'default', 'flows'), { recursive: true });
       await writeFile(
         join(sourceDir, 'main', 'default', 'flows', 'Old_Flow.flow-meta.xml'),
@@ -310,6 +318,88 @@ describe('reconcileSourceDeletions safety rail', () => {
       expect(result.refused).toBe(false);
       await expect(access(join(sourceDir, 'classes/Foo_0.cls'))).rejects.toThrow();
       await expect(access(join(sourceDir, 'classes/Foo_5.cls'))).resolves.toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * RECONCILE-TOTAL-WIPE-BLIND-WINDOW.
+   *
+   * The doc above {@link RECONCILE_GUARD_MIN_CONSIDERED} promised that wholesale
+   * mismatch on a small tree "is still caught by the ... rail, which is
+   * size-independent". It was not: the total-wipe rail was additionally gated on
+   * `authoritative.inScopeCount > 0`, so a retrieve that produced NO in-scope
+   * files left only the fraction rail — which does not engage below 20 files.
+   *
+   * The result was a cliff, not a policy: an identical 100% deletion was REFUSED
+   * at 20 considered files and PERFORMED at 19. Documentation described the rail
+   * the code did not have, which is the failure this repo keeps rediscovering —
+   * a comment standing in for a guard.
+   */
+  it('FAIL-BEFORE/PASS-AFTER: refuses a TOTAL wipe below the fraction floor', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-reconcile-total-small-'));
+    try {
+      const sourceDir = join(cwd, 'source');
+      const authoritativeDir = join(cwd, 'authoritative');
+      // Fifteen — deliberately under RECONCILE_GUARD_MIN_CONSIDERED (20).
+      for (let i = 0; i < 15; i += 1) {
+        await writeAt(sourceDir, `classes/Foo_${i}.cls`, `public class Foo_${i} {}`);
+      }
+      // A retrieve that yielded nothing of the reconciled type. Indistinguishable,
+      // from here, between "the org really lost all fifteen" and "the retrieve
+      // failed or was read in a layout we do not recognise" — and a 100% wipe is
+      // the fingerprint of the second.
+      await mkdir(authoritativeDir, { recursive: true });
+
+      const result = await reconcileSourceDeletions(
+        sourceDir,
+        authoritativeDir,
+        new Set(['ApexClass']),
+      );
+
+      expect(result.refused).toBe(true);
+      expect(result.deletedCount).toBe(0);
+      expect(result.consideredCount).toBe(15);
+      expect(result.refusalReason).toMatch(/every in-scope vault file/i);
+      expect(await readTombstones(cwd)).toEqual([]);
+      for (let i = 0; i < 15; i += 1) {
+        await expect(access(join(sourceDir, 'classes', `Foo_${i}.cls`))).resolves.toBeUndefined();
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The over-correction guard. RECONCILE_GUARD_MIN_CONSIDERED exists for a real
+   * case, stated in its own doc: "a vault holding two classes, one of which was
+   * really deleted". That is a PARTIAL deletion on a tiny tree and it must keep
+   * working — the fix above narrows only the TOTAL-wipe shape.
+   */
+  it('still performs a genuine partial deletion on a tiny tree', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-reconcile-partial-tiny-'));
+    try {
+      const sourceDir = join(cwd, 'source');
+      const authoritativeDir = join(cwd, 'authoritative');
+      await writeAt(sourceDir, 'classes/Keep.cls', 'public class Keep {}');
+      await writeAt(sourceDir, 'classes/Gone.cls', 'public class Gone {}');
+      await writeAt(
+        authoritativeDir,
+        'force-app/main/default/classes/Keep.cls',
+        'public class Keep {}',
+      );
+
+      const result = await reconcileSourceDeletions(
+        sourceDir,
+        authoritativeDir,
+        new Set(['ApexClass']),
+      );
+
+      expect(result.refused).toBe(false);
+      expect(result.deletedCount).toBe(1);
+      await expect(access(join(sourceDir, 'classes/Gone.cls'))).rejects.toThrow();
+      await expect(access(join(sourceDir, 'classes/Keep.cls'))).resolves.toBeUndefined();
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -209,9 +209,15 @@ export const RECONCILE_MAX_DELETE_FRACTION = 0.5;
  * Below this many in-scope files, the fraction rail is not applied: on a tiny
  * considered set (a vault holding two classes, one of which was really deleted)
  * a majority deletion is ordinary, and tripping there would break genuine
- * reconciliation for no safety gain. Wholesale mismatch on a small tree is still
- * caught by the "everything deleted while the retrieve returned components of
- * these very types" rail, which is size-independent.
+ * reconciliation for no safety gain.
+ *
+ * This floor applies to PARTIAL deletions only. A total wipe is refused at every
+ * size by {@link layoutMismatchRefusal}'s first rail — see the note there: this
+ * comment previously claimed that was already so while the code additionally
+ * gated it on a non-empty retrieve, which left an identical 100% deletion
+ * REFUSED at 20 files and PERFORMED at 19. Covered now by
+ * `FAIL-BEFORE/PASS-AFTER: refuses a TOTAL wipe below the fraction floor`, so
+ * the promise is held by a test rather than by this sentence.
  */
 export const RECONCILE_GUARD_MIN_CONSIDERED = 20;
 
@@ -233,9 +239,15 @@ export interface SourceReconcileResult {
  * Two shapes are rejected, because both are the fingerprint of comparing two
  * trees written in different layouts rather than of an org that lost metadata:
  *
- *   1. Total wipe with a non-empty answer — the retrieve DID return components
- *      of the reconciled types, yet not one of them matched anything already in
- *      the vault. Size-independent; this is the exact shape of the incident.
+ *   1. Total wipe — every in-scope vault file would go at once. Refused at ANY
+ *      size and whether or not the retrieve returned files of these types,
+ *      because both readings are the mismatch fingerprint: a retrieve that
+ *      returned components none of which matched, or a retrieve that returned
+ *      nothing of these types at all. An empty answer is not proof the org lost
+ *      them — it is equally the shape of a retrieve that failed or was read in a
+ *      layout the dispatcher does not recognise. An org that really did delete
+ *      every component of a type is served by the refusal message, which tells
+ *      the operator to remove the files deliberately.
  *   2. Majority wipe on a large enough set — more than
  *      {@link RECONCILE_MAX_DELETE_FRACTION} of the considered files at once,
  *      once at least {@link RECONCILE_GUARD_MIN_CONSIDERED} files are in play
@@ -255,10 +267,13 @@ const layoutMismatchRefusal = (
     `The vault was left untouched; re-run the refresh once the layouts agree, or delete the ` +
     `stale files deliberately if the org really did lose them.`;
 
-  if (deleteCount === consideredCount && authoritative.inScopeCount > 0) {
+  if (deleteCount === consideredCount) {
     return reason(
-      `all ${consideredCount} in-scope vault file(s) would be deleted even though the retrieve ` +
-        `returned ${authoritative.inScopeCount} component file(s) of those same types`,
+      authoritative.inScopeCount > 0
+        ? `all ${consideredCount} in-scope vault file(s) would be deleted even though the retrieve ` +
+            `returned ${authoritative.inScopeCount} component file(s) of those same types`
+        : `every in-scope vault file (${consideredCount}) would be deleted and the retrieve returned ` +
+            `no file of these types at all — an empty answer is not proof the org lost them`,
     );
   }
   if (
