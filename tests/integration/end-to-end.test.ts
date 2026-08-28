@@ -45,8 +45,9 @@ import { join, resolve } from 'node:path';
 // exercising the production code path: vitest transforms the .ts sources
 // on the fly when run via the local config in this directory.
 import { runRefresh } from '../../packages/cli/src/commands/refresh.js';
+import { readCliPackageVersion } from '../../packages/cli/src/package-version.js';
 import type { Edge, VaultManifest } from '../../packages/contracts/src/index.js';
-import { listEdges } from '../../packages/graph/src/index.js';
+import { listEdges, listNodesByType } from '../../packages/graph/src/index.js';
 import {
   buildContext,
   createServer,
@@ -58,6 +59,7 @@ import {
 import { vaultPaths } from '../../packages/vault/src/index.js';
 
 import { assertNotStubEnvelope as assertNotStubShared } from './envelope-honesty.js';
+import { deriveArgs, sampleFromNodes } from './derived-tool-args.js';
 import { FIXTURE_ROOT, FIXTURE_SOURCE } from './fixture-paths.js';
 
 /**
@@ -937,7 +939,17 @@ describe('sf-intelligence v0.3 end-to-end', () => {
       await readFile(paths.manifest, 'utf8'),
     ) as VaultManifest;
     expect(manifest.sourceOrg).toBe(TEST_ORG_ALIAS);
-    expect(manifest.version).toBe('0.1.0');
+    // DERIVED, not pinned. This read `toBe('0.1.0')` — the shipped version when
+    // it was written — so it went red at 0.1.1 and stayed red through 0.3.2,
+    // asserting nothing except that nobody was running it. `refresh.ts` writes
+    // `version: PACKAGE_VERSION` from the CLI's own package.json, so that is the
+    // authority; comparing against a literal was always going to rot.
+    //
+    // This is still a real assertion: it fails if refresh stops stamping the
+    // version, stamps a different one, or stamps the string 'undefined'.
+    const shippedVersion = readCliPackageVersion();
+    expect(shippedVersion).toMatch(/^\d+\.\d+\.\d+/);
+    expect(manifest.version).toBe(shippedVersion);
     // The hash is sha256 (64 hex chars). `sourceTreeHash` in the
     // captured journal is `5da339f1...`; we cannot compare directly
     // because the live `cp -r` may include filesystem metadata
@@ -1746,14 +1758,47 @@ describe('sf-intelligence v0.3 end-to-end', () => {
       ['sfi.what_if_change_field_value', { fieldId: 'CustomField:Account.Name' }],
     ];
 
-    // Every advertised tool must appear in `calls`. If a new tool is
-    // added to V01_TOOLS, the sweep must be updated — fail loudly
-    // rather than silently miss coverage.
-    expect(calls.map(([toolName]) => toolName).sort()).toEqual(
+    // THE HAND-MAINTAINED HALF, AND WHY IT IS NO LONGER THE WHOLE.
+    //
+    // `calls` above is a hand-written map of realistic inputs. The assertion
+    // here used to be `calls === V01_TOOLS` exactly, on the theory that a new
+    // tool would "fail loudly rather than silently miss coverage". It did fail
+    // loudly — and then stayed failing. The roster grew to 217 while the list
+    // stopped at 141, so for 76 tools this sweep asserted nothing at all, and
+    // because CI excludes tests/integration by design nobody saw the red.
+    // A gate that fails loudly into a directory nobody runs is a silent gate.
+    //
+    // So the roster is now DERIVED (the same `deriveArgs` machinery
+    // `tool-honesty-sweep.test.ts` uses to reach 217/217), and the hand-written
+    // entries are kept as OVERRIDES rather than as the census. They encode real
+    // knowledge about what a meaningful input looks like for a specific tool;
+    // derivation only knows the schema. Both matter, and neither has to be a
+    // list somebody remembers to update.
+    const overrides = new Map(calls);
+    const byType = new Map<string, readonly Node[]>();
+    for (const type of ['CustomObject', 'CustomField', 'ApexClass', 'ApexTrigger', 'Flow', 'Profile', 'PermissionSet']) {
+      const nodes = await listNodesByType(liveCtx.graph, type, { limit: 5 });
+      byType.set(type, nodes.ok ? nodes.value : []);
+    }
+    const sample = sampleFromNodes(byType, liveCtx.vaultRoot);
+
+    const swept: Array<[string, Readonly<Record<string, unknown>>]> = V01_TOOLS.map((tool) => [
+      tool.name,
+      overrides.get(tool.name) ?? deriveArgs(tool, sample),
+    ]);
+
+    // The census is now the roster itself — it cannot drift from it.
+    expect(swept.map(([name]) => name).sort()).toEqual(
       [...V01_TOOLS].map((tool) => tool.name).sort(),
     );
+    // ANTI-VACUITY: a derivation that produced nothing would still satisfy the
+    // equality above. The hand-written overrides must still be REACHING tools —
+    // if that number collapses, the realistic-input knowledge has been lost even
+    // though the sweep still "covers" everything.
+    const overridesUsed = V01_TOOLS.filter((tool) => overrides.has(tool.name)).length;
+    expect(overridesUsed).toBeGreaterThan(100);
 
-    for (const [toolName, args] of calls) {
+    for (const [toolName, args] of swept) {
       const result = await dispatchTool(liveCtx, toolName, args);
       expect(result.content[0]?.type).toBe('text');
       const body = parseEnvelope(result.content);
@@ -1885,16 +1930,45 @@ describe('sf-intelligence v0.3 end-to-end', () => {
     );
     expect(edgesResult.ok).toBe(true);
     if (!edgesResult.ok) return;
-    const scannerEdges = edgesResult.value.filter(
-      (e: Edge) => e.source === 'apex-scanner',
+    // WHAT THIS USED TO ASSERT, AND WHY IT WENT RED.
+    //
+    // It required at least one edge with `source: 'apex-scanner'` out of this
+    // trigger, anchored on a journal entry documenting three. Apex extraction
+    // later gained a parser-grade AST pass that runs BY DEFAULT and emits
+    // `source: 'apex-ast'` at `confidence: 'parsed'`. On a fixture this simple
+    // the AST resolves everything and the regex scanner adds nothing, so the
+    // count went to zero — the extraction got BETTER and the test read that as
+    // a failure.
+    //
+    // Confirmed on a real 9,264-node vault before rewriting: both paths are
+    // alive there (apex-ast 1,844 edges, apex-scanner 1,257), and out of
+    // triggers specifically the scanner still contributes 16 `callsApex` and 15
+    // `readsFrom` on messier real code. So neither source is dead; which one
+    // wins is a property of the INPUT, and pinning either was always fragile.
+    //
+    // The invariant worth keeping is the one the original comment named: an
+    // edge must cite the uncertainty of the mechanism that produced it. That is
+    // now asserted per-source, over whichever paths actually fired.
+    const APEX_EDGE_CONFIDENCE: Readonly<Record<string, string>> = {
+      // Regex pass over source text — never more than heuristic.
+      'apex-scanner': 'heuristic',
+      // Parser-grade AST — the whole point of it is that it is not a guess.
+      'apex-ast': 'parsed',
+    };
+    const apexEdges = edgesResult.value.filter((e: Edge) =>
+      Object.hasOwn(APEX_EDGE_CONFIDENCE, e.source),
     );
-    expect(scannerEdges.length).toBeGreaterThanOrEqual(1);
-    // Every scanner-emitted edge MUST carry heuristic confidence —
-    // the scanner is a regex-based pass, not an AST, and the
-    // confidence wiring (journal 0073) is what lets downstream
-    // consumers cite the right uncertainty in their answers.
-    for (const edge of scannerEdges) {
-      expect(edge.confidence).toBe('heuristic');
+    expect(
+      apexEdges.length,
+      'this trigger produced NO Apex-derived edges from either the AST pass or the ' +
+        'regex scanner — the extraction did not run, which is a different failure ' +
+        'from one path superseding the other',
+    ).toBeGreaterThanOrEqual(1);
+    for (const edge of apexEdges) {
+      expect(
+        edge.confidence,
+        `${edge.source} emitted ${edge.edgeType} at confidence '${edge.confidence}'`,
+      ).toBe(APEX_EDGE_CONFIDENCE[edge.source]);
     }
   });
 
