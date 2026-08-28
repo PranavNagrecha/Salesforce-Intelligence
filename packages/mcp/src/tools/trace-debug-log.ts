@@ -850,7 +850,7 @@ export const traceDebugLogHandler = async (
     if (frame.kind === 'execution') continue;
     const self = frameSelfNanos(frame, byId);
     if (self === null) continue;
-    const key = `${frame.kind} ${frame.name}`;
+    const key = `${frame.kind}\u001f${frame.name}`;
     const prev = hotAcc.get(key);
     hotAcc.set(key, {
       kind: frame.kind,

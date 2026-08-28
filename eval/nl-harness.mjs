@@ -171,16 +171,97 @@ const LIVE_SAFE_ARGS = {
   'sfi.live_drift_check': { objectApiName: 'Account' },
 };
 
-const realizeArgs = (route, tool, sample) => {
+/**
+ * THE HARNESS WAS MEASURING ITSELF, NOT THE PRODUCT.
+ *
+ * `sfi.route_question` returns `suggestedArgs` — the arguments its own `reason`
+ * tells the host to supply ("what_happens_on_save needs an explicit DML event —
+ * default to 'update' … when none is stated", and it hands back
+ * `{event: 'insert'}` for "What happens when a Case is created?"). This function
+ * ignored them and synthesized args from the tool's advertised `required` list
+ * instead, so eight of the sixteen offline questions in the battery executed
+ * WITHOUT the argument the router had just supplied, came back `invalid-query`,
+ * and were tallied as product failures.
+ *
+ * Measured against a real 9,264-node org: those same eight questions ANSWER when
+ * called the way the router instructs. The routing was never the problem — the
+ * hand-off in this file was. A gate that under-reports is as dishonest as one
+ * that over-reports, and this one was telling the owner half his front-page
+ * questions did not work.
+ *
+ * Router-supplied args WIN over synthesized ones: the router read the question,
+ * the synthesizer only read the schema.
+ */
+/**
+ * THE OTHER HALF OF THE HAND-OFF: `route.needsResolve`.
+ *
+ * The router does not only suggest args — it says "resolve the named component
+ * first" and lists `sfi.resolve` as step one of its plan. This harness executed
+ * the CONCRETE tool and skipped that step, so a question that names an object
+ * ("What happens when a Case is created?") reached a tool that had never been
+ * told which object, and answered `invalid-query`. The product was fine; the
+ * question was being asked with the subject removed.
+ *
+ * This resolves the subject the way a host does: find the vault component the
+ * question actually names, then fill whichever selector the tool advertises.
+ * Deliberately conservative — it fills ONLY a selector the tool advertises and
+ * that nothing has already supplied, so it can add a subject and never override
+ * the router's own judgement or a live-safe fixture.
+ */
+const SELECTOR_ORDER = [
+  'objectApiName',
+  'objectId',
+  'componentId',
+  'rootId',
+  'fieldId',
+  'nodeId',
+  'id',
+];
+
+const subjectFromQuestion = (question, comps) => {
+  // Punctuation-insensitive: the first cut matched on ` term ` and so missed
+  // "…of Account?" — the question mark. A whole class of question ends in one.
+  const q = ` ${question.toLowerCase().replace(/[^a-z0-9_]+/g, ' ')} `;
+  let best = null;
+  for (const c of comps) {
+    for (const term of [c.apiName, c.label]) {
+      if (typeof term !== 'string' || term.length < 3) continue;
+      const t = term.toLowerCase().replace(/[^a-z0-9_]+/g, ' ');
+      if (!q.includes(` ${t} `) && !q.includes(` ${t}s `)) continue;
+      // Prefer the longest match, and an object over a field of the same name.
+      const score = t.length + (c.type === 'CustomObject' ? 100 : 0);
+      if (best === null || score > best.score) best = { comp: c, score };
+    }
+  }
+  return best?.comp ?? null;
+};
+
+const withResolvedSubject = (question, tool, comps, args) => {
+  const props = tool.inputSchema?.properties ?? {};
+  const already = SELECTOR_ORDER.find((k) => args[k] !== undefined);
+  if (already !== undefined) return args;
+  const slot = SELECTOR_ORDER.find((k) => props[k] !== undefined);
+  if (slot === undefined) return args;
+  const subject = subjectFromQuestion(question, comps);
+  if (subject === null) return args;
+  const value = slot === 'objectApiName' ? subject.apiName : subject.id;
+  if (value === undefined || value === null) return args;
+  return { ...args, [slot]: value };
+};
+
+const realizeArgs = (route, tool, sample, comps = []) => {
+  const suggested = route.suggestedArgs ?? {};
   if (tool.name === 'sfi.list_components') {
-    return { type: LIST_TYPE_BY_INTENT[route.intent] ?? 'CustomObject', limit: 50 };
+    return { type: LIST_TYPE_BY_INTENT[route.intent] ?? 'CustomObject', limit: 50, ...suggested };
   }
   if (tool.name in LIVE_SAFE_ARGS) {
-    return { ...LIVE_SAFE_ARGS[tool.name], liveEnabled: LIVE };
+    return { ...LIVE_SAFE_ARGS[tool.name], ...suggested, liveEnabled: LIVE };
   }
-  const args = synthArgs(tool, sample);
+  const args = { ...synthArgs(tool, sample), ...suggested };
   if (tool.name.startsWith('sfi.live')) args.liveEnabled = LIVE;
-  return args;
+  return route.needsResolve === true
+    ? withResolvedSubject(route.question ?? '', tool, comps, args)
+    : args;
 };
 
 const classifyOutcome = (r) => {
@@ -225,7 +306,7 @@ const runVault = async ({ name, path }) => {
       let exec = { status: 'routed-only', detail: '', sig: '' };
       if (concrete && toolByName.has(concrete)) {
         const tool = toolByName.get(concrete);
-        const args = realizeArgs(route, tool, sample);
+        const args = realizeArgs(route, tool, sample, comps);
         const t0 = performance.now();
         const r = parse(await dispatchTool(ctx, concrete, args));
         const ms = +(performance.now() - t0).toFixed(0);
