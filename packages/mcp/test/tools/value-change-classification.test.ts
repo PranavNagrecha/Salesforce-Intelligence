@@ -146,8 +146,17 @@ describe('classifyRole — identity/integration blast radius', () => {
     expect(r.role).toMatch(/Derived/);
   });
 
+  // The fixture carries `externalId: false` / `unique: false` BY DESIGN: that
+  // is what the DX extractor writes for a non-key field, and it is what makes
+  // this a checked-and-clean decoy rather than an unchecked one. The
+  // never-extracted variant of the same field is a DIFFERENT case and is
+  // asserted separately in the R1 block below.
   it('rates a plain text description field low (decoy must not over-fire)', () => {
-    const r = roleOf('CustomField:Account.Notes__c', 'Account', 'Notes__c', { dataType: 'LongTextArea' });
+    const r = roleOf('CustomField:Account.Notes__c', 'Account', 'Notes__c', {
+      dataType: 'LongTextArea',
+      externalId: false,
+      unique: false,
+    });
     expect(r.severity).toBe('low');
     expect(r.role).toBe('Standard editable field');
   });
@@ -164,5 +173,85 @@ describe('classifyField — combined', () => {
     expect(c.field).toBe('Marketo_Id__c');
     expect(c.upsertKey.isUpsertKey).toBe(true);
     expect(c.role.severity).toBe('high');
+  });
+});
+
+/**
+ * R1 — typed absence on the upsert-key metadata flags.
+ *
+ * `packages/extractors/src/custom-field.ts` writes `externalId` and `unique`
+ * as FIXED keys (`toBooleanWithDefault`), so a DX-extracted field ALWAYS
+ * carries both — `false` there means "checked, not a key".
+ * `packages/extractors/src/standard-object-describe-fields.ts`
+ * (`describePropertiesFromRow`) writes NEITHER, so every describe-synthesized
+ * standard-object field (`provenance: 'org-describe-snapshot'`) reaches the
+ * classifier with both properties ABSENT. Absent must never render as
+ * checked-false.
+ */
+describe('R1 — describe-synthesized fields carry no upsert flags', () => {
+  /** A standard field as `describePropertiesFromRow` actually emits it. */
+  const describeNode = (id: string, extra: Record<string, unknown> = {}): Node =>
+    fieldNode(id, {
+      label: 'Whatever',
+      dataType: 'Text',
+      custom: false,
+      synthetic: true,
+      provenance: 'org-describe-snapshot',
+      describeType: 'string',
+      ...extra,
+    });
+
+  it('reports the never-extracted flags instead of silently reading them as false', () => {
+    const r = classifyUpsertKey(describeNode('CustomField:Account.Some_Standard_Ref__c'), 'Account', 'Some_Standard_Ref__c');
+    expect(r.isUpsertKey).toBe(false);
+    expect(r.unverifiedSignals).toEqual(['externalId', 'unique']);
+  });
+
+  it('reports NO unverified flags when the DX extractor wrote them false (checked-and-clean)', () => {
+    const node = fieldNode('CustomField:Account.Notes__c', {
+      dataType: 'Text',
+      externalId: false,
+      unique: false,
+    });
+    expect(classifyUpsertKey(node, 'Account', 'Notes__c').unverifiedSignals).toEqual([]);
+  });
+
+  it('never stamps confirmed on a fallthrough whose key flags were never checked', () => {
+    const node = describeNode('CustomField:Account.Some_Standard_Ref__c');
+    const m = classifyMutability(node, 'Some_Standard_Ref__c');
+    const u = classifyUpsertKey(node, 'Account', 'Some_Standard_Ref__c');
+    const r = classifyRole(u, m, 'Account', 'Some_Standard_Ref__c');
+    expect(r.confidence).toBe('potential');
+    expect(r.signals.join(' ')).toMatch(/NOT extracted/i);
+    expect(r.role).toMatch(/not extracted/i);
+  });
+
+  it('keeps confirmed for a DX-extracted field whose flags were checked and are false', () => {
+    const node = fieldNode('CustomField:Account.Notes__c', {
+      dataType: 'LongTextArea',
+      externalId: false,
+      unique: false,
+    });
+    const m = classifyMutability(node, 'Notes__c');
+    const u = classifyUpsertKey(node, 'Account', 'Notes__c');
+    const r = classifyRole(u, m, 'Account', 'Notes__c');
+    expect(r.confidence).toBe('confirmed');
+    expect(r.role).toBe('Standard editable field');
+    expect(r.signals).toEqual([]);
+  });
+
+  it('carries the not-extracted signal alongside a catalog hit (Contact.Email from describe)', () => {
+    const node = describeNode('CustomField:Contact.Email', { dataType: 'Email', describeType: 'email' });
+    const m = classifyMutability(node, 'Email');
+    const u = classifyUpsertKey(node, 'Contact', 'Email');
+    const r = classifyRole(u, m, 'Contact', 'Email');
+    expect(r.confidence).not.toBe('confirmed');
+    expect(r.signals.join(' ')).toMatch(/NOT extracted/i);
+  });
+
+  it('classifyField end-to-end: a describe-synthesized field is not a confirmed low-risk verdict', () => {
+    const c = classifyField(describeNode('CustomField:Lead.Some_Standard_Ref__c'));
+    expect(c.upsertKey.unverifiedSignals).toEqual(['externalId', 'unique']);
+    expect(c.role.confidence).toBe('potential');
   });
 });

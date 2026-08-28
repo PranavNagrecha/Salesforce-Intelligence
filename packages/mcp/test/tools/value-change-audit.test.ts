@@ -352,6 +352,28 @@ describe('valueChangeAuditHandler — unresolvable object scope', () => {
     );
   });
 
+  it('refuses the phantom even when explicit `fields` are named (no all-zero summary + notFound)', async () => {
+    const r = await valueChangeAuditHandler(ctx, {
+      object: PHANTOM,
+      fields: ['Key__c', 'Username'],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain(PHANTOM);
+  });
+
+  it('a wrong-case object builds its `CustomField:` ids in the VAULT casing, not the caller\'s', async () => {
+    const r = await valueChangeAuditHandler(ctx, { object: 'user', fields: ['Username'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The pre-fix build made `CustomField:user.Username`, which no node carries,
+    // so a real field landed in `notFound` — a "this field does not exist"
+    // answer about a field that does.
+    expect(r.value.data.notFound).toBeUndefined();
+    expect(r.value.data.rows.map((x) => x.fieldId)).toEqual(['CustomField:User.Username']);
+  });
+
   it('REGRESSION: the canonical `{object: "User"}` call is untouched by the existence gate', async () => {
     const r = await valueChangeAuditHandler(ctx, { object: 'User' });
     expect(r.ok).toBe(true);

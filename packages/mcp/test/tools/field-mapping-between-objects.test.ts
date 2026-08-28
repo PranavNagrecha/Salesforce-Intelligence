@@ -629,3 +629,101 @@ describe('fieldMappingBetweenObjectsHandler — counts + paging (FIX 6)', () => 
     expect(r.value.data.reconciliation.balanced).toBe(true);
   });
 });
+
+/**
+ * R4 — an object filter must be VERIFIED to exist in the vault before it is
+ * used.
+ *
+ * `loadFields` string-templated `CustomObject:${objectApiName}`, so a typo
+ * ('Acount') and a wrong-CASE name ('contact' — Salesforce api names are
+ * case-INSENSITIVE, so this names the same object) both returned zero rows.
+ * The tool then reported `fieldCount: 0` with empty lists AND stamped its own
+ * integrity check VALID — `reconciliation.balanced` is `0 === 0` — while its
+ * boundary tells the reader to use the result for a migration script.
+ */
+describe('fieldMappingBetweenObjectsHandler — object scope must exist (R4)', () => {
+  it('REFUSES a nonexistent objectA instead of certifying an empty mapping', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(ctx, {
+      objectA: 'Acount',
+      objectB: 'Contact',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      // Pre-fix shape, recorded so the failure names the defect precisely.
+      expect({
+        objectA: r.value.data.objectA,
+        counts: r.value.data.counts,
+        reconciliation: r.value.data.reconciliation,
+      }).toEqual('a refusal');
+      return;
+    }
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain("no object named 'Acount' exists in this vault");
+    expect(r.error.path).toBe('objectA');
+  });
+
+  it('REFUSES a nonexistent objectB instead of certifying an empty mapping', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(ctx, {
+      objectA: 'Lead',
+      objectB: 'Contct',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      expect({
+        objectB: r.value.data.objectB,
+        reconciliation: r.value.data.reconciliation,
+      }).toEqual('a refusal');
+      return;
+    }
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain("no object named 'Contct' exists in this vault");
+    expect(r.error.path).toBe('objectB');
+  });
+
+  it('answers a wrong-CASE object name against the vault casing', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(ctx, {
+      objectA: 'lead',
+      objectB: 'contact',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Same answer as the exactly-cased call: fields found, pairs suggested.
+    expect(d.objectA.fieldCount).toBeGreaterThan(0);
+    expect(d.objectB.fieldCount).toBeGreaterThan(0);
+    expect(
+      d.suggestedPairs.some(
+        (p) =>
+          p.fieldA.apiName === 'Lead_Score__c' &&
+          p.fieldB.apiName === 'Contact_Score__c',
+      ),
+    ).toBe(true);
+    // The echoed api name is the VAULT's casing, never the caller's — the
+    // response must not assert a component id that does not exist.
+    expect(d.objectA.apiName).toBe('Lead');
+    expect(d.objectB.apiName).toBe('Contact');
+  });
+
+  it('never reports balanced: true for an object it could not find', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(ctx, {
+      objectA: 'Acount',
+      objectB: 'Contact',
+    });
+    if (r.ok) {
+      expect(r.value.data.reconciliation.balanced).toBe(false);
+      return;
+    }
+    expect(r.ok).toBe(false);
+  });
+
+  it('refuses a nonexistent object on the served vault too (no `vault` arg)', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(ctx, {
+      vault: 'acme-prod',
+      objectA: 'Lead',
+      objectB: 'Opportunty',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

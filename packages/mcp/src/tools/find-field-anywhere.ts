@@ -46,6 +46,16 @@
  *     the field-tool family); exactly one is required and must start with
  *     `CustomField:`. A missing id or non-CustomField prefix surfaces as
  *     `invalid-query` at the handler boundary.
+ *   - EXISTENCE GATE: the prefix check alone let a typo, a WRONG-CASE id, and a
+ *     never-retrieved field all return the same confident
+ *     `{groups: [], totalCount: 0}` as a field that is genuinely referenced
+ *     nowhere. An id that no node carries AND no edge references now surfaces
+ *     as `component-not-found` with ranked `resolveSuggestions`
+ *     (`fieldNotFoundError` + `phantomAwareNotFoundMessage` — the same pair the
+ *     sibling field tools use). A PHANTOM id — referenced by real edges but
+ *     whose own definition was never retrieved — still ANSWERS (those
+ *     references are true) and carries a boundary saying the definition is
+ *     absent and the folded report/dashboard flags could not be read.
  *   - The sort within each group is deterministic — `componentId ASC`,
  *     then `edgeType ASC`. The grouped output is sorted alphabetically
  *     by component-type label so the response is reproducible across
@@ -78,6 +88,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { fieldNotFoundError } from './field-not-found-suggest.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -87,6 +98,7 @@ import {
   type PageableSection,
   type SectionDisclosure,
 } from './page-cursor.js';
+import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
   reportDashboardUsage,
@@ -107,6 +119,15 @@ const STATIC_GRAPH_DISCLOSURE =
   "the search uses pattern-matching over Apex source, Flow XML, and metadata XML. Dynamic SOQL (`Database.query('SELECT...')`) is stripped before the pattern pass and is invisible. Reflective field access (`obj.get('FieldName')`) is invisible. Custom utility methods that wrap the operation you're searching for are invisible — the search finds calls to `Messaging.sendEmail` but not calls to `MyEmailHelper.send(...)` unless you also search for that helper.";
 const MANAGED_PACKAGE_DISCLOSURE =
   'results from managed packages are limited to metadata XML; Apex source within managed packages is not indexed. If the operation lives inside a managed-package class, this search will not find it.';
+/**
+ * PHANTOM target: the id is referenced by real edges but no node carries it, so
+ * the field's own definition was never retrieved. The reference list is still
+ * true — refusing would throw away a real answer — but the folded
+ * report/dashboard flags live on the ABSENT node and cannot be read at all, so
+ * a plain "no report usage" caveat here would be a second confident zero.
+ */
+const phantomTargetDisclosure = (id: string): string =>
+  `\`${id}\` is referenced by the component(s) listed above, but its OWN CustomField definition was never retrieved into this vault — typically a managed-package field, an uncustomized standard field the Metadata API does not emit, or one outside the retrieve scope. Treat the reference list as what the graph holds ABOUT the id, not as a complete picture of the field; the folded \`usedInReport\` / \`usedInDashboard\` flags live on the missing node and could NOT be read, so report/dashboard usage is UNKNOWN here rather than absent.`;
 
 /**
  * Zod schema for the `sfi.find_field_anywhere` tool input.
@@ -284,6 +305,41 @@ export const findFieldAnywhereHandler = async (
     });
   }
 
+  // EXISTENCE GATE (R4). `targetId` was validated by PREFIX only. Without this
+  // gate four distinct causes produced a byte-identical
+  // `{groups: [], totalCount: 0, byEdgeType: {}, truncated: false}` and three of
+  // them were lies: a typo, a real field in the WRONG CASE (ids are
+  // case-sensitive), a field the refresh never retrieved, and a real field that
+  // genuinely is referenced nowhere. Only the last one may answer zero. The
+  // handler already fetched this node below (for the folded report/dashboard
+  // flags) and silently substituted `false` on null — ask FIRST, and route the
+  // refusal through the same `fieldNotFoundError` + phantom-aware message the
+  // sibling field tools use so the caller gets ranked `resolveSuggestions`.
+  const targetNodeResult = await getNodeById(ctx.graph, targetId);
+  if (!targetNodeResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${targetNodeResult.error.message}`,
+    });
+  }
+  const targetNode = targetNodeResult.value;
+  if (targetNode === null) {
+    // A PHANTOM (edges exist, definition not retrieved) still has a true answer
+    // to give, so only an id that is BOTH absent and unreferenced is refused.
+    const referencingEdges = edgesResult.value.filter(
+      (e) => e.edgeType !== 'parentOf',
+    ).length;
+    if (referencingEdges === 0) {
+      return err(
+        await fieldNotFoundError(
+          ctx,
+          targetId,
+          await phantomAwareNotFoundMessage(ctx, targetId, 'CustomField'),
+        ),
+      );
+    }
+  }
+
   const collected: FieldReference[] = [];
   for (const edge of edgesResult.value) {
     // The parentOf edge is the containment edge from CustomObject and
@@ -452,12 +508,14 @@ export const findFieldAnywhereHandler = async (
   // gives over EVERY extracted report. The property stays the authority here.
   // Surface it: a positive note when the field carries the folded usage,
   // otherwise the caveat that report usage is only modeled when the pull ran.
-  const targetNodeResult = await getNodeById(ctx.graph, targetId);
-  const rdUsage =
-    targetNodeResult.ok && targetNodeResult.value !== null
-      ? reportDashboardUsage(targetNodeResult.value)
-      : { usedInReport: false, usedInDashboard: false };
-  if (rdUsage.usedInReport || rdUsage.usedInDashboard) {
+  // `targetNode` was resolved by the existence gate above; a null here can now
+  // only mean PHANTOM (the gate refused the absent-and-unreferenced case). A
+  // phantom target has NO node to carry the folded flags, so it gets the
+  // phantom disclosure instead of a report/dashboard claim in either direction.
+  const rdUsage = targetNode !== null ? reportDashboardUsage(targetNode) : null;
+  if (rdUsage === null) {
+    boundaries.push(phantomTargetDisclosure(targetId));
+  } else if (rdUsage.usedInReport || rdUsage.usedInDashboard) {
     const where = [
       rdUsage.usedInReport ? 'report column(s) / filter(s)' : null,
       rdUsage.usedInDashboard ? 'dashboard component(s)' : null,

@@ -511,9 +511,34 @@ export interface IntegrationMapOutput {
   readonly absence?: IntegrationMapAbsence;
 }
 
-/** Honest-empty note attached when the integration map has zero components. */
-const INTEGRATION_EMPTY_NOTE =
-  'No integration metadata found in this vault. Either this org declares no AuthProviders / NamedCredentials / RemoteSiteSettings / ExternalDataSources / etc., or those types were not included in the retrieve. This is an empty result, not an error. NOTE: this map does not enumerate Apex HTTP callouts (see apexCalloutDisclosure) — an org whose integration is entirely Apex-based can still be active here.';
+/**
+ * Honest-empty note attached when the integration map has zero components.
+ *
+ * FILTER-MANUFACTURED-ABSENCE: the note enumerates families, so it may only
+ * ever enumerate families this call actually SCANNED. Under a narrowing
+ * `filter` the scoped-out types were never read, and the un-narrowed sentence
+ * ("this org declares no AuthProviders / NamedCredentials / RemoteSite-
+ * Settings / ExternalDataSources / etc.") turns the caller's own narrowing
+ * into a positive claim about the org. So the note is DERIVED from
+ * `scannedTypes` / `scopedOutTypes` rather than being a constant: `'all'`
+ * reproduces the original sentence verbatim, every other filter names what it
+ * checked and states, separately, what it did not.
+ */
+const buildIntegrationEmptyNote = (
+  filter: string,
+  scannedTypes: readonly ComponentType[],
+  scopedOutTypes: readonly ComponentType[],
+): string => {
+  const tail =
+    'This is an empty result, not an error. NOTE: this map does not enumerate Apex HTTP callouts (see apexCalloutDisclosure) — an org whose integration is entirely Apex-based can still be active here.';
+  if (scopedOutTypes.length === 0) {
+    return `No integration metadata found in this vault. Either this org declares no AuthProviders / NamedCredentials / RemoteSiteSettings / ExternalDataSources / etc., or those types were not included in the retrieve. ${tail}`;
+  }
+  return (
+    `No integration metadata found in the families this call SCANNED. \`filter: '${filter}'\` scanned only ${scannedTypes.join(' / ')} — either this org declares none of those, or those types were not included in the retrieve. ` +
+    `NOT CHECKED under \`filter: '${filter}'\`: ${scopedOutTypes.join(' / ')}. Those families were never read, so this empty result says NOTHING about them — re-call with \`filter: 'all'\` before concluding the org has no integration surface. ${tail}`
+  );
+};
 
 /** Always-present boundary: Apex HTTP callouts are out of scope for this map. */
 const APEX_CALLOUT_DISCLOSURE =
@@ -542,10 +567,23 @@ const enumerateNames = (names: readonly string[]): string =>
  * Takes the COMPLETE per-type sets, never the payload-trimmed buckets: the note
  * makes positive absence claims ("this map contains no NamedCredentials"), which
  * a truncated bucket turns into a lie.
+ *
+ * FILTER-MANUFACTURED-ABSENCE: the same is true of the FILTER, and the JSDoc
+ * above used to guard only against the trim. A scoped-out bucket is `[]`
+ * because it was never read, so each half of this note is gated on its own
+ * `inScope` flag: in scope => the grounded answer (or a real, checked "none");
+ * out of scope => an explicit NOT CHECKED naming the filter that caused it.
+ * The two halves are independent — `filter: 'sites'` answers the
+ * RemoteSiteSetting half in full while abstaining on the NamedCredential half.
  */
 const buildCalloutAuthorizationNote = (
   remoteSiteSettings: readonly IntegrationMapNode[],
   namedCredentials: readonly IntegrationMapNode[],
+  scope: {
+    readonly filter: string;
+    readonly remoteSiteSettingInScope: boolean;
+    readonly namedCredentialInScope: boolean;
+  },
 ): string => {
   const rssNames = remoteSiteSettings.map((n) => n.apiName).sort();
   const referencedNcs = namedCredentials
@@ -557,13 +595,15 @@ const buildCalloutAuthorizationNote = (
     .map((n) => n.apiName)
     .sort();
 
-  const rssPart =
-    rssNames.length > 0
+  const rssPart = !scope.remoteSiteSettingInScope
+    ? `NOT CHECKED: \`filter: '${scope.filter}'\` excluded RemoteSiteSetting from this call, so this map never read them and CANNOT say whether a hardcoded-URL outbound callout is authorized by a remote site setting. Re-call with \`filter: 'all'\`.`
+    : rssNames.length > 0
       ? `Active RemoteSiteSettings authorize outbound HTTP callouts to a hardcoded endpoint URL (an Apex \`Http.request\` to a literal host) — ${rssNames.length} in this org: ${enumerateNames(rssNames)}.`
       : 'This map contains no RemoteSiteSettings, so no hardcoded-URL outbound callout is authorized by a remote site setting.';
 
-  const ncPart =
-    namedCredentials.length === 0
+  const ncPart = !scope.namedCredentialInScope
+    ? `NOT CHECKED: \`filter: '${scope.filter}'\` excluded NamedCredential from this call, so this map never read them and CANNOT say whether a callout addresses a \`callout:{alias}\` endpoint. Re-call with \`filter: 'all'\`.`
+    : namedCredentials.length === 0
       ? 'This map contains no NamedCredentials, so no callout addresses a `callout:{alias}` endpoint.'
       : `NamedCredentials authorize callouts that address \`callout:{alias}\` — ${namedCredentials.length} in this org. Referenced (something in the retrieved metadata is wired to them): ${
           referencedNcs.length > 0 ? enumerateNames(referencedNcs) : 'none'
@@ -1343,6 +1383,10 @@ export const integrationMapHandler = async (
     buckets.set(type, []);
   }
   const scannedTypes = INTEGRATION_TYPES.filter((type) => inScopeTypes.has(type));
+  // The complement, kept as a first-class value rather than re-derived at each
+  // prose site: every family the caller's `filter` scoped OUT was never read,
+  // so no sentence in this response may enumerate one as a fact about the org.
+  const scopedOutTypes = INTEGRATION_TYPES.filter((type) => !inScopeTypes.has(type));
   const scan = await scanAllNodesOfTypes(ctx.graph, scannedTypes);
   if (!scan.ok) {
     return err({
@@ -1527,6 +1571,11 @@ export const integrationMapHandler = async (
     calloutAuthorizationNote: buildCalloutAuthorizationNote(
       buckets.get('RemoteSiteSetting') ?? [],
       buckets.get('NamedCredential') ?? [],
+      {
+        filter,
+        remoteSiteSettingInScope: inScopeTypes.has('RemoteSiteSetting'),
+        namedCredentialInScope: inScopeTypes.has('NamedCredential'),
+      },
     ),
     truncatedCategories,
     boundaries,
@@ -1580,7 +1629,10 @@ export const integrationMapHandler = async (
   return ok({
     data:
       totalNodes === 0 && omniSurfaceCount === 0 && martechConnectors.length === 0
-        ? { ...data, note: INTEGRATION_EMPTY_NOTE }
+        ? {
+            ...data,
+            note: buildIntegrationEmptyNote(filter, scannedTypes, scopedOutTypes),
+          }
         : data,
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

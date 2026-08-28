@@ -82,6 +82,39 @@ const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 500;
 
 /**
+ * The property the profile extractor ALWAYS writes when the login-restriction
+ * family was extracted at all.
+ *
+ * `collectLoginRestrictions` (`packages/extractors/src/profile.ts`) emits
+ * `{ loginIpRanges, loginHoursDefined, loginHours }` as ONE object on every
+ * Profile — `{ loginIpRanges: [] }` when the profile declares no restriction —
+ * so a consumer can tell "extracted, none" from "never extracted". A node
+ * carrying no such key was built by a refresh predating that extractor, so its
+ * login axis is NOT MODELED, never a verified "unrestricted".
+ *
+ * Read with {@link familyWasExtracted} (a `hasOwnProperty` check), never with
+ * `Array.isArray` / `=== true`: the checked-and-clean case writes `[]` and
+ * `false`, which are real answers and are both falsy, so truthiness cannot tell
+ * the two apart. Deliberately the SAME sentinel `profile_security.ts` reads, so
+ * the two login-security surfaces agree by construction rather than by luck.
+ */
+const LOGIN_RESTRICTIONS_SENTINEL = 'loginIpRanges';
+
+/**
+ * The property BOTH container extractors always write when the `flowAccesses`
+ * family was extracted at all.
+ *
+ * `buildFlowEdges` and `flowGrantCount: flowEdges.length` are emitted from the
+ * same block in `packages/extractors/src/profile.ts` and
+ * `packages/extractors/src/permission-set.ts`, on EVERY container including one
+ * granting zero flows — so the key's ABSENCE means the `flowAccess` grant edges
+ * were never extracted, and the empty edge set below is "not modeled", never a
+ * verified "this container can run no flows". Exactly the contract
+ * `customPermissionGrantCount` already carries one field down.
+ */
+const FLOW_GRANTS_SENTINEL = 'flowGrantCount';
+
+/**
  * User permissions that represent an ABILITY / ACTION (run, export, transfer,
  * convert, mass-edit, manage) rather than object CRUD or pure admin god-mode.
  * Curated — the high-signal "what can they DO" perms an admin asks about.
@@ -254,18 +287,36 @@ export interface UserAbilityOutput {
     readonly flowId: ComponentId;
     readonly targetMissing: boolean;
   }[];
-  /** Profile-only login security. Empty ipRanges/loginHours for a permission set. */
+  /**
+   * Profile-only login security. Empty ipRanges/loginHours for a permission set.
+   *
+   * Every field is `null` — never `0` / `false` / `[]` — when this Profile
+   * carries no extracted {@link LOGIN_RESTRICTIONS_SENTINEL}, i.e. the family
+   * was never extracted and NOTHING was checked. "No IP allowlist and no
+   * login-hours window" is a SECURITY-POSTURE claim; a vault whose refresh
+   * predates the extractor has not earned it.
+   *
+   * A permission set is the DIFFERENT case: it carries no login security BY
+   * DESIGN, which `applies: false` already states, so its zeros stay zeros.
+   * Reporting a blind spot there would be as wrong as hiding one here.
+   */
   readonly loginRestrictions: {
-    readonly ipRangeCount: number;
-    readonly loginHoursRestricted: boolean;
+    /** `null` = the family was never extracted (see above), not a checked zero. */
+    readonly ipRangeCount: number | null;
+    /** `null` = never extracted. `false` is reserved for a CHECKED "no window". */
+    readonly loginHoursRestricted: boolean | null;
     readonly applies: boolean;
-    /** Full IP-range windows (Profile-only; `[]` for a permission set). */
-    readonly ipRanges: readonly LoginIpRange[];
+    /**
+     * Full IP-range windows (Profile-only; `[]` for a permission set), or
+     * `null` when the family was never extracted.
+     */
+    readonly ipRanges: readonly LoginIpRange[] | null;
     /**
      * Login-hours per-weekday windows (Profile-only; `[]` for a permission set,
-     * or for a profile with no `<loginHours>` restriction declared).
+     * or for a profile with no `<loginHours>` restriction declared), or `null`
+     * when the family was never extracted.
      */
-    readonly loginHours: readonly LoginHourWindow[];
+    readonly loginHours: readonly LoginHourWindow[] | null;
   };
   /** The action/ability system permissions present (sorted). */
   readonly actionPermissions: readonly string[];
@@ -281,7 +332,16 @@ export interface UserAbilityOutput {
   readonly customPermissions: readonly { readonly name: string; readonly targetMissing: boolean }[];
 
   readonly summary: {
-    readonly runnableFlows: number;
+    /**
+     * Flows this container grants run access to, or `null` when the container
+     * carries no extracted {@link FLOW_GRANTS_SENTINEL} — the `flowAccess`
+     * grant edges were never extracted and NOTHING was checked. `0` is reserved
+     * for a CHECKED zero: a container that was examined and grants none.
+     *
+     * Same reasoning as `customPermissions` below — a false `0` in a security
+     * tool is a missed grant, so the two cases cannot share a value.
+     */
+    readonly runnableFlows: number | null;
     readonly actionPermissions: number;
     /**
      * Custom permissions this container confers, or `null` when the container
@@ -426,6 +486,12 @@ export const userAbilityHandler = async (
     .map(([flowId, targetMissing]) => ({ flowId: flowId as ComponentId, targetMissing }))
     .sort((a, b) => (a.flowId < b.flowId ? -1 : a.flowId > b.flowId ? 1 : 0));
   const missingFlowTargets = runnable.filter((f) => f.targetMissing).length;
+  // TYPED ABSENCE: whether the flowAccess family was extracted is decided by the
+  // SENTINEL PROPERTY, never by the edge set being empty. An empty grantedBy
+  // result reads identically for "checked, grants nothing" and "this refresh
+  // never emitted flowAccess edges" — and the second must not answer "can run
+  // no flows".
+  const flowGrantsChecked = familyWasExtracted(node.properties, FLOW_GRANTS_SENTINEL);
 
   // Action permissions from userPermissions.
   const perms = node.properties['userPermissions'];
@@ -625,10 +691,30 @@ export const userAbilityHandler = async (
   // Login restrictions (Profile only). Surface the FULL ip-range AND
   // login-hours windows structurally. A permission set carries no login
   // security, so both lists stay empty regardless of any stray property.
-  const loginIpRanges = isProfile ? readLoginIpRanges(node.properties) : [];
-  const loginHours = isProfile ? readLoginHours(node.properties) : [];
-  const ipRangeCount = loginIpRanges.length;
-  const loginHoursRestricted = isProfile && node.properties['loginHoursDefined'] === true;
+  //
+  // TYPED ABSENCE: for a PROFILE the answer is decided by the SENTINEL
+  // PROPERTY, never by the array's shape. `readLoginIpRanges` returns `[]` for
+  // a missing key and for a declared-empty one alike, which is exactly how a
+  // profile locked to a corporate network reads as "not IP-restricted" on a
+  // vault predating the extractor. A PERMISSION SET is not the same case: it
+  // carries no login security BY DESIGN and `applies:false` says so, so its
+  // zeros are N/A, not unchecked, and stay zeros.
+  const loginRestrictionsChecked =
+    !isProfile || familyWasExtracted(node.properties, LOGIN_RESTRICTIONS_SENTINEL);
+  const loginIpRanges: readonly LoginIpRange[] | null = !isProfile
+    ? []
+    : loginRestrictionsChecked
+      ? readLoginIpRanges(node.properties)
+      : null;
+  const loginHours: readonly LoginHourWindow[] | null = !isProfile
+    ? []
+    : loginRestrictionsChecked
+      ? readLoginHours(node.properties)
+      : null;
+  const ipRangeCount = loginIpRanges === null ? null : loginIpRanges.length;
+  const loginHoursRestricted = !loginRestrictionsChecked
+    ? null
+    : isProfile && node.properties['loginHoursDefined'] === true;
 
   const total = runnable.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
@@ -671,6 +757,53 @@ export const userAbilityHandler = async (
   const hasMore = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
 
+  // The muting sentences LEAD the note: each says a whole family was never
+  // measured, so neither may sit behind the sentences describing what those
+  // fields mean. Wording comes from the shared `absence-disclosure` template so
+  // this tool and `profile_security` cannot drift apart on the same sentinel.
+  const mutedFamilies =
+    (loginRestrictionsChecked
+      ? ''
+      : notExtractedFamilyDisclosure({
+          subject: 'Login restrictions',
+          verb: 'checked',
+          pluralSubject: true,
+          sentinelProperty: LOGIN_RESTRICTIONS_SENTINEL,
+          containers: [componentId],
+          surface:
+            '`loginRestrictions.ipRangeCount` / `ipRanges` / `loginHoursRestricted` / `loginHours`',
+          zeroReading: '"this profile is not IP- or hours-restricted"',
+        }) + ' ')
+    + (flowGrantsChecked
+      ? ''
+      : notExtractedFamilyDisclosure({
+          subject: 'Flow run grants',
+          verb: 'checked',
+          pluralSubject: true,
+          sentinelProperty: FLOW_GRANTS_SENTINEL,
+          containers: [componentId],
+          surface: '`runnableFlows` / `summary.runnableFlows`',
+          zeroReading: '"this container can run no flows"',
+        }) + ' ');
+
+  // Each clause DESCRIBES A POPULATED FIELD. When a family was never extracted
+  // its field is not populated, so emitting the clause makes the boundaryNote
+  // itself the thing that lies — drop the clause and let `mutedFamilies` state
+  // the absence instead.
+  const populatedFieldClauses =
+    [
+      ...(flowGrantsChecked
+        ? ['runnableFlows = the flowAccess grants on this container']
+        : []),
+      'actionPermissions are declared system permissions',
+      ...(customPermissionsChecked
+        ? [
+            'customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions)',
+          ]
+        : []),
+    ].join('; ')
+    + '. The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.';
+
   return ok({
     data: {
       componentId,
@@ -708,7 +841,7 @@ export const userAbilityHandler = async (
           }
         : {}),
       summary: {
-        runnableFlows: total,
+        runnableFlows: flowGrantsChecked ? total : null,
         actionPermissions: actionPermissions.length,
         customPermissions: customPermissionsChecked ? customPermissions.length : null,
       },
@@ -723,19 +856,14 @@ export const userAbilityHandler = async (
       // known action list, so an action permission the org's dependency
       // graph IMPLIES rather than declares is invisible here.
       boundaryNote:
-        declaredOnlyDependencyDisclosure({
+        mutedFamilies
+        + declaredOnlyDependencyDisclosure({
           noun: 'actionPermissions list',
           specifics:
             'Concretely for this surface: a container declaring `ExportReport` also confers `RunReports` (a dependency edge measured on a real org) and both are action permissions, yet only the declared one appears above.',
         })
         + ' '
-        // The custom-permission clause DESCRIBES A POPULATED FIELD. When the
-        // family was never extracted the field is not populated, so emitting
-        // the clause makes the boundaryNote itself the thing that lies. Drop
-        // the clause and state the absence instead.
-        + (customPermissionsChecked
-          ? 'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
-          : 'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions. The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.')
+        + populatedFieldClauses
         + (customPermissionsChecked
           ? ''
           : ' '

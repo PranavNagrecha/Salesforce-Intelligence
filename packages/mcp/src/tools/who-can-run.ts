@@ -14,6 +14,15 @@
  * not a grantedBy edge); "who can access a report/dashboard FOLDER" needs the
  * live plane (folder shares aren't in the offline metadata) — disclosed, not
  * fabricated. A user must also be ASSIGNED the profile/permission set (runtime).
+ *
+ * The sharper honesty axis is EXTRACTION VINTAGE. Every answer here is derived
+ * from `flowAccess` edges that only exist if the refresh that built the vault
+ * ran `buildFlowEdges`. On an older vault NO flow has one, so an unguarded
+ * handler answers `granters: [], summary.granters: 0, confidence: 'declared'`
+ * for every flow in the org — a false verified zero on a security surface, and
+ * the evidence an admin uses to call a flow orphaned and retire it. The family
+ * is therefore decided by the `flowGrantCount` SENTINEL on the granting
+ * containers (`familyWasExtracted`), never by the inbound edge set being empty.
  */
 
 import type {
@@ -28,11 +37,40 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 const FLOW_PREFIX = 'Flow:';
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 500;
+
+/**
+ * The property BOTH container extractors always write when the `flowAccesses`
+ * family was extracted at all — `flowGrantCount: flowEdges.length`, emitted
+ * from the same block as `buildFlowEdges` in
+ * `packages/extractors/src/profile.ts` and
+ * `packages/extractors/src/permission-set.ts`, on EVERY container INCLUDING one
+ * that grants zero flows. So the key's ABSENCE means the `flowAccess` grant
+ * edges were never extracted, and an empty inbound edge set is "not modeled",
+ * NEVER a verified "nobody can run this flow".
+ *
+ * Deliberately the SAME sentinel the forward direction (`user_ability`) reads,
+ * so the two ends of one edge family agree by construction rather than by luck.
+ */
+const FLOW_GRANTS_SENTINEL = 'flowGrantCount';
+
+/** The container types that can carry a `<flowAccesses>` run grant. */
+const GRANTER_TYPES = ['Profile', 'PermissionSet'] as const;
+
+/**
+ * The computed-from-what sentence this tool has always carried. Split out so
+ * the never-extracted disclosure can LEAD the note (it is an understatement of
+ * access) without the two being interleaved by hand at the return site.
+ */
+const COMPUTED_NOTE =
+  'These Profiles/PermissionSets grant RUN access to the flow (flowAccess). A user gains it only when ASSIGNED the container (runtime, not modeled), and run also requires the flow to be active. "Who can open an app" is app_access; report/dashboard FOLDER access needs the live plane (folder shares are not in the offline metadata).';
 
 export const whoCanRunInputSchema = z.object({
   componentId: z.string().min(1),
@@ -66,7 +104,35 @@ interface FlowRunGranterInternal extends FlowRunGranter {
 export interface WhoCanRunOutput {
   readonly componentId: string;
   readonly granters: readonly FlowRunGranter[];
-  readonly summary: { readonly granters: number };
+  readonly summary: {
+    /**
+     * Containers granting run access to this flow, or `null` when NOT ONE
+     * container in the vault carries the extracted {@link FLOW_GRANTS_SENTINEL}
+     * and no run grant was found — the `flowAccess` family was never extracted,
+     * so NOTHING was checked. `0` is reserved for a CHECKED zero: containers
+     * that were examined and grant nobody run access.
+     *
+     * A false `0` on a security surface is a missed grant (or a flow wrongly
+     * declared orphaned and retired), which is why the two cases cannot share a
+     * value. Same contract `user_ability.summary.runnableFlows` carries for the
+     * FORWARD direction of these same edges.
+     */
+    readonly granters: number | null;
+  };
+  /**
+   * How many Profile/PermissionSet containers in this vault carry NO extracted
+   * {@link FLOW_GRANTS_SENTINEL} — i.e. were never examined for `<flowAccesses>`
+   * at all. `0` on a fully-extracted vault. Any positive value means `granters`
+   * is a FLOOR, not an enumeration, and the reason is spelled out in
+   * `boundaryNote`.
+   */
+  readonly flowAccessNotChecked: number;
+  /**
+   * True when the container scan behind {@link flowAccessNotChecked} stopped at
+   * the full-scan residual cap, so MORE unchecked containers may exist behind
+   * it — the disclosure itself may be an understatement.
+   */
+  readonly scanTruncated: boolean;
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
@@ -155,6 +221,31 @@ export const whoCanRunHandler = async (
             : 0,
   );
 
+  // ------------------------------------------------------------------
+  // R1 TYPED ABSENCE — did this refresh extract `<flowAccesses>` AT ALL?
+  //
+  // The empty inbound edge set above reads IDENTICALLY for "checked, nobody
+  // grants it" and "this vault's refresh predates `buildFlowEdges`, so no flow
+  // has a run-grant edge". The flow node itself cannot answer that: the
+  // sentinel lives on the GRANTING containers, so the question is asked of the
+  // whole container corpus, per-container, never as a whole-corpus OR (one
+  // extracted container must not vouch for the ones that were never read).
+  // Scanned with the shared multi-window walk, so a corpus past the 500-row
+  // `listNodesByType` ceiling is not alphabetically capped.
+  // ------------------------------------------------------------------
+  const containerScan = await scanAllNodesOfTypes(ctx.graph, [...GRANTER_TYPES]);
+  if (!containerScan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${containerScan.error.message}` });
+  }
+  const containersNotChecked: string[] = [];
+  let containersChecked = 0;
+  for (const container of containerScan.value.nodes) {
+    if (familyWasExtracted(container.properties, FLOW_GRANTS_SENTINEL)) containersChecked += 1;
+    else containersNotChecked.push(container.id);
+  }
+  containersNotChecked.sort();
+  const scanTruncated = containerScan.value.scanIncomplete;
+
   const total = granters.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
@@ -199,19 +290,48 @@ export const whoCanRunHandler = async (
   const hasMore = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
 
+  // The case-1 sentence comes from the ONE shared builder (R6) — the same
+  // template `user_ability` / `app_access` render, so the two directions of this
+  // edge family cannot drift into two wordings of one blind spot.
+  const notCheckedNote =
+    containersNotChecked.length > 0
+      ? notExtractedFamilyDisclosure({
+          subject: 'Flow run grants',
+          verb: 'checked',
+          pluralSubject: true,
+          sentinelProperty: FLOW_GRANTS_SENTINEL,
+          containers: containersNotChecked,
+          surface: '`granters` / `summary.granters`',
+          zeroReading: '"nobody can run this flow"',
+        })
+      : null;
+  // Leading, because it is an UNDERSTATEMENT of access: a reader who stops after
+  // one sentence must still learn the enumeration may be short.
+  const baseNote = notCheckedNote === null ? COMPUTED_NOTE : `${notCheckedNote} ${COMPUTED_NOTE}`;
+  const boundaryNote = scanTruncated
+    ? `${baseNote} ${fullScanTruncationNote(containerScan.value.incompleteTypes)}`
+    : baseNote;
+
+  // NOTHING was checked and nothing was found → `null`, never a verified `0`.
+  // A grant that WAS found makes the count a real floor, so it stays a number
+  // even on a mixed-vintage vault (the shortfall is disclosed, not nulled).
+  const grantersSummary =
+    total === 0 && containersChecked === 0 && containersNotChecked.length > 0 ? null : total;
+
   return ok({
     data: {
       componentId,
       granters: page,
-      summary: { granters: total },
+      summary: { granters: grantersSummary },
       limit,
       offset,
       hasMore,
       truncated: hasMore || offset > 0,
+      flowAccessNotChecked: containersNotChecked.length,
+      scanTruncated,
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'declared',
-      boundaryNote:
-        'These Profiles/PermissionSets grant RUN access to the flow (flowAccess). A user gains it only when ASSIGNED the container (runtime, not modeled), and run also requires the flow to be active. "Who can open an app" is app_access; report/dashboard FOLDER access needs the live plane (folder shares are not in the offline metadata).',
+      boundaryNote,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

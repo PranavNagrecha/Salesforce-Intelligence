@@ -79,7 +79,7 @@ import {
   tallyResolutions,
   unknownActionError,
 } from './action-chain-model.js';
-import { resolveObjectAlias } from './input-aliases.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 
 /** Default / max number of ApprovalProcess components composed in one call. */
 const DEFAULT_PROCESS_LIMIT = 5;
@@ -87,6 +87,10 @@ const MAX_PROCESS_LIMIT = 25;
 
 /** The object a lead convert is always scoped to. */
 const LEAD_OBJECT = 'Lead';
+
+/** Canonical id prefix for an ApprovalProcess, named once so the three sites
+ * that parse, build and rebuild the id can never drift apart. */
+const APPROVAL_PROCESS_PREFIX = 'ApprovalProcess:';
 
 /**
  * Accepted spellings for each modeled action. Hosts and routers phrase the same
@@ -216,9 +220,9 @@ const resolveApprovalProcesses = async (
   >
 > => {
   if (approvalProcess !== undefined) {
-    const id = approvalProcess.startsWith('ApprovalProcess:')
+    const id = approvalProcess.startsWith(APPROVAL_PROCESS_PREFIX)
       ? approvalProcess
-      : `ApprovalProcess:${objectApiName}.${approvalProcess}`;
+      : `${APPROVAL_PROCESS_PREFIX}${objectApiName}.${approvalProcess}`;
     const node = await getNodeById(ctx.graph, id as ComponentId);
     if (!node.ok) {
       return err({ kind: 'internal', message: `graph query failed: ${node.error.message}` });
@@ -266,7 +270,19 @@ export const actionChainHandler = async (
   if (requestedAction === undefined) return err(unknownActionError(input.action));
   const action: ActionChainAction = requestedAction;
 
-  const scopeResult = resolveObjectAlias(input, { required: false });
+  // ACTION-CHAIN-UNCHECKED-OBJECT-SCOPE: the named object is VERIFIED to exist
+  // in the vault before anything is templated from it. The sync
+  // `resolveObjectAlias` alone never asks the graph, so `objectApiName:
+  // 'opportunity'` became `parentId: 'CustomObject:opportunity'` — an id no
+  // vault holds — the ApprovalProcess query came back empty, and the empty
+  // branch below then emitted the strongest affirmative sentence this tool
+  // owns ("a VERIFIED NONE … the object genuinely has no approval process")
+  // about an object it had never confirmed exists. An UNCHECKED zero relabelled
+  // a CHECKED one. `resolveExistingObjectScope` corrects the caller's casing to
+  // the vault's exact spelling, refuses an api name the vault does not hold,
+  // and refuses two ids that differ only by case rather than picking one — so
+  // by the time `object` reaches the parentId template it is a real node id.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input);
   if (!scopeResult.ok) return err(scopeResult.error);
   const namedObject = scopeResult.value?.object ?? null;
   const nestedSaveDepth: 0 | 1 = input.nestedSaveDepth ?? NESTED_SAVE_DEPTH_CAP;
@@ -305,8 +321,9 @@ export const actionChainHandler = async (
   } else {
     // approval-submit
     const fromProcessId =
-      input.approvalProcess !== undefined && input.approvalProcess.startsWith('ApprovalProcess:')
-        ? (input.approvalProcess.slice('ApprovalProcess:'.length).split('.')[0] ?? null)
+      input.approvalProcess !== undefined &&
+      input.approvalProcess.startsWith(APPROVAL_PROCESS_PREFIX)
+        ? (input.approvalProcess.slice(APPROVAL_PROCESS_PREFIX.length).split('.')[0] ?? null)
         : null;
     const resolvedObject = namedObject ?? fromProcessId;
     if (resolvedObject === null) {
@@ -317,10 +334,16 @@ export const actionChainHandler = async (
         path: 'objectApiName',
       });
     }
+    // Salesforce api names are case-INSENSITIVE, and `namedObject` is now the
+    // VAULT's spelling while `fromProcessId` is still the caller's, so a byte
+    // comparison here would manufacture a "disagreement" out of casing alone
+    // — `{objectApiName: 'opportunity', approvalProcess:
+    // 'ApprovalProcess:opportunity.X'}` names ONE object twice. Fold the case
+    // for the DISAGREEMENT test only; a genuine mismatch is still refused.
     if (
       namedObject !== null &&
       fromProcessId !== null &&
-      namedObject !== fromProcessId
+      namedObject.toLowerCase() !== fromProcessId.toLowerCase()
     ) {
       return err({
         kind: 'invalid-query',
@@ -331,12 +354,17 @@ export const actionChainHandler = async (
     object = resolvedObject;
     outcome = input.outcome ?? 'all';
     const limit = input.limit ?? DEFAULT_PROCESS_LIMIT;
-    const resolved = await resolveApprovalProcesses(
-      ctx,
-      object,
-      input.approvalProcess,
-      limit,
-    );
+    // A canonical `ApprovalProcess:` id carries the CALLER's spelling of its
+    // object segment; `object` carries the VAULT's. Rebuild the id around the
+    // vault's spelling so a fold-equal id is not looked up verbatim and missed.
+    // Identity when the caller named no object (then `object` IS the id's own
+    // segment) or when the id has no `.Name` tail to preserve.
+    let processArg = input.approvalProcess;
+    if (processArg !== undefined && fromProcessId !== null) {
+      const tail = processArg.slice(APPROVAL_PROCESS_PREFIX.length + fromProcessId.length);
+      if (tail.startsWith('.')) processArg = `${APPROVAL_PROCESS_PREFIX}${object}${tail}`;
+    }
+    const resolved = await resolveApprovalProcesses(ctx, object, processArg, limit);
     if (!resolved.ok) return err(resolved.error);
     omitted = resolved.value.omitted;
     if (input.approvalProcess !== undefined) {

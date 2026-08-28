@@ -81,8 +81,11 @@
  *
  * **Aggregate verdict.** Mirrors R2a / the sibling component-level
  * what-if tools:
- *   - `safe` if there are NO callers at all (the method is unused or
- *     only invoked dynamically).
+ *   - `safe` if there are NO callers at all AND the method was VERIFIED to
+ *     exist (the method is unused or only invoked dynamically).
+ *   - `unknown` if there are no callers but the method could not be verified
+ *     (source unreadable / unparseable / possibly inherited) - an empty caller
+ *     list is then equally consistent with "there is no such method".
  *   - `risky` if at least one direct caller appears (the default for
  *     this tool — no `metadata-blocker` paths exist for method
  *     signature changes since the v0.3 extractor is heuristic).
@@ -104,7 +107,9 @@
  * Implementation notes:
  *   - `classApiName` is required to start with `ApexClass:`. Other
  *     prefixes return `invalid-query`.
- *   - `methodName` is required, non-empty.
+ *   - `methodName` is required, non-empty, and is verified against the
+ *     class's parsed source. A name the class provably does not declare
+ *     returns `invalid-query` naming the methods it does declare.
  *   - `newSignature` is optional — accepted for caller-side rendering
  *     and echoed verbatim in the response so the renderer can produce
  *     before/after output. The tool does NOT validate the signature
@@ -123,6 +128,9 @@
  *     deterministic output.
  */
 
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import type {
   ComponentId,
   ComponentType,
@@ -135,6 +143,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { parseApexStructure } from '@sf-intelligence/parsers';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -192,6 +201,173 @@ export interface WhatIfImpactItem {
   readonly callerMethods?: readonly string[];
 }
 
+/**
+ * How many declared method names a refusal names before it summarises the
+ * rest. Mirrors `apex-structure.ts`'s cap so the two "no such method"
+ * refusals read identically.
+ */
+const DECLARED_NAMES_SHOWN = 20;
+
+/**
+ * Why the target class's method inventory could not be read, so `methodName`
+ * could NOT be checked against it. Each value is a distinct cause with a
+ * distinct fix — collapsing them into one boolean would hide which.
+ *
+ *   - `no-source-path` — the vault node records no source file at all.
+ *   - `source-unreadable` — the recorded file is missing / unreadable.
+ *   - `parse-failed` — the Apex grammar could not parse the file, so the
+ *     method list is UNKNOWN, not empty.
+ *   - `not-declared-here-but-inheritable` — the file parsed and does NOT
+ *     declare the name, but the class extends a superclass, implements an
+ *     interface, or holds inner types, any of which can legitimately supply
+ *     the method. Absence here is inconclusive, so it is NOT refused.
+ */
+export type MethodUnverifiedReason =
+  | 'no-source-path'
+  | 'source-unreadable'
+  | 'parse-failed'
+  | 'not-declared-here-but-inheritable';
+
+/**
+ * Whether the method whose signature is hypothetically changing was PROVEN to
+ * exist on the target class.
+ *
+ * METHOD-NAME-NEVER-VERIFIED: before this, `methodName` was a free-form string
+ * used only as a filter over `callsApex` edges. A typo'd or hallucinated name
+ * matched nothing, `callingClasses` came back `[]`, and the headline read
+ * `verdict: 'safe'` — a confident "safe to change" for a method that does not
+ * exist, byte-indistinguishable from a real method with no callers. A
+ * PROVEN-absent method is now REFUSED (never answered), and an UNVERIFIABLE
+ * one is typed here and blocks the `safe` headline.
+ */
+export type MethodVerification =
+  | {
+      readonly verified: true;
+      readonly source: 'parsed-source';
+      /**
+       * The name AS DECLARED in the source. Apex resolves method names
+       * case-insensitively, so `PROCESSOPPORTUNITY` matches and echoes back
+       * with the declared casing rather than the caller's.
+       */
+      readonly declaredAs: string;
+      /** How many overloads share that name (all of them change together). */
+      readonly overloads: number;
+    }
+  | {
+      readonly verified: false;
+      readonly source: 'unavailable';
+      readonly reason: MethodUnverifiedReason;
+      /** Plain-language statement of what was NOT checked, and why. */
+      readonly note: string;
+    };
+
+/**
+ * Internal outcome of {@link resolveMethod}. Adds the PROVEN-ABSENT case,
+ * which never reaches the response: the handler turns it into an
+ * `invalid-query` refusal.
+ */
+type MethodResolution =
+  | { readonly status: 'known'; readonly verification: MethodVerification }
+  | { readonly status: 'absent'; readonly declared: readonly string[] };
+
+/**
+ * Verify `methodName` against the target class's ACTUAL method inventory,
+ * parsed from the retrieved source (the same `parseApexStructure` path
+ * `sfi.apex_structure` uses — this tool does not invent a second inventory).
+ *
+ * Three outcomes, and the difference between them is the whole point:
+ *   - declared → `verified: true` (with the declared casing and overload
+ *     count), and a `safe` headline is available.
+ *   - PROVEN absent (parsed clean, no name match, and nothing — superclass,
+ *     interface, inner type — that could legitimately supply it) → `absent`,
+ *     which the handler REFUSES. The house law from
+ *     `resolveExistingObjectScope`: an unresolvable scope is refused, never
+ *     silently widened into a confident empty answer.
+ *   - unverifiable (no source path / unreadable / unparseable / inheritable)
+ *     → `verified: false` with the reason, which blocks `safe`.
+ */
+const resolveMethod = async (
+  ctx: Context,
+  classNode: Node,
+  methodName: string,
+): Promise<MethodResolution> => {
+  const unverified = (
+    reason: MethodUnverifiedReason,
+    note: string,
+  ): MethodResolution => ({
+    status: 'known',
+    verification: { verified: false, source: 'unavailable', reason, note },
+  });
+
+  const sourcePath = classNode.sourcePath;
+  if (typeof sourcePath !== 'string' || sourcePath.length === 0) {
+    return unverified(
+      'no-source-path',
+      `the vault node for ${classNode.id} records no source path, so '${methodName}' could not be checked against the class's declared methods — this answer does not assert that the method exists. Re-run /sfi-refresh.`,
+    );
+  }
+
+  let source: string | null = null;
+  try {
+    source = await readFile(join(ctx.vaultRoot, sourcePath), 'utf-8');
+  } catch {
+    source = null;
+  }
+  if (source === null) {
+    return unverified(
+      'source-unreadable',
+      `the source file recorded for ${classNode.id} could not be read, so '${methodName}' could not be checked against the class's declared methods — this answer does not assert that the method exists. Re-run /sfi-refresh.`,
+    );
+  }
+
+  const parsed = await parseApexStructure(source, { kind: 'class' });
+  if (!parsed.parsed || parsed.structure === null) {
+    return unverified(
+      'parse-failed',
+      `the Apex grammar could not parse ${classNode.id}, so its method list is UNKNOWN (not empty) and '${methodName}' could not be checked against it. First error: ${parsed.parseErrors[0] ?? 'unknown'}.`,
+    );
+  }
+
+  const structure = parsed.structure;
+  const wanted = methodName.toLowerCase();
+  const matches = structure.methods.filter(
+    (m) => m.name.toLowerCase() === wanted,
+  );
+  if (matches.length > 0) {
+    return {
+      status: 'known',
+      verification: {
+        verified: true,
+        source: 'parsed-source',
+        declaredAs: (matches[0] as { readonly name: string }).name,
+        overloads: matches.length,
+      },
+    };
+  }
+
+  // Not declared HERE — but an inherited, interface-declared, or inner-type
+  // method is a real method this class legitimately answers to, and the parse
+  // above cannot see any of them. Refusing on that evidence would be the same
+  // confident-wrong-answer defect pointed the other way, so it is disclosed
+  // instead.
+  // An enum's usable methods (`values()`, `name()`, `ordinal()`) are supplied
+  // by the language and appear in NO declaration, so an enum body that omits a
+  // name proves nothing.
+  if (
+    structure.kind === 'enum' ||
+    structure.superclass !== null ||
+    structure.interfaces.length > 0 ||
+    structure.innerTypes.length > 0
+  ) {
+    return unverified(
+      'not-declared-here-but-inheritable',
+      `${classNode.apiName} does not declare '${methodName}' in its own body, but it is an enum / extends / implements / nests other types whose methods this parse cannot see, so the name is neither confirmed nor refuted here.`,
+    );
+  }
+
+  return { status: 'absent', declared: structure.methods.map((m) => m.name) };
+};
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface WhatIfChangeMethodSignatureOutput {
   /**
@@ -205,7 +381,16 @@ export interface WhatIfChangeMethodSignatureOutput {
     readonly mode: 'component';
   };
   readonly classApiName: ComponentId;
+  /** The method name AS ASKED, verbatim. See {@link methodVerification}. */
   readonly methodName: string;
+  /**
+   * Whether that name was PROVEN to be a method of this class, and if not,
+   * why it could not be. A hallucinated or typo'd method no longer returns a
+   * confident `safe`: a proven-absent name is refused outright
+   * (`invalid-query`), and an unverifiable one lands here with
+   * `verified: false` and downgrades the headline to `unknown`.
+   */
+  readonly methodVerification: MethodVerification;
   readonly newSignature: string | null;
   readonly callingClasses: readonly WhatIfImpactItem[];
   readonly testClassesNeedingUpdate: readonly ComponentId[];
@@ -221,7 +406,7 @@ export interface WhatIfChangeMethodSignatureOutput {
  * dispatch) so the test suite can lock the phrasing.
  */
 const DISCLOSURE =
-  "caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified in ONE way that actually works: an incoming `callsApex` edge from a class whose `properties.isTest` is true. The `coversTest` edge this tool ALSO walks is declared in the contract but is emitted by NO extractor, graph-build mint, or enricher in this product (see `UNPRODUCED_EDGE_TYPES`), so on a real vault that walk ALWAYS returns nothing - Salesforce does not declare test-to-class coverage anywhere in the metadata source format (coverage is a RUNTIME artifact of a test run). Read an empty `testClassesNeedingUpdate` as \"test-coverage mapping UNAVAILABLE for this class\", never as \"no tests cover this class\": a test class that exercises the target only indirectly - through a helper, a trigger, or dynamic dispatch - has no `callsApex` edge to it and is invisible here. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
+  "the method name is CHECKED against the class's own source before any caller is enumerated: a name the parsed class does not declare (and cannot inherit) is REFUSED, not answered, and when the source could not be read or parsed `methodVerification.verified` is false and the headline is `unknown` rather than `safe` - so an empty caller list never doubles as \"that method does not exist\". caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified in ONE way that actually works: an incoming `callsApex` edge from a class whose `properties.isTest` is true. The `coversTest` edge this tool ALSO walks is declared in the contract but is emitted by NO extractor, graph-build mint, or enricher in this product (see `UNPRODUCED_EDGE_TYPES`), so on a real vault that walk ALWAYS returns nothing - Salesforce does not declare test-to-class coverage anywhere in the metadata source format (coverage is a RUNTIME artifact of a test run). Read an empty `testClassesNeedingUpdate` as \"test-coverage mapping UNAVAILABLE for this class\", never as \"no tests cover this class\": a test class that exercises the target only indirectly - through a helper, a trigger, or dynamic dispatch - has no `callsApex` edge to it and is invisible here. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
 
 /**
  * Zod schema for the `sfi.what_if_change_method_signature` tool input.
@@ -301,14 +486,24 @@ const resolveTargetId = (
  * callers of every method but one. We prefer `methods[]` and fall back to the
  * scalar `methodName` for vaults refreshed before P4-C5. The LWC/Aura/VF
  * extractors mirror the scalar `methodName` shape; both are honoured.
+ *
+ * The comparison is CASE-INSENSITIVE because Apex is: `svc.ProcessOpp()` and
+ * `svc.processOpp()` invoke the same method, and the scanner records whatever
+ * casing the CALL SITE wrote, not the declaration's. A case-sensitive `===`
+ * dropped every caller whose casing differed from the query's and returned the
+ * empty caller list as `safe` — the same confident-absence defect the
+ * method-existence check above closes, one axis over.
  */
 const callsMethod = (edge: Edge, methodName: string): boolean => {
+  const wanted = methodName.toLowerCase();
   const methods = edge.properties['methods'];
   if (Array.isArray(methods)) {
-    return methods.includes(methodName);
+    return methods.some(
+      (m) => typeof m === 'string' && m.toLowerCase() === wanted,
+    );
   }
   const raw = edge.properties['methodName'];
-  return typeof raw === 'string' && raw === methodName;
+  return typeof raw === 'string' && raw.toLowerCase() === wanted;
 };
 
 /**
@@ -330,9 +525,13 @@ const callerMethodsForTarget = (
   if (byMethod === null || typeof byMethod !== 'object' || Array.isArray(byMethod)) {
     return undefined;
   }
-  const raw = (byMethod as Record<string, unknown>)[methodName];
-  if (!Array.isArray(raw)) return undefined;
-  const strs = raw.filter((x): x is string => typeof x === 'string');
+  // Case-insensitive key lookup, for the same reason `callsMethod` is: the
+  // partition is keyed by the casing the call site wrote.
+  const wanted = methodName.toLowerCase();
+  const strs = Object.entries(byMethod as Record<string, unknown>)
+    .filter(([key]) => key.toLowerCase() === wanted)
+    .flatMap(([, value]) => (Array.isArray(value) ? value : []))
+    .filter((x): x is string => typeof x === 'string');
   return strs.length === 0 ? undefined : [...new Set(strs)].sort();
 };
 
@@ -412,7 +611,9 @@ const classifyCaller = (
  * Aggregate the per-impact verdicts into the headline severity. The
  * cascade mirrors R2a's `aggregateVerdict`:
  *   - empty impacts → `safe` (no callers — the method is unused or
- *     only invoked dynamically).
+ *     only invoked dynamically). The HANDLER downgrades that to `unknown`
+ *     when the method itself could not be verified to exist, so this
+ *     function's `safe` is a STRUCTURAL statement, not the headline.
  *   - any `metadata-blocker` → `blocking` (reserved; v2.3 does not
  *     emit `metadata-blocker` for method-signature changes today).
  *   - any non-blocker → `risky` (the default — every caller flag
@@ -661,6 +862,27 @@ export const whatIfChangeMethodSignatureHandler = async (
     });
   }
 
+  // METHOD-NAME-NEVER-VERIFIED: check the METHOD before enumerating callers of
+  // it. The class was resolved and type-checked above; the method — the very
+  // thing whose signature is changing — used to be taken verbatim and used only
+  // as a string filter, so a name that does not exist produced zero matches and
+  // a confident `safe`.
+  const methodResolution = await resolveMethod(ctx, classNode, methodName);
+  if (methodResolution.status === 'absent') {
+    const declared = [...new Set(methodResolution.declared)].sort();
+    const shown = declared.slice(0, DECLARED_NAMES_SHOWN);
+    const more =
+      declared.length > shown.length
+        ? ` (and ${String(declared.length - shown.length)} more)`
+        : '';
+    return err({
+      kind: 'invalid-query',
+      message: `no method named '${methodName}' is declared in ${classNode.apiName} (matched case-insensitively, the way Apex resolves it). Declared methods: ${shown.join(', ') || '(none)'}${more}. Refused rather than answered: an empty caller list for a method that does not exist would have read as "safe to change".`,
+      path: 'methodName',
+    });
+  }
+  const methodVerification = methodResolution.verification;
+
   const callersResult = await collectCallers(
     ctx,
     classId,
@@ -705,19 +927,44 @@ export const whatIfChangeMethodSignatureHandler = async (
   ]);
   const sortedTestIds = [...testIdSet].sort(compareIds);
 
-  const rawVerdict = aggregateVerdict(sortedImpacts);
+  const structuralVerdict = aggregateVerdict(sortedImpacts);
+  // `safe` here asserts "nothing calls THIS method". That claim is only
+  // available once the method is known to exist — otherwise an empty caller
+  // list is equally consistent with "there is no such method", and reporting
+  // `safe` would answer a question that was never checked.
+  const rawVerdict: Verdict =
+    structuralVerdict === 'safe' && !methodVerification.verified
+      ? 'unknown'
+      : structuralVerdict;
   const coverage = attachCoverageToWhatIf(
     ctx,
     METHOD_SIGNATURE_REQUIRED_COVERAGE,
     'Method signature change impact',
     rawVerdict,
   );
+  // An unverified method is a hole in THIS answer, so the trust block has to
+  // say so rather than reporting `completeness: complete` beside a headline
+  // that exists because something was not checked.
+  const trust: TrustSummary = methodVerification.verified
+    ? coverage.trust
+    : {
+        ...coverage.trust,
+        completeness:
+          coverage.trust.completeness.status === 'complete'
+            ? { status: 'partial' }
+            : coverage.trust.completeness,
+        limitations: [
+          ...coverage.trust.limitations,
+          `method existence NOT verified (${methodVerification.reason}): ${methodVerification.note}`,
+        ],
+      };
 
   return ok({
     data: {
       appliedScope: { component: classId, mode: 'component' },
       classApiName: classId,
       methodName,
+      methodVerification,
       newSignature,
       callingClasses: sortedImpacts,
       testClassesNeedingUpdate: sortedTestIds,
@@ -725,7 +972,7 @@ export const whatIfChangeMethodSignatureHandler = async (
       ...(coverage.coverageCaveat !== undefined
         ? { coverageCaveat: coverage.coverageCaveat }
         : {}),
-      trust: coverage.trust,
+      trust,
       disclosure: DISCLOSURE,
     },
     vaultState: {

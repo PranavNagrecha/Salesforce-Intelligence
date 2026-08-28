@@ -904,3 +904,253 @@ describe('canonicalJson — C-3 (finding 28) regression', () => {
     expect(canonicalJson(withUndefined)).toContain('\0undefined\0');
   });
 });
+
+/**
+ * The `grantedBy` edge query FAILED. Object / field / Apex-class grants live
+ * ONLY on those edges, so a failed query means those three categories were
+ * NEVER READ — which is not the same thing as "read, and there were none".
+ *
+ * The both-sides source gate (`isCategoryExtracted`) cannot see this: it reads
+ * the `objectGrantCount` / `fieldGrantCount` / `classGrantCount` NODE
+ * properties, which are present on both profiles here. So a bare
+ * `if (!edges.ok) return maps` walks straight past the gate and produces
+ * either a fabricated "verified 0 drift" (both sides failed) or a dump of the
+ * readable side's whole grant set as one-sided drift (one side failed) — the
+ * exact fabrication the gate's own JSDoc says it exists to prevent.
+ *
+ * The store is proxied rather than the vault corrupted so the failure is
+ * narrowed to the edges query alone: the profile NODE still loads, which is
+ * what makes the gate declare the categories evaluated.
+ */
+describe('compareProfileAcrossVaultsHandler — the `grantedBy` edge query fails', () => {
+  const EDGE_FIELD_IDS = [
+    'CustomField:Account.Edge_0__c',
+    'CustomField:Account.Edge_1__c',
+    'CustomField:Account.Edge_2__c',
+  ] as const;
+
+  /**
+   * A `GraphStore` whose `edges` query throws while every other query (the
+   * profile-node read included) still succeeds — the narrowest possible
+   * simulation of a `listEdges` failure.
+   */
+  const withFailingEdgeQuery = (real: GraphStore): GraphStore => ({
+    instance: real.instance,
+    connection: new Proxy(real.connection, {
+      get(target, prop) {
+        if (prop === 'runAndReadAll') {
+          return async (sql: string, params: unknown[]) => {
+            if (sql.includes('FROM edges')) {
+              throw new Error('simulated read failure on the edges table');
+            }
+            return target.runAndReadAll(sql, params as never[]);
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }),
+  });
+
+  let edgeRoot: string;
+  let edgeStoreA: GraphStore;
+  let edgeStoreB: GraphStore;
+  /** Both vaults readable — the control. */
+  let healthyCtx: Context;
+  /** Vault B's edge query fails; vault A's succeeds. */
+  let oneSideFailsCtx: Context;
+  /** Both compared aliases resolve to the vault whose edge query fails. */
+  let bothSidesFailCtx: Context;
+
+  beforeAll(async () => {
+    edgeRoot = await mkdtemp(join(tmpdir(), 'sfi-compare-profile-edgefail-'));
+    const aPath = join(edgeRoot, 'left');
+    const bPath = join(edgeRoot, 'right');
+    await mkdir(join(aPath, 'graph'), { recursive: true });
+    await mkdir(join(bPath, 'graph'), { recursive: true });
+    await saveManifest(aPath, FIXTURE_MANIFEST);
+    await saveManifest(bPath, FIXTURE_MANIFEST);
+    const oa = await openGraph(vaultPaths(aPath).graphDb);
+    if (!oa.ok) throw new Error(oa.error.message);
+    edgeStoreA = oa.value;
+    const ob = await openGraph(vaultPaths(bPath).graphDb);
+    if (!ob.ok) throw new Error(ob.error.message);
+    edgeStoreB = ob.value;
+
+    const targets: readonly Node[] = [
+      makeNode({ id: ACCOUNT_ID, type: 'CustomObject', apiName: 'Account' }),
+      makeNode({ id: BILLING_CLASS_ID, type: 'ApexClass', apiName: 'BillingService' }),
+      ...EDGE_FIELD_IDS.map((id) =>
+        makeNode({
+          id,
+          type: 'CustomField',
+          apiName: id.slice('CustomField:'.length),
+        }),
+      ),
+    ];
+    const objectGrant = { allowRead: true, allowEdit: true };
+    const seed = (
+      userPermissions: readonly string[],
+      firstFieldEditable: boolean,
+    ): ExtractionResult =>
+      ({
+        nodes: [
+          ...targets,
+          makeNode({
+            id: PROFILE_ID,
+            properties: {
+              userLicense: 'Salesforce',
+              objectGrantCount: 1,
+              fieldGrantCount: EDGE_FIELD_IDS.length,
+              classGrantCount: 1,
+              userPermissions: [...userPermissions],
+            },
+          }),
+        ],
+        edges: [
+          makeGrantEdge(ACCOUNT_ID, objectGrant),
+          makeGrantEdge(BILLING_CLASS_ID, { enabled: true }),
+          ...EDGE_FIELD_IDS.map((id, i) =>
+            makeGrantEdge(id, {
+              editable: i === 0 ? firstFieldEditable : true,
+              readable: true,
+            }),
+          ),
+        ],
+      }) as ExtractionResult;
+
+    await importExtractionResults(edgeStoreA, [
+      seed(['ApiEnabled', 'ViewAllData'], true),
+    ]);
+    await importExtractionResults(edgeStoreB, [seed(['ApiEnabled'], false)]);
+    await registerVault(edgeRoot, 'left', aPath);
+    await registerVault(edgeRoot, 'right', bPath);
+    // A SECOND alias for the same vault, so a comparison can be driven where
+    // BOTH sides resolve to the store whose edge query fails.
+    await registerVault(edgeRoot, 'right-twin', bPath);
+
+    healthyCtx = { vaultRoot: aPath, manifest: FIXTURE_MANIFEST, graph: edgeStoreA };
+    // `openVaultReadOnly` reuses `ctx.graph` for `ctx.vaultRoot`, so pointing
+    // the context at a vault injects the failing handle for that side only.
+    oneSideFailsCtx = {
+      vaultRoot: bPath,
+      manifest: FIXTURE_MANIFEST,
+      graph: withFailingEdgeQuery(edgeStoreB),
+    };
+    bothSidesFailCtx = oneSideFailsCtx;
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = edgeRoot;
+  });
+
+  afterAll(async () => {
+    delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    await closeGraph(edgeStoreA);
+    await closeGraph(edgeStoreB);
+    await rm(edgeRoot, { recursive: true, force: true });
+  });
+
+  it('control — with both edge queries working the fixture reports the REAL drift', async () => {
+    const r = await compareProfileAcrossVaultsHandler(healthyCtx, {
+      profileName: 'System Administrator',
+      vaultA: 'left',
+      vaultB: 'right',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { perCategoryDriftCount, notEvaluatedCategories } = r.value.data.summary;
+    // One field grant differs on `editable`; the object and Apex grants are
+    // byte-identical (REAL measured zeros); one user permission differs.
+    expect(perCategoryDriftCount['objectPermissions']).toBe(0);
+    expect(perCategoryDriftCount['fieldPermissions']).toBe(1);
+    expect(perCategoryDriftCount['apexClassAccesses']).toBe(0);
+    expect(perCategoryDriftCount['userPermissions']).toBe(1);
+    expect(notEvaluatedCategories).not.toContain('fieldPermissions');
+  });
+
+  it('a failure on ONE side is disclosed, not dumped as one-sided phantom drift', async () => {
+    const r = await compareProfileAcrossVaultsHandler(oneSideFailsCtx, {
+      profileName: 'System Administrator',
+      vaultA: 'left',
+      vaultB: 'right',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { notEvaluatedCategories, perCategoryDriftCount, totalDriftCount } =
+      r.value.data.summary;
+    // FAIL-BEFORE: vault B's map is EMPTY, so all 5 of vault A's readable
+    // grants are emitted as "drift, side A only" — 1 object + 3 field +
+    // 1 Apex phantom rows, none of them drift.
+    for (const category of [
+      'objectPermissions',
+      'fieldPermissions',
+      'apexClassAccesses',
+    ] as const) {
+      expect(notEvaluatedCategories).toContain(category);
+      expect(r.value.data.grantDiffs[category]).toEqual([]);
+      expect(
+        Object.prototype.hasOwnProperty.call(perCategoryDriftCount, category),
+      ).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(r.value.data.counts, category),
+      ).toBe(false);
+    }
+    // The node-backed categories are untouched by an EDGE failure — the fix
+    // must disclose, not over-refuse.
+    expect(perCategoryDriftCount['userPermissions']).toBe(1);
+    expect(totalDriftCount).toBe(1);
+    // The boundary names the vault whose edge query failed, and ONLY it.
+    const named = r.value.data.boundaries.filter((b) => b.includes("'right'"));
+    expect(named.length).toBeGreaterThan(0);
+    expect(
+      r.value.data.boundaries.some(
+        (b) => b.includes("'left'") && b.includes('grantedBy'),
+      ),
+    ).toBe(false);
+    expect(r.value.data.reconciliation.balanced).toBe(true);
+    // And it must not mis-diagnose the failure. Every grant-count property IS
+    // present on both profiles, so the stale-vault disclosure ("refreshed by an
+    // older builder \u2014 re-run /sfi-refresh") would be a SECOND fabricated
+    // finding layered on the first.
+    expect(
+      r.value.data.boundaries.some((b) =>
+        b.includes('refreshed by an older builder'),
+      ),
+    ).toBe(false);
+    // The source-absent boundary is still present for `tabVisibilities` (the
+    // fixture genuinely lacks it), but it must not claim an edge-backed
+    // category is source-absent when the count property is right there.
+    const sourceBoundary = r.value.data.boundaries.find((b) =>
+      b.includes('the source property is absent'),
+    );
+    expect(sourceBoundary).toBeDefined();
+    expect(sourceBoundary).not.toContain('objectGrantCount');
+    expect(sourceBoundary).not.toContain('fieldGrantCount');
+    expect(sourceBoundary).not.toContain('classGrantCount');
+  });
+
+  it('a failure on BOTH sides is disclosed, not reported as a measured 0 drift', async () => {
+    const r = await compareProfileAcrossVaultsHandler(bothSidesFailCtx, {
+      profileName: 'System Administrator',
+      vaultA: 'right-twin',
+      vaultB: 'right',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { notEvaluatedCategories, perCategoryDriftCount } = r.value.data.summary;
+    // FAIL-BEFORE: both maps are `{}`, `diffCategory({}, {})` is [], and the
+    // count-property gate declares all three EVALUATED — a confident
+    // "no object-permission drift" out of a query that never ran.
+    for (const category of [
+      'objectPermissions',
+      'fieldPermissions',
+      'apexClassAccesses',
+    ] as const) {
+      expect(notEvaluatedCategories).toContain(category);
+      expect(
+        Object.prototype.hasOwnProperty.call(perCategoryDriftCount, category),
+      ).toBe(false);
+    }
+    expect(
+      r.value.data.boundaries.some((b) => b.includes('grantedBy')),
+    ).toBe(true);
+  });
+});

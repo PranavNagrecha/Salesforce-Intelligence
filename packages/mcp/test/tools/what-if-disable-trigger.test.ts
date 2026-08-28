@@ -321,6 +321,119 @@ const verdictSpreadSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Suite 4 (R1 — UNRESOLVED EDGE TARGETS): the v0.3 apex-scanner emits heuristic
+// `writesTo` edges to `CustomField:<localVar>.<Field>` when it cannot resolve
+// the receiver's object. Those ids are NOT nodes in this vault, so the importer
+// stamps `targetMissing: true` on the edge. The WRITE is real and declared by
+// the scanner; only the TARGET is unnameable here.
+//
+//   InvoiceTrigger  1 resolvable callsApex + 3 unresolvable writesTo
+//   PaymentTrigger  ONE unresolvable writesTo and nothing else
+//   OrderTrigger    triggersOn an object outside the retrieve scope
+// =============================================================================
+
+const TRIGGER_MIXED_UNRESOLVED = 'ApexTrigger:InvoiceTrigger';
+const OBJ_INVOICE = 'CustomObject:Invoice__c';
+const APEX_INVOICE = 'ApexClass:InvoiceService';
+const MISSING_FIELD_A = 'CustomField:inv.Amount__c';
+const MISSING_FIELD_B = 'CustomField:inv.Balance__c';
+const MISSING_FIELD_C = 'CustomField:inv.Status__c';
+
+const TRIGGER_ALL_UNRESOLVED = 'ApexTrigger:PaymentTrigger';
+const OBJ_PAYMENT = 'CustomObject:Payment__c';
+const MISSING_FIELD_PMT = 'CustomField:pmt.Total__c';
+
+const TRIGGER_OFFVAULT_ENTRY = 'ApexTrigger:OrderTrigger';
+const MISSING_OBJ_ORDER = 'CustomObject:Order';
+const APEX_ORDER = 'ApexClass:OrderService';
+
+const unresolvedTargetsSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: TRIGGER_MIXED_UNRESOLVED,
+      type: 'ApexTrigger',
+      apiName: 'InvoiceTrigger',
+      properties: { status: 'Active', events: ['before update'] },
+    }),
+    makeNode({ id: OBJ_INVOICE, type: 'CustomObject', apiName: 'Invoice__c' }),
+    makeNode({
+      id: APEX_INVOICE,
+      type: 'ApexClass',
+      apiName: 'InvoiceService',
+    }),
+    makeNode({
+      id: TRIGGER_ALL_UNRESOLVED,
+      type: 'ApexTrigger',
+      apiName: 'PaymentTrigger',
+      properties: { status: 'Active', events: ['after insert'] },
+    }),
+    makeNode({ id: OBJ_PAYMENT, type: 'CustomObject', apiName: 'Payment__c' }),
+    makeNode({
+      id: TRIGGER_OFFVAULT_ENTRY,
+      type: 'ApexTrigger',
+      apiName: 'OrderTrigger',
+      properties: { status: 'Active', events: ['before insert'] },
+    }),
+    makeNode({ id: APEX_ORDER, type: 'ApexClass', apiName: 'OrderService' }),
+    // NOTE: MISSING_FIELD_A/B/C, MISSING_FIELD_PMT and MISSING_OBJ_ORDER are
+    // deliberately absent from this node list — that is the whole fixture.
+  ],
+  edges: [
+    makeEdge({
+      fromId: TRIGGER_MIXED_UNRESOLVED,
+      toId: OBJ_INVOICE,
+      edgeType: 'triggersOn',
+      confidence: 'declared',
+      source: 'apex-trigger-extractor',
+    }),
+    makeEdge({
+      fromId: TRIGGER_MIXED_UNRESOLVED,
+      toId: APEX_INVOICE,
+      edgeType: 'callsApex',
+    }),
+    makeEdge({
+      fromId: TRIGGER_MIXED_UNRESOLVED,
+      toId: MISSING_FIELD_A,
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: TRIGGER_MIXED_UNRESOLVED,
+      toId: MISSING_FIELD_B,
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: TRIGGER_MIXED_UNRESOLVED,
+      toId: MISSING_FIELD_C,
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: TRIGGER_ALL_UNRESOLVED,
+      toId: OBJ_PAYMENT,
+      edgeType: 'triggersOn',
+      confidence: 'declared',
+      source: 'apex-trigger-extractor',
+    }),
+    makeEdge({
+      fromId: TRIGGER_ALL_UNRESOLVED,
+      toId: MISSING_FIELD_PMT,
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: TRIGGER_OFFVAULT_ENTRY,
+      toId: MISSING_OBJ_ORDER,
+      edgeType: 'triggersOn',
+      confidence: 'declared',
+      source: 'apex-trigger-extractor',
+    }),
+    makeEdge({
+      fromId: TRIGGER_OFFVAULT_ENTRY,
+      toId: APEX_ORDER,
+      edgeType: 'callsApex',
+    }),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -337,6 +450,7 @@ beforeAll(async () => {
     richSeed,
     peSeed,
     verdictSpreadSeed,
+    unresolvedTargetsSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -379,6 +493,9 @@ describe('whatIfDisableTriggerHandler', () => {
         kind: 'triggersOn',
         componentId: ACCOUNT_OBJ,
         note: 'the object this trigger attaches to; disabling removes the handler here',
+        // ALWAYS written — a row without the key would make "resolved" and
+        // "never resolvable" render identically.
+        targetMissing: false,
       },
     ]);
   });
@@ -539,6 +656,9 @@ describe('whatIfDisableTriggerHandler — FIX 5 verdict information content', ()
         kind: 'triggersOn',
         componentId: OBJ_WIDGET,
         note: 'the object this trigger attaches to; disabling removes the handler here',
+        // ALWAYS written — a row without the key would make "resolved" and
+        // "never resolvable" render identically.
+        targetMissing: false,
       },
     ]);
   });
@@ -671,5 +791,113 @@ describe('whatIfDisableTriggerInputSchema', () => {
   it('rejects a missing triggerId', () => {
     const parsed = whatIfDisableTriggerInputSchema.safeParse({});
     expect(parsed.success).toBe(false);
+  });
+});
+
+// =============================================================================
+// GUARD (WHAT-IF-DISABLE-TRIGGER-UNRESOLVED-TARGETS, R1): an outgoing edge
+// whose target is not a node in this vault used to be DROPPED at a
+// `toNode === null` guard whose only justification was a comment claiming
+// parity with unnamed peer tools ("matches the tolerance every other
+// composition tool uses"). `writesTo` is the ONLY edge category that yields
+// `blocking`, and the v0.3 apex-scanner emits heuristic `writesTo` edges to
+// `CustomField:<localVar>.<Field>` whenever it cannot resolve the receiver's
+// object — real declared writes with an unnameable target. Every one of them
+// was deleted from the answer with no counter anywhere in the response, so a
+// trigger whose writes all left the vault reported the literal word `safe`
+// (plus `notProvenHarmless`, which is then a lie) and a mixed trigger read
+// `risky` instead of `blocking`.
+//
+// The edge is DECLARED and real; only the TARGET is unnameable, so each row is
+// now surfaced with `targetMissing: true` (the shared `edgeTargetMissing`
+// authority) and grades into the verdict exactly as its resolvable twin does —
+// the same shape `what_if_deactivate_flow` / `user_ability` /
+// `downstream_effects` already use.
+// =============================================================================
+
+describe('whatIfDisableTriggerHandler — unresolved edge targets (guard)', () => {
+  it('does NOT report `risky` when three unresolvable writesTo edges were dropped', async () => {
+    const r = await whatIfDisableTriggerHandler(ctx, {
+      triggerId: TRIGGER_MIXED_UNRESOLVED,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: the three writesTo rows were dropped, leaving the single
+    // callsApex → `risky`. A write other automation may consume is blocking.
+    expect(d.structuralVerdict).toBe('blocking');
+    expect(d.verdict).toBe('blocking');
+    // The resolvable row is untouched and still in `impacts`.
+    expect(d.impacts.map((i) => i.componentId)).toEqual([APEX_INVOICE]);
+    // The three dropped writes are named, verbatim, in their own array.
+    expect(d.unresolvedImpacts.map((i) => i.componentId).sort()).toEqual(
+      [MISSING_FIELD_A, MISSING_FIELD_B, MISSING_FIELD_C].sort(),
+    );
+    for (const row of d.unresolvedImpacts) {
+      expect(row.targetMissing).toBe(true);
+      expect(row.category).toBe('metadata-blocker');
+      expect(row.edgeType).toBe('writesTo');
+      // Never a fabricated identity: the row carries no apiName/componentType.
+      expect(row.explanation).toContain(row.componentId);
+    }
+    // The count is STATED, not merely implied by an array a caller may skip.
+    expect(d.unresolvedTargetsNote).toContain('3');
+    expect(d.unresolvedTargetsNote).toContain('targetMissing');
+  });
+
+  it('a trigger whose ONLY write leaves the vault is not `safe` and ships no notProvenHarmless', async () => {
+    const r = await whatIfDisableTriggerHandler(ctx, {
+      triggerId: TRIGGER_ALL_UNRESOLVED,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: `impacts: []` → `aggregateVerdict([])` → the literal word
+    // `safe`, PLUS the "no downstream effect is visible in this vault"
+    // sentence — a destructive answer manufactured by not looking.
+    expect(d.structuralVerdict).toBe('blocking');
+    expect(d.verdict).toBe('blocking');
+    expect(d.notProvenHarmless).toBeUndefined();
+    expect(d.impacts).toEqual([]);
+    expect(d.unresolvedImpacts).toHaveLength(1);
+    expect(d.unresolvedImpacts[0]?.componentId).toBe(MISSING_FIELD_PMT);
+  });
+
+  it('keeps an out-of-vault ENTRY POINT in the response instead of dropping it', async () => {
+    const r = await whatIfDisableTriggerHandler(ctx, {
+      triggerId: TRIGGER_OFFVAULT_ENTRY,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: `entryPoints: []` — indistinguishable from a trigger with no
+    // declared attachment point at all, while `parentObject` still named it.
+    expect(d.entryPoints).toEqual([
+      {
+        kind: 'triggersOn',
+        componentId: MISSING_OBJ_ORDER,
+        note: 'the object this trigger attaches to; disabling removes the handler here',
+        targetMissing: true,
+      },
+    ]);
+    expect(d.parentObject).toBe(MISSING_OBJ_ORDER);
+    // An entry point is not a dependent: it still moves no verdict.
+    expect(d.structuralVerdict).toBe('risky');
+    expect(d.unresolvedTargetsNote).toContain('entryPoints');
+  });
+
+  it('a fully resolvable trigger is unaffected: nothing is marked missing', async () => {
+    const r = await whatIfDisableTriggerHandler(ctx, {
+      triggerId: TRIGGER_RICH,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.unresolvedImpacts).toEqual([]);
+    expect(d.unresolvedTargetsNote).toBeUndefined();
+    for (const e of d.entryPoints) expect(e.targetMissing).toBe(false);
+    // The pre-existing four-impact answer is byte-identical.
+    expect(d.impacts).toHaveLength(4);
+    expect(d.verdict).toBe('blocking');
   });
 });

@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type {
   ExtractionResult,
@@ -610,5 +611,86 @@ describe('historyTrackingGapsHandler — untrackable-by-type segregation', () =>
     expect(result.value.data.summary.untrackableFields).toBe(1);
     expect(result.value.data.untrackable.map((u) => u.id)).toEqual([FORMULA_ONLY_PII]);
     expect(result.value.data.untrackable[0]?.reason).toBe('formula');
+  });
+});
+
+// =============================================================================
+// HISTORY-TRACKING-GAPS-SECOND-COPY-CORPUS-WALK. The corpus scan used to be a
+// hand-rolled `fetchAllOfType` offset loop whose only guard was a comment
+// asserting byte-parity with `pii_inventory`'s `fetchAllCustomFields` — a
+// third implementation of the one walk `scan-all-nodes.ts` exists to own. That
+// copy was strictly weaker than the shared helper: UNBOUNDED (no
+// `FULL_SCAN_MAX_NODES` residual ceiling, so a pathological vault could be
+// walked without limit) and it surfaced NO `scanIncomplete`, so this tool could
+// never disclose a residual cap the way its shard-mates do. A compliance answer
+// built on a capped corpus would have read `trust.completeness: 'complete'`.
+// =============================================================================
+
+describe('history-tracking-gaps corpus walk (shared full-scan adoption)', () => {
+  it('DRIFT GUARD: issues no hand-rolled listNodesByType corpus walk', () => {
+    const src = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        '../../src/tools/history-tracking-gaps.ts',
+      ),
+      'utf8',
+    );
+    expect(/listNodesByType\(/.test(src)).toBe(false);
+    expect(src).toContain('scanAllNodesOfTypes');
+  });
+});
+
+describe('historyTrackingGapsHandler — residual scan-cap disclosure', () => {
+  const saved = {
+    window: process.env['SFI_NODE_SCAN_LIMIT'],
+    ceiling: process.env['SFI_HISTORY_TRACKING_SCAN_MAX'],
+  };
+
+  afterEach(() => {
+    if (saved.window === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = saved.window;
+    if (saved.ceiling === undefined) delete process.env['SFI_HISTORY_TRACKING_SCAN_MAX'];
+    else process.env['SFI_HISTORY_TRACKING_SCAN_MAX'] = saved.ceiling;
+  });
+
+  it('a corpus walk stopped at the residual ceiling is disclosed, never a complete bill of health', async () => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+    process.env['SFI_HISTORY_TRACKING_SCAN_MAX'] = '2';
+    const result = await historyTrackingGapsHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanIncomplete).toBe(true);
+    expect(result.value.data.scanIncompleteTypes).toContain('CustomField');
+    expect(result.value.data.trust.completeness.status).toBe('partial');
+    expect(result.value.data.trust.completeness.missingCoverage?.join(' ')).toMatch(
+      /full scan capped/i,
+    );
+  });
+
+  it('does NOT over-disclose: a fully walked corpus stays scanIncomplete false / complete', async () => {
+    const result = await historyTrackingGapsHandler(ctx, { objectApiName: 'Contact' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanIncomplete).toBe(false);
+    expect(result.value.data.scanIncompleteTypes).toEqual([]);
+    expect(result.value.data.trust.completeness.status).toBe('complete');
+  });
+
+  it('CR-P3 boundary: a type holding EXACTLY the ceiling is complete, not truncated', async () => {
+    // 5 CustomField nodes are seeded; a ceiling of exactly 5 must NOT report a
+    // residual cap — nothing is behind it.
+    process.env['SFI_NODE_SCAN_LIMIT'] = '5';
+    process.env['SFI_HISTORY_TRACKING_SCAN_MAX'] = '5';
+    const result = await historyTrackingGapsHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanIncomplete).toBe(false);
+    expect(result.value.data.scanIncompleteTypes).toEqual([]);
+    // The bare org-wide call is ALREADY `partial` for the unmodeled-parent
+    // (Legacy__c) reason — the assertion that bites here is that no scan-cap
+    // line was added to missingCoverage.
+    expect(
+      (result.value.data.trust.completeness.missingCoverage ?? []).join(' '),
+    ).not.toMatch(/full scan capped/i);
   });
 });

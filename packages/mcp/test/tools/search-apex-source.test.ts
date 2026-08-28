@@ -444,6 +444,103 @@ describe('searchApexSourceHandler — typed absence', () => {
     }
   });
 
+  it('a zero over a corpus the MANIFEST says is incomplete is not proven-none', async () => {
+    // The residual half of TYPED-ABSENCE-SEARCH-APEX. `filesSearched > 0` proves
+    // some Apex was read; it does NOT prove the vault holds the org's Apex. Here
+    // the ApexClass retrieve ERRORED and the ApexTrigger row never confirmed,
+    // yet one stale `.cls` survives in `source/` — so the walk reads 1 file,
+    // finds nothing, and the pre-fix classifier certified `proven-none`:
+    // "all 1 file(s) in this vault were read line by line and none matched".
+    // An admin reads that as "this field is not referenced in Apex" over a
+    // corpus the vault itself knows is missing.
+    const vault = mkdtempSync(join(tmpdir(), 'sfi-mcp-apex-coverage-incomplete-'));
+    try {
+      writeSource(vault, 'classes', 'Stale.cls', 'public class Stale {}\n');
+      const incompleteCtx: Context = {
+        vaultRoot: vault,
+        manifest: {
+          ...FIXTURE_MANIFEST,
+          coverage: [
+            {
+              type: 'ApexClass',
+              requested: true,
+              retrieved: 0,
+              errored: true,
+              neverModeled: false,
+            },
+            {
+              type: 'ApexTrigger',
+              requested: true,
+              retrieved: 0,
+              errored: false,
+              neverModeled: false,
+            },
+          ],
+        },
+        graph: store,
+      };
+      const result = await searchApexSourceHandler(incompleteCtx, { query: 'ZZZZZ' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const absence = result.value.data.absence;
+      expect(absence?.filesSearched).toBe(1);
+      // The load-bearing assertion: a known-incomplete corpus can never be
+      // certified as a proven absence.
+      expect(absence?.status).not.toBe('proven-none');
+      expect(absence?.kind).toBe('coverage-disagrees');
+      expect(absence?.coverageCaveat?.missingCoverage).toEqual(
+        expect.arrayContaining(['ApexClass', 'ApexTrigger']),
+      );
+      expect(absence?.note).toMatch(/ApexClass/);
+      // And the old "Searched ... No matches" certification must not be the
+      // boundaryNote on this path.
+      expect(result.value.data.boundaryNote).not.toMatch(/Searched retrieved Apex/);
+    } finally {
+      rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  it('a COMPLETE Apex coverage row still yields a proven-none checked-empty', async () => {
+    // The mirror image: coverage that actually landed must NOT be downgraded,
+    // or the caveat becomes noise and the tool never proves anything again.
+    const vault = mkdtempSync(join(tmpdir(), 'sfi-mcp-apex-coverage-complete-'));
+    try {
+      writeSource(vault, 'classes', 'Clean.cls', 'public class Clean {}\n');
+      const completeCtx: Context = {
+        vaultRoot: vault,
+        manifest: {
+          ...FIXTURE_MANIFEST,
+          coverage: [
+            {
+              type: 'ApexClass',
+              requested: true,
+              retrieved: 1,
+              errored: false,
+              neverModeled: false,
+            },
+            {
+              type: 'ApexTrigger',
+              requested: true,
+              retrieved: 0,
+              errored: false,
+              neverModeled: false,
+              retrieveConfirmed: true,
+            },
+          ],
+        },
+        graph: store,
+      };
+      const result = await searchApexSourceHandler(completeCtx, { query: 'ZZZZZ' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.absence?.kind).toBe('checked-empty');
+      expect(result.value.data.absence?.status).toBe('proven-none');
+      expect(result.value.data.absence?.coverageCaveat).toBeUndefined();
+    } finally {
+      rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
   it('a NON-empty result carries no absence marker at all', async () => {
     // The mirror-image failure: stamping a not-checked marker on an answer that
     // actually found something would be a new lie, not a fix.

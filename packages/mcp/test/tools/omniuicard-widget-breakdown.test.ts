@@ -86,6 +86,20 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
 const SAMPLE_CARD_ID = 'OmniUiCard:SampleLinkingIntro_Developer_1';
 const MISSING_SOURCE_CARD_ID = 'OmniUiCard:MissingSource_Developer_1';
 const MALFORMED_JSON_CARD_ID = 'OmniUiCard:MalformedJson_Developer_1';
+// The source file vanished from the vault AFTER the refresh that stamped
+// the aggregates: the node still says 3 states / 12 widgets.
+const STALE_SOURCE_CARD_ID = 'OmniUiCard:StaleSource_Developer_1';
+// XML that does not validate at all (unclosed element).
+const MALFORMED_XML_CARD_ID = 'OmniUiCard:MalformedXml_Developer_1';
+// Node built by a refresh that predates the v3.2 R2 OmniUiCard extractor:
+// it carries NO `stateCount` property at all.
+const PRE_EXTRACTOR_CARD_ID = 'OmniUiCard:PreExtractor_Developer_1';
+// Same on-disk XML as the sample card, but the node's aggregates disagree
+// with what is on disk now (the file changed after the refresh).
+const DRIFTED_CARD_ID = 'OmniUiCard:Drifted_Developer_1';
+// A card whose one state hangs its widgets off `layer-1`, which v3.2 does
+// not walk.
+const OTHER_LAYER_CARD_ID = 'OmniUiCard:OtherLayer_Developer_1';
 
 const SAMPLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <OmniUiCard xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -112,18 +126,44 @@ const MALFORMED_JSON_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <versionNumber>1</versionNumber>
 </OmniUiCard>`;
 
+// XML that does not validate at all — the validator rejects it before the
+// parser ever runs.
+const MALFORMED_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<OmniUiCard>
+    <name>MalformedXml</name>
+`;
+
+// A single state whose widgets hang off `layer-1`. v3.2 walks `layer-0`
+// only, so the widget tree here is NEVER walked — which must not render
+// as "this state has no widgets".
+const OTHER_LAYER_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<OmniUiCard xmlns="http://soap.sforce.com/2006/04/metadata">
+    <authorName>Developer</authorName>
+    <isActive>true</isActive>
+    <name>OtherLayer</name>
+    <omniUiCardType>Parent</omniUiCardType>
+    <propertySetConfig>{"states":[{"name":"OnlyState","components":{"layer-1":{"children":[{"name":"Text","element":"outputField","elementLabel":"Text-0","type":"text"}]}}}]}</propertySetConfig>
+    <versionNumber>1</versionNumber>
+</OmniUiCard>`;
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
 let samplePath: string;
 let malformedPath: string;
+let malformedXmlPath: string;
+let otherLayerPath: string;
 
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-omniuicard-'));
   samplePath = join(tempDir, 'SampleLinkingIntro_Developer_1.ouc-meta.xml');
   malformedPath = join(tempDir, 'MalformedJson_Developer_1.ouc-meta.xml');
+  malformedXmlPath = join(tempDir, 'MalformedXml_Developer_1.ouc-meta.xml');
+  otherLayerPath = join(tempDir, 'OtherLayer_Developer_1.ouc-meta.xml');
   await writeFile(samplePath, SAMPLE_XML, 'utf8');
   await writeFile(malformedPath, MALFORMED_JSON_XML, 'utf8');
+  await writeFile(malformedXmlPath, MALFORMED_XML, 'utf8');
+  await writeFile(otherLayerPath, OTHER_LAYER_XML, 'utf8');
 
   const dbPath = join(tempDir, 'omniuicard.db');
   const opened = await openGraph(dbPath);
@@ -237,6 +277,107 @@ beforeAll(async () => {
           dataSourceType: null,
           dataSourceContextVariables: [],
           omniUiCardExtractionWarnings: ['failed to parse propertySetConfig JSON'],
+        },
+      }),
+      makeNode({
+        id: STALE_SOURCE_CARD_ID,
+        type: 'OmniUiCard',
+        apiName: 'StaleSource_Developer_1',
+        label: 'StaleSource',
+        sourcePath: join(tempDir, 'vanished.ouc-meta.xml'),
+        properties: {
+          omniUiCardType: 'Parent',
+          authorName: 'Developer',
+          versionNumber: 1,
+          isActive: true,
+          isManagedUsingStdDesigner: false,
+          name: 'StaleSource',
+          // The refresh SAW three states and twelve widgets.
+          stateCount: 3,
+          widgetCount: 12,
+          embeddedScriptCount: 0,
+          dataSourceType: null,
+          dataSourceContextVariables: [],
+          omniUiCardExtractionWarnings: [],
+        },
+      }),
+      makeNode({
+        id: MALFORMED_XML_CARD_ID,
+        type: 'OmniUiCard',
+        apiName: 'MalformedXml_Developer_1',
+        label: 'MalformedXml',
+        sourcePath: malformedXmlPath,
+        properties: {
+          omniUiCardType: 'Parent',
+          authorName: 'Developer',
+          versionNumber: 1,
+          isActive: true,
+          isManagedUsingStdDesigner: false,
+          name: 'MalformedXml',
+          stateCount: 1,
+          widgetCount: 4,
+          embeddedScriptCount: 0,
+          dataSourceType: null,
+          dataSourceContextVariables: [],
+          omniUiCardExtractionWarnings: [],
+        },
+      }),
+      makeNode({
+        id: PRE_EXTRACTOR_CARD_ID,
+        type: 'OmniUiCard',
+        apiName: 'PreExtractor_Developer_1',
+        label: 'PreExtractor',
+        sourcePath: join(tempDir, 'pre-extractor.ouc-meta.xml'),
+        // No `stateCount` / `widgetCount` / warnings at all — this vault's
+        // refresh predates the v3.2 R2 OmniUiCard extractor.
+        properties: {
+          omniUiCardType: 'Parent',
+          authorName: 'Developer',
+        },
+      }),
+      makeNode({
+        id: DRIFTED_CARD_ID,
+        type: 'OmniUiCard',
+        apiName: 'Drifted_Developer_1',
+        label: 'Drifted',
+        sourcePath: samplePath,
+        properties: {
+          omniUiCardType: 'Parent',
+          authorName: 'Developer',
+          versionNumber: 1,
+          isActive: true,
+          isManagedUsingStdDesigner: false,
+          name: 'Drifted',
+          // On disk the same file carries 2 states / 5 widgets.
+          stateCount: 9,
+          widgetCount: 40,
+          embeddedScriptCount: 0,
+          dataSourceType: null,
+          dataSourceContextVariables: [],
+          omniUiCardExtractionWarnings: [],
+        },
+      }),
+      makeNode({
+        id: OTHER_LAYER_CARD_ID,
+        type: 'OmniUiCard',
+        apiName: 'OtherLayer_Developer_1',
+        label: 'OtherLayer',
+        sourcePath: otherLayerPath,
+        properties: {
+          omniUiCardType: 'Parent',
+          authorName: 'Developer',
+          versionNumber: 1,
+          isActive: true,
+          isManagedUsingStdDesigner: false,
+          name: 'OtherLayer',
+          // The extractor walks layer-0 only too, so its own aggregate
+          // agrees at zero — the counts CANNOT catch this one.
+          stateCount: 1,
+          widgetCount: 0,
+          embeddedScriptCount: 0,
+          dataSourceType: null,
+          dataSourceContextVariables: [],
+          omniUiCardExtractionWarnings: [],
         },
       }),
     ],
@@ -397,34 +538,149 @@ describe('omniuicardWidgetBreakdownHandler', () => {
     );
   });
 
-  it('degrades gracefully when the source XML is missing on disk', async () => {
+  // ===========================================================================
+  // Honesty: `states: []` has SIX distinct causes. A genuinely empty card and
+  // a card whose XML was never read must NEVER render identically. These
+  // cases were previously asserted as "degrades gracefully ... boundaries
+  // .length === 2", which encoded the bug: the two constant boundaries
+  // discuss widget ORDER and the Vlocity namespace and distinguish nothing.
+  // ===========================================================================
+
+  it('discloses a blind spot — not a clean zero — when the source XML is missing on disk', async () => {
     const result = await omniuicardWidgetBreakdownHandler(ctx, {
       omniUiCardId: MISSING_SOURCE_CARD_ID,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const data = result.value.data;
-    // Metadata + boundaries still surface; states[] is empty
-    // because the XML re-parse silently fails.
+    // Metadata + the two constant boundaries still surface.
     expect(data.metadata.omniUiCardType).toBe('Parent');
     expect(data.states).toEqual([]);
     expect(data.dispatchedActions).toEqual([]);
-    expect(data.boundaries.length).toBe(2);
+    const blind = data.boundaries.filter((b) => b.includes('BLIND SPOT'));
+    expect(blind).toHaveLength(1);
+    expect(blind[0]).toContain('could not be read');
+    expect(blind[0]).toContain('NEVER a verified');
+    expect(blind[0]).toContain('/sfi-refresh');
+    // The two verbatim contract disclosures are still present.
+    expect(
+      data.boundaries.some((b) =>
+        b.includes('widget breakdown parses the propertySetConfig JSON blob'),
+      ),
+    ).toBe(true);
   });
 
-  it('degrades gracefully when the propertySetConfig JSON is malformed', async () => {
+  it('names the extractor aggregates the vault recorded when the source file vanished', async () => {
+    const result = await omniuicardWidgetBreakdownHandler(ctx, {
+      omniUiCardId: STALE_SOURCE_CARD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.states).toEqual([]);
+    const blind = data.boundaries.find((b) => b.includes('BLIND SPOT'));
+    expect(blind).toBeDefined();
+    // The node itself carries the answer the handler used to ignore.
+    expect(blind).toContain('stateCount');
+    expect(blind).toContain('3');
+    expect(blind).toContain('12');
+  });
+
+  it('discloses a blind spot when the source XML does not validate', async () => {
+    const result = await omniuicardWidgetBreakdownHandler(ctx, {
+      omniUiCardId: MALFORMED_XML_CARD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.states).toEqual([]);
+    const blind = data.boundaries.find((b) => b.includes('BLIND SPOT'));
+    expect(blind).toBeDefined();
+    expect(blind).toContain('not well-formed XML');
+  });
+
+  it('discloses a blind spot when the propertySetConfig JSON is unparseable', async () => {
     const result = await omniuicardWidgetBreakdownHandler(ctx, {
       omniUiCardId: MALFORMED_JSON_CARD_ID,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const data = result.value.data;
-    // Metadata still surfaces; the malformed JSON resolves to an
-    // empty states[] rather than throwing. Mirrors the extractor's
-    // best-effort JSON-parsing axis.
     expect(data.metadata.authorName).toBe('Developer');
     expect(data.states).toEqual([]);
-    expect(data.boundaries.length).toBe(2);
+    const blind = data.boundaries.find((b) => b.includes('BLIND SPOT'));
+    expect(blind).toBeDefined();
+    expect(blind).toContain('propertySetConfig');
+    // The extractor recorded its OWN parse failure at refresh time; the
+    // handler must surface it rather than report a clean zero.
+    expect(
+      data.boundaries.some((b) =>
+        b.includes('failed to parse propertySetConfig JSON'),
+      ),
+    ).toBe(true);
+  });
+
+  it('reports "not modeled" — not zero — when the node predates the OmniUiCard extractor', async () => {
+    const result = await omniuicardWidgetBreakdownHandler(ctx, {
+      omniUiCardId: PRE_EXTRACTOR_CARD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.states).toEqual([]);
+    const notModeled = data.boundaries.find((b) => b.includes('NOT parsed'));
+    expect(notModeled).toBeDefined();
+    // The shared absence-disclosure wording, keyed on the sentinel property.
+    expect(notModeled).toContain('stateCount');
+    expect(notModeled).toContain('not modeled');
+    expect(notModeled).toContain('/sfi-refresh');
+  });
+
+  it('discloses drift when the on-disk XML disagrees with the extractor aggregates', async () => {
+    const result = await omniuicardWidgetBreakdownHandler(ctx, {
+      omniUiCardId: DRIFTED_CARD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // The file parses; it just is not the file the refresh read.
+    expect(data.states).toHaveLength(2);
+    const drift = data.boundaries.find((b) => b.includes('DRIFT'));
+    expect(drift).toBeDefined();
+    expect(drift).toContain('9');
+    expect(drift).toContain('2');
+  });
+
+  it('discloses states whose widgets hang off a layer other than layer-0', async () => {
+    const result = await omniuicardWidgetBreakdownHandler(ctx, {
+      omniUiCardId: OTHER_LAYER_CARD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.states).toHaveLength(1);
+    // Empty widgets[] here means NOT WALKED, not "this state is empty" —
+    // and the extractor's own aggregate agrees at zero, so the count
+    // cross-check cannot catch this case.
+    expect(data.states[0]?.widgets).toEqual([]);
+    const layerNote = data.boundaries.find((b) => b.includes('layer-0'));
+    expect(layerNote).toBeDefined();
+    expect(layerNote).toContain('OnlyState');
+    expect(layerNote).toContain('NOT walked');
+  });
+
+  it('adds no blind-spot boundary when the card genuinely parsed clean', async () => {
+    const result = await omniuicardWidgetBreakdownHandler(ctx, {
+      omniUiCardId: SAMPLE_CARD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // A verified answer must not be hedged: over-disclosing is as
+    // dishonest as under-disclosing.
+    expect(data.boundaries).toHaveLength(2);
+    expect(data.boundaries.some((b) => b.includes('BLIND SPOT'))).toBe(false);
+    expect(data.boundaries.some((b) => b.includes('DRIFT'))).toBe(false);
   });
 
   it('returns invalid-query when the omniUiCardId carries a wrong prefix', async () => {

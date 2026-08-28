@@ -42,6 +42,11 @@ const seed: ExtractionResult = {
       // fixture without it models a node shape that cannot exist. Present-and-0
       // is the CHECKED zero this file locks below.
       customPermissionGrantCount: 0,
+      // Same law, the flowAccess family: the extractor writes `flowGrantCount`
+      // on EVERY container it processes (`packages/extractors/src/profile.ts`
+      // + `permission-set.ts`), so a fixture without it models a node shape a
+      // real refresh cannot produce.
+      flowGrantCount: 1,
       userPermissions: ['RunReports', 'ExportReport', 'ApiEnabled', 'ManageUsers' /* admin, filtered out */],
       loginIpRanges: [{ startAddress: '10.0.0.1', endAddress: '10.0.0.255' }],
       loginHoursDefined: true,
@@ -50,23 +55,23 @@ const seed: ExtractionResult = {
         { day: 'Tuesday', startTime: '480', endTime: '1020' },
       ],
     } }),
-    node({ id: 'PermissionSet:FlowRunner', type: 'PermissionSet', apiName: 'FlowRunner', properties: { userPermissions: [], customPermissionGrantCount: 0 } }),
+    node({ id: 'PermissionSet:FlowRunner', type: 'PermissionSet', apiName: 'FlowRunner', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 1 } }),
     node({ id: 'Flow:Onboard_Contact', type: 'Flow', apiName: 'Onboard_Contact' }),
     // CR-CAP-10: a defined CustomPermission (resolves) and a permset granting
     // both it and a managed-package perm with no definition (targetMissing).
     node({ id: 'CustomPermission:SkipValidation', type: 'CustomPermission', apiName: 'SkipValidation' }),
-    node({ id: 'PermissionSet:CustomPerms', type: 'PermissionSet', apiName: 'CustomPerms', properties: { userPermissions: [], customPermissionGrantCount: 2 } }),
+    node({ id: 'PermissionSet:CustomPerms', type: 'PermissionSet', apiName: 'CustomPerms', properties: { userPermissions: [], customPermissionGrantCount: 2, flowGrantCount: 0 } }),
     // A container from a vault refreshed BEFORE custom-permission extraction:
     // no sentinel, and therefore no evidence either way. Its empty grant set
     // must read as "not checked", never as a verified zero.
-    node({ id: 'PermissionSet:Pre_Extraction_Set', type: 'PermissionSet', apiName: 'Pre_Extraction_Set', properties: { userPermissions: [] } }),
+    node({ id: 'PermissionSet:Pre_Extraction_Set', type: 'PermissionSet', apiName: 'Pre_Extraction_Set', properties: { userPermissions: [], flowGrantCount: 0 } }),
     // A permission set granting run access to a flow that is NOT a node here —
     // a managed-package flow, or one this refresh did not retrieve. The
     // importer stamps `targetMissing` on the edge automatically.
-    node({ id: 'PermissionSet:PhantomFlowRunner', type: 'PermissionSet', apiName: 'PhantomFlowRunner', properties: { userPermissions: [], customPermissionGrantCount: 0 } }),
+    node({ id: 'PermissionSet:PhantomFlowRunner', type: 'PermissionSet', apiName: 'PhantomFlowRunner', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 2 } }),
     // A profile that grants run access to THREE flows — used to exercise the
     // CR-22 cursor over the paged runnableFlows list.
-    node({ id: 'Profile:MultiFlow', type: 'Profile', apiName: 'MultiFlow', properties: { userPermissions: [], customPermissionGrantCount: 0 } }),
+    node({ id: 'Profile:MultiFlow', type: 'Profile', apiName: 'MultiFlow', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 3, loginIpRanges: [], loginHoursDefined: false, loginHours: [] } }),
     node({ id: 'Flow:Alpha', type: 'Flow', apiName: 'Alpha' }),
     node({ id: 'Flow:Beta', type: 'Flow', apiName: 'Beta' }),
     node({ id: 'Flow:Gamma', type: 'Flow', apiName: 'Gamma' }),
@@ -74,7 +79,17 @@ const seed: ExtractionResult = {
     // real field nodes. Contact.Email = read+edit; Contact.Phone = read only;
     // Contact.Fax = a real field the profile grants NOTHING on (honest no-FLS,
     // not invalid-query).
-    node({ id: 'Profile:FieldEditor', type: 'Profile', apiName: 'FieldEditor', properties: { userPermissions: [], customPermissionGrantCount: 0 } }),
+    node({ id: 'Profile:FieldEditor', type: 'Profile', apiName: 'FieldEditor', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 0, loginIpRanges: [], loginHoursDefined: false, loginHours: [] } }),
+    // TYPED ABSENCE, login axis: a Profile from a refresh that predates
+    // `collectLoginRestrictions` — no `loginIpRanges` / `loginHoursDefined` /
+    // `loginHours` key at all. Its flow + custom-permission families ARE
+    // extracted, so the two axes stay independently observable.
+    node({ id: 'Profile:Pre_Login_Extraction', type: 'Profile', apiName: 'Pre_Login_Extraction', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 0 } }),
+    // TYPED ABSENCE, flow axis: a Profile from a refresh that predates
+    // `buildFlowEdges` — no `flowGrantCount` key. Its login + custom-permission
+    // families ARE extracted (and declare nothing), which is the CHECKED zero
+    // that must not be muted by the flow-family fix.
+    node({ id: 'Profile:Pre_Flow_Extraction', type: 'Profile', apiName: 'Pre_Flow_Extraction', properties: { userPermissions: [], customPermissionGrantCount: 0, loginIpRanges: [], loginHoursDefined: false, loginHours: [] } }),
     node({ id: 'CustomField:Contact.Email', type: 'CustomField', apiName: 'Contact.Email' }),
     node({ id: 'CustomField:Contact.Phone', type: 'CustomField', apiName: 'Contact.Phone' }),
     node({ id: 'CustomField:Contact.Fax', type: 'CustomField', apiName: 'Contact.Fax' }),
@@ -194,6 +209,99 @@ describe('userAbilityHandler', () => {
     // suppressed — today it described a field that is not populated, which
     // made the boundaryNote itself the thing that lied.
     expect(d.boundaryNote).not.toContain('customPermissions are declared');
+  });
+});
+
+// =============================================================================
+// TYPED ABSENCE (R1) — the two families this tool still decided by VALUE SHAPE.
+// `loginRestrictions` was `{ ipRangeCount: 0, loginHoursRestricted: false }` for
+// a Profile on a vault predating `collectLoginRestrictions` — a SECURITY-POSTURE
+// claim ("checked; not IP- or hours-restricted") derived from `!Array.isArray`
+// and `=== true`. `summary.runnableFlows` was a bare `0` for a Profile on a
+// vault predating `buildFlowEdges` — "can run no flows" — while the line under
+// it (`customPermissions`) had already been typed `number | null` for exactly
+// this reason. Both are now decided by the extractor's always-written sentinel
+// (`loginIpRanges` / `flowGrantCount`) via `familyWasExtracted`.
+// =============================================================================
+describe('userAbilityHandler — typed absence on the login + flow families', () => {
+  it('an UNCHECKED login-restriction family is null + disclosed, never a verified "unrestricted"', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:Pre_Login_Extraction' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    // NOT 0 / false / [] — those are the CHECKED answers and this was not checked.
+    expect(d.loginRestrictions.ipRangeCount).toBeNull();
+    expect(d.loginRestrictions.ipRangeCount).not.toBe(0);
+    expect(d.loginRestrictions.loginHoursRestricted).toBeNull();
+    expect(d.loginRestrictions.loginHoursRestricted).not.toBe(false);
+    expect(d.loginRestrictions.ipRanges).toBeNull();
+    expect(d.loginRestrictions.loginHours).toBeNull();
+    // `applies` still says the axis is MEANINGFUL for a Profile; the nulls say
+    // it was not measured. The two are different claims.
+    expect(d.loginRestrictions.applies).toBe(true);
+    expect(d.boundaryNote).toMatch(/Login restrictions were NOT checked/);
+    expect(d.boundaryNote).toContain('loginIpRanges');
+    expect(d.boundaryNote).toContain('Profile:Pre_Login_Extraction');
+  });
+
+  it('a CHECKED-and-clean login-restriction family stays 0 / false / [], never null', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:Pre_Flow_Extraction' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.loginRestrictions.ipRangeCount).toBe(0);
+    expect(d.loginRestrictions.ipRangeCount).not.toBeNull();
+    expect(d.loginRestrictions.loginHoursRestricted).toBe(false);
+    expect(d.loginRestrictions.loginHoursRestricted).not.toBeNull();
+    expect(d.loginRestrictions.ipRanges).toEqual([]);
+    expect(d.loginRestrictions.loginHours).toEqual([]);
+    expect(d.boundaryNote).not.toMatch(/Login restrictions were NOT checked/);
+  });
+
+  it('an UNCHECKED flowAccess family is summary.runnableFlows: null + disclosed, never a zero', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:Pre_Flow_Extraction' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.runnableFlows).toBeNull();
+    expect(d.summary.runnableFlows).not.toBe(0);
+    // The list stays `[]`; the reader's cue that `[]` is not "none" is the null
+    // count plus the sentence — the same contract `customPermissions` carries.
+    expect(d.runnableFlows).toEqual([]);
+    expect(d.boundaryNote).toMatch(/Flow run grants were NOT checked/);
+    expect(d.boundaryNote).toContain('flowGrantCount');
+    expect(d.boundaryNote).toContain('Profile:Pre_Flow_Extraction');
+    // The clause that DESCRIBES a populated runnableFlows list is suppressed —
+    // it is not populated, so keeping it makes the boundaryNote itself lie.
+    expect(d.boundaryNote).not.toContain('runnableFlows = the flowAccess grants');
+  });
+
+  it('a CHECKED zero flow family stays 0 and keeps its describing clause', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:Pre_Login_Extraction' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.runnableFlows).toBe(0);
+    expect(d.summary.runnableFlows).not.toBeNull();
+    expect(d.boundaryNote).not.toMatch(/Flow run grants were NOT checked/);
+    expect(d.boundaryNote).toContain('runnableFlows = the flowAccess grants');
+  });
+
+  it('a granting container still reports its real flow total, unmuted', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:MultiFlow' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.summary.runnableFlows).toBe(3);
+  });
+
+  it('a permission set is N/A-by-design on login security, not unchecked', async () => {
+    // `applies:false` already states the axis does not exist for a permission
+    // set, so its zeros must NOT be muted into nulls — that would report a
+    // BLIND SPOT where there is none.
+    const r = await userAbilityHandler(ctx, { componentId: 'PermissionSet:FlowRunner' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.loginRestrictions.applies).toBe(false);
+    expect(d.loginRestrictions.ipRangeCount).toBe(0);
+    expect(d.loginRestrictions.loginHoursRestricted).toBe(false);
+    expect(d.loginRestrictions.ipRanges).toEqual([]);
+    expect(d.loginRestrictions.loginHours).toEqual([]);
+    expect(d.boundaryNote).not.toMatch(/Login restrictions were NOT checked/);
   });
 });
 

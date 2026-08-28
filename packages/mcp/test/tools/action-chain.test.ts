@@ -1078,3 +1078,74 @@ describe('evidence envelope — a TRIMMED answer can never read as a complete on
     );
   });
 });
+
+describe('action_chain — the object scope is VERIFIED against the vault, never templated', () => {
+  // R4. `object` reaches `parentId: CustomObject:${object}` verbatim. A name the
+  // vault does not spell that way matches NOTHING, and the empty branch then
+  // emits the strongest affirmative sentence this tool owns — "VERIFIED NONE …
+  // the object genuinely has no approval process" — about an object it never
+  // confirmed exists. An UNCHECKED zero must never be relabelled a CHECKED one.
+  it('resolves a miscased object to the vault casing instead of calling it a verified none', async () => {
+    const r = await actionChainHandler(ctx, {
+      action: 'approval-submit',
+      objectApiName: 'opportunity',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosures.join(' ')).not.toContain('VERIFIED NONE');
+    expect(r.value.data.chains.map((c) => c.subject.componentId).sort()).toEqual(
+      [APPROVAL_MAIN, APPROVAL_NO_RECALL].sort(),
+    );
+    // The scope echoed back is the vault's spelling, not the caller's.
+    expect(r.value.data.appliedScope.object).toBe('Opportunity');
+  });
+
+  it('refuses an object absent from the vault instead of claiming it genuinely has none', async () => {
+    const r = await actionChainHandler(ctx, {
+      action: 'approval-submit',
+      objectApiName: 'Opportunty',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain("no object named 'Opportunty' exists in this vault");
+  });
+
+  it('accepts a miscased Lead for lead-convert rather than refusing it as another object', async () => {
+    const r = await actionChainHandler(ctx, { action: 'lead-convert', object: 'lead' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.object).toBe('Lead');
+    expect(r.value.data.chains[0]?.subject.componentId).toBe(LEAD);
+  });
+});
+
+describe('action_chain — object scope vs the approvalProcess id: casing is not disagreement', () => {
+  // Salesforce api names are case-INSENSITIVE, and `objectApiName` is now the
+  // VAULT's spelling while the `ApprovalProcess:` id carries the CALLER's. A
+  // byte comparison between the two manufactures a disagreement out of casing
+  // alone, and looking the id up verbatim misses a node that is right there.
+  it('composes the named process when object and process id differ only by CASE', async () => {
+    const r = await actionChainHandler(ctx, {
+      action: 'approval-submit',
+      objectApiName: 'Opportunity',
+      approvalProcess: 'ApprovalProcess:opportunity.Discount_Approval',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.chains.map((c) => c.subject.componentId)).toEqual([APPROVAL_MAIN]);
+    expect(r.value.data.appliedScope.approvalProcess).toBe(APPROVAL_MAIN);
+  });
+
+  it('still refuses a GENUINE disagreement between the object and the process id', async () => {
+    const r = await actionChainHandler(ctx, {
+      action: 'approval-submit',
+      objectApiName: 'Account',
+      approvalProcess: APPROVAL_MAIN,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('disagree');
+  });
+});

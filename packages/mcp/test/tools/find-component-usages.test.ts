@@ -214,6 +214,23 @@ describe('findComponentUsagesHandler', () => {
         "<!-- import selfWidget from 'c/selfWidget' -->\n",
       );
 
+      // REAL-SHAPE bundle: `extractLightningComponentBundle` /
+      // `extractAuraDefinitionBundle` are handed the bundle DIRECTORY (they
+      // `stat` it and refuse a non-directory) and persist it verbatim as
+      // `sourcePath`, so a real vault stores `.../lwc/realWidget` — NOT a file
+      // inside it. The two fixtures above use the file shape; this pair uses
+      // the shape the extractor actually writes.
+      mkdirSync(join(src, 'lwc', 'realWidget'), { recursive: true });
+      writeFileSync(
+        join(src, 'lwc', 'realWidget', 'realWidget.js'),
+        '// realWidget internal\nexport default class RealWidget {}\n',
+      );
+      mkdirSync(join(src, 'lwc', 'realHost'), { recursive: true });
+      writeFileSync(
+        join(src, 'lwc', 'realHost', 'realHost.html'),
+        "<!-- import realWidget from 'c/realWidget' -->\n",
+      );
+
       // Visualforce is NOT a bundle layout. `pages/` is FLAT — every page in
       // the org is a sibling in one directory — so "same directory" means
       // "different component", the exact opposite of what it means under
@@ -236,6 +253,8 @@ describe('findComponentUsagesHandler', () => {
           node({ id: 'ApexClass:Caller', type: 'ApexClass', apiName: 'Caller', sourcePath: 'source/main/default/classes/Caller.cls' }),
           node({ id: 'LightningComponentBundle:selfWidget', type: 'LightningComponentBundle', apiName: 'selfWidget', sourcePath: 'source/main/default/lwc/selfWidget/selfWidget.js' }),
           node({ id: 'LightningComponentBundle:hostWidget', type: 'LightningComponentBundle', apiName: 'hostWidget', sourcePath: 'source/main/default/lwc/hostWidget/hostWidget.html' }),
+          node({ id: 'LightningComponentBundle:realWidget', type: 'LightningComponentBundle', apiName: 'realWidget', sourcePath: 'source/main/default/lwc/realWidget' }),
+          node({ id: 'LightningComponentBundle:realHost', type: 'LightningComponentBundle', apiName: 'realHost', sourcePath: 'source/main/default/lwc/realHost' }),
           node({ id: 'VisualforcePage:SelfPage', type: 'VisualforcePage', apiName: 'SelfPage', sourcePath: 'source/main/default/pages/SelfPage.page' }),
           node({ id: 'VisualforcePage:CallerPage', type: 'VisualforcePage', apiName: 'CallerPage', sourcePath: 'source/main/default/pages/CallerPage.page' }),
         ],
@@ -300,6 +319,34 @@ describe('findComponentUsagesHandler', () => {
       // dropping the flat-directory rule entirely would resurrect the original
       // self-match bug for Visualforce.
       expect(paths.every((p) => !p.includes('SelfPage.page'))).toBe(true);
+    });
+
+    /**
+     * FIND-COMPONENT-USAGES-BUNDLE-DIR-SOURCEPATH — the SAME flat-directory
+     * over-exclusion as the Visualforce case above, still live for LWC/Aura,
+     * hidden because the fixtures used a file path the extractor never writes.
+     *
+     * `extractLightningComponentBundle` / `extractAuraDefinitionBundle` take
+     * the bundle DIRECTORY, assert it IS a directory, and store it verbatim as
+     * `sourcePath`. So a real node carries `source/main/default/lwc/realWidget`
+     * with no file. Slicing that to its last `/` yields `.../lwc/` — the parent
+     * of EVERY bundle in the org — and every genuine LWC/Aura caller was
+     * dropped as "this component's own definition", pushing the tool to
+     * "No static evidence of usage found in this vault" for a component another
+     * bundle actively imports.
+     */
+    it('FAIL-BEFORE/PASS-AFTER: a caller in a SIBLING bundle survives when sourcePath is the bundle DIRECTORY (the real extractor shape)', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'LightningComponentBundle:realWidget' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const d = r.value.data;
+      const paths = d.grepSupplement.matches.map((m) => m.path);
+      // The sibling bundle that imports it is a real caller...
+      expect(paths.some((p) => p.includes('lwc/realHost/realHost.html'))).toBe(true);
+      expect(d.summary.hasStaticEvidence).toBe(true);
+      // ...while its OWN bundle directory is still excluded, so the
+      // directory rule is narrowed, not dropped.
+      expect(paths.some((p) => p.includes('lwc/realWidget/'))).toBe(false);
+      expect(d.grepSupplement.selfMatchesExcluded).toBeGreaterThanOrEqual(1);
     });
 
     it('excludes a bundle self-reference from a DIFFERENT file in its OWN bundle directory', async () => {

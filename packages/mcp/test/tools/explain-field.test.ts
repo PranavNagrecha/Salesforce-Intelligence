@@ -470,6 +470,150 @@ const mdtUnusedFieldSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 5 (R1 typed absence): an `__mdt` parent whose CustomMetadataRecord
+// children were built by a refresh that PREDATES the v1.6 R2 record-values
+// extractor — the node carries NO `values` property at all (Alpha). The control
+// in the same seed is a record that WAS extracted (Bravo). Those two must never
+// render identically: the first is "never extracted", the second is a real
+// answer. A third record (Charlie) carries a CORRUPT `values` — present, but not
+// an array — readable by nothing, so it is a blind spot too, never a silent
+// skip. The "extracted and NAMES NO VALUE for this field" control (a verified
+// zero, which must carry NO note) is the separate `mdtUnusedFieldSeed`.
+// =============================================================================
+
+const LEGACY_MDT_TYPE_ID = 'CustomObject:Legacy_Setting__mdt';
+const LEGACY_MDT_FIELD_ID =
+  'CustomField:Legacy_Setting__mdt.Retry_Limit__c';
+const LEGACY_MDT_TIMEOUT_FIELD_ID =
+  'CustomField:Legacy_Setting__mdt.Timeout_Seconds__c';
+const LEGACY_RECORD_OLD_VAULT_ID =
+  'CustomMetadataRecord:Legacy_Setting__mdt.Alpha';
+const LEGACY_RECORD_EXTRACTED_EMPTY_ID =
+  'CustomMetadataRecord:Legacy_Setting__mdt.Bravo';
+const LEGACY_RECORD_CORRUPT_ID =
+  'CustomMetadataRecord:Legacy_Setting__mdt.Charlie';
+
+const legacyMdtSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: LEGACY_MDT_TYPE_ID,
+      type: 'CustomObject',
+      apiName: 'Legacy_Setting__mdt',
+      label: 'Legacy Setting',
+      properties: {},
+    }),
+    makeNode({
+      id: LEGACY_MDT_FIELD_ID,
+      type: 'CustomField',
+      apiName: 'Retry_Limit__c',
+      label: 'Retry Limit',
+      parentId: LEGACY_MDT_TYPE_ID,
+      properties: {
+        label: 'Retry Limit',
+        dataType: 'Number',
+        description: null,
+        required: false,
+      },
+    }),
+    makeNode({
+      id: LEGACY_MDT_TIMEOUT_FIELD_ID,
+      type: 'CustomField',
+      apiName: 'Timeout_Seconds__c',
+      label: 'Timeout Seconds',
+      parentId: LEGACY_MDT_TYPE_ID,
+      properties: {
+        label: 'Timeout Seconds',
+        dataType: 'Number',
+        description: null,
+        required: false,
+      },
+    }),
+    makeNode({
+      id: LEGACY_RECORD_OLD_VAULT_ID,
+      type: 'CustomMetadataRecord',
+      apiName: 'Legacy_Setting__mdt.Alpha',
+      label: 'Alpha',
+      parentId: LEGACY_MDT_TYPE_ID,
+      // NO `values` / `valuesCount` keys: the pre-v1.6 shape.
+      properties: {
+        label: 'Alpha',
+        protected: false,
+        recordName: 'Alpha',
+        typeApiName: 'Legacy_Setting__mdt',
+      },
+    }),
+    makeNode({
+      id: LEGACY_RECORD_EXTRACTED_EMPTY_ID,
+      type: 'CustomMetadataRecord',
+      apiName: 'Legacy_Setting__mdt.Bravo',
+      label: 'Bravo',
+      parentId: LEGACY_MDT_TYPE_ID,
+      properties: {
+        label: 'Bravo',
+        protected: false,
+        recordName: 'Bravo',
+        typeApiName: 'Legacy_Setting__mdt',
+        valuesCount: 1,
+        values: [
+          {
+            field: 'Timeout_Seconds__c',
+            value: 30,
+            valueType: 'number',
+            isMasked: false,
+          },
+        ],
+        hasMaskedValues: false,
+      },
+    }),
+    makeNode({
+      id: LEGACY_RECORD_CORRUPT_ID,
+      type: 'CustomMetadataRecord',
+      apiName: 'Legacy_Setting__mdt.Charlie',
+      label: 'Charlie',
+      parentId: LEGACY_MDT_TYPE_ID,
+      properties: {
+        label: 'Charlie',
+        protected: false,
+        recordName: 'Charlie',
+        typeApiName: 'Legacy_Setting__mdt',
+        valuesCount: 1,
+        // Present but unreadable — not an array.
+        values: { field: 'Retry_Limit__c', value: 9 },
+        hasMaskedValues: false,
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 6 (R1 typed absence): a CustomField with NO parentId at all. With an
+// explicit `includeRecordValues: true` the handler takes the "no parent to
+// enumerate from" branch and used to emit a bare `recordValues: []`.
+// =============================================================================
+
+const ORPHAN_FIELD_ID = 'CustomField:Orphan_Setting__mdt.Threshold__c';
+
+const orphanFieldSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: ORPHAN_FIELD_ID,
+      type: 'CustomField',
+      apiName: 'Threshold__c',
+      label: 'Threshold',
+      parentId: null,
+      properties: {
+        label: 'Threshold',
+        dataType: 'Number',
+        description: null,
+        required: false,
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // One shared graph store + Context across the suite. All seeds use distinct
 // ids; the MDT_TYPE_ID parent appears in two seeds but the import dedupes by
 // id so the second insert is a no-op.
@@ -496,6 +640,8 @@ beforeAll(async () => {
     mdtFieldSeed,
     mdtUnusedFieldSeed,
     lookupFieldSeed,
+    legacyMdtSeed,
+    orphanFieldSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -717,6 +863,73 @@ describe('explainFieldHandler', () => {
     const { recordValues } = result.value.data;
     expect(recordValues).toBeDefined();
     expect(recordValues).toEqual([]);
+  });
+
+  it('R1: a record whose `values` was NEVER EXTRACTED is disclosed, not silently dropped', async () => {
+    const result = await explainFieldHandler(ctx, {
+      fieldId: LEGACY_MDT_FIELD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { recordValues, recordValuesNote } = result.value.data;
+    // No row can be produced for a record whose values were never extracted —
+    // that part is correct. What must NOT happen is the empty list standing
+    // alone as if it were a verified "no record sets this field".
+    expect(recordValues).toEqual([]);
+    expect(recordValuesNote).toBeDefined();
+    expect(recordValuesNote).toContain('NOT');
+    expect(recordValuesNote).toContain('values');
+    // The un-extracted record is NAMED so the reader can chase it.
+    expect(recordValuesNote).toContain(LEGACY_RECORD_OLD_VAULT_ID);
+    // The record that WAS extracted and holds zero values is a real answer and
+    // must NOT be blamed as a blind spot.
+    expect(recordValuesNote).not.toContain(LEGACY_RECORD_EXTRACTED_EMPTY_ID);
+    // The corrupt (present-but-not-an-array) record is unreadable, so it is a
+    // blind spot too — never a silent skip.
+    expect(recordValuesNote).toContain(LEGACY_RECORD_CORRUPT_ID);
+  });
+
+  it('R1: an EXTRACTED-and-clean __mdt type carries NO note (the empty list is a real answer)', async () => {
+    const result = await explainFieldHandler(ctx, {
+      fieldId: MDT_UNUSED_FIELD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Both records carry an extracted `values` array; neither names this
+    // field. That is a VERIFIED zero and must not be hedged.
+    expect(result.value.data.recordValues).toEqual([]);
+    expect(result.value.data.recordValuesNote).toBeUndefined();
+  });
+
+  it('R1: a PARTIAL answer keeps its rows AND still discloses the unread records', async () => {
+    const result = await explainFieldHandler(ctx, {
+      fieldId: LEGACY_MDT_TIMEOUT_FIELD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { recordValues, recordValuesNote } = result.value.data;
+    // The one readable record IS answered — a blind spot must not suppress the
+    // evidence that survived it.
+    expect(recordValues?.length).toBe(1);
+    expect(recordValues?.[0]?.recordId).toBe(LEGACY_RECORD_EXTRACTED_EMPTY_ID);
+    expect(recordValues?.[0]?.value).toBe(30);
+    // ...and the two unreadable records are STILL named, so "1 record sets this"
+    // cannot be read as "exactly 1 record sets this".
+    expect(recordValuesNote).toBeDefined();
+    expect(recordValuesNote).toContain(LEGACY_RECORD_OLD_VAULT_ID);
+    expect(recordValuesNote).toContain(LEGACY_RECORD_CORRUPT_ID);
+  });
+
+  it('R1: a field with no parentId discloses why recordValues is empty', async () => {
+    const result = await explainFieldHandler(ctx, {
+      fieldId: ORPHAN_FIELD_ID,
+      includeRecordValues: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.recordValues).toEqual([]);
+    expect(result.value.data.recordValuesNote).toBeDefined();
+    expect(result.value.data.recordValuesNote).toContain('parent');
   });
 
   it('suppresses recordValues when includeRecordValues: false even on an __mdt parent', async () => {

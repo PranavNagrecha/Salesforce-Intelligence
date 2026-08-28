@@ -1,6 +1,13 @@
 /// <reference types="vitest/globals" />
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -903,5 +910,171 @@ describe('findHardcodedValuesAnywhereHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND
     expect(r.value.data.boundaries.join(' ')).not.toContain(
       'NOT SCANNED IN THIS VAULT',
     );
+  });
+});
+
+// =============================================================================
+// CR-07 HONESTY: the source-scan disclosure must report the scan's OUTCOME, not
+// the fact that it was ATTEMPTED.
+//
+// `ranApexSourceEmailScan` used to be set BEFORE the walk, so the affirmative
+// claim "Apex source files were also scanned directly (CR-07 fallback)" was
+// emitted even when the walk found ZERO files — the normal state of a vault
+// whose `source/` tree was never retrieved (or is gitignored). The response was
+// then `matches: [], totalCount: 0` PLUS a disclosure vouching for coverage
+// that never happened: a false clean whose own honesty machinery endorses it.
+// =============================================================================
+describe('findHardcodedValuesAnywhereHandler — CR-07 source-corpus absence', () => {
+  let absentDir: string;
+  let absentStore: GraphStore;
+  let absentCtx: Context;
+
+  beforeAll(async () => {
+    absentDir = mkdtempSync(join(tmpdir(), 'sfi-fhva-nosrc-'));
+    const opened = await openGraph(join(absentDir, 'graph.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    absentStore = opened.value;
+    const imported = await importExtractionResults(absentStore, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:NotificationService',
+            type: 'ApexClass',
+            apiName: 'NotificationService',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    // NOTE: no `source/` tree is created. This is the fresh-clone shape.
+    absentCtx = { vaultRoot: absentDir, manifest: MANIFEST, graph: absentStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(absentStore);
+    rmSync(absentDir, { recursive: true, force: true });
+  });
+
+  it('does NOT claim source files were scanned when the source tree is absent', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(absentCtx, {
+      category: 'email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches).toEqual([]);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).not.toContain('source files were also scanned');
+  });
+
+  it('names the source-corpus absence so the zero is not read as a clean scan', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(absentCtx, {
+      category: 'email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('NOT SCANNED');
+    expect(joined).toContain('CR-07');
+  });
+
+  it('reports the source-scan census as a typed field (0 discovered, 0 read)', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(absentCtx, {
+      category: 'email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.apexSourceScan).toEqual({
+      filesDiscovered: 0,
+      filesRead: 0,
+      unreadablePaths: [],
+    });
+  });
+
+  it('discloses the absence for an @-bearing `value` with zero matches too', async () => {
+    // categoryFilter is undefined here and sorted.length === 0, so the old
+    // disclosure gate suppressed the CR-07 line entirely — a silent zero.
+    const r = await findHardcodedValuesAnywhereHandler(absentCtx, {
+      value: 'billing@acmeco.example',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches).toEqual([]);
+    expect(r.value.data.boundaries.join(' ')).toContain('NOT SCANNED');
+  });
+});
+
+describe('findHardcodedValuesAnywhereHandler — CR-07 partially-read source corpus', () => {
+  let partialDir: string;
+  let partialStore: GraphStore;
+  let partialCtx: Context;
+  let unreadableWorks = false;
+
+  beforeAll(async () => {
+    partialDir = mkdtempSync(join(tmpdir(), 'sfi-fhva-partial-'));
+    const opened = await openGraph(join(partialDir, 'graph.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    partialStore = opened.value;
+    const imported = await importExtractionResults(partialStore, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:Readable',
+            type: 'ApexClass',
+            apiName: 'Readable',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    partialCtx = { vaultRoot: partialDir, manifest: MANIFEST, graph: partialStore };
+
+    const clsDir = join(partialDir, 'source', 'main', 'default', 'classes');
+    mkdirSync(clsDir, { recursive: true });
+    writeFileSync(
+      join(clsDir, 'Readable.cls'),
+      "public class Readable { String e = 'ops@acmeco.example'; }",
+    );
+    const locked = join(clsDir, 'Locked.cls');
+    writeFileSync(locked, "public class Locked { String e = 'hidden@acmeco.example'; }");
+    chmodSync(locked, 0o000);
+    try {
+      readFileSync(locked, 'utf-8');
+    } catch {
+      unreadableWorks = true;
+    }
+  });
+
+  afterAll(async () => {
+    await closeGraph(partialStore);
+    try {
+      chmodSync(
+        join(partialDir, 'source', 'main', 'default', 'classes', 'Locked.cls'),
+        0o600,
+      );
+    } catch {
+      /* already gone */
+    }
+    rmSync(partialDir, { recursive: true, force: true });
+  });
+
+  it('names the file it could not read instead of counting it as scanned-and-clean', async () => {
+    if (!unreadableWorks) return; // running as root: chmod cannot deny reads
+    const r = await findHardcodedValuesAnywhereHandler(partialCtx, {
+      category: 'email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.apexSourceScan).toEqual({
+      filesDiscovered: 2,
+      filesRead: 1,
+      unreadablePaths: ['source/main/default/classes/Locked.cls'],
+    });
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('PARTIAL');
+    expect(joined).toContain('Locked.cls');
   });
 });

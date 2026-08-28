@@ -67,6 +67,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveExistingObjectScope } from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -189,11 +190,20 @@ const parsePropertiesJson = (
   }
 };
 
+/**
+ * Load the CustomField children of ONE object.
+ *
+ * `parentId` is a `CustomObject:` id the caller has already VERIFIED against
+ * the graph (see {@link resolveObjectSide}). It used to be string-templated
+ * from the raw argument here, so a typo and a wrong-CASE name each returned
+ * zero rows and the tool answered `fieldCount: 0` with a balanced
+ * reconciliation — a confident empty mapping for an object that was never
+ * looked up.
+ */
 const loadFields = async (
   store: GraphStore,
-  objectApiName: string,
+  parentId: ComponentId,
 ): Promise<readonly CompactField[]> => {
-  const parentId = `CustomObject:${objectApiName}` as ComponentId;
   const reader = await store.connection.runAndReadAll(
     "SELECT id, api_name, label, properties_json FROM nodes WHERE type = 'CustomField' AND parent_id = ?",
     [parentId] as never[],
@@ -318,6 +328,46 @@ const openVault = async (
   }
   const store = opened.value;
   return ok({ store, dispose: async () => closeGraph(store) });
+};
+
+/**
+ * Resolve ONE of the two object arguments against the graph and hand back the
+ * vault's OWN `CustomObject:` id.
+ *
+ * R4: an object filter must be VERIFIED to exist before it is used. This tool
+ * templated `CustomObject:${arg}` straight into the field query, so
+ * `objectA: 'Acount'` (a typo) and `objectA: 'contact'` (Salesforce api names
+ * are case-INSENSITIVE, so that names the real object) both produced
+ * `fieldCount: 0`, three empty lists, and `reconciliation.balanced: true` —
+ * because `0 === 0` — under a boundary that invites the reader to drive a
+ * migration script from it.
+ *
+ * The shared {@link resolveExistingObjectScope} owns the whole predicate:
+ * alias coercion, the case-variant probe, the two-variants-differ-only-by-case
+ * refusal, and the absent-object `invalid-query`. Only the `path` is rewritten,
+ * because this tool has TWO object arguments and the caller must be told WHICH
+ * one it could not find.
+ */
+const resolveObjectSide = async (
+  store: GraphStore,
+  apiName: string,
+  path: 'objectA' | 'objectB',
+): Promise<Result<{ readonly componentId: ComponentId; readonly object: string }, McpError>> => {
+  const scoped = await resolveExistingObjectScope(store, { objectApiName: apiName });
+  if (!scoped.ok) return err({ ...scoped.error, path });
+  if (scoped.value === null) {
+    // Unreachable: the zod schema requires a non-empty string, so the shared
+    // resolver always sees a named object. Fail loud rather than widen.
+    return err({
+      kind: 'invalid-query',
+      message: `\`${path}\` did not name an object`,
+      path,
+    });
+  }
+  return ok({
+    componentId: scoped.value.componentId as ComponentId,
+    object: scoped.value.object,
+  });
 };
 
 /**
@@ -452,8 +502,16 @@ export const fieldMappingBetweenObjectsHandler = async (
   if (!opened.ok) return opened;
 
   try {
-    const fieldsA = await loadFields(opened.value.store, input.objectA);
-    const fieldsB = await loadFields(opened.value.store, input.objectB);
+    // R4 — VERIFY both object scopes against the graph BEFORE the field load.
+    // An unresolvable side is REFUSED; it is never allowed to become a
+    // zero-field, "balanced", internally-consistent phantom mapping.
+    const scopeA = await resolveObjectSide(opened.value.store, input.objectA, 'objectA');
+    if (!scopeA.ok) return err(scopeA.error);
+    const scopeB = await resolveObjectSide(opened.value.store, input.objectB, 'objectB');
+    if (!scopeB.ok) return err(scopeB.error);
+
+    const fieldsA = await loadFields(opened.value.store, scopeA.value.componentId);
+    const fieldsB = await loadFields(opened.value.store, scopeB.value.componentId);
 
     // Greedy pairing: for each field in A, find the best match in B
     // (highest jaccard above threshold). A field in B may only be paired
@@ -542,8 +600,10 @@ export const fieldMappingBetweenObjectsHandler = async (
     ];
     const fingerprint = argsFingerprint({
       vault: input.vault,
-      objectA: input.objectA,
-      objectB: input.objectB,
+      // The vault's OWN casing, so a cursor minted for `contact` still resumes
+      // when the caller echoes it alongside `Contact` — same query, same page.
+      objectA: scopeA.value.object,
+      objectB: scopeB.value.object,
       similarityThreshold: input.similarityThreshold,
       includeTypeIncompatible: input.includeTypeIncompatible,
       section: input.section,
@@ -613,8 +673,10 @@ export const fieldMappingBetweenObjectsHandler = async (
     return ok({
       data: {
         vault: vaultRef,
-        objectA: { apiName: input.objectA, fieldCount: fieldsA.length },
-        objectB: { apiName: input.objectB, fieldCount: fieldsB.length },
+        // The vault's casing, never the caller's — the response must not
+        // assert an object api name that does not exist in this vault.
+        objectA: { apiName: scopeA.value.object, fieldCount: fieldsA.length },
+        objectB: { apiName: scopeB.value.object, fieldCount: fieldsB.length },
         suggestedPairs: pagedLists.suggestedPairs,
         unpairedFromA: pagedLists.unpairedFromA,
         unpairedFromB: pagedLists.unpairedFromB,

@@ -32,11 +32,14 @@
  * of whether it was the enricher's output or a future v1.7 pass.
  *
  * Implementation notes:
- *   - The scan iterates the requested ComponentTypes (defaulting to
- *     ALL types in the v1.x contract) and pages through
- *     `listNodesByType` at the graph layer's max page size (500). A
- *     real org with >500 nodes per type loses tail coverage past that
- *     page — surfaced as a future-tier limit, not a v1.7 axis.
+ *   - The scan iterates the requested ComponentTypes — defaulting to the
+ *     compile-time-proven `COMPONENT_TYPES` (the WHOLE `ComponentType`
+ *     union, not a hand-listed subset; see `CHANGED_SINCE_DEFAULT_TYPES`)
+ *     — via `scanAllNodesOfTypes`, which windows the SQL `OFFSET` forward
+ *     until each type is exhausted. Nodes 501+ ARE reached; the only
+ *     residual ceiling is `FULL_SCAN_MAX_NODES` per type, and a type that
+ *     hits it is disclosed by name in `boundaries` and classified
+ *     `scan-capped` in `absence`.
  *   - The `since` comparison is a string compare (ISO 8601 lex-sorts
  *     correctly for the same offset). v1.7 normalises `since` to UTC
  *     so a caller passing a local-time date does not silently flap the
@@ -71,74 +74,34 @@ const CHANGED_SINCE_DEFAULT_LIMIT = 100;
 
 const CHANGED_SINCE_TOOL = 'sfi.changed_since';
 
- /**
+/**
  * The types scanned when the caller omits `types`.
  *
- * This array USED to be named `COMPONENT_TYPES` and served two jobs at once:
- * the Zod enum AND this default. Its comment claimed to be the "full
- * superset" of the contracts union but had drifted to 46 of 101, so it
- * silently did both jobs wrong -- rejecting 55 retrievable types at the
- * validator, and quietly narrowing the default scan while `roster.ts`
- * advertised "default scans every ComponentType".
+ * DERIVED, not hand-listed. This constant USED to be a 46-entry literal that
+ * had drifted from the contracts union while `roster.ts` advertised "default
+ * scans every ComponentType" and this module's JSDoc claimed "ALL types in the
+ * v1.x contract". A bare `changed_since({ since })` therefore never looked at
+ * 57 modelled types -- FlexiPage, CustomPermission, Report, Dashboard,
+ * ListView, PermissionSetGroup, MutingPermissionSet, RestrictionRule,
+ * ScopingRule, Network, CustomSite, TransactionSecurityPolicy, and every CPQ /
+ * OmniStudio / GenAi type among them -- and still answered `truncated: false`
+ * with no boundary naming the gap. The blind spot was unreadable from the
+ * payload: a pre-deploy "what changed since my last refresh?" got a confident,
+ * complete-looking list over less than half the modelled surface.
  *
- * Validation now derives from the compile-time-proven `COMPONENT_TYPES` in
- * `list-components.ts`. This constant keeps the PREVIOUS default scan set
- * verbatim so the fix to the validator does not silently change what an
- * unqualified `changed_since` call returns.
+ * It is now the SAME compile-time-proven `COMPONENT_TYPES` the validator uses
+ * (`list-components.ts`, where a `satisfies` + an `Exclude<>` assertion prove it
+ * is the whole `ComponentType` union), so the accepted set and the default
+ * scanned set cannot drift apart again -- the advertised contract IS the
+ * implementation. A type absent from this vault costs one indexed empty page,
+ * and a requested type that contributed no node is still classified honestly by
+ * `unretrievedTypes` below rather than folded into "nothing changed".
  *
- * KNOWN GAP (deliberately not changed here): this default is still narrower
- * than the advertised "every ComponentType", so a change to e.g. a
- * `FlexiPage` is invisible to a default call. Widening it is a BEHAVIOUR
- * change and is tracked separately.
+ * `changed-since.test.ts` carries the drift guard: it seeds one freshly-dated
+ * node of EVERY `ComponentType` and asserts a default call returns all of them,
+ * so re-narrowing this default fails a test instead of a comment.
  */
-const CHANGED_SINCE_DEFAULT_TYPES = [
-  'CustomObject',
-  'CustomField',
-  'ValidationRule',
-  'Flow',
-  'ApexClass',
-  'ApexTrigger',
-  'Layout',
-  'Profile',
-  'PermissionSet',
-  'PermissionSetAssignment',
-  'NamedCredential',
-  'ConnectedApp',
-  'Group',
-  'Queue',
-  'Role',
-  'SharingRule',
-  'RecordType',
-  'BusinessProcess',
-  'CustomTab',
-  'CustomApplication',
-  'QuickAction',
-  'PathAssistant',
-  'GlobalValueSet',
-  'CustomLabel',
-  'StaticResource',
-  'WorkflowRule',
-  'ApprovalProcess',
-  'AssignmentRule',
-  'AutoResponseRule',
-  'EscalationRule',
-  'DuplicateRule',
-  'MatchingRule',
-  'EmailTemplate',
-  'Letterhead',
-  'LightningComponentBundle',
-  'AuraDefinitionBundle',
-  'VisualforcePage',
-  'VisualforceComponent',
-  'AuthProvider',
-  'RemoteSiteSetting',
-  'CspTrustedSite',
-  'ExternalDataSource',
-  'ExternalService',
-  'NetworkAccess',
-  'CustomMetadataRecord',
-  'CustomSettingRecord',
-] as const satisfies readonly ComponentType[];
+const CHANGED_SINCE_DEFAULT_TYPES: readonly ComponentType[] = COMPONENT_TYPES;
 
 /**
  * Natural "since my last refresh" tokens a host reaches for when the router

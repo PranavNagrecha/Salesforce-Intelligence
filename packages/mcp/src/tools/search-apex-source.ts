@@ -26,6 +26,12 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  APEX_USAGE_REQUIRED_COVERAGE,
+  buildEnumerationCoverageCaveatFor,
+  type CoverageCaveat,
+} from './coverage-trust.js';
+
 const SEARCH_APEX_SOURCE_MAX_LIMIT = 200;
 const SEARCH_APEX_SOURCE_DEFAULT_LIMIT = 50;
 
@@ -60,6 +66,11 @@ export interface SearchApexSourceMatch {
  *     READ. The lines in it were never compared against the query.
  *   - `result-capped` — the walk stopped at `limit` before exhausting the
  *     corpus, so the rest of it was never compared.
+ *   - `coverage-disagrees` — files WERE read, but the vault's own manifest says
+ *     the Apex retrieve did not land complete (errored, never requested, or a
+ *     zero it could not confirm). `filesSearched > 0` proves some Apex was
+ *     grepped; it does not prove the vault holds the org's Apex, so the zero
+ *     cannot be certified.
  *   - `checked-empty` — every discovered file was read line by line and none
  *     matched. This is the only kind that is a real finding of nothing, and it
  *     is still bounded by what a LITERAL grep can see (see `note`).
@@ -68,6 +79,7 @@ export type SearchApexAbsenceKind =
   | 'corpus-absent'
   | 'corpus-partially-read'
   | 'result-capped'
+  | 'coverage-disagrees'
   | 'checked-empty';
 
 /**
@@ -85,7 +97,8 @@ export type SearchApexAbsenceKind =
  *
  * `status` is the shared `EvidenceAbsenceStatusV2` vocabulary:
  * `proven-none` only for `checked-empty`, `not-checked` for the two corpus
- * gaps, `unknown` for a capped page.
+ * gaps, `unknown` for a capped page and for a corpus the manifest says is
+ * incomplete (`coverage-disagrees`).
  */
 export interface SearchApexAbsence extends EvidenceAbsenceV2 {
   readonly kind: SearchApexAbsenceKind;
@@ -96,6 +109,14 @@ export interface SearchApexAbsence extends EvidenceAbsenceV2 {
    * their lines were never compared to the query. Empty on the clean path.
    */
   readonly filesUnreadable: readonly string[];
+  /**
+   * The shared retrieve-coverage caveat for the Apex families, when the
+   * manifest says coverage is not complete. Present on ANY zero-match kind —
+   * a corpus gap and a coverage gap are independent axes and a caller must see
+   * both. Absent when the manifest carries no coverage rows (legacy vaults are
+   * never false-flagged) or when the retrieve landed clean.
+   */
+  readonly coverageCaveat?: CoverageCaveat;
 }
 
 export interface SearchApexSourceOutput {
@@ -243,7 +264,9 @@ const apexCoverageClaim = (ctx: Context): string => {
  *
  * Called only when `matches` is empty: a populated result asserts no absence
  * and must not acquire a not-checked marker. Ordered most-severe first so a
- * corpus that was never read can never be reported as "read and clean".
+ * corpus that was never read can never be reported as "read and clean", and
+ * `checked-empty` — the only `proven-none` — is reachable ONLY after both the
+ * walk and the manifest agree there is no gap.
  */
 const classifyEmptySearch = (
   ctx: Context,
@@ -251,8 +274,23 @@ const classifyEmptySearch = (
   filesUnreadable: readonly string[],
   truncated: boolean,
 ): SearchApexAbsence => {
+  // The SECOND axis, independent of the walk. The walk can only report what is
+  // on disk; whether what is on disk IS the org's Apex is a manifest question,
+  // and `buildEnumerationCoverageCaveatFor` is the one place that answers it
+  // (`APEX_USAGE_REQUIRED_COVERAGE` is the same ApexClass/ApexTrigger pair the
+  // graph-backed usage tools require — not a fourth copy of the list). It
+  // returns undefined for a legacy vault with no coverage rows and for a clean
+  // retrieve, so neither is false-flagged.
+  const coverageCaveat = buildEnumerationCoverageCaveatFor(
+    ctx,
+    APEX_USAGE_REQUIRED_COVERAGE,
+    'The Apex grep',
+  );
+  const withCoverage = (absence: SearchApexAbsence): SearchApexAbsence =>
+    coverageCaveat === undefined ? absence : { ...absence, coverageCaveat };
+
   if (filesSearched === 0) {
-    return {
+    return withCoverage({
       kind: 'corpus-absent',
       status: 'not-checked',
       filesSearched,
@@ -261,10 +299,10 @@ const classifyEmptySearch = (
         'NOT CHECKED: the walk over `{vaultRoot}/source/` found NO `.cls` or `.trigger` file, so not one line was compared against this query. ' +
         'Zero matches here says nothing about the org’s Apex. ' +
         `${apexCoverageClaim(ctx)} Run \`/sfi-refresh\` and search again.`,
-    };
+    });
   }
   if (truncated) {
-    return {
+    return withCoverage({
       kind: 'result-capped',
       status: 'unknown',
       filesSearched,
@@ -272,10 +310,10 @@ const classifyEmptySearch = (
       note:
         `CAPPED: the walk stopped at the \`limit\` before exhausting the ${String(filesSearched)} Apex file(s) in this vault, ` +
         'so the remainder was never compared. Raise `limit` before reading this as an absence.',
-    };
+    });
   }
   if (filesUnreadable.length > 0) {
-    return {
+    return withCoverage({
       kind: 'corpus-partially-read',
       status: 'not-checked',
       filesSearched,
@@ -283,8 +321,28 @@ const classifyEmptySearch = (
       note:
         `PARTIAL: ${String(filesUnreadable.length)} of ${String(filesSearched)} discovered Apex file(s) could not be read (${filesUnreadable.join(', ')}), ` +
         'so their lines were never compared against this query. The zero covers only the files that WERE read.',
+    });
+  }
+  // COVERAGE-DISAGREES before CHECKED-EMPTY. Everything the walk itself can see
+  // looked clean, so without this branch the handler would certify
+  // `proven-none` over a corpus the vault's OWN manifest says is incomplete —
+  // "all 1 file(s) were read and none matched" for an org whose ApexClass
+  // retrieve errored. `filesSearched > 0` is evidence that SOMETHING was
+  // grepped, never evidence that everything was.
+  if (coverageCaveat !== undefined) {
+    return {
+      kind: 'coverage-disagrees',
+      status: 'unknown',
+      filesSearched,
+      filesUnreadable,
+      coverageCaveat,
+      note:
+        `NOT CONFIRMED: ${String(filesSearched)} \`.cls\` / \`.trigger\` file(s) present in this vault were read and none matched, ` +
+        `but the manifest says the Apex retrieve did not land complete — ${coverageCaveat.message} ` +
+        'Re-run `/sfi-refresh` before reading this zero as "not referenced in Apex".',
     };
   }
+
   return {
     kind: 'checked-empty',
     status: 'proven-none',

@@ -162,12 +162,31 @@ const makeEdge = (
   o: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>,
 ): Edge => ({ confidence: 'declared', source: 'unit-test', properties: {}, ...o });
 
+/**
+ * A WIDE covering-test set: one production Apex class reached by 12 distinct
+ * test classes. Exists so the per-component `selectedTests` sample cap (10)
+ * actually BITES — a truncated test list that discloses no total is a deploy
+ * gate that under-reports the suite an operator must run.
+ */
+const WIDE_TEST_COUNT = 12;
+const wideTestApiName = (n: number): string => `WideServiceTest${String(n).padStart(2, '0')}`;
+const wideTestId = (n: number): string => `ApexClass:${wideTestApiName(n)}`;
+
 const SEED: ExtractionResult = {
   nodes: [
     makeNode({ id: 'ApexClass:OrderService', apiName: 'OrderService', properties: { isTest: false } }),
     makeNode({ id: 'ApexClass:CheckoutController', apiName: 'CheckoutController', properties: { isTest: false } }),
     makeNode({ id: 'ApexClass:OrderServiceTest', apiName: 'OrderServiceTest', properties: { isTest: true } }),
     makeNode({ id: 'ApexClass:LonelyService', apiName: 'LonelyService', properties: { isTest: false } }),
+    // 12 covering tests over one class — exercises the selectedTests sample cap.
+    makeNode({ id: 'ApexClass:WideService', apiName: 'WideService', properties: { isTest: false } }),
+    ...Array.from({ length: WIDE_TEST_COUNT }, (_, i) =>
+      makeNode({
+        id: wideTestId(i + 1),
+        apiName: wideTestApiName(i + 1),
+        properties: { isTest: true },
+      }),
+    ),
     makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     makeNode({ id: 'CustomField:Account.Rating__c', type: 'CustomField', apiName: 'Rating__c', parentId: 'CustomObject:Account' }),
     makeNode({ id: 'CustomField:Account.Firm__c', type: 'CustomField', apiName: 'Firm__c', parentId: 'CustomObject:Account' }),
@@ -254,6 +273,10 @@ const SEED: ExtractionResult = {
     makeEdge({ fromId: 'ApexClass:PromoControllerTest', toId: 'ApexClass:PromoController', edgeType: 'callsApex' }),
     makeEdge({ fromId: 'LightningComponentBundle:promoPanel', toId: 'ApexClass:PromoController', edgeType: 'callsApex' }),
     makeEdge({ fromId: 'LightningComponentBundle:promoPanel', toId: 'CustomPermission:See_promoPanel', edgeType: 'references' }),
+    // Every WideServiceTest calls WideService → 12 covering tests at depth 1.
+    ...Array.from({ length: WIDE_TEST_COUNT }, (_, i) =>
+      makeEdge({ fromId: wideTestId(i + 1), toId: 'ApexClass:WideService', edgeType: 'callsApex' }),
+    ),
     makeEdge({ fromId: 'ApexClass:HeuristicReader', toId: 'CustomField:Account.Rating__c', edgeType: 'readsFrom', confidence: 'heuristic', source: 'apex-scanner' }),
     makeEdge({ fromId: 'CustomObject:Account', toId: 'CustomField:Account.Rating__c', edgeType: 'parentOf' }),
     makeEdge({ fromId: 'Flow:FirmFlow', toId: 'CustomField:Account.Firm__c', edgeType: 'readsFrom', confidence: 'parsed', source: 'flow-extractor' }),
@@ -1109,5 +1132,78 @@ describe('reviewChangeInputSchema', () => {
         components: [{ componentId: ':X', changeKind: 'deleted' }],
       }).success,
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2 — REVIEW-CHANGE-SELECTED-TESTS-SILENT-TRUNCATION
+//
+// The per-component covering-test list is sample-capped at TEST_SAMPLE_CAP (10).
+// Pre-fix the row carried the truncated array and NOTHING else: no count, no
+// flag. `testCoverage` is a three-value enum ('covered') and `summary.testsToRun`
+// is the union across the WHOLE change set, so neither recovers the per-component
+// total — an operator modifying a class with 12 covering tests was handed 10 and
+// told by `recommendation` to run "the N selected test(s) before deploying".
+// The row must disclose its true total the way `dependentCount` already does
+// beside the identically sample-capped `dependents`.
+// ---------------------------------------------------------------------------
+describe('reviewChangeHandler — per-component covering-test truncation honesty', () => {
+  it('discloses the TRUE covering-test count when the sample cap bites', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'ApexClass', apiName: 'WideService', changeKind: 'modified' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.id).toBe('ApexClass:WideService');
+    expect(c?.testCoverage).toBe('covered');
+    // The cap really bites: 12 covering tests exist, 10 are inlined.
+    expect(c?.selectedTests).toHaveLength(10);
+    // …so the row MUST carry the total, exactly as `dependentCount` does.
+    expect(c?.selectedTestCount).toBe(WIDE_TEST_COUNT);
+    expect(c?.selectedTestCount).toBeGreaterThan(c?.selectedTests.length ?? 0);
+  });
+
+  it('neither testCoverage nor summary.testsToRun recovers the per-component total', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [
+        { type: 'ApexClass', apiName: 'WideService', changeKind: 'modified' },
+        { type: 'ApexClass', apiName: 'OrderService', changeKind: 'modified' },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const wide = r.value.data.reviewed.find((c) => c.id === 'ApexClass:WideService');
+    const order = r.value.data.reviewed.find((c) => c.id === 'ApexClass:OrderService');
+    // Both read 'covered' — the enum carries no number.
+    expect(wide?.testCoverage).toBe('covered');
+    expect(order?.testCoverage).toBe('covered');
+    // The union is across the whole change set, so it is NOT either row's total.
+    expect(r.value.data.summary.testsToRun).toBe(WIDE_TEST_COUNT + 1);
+    expect(wide?.selectedTestCount).toBe(WIDE_TEST_COUNT);
+    expect(order?.selectedTestCount).toBe(1);
+  });
+
+  it('an UNCAPPED row reports count === inlined length (the count is derived, not a constant)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'ApexClass', apiName: 'OrderService', changeKind: 'modified' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.selectedTests).toEqual(['ApexClass:OrderServiceTest']);
+    expect(c?.selectedTestCount).toBe(1);
+  });
+
+  it('a component with NO covering tests reports 0, not a truncation', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'ApexClass', apiName: 'LonelyService', changeKind: 'modified' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.testCoverage).toBe('uncovered');
+    expect(c?.selectedTests).toEqual([]);
+    expect(c?.selectedTestCount).toBe(0);
   });
 });

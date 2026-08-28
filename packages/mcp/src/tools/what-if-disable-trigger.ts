@@ -99,9 +99,19 @@
  *     prefixes return `invalid-query` at the handler boundary.
  *   - Unknown ids resolve to `component-not-found`.
  *   - For each outgoing edge, `getNodeById(edge.toId)` resolves the
- *     downstream node's identity. Sparse-graph misses are silently
- *     dropped — matches the tolerance every other composition tool
- *     uses.
+ *     downstream node's identity. An edge whose target is NOT a node in
+ *     this vault (the importer's `targetMissing` marker, read via the
+ *     shared {@link edgeTargetMissing}) is NEVER dropped: it is diverted
+ *     to `unresolvedImpacts` — or, for an entry point, kept in
+ *     `entryPoints` with `targetMissing: true` — and it grades into the
+ *     verdict alongside the resolvable rows. Dropping it (the old
+ *     behaviour, justified only by a comment claiming parity with
+ *     unnamed peers) mattered most on `writesTo`, the ONLY category that
+ *     produces `blocking`: the v0.3 apex-scanner emits heuristic
+ *     `writesTo` edges to `CustomField:<localVar>.<Field>` whenever it
+ *     cannot resolve the receiver's object, so a trigger whose writes all
+ *     left the vault reported `impacts: []`, which `aggregateVerdict`
+ *     turns into the literal word `safe`.
  *   - The `triggersOn` edge is surfaced as the `parentObject` scalar
  *     (the renderer's "automation on Account" line) AND as an
  *     `entryPoints` row. It is NOT an impact: it is where the trigger
@@ -115,6 +125,7 @@ import type {
   ComponentType,
   ConfidenceLevel,
   Edge,
+  EdgeType,
   McpError,
   McpResponse,
   Node,
@@ -126,6 +137,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  edgeTargetMissing,
+  unresolvedTargetsDisclosure,
+} from './absence-disclosure.js';
 import {
   attachCoverageToWhatIf,
   type CoverageCaveat,
@@ -184,6 +199,47 @@ export interface WhatIfEntryPoint {
   readonly kind: 'triggersOn' | 'listensTo';
   readonly componentId: ComponentId;
   readonly note: string;
+  /**
+   * True when the entry-point target is not a node in this vault — a standard
+   * object outside the retrieve scope, or a managed-package Platform Event.
+   * ALWAYS written: a row without the key would make "resolved" and "never
+   * resolvable" render the same. The row is emitted either way, because a
+   * trigger whose attachment object is out of vault previously reported
+   * `entryPoints: []` — indistinguishable from a trigger with no declared
+   * attachment point at all, while `parentObject` still named the id.
+   */
+  readonly targetMissing: boolean;
+}
+
+/**
+ * One impact whose target component is NOT a node in this vault: a
+ * managed-package Apex class, a field on an object the refresh never
+ * retrieved, or — the dominant case for triggers — an apex-scanner
+ * `CustomField:<localVar>.<Field>` write whose receiver object it could not
+ * resolve.
+ *
+ * The EDGE is declared and real — disabling the trigger stops that write
+ * whether or not the target can be named here — so these rows are NEVER
+ * dropped and they bear on the verdict exactly as their resolvable twins do.
+ * They are kept OUT of `impacts` because `componentType` / `apiName` are
+ * genuinely unknown, and a fabricated identity would send the caller to
+ * `resolve` / `get_component` on an id that dead-ends.
+ *
+ * Before this shape existed the walk dropped the edge at a `toNode === null`
+ * guard, so a trigger whose every write left the vault produced `impacts: []`
+ * and the aggregate verdict `safe`. `sfi.what_if_deactivate_flow`,
+ * `sfi.user_ability` and `sfi.downstream_effects` already solve the identical
+ * case by marking the row; this mirrors them.
+ */
+export interface WhatIfUnresolvedImpact {
+  readonly category: Category;
+  /** The edge endpoint id, verbatim. `resolve` on it returns not-found. */
+  readonly componentId: ComponentId;
+  readonly edgeType: EdgeType;
+  readonly confidence: ConfidenceLevel;
+  /** Always `true` on this array — see {@link edgeTargetMissing}. */
+  readonly targetMissing: true;
+  readonly explanation: string;
 }
 
 /**
@@ -225,6 +281,18 @@ export interface WhatIfDisableTriggerOutput {
   /** Where the runtime enters this trigger. NOT impacts — see {@link WhatIfEntryPoint}. */
   readonly entryPoints: readonly WhatIfEntryPoint[];
   readonly impacts: readonly WhatIfImpactItem[];
+  /**
+   * Impact edges whose TARGET is not a node in this vault. Never merged into
+   * `impacts` (their type / api name are unknown) and never dropped — see
+   * {@link WhatIfUnresolvedImpact}.
+   */
+  readonly unresolvedImpacts: readonly WhatIfUnresolvedImpact[];
+  /**
+   * The follow-the-id caveat for the rows above. Present iff at least one
+   * `unresolvedImpacts` row or one `targetMissing` entry point exists — a
+   * "0 …" sentence would itself be a false statement.
+   */
+  readonly unresolvedTargetsNote?: string;
   /** Does it run today? Its own axis; see {@link WhatIfRuntimeState}. */
   readonly runtimeState: WhatIfRuntimeState;
   /** HEADLINE. `already-inactive` when the trigger does not run today. */
@@ -388,11 +456,88 @@ const buildExplanation = (
 };
 
 /**
+ * The `explanation` for an outgoing edge whose target is not a node here. It
+ * names the id verbatim (never a fabricated apiName), says why the lookup
+ * dead-ends, and states that the effect stops anyway — the edge is declared.
+ */
+const buildUnresolvedExplanation = (
+  edge: Edge,
+  triggerApiName: string,
+): string => {
+  const verb =
+    edge.edgeType === 'writesTo'
+      ? 'writes to'
+      : edge.edgeType === 'callsApex'
+        ? 'calls'
+        : edge.edgeType === 'dispatchesAsync'
+          ? 'dispatches async'
+          : edge.edgeType === 'readsFrom'
+            ? 'reads'
+            : 'references';
+  const consequence =
+    edge.edgeType === 'readsFrom'
+      ? 'Disabling the trigger removes that read; nothing downstream of it is affected (listed as a dependency of this trigger, not a dependent on it).'
+      : 'Disabling the trigger stops this action.';
+  return (
+    `ApexTrigger '${triggerApiName}' ${verb} '${edge.toId}', which is NOT a ` +
+    'node in this vault (`targetMissing`) — a managed-package component, one ' +
+    'this refresh did not retrieve, or an apex-scanner reference whose ' +
+    `receiver object it could not resolve. The edge is DECLARED and real. ${consequence} ` +
+    "The target's type and api name cannot be reported here, so this row is " +
+    'in `unresolvedImpacts` rather than `impacts`.'
+  );
+};
+
+/**
+ * Build the response's `unresolvedTargetsNote`, or `undefined` when every
+ * target resolved. The impact half is the shared
+ * {@link unresolvedTargetsDisclosure} contract sentence so this tool cannot
+ * drift from `what_if_deactivate_flow` / `user_ability` /
+ * `downstream_effects`; the entry-point half is appended only when it applies,
+ * because a "0 …" sentence is itself a false statement.
+ */
+const buildUnresolvedTargetsNote = (
+  unresolvedImpactCount: number,
+  unresolvedEntryPointCount: number,
+): string | undefined => {
+  const parts: string[] = [];
+  if (unresolvedImpactCount > 0) {
+    parts.push(
+      unresolvedTargetsDisclosure({
+        count: unresolvedImpactCount,
+        targetKind: 'impact-edge',
+        targetNoun: 'edge',
+        surface: '`unresolvedImpacts`',
+      }) +
+        ' They are carried in `unresolvedImpacts`, EXCLUDED from `impacts` ' +
+        '(their type / api name are unknown), and they DO bear on the verdict ' +
+        '— the declared effect stops on disable whether or not the target can ' +
+        'be named here.',
+    );
+  }
+  if (unresolvedEntryPointCount > 0) {
+    parts.push(
+      `${unresolvedEntryPointCount} entryPoints row(s) name a component that is ` +
+        'NOT in this vault (`targetMissing`) — typically a standard object or ' +
+        'Platform Event outside the retrieve scope. The row is kept so an ' +
+        'out-of-vault attachment object cannot read as "this trigger has no ' +
+        'entry point".',
+    );
+  }
+  return parts.length > 0 ? parts.join(' ') : undefined;
+};
+
+/**
  * TRUE when an impact is a DEPENDENT of this trigger — something downstream
  * that stops. `input-only` entries are dependencies the trigger CONSUMES and
  * are excluded: they are reported, but they never move the verdict.
+ *
+ * Takes the CATEGORY-bearing shape rather than `WhatIfImpactItem` so the
+ * resolvable rows and the `targetMissing` rows are graded by ONE predicate. An
+ * unresolvable target is still a real declared effect; grading it separately
+ * is how `impacts: []` became the word `safe`.
  */
-const isVerdictBearing = (impact: WhatIfImpactItem): boolean =>
+const isVerdictBearing = (impact: { readonly category: Category }): boolean =>
   impact.category !== 'input-only';
 
 /**
@@ -400,7 +545,9 @@ const isVerdictBearing = (impact: WhatIfImpactItem): boolean =>
  * cascade mirrors R2a's `aggregateVerdict`; the filter is what stops an
  * input-only read from producing a downstream-effect verdict.
  */
-const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
+const aggregateVerdict = (
+  impacts: readonly { readonly category: Category }[],
+): Verdict => {
   const dependents = impacts.filter(isVerdictBearing);
   if (dependents.length === 0) return 'safe';
   for (const impact of dependents) {
@@ -459,7 +606,12 @@ const resolveRuntimeState = (
  * `category` ASC then by `componentId` ASC so related blockers stay
  * grouped in the rendered output.
  */
-const compareImpacts = (a: WhatIfImpactItem, b: WhatIfImpactItem): number => {
+interface SortableImpact {
+  readonly category: Category;
+  readonly componentId: ComponentId;
+}
+
+const compareImpacts = (a: SortableImpact, b: SortableImpact): number => {
   if (a.category !== b.category) return a.category < b.category ? -1 : 1;
   if (a.componentId !== b.componentId) {
     return a.componentId < b.componentId ? -1 : 1;
@@ -559,6 +711,7 @@ export const whatIfDisableTriggerHandler = async (
   }
 
   const impacts: WhatIfImpactItem[] = [];
+  const unresolvedImpacts: WhatIfUnresolvedImpact[] = [];
   const entryPoints: WhatIfEntryPoint[] = [];
   for (const edge of edgesResult.value) {
     // `parentOf` is structural — the trigger's container relationship —
@@ -575,19 +728,46 @@ export const whatIfDisableTriggerHandler = async (
       });
     }
     const toNode = toResult.value;
-    if (toNode === null) {
-      // Sparse-graph case: drop silently.
+    // The edge names a component this vault holds no node for: a
+    // managed-package class, a field on an object the refresh never retrieved,
+    // or an apex-scanner `CustomField:<localVar>.<Field>` write. The importer
+    // stamps `targetMissing` on such an edge (`edgeTargetMissing` is the shared
+    // authority); the null lookup additionally covers a vault built before the
+    // marker existed. The EDGE is declared and real, so the row is DIVERTED,
+    // never dropped — dropping it is what turned a trigger whose writes all
+    // left the vault into the word `safe`.
+    const targetMissing = toNode === null || edgeTargetMissing(edge);
+    // The trigger's OWN entry points are recategorised here, not dropped.
+    const entryNote = entryPointNoteFor(edge.edgeType);
+    if (targetMissing) {
+      if (entryNote !== undefined) {
+        // An entry point is not a dependent and never moves the verdict, but
+        // it is still surfaced: an out-of-vault attachment object must not
+        // render as "this trigger has no entry point".
+        entryPoints.push({
+          kind: edge.edgeType as WhatIfEntryPoint['kind'],
+          componentId: edge.toId,
+          note: entryNote,
+          targetMissing: true,
+        });
+        continue;
+      }
+      unresolvedImpacts.push({
+        category: classifyOutgoingEdge(edge).category,
+        componentId: edge.toId,
+        edgeType: edge.edgeType,
+        confidence: edge.confidence,
+        targetMissing: true,
+        explanation: buildUnresolvedExplanation(edge, triggerNode.apiName),
+      });
       continue;
     }
-    // The trigger's OWN entry points are recategorised here, not dropped: the
-    // node is resolved first, so an `entryPoints` row can never name an id the
-    // graph has no node for.
-    const entryNote = entryPointNoteFor(edge.edgeType);
     if (entryNote !== undefined) {
       entryPoints.push({
         kind: edge.edgeType as WhatIfEntryPoint['kind'],
         componentId: toNode.id,
         note: entryNote,
+        targetMissing: false,
       });
       continue;
     }
@@ -603,6 +783,7 @@ export const whatIfDisableTriggerHandler = async (
   }
 
   const sortedImpacts = [...impacts].sort(compareImpacts);
+  const sortedUnresolvedImpacts = [...unresolvedImpacts].sort(compareImpacts);
   const sortedEntryPoints = [...entryPoints].sort((a, b) =>
     a.kind !== b.kind
       ? a.kind < b.kind
@@ -623,7 +804,14 @@ export const whatIfDisableTriggerHandler = async (
   // The STRUCTURAL axis is what gets coverage-downgraded: "nothing depends on
   // this" is a coverage-dependent claim. "It is already switched off" is not,
   // so the headline `already-inactive` is never downgraded.
-  const rawVerdict = aggregateVerdict(sortedImpacts);
+  // The unresolvable rows are graded alongside the resolvable ones: the edge
+  // is declared, so the effect stops whether or not the target can be named.
+  // Grading only `sortedImpacts` is precisely how "we could not resolve any of
+  // them" was answered with the word `safe`.
+  const rawVerdict = aggregateVerdict([
+    ...sortedImpacts,
+    ...sortedUnresolvedImpacts,
+  ]);
   const coverage = attachCoverageToWhatIf(
     ctx,
     TRIGGER_DISABLE_REQUIRED_COVERAGE,
@@ -633,7 +821,19 @@ export const whatIfDisableTriggerHandler = async (
   const structuralVerdict = coverage.verdict as Verdict;
 
   const status = readTriggerStatus(triggerNode);
-  const dependentCount = sortedImpacts.filter(isVerdictBearing).length;
+  // Counts BOTH halves: `notProvenHarmless` claims "no downstream effect is
+  // visible in this vault", which is false the moment one unresolvable
+  // dependent exists.
+  const dependentCount =
+    sortedImpacts.filter(isVerdictBearing).length +
+    sortedUnresolvedImpacts.filter(isVerdictBearing).length;
+  const unresolvedEntryPointCount = sortedEntryPoints.filter(
+    (e) => e.targetMissing,
+  ).length;
+  const unresolvedTargetsNote = buildUnresolvedTargetsNote(
+    sortedUnresolvedImpacts.length,
+    unresolvedEntryPointCount,
+  );
   const runtimeState = resolveRuntimeState(status, dependentCount);
   // `currentlyRunning === null` (status unknown) deliberately does NOT take
   // this branch: an unrecorded status is not evidence the trigger is off.
@@ -651,6 +851,8 @@ export const whatIfDisableTriggerHandler = async (
       events: readTriggerEvents(triggerNode),
       entryPoints: sortedEntryPoints,
       impacts: sortedImpacts,
+      unresolvedImpacts: sortedUnresolvedImpacts,
+      ...(unresolvedTargetsNote !== undefined ? { unresolvedTargetsNote } : {}),
       runtimeState,
       verdict,
       structuralVerdict,

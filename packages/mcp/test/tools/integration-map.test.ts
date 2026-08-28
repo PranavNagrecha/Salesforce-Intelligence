@@ -1445,3 +1445,109 @@ describe('integrationMapHandler (full category scan — G2)', () => {
     expect(d.calloutAuthorizationNote).toContain('ZZ_Marketo');
   });
 });
+
+// =============================================================================
+// FILTER-MANUFACTURED-ABSENCE. `filter` narrows WHICH ComponentTypes are
+// scanned, but the two PROSE fields — `calloutAuthorizationNote` and the
+// honest-empty `note` — were built from the raw buckets, which sit at `[]`
+// for every scoped-out type. So `filter: 'auth'` (AuthProvider + ConnectedApp
+// only) made the map assert, as a positive fact ABOUT THE ORG, that it holds
+// no RemoteSiteSettings and no NamedCredentials — on a vault that holds both.
+// That is a security-adjacent claim (what authorizes an outbound callout)
+// manufactured from a narrowing the caller chose. The seed reuses the
+// callout-authorization store: 2 RemoteSiteSettings + 2 NamedCredentials +
+// 1 ExternalService, and ZERO AuthProviders / ConnectedApps.
+// =============================================================================
+
+describe('integrationMapHandler (filter must not manufacture absence)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-intmap-filterabsence-'));
+    const opened = await openGraph(join(dir, 'filter.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imported = await importExtractionResults(store, [calloutAuthSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("filter 'auth' does not claim the org contains no RemoteSiteSettings / NamedCredentials", async () => {
+    const result = await integrationMapHandler(ctx, { filter: 'auth' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const note = result.value.data.calloutAuthorizationNote;
+    // Both families are OUT OF SCOPE under `auth` — never read. The map may
+    // not turn that into a fact about the org.
+    expect(note).not.toContain('This map contains no RemoteSiteSettings');
+    expect(note).not.toContain('This map contains no NamedCredentials');
+    // It must say WHY it cannot answer, and name the filter that caused it.
+    expect(note).toContain('NOT CHECKED');
+    expect(note).toContain("filter: 'auth'");
+    expect(note).toContain('RemoteSiteSetting');
+    expect(note).toContain('NamedCredential');
+  });
+
+  it("filter 'sites' answers for RemoteSiteSetting but abstains for NamedCredential", async () => {
+    const result = await integrationMapHandler(ctx, { filter: 'sites' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const note = result.value.data.calloutAuthorizationNote;
+    // RemoteSiteSetting IS in scope under `sites` — the grounded half survives.
+    expect(note).toContain('Marketo_Prod');
+    expect(note).toContain('MarketoSoapAPI');
+    // NamedCredential is not.
+    expect(note).not.toContain('This map contains no NamedCredentials');
+    expect(note).toContain('NOT CHECKED');
+    expect(note).toContain("filter: 'sites'");
+  });
+
+  it("the honest-empty note under filter 'auth' does not enumerate unscanned families", async () => {
+    const result = await integrationMapHandler(ctx, { filter: 'auth' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const note = result.value.data.note;
+    expect(note).toBeDefined();
+    if (note === undefined) return;
+    // The org HAS NamedCredentials and RemoteSiteSettings; only AuthProvider
+    // and ConnectedApp were scanned and found empty. The note may not read as
+    // "this org declares no NamedCredentials / RemoteSiteSettings".
+    expect(note).not.toContain('NamedCredentials / RemoteSiteSettings');
+    expect(note).toContain('AuthProvider');
+    expect(note).toContain('ConnectedApp');
+    // It must disclose that the filter scoped the rest out.
+    expect(note).toContain("filter: 'auth'");
+  });
+
+  it("filter 'all' keeps the grounded note byte-for-byte (no regression)", async () => {
+    const result = await integrationMapHandler(ctx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const note = result.value.data.calloutAuthorizationNote;
+    expect(note).toContain('2 in this org');
+    expect(note).toContain('Marketo_Prod');
+    expect(note).toContain('Google_Site');
+    expect(note).toContain('AcmeCloud_US_East_1');
+    expect(note).not.toContain('NOT CHECKED');
+  });
+
+  it("a scoped-out family's checked-empty claim is not laundered through an in-scope filter", async () => {
+    // `access` scopes IN NamedCredential but OUT RemoteSiteSetting. The NC half
+    // must be grounded; the RSS half must abstain.
+    const result = await integrationMapHandler(ctx, { filter: 'access' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const note = result.value.data.calloutAuthorizationNote;
+    expect(note).toContain('2 in this org');
+    expect(note).toContain('Google_Site');
+    expect(note).not.toContain('This map contains no RemoteSiteSettings');
+    expect(note).toContain('NOT CHECKED');
+  });
+});

@@ -153,6 +153,29 @@ const HARDCODED_APEX_RULES: ReadonlySet<string> = new Set([
 const APEX_SOURCE_SUFFIXES = ['.cls', '.trigger'] as const;
 
 /**
+ * CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. What the raw-source email
+ * pass actually READ, so the disclosure can report the scan's OUTCOME rather
+ * than the fact it was attempted.
+ *
+ * `filesDiscovered === 0` is the fresh-clone / never-retrieved / gitignored
+ * `source/` tree — not one line was compared, and the zero says nothing about
+ * the org's Apex. `unreadablePaths` are files the walk found but could not
+ * open; they are NOT part of the scanned-and-clean count.
+ */
+export interface ApexSourceScanCoverage {
+  /** `.cls` / `.trigger` files the walk over `{vaultRoot}/source/` found. */
+  readonly filesDiscovered: number;
+  /** Of those, the ones actually opened and scanned. */
+  readonly filesRead: number;
+  /** Vault-relative paths discovered but not readable — never compared. */
+  readonly unreadablePaths: readonly string[];
+}
+
+interface ApexSourceEmailScanCensus extends ApexSourceScanCoverage {
+  readonly hits: readonly HardcodedValueAnywhereMatch[];
+}
+
+/**
  * CR-07: source-file email fallback. Scans raw `.cls`/`.trigger` files
  * for email-shaped string literals. This catches emails in production
  * classes that were added AFTER the last vault refresh (so their
@@ -166,12 +189,16 @@ const APEX_SOURCE_SUFFIXES = ['.cls', '.trigger'] as const;
  * contextSnippet), so duplicate rows from a stale-graph/fresh-source race
  * are possible but rare and clearly labelled.
  *
- * Returns an empty array on any I/O failure (fire-and-forget fallback).
+ * Returns a CENSUS, never a bare array. The old signature returned `[]` for
+ * three indistinguishable states — scanned-and-clean, `source/` tree absent,
+ * and every file unreadable — and the caller then emitted an affirmative
+ * "source files were also scanned" disclosure for all three. `filesDiscovered`
+ * / `filesRead` / `unreadablePaths` let the caller say which one happened.
  */
 const scanApexSourceForEmails = async (
   vaultRoot: string,
   valueFilter: string | undefined,
-): Promise<HardcodedValueAnywhereMatch[]> => {
+): Promise<ApexSourceEmailScanCensus> => {
   // Inline email regex — same shape as EMAIL_REGEX but as a new instance
   // so `lastIndex` reset is isolated from the formula-scope scan.
   const EMAIL_RE = /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g;
@@ -179,16 +206,25 @@ const scanApexSourceForEmails = async (
   try {
     files = await collectVaultSourceFiles(vaultRoot, { suffixes: APEX_SOURCE_SUFFIXES });
   } catch {
-    return [];
+    // The walk itself failed (permission on `source/`, a broken symlink loop).
+    // NOT the same as "no file held an email" — report zero discovered so the
+    // caller discloses a NOT-SCANNED corpus rather than vouching for coverage.
+    return { hits: [], filesDiscovered: 0, filesRead: 0, unreadablePaths: [] };
   }
   const hits: HardcodedValueAnywhereMatch[] = [];
+  const unreadablePaths: string[] = [];
+  let filesRead = 0;
   for (const file of files) {
     let source: string;
     try {
       source = await readFile(file.absolutePath, 'utf-8');
     } catch {
+      // A discovered-but-unreadable file was never compared against anything.
+      // Naming it keeps it out of the scanned-and-clean count.
+      unreadablePaths.push(file.vaultRelativePath);
       continue;
     }
+    filesRead += 1;
     // Derive apiName from the file's basename (strip suffix).
     const name = basename(file.absolutePath);
     const apiName = name.endsWith('.trigger')
@@ -226,7 +262,12 @@ const scanApexSourceForEmails = async (
       });
     }
   }
-  return hits;
+  return {
+    hits,
+    filesDiscovered: files.length,
+    filesRead,
+    unreadablePaths: unreadablePaths.sort(),
+  };
 };
 
 const NUMERIC_FP_DISCLOSURE =
@@ -244,6 +285,35 @@ const TEST_CLASS_REFUSAL_DISCLOSURE =
  */
 const APEX_SOURCE_EMAIL_SCAN_DISCLOSURE =
   'For the email category, Apex source files were also scanned directly (CR-07 fallback) to catch addresses in classes updated after the last vault refresh. Source-scan matches are comment-stripped but not string-boundary-isolated — email-shaped tokens in @param JavaDoc or string-concatenation expressions may surface as false positives. Confidence: heuristic.';
+
+/**
+ * CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Renders the disclosure from
+ * what the pass READ. The old code set a boolean BEFORE the walk and emitted the
+ * affirmative sentence unconditionally, so a vault with no `source/` tree — the
+ * normal shape of a fresh clone, where the source tree is gitignored — answered
+ * "is this address still in the code?" with `matches: []` PLUS a claim that the
+ * raw source had been scanned. That is a false clean vouched for by its own
+ * honesty machinery, which is strictly worse than a bare zero.
+ */
+const apexSourceEmailScanDisclosure = (
+  coverage: ApexSourceScanCoverage,
+): string => {
+  if (coverage.filesDiscovered === 0) {
+    return (
+      'NOT SCANNED: the CR-07 Apex source-file fallback found NO `.cls` or `.trigger` file under the vault `source/` tree, so not one raw source line was read for this query. ' +
+      'Only the graph `qualityIssues` were consulted — an address added to a class after the last refresh (or never scanned by the recognizer) would NOT appear here. ' +
+      'An empty source tree is typical for a fresh clone where it is gitignored; run a vault refresh and ask again before reading this as an absence.'
+    );
+  }
+  const scanned =
+    `The CR-07 Apex source-file fallback read ${String(coverage.filesRead)} of ${String(coverage.filesDiscovered)} \`.cls\`/\`.trigger\` file(s) under the vault \`source/\` tree. ` +
+    APEX_SOURCE_EMAIL_SCAN_DISCLOSURE;
+  if (coverage.unreadablePaths.length === 0) return scanned;
+  return (
+    `PARTIAL: ${String(coverage.unreadablePaths.length)} of ${String(coverage.filesDiscovered)} discovered Apex source file(s) could not be read (${coverage.unreadablePaths.join(', ')}), so their lines were never scanned for email addresses. ` +
+    scanned
+  );
+};
 
 /**
  * Zod schema for the `sfi.find_hardcoded_values_anywhere` tool input.
@@ -341,6 +411,14 @@ export interface FindHardcodedValuesAnywhereOutput {
    * fully-scanned vault, whose response is unchanged.
    */
   readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
+  /**
+   * CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. What the raw Apex
+   * source-file email pass actually read. Present ONLY when that pass ran
+   * (`category: 'email'`, or a `value` containing `@`); absent otherwise.
+   * `filesDiscovered: 0` means the `source/` tree held no `.cls`/`.trigger`
+   * file, so the email zero rests on the graph alone.
+   */
+  readonly apexSourceScan?: ApexSourceScanCoverage;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
   /**
@@ -579,9 +657,11 @@ export const findHardcodedValuesAnywhereHandler = async (
   // FULL_SCAN_MAX_NODES cap so the residual incompleteness is disclosed honestly.
   const incompleteTypes: string[] = [];
 
-  // CR-07: true when the email source-scan fallback was triggered. Set here
-  // so the boundary disclosure fires after the scan completes.
-  let ranApexSourceEmailScan = false;
+  // CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Null until the email
+  // source-scan fallback RUNS; then it holds what that pass actually read.
+  // This used to be a boolean set BEFORE the walk, so the disclosure claimed
+  // coverage the walk never delivered.
+  let apexSourceScan: ApexSourceScanCoverage | null = null;
 
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type coverage of the Apex nodes
   // this call actually read, populated only when the `apex` scope runs.
@@ -651,8 +731,13 @@ export const findHardcodedValuesAnywhereHandler = async (
       categoryFilter === 'email' ||
       (valueFilter !== undefined && valueFilter.includes('@'));
     if (needEmailSourceScan) {
-      ranApexSourceEmailScan = true;
-      const sourceHits = await scanApexSourceForEmails(ctx.vaultRoot, valueFilter);
+      const sourceScan = await scanApexSourceForEmails(ctx.vaultRoot, valueFilter);
+      apexSourceScan = {
+        filesDiscovered: sourceScan.filesDiscovered,
+        filesRead: sourceScan.filesRead,
+        unreadablePaths: sourceScan.unreadablePaths,
+      };
+      const sourceHits = sourceScan.hits;
       // De-dup against graph-sourced findings by (componentId, location, matchedValue).
       const graphKeys = new Set<string>(
         collected
@@ -902,7 +987,15 @@ export const findHardcodedValuesAnywhereHandler = async (
     if (categoryFilter === 'numeric') boundaries.push(NUMERIC_FP_DISCLOSURE);
     if (categoryFilter === 'id') boundaries.push(ID_FP_DISCLOSURE);
     if (sawTestClass) boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
-    if (ranApexSourceEmailScan) boundaries.push(APEX_SOURCE_EMAIL_SCAN_DISCLOSURE);
+  }
+  // CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Lives OUTSIDE the
+  // `sorted.length > 0` gate above for the same reason the Apex quality-scan
+  // census does: the zero-match response IS the false-clean one. Under the old
+  // gate a `{value: 'someone@example.com'}` call with no hits emitted NO CR-07
+  // line at all (categoryFilter is undefined there), so the silent zero came
+  // back with nothing to qualify it.
+  if (apexSourceScan !== null) {
+    boundaries.push(apexSourceEmailScanDisclosure(apexSourceScan));
   }
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Lives OUTSIDE the
   // `sorted.length > 0` gate above because the zero-match response IS the
@@ -925,6 +1018,7 @@ export const findHardcodedValuesAnywhereHandler = async (
       ...(unscannedApexNote !== undefined
         ? { qualityScanCoverage: apexQualityScanCoverage }
         : {}),
+      ...(apexSourceScan !== null ? { apexSourceScan } : {}),
       boundaries,
       truncated,
       ...(isPaged ? { limit, offset } : {}),

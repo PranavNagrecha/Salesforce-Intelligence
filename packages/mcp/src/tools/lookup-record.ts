@@ -37,6 +37,12 @@
  *     value. Callers rendering the response surface the masked
  *     status to the end user so the missing value is visibly absent
  *     rather than mistaken for `null`.
+ *   - **Typed absence** (R1): `values: []` is ambiguous on its own, so the
+ *     response also carries `valuesState` (`read` / `not-extracted` /
+ *     `unreadable`), the extractor's own `valuesCount`, and a `disclosures`
+ *     array. A node that does not CARRY the `values` property was built by a
+ *     refresh predating the v1.6 R2 extractors — never scanned — and must
+ *     never render as a record that was scanned and declares nothing.
  *   - The `typeApiName` field on the output carries the parent type's
  *     ApiName with its suffix preserved (`__mdt` for
  *     CustomMetadataRecord, `__c` for CustomSettingRecord). The
@@ -59,6 +65,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+} from './absence-disclosure.js';
 import { firstNonEmpty } from './input-aliases.js';
 
 /**
@@ -74,6 +84,19 @@ const RECORD_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 /** Canonical id prefixes that map to the two record node types. */
 const CUSTOM_METADATA_RECORD_PREFIX = 'CustomMetadataRecord:';
 const CUSTOM_SETTING_RECORD_PREFIX = 'CustomSettingRecord:';
+
+/**
+ * The node property BOTH v1.6 R2 extractors ALWAYS write when they read a
+ * record's `<values>` elements — `[]` for a record that declares none
+ * (`custom-metadata-record.ts` / `custom-setting-record.ts` both push
+ * `values` and `valuesCount` unconditionally). So a node that does not CARRY
+ * this property was built by a refresh that predates the extractor: never
+ * scanned, NOT scanned-and-clean.
+ */
+const RECORD_VALUES_SENTINEL = 'values';
+
+/** The extractor's own count of `<values>` entries, written beside the array. */
+const RECORD_VALUES_COUNT_PROPERTY = 'valuesCount';
 
 /**
  * The arguments this tool advertises, named once so the refusal can list them.
@@ -154,6 +177,31 @@ export interface LookupRecordOutput {
   readonly protected: boolean;
   readonly values: readonly RecordFieldValue[];
   /**
+   * WHY `values` looks the way it does — the R1 axis, in the payload rather
+   * than in a comment:
+   *
+   *   - `read` — the extractor scanned this record. `values` is the answer,
+   *     and `values: []` is a VERIFIED "this record declares no fields".
+   *   - `not-extracted` — the node carries no `values` property at all, so
+   *     this vault's refresh predates the v1.6 R2 record-values extractors.
+   *     `values: []` here is "not modeled", NEVER "no fields".
+   *   - `unreadable` — the property is present but is not an array: a corrupt
+   *     or partially written vault entry. A blind spot, never a verified zero.
+   */
+  readonly valuesState: RecordValuesState;
+  /**
+   * The extractor's OWN count of `<values>` entries (`valuesCount`), or `null`
+   * when the node does not carry it. Surfaced so a caller can detect drift
+   * between the count and the materialized array — the mechanism this module
+   * used to only DESCRIBE in a comment.
+   */
+  readonly valuesCount: number | null;
+  /**
+   * Blind-spot sentences. EMPTY when `valuesState` is `read` — hedging a
+   * verified zero would be as dishonest as hiding a blind spot.
+   */
+  readonly disclosures: readonly string[];
+  /**
    * What the answer is actually scoped to, per CLAUDE.md's scope-honesty rule.
    * `source` says whether the caller named it or the record id determined it.
    * `objectApiName` is the CANONICAL casing read off the node, not the
@@ -204,21 +252,97 @@ const normalizeValueEntry = (raw: unknown): RecordFieldValue => {
 };
 
 /**
- * Read the record's per-field values array from `node.properties`.
- * Returns an empty array when the property is missing or has an
- * unrecognised shape — the v1.6 R2 extractors always emit a
- * `values: []` even for empty records, so a missing property
- * indicates an upstream extraction issue rather than a record with
- * no fields. The empty-array fallback keeps the response shape
- * stable and lets the caller distinguish "no values" from
- * "extractor produced an unexpected shape" via the `valuesCount`
- * the extractor also wrote (callers can compare `values.length` to
- * `valuesCount` if they want to detect that drift).
+ * Narrow an ALREADY-PRESENT property value to an entry array, or `null` when
+ * the vault wrote something that is not an array.
+ *
+ * Takes `unknown`, not a node: shape-narrowing is deliberately kept away from
+ * the property READ so it can never be mistaken for — or grow back into — an
+ * extracted/not-extracted decision. That question is answered once, by
+ * `familyWasExtracted`.
  */
-const readRecordValues = (node: Node): readonly RecordFieldValue[] => {
-  const raw = node.properties['values'];
-  if (!Array.isArray(raw)) return [];
-  return raw.map(normalizeValueEntry);
+const asEntryArray = (raw: unknown): readonly unknown[] | null =>
+  Array.isArray(raw) ? (raw as readonly unknown[]) : null;
+
+/**
+ * The three ways a record's `values` list can come back. See
+ * {@link LookupRecordOutput.valuesState} for what each one licenses a reader
+ * to conclude.
+ */
+export type RecordValuesState = 'read' | 'not-extracted' | 'unreadable';
+
+/** What {@link readRecordValues} resolved, and why. */
+interface RecordValuesRead {
+  readonly state: RecordValuesState;
+  readonly values: readonly RecordFieldValue[];
+  readonly valuesCount: number | null;
+}
+
+/**
+ * Read the record's per-field values array from `node.properties`, reporting
+ * WHY it is unusable when it is.
+ *
+ * The decision is made by {@link familyWasExtracted} — whether the node
+ * CARRIES the property at all — never by whether an array is empty. Both v1.6
+ * R2 extractors write `values` unconditionally (`[]` for a record with no
+ * `<values>` elements), so `Array.isArray(raw) ? ... : []` collapsed
+ * NEVER-SCANNED into SCANNED-AND-CLEAN: a record from a pre-v1.6 vault and a
+ * record that genuinely declares nothing both rendered as `values: []`, and a
+ * business user asking what a feature-flag record contains was told it was
+ * empty.
+ */
+const readRecordValues = (node: Node): RecordValuesRead => {
+  const countRaw = node.properties[RECORD_VALUES_COUNT_PROPERTY];
+  const valuesCount = typeof countRaw === 'number' ? countRaw : null;
+  // PRESENCE decides extracted-vs-never-extracted. Shape only ever decides
+  // readable-vs-corrupt, and only AFTER presence has been established — the
+  // two questions are never asked by the same expression.
+  if (!familyWasExtracted(node.properties, RECORD_VALUES_SENTINEL)) {
+    return { state: 'not-extracted', values: [], valuesCount };
+  }
+  const entries = asEntryArray(node.properties[RECORD_VALUES_SENTINEL]);
+  if (entries === null) {
+    return { state: 'unreadable', values: [], valuesCount };
+  }
+  return { state: 'read', values: entries.map(normalizeValueEntry), valuesCount };
+};
+
+/**
+ * The ONE place this tool's record-values blind spot is worded (R6). The
+ * never-extracted half is the shared `notExtractedFamilyDisclosure` template
+ * so it cannot drift from the same sentence elsewhere in the tree; the
+ * corrupt half gets its own clause because "carries no extracted `values`
+ * property" would be a FALSE statement about a record that carries a
+ * malformed one.
+ *
+ * Returns `[]` for `read` — an empty `values` that was actually scanned is a
+ * verified answer and must not be hedged.
+ */
+const recordValuesDisclosures = (
+  recordId: ComponentId,
+  read: RecordValuesRead,
+): readonly string[] => {
+  if (read.state === 'not-extracted') {
+    return [
+      notExtractedFamilyDisclosure({
+        subject: 'Record field values',
+        verb: 'read',
+        pluralSubject: true,
+        sentinelProperty: RECORD_VALUES_SENTINEL,
+        containers: [recordId],
+        surface: '`values`',
+        zeroReading: '"this record declares no fields"',
+      }),
+    ];
+  }
+  if (read.state === 'unreadable') {
+    return [
+      `Record \`${recordId}\` carries a \`${RECORD_VALUES_SENTINEL}\` property that is NOT an ` +
+        'array and could not be read — a corrupt or partially written vault entry. Its field ' +
+        'values are a BLIND SPOT here, NEVER a verified "this record declares no fields". ' +
+        'Re-run `/sfi-refresh`.',
+    ];
+  }
+  return [];
 };
 
 /**
@@ -331,6 +455,8 @@ export const lookupRecordHandler = async (
         ? node.label
         : '';
 
+  const valuesRead = readRecordValues(node);
+
   return ok({
     data: {
       recordId: node.id,
@@ -338,7 +464,10 @@ export const lookupRecordHandler = async (
       typeApiName: canonicalTypeApiName,
       label,
       protected: isProtected,
-      values: readRecordValues(node),
+      values: valuesRead.values,
+      valuesState: valuesRead.state,
+      valuesCount: valuesRead.valuesCount,
+      disclosures: recordValuesDisclosures(node.id, valuesRead),
       appliedScope: {
         objectApiName: canonicalTypeApiName,
         source: supplied !== undefined ? 'objectApiName' : 'recordId',

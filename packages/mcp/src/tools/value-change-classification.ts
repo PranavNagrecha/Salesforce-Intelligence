@@ -25,6 +25,9 @@
  *     field with `externalId`, `unique`, or `idLookup` = true is usable in
  *     an upsert. The first two live in the field metadata (per-instance!);
  *     `idLookup` is a curated standard-field list (not in the XML).
+ *     A node that does not CARRY `externalId`/`unique` was never checked
+ *     for them (describe-synthesized standard fields carry neither) — that
+ *     reports as `unverifiedSignals`, never as a checked `false`.
  *   - **identity role** — does the value carry login/identity/match
  *     meaning? Seeded from a standard-field catalog + the upsert signal + a
  *     conservative name lexicon (weak prior only).
@@ -40,6 +43,7 @@
 
 import type { Node } from '@sf-intelligence/contracts';
 
+import { familyWasExtracted } from './absence-disclosure.js';
 import { readFieldDataType } from './field-properties.js';
 
 /** Canonical id prefix for CustomField nodes. */
@@ -160,7 +164,30 @@ export type UpsertSignal = 'externalId' | 'unique' | 'idLookup';
 export interface UpsertKeyResult {
   readonly isUpsertKey: boolean;
   readonly signals: readonly UpsertSignal[];
+  /**
+   * The per-instance metadata flags this node does not CARRY, so they were
+   * never checked — NOT flags that were checked and came back `false`.
+   *
+   * `packages/extractors/src/custom-field.ts` writes `unique` and
+   * `externalId` as fixed keys (`toBooleanWithDefault`), so a DX-extracted
+   * field always carries both and a `false` there is a real answer.
+   * `packages/extractors/src/standard-object-describe-fields.ts`
+   * (`describePropertiesFromRow`) writes NEITHER, so every
+   * describe-synthesized standard-object field (`provenance:
+   * 'org-describe-snapshot'`) arrives with both ABSENT. Reading absence as
+   * `false` turns "we never looked" into "we looked and it is not a key",
+   * which is the one verdict this module must never produce.
+   */
+  readonly unverifiedSignals: readonly UpsertSignal[];
 }
+
+/**
+ * The upsert signals that live in the field's own metadata, i.e. the ones a
+ * node can be MISSING. `idLookup` is not here: it comes from the curated
+ * {@link STANDARD_IDLOOKUP} list, so it is answerable for every node
+ * regardless of what the extractor wrote.
+ */
+const METADATA_UPSERT_SIGNALS = ['externalId', 'unique'] as const satisfies readonly UpsertSignal[];
 
 /**
  * Curated standard `idLookup` fields (upsert-targetable but NOT marked in
@@ -186,13 +213,21 @@ export const classifyUpsertKey = (
   fieldName: string,
 ): UpsertKeyResult => {
   const signals: UpsertSignal[] = [];
-  if (node.properties['externalId'] === true) signals.push('externalId');
-  if (node.properties['unique'] === true) signals.push('unique');
+  const unverifiedSignals: UpsertSignal[] = [];
+  for (const flag of METADATA_UPSERT_SIGNALS) {
+    // R1: `hasOwnProperty`, never truthiness — `externalId: false` is a real
+    // answer, an absent `externalId` is no answer at all.
+    if (!familyWasExtracted(node.properties, flag)) {
+      unverifiedSignals.push(flag);
+      continue;
+    }
+    if (node.properties[flag] === true) signals.push(flag);
+  }
   const idLookup =
     (STANDARD_IDLOOKUP[object]?.has(fieldName) ?? false) ||
     (STANDARD_IDLOOKUP['*']?.has(fieldName) ?? false);
   if (idLookup) signals.push('idLookup');
-  return { isUpsertKey: signals.length > 0, signals };
+  return { isUpsertKey: signals.length > 0, signals, unverifiedSignals };
 };
 
 // ---------------------------------------------------------------------------
@@ -275,6 +310,22 @@ interface Candidate {
 const CONF_RANK: Record<Confidence, number> = { potential: 0, likely: 1, confirmed: 2 };
 
 /**
+ * The signal sentence for {@link UpsertKeyResult.unverifiedSignals}: the
+ * per-instance key flags this node never carried.
+ *
+ * Deliberately NOT `notExtractedFamilyDisclosure()`: that shared sentence
+ * ends "this vault's refresh predates X extraction … Re-run `/sfi-refresh`",
+ * and a re-refresh does NOT fix this case — a describe-synthesized standard
+ * field has no `field-meta.xml` in the retrieve to read the flags from, so
+ * the remedy clause would be a false promise. The shared PREDICATE
+ * (`familyWasExtracted`) is what decides the case; only the copy is local.
+ */
+const unverifiedFlagsSignal = (unverified: readonly UpsertSignal[]): string =>
+  `upsert-key flags NOT extracted (${unverified.join(', ')}) — this field node carries no such ` +
+  `property (describe-synthesized standard field), so "not an upsert key" here is UNCHECKED, ` +
+  `never a verified negative. Confirm in Setup before mass-updating the value.`;
+
+/**
  * Classify a field's identity/integration role by merging three signals:
  * the standard-field catalog (likely→confirmed when corroborated), the
  * upsert-key flags (confirmed, metadata-derived), and the name lexicon
@@ -331,6 +382,18 @@ export const classifyRole = (
   }
 
   if (candidates.length === 0) {
+    // R1: the fallthrough is only CONFIRMED when every metadata flag that
+    // could have contradicted it was actually read. With the flags absent the
+    // low/`Standard editable field` verdict is a guess, and stamping it
+    // `confirmed` is exactly how a genuine integration key gets mass-updated.
+    if (upsert.unverifiedSignals.length > 0) {
+      return {
+        role: 'Standard editable field (upsert-key flags NOT extracted — unverified)',
+        severity: 'low',
+        confidence: 'potential',
+        signals: [unverifiedFlagsSignal(upsert.unverifiedSignals)],
+      };
+    }
     return {
       role: 'Standard editable field',
       severity: 'low',
@@ -350,7 +413,16 @@ export const classifyRole = (
     role: top.role,
     severity: top.severity,
     confidence: top.confidence,
-    signals: candidates.map((c) => c.signal),
+    // The unchecked-flag note rides along even when another signal fired: a
+    // `likely` catalog verdict on a describe-synthesized field is `likely`
+    // BECAUSE the flags that would corroborate it were never read, and the
+    // reader cannot tell that from the confidence word alone.
+    signals: [
+      ...candidates.map((c) => c.signal),
+      ...(upsert.unverifiedSignals.length > 0
+        ? [unverifiedFlagsSignal(upsert.unverifiedSignals)]
+        : []),
+    ],
   };
 };
 

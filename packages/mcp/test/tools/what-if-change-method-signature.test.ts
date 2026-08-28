@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -208,6 +208,12 @@ const richSeed: ExtractionResult = {
 // =============================================================================
 
 const TARGET_UNUSED = 'ApexClass:UnusedService';
+// The fixture carries a REAL `.cls` (written in beforeAll) declaring
+// `anything()`. `safe` asserts "nothing calls THIS method", which is only a
+// true statement once the method is known to exist — the old fixture pointed
+// at a file that was never written, so the suite was locking in `safe` for a
+// method nobody had checked. See TARGET_NO_SOURCE for the honest other half.
+const UNUSED_SOURCE = join('classes', 'UnusedService.cls');
 
 const unusedSeed: ExtractionResult = {
   nodes: [
@@ -215,6 +221,22 @@ const unusedSeed: ExtractionResult = {
       id: TARGET_UNUSED,
       type: 'ApexClass',
       apiName: 'UnusedService',
+      sourcePath: UNUSED_SOURCE,
+    }),
+  ],
+  edges: [],
+};
+
+// The same shape with NO readable source: the method inventory is unknowable,
+// so an empty caller list must NOT be reported as `safe`.
+const TARGET_NO_SOURCE = 'ApexClass:UnreadableService';
+const noSourceSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: TARGET_NO_SOURCE,
+      type: 'ApexClass',
+      apiName: 'UnreadableService',
+      sourcePath: join('classes', 'UnreadableService.cls'),
     }),
   ],
   edges: [],
@@ -241,13 +263,24 @@ beforeAll(async () => {
   tempDir = mkdtempSync(
     join(tmpdir(), 'sfi-mcp-what-if-change-method-signature-'),
   );
+  mkdirSync(join(tempDir, 'classes'), { recursive: true });
+  writeFileSync(
+    join(tempDir, UNUSED_SOURCE),
+    'public class UnusedService {\n  public void anything() { }\n}',
+    'utf-8',
+  );
   const dbPath = join(tempDir, 'wcms.db');
   const opened = await openGraph(dbPath);
   if (!opened.ok) {
     throw new Error(`openGraph failed: ${opened.error.message}`);
   }
   store = opened.value;
-  const imported = await importExtractionResults(store, [richSeed, unusedSeed, phantomSeed]);
+  const imported = await importExtractionResults(store, [
+    richSeed,
+    unusedSeed,
+    noSourceSeed,
+    phantomSeed,
+  ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
   }
@@ -392,6 +425,27 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     expect(data.callingClasses.length).toBe(0);
     expect(data.testClassesNeedingUpdate.length).toBe(0);
     expect(data.verdict).toBe('safe');
+    expect(data.methodVerification.verified).toBe(true);
+  });
+
+  it('does NOT say safe when the method could not be verified — unknown, not safe', async () => {
+    // Honest split of the case above: same empty caller list, but the source
+    // this class records cannot be read, so "nothing calls anything()" and
+    // "there is no method called anything()" are indistinguishable here.
+    const result = await whatIfChangeMethodSignatureHandler(ctx, {
+      classApiName: TARGET_NO_SOURCE,
+      methodName: 'anything',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.callingClasses.length).toBe(0);
+    expect(data.verdict).toBe('unknown');
+    expect(data.methodVerification.verified).toBe(false);
+    expect(data.trust.completeness.status).not.toBe('complete');
+    expect(data.trust.limitations.join(' ')).toContain(
+      'method existence NOT verified',
+    );
   });
 
   it('downgrades safe to review under unknown coverage, naming the gap', async () => {
@@ -820,5 +874,248 @@ describe('whatIfChangeMethodSignatureHandler: callerMethods (CR-CAP-06)', () => 
       await closeGraph(store4);
       rmSync(dir4, { recursive: true, force: true });
     }
+  });
+});
+
+// =============================================================================
+// METHOD-NAME-NEVER-VERIFIED — the method whose signature is changing was
+// taken verbatim as a string filter and never checked against the class.
+// A typo'd / hallucinated name matched zero `callsApex` edges, so the answer
+// came back `callingClasses: []`, `verdict: 'safe'` — a confident
+// "safe to change" for a method that DOES NOT EXIST, byte-indistinguishable
+// from a real method with no callers.
+//
+// These cases seed a REAL `.cls` file under the vault root (that is what a
+// refreshed vault holds: `sourcePath` points at the retrieved source), so the
+// method inventory is actually knowable.
+// =============================================================================
+describe('whatIfChangeMethodSignatureHandler: methodName verification', () => {
+  let dir5: string;
+  let store5: GraphStore;
+  let ctx5: Context;
+
+  const SERVICE_ID = 'ApexClass:OrderService';
+  const CALLER_ID = 'ApexClass:OrderCaller';
+  const NOSOURCE_ID = 'ApexClass:NoSourceService';
+  const UNPARSEABLE_ID = 'ApexClass:BrokenService';
+  const SUBCLASS_ID = 'ApexClass:ChildService';
+
+  beforeAll(async () => {
+    dir5 = mkdtempSync(join(tmpdir(), 'sfi-mcp-wcms-methodverify-'));
+    mkdirSync(join(dir5, 'classes'), { recursive: true });
+    writeFileSync(
+      join(dir5, 'classes', 'OrderService.cls'),
+      [
+        'public with sharing class OrderService {',
+        '  public void processOpportunity(Opportunity opp) { }',
+        '  public static Integer total(List<Order> rows) { return rows.size(); }',
+        '}',
+      ].join('\n'),
+      'utf-8',
+    );
+    writeFileSync(
+      join(dir5, 'classes', 'BrokenService.cls'),
+      'public class BrokenService { this is not apex at all (((',
+      'utf-8',
+    );
+    writeFileSync(
+      join(dir5, 'classes', 'ChildService.cls'),
+      'public class ChildService extends BaseService {\n  public void ownMethod() { }\n}',
+      'utf-8',
+    );
+
+    const opened = await openGraph(join(dir5, 'mv.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store5 = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: SERVICE_ID,
+          type: 'ApexClass',
+          apiName: 'OrderService',
+          sourcePath: join('classes', 'OrderService.cls'),
+        }),
+        makeNode({
+          id: CALLER_ID,
+          type: 'ApexClass',
+          apiName: 'OrderCaller',
+          sourcePath: join('classes', 'OrderCaller.cls'),
+        }),
+        makeNode({
+          id: NOSOURCE_ID,
+          type: 'ApexClass',
+          apiName: 'NoSourceService',
+          sourcePath: join('classes', 'NoSourceService.cls'),
+        }),
+        makeNode({
+          id: UNPARSEABLE_ID,
+          type: 'ApexClass',
+          apiName: 'BrokenService',
+          sourcePath: join('classes', 'BrokenService.cls'),
+        }),
+        makeNode({
+          id: SUBCLASS_ID,
+          type: 'ApexClass',
+          apiName: 'ChildService',
+          sourcePath: join('classes', 'ChildService.cls'),
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: CALLER_ID,
+          toId: SERVICE_ID,
+          edgeType: 'callsApex',
+          source: 'apex-ast',
+          properties: {
+            methods: ['processOpportunity'],
+            callerMethodsByMethod: { processOpportunity: ['placeOrder'] },
+          },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store5, [seed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx5 = { vaultRoot: dir5, manifest: FIXTURE_MANIFEST, graph: store5 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store5);
+    rmSync(dir5, { recursive: true, force: true });
+  });
+
+  it('REFUSES a method the class does not declare instead of answering "safe"', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx5, {
+      classApiName: 'OrderService',
+      methodName: 'processOpp',
+    });
+    if (result.ok) {
+      throw new Error(
+        `expected a refusal for a method the class does not declare; got ok verdict=${result.value.data.verdict} callers=${String(result.value.data.callingClasses.length)}`,
+      );
+    }
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('processOpp');
+    expect(result.error.message).toContain('processOpportunity');
+    expect(result.error.path).toBe('methodName');
+  });
+
+  it('WRONG CASE is a real method, not a refusal (Apex resolves case-insensitively)', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx5, {
+      classApiName: 'OrderService',
+      methodName: 'PROCESSOPPORTUNITY',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const v = result.value.data.methodVerification;
+    expect(v.verified).toBe(true);
+    if (!v.verified) return;
+    expect(v.declaredAs).toBe('processOpportunity');
+    expect(v.overloads).toBe(1);
+    // The caller edge indexes the DECLARED casing, so the caller still lands.
+    expect(
+      result.value.data.callingClasses.map((c) => c.componentId),
+    ).toContain(CALLER_ID);
+    expect(result.value.data.verdict).toBe('risky');
+    // The AST partition is keyed by the declared casing too — the enrichment
+    // must survive the same case fold, not silently vanish.
+    const item = result.value.data.callingClasses.find(
+      (c) => c.componentId === CALLER_ID,
+    );
+    expect(item?.callerMethods).toEqual(['placeOrder']);
+  });
+
+  it('a verified method with no callers keeps the honest `safe`', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx5, {
+      classApiName: 'OrderService',
+      methodName: 'total',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.callingClasses.length).toBe(0);
+    expect(result.value.data.verdict).toBe('safe');
+    expect(result.value.data.methodVerification.verified).toBe(true);
+  });
+
+  it('an UNPARSEABLE class is unknown, never refused — the method list is unknown, not empty', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx5, {
+      classApiName: 'BrokenService',
+      methodName: 'whatever',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const v = result.value.data.methodVerification;
+    expect(v.verified).toBe(false);
+    if (v.verified) return;
+    expect(v.reason).toBe('parse-failed');
+    expect(result.value.data.verdict).toBe('unknown');
+  });
+
+  it('a name the class could INHERIT is not refused — absence there is inconclusive', async () => {
+    // ChildService extends BaseService. `inheritedMethod` is not in its own
+    // body, but the parse cannot see the superclass, so refusing would be the
+    // same confident-wrong answer pointed the other way.
+    const result = await whatIfChangeMethodSignatureHandler(ctx5, {
+      classApiName: 'ChildService',
+      methodName: 'inheritedMethod',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const v = result.value.data.methodVerification;
+    expect(v.verified).toBe(false);
+    if (v.verified) return;
+    expect(v.reason).toBe('not-declared-here-but-inheritable');
+    expect(result.value.data.verdict).toBe('unknown');
+  });
+
+  it('a node that records NO source path reports that reason specifically', async () => {
+    const dir6 = mkdtempSync(join(tmpdir(), 'sfi-mcp-wcms-nosrcpath-'));
+    const opened = await openGraph(join(dir6, 'ns.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const store6 = opened.value;
+    try {
+      const imported = await importExtractionResults(store6, [
+        {
+          nodes: [
+            makeNode({
+              id: NOSOURCE_ID,
+              type: 'ApexClass',
+              apiName: 'NoSourceService',
+              sourcePath: '',
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      if (!imported.ok) throw new Error(imported.error.message);
+      const ctx6: Context = {
+        vaultRoot: dir6,
+        manifest: FIXTURE_MANIFEST,
+        graph: store6,
+      };
+      const result = await whatIfChangeMethodSignatureHandler(ctx6, {
+        classApiName: 'NoSourceService',
+        methodName: 'anything',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const v = result.value.data.methodVerification;
+      expect(v.verified).toBe(false);
+      if (v.verified) return;
+      expect(v.reason).toBe('no-source-path');
+      expect(result.value.data.verdict).toBe('unknown');
+    } finally {
+      await closeGraph(store6);
+      rmSync(dir6, { recursive: true, force: true });
+    }
+  });
+
+  it('the always-on disclosure names the method-name check', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx5, {
+      classApiName: 'OrderService',
+      methodName: 'total',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.disclosure).toContain('method name is CHECKED');
   });
 });

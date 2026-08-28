@@ -57,6 +57,12 @@
  *   - Only CustomField-declared signals are checked. A field the vault does
  *     not model (a standard field whose object was never retrieved) is
  *     invisible here — never silently treated as compliant.
+ *   - The corpus walk is the shared `scanAllNodesOfTypes` (advancing SQL
+ *     `OFFSET`, bounded per type). If it stops at that residual ceiling with
+ *     nodes still behind it, some fields were NEVER classified, so the answer
+ *     is a FLOOR: `scanIncomplete` / `scanIncompleteTypes` say so and
+ *     `trust.completeness` drops to `partial`. It is never presented as a
+ *     complete bill of health.
  *
  * Byte-budget + pagination mirror `sfi.pii_inventory` exactly (CR-22 opaque
  * continuation cursor, ~38 KB per-page byte budget, global classification
@@ -65,6 +71,7 @@
 
 import type {
   ComponentId,
+  ComponentType,
   McpError,
   McpResponse,
   Node,
@@ -72,7 +79,6 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import {
   detectPiiClassificationWithReason,
   type PiiCategory,
@@ -91,6 +97,8 @@ import {
   toObjectApiName,
 } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES, fullScanTruncationNote } from './scan-cap.js';
 
 const TOOL_NAME = 'sfi.history_tracking_gaps';
 
@@ -100,8 +108,16 @@ const MAX_LIMIT = 500;
 /** Default `limit` when the caller omits it. Mirrors `pii_inventory`. */
 const DEFAULT_LIMIT = 200;
 
-/** Page size used when walking `listNodesByType` for the corpus scans. */
-const SCAN_PAGE_SIZE = 500;
+/**
+ * Residual ceiling on the multi-window corpus walk, per node type. Defaults to
+ * the house-wide {@link FULL_SCAN_MAX_NODES}; `SFI_HISTORY_TRACKING_SCAN_MAX`
+ * overrides it so a test can exercise the truncated-disclosure path without
+ * seeding 20 000 nodes. Mirrors `flow_fault_audit`'s `SFI_FLOW_FAULT_SCAN_MAX`.
+ */
+const historyScanCeiling = (): number => {
+  const v = Number(process.env['SFI_HISTORY_TRACKING_SCAN_MAX']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
+};
 
 /** Per-response byte budget for `groups`. Mirrors `pii_inventory`'s `PII_PAYLOAD_BUDGET_BYTES`. */
 const PAYLOAD_BUDGET_BYTES = 38_000;
@@ -249,6 +265,16 @@ export interface HistoryTrackingGapsOutput {
     readonly piiClassification: 'heuristic';
     readonly trackHistoryReadout: 'declared';
   };
+  /**
+   * True when the CORPUS WALK behind this answer stopped at its residual
+   * ceiling with strictly more nodes behind it — i.e. some CustomObject /
+   * CustomField nodes were never classified at all. Distinct from `truncated`,
+   * which is about the OUTPUT page, not the scan. `false` here means the scan
+   * itself was exhaustive.
+   */
+  readonly scanIncomplete: boolean;
+  /** The node types whose walk hit the ceiling. Empty (never omitted) when the scan was exhaustive. */
+  readonly scanIncompleteTypes: readonly string[];
   readonly limit: number;
   readonly offset: number;
   readonly truncated: boolean;
@@ -265,6 +291,7 @@ const STATIC_LIMITATIONS: readonly string[] = Object.freeze([
   'An object whose CustomObject metadata was never retrieved into the vault reports objectHistoryEnabled: null (unknown) — never silently assumed enabled or disabled.',
   'Salesforce does not support history tracking on formula, roll-up-summary, auto-number, or synthesized platform system/audit fields regardless of the declared flags — turning tracking on for them is impossible. Such PII/sensitive fields are segregated into untrackable[] (severity none) and excluded from groups and from summary.totalGapFields (which counts only actionable gaps); their full count is summary.untrackableFields / byUntrackableReason.',
   'Only CustomField-declared signals are checked. A field the vault does not model (a standard field whose object was never retrieved) is invisible here — never silently treated as compliant.',
+  'The CustomObject / CustomField corpus walk is bounded by a per-type residual ceiling. When it stops short (scanIncomplete: true, with the types named in scanIncompleteTypes) some fields were never classified at all, so every count is a FLOOR and trust.completeness reads partial — not a complete bill of health.',
 ]);
 
 /** Read the field data type from `properties.dataType`. Falls back to `'Unknown'`, mirrors `pii_inventory`. */
@@ -365,22 +392,40 @@ const resolveParentObjectId = (node: Node): ComponentId | null => {
   return apiName === null ? null : toCustomObjectId(apiName);
 };
 
-/** Walk one node type with offset-based pagination and return the full list. Mirrors `pii_inventory`'s `fetchAllCustomFields`. */
-const fetchAllOfType = async (
+/**
+ * HISTORY-TRACKING-GAPS-SECOND-COPY-CORPUS-WALK: the corpus scan was a
+ * hand-rolled `listNodesByType` offset loop guarded only by a comment claiming
+ * byte-parity with `pii_inventory`'s `fetchAllCustomFields` — a THIRD copy of
+ * the walk `scan-all-nodes.ts` was written to own, bound to its siblings by
+ * nothing a test could break. The copy was also strictly weaker: UNBOUNDED (no
+ * residual ceiling, so a pathological vault was walked without limit) and it
+ * produced NO `scanIncomplete`, so a compliance answer computed over a capped
+ * corpus still read `trust.completeness: 'complete'`. This now delegates to the
+ * shared `scanAllNodesOfTypes`, which windows the SQL `OFFSET` forward, bounds
+ * the walk at {@link historyScanCeiling}, and settles the exactly-at-the-ceiling
+ * boundary with one probe (CR-P3) instead of over-disclosing.
+ */
+const scanCorpus = async (
   ctx: Context,
-  type: 'CustomField' | 'CustomObject',
-): Promise<Result<readonly Node[], string>> => {
-  const all: Node[] = [];
-  let offset = 0;
-  for (;;) {
-    const page = await listNodesByType(ctx.graph, type, { limit: SCAN_PAGE_SIZE, offset });
-    if (!page.ok) return err(page.error.message);
-    all.push(...page.value);
-    if (page.value.length < SCAN_PAGE_SIZE) break;
-    offset += SCAN_PAGE_SIZE;
+  types: readonly ComponentType[],
+): Promise<Result<CorpusScan, McpError>> => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, types, historyScanCeiling());
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
   }
-  return ok(all);
+  return ok({
+    nodes: scan.value.nodes,
+    incompleteTypes: scan.value.incompleteTypes,
+    scanIncomplete: scan.value.scanIncomplete,
+  });
 };
+
+/** One shared-helper corpus walk: every node of the requested types plus its residual-cap disclosure. */
+interface CorpusScan {
+  readonly nodes: readonly Node[];
+  readonly incompleteTypes: readonly string[];
+  readonly scanIncomplete: boolean;
+}
 
 /** Severity rank for the total-order sort — `object-history-disabled` (critical) before `field-not-tracked` (high). */
 const SEVERITY_RANK: Readonly<Record<'critical' | 'high', number>> = {
@@ -409,6 +454,10 @@ interface ClassifiedGaps {
   readonly enableHistoryByObjectId: ReadonlyMap<ComponentId, boolean>;
   readonly objectApiNameById: ReadonlyMap<ComponentId, string>;
   readonly fieldsScanned: number;
+  /** Node types whose corpus walk stopped at the residual ceiling with strictly more behind it. */
+  readonly incompleteTypes: readonly string[];
+  /** True when any scanned type was left incomplete — the corpus this answer rests on is PARTIAL. */
+  readonly scanIncomplete: boolean;
   readonly summary: HistoryTrackingGapsSummary;
 }
 
@@ -429,20 +478,18 @@ const classifyHistoryGaps = async (
     objectApiName: input.objectApiName,
   });
 
-  const [objectsResult, fieldsResult] = await Promise.all([
-    fetchAllOfType(ctx, 'CustomObject'),
-    fetchAllOfType(ctx, 'CustomField'),
-  ]);
-  if (!objectsResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${objectsResult.error}` });
-  }
-  if (!fieldsResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${fieldsResult.error}` });
+  const scan = await scanCorpus(ctx, ['CustomObject', 'CustomField']);
+  if (!scan.ok) return scan;
+  const objectNodes: Node[] = [];
+  const fieldNodes: Node[] = [];
+  for (const node of scan.value.nodes) {
+    if (node.type === 'CustomObject') objectNodes.push(node);
+    else if (node.type === 'CustomField') fieldNodes.push(node);
   }
 
   const enableHistoryByObjectId = new Map<ComponentId, boolean>();
   const objectApiNameById = new Map<ComponentId, string>();
-  for (const obj of objectsResult.value) {
+  for (const obj of objectNodes) {
     enableHistoryByObjectId.set(obj.id, readEnableHistory(obj.properties));
     objectApiNameById.set(obj.id, obj.apiName);
   }
@@ -462,7 +509,7 @@ const classifyHistoryGaps = async (
   };
   let fieldsScanned = 0;
 
-  for (const node of fieldsResult.value) {
+  for (const node of fieldNodes) {
     if (
       objectScopeParentId !== undefined &&
       !fieldMatchesObjectScope(node, objectScopeParentId)
@@ -545,6 +592,8 @@ const classifyHistoryGaps = async (
     enableHistoryByObjectId,
     objectApiNameById,
     fieldsScanned,
+    incompleteTypes: scan.value.incompleteTypes,
+    scanIncomplete: scan.value.scanIncomplete,
     summary: {
       totalGapFields: sorted.length,
       objectsWithGaps,
@@ -592,18 +641,32 @@ const groupByObject = (
   });
 };
 
-const buildTrust = (ctx: Context, anyUnmodeledObject: boolean): TrustSummary => ({
+const buildTrust = (
+  ctx: Context,
+  anyUnmodeledObject: boolean,
+  incompleteTypes: readonly string[],
+): TrustSummary => ({
   provenance: 'offline_snapshot',
   // The trackHistory/enableHistory readout is declared, but the classification
   // that SELECTS which fields matter is heuristic — the weaker signal governs.
   confidence: 'heuristic',
   freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
   completeness: {
-    status: anyUnmodeledObject ? 'partial' : 'complete',
-    ...(anyUnmodeledObject
+    status: anyUnmodeledObject || incompleteTypes.length > 0 ? 'partial' : 'complete',
+    ...(anyUnmodeledObject || incompleteTypes.length > 0
       ? {
           missingCoverage: [
-            'one or more gap fields\' parent CustomObject metadata was not retrieved into the vault — their objectHistoryEnabled reads null (unknown), not assumed',
+            ...(anyUnmodeledObject
+              ? [
+                  'one or more gap fields\' parent CustomObject metadata was not retrieved into the vault — their objectHistoryEnabled reads null (unknown), not assumed',
+                ]
+              : []),
+            // A corpus walk that stopped at the residual ceiling means some
+            // fields were NEVER classified — the counts below are a floor, not
+            // a complete bill of health. Never let that read `complete`.
+            ...(incompleteTypes.length > 0
+              ? [fullScanTruncationNote(incompleteTypes, historyScanCeiling())]
+              : []),
           ],
         }
       : {}),
@@ -659,13 +722,11 @@ export const historyTrackingGapsHandler = async (
       // No modeled CustomObject: node under any casing. Fall back to the
       // tool's own pre-existing signal: does any CustomField's parent object
       // resolve to this name (case-insensitively)?
-      const fieldsProbe = await fetchAllOfType(ctx, 'CustomField');
-      if (!fieldsProbe.ok) {
-        return err({ kind: 'internal', message: `graph query failed: ${fieldsProbe.error}` });
-      }
+      const fieldsProbe = await scanCorpus(ctx, ['CustomField']);
+      if (!fieldsProbe.ok) return fieldsProbe;
       const folded = input.objectApiName.toLowerCase();
       let fieldMatch: string | null = null;
-      for (const f of fieldsProbe.value) {
+      for (const f of fieldsProbe.value.nodes) {
         const parentId = resolveParentObjectId(f);
         if (parentId === null) continue;
         const bare = toObjectApiName(parentId);
@@ -675,6 +736,21 @@ export const historyTrackingGapsHandler = async (
         }
       }
       if (fieldMatch === null) {
+        // The probe is bounded by the residual ceiling like every other walk in
+        // this file. An UNMATCHED name after an INCOMPLETE walk does not prove
+        // the object is absent — refusing there would swap one confident
+        // fabrication ("this object does not exist") for another. Report the
+        // walk that could not finish instead.
+        if (fieldsProbe.value.scanIncomplete) {
+          return err({
+            kind: 'internal',
+            message:
+              `could not confirm whether an object named '${input.objectApiName}' exists: the ` +
+              `CustomField walk stopped at its residual ceiling (${historyScanCeiling()} nodes ` +
+              'per type) before the name could be matched — narrow the query or raise ' +
+              'SFI_HISTORY_TRACKING_SCAN_MAX',
+          });
+        }
         return err({
           kind: 'invalid-query',
           message:
@@ -696,6 +772,7 @@ export const historyTrackingGapsHandler = async (
     enableHistoryByObjectId,
     objectApiNameById,
     fieldsScanned,
+    incompleteTypes,
     summary,
   } = classified.value;
 
@@ -758,6 +835,8 @@ export const historyTrackingGapsHandler = async (
     untrackableTruncated,
     summary,
     confidenceAxis: { piiClassification: 'heuristic', trackHistoryReadout: 'declared' },
+    scanIncomplete: incompleteTypes.length > 0,
+    scanIncompleteTypes: incompleteTypes,
     limit,
     offset,
     truncated,
@@ -771,7 +850,7 @@ export const historyTrackingGapsHandler = async (
             `with offset += ${kept.length} for the rest.`,
         }
       : {}),
-    trust: buildTrust(ctx, anyUnmodeledObject),
+    trust: buildTrust(ctx, anyUnmodeledObject, incompleteTypes),
   });
 
   // The untrackable-by-type set is an informational appendix (severity none)

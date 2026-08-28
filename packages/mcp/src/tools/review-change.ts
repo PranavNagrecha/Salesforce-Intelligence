@@ -530,9 +530,23 @@ export interface ReviewedComponent {
   /** Weakest edge confidence among the surviving dependents; null when none. */
   readonly weakestDependentConfidence: Edge['confidence'] | null;
   /**
-   * Covering tests to run for this component. For Apex, the component's own
-   * covering tests; for a frontend bundle (LWC/Aura/VF), the covering tests of
-   * the Apex controllers it `callsApex` (its outbound risk).
+   * DISTINCT covering tests selected for this component — the FULL total, never
+   * reduced by the {@link TEST_SAMPLE_CAP} sample below (the `dependentCount` /
+   * `dependents` pair, one field up). Compare against `selectedTests.length` to
+   * tell a complete list from a truncated sample: `testCoverage` is a
+   * three-value enum that carries no number, and `summary.testsToRun` is the
+   * union across the WHOLE change set, so neither recovers this row's total.
+   * REVIEW-CHANGE-SELECTED-TESTS-SILENT-TRUNCATION.
+   */
+  readonly selectedTestCount: number;
+  /**
+   * Up to {@link TEST_SAMPLE_CAP} covering tests to run for this component
+   * (sorted ASC) — a SAMPLE, not the whole set; `selectedTestCount` is the
+   * total. For Apex, the component's own covering tests; for a frontend bundle
+   * (LWC/Aura/VF), the covering tests of the Apex controllers it `callsApex`
+   * (its outbound risk). The top-level `selectedTests` union (capped at
+   * {@link SELECTED_TESTS_CAP}, total in `summary.testsToRun`) is the set to
+   * run for the change set as a whole.
    */
   readonly selectedTests: readonly ComponentId[];
   readonly testCoverage: TestCoverageStatus;
@@ -891,6 +905,11 @@ const runReviewCore = async (
     } else {
       selectedTests = pc !== undefined ? pc.coveringTests.map((t) => t.id) : [];
     }
+    // DISTINCT + sorted ONCE, so the disclosed count and the inlined sample are
+    // computed from the same array — the count can never over- or under-report
+    // the truncation it exists to disclose.
+    // REVIEW-CHANGE-SELECTED-TESTS-SILENT-TRUNCATION.
+    const distinctSelectedTests = sortIds(new Set<ComponentId>(selectedTests));
     const testCoverage: TestCoverageStatus = !isApex
       ? 'not-applicable'
       : pc !== undefined && pc.covered
@@ -986,7 +1005,10 @@ const runReviewCore = async (
       dependentCount,
       dependents: sortIds(dependentIds).slice(0, DEPENDENT_SAMPLE_CAP),
       weakestDependentConfidence: weakest,
-      selectedTests: sortIds(selectedTests).slice(0, TEST_SAMPLE_CAP),
+      // DERIVED from the same array the sample is sliced from, so the count can
+      // never drift from the truncation it discloses (mirrors dependentCount).
+      selectedTestCount: distinctSelectedTests.length,
+      selectedTests: distinctSelectedTests.slice(0, TEST_SAMPLE_CAP),
       testCoverage,
       ...(isFrontendBundle && outboundApex.length > 0
         ? { outboundApex: outboundApex.slice(0, DEPENDENT_SAMPLE_CAP) }

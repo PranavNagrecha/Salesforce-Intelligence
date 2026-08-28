@@ -96,6 +96,8 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { firstNonEmpty, toProfileOrPermSetId } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, FULL_SCAN_MAX_NODES } from './scan-cap.js';
 
 /**
  * Zod schema for the `sfi.layout_for_user` tool input.
@@ -208,11 +210,19 @@ export interface LayoutForUserOutput {
   readonly layoutId: ComponentId | null;
   /** Lightning record page when the vault models FlexiPages for this object. */
   readonly flexiPageId: ComponentId | null;
-  /** Which UI surface the answer primarily describes. */
+  /**
+   * Which UI surface the answer primarily describes. `classic-layout` is
+   * claimed ONLY when the whole FlexiPage corpus was read and none targets the
+   * object; a walk that stopped at the residual scan cap reports `unknown`.
+   */
   readonly uiSurface: 'classic-layout' | 'lightning-flexipage' | 'unknown';
   readonly recordTypeUsed: ComponentId | null;
   readonly reasoning: readonly LayoutRoutingStep[];
-  /** Set when Classic layout metadata is returned but Lightning pages exist. */
+  /**
+   * Set when Classic layout metadata is returned but Lightning pages exist —
+   * or when the FlexiPage corpus exceeded the scan cap, so "no Lightning page"
+   * could not be established.
+   */
   readonly boundaryNote?: string;
 }
 
@@ -562,26 +572,79 @@ const pickFlexiPageForObject = (
  * Resolve a Lightning FlexiPage for the object when the vault contains
  * record pages. Profile metadata still assigns Classic layouts; this
  * stage surfaces the Lightning surface users actually see.
+ *
+ * Searches the COMPLETE FlexiPage corpus — a `sobjectType` SQL narrow first,
+ * then `scanAllNodesOfTypes` when that finds nothing (or fills its window) —
+ * so a record page past the graph's 500-row `listNodesByType` ceiling is still
+ * found. Reports `scanIncomplete` when even the multi-window walk stopped at
+ * the residual cap, so no caller can read "not found" as "does not exist".
  */
 const evaluateLightningPageLookup = async (
   ctx: Context,
   objectApiName: string,
-): Promise<Result<{ step: LayoutRoutingStep; flexiPageId: ComponentId | null }, string>> => {
-  const pagesResult = await listNodesByType(ctx.graph, 'FlexiPage', { limit: 500 });
-  if (!pagesResult.ok) return err(pagesResult.error.message);
-  const match = pickFlexiPageForObject(pagesResult.value, objectApiName);
+): Promise<
+  Result<
+    {
+      step: LayoutRoutingStep;
+      flexiPageId: ComponentId | null;
+      scanIncomplete: boolean;
+    },
+    string
+  >
+> => {
+  // LAYOUT-FOR-USER-FLEXIPAGE-SCAN-CAP: this used to read ONE
+  // `listNodesByType(..., { limit: 500 })` page — the graph's HARD ceiling,
+  // served `ORDER BY id ASC OFFSET 0`. A mature Lightning org holds far more
+  // than 500 FlexiPages (every record/app/home page, plus managed-package
+  // pages), so an object whose record page sorted past that alphabetical
+  // window produced the CHECKED-sounding reason "no FlexiPage in vault targets
+  // object 'X'" over a corpus that was never fully read — and, downstream, a
+  // `uiSurface: 'classic-layout'` verdict with the Lightning divergence
+  // `boundaryNote` suppressed.
+  //
+  // Step 1 — narrow in SQL on the page's declared `sobjectType`, the same
+  // signal `pickFlexiPageForObject` prefers (the `propertyStringEquals` narrow
+  // `what-happens-on-save` uses for EntitlementProcess). One bounded query, no
+  // alphabetical window over the whole type.
+  const windowSize = clampedNodeScanLimit();
+  const declared = await listNodesByType(ctx.graph, 'FlexiPage', {
+    propertyStringEquals: { sobjectType: objectApiName },
+    limit: windowSize,
+  });
+  if (!declared.ok) return err(declared.error.message);
+
+  // Step 2 — fall back to the COMPLETE FlexiPage corpus when the narrow found
+  // nothing (pages that predate `sobjectType` extraction are matched only by
+  // the apiName-prefix fallback), or when the narrow itself filled its window
+  // and may therefore be capped. `scanAllNodesOfTypes` walks the SQL OFFSET
+  // forward window-by-window, so node 501+ is reachable and any residual
+  // incompleteness is disclosed rather than assumed away.
+  let candidates: readonly Node[] = declared.value;
+  let scanIncomplete = false;
+  if (candidates.length === 0 || candidates.length >= windowSize) {
+    const full = await scanAllNodesOfTypes(ctx.graph, ['FlexiPage']);
+    if (!full.ok) return err(full.error.message);
+    candidates = full.value.nodes;
+    scanIncomplete = full.value.scanIncomplete;
+  }
+
+  const match = pickFlexiPageForObject(candidates, objectApiName);
   if (match === null) {
     return ok({
       flexiPageId: null,
+      scanIncomplete,
       step: step(
         'LightningPageLookup',
         'unknown',
-        `no FlexiPage in vault targets object '${objectApiName}'`,
+        scanIncomplete
+          ? `no FlexiPage targeting object '${objectApiName}' in the first ${FULL_SCAN_MAX_NODES} FlexiPages — the FlexiPage corpus was NOT fully read, so a Lightning page may exist beyond the scan cap`
+          : `no FlexiPage in vault targets object '${objectApiName}'`,
       ),
     });
   }
   return ok({
     flexiPageId: match.id,
+    scanIncomplete,
     step: step(
       'LightningPageLookup',
       'matched',
@@ -756,12 +819,22 @@ export const layoutForUserHandler = async (
   reasoning.push(lightningResult.value.step);
 
   const flexiPageId = lightningResult.value.flexiPageId;
+  // With no FlexiPage found, `classic-layout` is only claimable when the
+  // FlexiPage corpus was READ TO THE END. If the walk stopped at the residual
+  // scan cap, the surface is genuinely unknown — never assert Classic off an
+  // unfinished scan (LAYOUT-FOR-USER-FLEXIPAGE-SCAN-CAP).
   const uiSurface =
-    flexiPageId !== null ? 'lightning-flexipage' : 'classic-layout';
+    flexiPageId !== null
+      ? 'lightning-flexipage'
+      : lightningResult.value.scanIncomplete
+        ? 'unknown'
+        : 'classic-layout';
   const boundaryNote =
     flexiPageId !== null
       ? `Profile layoutAssignments resolve to Classic layout '${layoutId}', but the vault models Lightning FlexiPage '${flexiPageId}' for this object — users in Lightning Experience typically see the FlexiPage.`
-      : undefined;
+      : lightningResult.value.scanIncomplete
+        ? `Profile layoutAssignments resolve to Classic layout '${layoutId}', but the FlexiPage corpus exceeded the ${FULL_SCAN_MAX_NODES}-node scan cap and was not fully read — a Lightning record page for this object may exist beyond the cap.`
+        : undefined;
 
   return ok({
     data: {

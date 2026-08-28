@@ -581,3 +581,153 @@ describe('scheduledJobCatalogInputSchema', () => {
     ).toBe(false);
   });
 });
+
+// =============================================================================
+// G2 single-page-corpus regression (the "page one is the whole org" bug).
+//
+// The corpus scan used to be ONE `listNodesByType(type, { limit: 500 })` with
+// no SQL OFFSET, which `packages/graph/src/queries.ts` serves as
+// `ORDER BY id ASC LIMIT 500 OFFSET 0`. On an org with more than 500 ApexClass
+// (or Flow) nodes only the alphabetically-first page was ever read, so a
+// Schedulable class or a scheduled Flow sorting past position 500 was INVISIBLE
+// to "which classes run on a schedule?" — and `summary.totalSchedulableClasses`
+// / `classesScheduledFromProduction` / `classesLikelyUnscheduled` were page-one
+// figures published as org totals with no truncation flag.
+//
+// This fixture puts 500 non-schedulable filler classes and 500 unscheduled
+// filler flows AHEAD (id-ASC) of the only two nodes that should surface, so
+// every one of those numbers is wrong unless the scan windows the OFFSET
+// forward.
+// =============================================================================
+
+const TAIL_PAGE_SIZE = 500;
+const TAIL_SCHEDULABLE = 'ApexClass:zzTailWeeklyBillingJob';
+const TAIL_SCHEDULER = 'ApexClass:zzTailWeeklyBillingScheduler';
+const TAIL_FLOW = 'Flow:zzTailNightlySweep';
+
+const pad = (n: number): string => String(n).padStart(4, '0');
+
+const tailSeed: ExtractionResult = {
+  nodes: [
+    ...Array.from({ length: TAIL_PAGE_SIZE }, (_unused, i) =>
+      makeNode({
+        id: `ApexClass:AaFiller${pad(i)}`,
+        apiName: `AaFiller${pad(i)}`,
+        properties: { isSchedulable: false, isTest: false },
+      }),
+    ),
+    ...Array.from({ length: TAIL_PAGE_SIZE }, (_unused, i) =>
+      makeNode({
+        id: `Flow:AaFiller${pad(i)}`,
+        type: 'Flow',
+        apiName: `AaFiller${pad(i)}`,
+        sourcePath: 'unused.flow-meta.xml',
+        properties: { triggerObject: 'Account' },
+      }),
+    ),
+    // The two nodes that sort PAST the first 500-row page of their type.
+    makeNode({
+      id: TAIL_SCHEDULABLE,
+      apiName: 'zzTailWeeklyBillingJob',
+      properties: { isSchedulable: true, isTest: false },
+    }),
+    makeNode({
+      id: TAIL_SCHEDULER,
+      apiName: 'zzTailWeeklyBillingScheduler',
+      properties: { isTest: false },
+    }),
+    makeNode({
+      id: TAIL_FLOW,
+      type: 'Flow',
+      apiName: 'zzTailNightlySweep',
+      sourcePath: 'unused.flow-meta.xml',
+      properties: {
+        scheduleFrequency: 'Daily',
+        scheduleStartDate: '2026-01-02',
+        scheduleStartTime: '03:00:00.000Z',
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: TAIL_SCHEDULER,
+      toId: TAIL_SCHEDULABLE,
+      edgeType: 'dispatchesAsync',
+      properties: { dispatchMechanism: 'schedule' },
+    }),
+  ],
+};
+
+describe('scheduledJobCatalogHandler — corpus past the first 500-row page (G2)', () => {
+  let tailDir: string;
+  let tailStore: GraphStore;
+  let tailCtx: Context;
+
+  beforeAll(async () => {
+    tailDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-scheduled-tail-'));
+    const opened = await openGraph(join(tailDir, 'tail.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    tailStore = opened.value;
+    const imported = await importExtractionResults(tailStore, [tailSeed]);
+    if (!imported.ok) {
+      throw new Error(`tail seed import failed: ${imported.error.message}`);
+    }
+    tailCtx = { vaultRoot: tailDir, manifest: FIXTURE_MANIFEST, graph: tailStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(tailStore);
+    rmSync(tailDir, { recursive: true, force: true });
+  });
+
+  it('surfaces a Schedulable class that sorts past the first ApexClass page', async () => {
+    const result = await scheduledJobCatalogHandler(tailCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.jobs.map((j) => j.classId)).toEqual([
+      TAIL_SCHEDULABLE,
+    ]);
+  });
+
+  it('reports org-wide summary counts, not page-one counts', async () => {
+    const result = await scheduledJobCatalogHandler(tailCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const s = result.value.data.summary;
+    expect(s.totalSchedulableClasses).toBe(1);
+    expect(s.classesWithKnownCallers).toBe(1);
+    expect(s.classesScheduledFromProduction).toBe(1);
+    expect(s.classesLikelyUnscheduled).toBe(0);
+  });
+
+  it('surfaces a scheduled Flow that sorts past the first Flow page', async () => {
+    const result = await scheduledJobCatalogHandler(tailCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scheduledFlows.map((f) => f.flowId)).toEqual([
+      TAIL_FLOW,
+    ]);
+    expect(result.value.data.summary.totalScheduledFlows).toBe(1);
+  });
+
+  it('honors nameContains against the tail of the corpus, not just page one', async () => {
+    const result = await scheduledJobCatalogHandler(tailCtx, {
+      nameContains: 'weeklybilling',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Case-insensitive match on a class that only exists past page one. A
+    // page-one scan answers this "no scheduled job named WeeklyBilling".
+    expect(result.value.data.jobs.map((j) => j.classId)).toEqual([
+      TAIL_SCHEDULABLE,
+    ]);
+  });
+
+  it('declares the corpus fully scanned (no residual full-scan cap)', async () => {
+    const result = await scheduledJobCatalogHandler(tailCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanTruncated).toBe(false);
+    expect(result.value.data.boundaries).toEqual([]);
+  });
+});

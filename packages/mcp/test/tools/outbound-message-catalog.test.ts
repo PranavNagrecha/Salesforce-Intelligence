@@ -195,6 +195,25 @@ const contactSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 4: an object that EXISTS in the vault but defines ZERO outbound
+// messages. The scoped-negative case: a zero-entry answer for THIS object is
+// not a statement about the org, which defines three.
+// =============================================================================
+
+const CASE_OBJECT = 'CustomObject:Case';
+
+const caseSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: CASE_OBJECT,
+      type: 'CustomObject',
+      apiName: 'Case',
+    }),
+  ],
+  edges: [],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -208,6 +227,7 @@ beforeAll(async () => {
     accountSeed,
     orphanSeed,
     contactSeed,
+    caseSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -479,5 +499,142 @@ describe('outboundMessageCatalogHandler — zero-result honesty (batch 8)', () =
     expect(d.coverageStatus).not.toBe('complete');
     expect(d.disclosure).toContain('INCONCLUSIVE');
     expect(d.disclosure).not.toContain('No outbound message definitions exist');
+  });
+});
+
+// =============================================================================
+// OUTBOUND-MESSAGE-CATALOG-UNVERIFIED-OBJECT-SCOPE (R4 / HIGH)
+//
+// `objectFilter` was a case-SENSITIVE exact string comparison against the
+// apiName prefix, with no check that the named object exists — and the
+// zero-entry disclosure made an ORG-WIDE determinate-negative claim ("no
+// outbound message definitions exist in this org … the org defines none … do
+// not suggest a refresh") computed from the count AFTER the narrowing. So a
+// scoped call, a wrong-case object name and an outright typo all produced the
+// same flatly false org-wide negative, with the disclosure explicitly telling
+// the reader not to investigate further.
+// =============================================================================
+
+/**
+ * A manifest whose WorkflowRule family is CONFIRMED-complete, so
+ * `summarizeCoverage` returns `complete` and the zero-entry disclosure takes
+ * the DETERMINATE-NEGATIVE branch — the branch the census flagged.
+ */
+const COMPLETE_COVERAGE_MANIFEST = {
+  version: '0.1.0',
+  refreshedAt: '2026-05-27T14:33:08Z',
+  sourceOrg: 'me@example.com',
+  components: { CustomObject: 3, OutboundMessage: 3, WorkflowRule: 2 },
+  edges: {},
+  sourceTreeHash: 'sha256:outbound-fixture-complete',
+  coverage: [
+    {
+      type: 'WorkflowRule',
+      requested: true,
+      retrieved: 2,
+      errored: false,
+      neverModeled: false,
+      retrieveConfirmed: true,
+    },
+  ],
+} as unknown as VaultManifest;
+
+describe('outboundMessageCatalogHandler — objectFilter is a VERIFIED scope', () => {
+  it('does not emit the ORG-WIDE determinate negative for a SCOPED zero-result', async () => {
+    // The org defines three outbound messages (two on Account, one on
+    // Contact) and WorkflowRule coverage is COMPLETE. Scoping to Case — a real
+    // object with none — must not turn that into "the org defines none … do
+    // not suggest a refresh".
+    const completeCtx: Context = {
+      vaultRoot: tempDir,
+      manifest: COMPLETE_COVERAGE_MANIFEST,
+      graph: store,
+    };
+    const orgWide = await outboundMessageCatalogHandler(completeCtx, {});
+    expect(orgWide.ok).toBe(true);
+    if (!orgWide.ok) return;
+    expect(orgWide.value.data.summary.totalEntries).toBe(3);
+    expect(orgWide.value.data.coverageStatus).toBe('complete');
+
+    const scoped = await outboundMessageCatalogHandler(completeCtx, {
+      objectFilter: 'Case',
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    const d = scoped.value.data;
+    expect(d.summary.totalEntries).toBe(0);
+    expect(d.disclosure).not.toContain(
+      'No outbound message definitions exist in this org',
+    );
+    expect(d.disclosure).not.toContain('the org defines none');
+    expect(d.disclosure).toContain('Case');
+  });
+
+  it('does not claim the ORG defines none when the SCOPE defines none', async () => {
+    const result = await outboundMessageCatalogHandler(ctx, {
+      objectFilter: 'Case',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    // The org defines three outbound messages; Case defines none.
+    expect(d.summary.totalEntries).toBe(0);
+    expect(d.disclosure).not.toContain('exist in this org');
+    expect(d.disclosure).not.toContain('the org defines none');
+    // ...and it must say WHICH object the negative is about.
+    expect(d.disclosure).toContain('Case');
+  });
+
+  it('echoes appliedScope on a scoped call and omits it on a bare call', async () => {
+    const scoped = await outboundMessageCatalogHandler(ctx, {
+      objectFilter: 'Account',
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    expect(scoped.value.data.appliedScope).toEqual({
+      object: ACCOUNT_OBJECT,
+      mode: 'component',
+    });
+
+    const bare = await outboundMessageCatalogHandler(ctx, {});
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.value.data).not.toHaveProperty('appliedScope');
+  });
+
+  it("resolves a wrong-CASE objectFilter ('account') to the vault's casing instead of answering about the empty set", async () => {
+    const result = await outboundMessageCatalogHandler(ctx, {
+      objectFilter: 'account',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.summary.totalEntries).toBe(2);
+    const ids = d.entries.map((e) => e.outboundMessageId);
+    expect(ids).toContain(ACCOUNT_OM);
+    expect(ids).toContain(ORPHAN_OM);
+    expect(d.appliedScope?.object).toBe(ACCOUNT_OBJECT);
+  });
+
+  it('REFUSES an objectFilter naming an object that is not in the vault', async () => {
+    const result = await outboundMessageCatalogHandler(ctx, {
+      objectFilter: 'Acount__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('Acount__c');
+  });
+
+  it('keeps the scoped non-empty answer from reading as an org-wide catalog', async () => {
+    const result = await outboundMessageCatalogHandler(ctx, {
+      objectFilter: 'Contact',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.summary.totalEntries).toBe(1);
+    expect(d.disclosure).toContain('SCOPED');
+    expect(d.disclosure).toContain('NOT VALIDATED');
   });
 });

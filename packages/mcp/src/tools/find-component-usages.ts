@@ -96,8 +96,29 @@ const FRONTEND_DIR_RE = /\/(lwc|aura|pages|components)\//;
  * `FRONTEND_DIR_RE` must keep listing all four because it also bounds the grep
  * WALK, where flat directories genuinely belong. Only the self-match test
  * narrows to bundles.
+ *
+ * The pattern CAPTURES the bundle directory rather than merely detecting one,
+ * because a bundle node's `sourcePath` comes in two shapes and slicing to the
+ * last `/` is only right for one of them:
+ *   - `.../lwc/myCmp`          — the DIRECTORY. This is what a real vault
+ *     holds: `extractLightningComponentBundle` / `extractAuraDefinitionBundle`
+ *     are handed the bundle directory, `stat` it and REFUSE a non-directory,
+ *     then persist it verbatim as `sourcePath`. Slicing this to its last `/`
+ *     yields `.../lwc/` — the parent of EVERY bundle in the org.
+ *   - `.../lwc/myCmp/myCmp.js` — a FILE inside it.
+ * Capturing `(lwc|aura)/<bundleName>` handles both and can never widen to the
+ * `lwc/` root, which would discard every genuine LWC/Aura caller in the org.
  */
-const BUNDLE_DIR_RE = /\/(lwc|aura)\//;
+const BUNDLE_DIR_RE = /^((?:.*\/)?(?:lwc|aura)\/[^/]+)(?:\/|$)/;
+
+/**
+ * The bundle directory (trailing `/`) that owns `p`, or null when `p` is not
+ * part of an LWC / Aura bundle.
+ */
+const bundleDirOf = (p: string): string | null => {
+  const m = BUNDLE_DIR_RE.exec(p);
+  return m === null ? null : `${m[1]!}/`;
+};
 
 /** File name up to its first dot — `Foo.page` and `Foo.page-meta.xml` share `Foo`. */
 const basenameStem = (p: string): string => {
@@ -285,9 +306,10 @@ const apiNameOf = (id: string): string => {
  */
 const isSelfMatch = (matchPath: string, ownSourcePath: string): boolean => {
   if (matchPath === ownSourcePath) return true;
+  const bundleDir = bundleDirOf(ownSourcePath);
+  if (bundleDir !== null) return matchPath.startsWith(bundleDir);
   const ownDir = ownSourcePath.slice(0, ownSourcePath.lastIndexOf('/') + 1);
   if (ownDir.length === 0) return false;
-  if (BUNDLE_DIR_RE.test(ownSourcePath)) return matchPath.startsWith(ownDir);
   if (FRONTEND_DIR_RE.test(ownSourcePath)) {
     return (
       matchPath.startsWith(ownDir) &&
@@ -450,7 +472,7 @@ export const findComponentUsagesHandler = async (
   if (selfMatchesExcluded > 0) {
     boundaries.push(
       `${selfMatchesExcluded} grep match(es) were this component's OWN definition (its declaring file${
-        FRONTEND_DIR_RE.test(node?.sourcePath ?? '') ? ' / bundle directory' : ''
+        bundleDirOf(node?.sourcePath ?? '') !== null ? ' / bundle directory' : ''
       }) and were EXCLUDED before \`grepMatchCount\` — a component's own declaration matching its own name is not evidence anything ELSE uses it. ${
         grepMatches.length === 0
           ? 'After exclusion, grep found NO other reference.'

@@ -17,6 +17,7 @@ import {
   deriveSiblingObject,
   isLivePlaneEnabled,
   STALE_CHECK_TYPES,
+  INACTIVE_USERS_BYTE_BUDGET,
   liveCountHandler,
   liveDescribeHandler,
   liveEmailTemplateUsageHandler,
@@ -1995,5 +1996,181 @@ describe('CR-09 — live-plane budget routing (H9)', () => {
     }
     // No budget was spent — gateLive returned before any read.
     expect(liveBudgetStatus().used).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CENSUS-029 R1 — live_count must not fabricate a number it did not read.
+//
+// Two distinct wrong-confident-answer paths lived in ONE expression:
+//   count = result.totalSize ?? result.records[0].expr0 ?? 0
+//
+//   (1) AGGREGATE FORM. `assertCountSoql` accepts `SELECT COUNT(Id) FROM X`
+//       (the form a host LLM writes by default), not just the bare `COUNT()`
+//       the description advertises. Salesforce answers an aggregate with
+//       `{totalSize: 1, records: [{expr0: <the real count>}]}` — totalSize is
+//       the number of AGGREGATE ROWS. `??` short-circuits on the non-nullish 1,
+//       so the expr0 branch that exists for exactly this shape can NEVER run.
+//   (2) UNREADABLE ENVELOPE. `runSfJson` validates neither `status` nor
+//       `result`, so any envelope the reader does not recognise fell through to
+//       a CONFIDENT `count: 0` stamped `provenance: 'live_org'` — and that zero
+//       propagates into live_field_population's populatedCount.
+// ---------------------------------------------------------------------------
+describe('live_count envelope honesty (CENSUS-029 R1)', () => {
+  /** Salesforce's real answer to a NON-bare aggregate: one row, expr0 = count. */
+  const aggregateExec: ExecCommand = async () => ({
+    stdout: JSON.stringify({
+      status: 0,
+      result: {
+        totalSize: 1,
+        done: true,
+        records: [{ attributes: { type: 'AggregateResult' }, expr0: 45231 }],
+      },
+    }),
+    stderr: '',
+  });
+
+  /** Valid JSON, exit 0, but no `result` the count reader can understand. */
+  const unreadableExec: ExecCommand = async () => ({
+    stdout: JSON.stringify({
+      status: 1,
+      name: 'MALFORMED_QUERY',
+      message: 'unexpected token',
+    }),
+    stderr: '',
+  });
+
+  it('reads the aggregate COUNT(Id) row, not the aggregate-row totalSize of 1', async () => {
+    const r = await liveCountHandler(
+      ctx,
+      { liveEnabled: true, soql: 'SELECT COUNT(Id) FROM Account' },
+      aggregateExec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.count).toBe(45231);
+    expect(r.value.data.rendered).toContain('45,231');
+  });
+
+  it('never reports a confident 0 for an envelope it could not read', async () => {
+    const r = await liveCountHandler(
+      ctx,
+      { liveEnabled: true, objectApiName: 'Account' },
+      unreadableExec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The whole point: absence of a readable count is NOT a counted zero.
+    expect(r.value.data.count).not.toBe(0);
+    expect(r.value.data.count).toBeNull();
+    expect(r.value.data.cannotAnswer).toBe(true);
+    expect(r.value.data.countNotRead).toBeTypeOf('string');
+    expect(r.value.data.rendered).not.toMatch(/\*\*0\*\* records/);
+  });
+
+  it('live_field_population refuses rather than reporting populatedCount 0 from an unread count', async () => {
+    const r = await liveFieldPopulationHandler(
+      ctx,
+      { liveEnabled: true, objectApiName: 'Account', fieldApiName: 'Industry' },
+      unreadableExec,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      expect.fail(
+        `live_field_population fabricated population evidence: ${JSON.stringify({
+          totalCount: r.value.data.totalCount,
+          populatedCount: r.value.data.populatedCount,
+          populationRate: r.value.data.populationRate,
+        })}`,
+      );
+    }
+  });
+
+  it('refuses a GROUP BY count instead of returning the first group as the whole answer', async () => {
+    const groupedExec: ExecCommand = async () => ({
+      stdout: JSON.stringify({
+        status: 0,
+        result: {
+          totalSize: 3,
+          records: [{ expr0: 12 }, { expr0: 40 }, { expr0: 900 }],
+        },
+      }),
+      stderr: '',
+    });
+    const r = await liveCountHandler(
+      ctx,
+      { liveEnabled: true, soql: 'SELECT COUNT(Id) FROM Account GROUP BY Industry' },
+      groupedExec,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('still reads the bare COUNT() form from totalSize', async () => {
+    const bareExec: ExecCommand = async () => ({
+      stdout: JSON.stringify({ status: 0, result: { totalSize: 7, records: [] } }),
+      stderr: '',
+    });
+    const r = await liveCountHandler(
+      ctx,
+      { liveEnabled: true, objectApiName: 'Account' },
+      bareExec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.count).toBe(7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CENSUS-029 R6 — the five hand-copied byte-fit loops.
+//
+// Four of the five build the "rows were trimmed" NOTE inside the shape they
+// MEASURE. `fitInactiveUsers` did not: it returned a bare `byteTrimmed` flag and
+// the handler appended the note AFTERWARDS, so the note's bytes were never
+// counted and the fitter's stated contract — "the serialized data stays under
+// INACTIVE_USERS_BYTE_BUDGET" — did not hold. Same seam, five copies, one of
+// them already drifted; this pins the invariant to the SHARED fitter.
+// ---------------------------------------------------------------------------
+describe('live roster byte-fit invariant (CENSUS-029 R6)', () => {
+  /** 400 dormant users sized to land the trimmed page just under the budget —
+   *  the window where the un-measured note tipped the response over it. */
+  const rows = Array.from({ length: 400 }, (_, i) => ({
+    Id: `005${String(i).padStart(15, '0')}`,
+    Name: `User ${String(i).padStart(4, '0')}${'x'.repeat(10)}`,
+    Username: `u${i}@example.invalid`,
+    UserType: 'Standard',
+    Profile: { Name: 'Standard User' },
+    LastLoginDate: null,
+  }));
+
+  const exec: ExecCommand = async (_binary, args) => {
+    const i = args.indexOf('--query');
+    const q = String(args[i + 1] ?? '');
+    return q.toUpperCase().includes('COUNT()')
+      ? { stdout: JSON.stringify({ result: { totalSize: 9999, records: [] } }), stderr: '' }
+      : { stdout: JSON.stringify({ result: { records: rows } }), stderr: '' };
+  };
+
+  it('live_inactive_users honours its own byte budget WITH the trim note attached', async () => {
+    const r = await liveInactiveUsersHandler(
+      ctx,
+      { liveEnabled: true, limit: 500 },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The fixture must actually exercise the trimming path, or this proves nothing.
+    expect(r.value.data.note).toBeTypeOf('string');
+    const bytes = Buffer.byteLength(JSON.stringify(r.value.data), 'utf8');
+    expect(
+      bytes,
+      `serialized data (incl. note) must fit INACTIVE_USERS_BYTE_BUDGET`,
+    ).toBeLessThanOrEqual(INACTIVE_USERS_BYTE_BUDGET);
+    // R2 still holds: a trimmed page never claims completeness.
+    expect(r.value.data.capped).toBe(true);
+    expect(r.value.data.totalInactive).toBe(9999);
+    expect(r.value.data.returned).toBe(r.value.data.users.length);
   });
 });

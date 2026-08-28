@@ -494,7 +494,14 @@ const resolveCountSoql = (input: LiveCountInput): Result<string, McpError> => {
 };
 
 export interface LiveCountOutput {
-  readonly count: number;
+  /**
+   * The record count, or `null` when the org's response could not be READ as a
+   * count ({@link LIVE_COUNT_NOT_READ_DISCLOSURE}). `null` is NOT zero: it means
+   * the number was never established. A `null` count always ships with
+   * `cannotAnswer: true` and `countNotRead`, so an absence can never be read as
+   * "no records exist".
+   */
+  readonly count: number | null;
   readonly soql: string;
   readonly trust: TrustSummary;
   readonly rendered: string;
@@ -517,6 +524,12 @@ export interface LiveCountOutput {
   /** When true, do not treat `count` as an answer to a filtered data question. */
   readonly cannotAnswer?: boolean;
   readonly coverageCaveat?: string;
+  /**
+   * Present EXACTLY when `count` is `null` — the disclosure plus the specific
+   * reason the org's response could not be read as a count. Absent when a count
+   * was genuinely read (including a real, measured 0).
+   */
+  readonly countNotRead?: string;
 }
 
 const assertCountSoql = (soql: string): Result<string, McpError> => {
@@ -528,8 +541,139 @@ const assertCountSoql = (soql: string): Result<string, McpError> => {
       path: 'soql',
     });
   }
+  // A GROUP BY count is MANY counts, one per group — there is no single number
+  // for this tool to return. Reading `records[0]` would report the FIRST
+  // group's count as the whole answer and reading `totalSize` would report the
+  // NUMBER OF GROUPS; both are confidently wrong. Refuse and name the tool that
+  // does answer it.
+  if (/\bgroup\s+by\b/i.test(normalized)) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'live_count returns ONE number and cannot answer a GROUP BY query (that is ' +
+        'one count per group). Drop the GROUP BY, or use sfi.live_group_count for a ' +
+        'per-value breakdown.',
+      path: 'soql',
+    });
+  }
   return ok(normalized);
 };
+
+/**
+ * TRUE for the bare `SELECT COUNT()` form, FALSE for an aggregate
+ * `SELECT COUNT(<field>)`. This distinction decides WHICH field of the org's
+ * response carries the answer, and getting it wrong is silent:
+ *
+ *   `SELECT COUNT() FROM Account`   -> {totalSize: 45231, records: []}
+ *   `SELECT COUNT(Id) FROM Account` -> {totalSize: 1, records: [{expr0: 45231}]}
+ *
+ * `assertCountSoql` accepts BOTH (a host LLM writes `COUNT(Id)` by default), so
+ * the reader must branch on the query FORM rather than on which property
+ * happens to be non-nullish first.
+ */
+const isBareCountForm = (normalizedSoql: string): boolean =>
+  /^select\s+count\s*\(\s*\)/i.test(normalizedSoql);
+
+/** What {@link readLiveCountEnvelope} could establish from the org's response. */
+type LiveCountRead =
+  | { readonly read: true; readonly count: number }
+  | { readonly read: false; readonly reason: string };
+
+/** Read one aggregate row's count column (`expr0`, or a caller-supplied alias). */
+const aggregateRowCount = (row: unknown): number | null => {
+  if (row === null || typeof row !== 'object') return null;
+  const rec = row as Record<string, unknown>;
+  const direct = rec['expr0'];
+  if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
+  // `SELECT COUNT(Id) total FROM X` names the column `total`, not `expr0`.
+  for (const [key, value] of Object.entries(rec)) {
+    if (key === 'attributes') continue;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return null;
+};
+
+/**
+ * Read a record count out of a `sf data query --json` envelope, or say it could
+ * NOT be read. There is deliberately no `?? 0` tail: `runSfJson` validates
+ * neither `status` nor `result` (it only proves the CLI exited 0 and stdout was
+ * JSON), so every envelope shape this reader does not recognise used to become a
+ * confident `count: 0` stamped `provenance: 'live_org'` — an answer that says
+ * "production is empty" when the truth is "the org's reply was not understood".
+ * A NOT-READ count is a typed absence the caller discloses, never a zero.
+ */
+const readLiveCountEnvelope = (
+  payload: unknown,
+  normalizedSoql: string,
+): LiveCountRead => {
+  const envelope =
+    payload !== null && typeof payload === 'object'
+      ? (payload as { result?: unknown })
+      : undefined;
+  const result = envelope?.result;
+  if (result === null || result === undefined || typeof result !== 'object') {
+    return {
+      read: false,
+      reason:
+        'the org response carried no `result` object (the sf CLI exited 0 and ' +
+        'returned JSON, but not a query result)',
+    };
+  }
+  const shaped = result as {
+    totalSize?: unknown;
+    records?: unknown;
+  };
+  if (isBareCountForm(normalizedSoql)) {
+    // Bare COUNT(): the row count IS totalSize; `records` is empty by design.
+    return typeof shaped.totalSize === 'number' && Number.isFinite(shaped.totalSize)
+      ? { read: true, count: shaped.totalSize }
+      : {
+          read: false,
+          reason:
+            'the org response carried no numeric `result.totalSize` for a bare ' +
+            'SELECT COUNT() query',
+        };
+  }
+  // Aggregate COUNT(<field>): `totalSize` is the number of AGGREGATE ROWS
+  // (always 1 without GROUP BY), never the record count. The answer is the
+  // single aggregate row's count column.
+  const rows = shaped.records;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return {
+      read: false,
+      reason:
+        'an aggregate SELECT COUNT(<field>) query returned no aggregate row to ' +
+        'read the count from',
+    };
+  }
+  if (rows.length > 1) {
+    return {
+      read: false,
+      reason:
+        `an aggregate SELECT COUNT(<field>) query returned ${rows.length} aggregate ` +
+        'rows; a single record count cannot be read from a grouped result',
+    };
+  }
+  const value = aggregateRowCount(rows[0]);
+  return value === null
+    ? {
+        read: false,
+        reason:
+          'the aggregate row carried no numeric count column (expected `expr0` or ' +
+          'a numeric alias)',
+      }
+    : { read: true, count: value };
+};
+
+/**
+ * Verbatim disclosure attached when {@link readLiveCountEnvelope} could not read
+ * a count. Paired with `count: null` + `cannotAnswer: true` so no caller can
+ * read the absence as a measured zero.
+ */
+export const LIVE_COUNT_NOT_READ_DISCLOSURE =
+  'Live count NOT READ: the org answered, but its response could not be read as a ' +
+  'record count. `count` is null — this is NOT a count of zero and must not be ' +
+  'reported as "no records".';
 
 /** Pull the FROM object API name from a SELECT statement, or `null`. */
 const fromObjectOf = (soql: string): string | null => {
@@ -720,13 +864,14 @@ export const liveCountHandler = async (
     exec,
   );
   if (!parsed.ok) return parsed;
-  const payload = parsed.value.value as {
-    result?: { totalSize?: number; records?: readonly { expr0?: number }[] };
-  };
-  const count =
-    payload.result?.totalSize ??
-    payload.result?.records?.[0]?.expr0 ??
-    0;
+  // The count is read by QUERY FORM (bare COUNT() -> totalSize, aggregate
+  // COUNT(<field>) -> the aggregate row), and an unrecognised envelope reads as
+  // NOT READ rather than as zero. See readLiveCountEnvelope.
+  const countRead = readLiveCountEnvelope(parsed.value.value, soqlCheck.value);
+  const count = countRead.read ? countRead.count : null;
+  const countNotRead = countRead.read
+    ? undefined
+    : `${LIVE_COUNT_NOT_READ_DISCLOSURE} Reason: ${countRead.reason}.`;
   const { mismatches, validationGaps } = await collectPicklistMismatches(
     ctx,
     soqlCheck.value,
@@ -736,14 +881,24 @@ export const liveCountHandler = async (
     soql: soqlCheck.value,
     trust: liveTrust(queriedAt),
   };
-  const baseRendered = renderLiveCountMarkdown(countData);
+  const baseRendered =
+    count === null
+      ? `**Count not read.** ${countNotRead ?? LIVE_COUNT_NOT_READ_DISCLOSURE}` +
+        `\n\n\`${soqlCheck.value}\`\n\n${renderTrustFooter(countData.trust)}`
+      : renderLiveCountMarkdown({ ...countData, count });
   const caveats = [
     ...mismatches.map((m) => `> ⚠️ ${m.disclosure}`),
     ...validationGaps.map((g) => `> ⚠️ ${g.disclosure}`),
   ];
-  const cannotAnswer = validationGaps.length > 0;
+  // TWO independent reasons this count cannot answer the question, kept apart
+  // because they have DIFFERENT outcomes: an offline picklist validation gap is
+  // a refusal (below), while an unread envelope is a DISCLOSED null count — the
+  // artifact still carries the query and the provenance, it just never claims a
+  // number. Folding them together would make one behave like the other.
+  const gapsCannotAnswer = validationGaps.length > 0;
+  const cannotAnswer = gapsCannotAnswer || count === null;
   const coverageCaveat =
-    cannotAnswer
+    gapsCannotAnswer
       ? 'Record count filtered on field values that could not be validated offline ' +
         '(managed-package field or live org data required) — this count cannot answer ' +
         'the question without querying live data.'
@@ -751,9 +906,12 @@ export const liveCountHandler = async (
   if (coverageCaveat !== undefined) {
     caveats.push(`> ⚠️ ${coverageCaveat}`);
   }
+  if (countNotRead !== undefined) {
+    caveats.push(`> ⚠️ ${countNotRead}`);
+  }
   const rendered =
     caveats.length > 0 ? `${baseRendered}\n\n${caveats.join('\n')}` : baseRendered;
-  if (cannotAnswer && coverageCaveat !== undefined) {
+  if (gapsCannotAnswer && coverageCaveat !== undefined) {
     const filterHint =
       input.objectApiName !== undefined
         ? ` object=${input.objectApiName}` +
@@ -763,7 +921,8 @@ export const liveCountHandler = async (
       kind: 'invalid-query',
       message:
         `${coverageCaveat}${filterHint} Query: ${soqlCheck.value} ` +
-        `Live query returned count=${count} but that cannot answer the filtered question.`,
+        `Live query returned count=${count === null ? 'null (not read)' : String(count)} ` +
+        `but that cannot answer the filtered question.`,
       path: 'soql',
     });
   }
@@ -775,6 +934,8 @@ export const liveCountHandler = async (
       ...(validationGaps.length > 0
         ? { picklistValidationGaps: validationGaps }
         : {}),
+      ...(cannotAnswer ? { cannotAnswer: true } : {}),
+      ...(countNotRead !== undefined ? { countNotRead } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -1147,6 +1308,21 @@ export interface LiveFieldPopulationOutput {
   readonly rendered: string;
 }
 
+/**
+ * A composed tool needs a NUMBER; `sfi.live_count` may honestly answer `null`.
+ * Turning that null into an error (rather than into a 0) is the whole point of
+ * the typed absence — see {@link LIVE_COUNT_NOT_READ_DISCLOSURE}.
+ */
+const unreadCountError = (
+  objectApiName: string,
+  data: Pick<LiveCountOutput, 'soql' | 'countNotRead'>,
+): McpError => ({
+  kind: 'internal',
+  message:
+    `Live population for ${objectApiName} could not be computed: ` +
+    `${data.countNotRead ?? LIVE_COUNT_NOT_READ_DISCLOSURE} Query: ${data.soql}`,
+});
+
 export const liveFieldPopulationHandler = async (
   ctx: Context,
   input: LiveFieldPopulationInput,
@@ -1180,6 +1356,11 @@ export const liveFieldPopulationHandler = async (
   );
   if (!totalResult.ok) return totalResult;
   const totalCount = totalResult.value.data.count;
+  // A NOT-READ count is not a zero. Refusing here is what keeps
+  // `populatedCount: 0` — "production holds no values for this field" — from
+  // being manufactured out of an envelope nobody could read, and then read as
+  // live evidence that a field is safe to delete.
+  if (totalCount === null) return err(unreadCountError(objectName, totalResult.value.data));
 
   const nullResult = await liveCountHandler(
     ctx,
@@ -1192,6 +1373,7 @@ export const liveFieldPopulationHandler = async (
   );
   if (!nullResult.ok) return nullResult;
   const nullCount = nullResult.value.data.count;
+  if (nullCount === null) return err(unreadCountError(objectName, nullResult.value.data));
   const populatedCount = Math.max(0, totalCount - nullCount);
   const populationRate =
     totalCount === 0 ? 0 : Math.round((populatedCount / totalCount) * 1000) / 1000;
@@ -1277,7 +1459,7 @@ const MAX_INACTIVE_USER_ROWS = 500;
 const DEFAULT_INACTIVE_USER_ROWS = 100;
 /** Keep the serialized `data` (structured rows + rendered table) under the
  *  global MAX_RESPONSE_BYTES (~45 KB) guard, with headroom for the wrapper. */
-const INACTIVE_USERS_BYTE_BUDGET = 36_000;
+export const INACTIVE_USERS_BYTE_BUDGET = 36_000;
 const DEFAULT_INACTIVE_DAYS = 30;
 const MS_PER_DAY = 86_400_000;
 
@@ -1346,37 +1528,82 @@ type InactiveUsersBase = Pick<
   'cutoff' | 'days' | 'userTypeFilter' | 'totalInactive' | 'trust'
 >;
 
-/** Trim the detail rows so the fully-serialized `data` (the structured `users[]`
- *  AND the `rendered` markdown table, which re-serializes each row) stays under
- *  INACTIVE_USERS_BYTE_BUDGET. The true total is reported separately, so a
- *  byte-trimmed page never understates the count — it only shows fewer rows. */
-const fitInactiveUsers = (
-  base: InactiveUsersBase,
-  allUsers: readonly InactiveUser[],
-): {
-  returned: number;
-  capped: boolean;
-  users: readonly InactiveUser[];
-  rendered: string;
-  byteTrimmed: boolean;
-} => {
-  let slice: readonly InactiveUser[] = allUsers;
+/**
+ * THE byte-fit loop for every live roster page (CENSUS-029 R6). Five handlers
+ * (`live_inactive_users`, `live_permset_holders`, `live_zombie_accounts`,
+ * `live_group_members`, `live_user_permsets`) each ship BOTH a structured row
+ * array and a `rendered` markdown table that re-serializes every row, so a wide
+ * page costs roughly double and must be trimmed to stay under the global
+ * response guard. That loop used to be hand-written FIVE times with five budget
+ * constants and five trim-note wordings, and it had already drifted: four
+ * copies built the trim note INSIDE the shape they measured, while the fifth
+ * appended it afterwards — so its bytes were never counted and that fitter's
+ * stated contract did not hold.
+ *
+ * The contract this ONE definition holds for all five:
+ *   - `build` receives the current slice AND whether trimming has happened, so
+ *     every field whose value depends on the slice — `returned`, `capped`, the
+ *     trim `note`, a keyset `nextAfterId` — is RECOMPUTED on each pass and can
+ *     never claim a completeness the trimmed page does not have (R2).
+ *   - the measured value is the FULL serialized shape INCLUDING `rendered` and
+ *     including the note, not a subset of it.
+ *   - forward progress: the slice never shrinks below one row, so a single
+ *     oversized row ships (flagged by the caller's own note) rather than
+ *     looping forever.
+ * A caller supplies only its budget constant, its shape builder, and its
+ * renderer; there is nothing left to drift.
+ */
+const fitRowsToByteBudget = <Row, Shape extends object>(
+  allRows: readonly Row[],
+  byteBudget: number,
+  build: (slice: readonly Row[], byteTrimmed: boolean) => Shape,
+  render: (shape: Shape) => string,
+): Shape & { readonly rendered: string } => {
+  let slice: readonly Row[] = allRows;
   let byteTrimmed = false;
   for (;;) {
-    const returned = slice.length;
-    const capped = base.totalInactive > returned;
-    const rendered = renderInactiveUsersMarkdown({ ...base, returned, capped, users: slice });
-    const bytes = Buffer.byteLength(
-      JSON.stringify({ ...base, returned, capped, users: slice, rendered }),
-      'utf8',
-    );
-    if (bytes <= INACTIVE_USERS_BYTE_BUDGET || slice.length <= 1) {
-      return { returned, capped, users: slice, rendered, byteTrimmed };
+    const shape = build(slice, byteTrimmed);
+    const fitted = { ...shape, rendered: render(shape) };
+    if (
+      Buffer.byteLength(JSON.stringify(fitted), 'utf8') <= byteBudget ||
+      slice.length <= 1
+    ) {
+      return fitted;
     }
     slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
     byteTrimmed = true;
   }
 };
+
+/** Trim the detail rows so the fully-serialized `data` (the structured `users[]`,
+ *  the `rendered` markdown table, AND the trim note) stays under
+ *  INACTIVE_USERS_BYTE_BUDGET. The true total is reported separately, so a
+ *  byte-trimmed page never understates the count — it only shows fewer rows. */
+const fitInactiveUsers = (
+  base: InactiveUsersBase,
+  allUsers: readonly InactiveUser[],
+): LiveInactiveUsersOutput =>
+  fitRowsToByteBudget(
+    allUsers,
+    INACTIVE_USERS_BYTE_BUDGET,
+    (slice, byteTrimmed): Omit<LiveInactiveUsersOutput, 'rendered'> => {
+      const returned = slice.length;
+      return {
+        ...base,
+        returned,
+        capped: byteTrimmed || base.totalInactive > returned,
+        users: slice,
+        ...(byteTrimmed
+          ? {
+              note:
+                `Detail rows trimmed to ${returned} to stay within the response ` +
+                `size limit; totalInactive (${base.totalInactive}) is the true count.`,
+            }
+          : {}),
+      };
+    },
+    (shape) => renderInactiveUsersMarkdown(shape),
+  );
 
 export const liveInactiveUsersHandler = async (
   ctx: Context,
@@ -1408,6 +1635,12 @@ export const liveInactiveUsersHandler = async (
   );
   if (!countResult.ok) return countResult;
   const totalInactive = countResult.value.data.count;
+  // `capped` and every "showing N of TOTAL" line hang off this number. An
+  // unread count would make the whole roster claim a completeness it never
+  // measured, so refuse rather than substitute a zero.
+  if (totalInactive === null) {
+    return err(unreadCountError('User', countResult.value.data));
+  }
 
   // Detail rows, oldest-dormant first (nulls — never logged in — first).
   const detailSoql =
@@ -1447,21 +1680,9 @@ export const liveInactiveUsersHandler = async (
     totalInactive,
     trust: liveTrust(queriedAt),
   };
-  const fit = fitInactiveUsers(base, users);
-  const data: LiveInactiveUsersOutput = {
-    ...base,
-    returned: fit.returned,
-    capped: fit.capped,
-    users: fit.users,
-    rendered: fit.rendered,
-    ...(fit.byteTrimmed
-      ? {
-          note:
-            `Detail rows trimmed to ${fit.returned} to stay within the response ` +
-            `size limit; totalInactive (${totalInactive}) is the true count.`,
-        }
-      : {}),
-  };
+  // The note is built INSIDE the fitter's measured shape — appending it here
+  // was exactly the drift that broke the fitter's byte contract.
+  const data: LiveInactiveUsersOutput = fitInactiveUsers(base, users);
   return ok({
     data,
     vaultState: {
@@ -4071,43 +4292,38 @@ const fitPermsetHolders = (
   allRows: readonly PermsetHolder[],
   groupNames: readonly string[],
   buckets: readonly HolderProfileBucket[] | undefined,
-): LivePermsetHoldersOutput => {
-  let slice: readonly PermsetHolder[] = allRows;
-  let byteTrimmed = false;
-  for (;;) {
-    const returned = slice.length;
-    const distinctReturned = new Set(slice.map((h) => h.userId)).size;
-    const capped = byteTrimmed || base.totalAssignees > distinctReturned;
-    const last = slice[slice.length - 1];
-    const nextAfterId =
-      capped && last !== undefined ? (last.assignmentId ?? last.userId) : undefined;
-    const { direct, via } = splitHolders(slice, groupNames);
-    const shape: Omit<LivePermsetHoldersOutput, 'rendered'> = {
-      ...base,
-      returned,
-      capped,
-      ...(nextAfterId !== undefined ? { nextAfterId } : {}),
-      ...(buckets !== undefined ? { buckets } : {}),
-      directHolders: direct,
-      ...(groupNames.length > 0 || via.length > 0 ? { viaGroupHolders: via } : {}),
-      ...(byteTrimmed
-        ? {
-            note:
-              `Detail rows trimmed to ${returned} to stay within the response size ` +
-              `limit; totalAssignees (${base.totalAssignees}) is the true count — ` +
-              `page on with afterId.`,
-          }
-        : {}),
-    };
-    const rendered = renderPermsetHoldersMarkdown(shape);
-    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
-    if (bytes <= HOLDERS_BYTE_BUDGET || slice.length <= 1) {
-      return { ...shape, rendered };
-    }
-    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
-    byteTrimmed = true;
-  }
-};
+): LivePermsetHoldersOutput =>
+  fitRowsToByteBudget(
+    allRows,
+    HOLDERS_BYTE_BUDGET,
+    (slice, byteTrimmed): Omit<LivePermsetHoldersOutput, 'rendered'> => {
+      const returned = slice.length;
+      const distinctReturned = new Set(slice.map((h) => h.userId)).size;
+      const capped = byteTrimmed || base.totalAssignees > distinctReturned;
+      const last = slice[slice.length - 1];
+      const nextAfterId =
+        capped && last !== undefined ? (last.assignmentId ?? last.userId) : undefined;
+      const { direct, via } = splitHolders(slice, groupNames);
+      return {
+        ...base,
+        returned,
+        capped,
+        ...(nextAfterId !== undefined ? { nextAfterId } : {}),
+        ...(buckets !== undefined ? { buckets } : {}),
+        directHolders: direct,
+        ...(groupNames.length > 0 || via.length > 0 ? { viaGroupHolders: via } : {}),
+        ...(byteTrimmed
+          ? {
+              note:
+                `Detail rows trimmed to ${returned} to stay within the response size ` +
+                `limit; totalAssignees (${base.totalAssignees}) is the true count — ` +
+                `page on with afterId.`,
+            }
+          : {}),
+      };
+    },
+    (shape) => renderPermsetHoldersMarkdown(shape),
+  );
 
 // ---------------------------------------------------------------------------
 // sfi.live_zombie_accounts — login access, no permission-set assignments
@@ -4223,37 +4439,31 @@ const fitZombieUsers = (
   base: ZombieBase,
   allUsers: readonly ZombieUser[],
   extraNote: string | undefined,
-): LiveZombieAccountsOutput => {
-  let slice: readonly ZombieUser[] = allUsers;
-  let byteTrimmed = false;
-  for (;;) {
-    const returned = slice.length;
-    const capped = byteTrimmed || base.totalZombies > returned;
-    const noteText = [
-      ...(extraNote !== undefined ? [extraNote] : []),
-      ...(byteTrimmed
-        ? [
-            `Detail rows trimmed to ${returned} to stay within the response size limit; ` +
-              `totalZombies (${base.totalZombies}) is the true count.`,
-          ]
-        : []),
-    ].join(' ');
-    const shape: Omit<LiveZombieAccountsOutput, 'rendered'> = {
-      ...base,
-      returned,
-      capped,
-      users: slice,
-      ...(noteText.length > 0 ? { note: noteText } : {}),
-    };
-    const rendered = renderZombieAccountsMarkdown(shape);
-    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
-    if (bytes <= ZOMBIE_BYTE_BUDGET || slice.length <= 1) {
-      return { ...shape, rendered };
-    }
-    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
-    byteTrimmed = true;
-  }
-};
+): LiveZombieAccountsOutput =>
+  fitRowsToByteBudget(
+    allUsers,
+    ZOMBIE_BYTE_BUDGET,
+    (slice, byteTrimmed): Omit<LiveZombieAccountsOutput, 'rendered'> => {
+      const returned = slice.length;
+      const noteText = [
+        ...(extraNote !== undefined ? [extraNote] : []),
+        ...(byteTrimmed
+          ? [
+              `Detail rows trimmed to ${returned} to stay within the response size limit; ` +
+                `totalZombies (${base.totalZombies}) is the true count.`,
+            ]
+          : []),
+      ].join(' ');
+      return {
+        ...base,
+        returned,
+        capped: byteTrimmed || base.totalZombies > returned,
+        users: slice,
+        ...(noteText.length > 0 ? { note: noteText } : {}),
+      };
+    },
+    (shape) => renderZombieAccountsMarkdown(shape),
+  );
 
 export const liveZombieAccountsHandler = async (
   ctx: Context,
@@ -4610,37 +4820,30 @@ const fitGroupMembers = (
   allUsers: readonly GroupMemberUser[],
   pageEntryCount: number,
   extraNote: string | undefined,
-): LiveGroupMembersOutput => {
-  let slice: readonly GroupMemberUser[] = allUsers;
-  let byteTrimmed = false;
-  for (;;) {
-    const returned = pageEntryCount - (allUsers.length - slice.length);
-    const capped = byteTrimmed || base.totalDirectMembers > pageEntryCount;
-    const noteText = [
-      ...(extraNote !== undefined ? [extraNote] : []),
-      ...(byteTrimmed
-        ? [
-            `User rows trimmed to ${slice.length} to stay within the response size limit; ` +
-              `totalDirectMembers (${base.totalDirectMembers}) is the true count.`,
-          ]
-        : []),
-    ].join(' ');
-    const shape: Omit<LiveGroupMembersOutput, 'rendered'> = {
-      ...base,
-      returned,
-      capped,
-      users: slice,
-      ...(noteText.length > 0 ? { note: noteText } : {}),
-    };
-    const rendered = renderGroupMembersMarkdown(shape);
-    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
-    if (bytes <= MEMBERS_BYTE_BUDGET || slice.length <= 1) {
-      return { ...shape, rendered };
-    }
-    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
-    byteTrimmed = true;
-  }
-};
+): LiveGroupMembersOutput =>
+  fitRowsToByteBudget(
+    allUsers,
+    MEMBERS_BYTE_BUDGET,
+    (slice, byteTrimmed): Omit<LiveGroupMembersOutput, 'rendered'> => {
+      const noteText = [
+        ...(extraNote !== undefined ? [extraNote] : []),
+        ...(byteTrimmed
+          ? [
+              `User rows trimmed to ${slice.length} to stay within the response size limit; ` +
+                `totalDirectMembers (${base.totalDirectMembers}) is the true count.`,
+            ]
+          : []),
+      ].join(' ');
+      return {
+        ...base,
+        returned: pageEntryCount - (allUsers.length - slice.length),
+        capped: byteTrimmed || base.totalDirectMembers > pageEntryCount,
+        users: slice,
+        ...(noteText.length > 0 ? { note: noteText } : {}),
+      };
+    },
+    (shape) => renderGroupMembersMarkdown(shape),
+  );
 
 export const liveGroupMembersHandler = async (
   ctx: Context,
@@ -5001,47 +5204,41 @@ const renderUserPermsetsMarkdown = (data: Omit<LiveUserPermsetsOutput, 'rendered
 const fitUserPermsets = (
   base: UserPermsetsBase,
   allRows: readonly TaggedUserGrant[],
-): LiveUserPermsetsOutput => {
-  let slice: readonly TaggedUserGrant[] = allRows;
-  let byteTrimmed = false;
-  for (;;) {
-    const returned = slice.length;
-    const capped = byteTrimmed || base.totalAssignments > returned;
-    const direct: UserPermsetGrant[] = [];
-    const byGroup = new Map<string, UserPermsetGrant[]>();
-    for (const row of slice) {
-      const { viaGroup, ...grant } = row;
-      if (viaGroup === null) {
-        direct.push(grant);
-      } else {
-        const list = byGroup.get(viaGroup) ?? [];
-        list.push(grant);
-        byGroup.set(viaGroup, list);
+): LiveUserPermsetsOutput =>
+  fitRowsToByteBudget(
+    allRows,
+    USER_PERMSETS_BYTE_BUDGET,
+    (slice, byteTrimmed): Omit<LiveUserPermsetsOutput, 'rendered'> => {
+      const returned = slice.length;
+      const direct: UserPermsetGrant[] = [];
+      const byGroup = new Map<string, UserPermsetGrant[]>();
+      for (const row of slice) {
+        const { viaGroup, ...grant } = row;
+        if (viaGroup === null) {
+          direct.push(grant);
+        } else {
+          const list = byGroup.get(viaGroup) ?? [];
+          list.push(grant);
+          byGroup.set(viaGroup, list);
+        }
       }
-    }
-    const shape: Omit<LiveUserPermsetsOutput, 'rendered'> = {
-      ...base,
-      returned,
-      capped,
-      directPermsets: direct,
-      viaGroups: [...byGroup.entries()].map(([groupName, permsets]) => ({ groupName, permsets })),
-      ...(byteTrimmed
-        ? {
-            note:
-              `Assignment rows trimmed to ${returned} to stay within the response size limit; ` +
-              `totalAssignments (${base.totalAssignments}) is the true count.`,
-          }
-        : {}),
-    };
-    const rendered = renderUserPermsetsMarkdown(shape);
-    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
-    if (bytes <= USER_PERMSETS_BYTE_BUDGET || slice.length <= 1) {
-      return { ...shape, rendered };
-    }
-    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
-    byteTrimmed = true;
-  }
-};
+      return {
+        ...base,
+        returned,
+        capped: byteTrimmed || base.totalAssignments > returned,
+        directPermsets: direct,
+        viaGroups: [...byGroup.entries()].map(([groupName, permsets]) => ({ groupName, permsets })),
+        ...(byteTrimmed
+          ? {
+              note:
+                `Assignment rows trimmed to ${returned} to stay within the response size limit; ` +
+                `totalAssignments (${base.totalAssignments}) is the true count.`,
+            }
+          : {}),
+      };
+    },
+    (shape) => renderUserPermsetsMarkdown(shape),
+  );
 
 export const liveUserPermsetsHandler = async (
   ctx: Context,

@@ -551,3 +551,127 @@ describe('layoutForUserInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+// =============================================================================
+// LAYOUT-FOR-USER-FLEXIPAGE-SCAN-CAP: the Lightning-surface lookup used to read
+// ONE alphabetical `listNodesByType(..., { limit: 500 })` page of FlexiPage. A
+// mature Lightning org holds far more than 500 record/app/home pages, so an
+// object whose record page sorts PAST that window produced the confident step
+// reason "no FlexiPage in vault targets object 'X'" AND — when the profile did
+// resolve a Classic layout — `uiSurface: 'classic-layout'` with the
+// `boundaryNote` suppressed. That is a wrong answer to the tool's headline
+// question, from a corpus that was never fully read.
+//
+// This block owns its OWN store (600 filler FlexiPages would otherwise slow and
+// pollute the shared seed above).
+// =============================================================================
+
+const CAP_PROFILE = 'Profile:Cap Admin';
+const FILLER_PAGE_COUNT = 600;
+
+/** Filler pages sort under `FlexiPage:Filler_…`, ahead of the `W…` targets. */
+const scanCapSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: CAP_PROFILE,
+      apiName: 'Cap Admin',
+      properties: {
+        layoutAssignments: [
+          { layout: 'Widget__c-Widget Layout', recordType: null },
+          { layout: 'Gadget__c-Gadget Layout', recordType: null },
+        ],
+      },
+    }),
+    ...Array.from({ length: FILLER_PAGE_COUNT }, (_, i) => {
+      const n = String(i).padStart(4, '0');
+      return makeNode({
+        id: `FlexiPage:Filler_${n}`,
+        type: 'FlexiPage',
+        apiName: `Filler_${n}`,
+        properties: { sobjectType: `Filler${n}__c`, pageType: 'RecordPage' },
+      });
+    }),
+    // The page the admin actually cares about — sorts AFTER every filler, so a
+    // single 500-row alphabetical window never reaches it.
+    makeNode({
+      id: 'FlexiPage:Widget_Record_Page',
+      type: 'FlexiPage',
+      apiName: 'Widget_Record_Page',
+      properties: { sobjectType: 'Widget__c', pageType: 'RecordPage' },
+    }),
+    // A page that predates `sobjectType` extraction (matched only by the
+    // apiName-prefix fallback) and also sorts past the window.
+    makeNode({
+      id: 'FlexiPage:Zeta__c_Legacy_Page',
+      type: 'FlexiPage',
+      apiName: 'Zeta__c_Legacy_Page',
+    }),
+  ],
+  edges: [],
+};
+
+describe('layoutForUserHandler — FlexiPage corpus past the 500-row scan window', () => {
+  let capDir: string;
+  let capStore: GraphStore;
+  let capCtx: Context;
+
+  beforeAll(async () => {
+    capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-layout-cap-'));
+    const opened = await openGraph(join(capDir, 'layout-cap.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    capStore = opened.value;
+    const imported = await importExtractionResults(capStore, [scanCapSeed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    capCtx = { vaultRoot: capDir, manifest: FIXTURE_MANIFEST, graph: capStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(capStore);
+    rmSync(capDir, { recursive: true, force: true });
+  });
+
+  it('resolves a FlexiPage that sorts past the first 500-row window', async () => {
+    const result = await layoutForUserHandler(capCtx, {
+      objectApiName: 'Widget__c',
+      profileId: CAP_PROFILE,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.flexiPageId).toBe('FlexiPage:Widget_Record_Page');
+    expect(d.uiSurface).toBe('lightning-flexipage');
+    // The Classic-vs-Lightning divergence warning must NOT be suppressed.
+    expect(d.boundaryNote).toContain('FlexiPage:Widget_Record_Page');
+    const pageStep = d.reasoning.find((s) => s.stage === 'LightningPageLookup');
+    expect(pageStep?.verdict).toBe('matched');
+  });
+
+  it('reaches an apiName-prefix-only page past the window (no sobjectType)', async () => {
+    const result = await layoutForUserHandler(capCtx, {
+      objectApiName: 'Zeta__c',
+      profileId: CAP_PROFILE,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.flexiPageId).toBe('FlexiPage:Zeta__c_Legacy_Page');
+    expect(result.value.data.uiSurface).toBe('lightning-flexipage');
+  });
+
+  it('still reports classic-layout for an object with no FlexiPage anywhere in the corpus', async () => {
+    const result = await layoutForUserHandler(capCtx, {
+      objectApiName: 'Gadget__c',
+      profileId: CAP_PROFILE,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.flexiPageId).toBeNull();
+    expect(d.uiSurface).toBe('classic-layout');
+    expect(d.boundaryNote).toBeUndefined();
+    const pageStep = d.reasoning.find((s) => s.stage === 'LightningPageLookup');
+    expect(pageStep?.verdict).toBe('unknown');
+    expect(pageStep?.reason).toContain('Gadget__c');
+  });
+});

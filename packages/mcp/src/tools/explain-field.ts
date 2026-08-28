@@ -47,17 +47,26 @@
  *     `recordValues` is omitted from the output entirely — present-
  *     but-empty would be misleading (a non-`__mdt` parent has no
  *     CustomMetadataRecord children by definition).
- *   - **Honesty axis** (per PLAN-v1.6 §3): when the parent is
- *     `__mdt` but the v1.6 R2 extraction did not surface any
- *     CustomMetadataRecord children (the vault either has no
- *     records for the type or the records were extracted but
- *     dropped), `recordValues` is the empty array. The tool does
- *     NOT fabricate records. Records that exist but lack a value
- *     for this specific field are omitted from the list — emitting
- *     `value: null` without context would conflate "no value set"
- *     with "the masked value is null", which is the wrong signal
- *     for a business-user trying to understand what a field is
- *     configured to.
+ *   - **Honesty axis** (per PLAN-v1.6 §3): the tool does NOT fabricate
+ *     records. Records that exist but lack a value for this specific
+ *     field are omitted from the list — emitting `value: null` without
+ *     context would conflate "no value set" with "the masked value is
+ *     null", which is the wrong signal for a business-user trying to
+ *     understand what a field is configured to.
+ *   - **Typed absence (R1)**: an empty `recordValues` is only ever a
+ *     VERIFIED zero. The three ways it can be empty no longer render
+ *     identically. (a) Every record carries an extracted `values` array
+ *     and none names this field → `recordValues: []` with NO note: a real
+ *     "no record sets this field". (b) One or more records carry no
+ *     `values` property AT ALL — a vault refreshed before the v1.6 R2
+ *     record-values extractor, which always writes `values` (`[]` when the
+ *     record declares none) — or carry one that is not an array →
+ *     `recordValuesNote` names those record ids and says the values were
+ *     NOT read. (c) The field node has no `parentId`, so there is no
+ *     Custom Metadata Type to enumerate from → `recordValuesNote` says so.
+ *     The decision is made by `familyWasExtracted` (does the node CARRY
+ *     the property) — never by whether the array is empty, which is
+ *     exactly what `absence-disclosure.ts` forbids.
  *   - Masked values are passed through verbatim per the lookup-record
  *     convention: `{ value: null, isMasked: true }` so the caller
  *     surfaces the masked status to the end user.
@@ -75,6 +84,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+} from './absence-disclosure.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { resolveFieldAlias } from './input-aliases.js';
@@ -225,7 +238,19 @@ export interface ExplainFieldOutput {
    * `isActive` as an inline definition, so no disclosure is needed.
    */
   readonly picklistValuesNote?: string;
-  readonly recordValues?: readonly ExplainFieldRecordValue[];  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
+  readonly recordValues?: readonly ExplainFieldRecordValue[];
+  /**
+   * Present ONLY when `recordValues` is incomplete for a reason that is NOT
+   * "the org sets no value" (R1 typed absence). Two causes: one or more
+   * CustomMetadataRecord children carry no extracted `values` property (a
+   * vault built before the v1.6 R2 record-values extractor, which ALWAYS
+   * writes `values` — `[]` when the record declares none) or carry one that
+   * is not an array; or the field node has no `parentId` so there is no
+   * Custom Metadata Type to enumerate records from. Absent when every record
+   * WAS read — an empty `recordValues` with no note is a verified zero.
+   */
+  readonly recordValuesNote?: string;
+  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
 }
 
@@ -391,20 +416,58 @@ const shouldIncludeRecordValues = (
 const readFieldApiName = (node: Node): string => node.apiName;
 
 /**
- * Pull one CustomMetadataRecord child's value for a given field name.
- * Returns `null` when the record has no matching `<values>` entry for
- * the field — the v1.6 R2 extractor only emits an entry when the
- * record's XML carries one, so a missing entry semantically means
- * "no value set" and should be omitted from the cross-record list
- * (per the honesty-axis design in this module's JSDoc).
+ * The CustomMetadataRecord node property that says the record-values family
+ * WAS extracted. `packages/extractors/src/custom-metadata-record.ts` writes it
+ * unconditionally (alongside `valuesCount`), `[]` included, so a node that
+ * does not CARRY it was built by a refresh predating that extractor.
+ */
+const RECORD_VALUES_SENTINEL = 'values';
+
+/**
+ * How readable one record's value list turned out to be. R1: the three states
+ * are kept apart at the point of reading so the caller cannot collapse
+ * NEVER-SCANNED into SCANNED-AND-CLEAN downstream.
+ */
+type RecordValuesReadState = 'not-extracted' | 'unreadable' | 'read';
+
+/**
+ * Read one CustomMetadataRecord's `values` list, reporting WHY it is
+ * unusable when it is.
+ *
+ *   - no sentinel property → never extracted (the R1 law: the node not
+ *     CARRYING the property, not an empty array, is what says "not checked");
+ *   - sentinel present but not an array → a corrupt vault entry. The
+ *     extractor guarantees an array, so a non-array is unreadable and
+ *     contributes nothing — a blind spot, never a silent skip.
+ *
+ * An extracted, EMPTY array is a real answer and comes back as `read`.
+ */
+const readRecordValueEntries = (
+  props: Readonly<Record<string, unknown>>,
+): { readonly state: RecordValuesReadState; readonly entries: readonly unknown[] } => {
+  if (!familyWasExtracted(props, RECORD_VALUES_SENTINEL)) {
+    return { state: 'not-extracted', entries: [] };
+  }
+  const raw = props[RECORD_VALUES_SENTINEL];
+  if (!Array.isArray(raw)) return { state: 'unreadable', entries: [] };
+  return { state: 'read', entries: raw as readonly unknown[] };
+};
+
+/**
+ * Pull one record's value for a given field name out of an ALREADY-READ
+ * `values` list. Returns `null` when the list has no matching entry for the
+ * field — the v1.6 R2 extractor only emits an entry when the record's XML
+ * carries one, so a missing entry semantically means "no value set" and is
+ * omitted from the cross-record list (per the honesty-axis design in this
+ * module's JSDoc). Callers must route through {@link readRecordValueEntries}
+ * so a `null` here can only ever mean "read, and this record sets nothing" —
+ * never "we could not look".
  */
 const findValueForField = (
-  record: Node,
+  entries: readonly unknown[],
   fieldApiName: string,
 ): { value: unknown; isMasked: boolean } | null => {
-  const values = record.properties['values'];
-  if (!Array.isArray(values)) return null;
-  for (const entry of values) {
+  for (const entry of entries) {
     if (typeof entry !== 'object' || entry === null) continue;
     const obj = entry as Record<string, unknown>;
     if (obj['field'] === fieldApiName) {
@@ -427,24 +490,50 @@ const compareRecordValues = (
 ): number => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0);
 
 /**
+ * What one `__mdt` parent's record sweep produced: the rows that were read,
+ * plus the record ids whose values could NOT be read at all. The second half
+ * is what stops an empty `rows` from reading as a verified zero.
+ */
+interface CollectedRecordValues {
+  readonly rows: readonly ExplainFieldRecordValue[];
+  /** Records carrying no `values` property — a pre-v1.6 refresh. */
+  readonly notExtracted: readonly string[];
+  /** Records whose `values` is present but not an array — corrupt. */
+  readonly unreadable: readonly string[];
+}
+
+/**
  * Enumerate every CustomMetadataRecord child of the parent
  * `__mdt` type and project each one's matching field value into the
  * `ExplainFieldRecordValue` shape. Records without a value for the
- * field are omitted (per the honesty axis). Sort: `recordId` ASC.
+ * field are omitted (per the honesty axis); records whose value list could
+ * not be READ are collected separately so the caller can disclose them
+ * instead of letting them vanish. Sort: `recordId` ASC.
  */
 const collectRecordValues = async (
   ctx: Context,
   parentId: ComponentId,
   fieldApiName: string,
-): Promise<Result<readonly ExplainFieldRecordValue[], string>> => {
+): Promise<Result<CollectedRecordValues, string>> => {
   const childrenResult = await listChildren(ctx.graph, parentId);
   if (!childrenResult.ok) {
     return err(childrenResult.error.message);
   }
   const out: ExplainFieldRecordValue[] = [];
+  const notExtracted: string[] = [];
+  const unreadable: string[] = [];
   for (const child of childrenResult.value) {
     if (child.type !== 'CustomMetadataRecord') continue;
-    const match = findValueForField(child, fieldApiName);
+    const read = readRecordValueEntries(child.properties);
+    if (read.state === 'not-extracted') {
+      notExtracted.push(child.id);
+      continue;
+    }
+    if (read.state === 'unreadable') {
+      unreadable.push(child.id);
+      continue;
+    }
+    const match = findValueForField(read.entries, fieldApiName);
     if (match === null) continue;
     const recordLabelRaw = child.properties['label'];
     const recordLabel =
@@ -460,8 +549,63 @@ const collectRecordValues = async (
       isMasked: match.isMasked,
     });
   }
-  return ok(out.sort(compareRecordValues));
+  return ok({
+    rows: out.sort(compareRecordValues),
+    notExtracted: notExtracted.sort(),
+    unreadable: unreadable.sort(),
+  });
 };
+
+/**
+ * The ONE place the record-values blind spot is worded (R6). The
+ * never-extracted half is built from the shared `notExtractedFamilyDisclosure`
+ * template so it cannot drift from the rest of the tree; the corrupt half gets
+ * its own clause because "carries no extracted `values` property" would be a
+ * false statement about a record that carries a malformed one.
+ *
+ * Returns `undefined` when every record was read — an empty `recordValues`
+ * with no note is a VERIFIED "no record sets this field", and hedging that
+ * would be as dishonest as hiding the blind spot.
+ */
+const recordValuesBlindSpotNote = (
+  collected: CollectedRecordValues,
+): string | undefined => {
+  const parts: string[] = [];
+  if (collected.notExtracted.length > 0) {
+    parts.push(
+      notExtractedFamilyDisclosure({
+        subject: 'Custom metadata record values',
+        verb: 'read',
+        pluralSubject: true,
+        sentinelProperty: RECORD_VALUES_SENTINEL,
+        containers: collected.notExtracted,
+        surface: '`recordValues`',
+        zeroReading: '"no record sets this field"',
+      }),
+    );
+  }
+  if (collected.unreadable.length > 0) {
+    parts.push(
+      `${collected.unreadable.length} CustomMetadataRecord(s) carry a ` +
+        `\`${RECORD_VALUES_SENTINEL}\` property that is NOT an array and could not be read ` +
+        `(${collected.unreadable.join(', ')}) — a corrupt or partially written vault entry. ` +
+        'Their values are a BLIND SPOT here, NEVER a verified "no value set". ' +
+        'Re-run `/sfi-refresh`.',
+    );
+  }
+  return parts.length > 0 ? parts.join(' ') : undefined;
+};
+
+/**
+ * The `parentId === null` disclosure. There is no Custom Metadata Type to
+ * enumerate CustomMetadataRecord children from, so NOTHING was checked — the
+ * empty array is a structural absence, not a verified zero.
+ */
+const NO_PARENT_RECORD_VALUES_NOTE =
+  '`recordValues` is empty because this CustomField node carries NO parentId — there is no ' +
+  'Custom Metadata Type to enumerate CustomMetadataRecord children from, so nothing was ' +
+  'checked. This is a structural absence (the vault recorded this field without a parent), ' +
+  'NEVER a verified "no record sets this field". Re-run `/sfi-refresh`.';
 
 /**
  * The `sfi.explain_field` MCP tool. Returns one field's label,
@@ -475,6 +619,8 @@ const collectRecordValues = async (
  *     fieldId: 'CustomField:Marketo_Api_Setting__mdt.Number_Of_Retries__c',
  *   });
  *   if (r.ok) console.log(r.value.data.recordValues?.length);
+ *   // An empty list with NO `recordValuesNote` is a verified zero; one WITH
+ *   // a note means some record's values were never extracted.
  */
 export const explainFieldHandler = async (
   ctx: Context,
@@ -593,13 +739,15 @@ export const explainFieldHandler = async (
   }
 
   if (node.parentId === null) {
-    // No parent to enumerate from — surface an empty list rather
-    // than fabricating. This is the same honesty signal as the
-    // "parent has no extracted records" path below: callers see an
-    // empty array and know to refresh the vault if they expected
-    // records.
+    // No parent to enumerate from. R1: an empty array ALONE would read as a
+    // verified "no record sets this field", so the structural reason ships
+    // with it.
     return ok({
-      data: { ...base, recordValues: [] },
+      data: {
+        ...base,
+        recordValues: [],
+        recordValuesNote: NO_PARENT_RECORD_VALUES_NOTE,
+      },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
         refreshedAt: ctx.manifest.refreshedAt,
@@ -619,8 +767,13 @@ export const explainFieldHandler = async (
     });
   }
 
+  const recordValuesNote = recordValuesBlindSpotNote(recordValuesResult.value);
   return ok({
-    data: { ...base, recordValues: recordValuesResult.value },
+    data: {
+      ...base,
+      recordValues: recordValuesResult.value.rows,
+      ...(recordValuesNote !== undefined ? { recordValuesNote } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

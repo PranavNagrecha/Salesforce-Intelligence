@@ -1,11 +1,20 @@
 /// <reference types="vitest/globals" />
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { VaultManifest } from '@sf-intelligence/contracts';
-import { openGraph, closeGraph, type GraphStore } from '@sf-intelligence/graph';
+import type {
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
 import {
@@ -392,6 +401,29 @@ describe('searchFlowMetadataInputSchema', () => {
 // Uses a self-contained temp vault so these tests are independent of the
 // shared fixture (which has no <status> elements in its flows).
 // =============================================================================
+const makeObjectNode = (id: string): Node => ({
+  id,
+  type: 'CustomObject',
+  apiName: id.slice('CustomObject:'.length),
+  label: null,
+  parentId: null,
+  sourcePath: 'unused.object-meta.xml',
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+});
+
+/** The three objects the CR-06 flow corpus declares in its `<object>` tags. */
+const OBJECT_SEED: ExtractionResult = {
+  nodes: [
+    makeObjectNode('CustomObject:Account'),
+    makeObjectNode('CustomObject:Contact'),
+    makeObjectNode('CustomObject:Opportunity'),
+  ],
+  edges: [],
+};
+
 describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => {
   let cr06Dir: string;
   let cr06Store: GraphStore;
@@ -402,6 +434,12 @@ describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => 
     const opened = await openGraph(join(cr06Dir, 'unused.db'));
     if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
     cr06Store = opened.value;
+    // R4: `triggerObject` is now VERIFIED against the vault before it is used,
+    // so the object nodes the corpus references must exist in the graph. Note
+    // the vault spells the object `Account` — the wrong-case test below passes
+    // `account` and must still get the Account answer.
+    const imported = await importExtractionResults(cr06Store, [OBJECT_SEED]);
+    if (!imported.ok) throw new Error(`import failed: ${imported.error.message}`);
     cr06Ctx = { vaultRoot: cr06Dir, manifest: FIXTURE_MANIFEST, graph: cr06Store };
 
     // Helper: write a flow with a given <status> and optional <object>.
@@ -508,5 +546,183 @@ describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => 
     // Only Draft_Flow has <object>Opportunity</object>; only its status line matches.
     expect(r.value.data.matches.every((m) => m.path.includes('Draft_Flow'))).toBe(true);
     expect(r.value.data.matches.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// =============================================================================
+// R4 — SEARCH-FLOW-METADATA-TRUSTS-AN-UNVERIFIED-TRIGGEROBJECT
+// `triggerObject` was string-templated straight into a CASE-SENSITIVE regex and
+// never checked against the vault, so a wrong-case name, a typo, and a
+// regex-shaped value each produced a confident answer about the wrong set of
+// flows: `{Active: 0, ..., total: 0}` reads identically to a checked
+// "this object has no flows at all".
+// =============================================================================
+describe('searchFlowMetadataHandler — R4 triggerObject scope resolution', () => {
+  let r4Dir: string;
+  let r4Store: GraphStore;
+  let r4Ctx: Context;
+
+  beforeAll(async () => {
+    r4Dir = mkdtempSync(join(tmpdir(), 'sfi-sfm-r4-'));
+    const opened = await openGraph(join(r4Dir, 'unused.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    r4Store = opened.value;
+    const imported = await importExtractionResults(r4Store, [OBJECT_SEED]);
+    if (!imported.ok) throw new Error(`import failed: ${imported.error.message}`);
+    r4Ctx = { vaultRoot: r4Dir, manifest: FIXTURE_MANIFEST, graph: r4Store };
+
+    const dir = join(r4Dir, 'source', 'flows');
+    mkdirSync(dir, { recursive: true });
+    const write = (name: string, status: string, object: string): void => {
+      writeFileSync(
+        join(dir, name),
+        `<?xml version="1.0" encoding="UTF-8"?>\n<Flow xmlns="http://soap.sforce.com/2006/04/metadata">\n    <status>${status}</status>\n    <object>${object}</object>\n</Flow>\n`,
+      );
+    };
+    // The vault spells the object with its canonical Salesforce casing.
+    write('Acc_One.flow-meta.xml', 'Active', 'Account');
+    write('Acc_Two.flow-meta.xml', 'Active', 'Account');
+    write('Acc_Three.flow-meta.xml', 'Obsolete', 'Account');
+    write('Con_One.flow-meta.xml', 'Active', 'Contact');
+  });
+
+  afterAll(async () => {
+    await closeGraph(r4Store);
+    rmSync(r4Dir, { recursive: true, force: true });
+  });
+
+  it('WRONG CASE: `account` must answer about Account, not report a confident zero', async () => {
+    const r = await searchFlowMetadataHandler(r4Ctx, {
+      summarize: true,
+      triggerObject: 'account',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const summary = r.value.data.statusSummary;
+    expect(summary).toBeDefined();
+    if (summary === undefined) return;
+    // Salesforce api names are case-insensitive: `account` names Account.
+    expect(summary.total).toBe(3);
+    expect(summary.Active).toBe(2);
+    expect(summary.Obsolete).toBe(1);
+  });
+
+  it('TYPO: an object absent from the vault is REFUSED, never answered with total 0', async () => {
+    const r = await searchFlowMetadataHandler(r4Ctx, {
+      summarize: true,
+      triggerObject: 'Acount',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Acount');
+  });
+
+  it('METACHARACTERS: a regex-shaped triggerObject cannot silently over-match', async () => {
+    const r = await searchFlowMetadataHandler(r4Ctx, {
+      summarize: true,
+      triggerObject: 'Account|Contact',
+    });
+    // Whatever the tool does, it must NOT quietly answer for BOTH objects as
+    // though the caller had named one.
+    if (r.ok) {
+      expect(r.value.data.statusSummary?.total).not.toBe(4);
+    } else {
+      expect(r.error.kind).toBe('invalid-query');
+    }
+  });
+
+  it('appliedScope: a scoped call echoes the canonical object id; a bare call omits it', async () => {
+    const scoped = await searchFlowMetadataHandler(r4Ctx, {
+      summarize: true,
+      triggerObject: 'account',
+    });
+    const bare = await searchFlowMetadataHandler(r4Ctx, { summarize: true });
+    expect(scoped.ok && bare.ok).toBe(true);
+    if (!scoped.ok || !bare.ok) return;
+    expect(scoped.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Account',
+      mode: 'component',
+    });
+    expect('appliedScope' in bare.value.data).toBe(false);
+  });
+});
+
+// =============================================================================
+// R1 — SEARCH-FLOW-METADATA-SWALLOWS-UNREADABLE-FILES
+// A flow file that fails to read was `continue`d: it contributed to nothing —
+// not `statusSummary.total`, not `matches`, not any error or disclosure — so a
+// partial tally was presented as the org's complete flow status.
+// =============================================================================
+describe('searchFlowMetadataHandler — R1 unreadable flow files', () => {
+  let r1Dir: string;
+  let r1Store: GraphStore;
+  let r1Ctx: Context;
+  let lockedPath: string;
+
+  beforeAll(async () => {
+    r1Dir = mkdtempSync(join(tmpdir(), 'sfi-sfm-r1-'));
+    const opened = await openGraph(join(r1Dir, 'unused.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    r1Store = opened.value;
+    r1Ctx = { vaultRoot: r1Dir, manifest: FIXTURE_MANIFEST, graph: r1Store };
+
+    const dir = join(r1Dir, 'source', 'flows');
+    mkdirSync(dir, { recursive: true });
+    const body = (status: string): string =>
+      `<?xml version="1.0" encoding="UTF-8"?>\n<Flow xmlns="http://soap.sforce.com/2006/04/metadata">\n    <status>${status}</status>\n</Flow>\n`;
+    writeFileSync(join(dir, 'Readable_A.flow-meta.xml'), body('Active'));
+    writeFileSync(join(dir, 'Readable_B.flow-meta.xml'), body('Obsolete'));
+    // A file that `stat`s as a regular file (so it IS collected) but cannot be
+    // opened — the permissions / truncated-refresh / broken-mount case.
+    lockedPath = join(dir, 'Unreadable_C.flow-meta.xml');
+    writeFileSync(lockedPath, body('Active'));
+    chmodSync(lockedPath, 0o000);
+  });
+
+  afterAll(async () => {
+    chmodSync(lockedPath, 0o644);
+    await closeGraph(r1Store);
+    rmSync(r1Dir, { recursive: true, force: true });
+  });
+
+  it('DISCLOSES the unreadable file rather than dropping it from the tally in silence', async () => {
+    const r = await searchFlowMetadataHandler(r1Ctx, { summarize: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    // The two readable files are tallied.
+    expect(data.statusSummary?.total).toBe(2);
+    // And the third is NAMED as never opened.
+    expect(data.filesFound).toBe(3);
+    expect(data.filesUnreadable).toBe(1);
+    expect(data.unreadablePaths).toEqual([
+      'source/flows/Unreadable_C.flow-meta.xml',
+    ]);
+    expect(data.coverageNote).toBeDefined();
+    expect(data.coverageNote ?? '').toMatch(/not checked/i);
+  });
+
+  it('a fully readable vault reports zero unreadable files and NO coverage note', async () => {
+    const r = await searchFlowMetadataHandler(ctx, { summarize: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.filesUnreadable).toBe(0);
+    expect(r.value.data.unreadablePaths).toEqual([]);
+    expect(r.value.data.coverageNote).toBeUndefined();
+  });
+
+  it('summarize-only mode does not present `matches: []` as a checked-empty search', async () => {
+    const summaryOnly = await searchFlowMetadataHandler(r1Ctx, { summarize: true });
+    const searched = await searchFlowMetadataHandler(r1Ctx, {
+      summarize: true,
+      query: 'status',
+    });
+    expect(summaryOnly.ok && searched.ok).toBe(true);
+    if (!summaryOnly.ok || !searched.ok) return;
+    // No query was supplied, so no line search ran — `matches: []` must not be
+    // readable as "searched and found nothing".
+    expect(summaryOnly.value.data.searched).toBe(false);
+    expect(searched.value.data.searched).toBe(true);
   });
 });

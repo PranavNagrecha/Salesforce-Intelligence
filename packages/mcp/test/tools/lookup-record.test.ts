@@ -17,6 +17,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import type { LookupRecordOutput } from '../../src/tools/lookup-record.js';
 import {
   lookupRecordHandler,
   lookupRecordInputSchema,
@@ -255,6 +256,79 @@ const customSettingSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 5: A record node built by a refresh that PREDATES the v1.6 R2 values
+// extractor — the node carries NO `values` property at all. This is the R1
+// never-extracted case: it must NOT render identically to `emptyValuesSeed`,
+// which was checked and genuinely holds nothing.
+// =============================================================================
+
+const LEGACY_TYPE_ID = 'CustomObject:Legacy_Type__mdt';
+const LEGACY_RECORD_ID = 'CustomMetadataRecord:Legacy_Type__mdt.Retry_Policy';
+
+const legacyNoValuesPropertySeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: LEGACY_TYPE_ID,
+      type: 'CustomObject',
+      apiName: 'Legacy_Type__mdt',
+      properties: {},
+    }),
+    makeNode({
+      id: LEGACY_RECORD_ID,
+      type: 'CustomMetadataRecord',
+      apiName: 'Legacy_Type__mdt.Retry_Policy',
+      label: 'Retry Policy',
+      parentId: LEGACY_TYPE_ID,
+      // No `values` and no `valuesCount` — exactly what an older extractor
+      // schema wrote.
+      properties: {
+        label: 'Retry Policy',
+        protected: false,
+        recordName: 'Retry_Policy',
+        typeApiName: 'Legacy_Type__mdt',
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 6: A record node whose `values` property IS present but is not an
+// array — a corrupt / partially written vault entry. Distinct from both
+// "never extracted" and "extracted and empty".
+// =============================================================================
+
+const CORRUPT_TYPE_ID = 'CustomObject:Corrupt_Type__mdt';
+const CORRUPT_RECORD_ID = 'CustomMetadataRecord:Corrupt_Type__mdt.Flag';
+
+const corruptValuesSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: CORRUPT_TYPE_ID,
+      type: 'CustomObject',
+      apiName: 'Corrupt_Type__mdt',
+      properties: {},
+    }),
+    makeNode({
+      id: CORRUPT_RECORD_ID,
+      type: 'CustomMetadataRecord',
+      apiName: 'Corrupt_Type__mdt.Flag',
+      label: 'Feature Flag',
+      parentId: CORRUPT_TYPE_ID,
+      properties: {
+        label: 'Feature Flag',
+        protected: false,
+        recordName: 'Flag',
+        typeApiName: 'Corrupt_Type__mdt',
+        valuesCount: 2,
+        values: 'not-an-array',
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // One shared graph store + Context across the suite. All seeds use distinct
 // ids so there is no cross-test interference.
 let tempDir: string;
@@ -274,6 +348,8 @@ beforeAll(async () => {
     clinicalModule2Seed,
     emptyValuesSeed,
     customSettingSeed,
+    legacyNoValuesPropertySeed,
+    corruptValuesSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -531,5 +607,93 @@ describe('lookupRecordHandler — scope honesty (FIX 12)', () => {
     expect(result.error.message).toContain(
       'object selectors name different targets',
     );
+  });
+});
+
+// =============================================================================
+// R1 — typed absence for `values`. Both v1.6 R2 extractors ALWAYS write
+// `values` (and `valuesCount`), so a node that does not CARRY the property was
+// never scanned. Deciding by `Array.isArray` collapses NEVER-EXTRACTED into
+// EXTRACTED-AND-CLEAN and tells a business user a feature-flag record is
+// empty when the truth is "we never looked".
+// =============================================================================
+
+describe('lookupRecordHandler — typed absence for `values` (R1)', () => {
+  it('does not render a never-extracted record identically to an empty one', async () => {
+    const legacy = await lookupRecordHandler(ctx, {
+      recordId: LEGACY_RECORD_ID,
+    });
+    const empty = await lookupRecordHandler(ctx, { recordId: EMPTY_RECORD_ID });
+    expect(legacy.ok).toBe(true);
+    expect(empty.ok).toBe(true);
+    if (!legacy.ok || !empty.ok) return;
+    // Project ONLY the values answer — identity fields obviously differ, and
+    // comparing whole payloads would let this test pass for the wrong reason.
+    const valuesAnswer = (d: LookupRecordOutput): unknown => ({
+      values: d.values,
+      valuesState: d.valuesState,
+      valuesCount: d.valuesCount,
+      disclosures: d.disclosures,
+    });
+    // The whole finding: these two answers must be distinguishable.
+    expect(valuesAnswer(legacy.value.data)).not.toEqual(
+      valuesAnswer(empty.value.data),
+    );
+  });
+
+  it('marks a node with NO `values` property as not-extracted, never as empty', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: LEGACY_RECORD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { valuesState, valuesCount, disclosures } = result.value.data;
+    expect(valuesState).toBe('not-extracted');
+    // `valuesCount` is the extractor's own count; absent means never written.
+    expect(valuesCount).toBeNull();
+    expect(disclosures.length).toBeGreaterThan(0);
+    expect(disclosures.join(' ')).toContain('NOT');
+    expect(disclosures.join(' ')).toContain('values');
+  });
+
+  it('marks an EXTRACTED-and-empty record as read with a verified zero and no hedge', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: EMPTY_RECORD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { values, valuesState, valuesCount, disclosures } = result.value.data;
+    expect(values).toEqual([]);
+    expect(valuesState).toBe('read');
+    expect(valuesCount).toBe(0);
+    // A verified zero must NOT be hedged — that would be as dishonest as
+    // hiding the blind spot.
+    expect(disclosures).toEqual([]);
+  });
+
+  it('marks a present-but-non-array `values` as unreadable, never as empty', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: CORRUPT_RECORD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { values, valuesState, disclosures } = result.value.data;
+    expect(values).toEqual([]);
+    expect(valuesState).toBe('unreadable');
+    expect(disclosures.join(' ')).toContain('BLIND SPOT');
+    // The corrupt case must not be worded as "carries no extracted property" —
+    // it carries one; it is malformed.
+    expect(valuesState).not.toBe('not-extracted');
+  });
+
+  it('surfaces the `valuesCount` drift the module JSDoc promised as a distinguishing mechanism', async () => {
+    const result = await lookupRecordHandler(ctx, {
+      recordId: MARKETO_DEFAULT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.valuesCount).toBe(3);
+    expect(result.value.data.values.length).toBe(3);
+    expect(result.value.data.valuesState).toBe('read');
   });
 });

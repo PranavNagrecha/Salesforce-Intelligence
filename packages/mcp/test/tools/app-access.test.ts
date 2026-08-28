@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { Edge, ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
 import {
@@ -274,5 +275,190 @@ describe('appAccessHandler', () => {
     // Either component-not-found (decode happens after node lookup) or
     // invalid-query (cursor rejected) — both prove the token can't cross apps.
     expect(['invalid-query', 'component-not-found']).toContain(replay.error.kind);
+  });
+});
+
+/**
+ * R1 — PARTIAL extraction of `applicationVisibilities`.
+ *
+ * The pre-fix handler decided the boundaryNote from a whole-corpus OR
+ * (`anyGranterHadAppVis`): one granter carrying the property was enough to
+ * select the CONFIDENT wording, while every granter that did NOT carry it was
+ * silently `continue`d out of the scan. On a vault where most containers were
+ * extracted and one was not, the missing one contributes nothing to `canOpen`
+ * and the note still asserts the list was computed from
+ * `applicationVisibilities` — a missed grant in a security tool.
+ *
+ * Own store: the shared fixture above mutates as tests run (one case imports a
+ * property-less Profile into it), so the partial/whole cases are isolated here.
+ */
+describe('appAccessHandler — partial applicationVisibilities extraction (R1)', () => {
+  const APP2 = 'CustomApplication:Finance';
+  let dir2: string; let store2: GraphStore; let ctx2: Context;
+
+  beforeAll(async () => {
+    dir2 = mkdtempSync(join(tmpdir(), 'sfi-app-access-partial-'));
+    const o = await openGraph(join(dir2, 'g.db')); if (!o.ok) throw new Error(o.error.message);
+    store2 = o.value;
+    const i = await importExtractionResults(store2, [{
+      nodes: [
+        node({ id: APP2, type: 'CustomApplication', apiName: 'Finance', label: 'Finance', properties: { navType: 'Standard' } }),
+        // Extracted AND grants — the container that makes the whole-corpus OR true.
+        node({ id: 'Profile:Extracted', type: 'Profile', apiName: 'Extracted', properties: {
+          applicationVisibilities: [{ application: 'Finance', default: false, visible: true }],
+        } }),
+        // Extracted and CLEAN — a real verified "cannot open".
+        node({ id: 'Profile:ExtractedClean', type: 'Profile', apiName: 'ExtractedClean', properties: {
+          applicationVisibilities: [],
+        } }),
+        // NEVER extracted — the blind spot. Its real grants are unknown.
+        node({ id: 'Profile:NeverExtracted', type: 'Profile', apiName: 'NeverExtracted', properties: {} }),
+        node({ id: 'PermissionSet:NeverExtractedPS', type: 'PermissionSet', apiName: 'NeverExtractedPS', properties: {} }),
+      ],
+      edges: [],
+    }]);
+    if (!i.ok) throw new Error(i.error.message);
+    ctx2 = { vaultRoot: dir2, manifest: MANIFEST, graph: store2 };
+  });
+  afterAll(async () => { await closeGraph(store2); rmSync(dir2, { recursive: true, force: true }); });
+
+  it('PARTIAL extraction is disclosed and ENUMERATES the un-extracted containers', async () => {
+    const r = await appAccessHandler(ctx2, { componentId: APP2 });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data as AppAccessOutput;
+    // The one extracted grant is still returned...
+    expect(d.canOpen.map((g) => g.granterId)).toEqual(['Profile:Extracted']);
+    // ...but the answer must NOT be presented as a complete who-can-open list.
+    expect(d.boundaryNote).toMatch(/App visibility was NOT checked/);
+    expect(d.boundaryNote).toContain('Profile:NeverExtracted');
+    expect(d.boundaryNote).toContain('PermissionSet:NeverExtractedPS');
+    expect(d.boundaryNote).toMatch(/not modeled/i);
+    // The container that WAS extracted and holds none is a verified empty and
+    // must NOT be named as a blind spot.
+    expect(d.boundaryNote).not.toContain('Profile:ExtractedClean');
+    // The confident sentence still explains how the shown rows were computed.
+    expect(d.boundaryNote).toMatch(/computed from profile\/permission-set applicationVisibilities/);
+  });
+
+  it('a container whose property is present but GARBLED is a blind spot, not a silent skip', async () => {
+    const i = await importExtractionResults(store2, [{
+      nodes: [node({ id: 'Profile:Garbled', type: 'Profile', apiName: 'Garbled', properties: {
+        applicationVisibilities: 'not-an-array',
+      } })],
+      edges: [],
+    }]);
+    expect(i.ok).toBe(true);
+    const r = await appAccessHandler(ctx2, { componentId: APP2 });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect((r.value.data as AppAccessOutput).boundaryNote).toContain('Profile:Garbled');
+  });
+});
+
+/**
+ * R1 — the FULLY-extracted vault must stay confident (no false alarm).
+ */
+describe('appAccessHandler — fully extracted vault stays confident (R1)', () => {
+  const APP3 = 'CustomApplication:Ops';
+  let dir3: string; let store3: GraphStore; let ctx3: Context;
+  beforeAll(async () => {
+    dir3 = mkdtempSync(join(tmpdir(), 'sfi-app-access-full-'));
+    const o = await openGraph(join(dir3, 'g.db')); if (!o.ok) throw new Error(o.error.message);
+    store3 = o.value;
+    const i = await importExtractionResults(store3, [{
+      nodes: [
+        node({ id: APP3, type: 'CustomApplication', apiName: 'Ops', label: 'Ops', properties: { navType: 'Standard' } }),
+        node({ id: 'Profile:A', type: 'Profile', apiName: 'A', properties: {
+          applicationVisibilities: [{ application: 'Ops', default: true, visible: true }],
+        } }),
+        node({ id: 'Profile:B', type: 'Profile', apiName: 'B', properties: { applicationVisibilities: [] } }),
+      ],
+      edges: [],
+    }]);
+    if (!i.ok) throw new Error(i.error.message);
+    ctx3 = { vaultRoot: dir3, manifest: MANIFEST, graph: store3 };
+  });
+  afterAll(async () => { await closeGraph(store3); rmSync(dir3, { recursive: true, force: true }); });
+
+  it('no container is named as a blind spot when every container carries the property', async () => {
+    const r = await appAccessHandler(ctx3, { componentId: APP3 });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data as AppAccessOutput;
+    expect(d.canOpen.map((g) => g.granterId)).toEqual(['Profile:A']);
+    expect(d.boundaryNote).not.toMatch(/NOT checked/);
+    expect(d.boundaryNote).not.toMatch(/not modeled,/);
+    expect(d.boundaryNote).toMatch(/computed from profile\/permission-set applicationVisibilities/);
+  });
+});
+
+/**
+ * R6 — the two hand-rolled case-1 wordings named in `absence-disclosure.ts`'s
+ * own header ("`app-access.ts` ×2") must be DELETED, not reworded. A deny-list
+ * drift guard modelled on `full-scan-adoption.test.ts`: the remediation
+ * sentence may only come from the shared builder, so it must not appear as a
+ * literal in this file at all.
+ */
+describe('app-access absence-disclosure adoption (R6 drift guard)', () => {
+  const SRC = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../../src/tools/app-access.ts'),
+    'utf8',
+  );
+
+  it('imports the shared case-1 builders', () => {
+    expect(SRC).toMatch(/from '\.\/absence-disclosure\.js'/);
+    expect(SRC).toContain('familyWasExtracted');
+    expect(SRC).toContain('notExtractedFamilyDisclosure');
+  });
+
+  it('carries no hand-rolled case-1 sentence', () => {
+    expect(/never a verified empty/i.test(SRC)).toBe(false);
+    expect(/sfi-refresh/i.test(SRC)).toBe(false);
+  });
+
+  it('does not decide extraction from Array.isArray on applicationVisibilities', () => {
+    expect(/anyGranterHadAppVis/.test(SRC)).toBe(false);
+    expect(/const hasVis = Array\.isArray/.test(SRC)).toBe(false);
+  });
+});
+
+/**
+ * R6 — the INVERSE (granter) direction's own hand-rolled case-1 sentence.
+ * It had drifted from its sibling at the app path (it named a version cutoff
+ * the other did not) and enumerated no container id. It must now render the
+ * shared builder's fixed template, naming the granter it is talking about.
+ */
+describe('appAccessHandler — granter direction uses the shared case-1 builder (R6)', () => {
+  let dir4: string; let store4: GraphStore; let ctx4: Context;
+  beforeAll(async () => {
+    dir4 = mkdtempSync(join(tmpdir(), 'sfi-app-access-granter-'));
+    const o = await openGraph(join(dir4, 'g.db')); if (!o.ok) throw new Error(o.error.message);
+    store4 = o.value;
+    const i = await importExtractionResults(store4, [{
+      nodes: [
+        node({ id: 'Profile:NoProp', type: 'Profile', apiName: 'NoProp', properties: {} }),
+        node({ id: 'PermissionSet:Clean', type: 'PermissionSet', apiName: 'Clean', properties: { applicationVisibilities: [] } }),
+      ],
+      edges: [],
+    }]);
+    if (!i.ok) throw new Error(i.error.message);
+    ctx4 = { vaultRoot: dir4, manifest: MANIFEST, graph: store4 };
+  });
+  afterAll(async () => { await closeGraph(store4); rmSync(dir4, { recursive: true, force: true }); });
+
+  it('a granter with NO property renders the shared template and names itself', async () => {
+    const r = await appAccessHandler(ctx4, { componentId: 'Profile:NoProp' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data as AppAccessGranterOutput;
+    expect(d.openableApps).toEqual([]);
+    expect(d.boundaryNote).toMatch(/App visibility was NOT checked/);
+    expect(d.boundaryNote).toContain('Profile:NoProp');
+    expect(d.boundaryNote).toMatch(/not modeled/i);
+  });
+
+  it('a granter that WAS extracted and holds none is a verified empty, not a blind spot', async () => {
+    const r = await appAccessHandler(ctx4, { componentId: 'PermissionSet:Clean' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data as AppAccessGranterOutput;
+    expect(d.openableApps).toEqual([]);
+    expect(d.boundaryNote).not.toMatch(/NOT checked/);
   });
 });

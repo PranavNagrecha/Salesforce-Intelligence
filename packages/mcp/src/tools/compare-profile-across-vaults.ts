@@ -36,6 +36,16 @@
  * (a 0 would smuggle the fabricated "no drift" back into the total), and the
  * boundary NAMES the deficient vault. Self-heals on the next `/sfi-refresh`.
  *
+ * EDGE-READ GATE. The three edge-backed families are additionally gated on the
+ * `grantedBy` query having actually RUN on both vaults. The source gate above
+ * cannot cover this: it inspects the grant-COUNT properties on the profile
+ * NODE, which are untouched by a failed EDGE query, so a failed read used to
+ * slip past it as either a fabricated "verified 0 drift" (both sides failed) or
+ * a dump of the readable side's entire grant set as one-sided drift (one side
+ * failed). A failed read is now `notEvaluatedCategories` with its own boundary,
+ * which names the vault and the error, and says RETRY rather than refresh —
+ * an unreadable graph is not a stale one.
+ *
  * BOUNDED PAYLOAD. Reading the edges made the drift arrays genuinely large,
  * so the response is fitted to `toolLocalPayloadBudgetBytes()` (DERIVED from
  * the global budget, so the envelope's global tail-trim never fires and the
@@ -268,6 +278,20 @@ const edgeCategoryForTarget = (targetId: string): EdgeBackedCategory | null => {
 };
 
 /**
+ * The outcome of one vault's `grantedBy` read: the maps PLUS whether the query
+ * actually ran. The two are inseparable — an empty map means "no grants" only
+ * when `queried` is true; when the query failed the maps are UNREAD, and
+ * reading them as data is exactly the fabrication this module exists to stop.
+ */
+interface EdgeGrantRead {
+  readonly maps: EdgeGrantMaps;
+  /** `false` when `listEdges` itself failed — the maps are unread, not empty. */
+  readonly queried: boolean;
+  /** The `listEdges` error message when `queried` is false, else `null`. */
+  readonly failure: string | null;
+}
+
+/**
  * Read the object / field / Apex-class grants from the profile's outgoing
  * `grantedBy` edges — the ONLY place the extractor puts them. The map VALUE is
  * `edge.properties` (`allowRead`/`allowEdit`/…, `readable`/`editable`,
@@ -278,14 +302,24 @@ const edgeCategoryForTarget = (targetId: string): EdgeBackedCategory | null => {
  * per-category counts derived from them are true totals — the response ARRAYS
  * are paged, the counts are not.
  *
- * A failed edge query degrades to empty maps; the both-sides presence gate on
- * the grant-COUNT properties is what decides evaluated-vs-not, so an empty map
- * here can never masquerade as a measured 0.
+ * A FAILED edge query is reported as `queried: false`, NOT degraded to empty
+ * maps. This used to `return maps` on failure, with a comment claiming the
+ * both-sides presence gate would catch it. It cannot: `isCategoryExtracted`
+ * gates on the NODE properties `objectGrantCount` / `fieldGrantCount` /
+ * `classGrantCount`, which are present on a healthy profile whatever the edge
+ * query did, so the gate never sees the failure. The measured consequences on
+ * a fixture whose true drift is 1: both queries failing yielded
+ * `totalDriftCount: 0` with all three categories declared EVALUATED (a
+ * confident "no object-permission drift" from a query that never ran), and one
+ * query failing yielded `totalDriftCount: 6` — every grant on the readable side
+ * emitted as "drift, side A only", the same fabrication the gate's own JSDoc
+ * was written to prevent. The handler now routes `queried: false` into
+ * `notEvaluatedCategories` beside the source-absent case.
  */
 const loadEdgeGrantMaps = async (
   store: GraphStore,
   profileName: string,
-): Promise<EdgeGrantMaps> => {
+): Promise<EdgeGrantRead> => {
   const maps: Record<EdgeBackedCategory, Record<string, unknown>> = {
     objectPermissions: {},
     fieldPermissions: {},
@@ -295,13 +329,13 @@ const loadEdgeGrantMaps = async (
     direction: 'out',
     edgeType: 'grantedBy',
   });
-  if (!edges.ok) return maps;
+  if (!edges.ok) return { maps, queried: false, failure: edges.error.message };
   for (const edge of edges.value) {
     const category = edgeCategoryForTarget(edge.toId);
     if (category === null) continue;
     maps[category][edge.toId] = edge.properties;
   }
-  return maps;
+  return { maps, queried: true, failure: null };
 };
 
 /**
@@ -404,6 +438,17 @@ const TAB_VISIBILITY_NOT_EXTRACTED_DISCLOSURE =
  */
 const GRANT_SOURCE_NOT_EXTRACTED_DISCLOSURE =
   'A compared vault has no grant-source property on this profile for one or more categories (see `summary.notEvaluatedCategories`) — object / field / Apex-class grants are read from `grantedBy` edges and proven present by the extractor\u2019s `objectGrantCount` / `fieldGrantCount` / `classGrantCount` properties, and `userPermissions` from the profile node. A profile missing them was refreshed by an older builder (re-run `/sfi-refresh`). Those categories are "not evaluated", NOT a verified "no drift".';
+
+/**
+ * Honesty disclosure surfaced when the `grantedBy` edge query FAILED on a
+ * compared vault. Object / field / Apex-class grants live only on those edges,
+ * so a failed query means those families were NEVER READ. Unlike a missing
+ * source property this is a transient READ failure (a locked / corrupt /
+ * mid-refresh graph), not a stale vault, so the remedy is a retry rather than a
+ * refresh. Either way the categories are "not evaluated", never a measured 0.
+ */
+const GRANT_EDGE_QUERY_FAILED_DISCLOSURE =
+  'The `grantedBy` edge query FAILED on a compared vault, so object / field / Apex-class grants were never read on that side (see `summary.notEvaluatedCategories`). Those categories are "not evaluated", NOT a verified "no drift" \u2014 and no grant on the readable side is reported as one-sided drift, which is what an unread side would otherwise manufacture. Retry; if it persists the vault graph is unreadable and needs a `/sfi-refresh`.';
 
 /**
  * Per-category SOURCE property, and whether the grants themselves come from
@@ -546,9 +591,10 @@ export const compareProfileAcrossVaultsHandler = async (
     const safeA = propsA ?? {};
     const safeB = propsB ?? {};
 
-    // The three edge-backed families, one `grantedBy` query per vault.
-    const edgeMapsA = await loadEdgeGrantMaps(openA.value.store, input.profileName);
-    const edgeMapsB = await loadEdgeGrantMaps(openB.value.store, input.profileName);
+    // The three edge-backed families, one `grantedBy` query per vault. The
+    // read carries whether the query RAN, not just what it returned.
+    const edgeReadA = await loadEdgeGrantMaps(openA.value.store, input.profileName);
+    const edgeReadB = await loadEdgeGrantMaps(openB.value.store, input.profileName);
 
     const fullDiffs: Record<CompareProfileSection, GrantDiff[]> = {
       objectPermissions: [],
@@ -561,27 +607,62 @@ export const compareProfileAcrossVaultsHandler = async (
     const notEvaluatedCategories: string[] = [];
     /** Which vault(s) lack the source, per not-evaluated category — named in the boundary. */
     const deficientVaults: string[] = [];
+    /** Which vault(s) the `grantedBy` query FAILED on, per not-evaluated category. */
+    const unreadVaults: string[] = [];
+    /**
+     * Categories not evaluated because their SOURCE PROPERTY is absent — a
+     * STRICT subset of `notEvaluatedCategories` now that a failed edge query
+     * can also land a category there. The two stale-vault disclosures key off
+     * this list, not off `notEvaluatedCategories`: telling a caller whose
+     * grant-count properties are all present that their vault "was refreshed by
+     * an older builder" would be a second fabricated diagnosis on top of the
+     * failed read.
+     */
+    const sourceAbsentCategories: string[] = [];
 
     for (const { outKey, sourceKey, fromEdges } of CATEGORY_SOURCES) {
-      // Honesty gate: a category whose source is absent on EITHER side must NOT
-      // report a fabricated "0 drift" — nor a one-sided dump of the present
-      // side's whole grant set as "drift". Disclose it as not-evaluated.
-      if (!isCategoryExtracted(safeA, safeB, sourceKey)) {
+      const sourcePresent = isCategoryExtracted(safeA, safeB, sourceKey);
+      // A category read from `grantedBy` edges is evaluable only if the edge
+      // query RAN on both vaults. `sourcePresent` cannot stand in for this:
+      // it inspects the grant-COUNT node properties, which survive a failed
+      // edge query untouched. An unread side is not an empty side.
+      const edgesRead =
+        !fromEdges || (edgeReadA.queried && edgeReadB.queried);
+      // Honesty gate: a category whose source is absent on EITHER side — or
+      // whose edges were never read on either side — must NOT report a
+      // fabricated "0 drift", nor a one-sided dump of the present side's whole
+      // grant set as "drift". Disclose it as not-evaluated.
+      if (!sourcePresent || !edgesRead) {
         notEvaluatedCategories.push(outKey);
-        const missingIn: string[] = [];
-        if (!hasSource(safeA, sourceKey)) missingIn.push(`'${input.vaultA}'`);
-        if (!hasSource(safeB, sourceKey)) missingIn.push(`'${input.vaultB}'`);
-        deficientVaults.push(
-          `\`${outKey}\` (source \`${sourceKey}\`) missing in ${missingIn.join(' and ')}`,
-        );
+        if (!sourcePresent) {
+          sourceAbsentCategories.push(outKey);
+          const missingIn: string[] = [];
+          if (!hasSource(safeA, sourceKey)) missingIn.push(`'${input.vaultA}'`);
+          if (!hasSource(safeB, sourceKey)) missingIn.push(`'${input.vaultB}'`);
+          deficientVaults.push(
+            `\`${outKey}\` (source \`${sourceKey}\`) missing in ${missingIn.join(' and ')}`,
+          );
+        }
+        if (!edgesRead) {
+          const failedIn: string[] = [];
+          if (!edgeReadA.queried) {
+            failedIn.push(`'${input.vaultA}' (${edgeReadA.failure ?? 'unknown error'})`);
+          }
+          if (!edgeReadB.queried) {
+            failedIn.push(`'${input.vaultB}' (${edgeReadB.failure ?? 'unknown error'})`);
+          }
+          unreadVaults.push(
+            `\`${outKey}\` (read from \`grantedBy\` edges) unread in ${failedIn.join(' and ')}`,
+          );
+        }
         // DELIBERATELY not written to `perCategoryDriftCount`:
         // `totalDriftCount` sums its values, so a 0 here would smuggle the
         // fabricated "no drift" back into the total. The key's ABSENCE is the
         // signal (`notEvaluatedCategories` names it).
         continue;
       }
-      const mapA = fromEdges ? edgeMapsA[outKey as EdgeBackedCategory] : extractGrantMap(safeA, sourceKey);
-      const mapB = fromEdges ? edgeMapsB[outKey as EdgeBackedCategory] : extractGrantMap(safeB, sourceKey);
+      const mapA = fromEdges ? edgeReadA.maps[outKey as EdgeBackedCategory] : extractGrantMap(safeA, sourceKey);
+      const mapB = fromEdges ? edgeReadB.maps[outKey as EdgeBackedCategory] : extractGrantMap(safeB, sourceKey);
       const diffs = diffCategory(mapA, mapB);
       fullDiffs[outKey] = diffs;
       perCategoryDriftCount[outKey] = diffs.length;
@@ -593,15 +674,21 @@ export const compareProfileAcrossVaultsHandler = async (
     );
 
     const boundaries = [PROFILE_EDITION_DISCLOSURE];
-    if (notEvaluatedCategories.includes('tabVisibilities')) {
+    if (sourceAbsentCategories.includes('tabVisibilities')) {
       boundaries.push(TAB_VISIBILITY_NOT_EXTRACTED_DISCLOSURE);
     }
-    if (notEvaluatedCategories.some((c) => c !== 'tabVisibilities')) {
+    if (sourceAbsentCategories.some((c) => c !== 'tabVisibilities')) {
       boundaries.push(GRANT_SOURCE_NOT_EXTRACTED_DISCLOSURE);
     }
     if (deficientVaults.length > 0) {
       boundaries.push(
         `Not evaluated because the source property is absent on at least one compared vault: ${deficientVaults.join('; ')}. A category is compared ONLY when its source is present on BOTH profiles — a one-sided comparison would report every grant on the present side as "drift, side A only", which is fabrication, not drift. Re-run \`/sfi-refresh\` on the named vault.`,
+      );
+    }
+    if (unreadVaults.length > 0) {
+      boundaries.push(GRANT_EDGE_QUERY_FAILED_DISCLOSURE);
+      boundaries.push(
+        `Not evaluated because the \`grantedBy\` edge query failed on at least one compared vault: ${unreadVaults.join('; ')}. The grant-count properties on the profile NODE are present, so this is NOT a stale vault — the grants themselves could not be read. Retry the comparison.`,
       );
     }
 

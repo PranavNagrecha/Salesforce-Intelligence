@@ -33,6 +33,12 @@ const MANIFEST: VaultManifest = {
 };
 
 const FIELD_ID = 'CustomField:Account.Industry__c';
+/** A field node that EXISTS in the vault but is referenced by nothing. */
+const UNREFERENCED_FIELD_ID = 'CustomField:Account.Unreferenced__c';
+/** Referenced by an edge, but its own definition was never retrieved. */
+const PHANTOM_FIELD_ID = 'CustomField:Account.Phantom__c';
+/** Names no node and is referenced by nothing — a typo. */
+const ABSENT_FIELD_ID = 'CustomField:Account.Nonexistant__c';
 
 const makeNode = (overrides: Partial<Node> & Pick<Node, 'id' | 'type'>): Node => ({
   apiName: 'Anon',
@@ -66,6 +72,15 @@ const seed: ExtractionResult = {
       id: FIELD_ID,
       type: 'CustomField',
       apiName: 'Account.Industry__c',
+      parentId: 'CustomObject:Account',
+    }),
+    // An EXISTING field that nothing references — the honest "scanned and
+    // clean" case, which must stay distinguishable from a field that is not in
+    // the vault at all.
+    makeNode({
+      id: UNREFERENCED_FIELD_ID,
+      type: 'CustomField',
+      apiName: 'Account.Unreferenced__c',
       parentId: 'CustomObject:Account',
     }),
     makeNode({
@@ -139,6 +154,15 @@ const seed: ExtractionResult = {
       edgeType: 'usedInLayout',
       confidence: 'declared',
       source: 'layout-extractor',
+    }),
+    // A reference to a field whose OWN definition was never retrieved
+    // (managed package / out of retrieve scope). The edge exists, the node
+    // does not.
+    makeEdge({
+      fromId: 'ApexClass:AccountSvc',
+      toId: PHANTOM_FIELD_ID,
+      edgeType: 'readsFrom',
+      source: 'apex-scanner',
     }),
     // ValidationRule reference
     makeEdge({
@@ -224,9 +248,13 @@ describe('findFieldAnywhereHandler', () => {
     expect(joined).toContain('managed-package');
   });
 
-  it('surfaces only the report/dashboard caveat when the field has no other references', async () => {
+  // SPLIT: this case used to be asserted against `CustomField:Account.NoSuchField__c`
+  // — an id NO node in the fixture carries. It therefore proved only that an
+  // ABSENT field returns a confident zero, and encoded exactly the defect below.
+  // The honest "scanned and clean" case needs a field that EXISTS.
+  it('surfaces only the report/dashboard caveat when an EXISTING field has no references', async () => {
     const r = await findFieldAnywhereHandler(ctx, {
-      targetId: 'CustomField:Account.NoSuchField__c',
+      targetId: UNREFERENCED_FIELD_ID,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -430,6 +458,80 @@ describe('findFieldAnywhereHandler — CR-22 section cursor', () => {
     expect(stale.ok).toBe(false);
     if (stale.ok) return;
     expect(stale.error.kind).toBe('invalid-query');
+  });
+});
+
+describe('findFieldAnywhereHandler — existence gate (R4)', () => {
+  it('REFUSES an id no node carries instead of answering a confident zero', async () => {
+    const r = await findFieldAnywhereHandler(ctx, { targetId: ABSENT_FIELD_ID });
+    if (r.ok) {
+      throw new Error(
+        `expected component-not-found; got a confident answer: totalCount=${String(
+          r.value.data.totalCount,
+        )} groups=${String(r.value.data.groups.length)} byEdgeType=${JSON.stringify(
+          r.value.data.byEdgeType,
+        )} truncated=${String(r.value.data.truncated)}`,
+      );
+    }
+    expect(r.ok).toBe(false);
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.path).toBe(ABSENT_FIELD_ID);
+  });
+
+  it('REFUSES a wrong-CASE field id (ids are case-sensitive)', async () => {
+    const r = await findFieldAnywhereHandler(ctx, {
+      targetId: 'CustomField:account.industry__c',
+    });
+    if (r.ok) {
+      throw new Error(
+        `expected component-not-found for a miscased id; got a confident totalCount=${String(
+          r.value.data.totalCount,
+        )} — the truth is ${String(6)} references on the correctly-cased id`,
+      );
+    }
+    expect(r.ok).toBe(false);
+    expect(r.error.kind).toBe('component-not-found');
+    // The refusal message must not read as "this field is clean" — it names the
+    // id that was not found. (Ranked `resolveSuggestions` are NOT asserted here:
+    // the shared `fieldNotFoundError` scopes its resolve to a CASE-EXACT parent
+    // object id, so a miscased field id gets zero suggestions from every tool
+    // that uses it. Reported to the orchestrator; out of this file's scope.)
+    expect(r.error.message).toContain('CustomField:account.industry__c');
+  });
+
+  it('refuses through the `fieldId` alias too (no back door)', async () => {
+    const r = await findFieldAnywhereHandler(ctx, { fieldId: ABSENT_FIELD_ID });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('a componentTypes filter does not smuggle an absent field past the gate', async () => {
+    const r = await findFieldAnywhereHandler(ctx, {
+      targetId: ABSENT_FIELD_ID,
+      componentTypes: ['ApexClass'],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('STILL ANSWERS for a phantom field (edges exist, definition not retrieved) and says so', async () => {
+    const r = await findFieldAnywhereHandler(ctx, { targetId: PHANTOM_FIELD_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The reference is real — refusing here would throw away a true answer.
+    expect(r.value.data.totalCount).toBe(1);
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('never retrieved');
+  });
+
+  it('an EXISTING field with references is unaffected by the gate', async () => {
+    const r = await findFieldAnywhereHandler(ctx, { targetId: FIELD_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(6);
+    expect(r.value.data.boundaries.join(' ')).not.toContain('never retrieved');
   });
 });
 

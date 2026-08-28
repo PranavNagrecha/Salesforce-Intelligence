@@ -15,7 +15,8 @@
  *
  * Two read paths, both backed by the PSG extractor
  * (`extractPermissionSetGroup`):
- *   - FORWARD (`expandPermissionSetGroup` / `expandAllPermissionSetGroups`):
+ *   - FORWARD (`expandPermissionSetGroup` / `scanAllPermissionSetGroups` /
+ *     `expandAllPermissionSetGroups`):
  *     read the PSG node's `permissionSets` / `mutingPermissionSets` properties
  *     (bare member names) and prefix them to canonical ids. This is the
  *     cheapest path and exactly what `synthesis-reports` already does, so
@@ -48,14 +49,13 @@ import type {
 } from '@sf-intelligence/contracts';
 import { OBJECT_PERMISSION_FLAGS } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
-import {
-  getNodeById,
-  listEdges,
-  listNodesByType,
-  type GraphError,
-} from '@sf-intelligence/graph';
+import { getNodeById, listEdges, type GraphError } from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
+
+import { familyWasExtracted } from './absence-disclosure.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES } from './scan-cap.js';
 
 /** Canonical id prefixes for the families this helper composes. */
 const PSG_PREFIX = 'PermissionSetGroup:';
@@ -65,9 +65,6 @@ const MUTING_PERMISSION_SET_PREFIX = 'MutingPermissionSet:';
 /** PSG-member `references` edge discriminator stamped by the extractor. */
 const MEMBER_REFERENCE_KIND = 'permissionSetGroupMember';
 
-/** Cap on how many PSGs `expandAllPermissionSetGroups` enumerates. */
-const PSG_SCAN_CAP = 500;
-
 /** The declared expansion of one PermissionSetGroup. */
 export interface ExpandedPsg {
   /** The PSG's canonical id (`PermissionSetGroup:<ApiName>`). */
@@ -75,9 +72,12 @@ export interface ExpandedPsg {
   /** Canonical ids of the member permission sets (the union contributors). */
   readonly memberPermissionSetIds: readonly ComponentId[];
   /**
-   * Canonical ids of the muting permission sets. DISCLOSED only — NEVER
-   * subtracted (the muting extractor parses no denied perms, so there is
-   * nothing enumerable to net out).
+   * Canonical ids of the muting permission sets. This field is ids ONLY — it
+   * carries no denied perms, so a consumer reading it alone can DISCLOSE
+   * muting but must never claim it was subtracted. To actually net muting out,
+   * pass these ids to {@link loadMutingPermissions}, which reads the R6-06
+   * muted-perm node properties and returns the three honest buckets
+   * (subtractable / present-without-data / missing).
    */
   readonly mutingPermissionSetIds: readonly ComponentId[];
   /** True when the PSG references ≥1 muting permission set (forces a caveat). */
@@ -187,19 +187,69 @@ export const expandPermissionSetGroup = async (
   return ok(expandFromNode(nodeResult.value));
 };
 
+/** The full PSG roster plus the residual-cap disclosure the walk carries. */
+export interface PsgScanResult {
+  /** Every PermissionSetGroup in the vault, expanded, in id-ASC order. */
+  readonly groups: readonly ExpandedPsg[];
+  /**
+   * `['PermissionSetGroup']` when the walk stopped at the residual full-scan
+   * ceiling with STRICTLY MORE groups behind it; empty otherwise.
+   */
+  readonly incompleteTypes: readonly string[];
+  /** Convenience: true when the roster is NOT the whole vault. */
+  readonly scanIncomplete: boolean;
+}
+
 /**
- * Expand EVERY PermissionSetGroup in the vault (FORWARD). Used by consumers
- * that need the full PSG roster (e.g. a reverse scan that the edge lookup
- * cannot serve).
+ * Expand EVERY PermissionSetGroup in the vault (FORWARD), WITH the honest
+ * truncation channel.
+ *
+ * This WAS a single `listNodesByType` page capped at 500 with no SQL `OFFSET`
+ * and no incompleteness signal, so PSG #501+ by id ASC did not exist for the
+ * caller and a complete roster was indistinguishable from page one — a missed
+ * group is a missed grant in a least-privilege review, and the only guard was a
+ * comment on the cap constant. It now adopts the shared
+ * {@link scanAllNodesOfTypes}, which windows the SQL `OFFSET` forward until the
+ * type is exhausted (or `FULL_SCAN_MAX_NODES` is reached) and reports the
+ * residual cap in {@link PsgScanResult.scanIncomplete} instead of dropping the
+ * tail silently. Prefer this form over {@link expandAllPermissionSetGroups}:
+ * the disclosure is the difference between "these are the groups" and "these
+ * are the groups we managed to read".
+ *
+ * `maxNodes` mirrors `scanAllNodesOfTypes`' own parameter (default
+ * `FULL_SCAN_MAX_NODES`); no production caller should need to lower it.
+ */
+export const scanAllPermissionSetGroups = async (
+  ctx: Context,
+  maxNodes: number = FULL_SCAN_MAX_NODES,
+): Promise<Result<PsgScanResult, GraphError>> => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['PermissionSetGroup'], maxNodes);
+  if (!scan.ok) {
+    return { ok: false, error: { kind: 'query-failed', message: scan.error.message } };
+  }
+  return ok({
+    groups: scan.value.nodes.map(expandFromNode),
+    incompleteTypes: scan.value.incompleteTypes,
+    scanIncomplete: scan.value.scanIncomplete,
+  });
+};
+
+/**
+ * Expand EVERY PermissionSetGroup in the vault (FORWARD), roster only. Used by
+ * consumers that need the full PSG roster (e.g. a reverse scan that the edge
+ * lookup cannot serve).
+ *
+ * Thin wrapper over {@link scanAllPermissionSetGroups} — the roster is now the
+ * COMPLETE type walk rather than one 500-row page — that DROPS the
+ * `scanIncomplete` channel. Kept for call sites that cannot yet surface the
+ * disclosure; new consumers should call {@link scanAllPermissionSetGroups}.
  */
 export const expandAllPermissionSetGroups = async (
   ctx: Context,
 ): Promise<Result<readonly ExpandedPsg[], GraphError>> => {
-  const nodesResult = await listNodesByType(ctx.graph, 'PermissionSetGroup', {
-    limit: PSG_SCAN_CAP,
-  });
-  if (!nodesResult.ok) return nodesResult;
-  return ok(nodesResult.value.map(expandFromNode));
+  const scan = await scanAllPermissionSetGroups(ctx);
+  if (!scan.ok) return scan;
+  return ok(scan.value.groups);
 };
 
 /**
@@ -320,7 +370,11 @@ export const loadMutingPermissions = async (
     }
     // The R6-06 extractor always writes `mutedObjectPermissions` (even `[]`);
     // its ABSENCE marks a node from a vault refreshed before that extractor.
-    if (!('mutedObjectPermissions' in node.properties)) {
+    // Decided by the SHARED `familyWasExtracted` (own-property), not a local
+    // `in`: `in` also resolves the sentinel on the PROTOTYPE chain, which would
+    // classify a never-extracted node as subtractable and mute nothing while
+    // claiming muting was applied.
+    if (!familyWasExtracted(node.properties, 'mutedObjectPermissions')) {
       presentWithoutData.push(mutingId);
       continue;
     }

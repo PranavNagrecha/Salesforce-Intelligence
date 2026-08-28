@@ -37,6 +37,17 @@
  *     Tooling API surface and is invisible to the offline DX-source
  *     scanner. A class flagged "schedulable" may NOT be currently
  *     scheduled — the schedule is a runtime registration.
+ *   - Corpus scan (G2): both the ApexClass and the Flow corpus are read to
+ *     EXHAUSTION through the shared `scanAllNodesOfTypes`, which windows the
+ *     SQL `OFFSET` forward. The single `listNodesByType(type, { limit: 500 })`
+ *     this replaced was served as `ORDER BY id ASC LIMIT 500 OFFSET 0`, so an
+ *     org with more than 500 Apex classes had only its alphabetically-first
+ *     page scanned — a Schedulable class named later in the alphabet was
+ *     simply invisible, and `summary.totalSchedulableClasses` /
+ *     `classesScheduledFromProduction` / `classesLikelyUnscheduled` /
+ *     `totalScheduledFlows` were page-one figures published as org totals with
+ *     no truncation flag. `scanTruncated` + `boundaries` now disclose the only
+ *     remaining ceiling (the residual `FULL_SCAN_MAX_NODES` per type).
  *   - Scope filter (SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS): the
  *     optional `nameContains` input narrows BOTH the Schedulable-class
  *     catalog and the scheduled-Flow section to entries whose apiName
@@ -51,20 +62,15 @@ import type {
   ComponentId,
   McpError,
   McpResponse,
-  Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByIds, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges, listNodesByIds } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-/**
- * Hard cap on the catalog size. Mirrors the
- * `INTEGRATION_MAP_MAX_LIMIT` ceiling so the v2.8 catalog tools share
- * the same blast-radius cap as the other enumeration-style tools.
- */
-const SCHEDULED_JOB_CATALOG_MAX_CLASSES = 500;
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * Zod schema for the `sfi.scheduled_job_catalog` tool input.
@@ -180,6 +186,20 @@ export interface ScheduledJobCatalogOutput {
   };
   readonly disclosure: string;
   readonly flowScheduleDisclosure: string;
+  /**
+   * `true` when the corpus walk stopped at the residual full-scan ceiling
+   * (`FULL_SCAN_MAX_NODES` per ComponentType) with nodes still behind it, so
+   * this catalog and every `summary` figure above is an UNDERCOUNT. `false`
+   * means the ApexClass and Flow types were both read to exhaustion — the
+   * counts are true org totals, not the first page by id.
+   */
+  readonly scanTruncated: boolean;
+  /**
+   * Human-readable disclosure of what the walk could NOT see. Empty in the
+   * normal case; carries {@link fullScanTruncationNote} when
+   * {@link ScheduledJobCatalogOutput.scanTruncated} is true.
+   */
+  readonly boundaries: readonly string[];
   /**
    * SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS: the scope ACTUALLY applied to
    * this catalog. Present ONLY when the caller passed a `nameContains` filter —
@@ -366,9 +386,15 @@ export const scheduledJobCatalogHandler = async (
   const nameNeedle =
     input.nameContains !== undefined ? input.nameContains.toLowerCase() : null;
 
-  const apexClassesResult = await listNodesByType(ctx.graph, 'ApexClass', {
-    limit: SCHEDULED_JOB_CATALOG_MAX_CLASSES,
-  });
+  // G2 (single-page corpus): this used to be ONE
+  // `listNodesByType('ApexClass', { limit: 500 })` with no SQL OFFSET, which
+  // the graph serves as `ORDER BY id ASC LIMIT 500 OFFSET 0` — so on any org
+  // with more than 500 Apex classes ONLY the alphabetically-first page was
+  // scanned and a Schedulable class sorting past it was invisible to "which
+  // classes run on a schedule?", while `summary.totalSchedulableClasses` and
+  // friends were published as org totals. The shared `scanAllNodesOfTypes`
+  // windows the OFFSET forward until the type is exhausted.
+  const apexClassesResult = await scanAllNodesOfTypes(ctx.graph, ['ApexClass']);
   if (!apexClassesResult.ok) {
     return err({
       kind: 'internal',
@@ -380,7 +406,7 @@ export const scheduledJobCatalogHandler = async (
   let classesWithKnownCallers = 0;
   let classesScheduledFromProduction = 0;
   let classesLikelyUnscheduled = 0;
-  for (const node of apexClassesResult.value as readonly Node[]) {
+  for (const node of apexClassesResult.value.nodes) {
     if (!readIsSchedulable(node.properties)) continue;
     // Apply the caller name scope before reading callers/cron so a scoped call
     // reports only its matching jobs (and an empty result honestly means "no
@@ -422,9 +448,10 @@ export const scheduledJobCatalogHandler = async (
   const sorted = jobs.sort(compareEntries);
 
   // T7: scheduled Flows from <start><schedule>.
-  const flowsResult = await listNodesByType(ctx.graph, 'Flow', {
-    limit: SCHEDULED_JOB_CATALOG_MAX_CLASSES,
-  });
+  // Same G2 fix as the ApexClass corpus above: a scheduled Flow sorting past
+  // the first 500-row page used to be invisible, and `totalScheduledFlows`
+  // reported the page-one count as the org total.
+  const flowsResult = await scanAllNodesOfTypes(ctx.graph, ['Flow']);
   if (!flowsResult.ok) {
     return err({
       kind: 'internal',
@@ -432,7 +459,7 @@ export const scheduledJobCatalogHandler = async (
     });
   }
   const scheduledFlows: ScheduledFlowEntry[] = [];
-  for (const node of flowsResult.value as readonly Node[]) {
+  for (const node of flowsResult.value.nodes) {
     if (!isScheduledFlow(node.properties)) continue;
     if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
       continue;
@@ -447,6 +474,16 @@ export const scheduledJobCatalogHandler = async (
   }
   const sortedFlows = scheduledFlows.sort(compareFlows);
 
+  // Residual full-scan cap (FULL_SCAN_MAX_NODES per type). Empty in the normal
+  // case — the walk exhausts the type — but when it fires every `summary`
+  // figure below is an UNDERCOUNT and must not read as a complete tally.
+  const incompleteTypes = [
+    ...apexClassesResult.value.incompleteTypes,
+    ...flowsResult.value.incompleteTypes,
+  ];
+  const boundaries =
+    incompleteTypes.length > 0 ? [fullScanTruncationNote(incompleteTypes)] : [];
+
   return ok({
     data: {
       jobs: sorted,
@@ -460,6 +497,8 @@ export const scheduledJobCatalogHandler = async (
       },
       disclosure: SCHEDULED_JOB_CATALOG_DISCLOSURE,
       flowScheduleDisclosure: SCHEDULED_FLOW_DISCLOSURE,
+      scanTruncated: boundaries.length > 0,
+      boundaries,
       // Present ONLY when a name filter was passed, so a bare org-wide call
       // stays byte-identical to the pre-filter golden.
       ...(input.nameContains !== undefined

@@ -17,7 +17,11 @@
  *   - `boundaries[]` — verbatim disclosures the v3.2 honesty axis
  *     mandates: the propertySetConfig-parsing caveat AND the
  *     Native-vs-Vlocity legacy boundary. Surfaced unconditionally on
- *     every response.
+ *     every response. When the widget-tree re-parse could not run, or
+ *     ran and disagreed with the aggregates the extractor stamped on
+ *     the node, a blind-spot / drift disclosure LEADS the list — an
+ *     empty `states[]` is otherwise indistinguishable from a card
+ *     that genuinely has no states.
  *
  * Why this tool re-reads XML (instead of pulling widget tree from
  * the node):
@@ -68,6 +72,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+} from './absence-disclosure.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /** Canonical id prefix for the OmniUiCard node type. */
@@ -75,6 +83,36 @@ const OMNI_UI_CARD_PREFIX = 'OmniUiCard:';
 
 /** Root element name in the source `.ouc-meta.xml` file. */
 const ROOT_ELEMENT = 'OmniUiCard';
+
+/**
+ * The widget-layer key v3.2 walks. FlexCards historically support multiple
+ * visual layers; both this tool and the v3.2 R2 extractor walk `layer-0`
+ * only, so a state that hangs its widgets off any other layer is NOT WALKED
+ * — and because the extractor shares the limitation, its `widgetCount`
+ * aggregate agrees at zero and the cross-check below cannot catch it. That
+ * case gets its own disclosure.
+ */
+const WALKED_LAYER_KEY = 'layer-0';
+
+/**
+ * The node property the v3.2 R2 extractor ALWAYS stamps (see
+ * `packages/extractors/src/omni-ui-card.ts` — it is an unconditional literal
+ * in the node's `properties` bag, written as `0` when the card genuinely has
+ * no states). Its ABSENCE therefore means the vault was built by a refresh
+ * that predates the extractor, never that the card is empty. This is the R1
+ * sentinel for {@link familyWasExtracted}.
+ */
+const STATE_COUNT_SENTINEL = 'stateCount';
+
+/** The extractor's recursive widget total, stamped alongside {@link STATE_COUNT_SENTINEL}. */
+const WIDGET_COUNT_PROPERTY = 'widgetCount';
+
+/**
+ * The extractor's own parse-warning list, also always stamped (`[]` when the
+ * parse was clean). A non-empty list is the extractor telling us, from the
+ * refresh that built this vault, that it could not read part of this card.
+ */
+const EXTRACTION_WARNINGS_PROPERTY = 'omniUiCardExtractionWarnings';
 
 /**
  * Verbatim disclosure for the propertySetConfig parsing axis. Per
@@ -268,18 +306,27 @@ const countWidgets = (widgets: readonly OmniUiCardWidget[]): number => {
 };
 
 /**
+ * The result of walking `propertySetConfig.states[]`: the tool's `states[]`
+ * payload PLUS the names of the states whose widgets were never walked
+ * because they hang off a layer other than {@link WALKED_LAYER_KEY}. Those
+ * states surface with an empty `widgets[]` that means NOT WALKED, which is a
+ * different fact from "this state declares no widgets" and must be reported
+ * as such.
+ */
+interface BuiltStates {
+  readonly states: readonly OmniUiCardState[];
+  readonly unwalkedLayerStates: readonly string[];
+}
+
+/**
  * Walk every state in the parsed propertySetConfig and build the
  * tool's `states[]` payload. State indexes preserve the JSON's
  * declared order (the propertySetConfig-parsing disclosure axis).
  * Non-object states are skipped defensively.
  */
-const buildStates = (
-  propertySetConfig: Readonly<Record<string, unknown>> | null,
-): OmniUiCardState[] => {
-  if (propertySetConfig === null) return [];
-  const statesRaw = propertySetConfig['states'];
-  if (!Array.isArray(statesRaw)) return [];
+const buildStates = (statesRaw: readonly unknown[]): BuiltStates => {
   const states: OmniUiCardState[] = [];
+  const unwalkedLayerStates: string[] = [];
   for (let i = 0; i < statesRaw.length; i += 1) {
     const state = statesRaw[i];
     if (typeof state !== 'object' || state === null) continue;
@@ -287,15 +334,17 @@ const buildStates = (
     const name = typeof stateObj['name'] === 'string' ? stateObj['name'] : '';
     // The widget root is `components.layer-0.children`. v3.2 walks
     // only `layer-0` — production cards in the recon use the
-    // layer-0 root exclusively. Other layers (legacy) would surface
-    // as zero widgets; the propertySetConfig-parsing disclosure
-    // covers the limitation.
+    // layer-0 root exclusively. A state that declares OTHER layers and
+    // no `layer-0` is recorded so the caller can say so out loud.
     let widgets: readonly OmniUiCardWidget[] = [];
     const componentsRaw = stateObj['components'];
     if (typeof componentsRaw === 'object' && componentsRaw !== null) {
-      const layer0 = (componentsRaw as Record<string, unknown>)['layer-0'];
+      const components = componentsRaw as Record<string, unknown>;
+      const layer0 = components[WALKED_LAYER_KEY];
       if (typeof layer0 === 'object' && layer0 !== null) {
         widgets = walkWidgets((layer0 as Record<string, unknown>)['children']);
+      } else if (Object.keys(components).length > 0) {
+        unwalkedLayerStates.push(name.length > 0 ? name : `#${i}`);
       }
     }
     states.push({
@@ -305,7 +354,7 @@ const buildStates = (
       widgets,
     });
   }
-  return states;
+  return { states, unwalkedLayerStates };
 };
 
 /**
@@ -419,12 +468,52 @@ const sortDispatchedActions = (
 };
 
 /**
+ * Why the widget tree could not be walked. Six distinct conditions used to
+ * collapse into the same `states: []`, which is exactly the answer a
+ * genuinely empty card gives — so a host asking "what widgets are on this
+ * FlexCard?" could not tell "we looked and it has none" from "we never
+ * looked". Each cause now carries its own clause.
+ */
+type WidgetTreeFailure =
+  | 'source-unreadable'
+  | 'malformed-xml'
+  | 'parser-threw'
+  | 'no-root-element'
+  | 'property-set-config-unparseable'
+  | 'states-not-an-array';
+
+/** Outcome of {@link buildStatesFromSourceXml}: a real walk, or a named blind spot. */
+type WidgetTreeOutcome =
+  | ({ readonly kind: 'parsed' } & BuiltStates)
+  | { readonly kind: 'blind'; readonly cause: WidgetTreeFailure };
+
+/**
+ * The blind-spot clause for each cause, in the voice of the disclosure
+ * sentence built by {@link widgetTreeDisclosures}. Kept as one table so a
+ * new failure branch cannot be added without giving the host words for it.
+ */
+const WIDGET_TREE_FAILURE_CLAUSE: Readonly<Record<WidgetTreeFailure, string>> = {
+  'source-unreadable':
+    "the card's source file could not be read from this vault — the refresh " +
+    'did not retrieve it, or it was removed after the refresh',
+  'malformed-xml':
+    "the card's source file is not well-formed XML and was rejected by the validator",
+  'parser-threw': "the XML parser threw while reading the card's source file",
+  'no-root-element': `the card's source file carries no \`${ROOT_ELEMENT}\` root element`,
+  'property-set-config-unparseable':
+    'the `propertySetConfig` blob is absent, empty, or not parseable JSON',
+  'states-not-an-array':
+    'the `propertySetConfig` blob carries no `states` array',
+};
+
+/**
  * Read + validate the source `.ouc-meta.xml`, parse the
- * propertySetConfig JSON, and walk the states. Returns an empty
- * states[] when the file is missing, malformed, or carries an
- * empty / non-parseable propertySetConfig — the tool degrades
- * gracefully because the metadata + dispatchedActions + boundaries
- * sections are still meaningful without the widget tree.
+ * propertySetConfig JSON, and walk the states.
+ *
+ * Every failure path returns a NAMED cause rather than an empty list: the
+ * metadata + dispatchedActions sections are still meaningful without the
+ * widget tree, but the empty `states[]` they sit next to must never be read
+ * as a verified zero.
  *
  * fast-xml-parser's entity processor is configured the same way the
  * v3.2 R2 extractor configures it: the FlexCard propertySetConfig
@@ -433,15 +522,15 @@ const sortDispatchedActions = (
  */
 const buildStatesFromSourceXml = async (
   sourcePath: string,
-): Promise<readonly OmniUiCardState[]> => {
+): Promise<WidgetTreeOutcome> => {
   let xmlText: string;
   try {
     xmlText = await readFile(sourcePath, 'utf-8');
   } catch {
-    return [];
+    return { kind: 'blind', cause: 'source-unreadable' };
   }
   if (XMLValidator.validate(xmlText) !== true) {
-    return [];
+    return { kind: 'blind', cause: 'malformed-xml' };
   }
   // Same parser configuration as the v3.2 R2 extractor — see
   // `extractors/src/omni-ui-card.ts` for the inline rationale on the
@@ -456,13 +545,118 @@ const buildStatesFromSourceXml = async (
   try {
     parsed = parser.parse(xmlText) as Record<string, unknown>;
   } catch {
-    return [];
+    return { kind: 'blind', cause: 'parser-threw' };
   }
   const root = unwrapSingle(parsed[ROOT_ELEMENT]);
-  if (typeof root !== 'object' || root === null) return [];
+  if (typeof root !== 'object' || root === null) {
+    return { kind: 'blind', cause: 'no-root-element' };
+  }
   const rootObj = root as Record<string, unknown>;
   const propertySetConfig = parseJsonBlob(rootObj['propertySetConfig']);
-  return buildStates(propertySetConfig);
+  if (propertySetConfig === null) {
+    return { kind: 'blind', cause: 'property-set-config-unparseable' };
+  }
+  const statesRaw = propertySetConfig['states'];
+  if (!Array.isArray(statesRaw)) {
+    return { kind: 'blind', cause: 'states-not-an-array' };
+  }
+  return { kind: 'parsed', ...buildStates(statesRaw) };
+};
+
+/**
+ * Build the disclosures that make an empty / partial `states[]` legible.
+ *
+ * Four independent facts, in the order a reader needs them:
+ *
+ *   1. R1 — the node carries no `stateCount` at all, so the whole family was
+ *      never extracted (shared {@link notExtractedFamilyDisclosure}).
+ *   2. The walk failed for a named reason, and the extractor's OWN aggregates
+ *      (`stateCount` / `widgetCount`) say what the refresh saw at the time.
+ *      This is the derived cross-check: the answer was on the node all along.
+ *   3. The walk succeeded but DISAGREES with those aggregates — the file on
+ *      disk is not the file the refresh read.
+ *   4. Some state's widgets hang off a layer this version does not walk.
+ *
+ * Returns an empty array when the card parsed clean and agrees with the
+ * vault: hedging a verified answer is as dishonest as hiding a blind spot.
+ */
+const widgetTreeDisclosures = (
+  node: Node,
+  outcome: WidgetTreeOutcome,
+  states: readonly OmniUiCardState[],
+): readonly string[] => {
+  const disclosures: string[] = [];
+  const extracted = familyWasExtracted(node.properties, STATE_COUNT_SENTINEL);
+  if (!extracted) {
+    disclosures.push(
+      notExtractedFamilyDisclosure({
+        subject: 'FlexCard states and widgets',
+        verb: 'parsed',
+        pluralSubject: true,
+        sentinelProperty: STATE_COUNT_SENTINEL,
+        containers: [node.id],
+        surface: '`states` / `states[].widgets`',
+        zeroReading: '"this card declares no states and no widgets"',
+      }),
+    );
+  }
+  const recordedStates = readNullableNumberProperty(node, STATE_COUNT_SENTINEL);
+  const recordedWidgets = readNullableNumberProperty(node, WIDGET_COUNT_PROPERTY);
+  const parsedWidgets = states.reduce((total, s) => total + s.widgetCount, 0);
+  const recordedClause =
+    recordedStates === null
+      ? ''
+      : ` The refresh that built this vault recorded \`${STATE_COUNT_SENTINEL}: ` +
+        `${recordedStates}\` / \`${WIDGET_COUNT_PROPERTY}: ${recordedWidgets ?? 0}\` ` +
+        'for this card.';
+
+  if (outcome.kind === 'blind') {
+    disclosures.push(
+      `The widget tree was NOT parsed — ${WIDGET_TREE_FAILURE_CLAUSE[outcome.cause]}. ` +
+        '`states` is a BLIND SPOT here, NEVER a verified "this card declares no ' +
+        `states and no widgets".${recordedClause} Re-run \`/sfi-refresh\`.`,
+    );
+  } else if (extracted && recordedStates !== null && recordedStates !== states.length) {
+    disclosures.push(
+      `DRIFT: the source XML on disk parses to ${states.length} state(s), but the ` +
+        `refresh recorded \`${STATE_COUNT_SENTINEL}: ${recordedStates}\` for this card. ` +
+        'The file changed after the refresh, so `states` describes the file on disk, ' +
+        'NOT the vault the rest of this answer is built from. Re-run `/sfi-refresh`.',
+    );
+  } else if (
+    extracted &&
+    recordedWidgets !== null &&
+    recordedWidgets !== parsedWidgets
+  ) {
+    disclosures.push(
+      `DRIFT: the source XML on disk parses to ${parsedWidgets} widget(s), but the ` +
+        `refresh recorded \`${WIDGET_COUNT_PROPERTY}: ${recordedWidgets}\` for this card. ` +
+        'The file changed after the refresh, so `states[].widgets` describes the file ' +
+        'on disk, NOT the vault the rest of this answer is built from. ' +
+        'Re-run `/sfi-refresh`.',
+    );
+  }
+
+  if (outcome.kind === 'parsed' && outcome.unwalkedLayerStates.length > 0) {
+    disclosures.push(
+      `${outcome.unwalkedLayerStates.length} state(s) hang their widgets off a ` +
+        `component layer other than \`${WALKED_LAYER_KEY}\` ` +
+        `(${outcome.unwalkedLayerStates.join(', ')}); v3.2 walks \`${WALKED_LAYER_KEY}\` ` +
+        'only, so their `widgets` list is empty because it was NOT walked, NEVER ' +
+        'because the state is empty. The extractor shares this limitation, so its ' +
+        `\`${WIDGET_COUNT_PROPERTY}\` aggregate cannot contradict it either.`,
+    );
+  }
+
+  const warnings = readStringArrayProperty(node, EXTRACTION_WARNINGS_PROPERTY);
+  if (warnings.length > 0) {
+    disclosures.push(
+      `The extractor recorded ${warnings.length} parse warning(s) for this card at ` +
+        `refresh time: ${warnings.join('; ')}. Anything those warnings cover is ` +
+        'missing from this answer.',
+    );
+  }
+  return disclosures;
 };
 
 /**
@@ -545,10 +739,14 @@ export const omniuicardWidgetBreakdownHandler = async (
 
   // Re-parse the source XML to surface the widget tree. The v3.2 R2
   // extractor stores aggregates on the node but not the full tree;
-  // the XML on disk is the canonical source.
-  const states = await buildStatesFromSourceXml(
+  // the XML on disk is the canonical source. When that re-parse fails
+  // the node's own aggregates are the cross-check that keeps the empty
+  // `states[]` from reading as a verified zero.
+  const outcome = await buildStatesFromSourceXml(
     resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath),
   );
+  const states = outcome.kind === 'parsed' ? outcome.states : [];
+  const widgetTreeBoundaries = widgetTreeDisclosures(node, outcome, states);
 
   return ok({
     data: {
@@ -573,7 +771,11 @@ export const omniuicardWidgetBreakdownHandler = async (
         ),
       },
       dispatchedActions: sortDispatchedActions(dispatchedActions),
+      // Blind-spot / drift disclosures lead: they mute the answer above
+      // them. The two verbatim v3.2 contract disclosures follow and are
+      // still surfaced unconditionally on every response.
       boundaries: [
+        ...widgetTreeBoundaries,
         PROPERTY_SET_CONFIG_PARSING_DISCLOSURE,
         NATIVE_VS_VLOCITY_DISCLOSURE,
       ],

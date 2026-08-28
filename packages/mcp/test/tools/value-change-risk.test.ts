@@ -15,7 +15,7 @@ const NO_EDGES: EdgeSummary = { automation: [], code: [], integration: [], displ
 const cls = (
   object: string,
   field: string,
-  opts: { signals?: UpsertSignal[]; derived?: boolean } = {},
+  opts: { signals?: UpsertSignal[]; unverified?: UpsertSignal[]; derived?: boolean } = {},
 ): FieldClassification => ({
   fieldId: `CustomField:${object}.${field}`,
   object,
@@ -23,7 +23,16 @@ const cls = (
   mutability: opts.derived
     ? { mutability: 'derived', reason: 'Formula field — computed.', sourceFormula: 'Related_Widget__r.Member_ID__c' }
     : { mutability: 'writable', reason: 'Directly editable field.' },
-  upsertKey: { isUpsertKey: (opts.signals?.length ?? 0) > 0, signals: opts.signals ?? [] },
+  upsertKey: {
+    isUpsertKey: (opts.signals?.length ?? 0) > 0,
+    signals: opts.signals ?? [],
+    // `unverifiedSignals` is the third state classifyUpsertKey now keeps apart:
+    // a node that does not CARRY `externalId`/`unique` was never checked for them,
+    // which is not the same as checked-and-false. These fixtures name their signals
+    // explicitly, so they model a field that WAS checked — `[]` is the honest value
+    // here, not a convenient one. Pass `unverified` to model the other state.
+    unverifiedSignals: opts.unverified ?? [],
+  },
   role: { role: 'x', severity: 'low', confidence: 'confirmed', signals: [] },
 });
 

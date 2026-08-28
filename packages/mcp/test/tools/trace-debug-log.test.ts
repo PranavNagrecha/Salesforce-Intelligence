@@ -521,3 +521,124 @@ describe('sfi.trace_debug_log — the empty-limit sentence must not blame the pa
     expect(d.boundaries.join(' ')).not.toMatch(/No CUMULATIVE_LIMIT_USAGE block is present/);
   });
 });
+
+// =============================================================================
+// CENSUS 055 / R1 — the two log-name indexes were capped at 8 pages of 500, and
+// the ValidationRule index disclosed NOTHING about it. A rule sorting past node
+// 4,000 came back `not-in-vault` with four enumerated causes ("managed, not
+// retrieved, renamed since the refresh, or from a different org") — all four
+// false: the real cause was that the scan stopped. Both indexes now walk the
+// type to exhaustion through the shared `scanAllNodesOfTypes`.
+// =============================================================================
+
+describe('sfi.trace_debug_log — a name past node 4,000 is not "not in your org"', () => {
+  /** One more than the old FLOW_LABEL_SCAN_MAX_PAGES (8) x _PAGE (500) = 4,000. */
+  const FILLERS = 4001;
+
+  const LATE_LOG = [
+    '57.0 APEX_CODE,FINE;VALIDATION,INFO;WORKFLOW,FINER',
+    '09:00:00.001 (1000000)|EXECUTION_STARTED',
+    '09:00:00.002 (2000000)|VALIDATION_RULE|03d000000000001AAA|Zz_Late_Rule',
+    '09:00:00.002 (2500000)|VALIDATION_PASS',
+    '09:00:00.003 (3000000)|FLOW_START_INTERVIEWS_BEGIN|1',
+    '09:00:00.003 (3500000)|FLOW_START_INTERVIEW_BEGIN|1|Zz Late Flow',
+    '09:00:00.004 (4000000)|FLOW_START_INTERVIEW_END|1|Zz Late Flow',
+    '09:00:00.004 (4500000)|FLOW_START_INTERVIEWS_END',
+    '09:00:00.005 (5000000)|EXECUTION_FINISHED',
+  ].join('\n');
+
+  let deepDir: string;
+  let deepStore: GraphStore;
+  let deepCtx: Context;
+
+  beforeAll(async () => {
+    deepDir = mkdtempSync(join(tmpdir(), 'sfi-trace-debug-log-deep-'));
+    const o = await openGraph(join(deepDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    deepStore = o.value;
+    const nodes: Node[] = [
+      node({ id: 'CustomObject:Widget__c', type: 'CustomObject', apiName: 'Widget__c' }),
+    ];
+    for (let i = 0; i < FILLERS; i += 1) {
+      const n = String(i).padStart(5, '0');
+      nodes.push(
+        node({
+          id: `ValidationRule:Widget__c.Aa_Filler_${n}`,
+          type: 'ValidationRule',
+          apiName: `Widget__c.Aa_Filler_${n}`,
+          parentId: 'CustomObject:Widget__c',
+          properties: { active: true },
+        }),
+        node({
+          id: `Flow:Aa_Filler_${n}`,
+          type: 'Flow',
+          apiName: `Aa_Filler_${n}`,
+          label: `Aa Filler ${n}`,
+          properties: { status: 'Active' },
+        }),
+      );
+    }
+    // Both of these sort LAST by id ASC, so a walk that stops at 4,000 nodes
+    // never reaches them — and the vault demonstrably holds them.
+    nodes.push(
+      node({
+        id: 'ValidationRule:Widget__c.Zz_Late_Rule',
+        type: 'ValidationRule',
+        apiName: 'Widget__c.Zz_Late_Rule',
+        parentId: 'CustomObject:Widget__c',
+        properties: { active: true },
+      }),
+      node({
+        id: 'Flow:Zz_Late_Flow',
+        type: 'Flow',
+        apiName: 'Zz_Late_Flow',
+        label: 'Zz Late Flow',
+        properties: { status: 'Active' },
+      }),
+    );
+    const imported = await importExtractionResults(deepStore, [{ nodes, edges: [] }]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    deepCtx = { vaultRoot: deepDir, manifest: MANIFEST, graph: deepStore };
+  }, 180_000);
+
+  afterAll(async () => {
+    await closeGraph(deepStore);
+    rmSync(deepDir, { recursive: true, force: true });
+  });
+
+  const runDeep = async () => {
+    const r = await traceDebugLogHandler(
+      deepCtx,
+      traceDebugLogInputSchema.parse({ logText: LATE_LOG }),
+    );
+    if (!r.ok) throw new Error(r.error.message);
+    return r.value.data;
+  };
+
+  it('resolves a ValidationRule that sorts past the old 4,000-node index cap', async () => {
+    const d = await runDeep();
+    const rule = d.componentResolution.find((r) => r.nameInLog === 'Zz_Late_Rule');
+    expect(rule?.componentId).toBe('ValidationRule:Widget__c.Zz_Late_Rule');
+    expect(rule?.identity).toBe('heuristic');
+  });
+
+  it('never enumerates four false causes for a rule the vault actually holds', async () => {
+    const d = await runDeep();
+    const rule = d.componentResolution.find((r) => r.nameInLog === 'Zz_Late_Rule');
+    expect(rule?.identity).not.toBe('not-in-vault');
+    expect(rule?.why ?? '').not.toMatch(/No ValidationRule in this vault/);
+  });
+
+  it('resolves a Flow whose MasterLabel sorts past the old 4,000-node index cap', async () => {
+    const d = await runDeep();
+    const flow = d.componentResolution.find((r) => r.nameInLog === 'Zz Late Flow');
+    expect(flow?.componentId).toBe('Flow:Zz_Late_Flow');
+    expect(flow?.identity).toBe('heuristic');
+  });
+
+  it('does not disclose a cap it no longer hit — the type was walked to exhaustion', async () => {
+    const d = await runDeep();
+    expect(d.boundaries.join(' ')).not.toMatch(/index was capped at/);
+    expect(d.boundaries.join(' ')).not.toMatch(/Full scan capped at/);
+  });
+});

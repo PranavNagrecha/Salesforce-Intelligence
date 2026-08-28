@@ -1706,3 +1706,94 @@ describe('RM-3 interpret fold', () => {
     expect(d.evidence.interpretations).toEqual([]);
   });
 });
+
+describe('synthesizeAnswerHandler — cap honesty', () => {
+  // ---------------------------------------------------------------------
+  // CITATION-CAP HONESTY (R1). The grounding SET must never be capped: a
+  // capped set turns a verbatim, in-source id into a fabricated accusation of
+  // fabrication. The PUBLISHED citation list may be capped, but only with a
+  // typed sentinel (`citationsTruncated` + `citationsTotal`) so a host can see
+  // the list is short.
+  // ---------------------------------------------------------------------
+
+  /** A payload carrying `count` distinct canonical ids, in insertion order. */
+  const manyIdPayload = (count: number): unknown => ({
+    objectId: 'CustomObject:Fixture_Object__c',
+    grants: Array.from({ length: count }, (_, n) => ({
+      grantorId: `PermissionSet:Fixture_Perm_${String(n).padStart(3, '0')}`,
+      permission: 'read',
+    })),
+  });
+
+  it('does NOT flag an id as hallucinated when it sits past the citation cap in the source', async () => {
+    // 250 canonical ids > MAX_CITATIONS (200). The draft cites id #230
+    // VERBATIM from the same payload, so it is grounded by construction.
+    const citedId = 'PermissionSet:Fixture_Perm_230';
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: manyIdPayload(250),
+      draft: `Read access is granted by ${citedId}.`,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.hallucinatedIds).toEqual([]);
+    expect(d.groundedIds).toEqual([citedId]);
+  });
+
+  it('publishes a typed truncation sentinel when the citation list is capped', async () => {
+    const r = await synthesizeAnswerHandler(ctx, { input: manyIdPayload(250) });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // 250 distinct ids in the source + the object id itself = 251.
+    expect(d.citationsTotal).toBe(251);
+    expect(d.citationsTruncated).toBe(true);
+    expect(d.citations.length).toBe(200);
+    // A host reading only `caveats` must also see it.
+    expect(d.caveats.some((c) => c.startsWith('CITATIONS TRUNCATED:'))).toBe(true);
+  });
+
+  it('reports citationsTruncated:false with the true total when nothing was capped (control)', async () => {
+    const r = await synthesizeAnswerHandler(ctx, { input: manyIdPayload(3) });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.citationsTruncated).toBe(false);
+    expect(d.citationsTotal).toBe(4);
+    expect(d.citations.length).toBe(4);
+    expect(d.caveats.some((c) => c.startsWith('CITATIONS TRUNCATED:'))).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------
+  // CAVEAT-CAP HONESTY (R1/R6). `caveats` is a HONESTY_LIST_KEY in
+  // tool-dispatch.ts, deliberately exempt from the global response-budget
+  // trimmer because a silently shortened blind-spot list leaves a host MORE
+  // confident than the evidence allows. This tool must not re-introduce that
+  // trim inside its own handler.
+  // ---------------------------------------------------------------------
+
+  it('carries EVERY caveat from the source — never silently drops past a cap', async () => {
+    const caveats = Array.from(
+      { length: 45 },
+      (_, n) => `Coverage caveat ${String(n).padStart(2, '0')}: family ${n} was not retrieved.`,
+    );
+    const r = await synthesizeAnswerHandler(ctx, { input: { caveats } });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    for (const c of caveats) expect(d.caveats).toContain(c);
+    expect(d.caveats.length).toBe(45);
+    // The summary count must agree with what was actually carried.
+    expect(d.summary).toContain('45 caveat(s)');
+  });
+
+  it('still dedupes repeated caveats (uncapped is not unbounded duplication)', async () => {
+    const dup = 'Criteria-based sharing is deferred.';
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: { caveats: [dup, dup, dup], boundaries: [dup] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.caveats.filter((c) => c === dup).length).toBe(1);
+  });
+});

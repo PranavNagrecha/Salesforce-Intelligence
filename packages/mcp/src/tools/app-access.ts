@@ -29,12 +29,21 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { firstNonEmpty, toCustomApplicationId } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
 const APP_PREFIX = 'CustomApplication:';
+/**
+ * The node property the profile/permission-set extractors ALWAYS write when
+ * they ran (`[]` when the source XML declares none) — see
+ * `packages/extractors/src/profile.ts` / `permission-set.ts`
+ * `collectApplicationVisibilities`. Its ABSENCE, not its emptiness, is what
+ * says "this container was never checked" (R1).
+ */
+const APP_VIS_SENTINEL = 'applicationVisibilities';
 const DEFAULT_LIMIT = 120;
 const MAX_LIMIT = 250;
 const APP_ACCESS_TOOL = 'sfi.app_access';
@@ -155,6 +164,45 @@ interface RawAppVis {
   readonly visible?: unknown;
   readonly default?: unknown;
 }
+
+/**
+ * Read a granter's `applicationVisibilities`, or `null` when it CANNOT be read.
+ *
+ * One place answers the whole question for both directions of this tool, so the
+ * two can never disagree about what counts as checked:
+ *   - no sentinel property  → never extracted (the R1 law: the node not CARRYING
+ *     the property, not an empty array, is what says "not checked");
+ *   - sentinel present but not an array → a corrupt vault. The extractors
+ *     guarantee an array (`[]` when the XML declares none), so a non-array is
+ *     unreadable and contributes nothing — a blind spot, never a silent skip.
+ * An extracted, EMPTY array is a real answer and comes back as `[]`.
+ */
+const readAppVisibilities = (
+  props: Readonly<Record<string, unknown>>,
+): readonly RawAppVis[] | null => {
+  if (!familyWasExtracted(props, APP_VIS_SENTINEL)) return null;
+  const value = props[APP_VIS_SENTINEL];
+  return Array.isArray(value) ? (value as RawAppVis[]) : null;
+};
+
+/**
+ * The ONE case-1 sentence for both directions of this tool (R6).
+ *
+ * `absence-disclosure.ts`'s header names this file twice as a place the wording
+ * had been copied; the two copies had already drifted (only one of them named a
+ * version cutoff, neither enumerated the affected containers). Both call sites
+ * now build the sentence here, from the shared template, so a future edit
+ * cannot separate them again.
+ */
+const appVisNotCheckedDisclosure = (containers: readonly string[]): string =>
+  notExtractedFamilyDisclosure({
+    subject: 'App visibility',
+    verb: 'checked',
+    sentinelProperty: APP_VIS_SENTINEL,
+    containers: [...containers].sort(),
+    surface: '`canOpen` / `summary.canOpen` / `defaultedBy` / `openableApps`',
+    zeroReading: '"cannot open this app"',
+  });
 
 /** Normalize an app name/label for case-/separator-insensitive matching. */
 const normApp = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -344,17 +392,25 @@ export const appAccessHandler = async (
   // and paged on the output axis below; the scan completes inside this call.
   const canOpen: AppGranter[] = [];
   const defaultedBy: string[] = [];
-  let anyGranterHadAppVis = false;
+  // R1: PER-CONTAINER, never a whole-corpus OR. One extracted container used to
+  // be enough to select the confident wording while every container WITHOUT the
+  // property was silently skipped — a missed grant in a security tool. The
+  // containers that could not be read are ENUMERATED for the disclosure.
+  const containersNotChecked: string[] = [];
+  let containersChecked = 0;
   const scan = await scanAllNodesOfTypes(ctx.graph, ['Profile', 'PermissionSet']);
   if (!scan.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
   }
   for (const node of scan.value.nodes) {
-    const raw = node.properties['applicationVisibilities'];
-    if (!Array.isArray(raw)) continue;
-    anyGranterHadAppVis = true;
+    const raw = readAppVisibilities(node.properties);
+    if (raw === null) {
+      containersNotChecked.push(node.id);
+      continue;
+    }
+    containersChecked += 1;
     const granterType = node.id.startsWith('Profile:') ? 'Profile' : 'PermissionSet';
-    for (const item of raw as RawAppVis[]) {
+    for (const item of raw) {
       if (item.application !== appApiName) continue;
       if (item.visible !== true) continue;
       const isDefault = item.default === true;
@@ -410,9 +466,20 @@ export const appAccessHandler = async (
   const emitCursor = paged.nextCursor !== null;
 
   const scanTruncated = scan.value.scanIncomplete;
-  const baseNote = anyGranterHadAppVis
-    ? 'Who-can-open is computed from profile/permission-set applicationVisibilities (`visible: true`); tab membership is the app definition. App access also depends on the user being ASSIGNED the profile/permission set (runtime, not modeled).'
-    : 'No profile/permission set in this vault carries an extracted `applicationVisibilities` property — re-run `/sfi-refresh`; the who-can-open list is "not modeled", not a verified empty.';
+  const computedNote =
+    'Who-can-open is computed from profile/permission-set applicationVisibilities (`visible: true`); tab membership is the app definition. App access also depends on the user being ASSIGNED the profile/permission set (runtime, not modeled).';
+  // R6: the case-1 sentence comes from the ONE shared builder (it used to be
+  // hand-rolled here and again in the granter direction, and the two had
+  // already drifted). It leads the note when it applies, because it is an
+  // UNDERSTATEMENT of access.
+  const notCheckedNote =
+    containersNotChecked.length > 0 ? appVisNotCheckedDisclosure(containersNotChecked) : null;
+  const baseNote =
+    notCheckedNote === null
+      ? computedNote
+      : containersChecked > 0
+        ? `${notCheckedNote} ${computedNote}`
+        : notCheckedNote;
   const boundaryNote = scanTruncated
     ? `${baseNote} ${scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit())}`
     : baseNote;
@@ -450,7 +517,8 @@ export const appAccessHandler = async (
 /**
  * The inverse lookup (P14-APP-default-reverse): read the granter node's own
  * `applicationVisibilities` and project `{openableApps, defaultApp}`. Honest
- * when the property is missing: "not modeled", never a verified empty.
+ * when the property is missing — via the SHARED case-1 builder (R6), so this
+ * direction and the app direction above cannot word it differently.
  */
 const appAccessForGranter = async (
   ctx: Context,
@@ -469,12 +537,14 @@ const appAccessForGranter = async (
     });
   }
   const node = nodeRes.value;
-  const raw = node.properties['applicationVisibilities'];
-  const hasVis = Array.isArray(raw);
+  // R1: the SENTINEL decides, not the array length — an extracted container
+  // holding `[]` is a verified "opens nothing"; one with no such key was never
+  // checked. Same reader as the app direction above.
+  const raw = readAppVisibilities(node.properties);
   const openable: string[] = [];
   let defaultApp: string | null = null;
-  if (hasVis) {
-    for (const item of raw as RawAppVis[]) {
+  if (raw !== null) {
+    for (const item of raw) {
       if (typeof item.application !== 'string' || item.visible !== true) continue;
       const appId = `CustomApplication:${item.application}`;
       openable.push(appId);
@@ -491,9 +561,9 @@ const appAccessForGranter = async (
       defaultApp,
       summary: { openableApps: openable.length },
       confidence: 'declared',
-      boundaryNote: hasVis
+      boundaryNote: raw !== null
         ? 'Computed from this granter\'s declared applicationVisibilities (visible: true; default flags the default app). Actual access also requires the user to be ASSIGNED this profile/permission set (runtime, not modeled).'
-        : 'This granter carries NO extracted applicationVisibilities property — the answer is "not modeled", never a verified empty. Re-run /sfi-refresh; pre-0.1.8 vaults may predate the extraction.',
+        : appVisNotCheckedDisclosure([componentId]),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

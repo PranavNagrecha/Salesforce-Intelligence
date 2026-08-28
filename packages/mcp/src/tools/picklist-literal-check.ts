@@ -108,7 +108,15 @@ export const detectPicklistLiteralMismatch = (
 ): PicklistLiteralMismatch | null => {
   if (literals.length === 0) return null;
   const defined = normalizePicklistValues(rawPicklistValues);
-  // Absent / not-an-array ⇒ not an inline picklist; do not second-guess.
+  // Absent / not-an-array ⇒ NO VALUES WERE SUPPLIED. That is NOT the same as
+  // "not a picklist": a GlobalValueSet-backed picklist stores nothing in
+  // `properties.picklistValues` (the extractor only fills it from an inline
+  // `<valueSetDefinition>`), so this branch is also reached for a real picklist
+  // whose declared values live on the GlobalValueSet node. This function cannot
+  // tell the two apart from values alone and correctly refuses to guess — the
+  // caller resolves the value set (see `resolveGlobalValueSetValues`) and, when
+  // it cannot, declares the field a GAP via `scanSoqlForValidationGaps` rather
+  // than letting the literal through unchecked.
   if (defined === null) return null;
   const definedKeys = new Set(
     defined.map((v) => v.value.trim().toLowerCase()),
@@ -212,39 +220,124 @@ export interface PicklistValidationGap {
 }
 
 /**
- * Find WHERE equality fields whose vault node is ABSENT, so picklist
- * pre-validation could not run for them. This is the managed-package /
- * not-in-vault case (e.g. an `hed__*` field the refresh never retrieved): the
- * scanner cannot confirm the literal is a defined picklist value, so a 0 count
- * (or empty sample) must NOT be asserted as "zero records exist" — it might be
- * an undetected VALUE MISMATCH. The caller supplies a `fieldKnown` predicate
- * (e.g. a graph node read): `true` when the CustomField node exists in the
- * vault, `false` when it is absent. Relationship-path fields (`Foo__r.Bar`)
- * cannot be resolved offline either and are reported as gaps.
+ * What the vault knows about one WHERE-equality field, as the caller read it
+ * off the CustomField node. A bare `boolean` is still accepted by
+ * {@link scanSoqlForValidationGaps} (`true` = the node exists) for callers that
+ * hold nothing else, but a boolean CANNOT express the GlobalValueSet case
+ * below, so a caller with the node in hand should return this object instead.
+ */
+export interface FieldPicklistState {
+  /** `true` when the CustomField node exists in the vault. */
+  readonly present: boolean;
+  /**
+   * Raw `properties.picklistValues` — the INLINE value set. `null`/absent for a
+   * non-picklist AND for a GlobalValueSet-backed picklist, which is exactly why
+   * it cannot be the sole discriminator.
+   */
+  readonly picklistValues?: unknown;
+  /**
+   * Raw `properties.valueSetName` — written by the CustomField extractor ONLY
+   * for a picklist whose values live on a GlobalValueSet. Its presence proves
+   * the field IS a picklist even though `picklistValues` is null.
+   */
+  readonly valueSetName?: unknown;
+  /**
+   * The declared values the caller resolved from the GlobalValueSet node (e.g.
+   * via `resolveGlobalValueSetValues`, which walks the `usesValueSet` edge).
+   * When supplied, the field was really validated by
+   * {@link scanSoqlForPicklistMismatches} and is NOT a gap here.
+   */
+  readonly resolvedValueSetValues?: unknown;
+}
+
+/**
+ * Find WHERE equality fields that picklist pre-validation could NOT run on, so
+ * a 0 count (or empty sample) is never asserted as "zero records exist" when it
+ * might be an undetected VALUE MISMATCH. Two distinct gaps are reported:
  *
- * Mutually exclusive with {@link scanSoqlForPicklistMismatches}: a field the
- * vault KNOWS is validated there (matched or mismatched); a field the vault does
- * NOT know is reported here. A field present in the vault but lacking an inline
- * picklist definition is neither — it is a non-picklist field, silently fine.
+ *  1. The field's vault node is ABSENT — the managed-package / not-modeled case
+ *     (a namespaced field the refresh never retrieved), or a relationship path
+ *     (`Foo__r.Bar`), which is never resolvable offline.
+ *  2. The field's node is PRESENT and it IS a picklist, but its declared values
+ *     are not in hand: `properties.picklistValues` is null while
+ *     `properties.valueSetName` names a GlobalValueSet, and the caller could not
+ *     resolve that value set. This is the shared Country/Industry-style value
+ *     set, and it used to fall through BOTH scanners in silence — the mismatch
+ *     scanner saw no values and skipped it as "not a picklist", while this
+ *     scanner saw a present node and skipped it as "known". A literal typo'd
+ *     against such a field produced a confident 0 with no disclosure at all.
+ *
+ * The caller supplies a `fieldKnown` lookup: a {@link FieldPicklistState} (the
+ * node's facts) or, for a caller that can only answer presence, a bare boolean —
+ * a boolean `true` keeps the pre-existing "known ⇒ silent" behavior and can
+ * therefore never surface gap (2).
+ *
+ * Complementary to {@link scanSoqlForPicklistMismatches}: a field whose declared
+ * values ARE in hand (inline, or resolved from its GlobalValueSet) is validated
+ * there and never reported here; a field with no value set at all is a genuine
+ * non-picklist and is silently fine.
  */
 export const scanSoqlForValidationGaps = (
   soql: string,
-  fieldKnown: (fieldRef: string) => boolean,
+  fieldKnown: (fieldRef: string) => boolean | FieldPicklistState,
 ): readonly PicklistValidationGap[] => {
   const out: PicklistValidationGap[] = [];
   for (const eq of extractEqualityLiterals(soql)) {
-    if (fieldKnown(eq.field)) continue;
-    const litList = eq.literals.map((l) => `'${l}'`).join(', ');
-    out.push({
-      field: eq.field,
-      literals: eq.literals,
+    const gap = classifyValidationGap(
+      eq.field,
+      eq.literals,
+      fieldKnown(eq.field),
+    );
+    if (gap !== null) out.push(gap);
+  }
+  return out;
+};
+
+/**
+ * Decide which (if any) pre-validation gap one equality field has. Kept as one
+ * expression per case so the three outcomes — absent node, unresolved global
+ * value set, genuinely-validated-or-not-a-picklist — stay visibly exhaustive.
+ */
+const classifyValidationGap = (
+  field: string,
+  literals: readonly string[],
+  state: boolean | FieldPicklistState,
+): PicklistValidationGap | null => {
+  const present = typeof state === 'boolean' ? state : state.present;
+  const litList = literals.map((l) => `'${l}'`).join(', ');
+  if (!present) {
+    return {
+      field,
+      literals,
       disclosure:
-        `Could not pre-validate the WHERE literal ${litList} on ${eq.field}: ` +
+        `Could not pre-validate the WHERE literal ${litList} on ${field}: ` +
         `that field is not in the vault (e.g. a managed-package field the refresh ` +
         `did not retrieve, or a relationship path). If it is a picklist, a count/sample ` +
         `of 0 may be a VALUE MISMATCH rather than proof those records do not exist — ` +
         `verify the exact picklist value in the org (or run /sfi-refresh to model the field).`,
-    });
+    };
   }
-  return out;
+  // A presence-only caller told us nothing more; preserve the old silence
+  // rather than inventing a gap we cannot substantiate.
+  if (typeof state === 'boolean') return null;
+  // Declared values in hand (inline, or resolved from the GlobalValueSet) ⇒ the
+  // mismatch scanner really checked this literal. Not a gap.
+  if (normalizePicklistValues(state.picklistValues) !== null) return null;
+  if (normalizePicklistValues(state.resolvedValueSetValues) !== null) return null;
+  const valueSetName =
+    typeof state.valueSetName === 'string' ? state.valueSetName.trim() : '';
+  // No inline values AND no value-set name ⇒ genuinely not a picklist.
+  if (valueSetName.length === 0) return null;
+  return {
+    field,
+    literals,
+    disclosure:
+      `Could not pre-validate the WHERE literal ${litList} on ${field}: ` +
+      `that field IS a picklist, but its values live on the global value set ` +
+      `\`${valueSetName}\`, which could not be resolved from the vault (the ` +
+      `GlobalValueSet node or the field's usesValueSet edge is missing — re-run ` +
+      `/sfi-refresh to model it). A count/sample of 0 may therefore be a VALUE ` +
+      `MISMATCH rather than proof those records do not exist — verify the exact ` +
+      `picklist value in the org.`,
+  };
 };

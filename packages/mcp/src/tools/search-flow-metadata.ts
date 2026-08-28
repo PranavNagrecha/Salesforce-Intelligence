@@ -28,6 +28,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveExistingObjectScope } from './input-aliases.js';
+
 const SEARCH_FLOW_METADATA_MAX_LIMIT = 200;
 const SEARCH_FLOW_METADATA_DEFAULT_LIMIT = 50;
 const FLOW_FILE_SUFFIX = '.flow-meta.xml';
@@ -39,10 +41,53 @@ const extractFirstTag = (xml: string, tagName: string): string | null => {
   return m ? (m[1] ?? null) : null;
 };
 
-/** True when the flow XML contains `<object>VALUE</object>` for the given API name. */
+/** Every regex metacharacter, so a caller-supplied api name is matched LITERALLY. */
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * True when the flow XML contains `<object>VALUE</object>` for the given API name.
+ *
+ * SEARCH-FLOW-METADATA-TRUSTS-AN-UNVERIFIED-TRIGGEROBJECT: the value handed in
+ * here is the CANONICAL api name the vault holds (see
+ * {@link resolveExistingObjectScope} in the handler), never the caller's raw
+ * string. Two things still hold locally:
+ *   - EVERY metacharacter is escaped, not just `.`. The old escape let
+ *     `Account|Contact` compile to an alternation that matched flows on BOTH
+ *     objects and answered as though one had been named.
+ *   - the match is CASE-INSENSITIVE. Salesforce api names are case-insensitive,
+ *     so `<object>account</object>` in a hand-edited file names the same object
+ *     as the canonical `Account`; a case-sensitive test dropped it.
+ */
 const flowMatchesTriggerObject = (xml: string, triggerObject: string): boolean => {
-  const re = new RegExp(`<object>\\s*${triggerObject.replace(/\./g, '\\.')}\\s*</object>`);
+  const re = new RegExp(`<object>\\s*${escapeRegExp(triggerObject)}\\s*</object>`, 'i');
   return re.test(xml);
+};
+
+/**
+ * Cap on the unreadable paths echoed back. The COUNT is always exact; this only
+ * bounds the list so a wholly unreadable vault cannot blow the response budget.
+ */
+const MAX_UNREADABLE_PATHS_LISTED = 25;
+
+/**
+ * SEARCH-FLOW-METADATA-SWALLOWS-UNREADABLE-FILES: verbatim disclosure, shaped
+ * after `buildUnscannedNodesNote` in `quality-scan-coverage.ts`. Product copy;
+ * do not reword.
+ */
+const buildCoverageNote = (
+  unreadable: number,
+  found: number,
+  paths: readonly string[],
+): string => {
+  const listed = paths.join(', ');
+  const more = unreadable > paths.length ? `, +${unreadable - paths.length} more` : '';
+  return (
+    `NOT SCANNED IN THIS VAULT: ${unreadable} of ${found} flow files could not be READ ` +
+    `(${listed}${more}). They are excluded from \`statusSummary\` and from \`matches\`, so ` +
+    'this tally is NOT the org\'s complete flow count and zero findings for those files is ' +
+    '"not checked", NOT "clean". Re-run `/sfi-refresh`, or check file permissions on the vault.'
+  );
 };
 
 export const searchFlowMetadataInputSchema = z.object({
@@ -99,16 +144,57 @@ export interface FlowStatusSummary {
   readonly InvalidDraft: number;
   /** Count of flows whose `<status>` does not match the four known values. */
   readonly other: number;
-  /** Total flow files scanned (sum of all status buckets). */
+  /**
+   * Total flow files successfully READ and tallied (sum of all status buckets).
+   * This is NOT necessarily the org's flow count — files that could not be
+   * opened are excluded and reported in `filesUnreadable`.
+   */
   readonly total: number;
 }
 
 export interface SearchFlowMetadataOutput {
+  /**
+   * SEARCH-FLOW-METADATA-TRUSTS-AN-UNVERIFIED-TRIGGEROBJECT: present ONLY when
+   * `triggerObject` was supplied — echoes the object the scan was narrowed to,
+   * in the vault's EXACT casing, so a host never reads a scoped tally as
+   * org-wide and a caller who typed `account` can see it resolved to `Account`.
+   * Absent on a bare call, keeping that response byte-identical to pre-fix.
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   readonly matches: readonly SearchFlowMetadataMatch[];
   readonly truncated: boolean;
   /**
+   * False when NO `query` was supplied (summary-only mode): no line search ran,
+   * so the empty `matches` above is NOT-SEARCHED, not searched-and-clean.
+   */
+  readonly searched: boolean;
+  /**
+   * Flow files DISCOVERED under `source/` — every one, BEFORE any
+   * `triggerObject` narrowing, because a file that could not be opened cannot
+   * be classified as in or out of scope. It is the denominator that makes
+   * `filesUnreadable` readable.
+   */
+  readonly filesFound: number;
+  /**
+   * SEARCH-FLOW-METADATA-SWALLOWS-UNREADABLE-FILES: how many of `filesFound`
+   * could not be opened. These contribute to NOTHING — not `statusSummary`, not
+   * `matches` — so a non-zero value means the answer is PARTIAL.
+   */
+  readonly filesUnreadable: number;
+  /**
+   * The vault-relative paths of the unreadable files, capped at 25. The count
+   * above is exact even when this list is truncated.
+   */
+  readonly unreadablePaths: readonly string[];
+  /** Verbatim disclosure, present ONLY when `filesUnreadable > 0`. */
+  readonly coverageNote?: string;
+  /**
    * CR-06: present when `summarize: true`. Tally of flow `<status>` values
-   * across all files (optionally filtered to `triggerObject`).
+   * across all files that were successfully READ (optionally filtered to
+   * `triggerObject`). Read `total` against `filesFound` / `filesUnreadable`.
    */
   readonly statusSummary?: FlowStatusSummary;
 }
@@ -118,6 +204,31 @@ export const searchFlowMetadataHandler = async (
   input: SearchFlowMetadataInput,
 ): Promise<Result<McpResponse<SearchFlowMetadataOutput>, McpError>> => {
   const limit = input.limit ?? SEARCH_FLOW_METADATA_DEFAULT_LIMIT;
+
+  // SEARCH-FLOW-METADATA-TRUSTS-AN-UNVERIFIED-TRIGGEROBJECT: `triggerObject`
+  // used to be string-templated straight into the match regex, so a wrong-case
+  // name (`account` against `<object>Account</object>`), a typo, and an object
+  // this refresh never retrieved ALL produced the same confident
+  // `{Active: 0, …, total: 0}` — indistinguishable from a checked "this object
+  // has no flows at all". It now goes through the shared
+  // `resolveExistingObjectScope`, which verifies the object EXISTS in the vault,
+  // rewrites it to the vault's exact casing, and REFUSES anything it cannot
+  // resolve rather than answering about the empty set.
+  let scopedObject: string | null = null;
+  let appliedScope: { readonly object: string; readonly mode: 'component' } | null = null;
+  if (input.triggerObject !== undefined) {
+    const scopeResult = await resolveExistingObjectScope(ctx.graph, {
+      objectApiName: input.triggerObject,
+    });
+    if (!scopeResult.ok) return err(scopeResult.error);
+    const scope = scopeResult.value;
+    // `triggerObject` is `min(1)`, so the resolver cannot report "no object
+    // named"; the null branch exists only so the type is honoured.
+    if (scope !== null) {
+      scopedObject = scope.object;
+      appliedScope = { object: scope.componentId, mode: 'component' };
+    }
+  }
 
   const files = await collectVaultSourceFiles(ctx.vaultRoot, {
     suffixes: [FLOW_FILE_SUFFIX],
@@ -138,19 +249,31 @@ export const searchFlowMetadataHandler = async (
     matcher = built.value;
   }
 
+  // SEARCH-FLOW-METADATA-SWALLOWS-UNREADABLE-FILES: a file that fails to read
+  // used to `continue` into silence — it reached neither `statusSummary.total`
+  // nor `matches` nor any error, so a partial tally shipped as the org's
+  // complete flow status. Count them and NAME them instead.
+  let filesUnreadable = 0;
+  const unreadablePaths: string[] = [];
+
   for (const file of files) {
     // Read the full file once — needed for both the object filter and the summary.
     let raw: string;
     try {
       raw = await readFile(file.absolutePath, 'utf-8');
     } catch {
+      filesUnreadable += 1;
+      if (unreadablePaths.length < MAX_UNREADABLE_PATHS_LISTED) {
+        unreadablePaths.push(file.vaultRelativePath);
+      }
       continue;
     }
 
     // CR-06: apply triggerObject filter at the file level (skip files that
-    // don't declare the object) — avoids matching flows on other objects.
-    if (input.triggerObject !== undefined) {
-      if (!flowMatchesTriggerObject(raw, input.triggerObject)) continue;
+    // don't declare the object) — avoids matching flows on other objects. The
+    // name matched is the vault-canonical one the resolver returned above.
+    if (scopedObject !== null) {
+      if (!flowMatchesTriggerObject(raw, scopedObject)) continue;
     }
 
     // CR-06: accumulate status summary.
@@ -187,8 +310,19 @@ export const searchFlowMetadataHandler = async (
 
   return ok({
     data: {
+      // appliedScope FIRST and only when scoped, so a bare call's serialized
+      // response is byte-identical to the pre-fix shape apart from the new
+      // always-present coverage fields.
+      ...(appliedScope !== null ? { appliedScope } : {}),
       matches,
       truncated,
+      searched: matcher !== null,
+      filesFound: files.length,
+      filesUnreadable,
+      unreadablePaths,
+      ...(filesUnreadable > 0
+        ? { coverageNote: buildCoverageNote(filesUnreadable, files.length, unreadablePaths) }
+        : {}),
       ...(statusSummary !== undefined ? { statusSummary } : {}),
     },
     vaultState: {

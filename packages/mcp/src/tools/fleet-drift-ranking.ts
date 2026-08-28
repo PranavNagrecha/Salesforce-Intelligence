@@ -18,6 +18,14 @@
  *     bounds the hybrid plane. When the budget can't cover a vault's checks, the
  *     vault is a `budget-exhausted` skip — the sweep degrades, never overruns
  *     the org's API limits.
+ *   - **An ERRORED check is UNKNOWN drift, never zero.** A per-type Tooling
+ *     query that fails (expired auth, revoked token, an entity the org refuses,
+ *     a response whose shape carries no `totalSize`) is NOT counted as a clean
+ *     zero. When EVERY type errors for an org the vault leaves the ranking
+ *     entirely as a `live-check-failed` skip — it must never sort last as the
+ *     "freshest" vault; when only some types error the row stays but its
+ *     `vaultStale` is `null` (unknown) rather than a confident `false`, and the
+ *     headline `recommendation` names what could not be checked.
  *   - **Roll-up provenance.** Each ranked row is its own `live_org` read with
  *     its own `liveQueriedAt`; the aggregate is a fleet roll-up, so one org's
  *     freshness never implies another's.
@@ -39,11 +47,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { probeLiveAccess, STALE_CHECK_TYPES } from './live-plane.js';
+import { probeLiveAccess, STALE_CHECK_TYPES, staleSinceLiteral } from './live-plane.js';
 import { liveBudgetStatus, runLiveQuery, type LiveBudgetStatus } from './live-session.js';
 
 export const FLEET_DRIFT_DISCLOSURE =
-  `Ranks registered vaults by how far each is BEHIND its live org — a per-org Tooling-API count of components modified since that vault's last refresh, across the ${String(STALE_CHECK_TYPES.length)} types \`sfi.live_stale_check\` checks (${STALE_CHECK_TYPES.join(' / ')}; other families NOT checked). Each ranked row is its own live_org read at its own time; the aggregate is a fleet roll-up, so one org's freshness never implies another's. Consent is per org (a vault without it is an honest no-consent skip); every query routes through the per-session live-query budget (a vault the budget can't cover is a budget-exhausted skip — raise SFI_LIVE_QUERY_BUDGET or sweep a subset). Read-only; mutates neither org nor vault.`;
+  `Ranks registered vaults by how far each is BEHIND its live org — a per-org Tooling-API count of components modified since that vault's last refresh, across the ${String(STALE_CHECK_TYPES.length)} types \`sfi.live_stale_check\` checks (${STALE_CHECK_TYPES.join(' / ')}; other families NOT checked). Each ranked row is its own live_org read at its own time; the aggregate is a fleet roll-up, so one org's freshness never implies another's. Consent is per org (a vault without it is an honest no-consent skip); every query routes through the per-session live-query budget (a vault the budget can't cover is a budget-exhausted skip — raise SFI_LIVE_QUERY_BUDGET or sweep a subset). A staleness query that FAILS is never counted as zero drift: a vault whose every query failed is a \`live-check-failed\` skip (drift UNKNOWN, not current), and a row with \`erroredTypes\` reports \`vaultStale: null\` — unknown for those types. Read-only; mutates neither org nor vault.`;
 
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const STALE_TYPE_COUNT = STALE_CHECK_TYPES.length;
@@ -67,8 +75,14 @@ interface DriftRow {
   readonly alias: string;
   readonly sourceOrg: string;
   readonly refreshedAt: string;
+  /** Drift across the types that were ACTUALLY checked (never a failed type's 0). */
   readonly driftCount: number;
-  readonly vaultStale: boolean;
+  /**
+   * `true` = drift proven, `false` = proven current across ALL checked types,
+   * `null` = UNKNOWN: the checked types show nothing but `erroredTypes` were
+   * never asked, so absence of drift here is not evidence of freshness.
+   */
+  readonly vaultStale: boolean | null;
   readonly checkedTypes: readonly string[];
   readonly erroredTypes: readonly string[];
   readonly liveQueriedAt: string;
@@ -80,7 +94,8 @@ type SkipReason =
   | 'no-consent'
   | 'never-refreshed'
   | 'unreadable'
-  | 'budget-exhausted';
+  | 'budget-exhausted'
+  | 'live-check-failed';
 
 interface SkipRow {
   readonly alias: string;
@@ -105,8 +120,17 @@ export interface FleetDriftRankingOutput {
   readonly note: string | null;
 }
 
-const totalSizeOf = (value: unknown): number =>
-  (value as { result?: { totalSize?: number } }).result?.totalSize ?? 0;
+/**
+ * The drift count a `data query --json` response carries, or `null` when the
+ * response does not carry one. `?? 0` here USED to fabricate a verified zero out
+ * of any unrecognised shape and push the type onto `checked` as if the org had
+ * answered "nothing changed"; an unparseable response is an ERRORED type.
+ */
+const parseTotalSize = (value: unknown): number | null => {
+  const total = (value as { result?: { totalSize?: unknown } } | null | undefined)?.result
+    ?.totalSize;
+  return typeof total === 'number' && Number.isFinite(total) ? total : null;
+};
 
 /** Run the per-type staleness check for one org through the session budget. */
 const driftForOrg = async (
@@ -114,7 +138,10 @@ const driftForOrg = async (
   refreshedAt: string,
   exec?: ExecCommand,
 ): Promise<{ total: number; checked: string[]; errored: string[]; queriedAt: string }> => {
-  const sinceLiteral = refreshedAt.replace(/\.\d+Z$/, 'Z');
+  // R6: the SOQL threshold comes from the ONE shared builder `sfi.live_stale_check`
+  // uses. The local copy this replaced FLOORED the fractional second where the
+  // shared one CEILs, so the same vault could read as drifted here and current there.
+  const sinceLiteral = staleSinceLiteral(refreshedAt);
   let total = 0;
   const checked: string[] = [];
   const errored: string[] = [];
@@ -130,8 +157,14 @@ const driftForOrg = async (
       errored.push(type);
       continue;
     }
+    const size = parseTotalSize(r.value.value);
+    if (size === null) {
+      // Answered, but not with a count we can read — unknown, not zero.
+      errored.push(type);
+      continue;
+    }
     queriedAt = r.value.queriedAt;
-    total += totalSizeOf(r.value.value);
+    total += size;
     checked.push(type);
   }
   return { total, checked, errored, queriedAt };
@@ -204,12 +237,27 @@ export const fleetDriftRankingHandler = async (
       refreshedAt,
       exec,
     );
+    if (checked.length === 0) {
+      // EVERY staleness query failed for this org (expired auth, revoked token,
+      // org unreachable — all AFTER consent passed). Ranking it with
+      // `driftCount: 0` sorts the LEAST-known vault last, i.e. presents the org
+      // most likely to be badly stale as the freshest. It is a skip.
+      skipped.push({
+        alias: vault.alias,
+        sourceOrg,
+        reason: 'live-check-failed',
+        detail: `All ${String(errored.length)} staleness queries failed for '${sourceOrg}' — drift is UNKNOWN, not zero. Check the org is reachable and the CLI session is still valid (\`sf org login\`), then re-run.`,
+      });
+      continue;
+    }
     ranking.push({
       alias: vault.alias,
       sourceOrg,
       refreshedAt,
       driftCount: total,
-      vaultStale: total > 0,
+      // Tri-state: 0 drift across a PARTIAL set of types is not proof of
+      // freshness — the types that errored were never asked.
+      vaultStale: total > 0 ? true : errored.length > 0 ? null : false,
       checkedTypes: checked,
       erroredTypes: errored,
       liveQueriedAt: queriedAt,
@@ -229,16 +277,33 @@ export const fleetDriftRankingHandler = async (
       ? { alias: top.alias, driftCount: top.driftCount }
       : null;
 
+  // The un-checked half of the sweep, folded into the headline so a partial or
+  // failed check is never read as "current".
+  const failedVaults = skipped.filter((s) => s.reason === 'live-check-failed');
+  const partialRows = ranking.filter((r) => r.erroredTypes.length > 0);
+  const failedNote =
+    failedVaults.length === 0
+      ? ''
+      : ` ${String(failedVaults.length)} vault(s) could not be drift-checked at all (${failedVaults
+          .map((s) => s.alias)
+          .join(', ')}) — every staleness query failed, so their drift is UNKNOWN, not zero: re-authenticate and re-run before treating this fleet as current.`;
+  const partialNote =
+    partialRows.length === 0
+      ? ''
+      : ` ${String(partialRows.length)} ranked vault(s) had type(s) that could not be checked (${partialRows
+          .map((r) => `${r.alias}: ${r.erroredTypes.join('/')}`)
+          .join('; ')}) — drift for those types is UNKNOWN, so their counts are floors, not totals.`;
+
   let recommendation: string;
   if (ranking.length === 0) {
     recommendation =
       registry.value.length === 0
         ? 'No vaults are registered. Register orgs with `sfi register-vault <alias> <path>` to rank fleet drift.'
-        : `No vault could be drift-checked (${skipped.length} skipped). Grant per-org consent with sfi.live_consent { grant: true } or pass liveEnabled: true, then re-run.`;
+        : `No vault could be drift-checked (${skipped.length} skipped). Grant per-org consent with sfi.live_consent { grant: true } or pass liveEnabled: true, then re-run.${failedNote}`;
   } else if (mostDrifted !== null) {
-    recommendation = `Refresh '${mostDrifted.alias}' first — its org has ${mostDrifted.driftCount} component(s) changed since its last refresh (${top?.refreshedAt}). ${ranking.length} vault(s) checked, ranked most-behind first.`;
+    recommendation = `Refresh '${mostDrifted.alias}' first — its org has ${mostDrifted.driftCount} component(s) changed since its last refresh (${top?.refreshedAt}). ${ranking.length} vault(s) checked, ranked most-behind first.${partialNote}${failedNote}`;
   } else {
-    recommendation = `All ${ranking.length} checked vault(s) are current for the checked types — no refresh needed yet.`;
+    recommendation = `All ${ranking.length} checked vault(s) are current for the checked types — no refresh needed yet.${partialNote}${failedNote}`;
   }
 
   const anyLive = ranking.length > 0;
@@ -252,7 +317,9 @@ export const fleetDriftRankingHandler = async (
       ? 'No registry found — fleet drift ranking needs registered vaults (sfi register-vault).'
       : skipped.length > 0 && ranking.length === 0
         ? 'Every registered vault was skipped — see `skipped` for the per-vault reason.'
-        : null;
+        : failedVaults.length > 0 || partialRows.length > 0
+          ? 'Part of this sweep is UNKNOWN, not zero — see `skipped` (reason `live-check-failed`) and each row\'s `erroredTypes`.'
+          : null;
 
   const trust: TrustSummary = {
     provenance: anyLive ? 'live_org' : 'offline_snapshot',
@@ -260,7 +327,12 @@ export const fleetDriftRankingHandler = async (
     freshness: anyLive && latestQueriedAt !== null
       ? { liveQueriedAt: latestQueriedAt }
       : { snapshotRefreshedAt: ctx.manifest.refreshedAt },
-    completeness: { status: skipped.length > 0 ? 'partial' : 'complete' },
+    // Coverage is partial when ANY vault was skipped OR any ranked vault has a
+    // type it could not check — a fleet whose queries all errored reported
+    // `complete` before this.
+    completeness: {
+      status: skipped.length > 0 || partialRows.length > 0 ? 'partial' : 'complete',
+    },
     limitations: [FLEET_DRIFT_DISCLOSURE],
   };
 

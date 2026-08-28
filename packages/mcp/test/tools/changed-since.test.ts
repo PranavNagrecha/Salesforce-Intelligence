@@ -22,6 +22,7 @@ import {
   changedSinceHandler,
   changedSinceInputSchema,
 } from '../../src/tools/changed-since.js';
+import { COMPONENT_TYPES } from '../../src/tools/list-components.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -597,5 +598,94 @@ describe('changedSinceHandler — vault-state envelope', () => {
     if (!result.ok) return;
     expect(result.value.vaultState.sourceTreeHash).toBe(FIXTURE_MANIFEST.sourceTreeHash);
     expect(result.value.vaultState.refreshedAt).toBe(FIXTURE_MANIFEST.refreshedAt);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CHANGED-SINCE-DEFAULT-SCAN-SET-NARROWER-THAN-ADVERTISED
+//
+// `roster.ts` advertises "default scans every ComponentType" and the module
+// JSDoc says the scan defaults to "ALL types in the v1.x contract". The default
+// set was a HAND-LISTED 46 of the 103 compile-time-proven `COMPONENT_TYPES`, so
+// a bare `changed_since({ since })` never looked at 57 types (FlexiPage,
+// CustomPermission, Report, Dashboard, ListView, PermissionSetGroup,
+// RestrictionRule, Network, every CPQ / OmniStudio / GenAi type, …) and still
+// answered `truncated: false` with no boundary naming them. The blind spot was
+// invisible in the payload: an admin asking "what changed since my last
+// refresh?" before a deploy got a confident, complete-looking list.
+//
+// This block is the DRIFT GUARD the old `KNOWN GAP` comment was not: it seeds
+// one freshly-dated node of EVERY `ComponentType` and asserts a DEFAULT call
+// returns all of them. Re-narrowing the default fails here, naming the types.
+// ---------------------------------------------------------------------------
+describe('changedSinceHandler — default scan set covers every ComponentType', () => {
+  let allDir: string;
+  let allStore: GraphStore;
+  let allCtx: Context;
+
+  beforeAll(async () => {
+    allDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-changed-since-all-'));
+    const opened = await openGraph(join(allDir, 'all-types.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    allStore = opened.value;
+    const everyType: ExtractionResult = {
+      nodes: COMPONENT_TYPES.map((type) =>
+        makeNode({
+          id: `${type}:Probe`,
+          type,
+          apiName: 'Probe',
+          properties: { lastModifiedDate: '2026-05-15T12:00:00.000Z' },
+        }),
+      ),
+      edges: [] as readonly Edge[],
+    };
+    const imported = await importExtractionResults(allStore, [everyType]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    allCtx = { vaultRoot: allDir, manifest: FIXTURE_MANIFEST, graph: allStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(allStore);
+    rmSync(allDir, { recursive: true, force: true });
+  });
+
+  it('a default (no `types`) call sees a changed component of EVERY ComponentType', async () => {
+    const result = await changedSinceHandler(allCtx, {
+      since: '2026-01-01',
+      limit: 500,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const seen = new Set(result.value.data.changed.map((c) => c.type));
+    const unscanned = COMPONENT_TYPES.filter((t) => !seen.has(t));
+    expect(unscanned).toEqual([]);
+    // …and the answer must not claim completeness by omission either.
+    expect(result.value.data.truncated).toBe(false);
+  });
+
+  it('a default call over an all-type vault reports a FlexiPage / CustomPermission / Report change', async () => {
+    const result = await changedSinceHandler(allCtx, {
+      since: '2026-01-01',
+      limit: 500,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.changed.map((c) => c.id);
+    expect(ids).toContain('FlexiPage:Probe');
+    expect(ids).toContain('CustomPermission:Probe');
+    expect(ids).toContain('Report:Probe');
+    expect(ids).toContain('PermissionSetGroup:Probe');
+    expect(ids).toContain('RestrictionRule:Probe');
+  });
+
+  it('an EXPLICIT types filter still narrows (widening the default did not break scoping)', async () => {
+    const result = await changedSinceHandler(allCtx, {
+      since: '2026-01-01',
+      types: ['FlexiPage'],
+      limit: 500,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.changed.map((c) => c.id)).toEqual(['FlexiPage:Probe']);
   });
 });

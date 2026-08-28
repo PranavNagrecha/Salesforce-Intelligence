@@ -13,7 +13,14 @@
  *   - `objectFilter` narrows the scan to one parent CustomObject —
  *     useful when an architect wants to focus on "what outbound
  *     messages does Account send?". When omitted every
- *     OutboundMessage in the graph is included.
+ *     OutboundMessage in the graph is included. The named object is
+ *     RESOLVED AND VERIFIED against the vault first (shared
+ *     `resolveExistingObjectScope`), so a typo or an object this
+ *     refresh never retrieved is REFUSED rather than answered with a
+ *     confident empty catalog, and a wrong-case name is corrected to
+ *     the vault's exact casing. A scoped call echoes `appliedScope`
+ *     and its disclosure is scoped too — a zero-result for ONE object
+ *     is never phrased as an org-wide "this org defines none".
  *   - Each catalog entry surfaces the entry's identity (id, apiName,
  *     name) plus the four extracted endpoint properties
  *     (endpointUrl, includeSessionId, useDeadLetterQueue,
@@ -44,6 +51,8 @@ import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { resolveExistingObjectScope } from './input-aliases.js';
 
 /**
  * Hard cap on the per-call scan. Mirrors the
@@ -95,6 +104,17 @@ export interface OutboundMessageCatalogEntry {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface OutboundMessageCatalogOutput {
+  /**
+   * Present ONLY on an `objectFilter` call — echoes the canonical
+   * `CustomObject:` id the catalog was narrowed to, in the VAULT's exact
+   * casing (not the caller's), so a host can never read a one-object answer
+   * as an org-wide catalog. Absent on the bare call, which keeps that
+   * response byte-identical to the pre-scope shape.
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   readonly entries: readonly OutboundMessageCatalogEntry[];
   readonly entriesByObject: Readonly<
     Record<string, readonly OutboundMessageCatalogEntry[]>
@@ -115,6 +135,12 @@ export interface OutboundMessageCatalogOutput {
    * simply not have been retrieved. The renderer/host MUST use this to
    * phrase a zero-result honestly instead of defaulting to "refresh the
    * vault".
+   *
+   * COVERAGE IS ORG-WIDE; the RESULT may be object-scoped. `complete` plus
+   * zero entries is a determinate negative about THE ORG only on a bare
+   * call — on an `objectFilter` call it is a determinate negative about
+   * THAT OBJECT and says nothing about the rest of the org. `disclosure`
+   * already carries that distinction; read it, not `coverageStatus` alone.
    */
   readonly coverageStatus: 'complete' | 'partial' | 'unknown';
   readonly disclosure: string;
@@ -154,6 +180,33 @@ const buildEmptyDisclosure = (
       OUTBOUND_MESSAGE_DISCLOSURE
     : 'No outbound message entries were found, BUT the WorkflowRule family that hosts classic `<outboundMessages>` is only partially covered in this vault, so this result is INCONCLUSIVE — outbound message definitions may exist in the org but were not retrieved. Run `/sfi-refresh` (or check `sfi.coverage_report`) before concluding the org has none. ' +
       OUTBOUND_MESSAGE_DISCLOSURE;
+
+/**
+ * OUTBOUND-MESSAGE-CATALOG-SCOPED-NEGATIVE-READ-AS-ORG-WIDE: the leading
+ * sentence on EVERY `objectFilter` answer. `entries` is the count AFTER the
+ * narrowing, so without this the reader has no way to tell a one-object
+ * catalog from the org's whole catalog — and on a zero-result the old
+ * org-wide wording actively told them not to look further.
+ */
+const scopedPrefix = (objectApiName: string): string =>
+  `SCOPED to ${objectApiName}: this catalog covers ONLY outbound messages whose parent object is ${objectApiName} — it is NOT an org-wide count, and says NOTHING about outbound messages on other objects. Re-run without \`objectFilter\` for the org-wide catalog. `;
+
+/**
+ * The zero-entry disclosure for an OBJECT-SCOPED call. The determinate
+ * negative it can honestly assert is bounded by the scope: "this OBJECT
+ * defines none", never "this ORG defines none". Coverage still decides
+ * determinate-vs-inconclusive, because the WorkflowRule family is the
+ * retrieval unit either way.
+ */
+const buildScopedEmptyDisclosure = (
+  objectApiName: string,
+  coverageStatus: 'complete' | 'partial' | 'unknown',
+): string =>
+  scopedPrefix(objectApiName) +
+  (coverageStatus === 'complete'
+    ? `No outbound message definitions are attached to ${objectApiName}. The WorkflowRule family — which is where classic SOAP \`<outboundMessages>\` are serialized — has COMPLETE coverage in this vault, so this is a determinate negative FOR ${objectApiName} (that object defines none), NOT a coverage gap: do not suggest a refresh to "surface" outbound messages that are not there. Other objects in this org may still define outbound messages. `
+    : `No outbound message entries were found on ${objectApiName}, BUT the WorkflowRule family that hosts classic \`<outboundMessages>\` is only partially covered in this vault, so this result is INCONCLUSIVE — outbound message definitions may exist on ${objectApiName} but were not retrieved. Run \`/sfi-refresh\` (or check \`sfi.coverage_report\`) before concluding ${objectApiName} has none. `) +
+  OUTBOUND_MESSAGE_DISCLOSURE;
 
 /**
  * Read a string property defensively. Returns the verbatim value
@@ -285,6 +338,31 @@ export const outboundMessageCatalogHandler = async (
   ctx: Context,
   input: OutboundMessageCatalogInput,
 ): Promise<Result<McpResponse<OutboundMessageCatalogOutput>, McpError>> => {
+  // OUTBOUND-MESSAGE-CATALOG-UNVERIFIED-OBJECT-SCOPE: `objectFilter` used to
+  // be a case-SENSITIVE `===` against the apiName prefix with no check that
+  // the object exists, so `account`, `Acount__c` and an object this refresh
+  // never retrieved ALL fell through to a zero-entry answer that was then
+  // dressed up as an ORG-WIDE determinate negative. It now goes through the
+  // one shared `resolveExistingObjectScope`, which verifies the object EXISTS
+  // in the vault, rewrites it to the vault's exact casing, and REFUSES what it
+  // cannot resolve instead of answering about the empty set.
+  let scopedObject: string | null = null;
+  let appliedScope: { readonly object: string; readonly mode: 'component' } | null =
+    null;
+  if (input.objectFilter !== undefined) {
+    const scopeResult = await resolveExistingObjectScope(ctx.graph, {
+      objectApiName: input.objectFilter,
+    });
+    if (!scopeResult.ok) return err(scopeResult.error);
+    const scope = scopeResult.value;
+    // `objectFilter` is `min(1)`, so the resolver cannot report "no object
+    // named"; the null branch exists only so the type is honoured.
+    if (scope !== null) {
+      scopedObject = scope.object;
+      appliedScope = { object: scope.componentId, mode: 'component' };
+    }
+  }
+
   const nodesResult = await listNodesByType(ctx.graph, 'OutboundMessage', {
     limit: OUTBOUND_MESSAGE_CATALOG_MAX_ENTRIES,
   });
@@ -299,9 +377,13 @@ export const outboundMessageCatalogHandler = async (
   let entriesWithKnownInvokers = 0;
   for (const node of nodesResult.value as readonly Node[]) {
     const objectKey = apiNameToObjectKey(node.apiName);
+    // Salesforce api names are case-INSENSITIVE: `Account` and `account` name
+    // the same object, and the OutboundMessage apiName prefix is whatever the
+    // source file spelled. Compare case-folded against the vault-resolved
+    // name so the narrowing agrees with the resolution above.
     if (
-      input.objectFilter !== undefined &&
-      objectKey !== input.objectFilter
+      scopedObject !== null &&
+      objectKey.toLowerCase() !== scopedObject.toLowerCase()
     ) {
       continue;
     }
@@ -344,6 +426,9 @@ export const outboundMessageCatalogHandler = async (
 
   return ok({
     data: {
+      // appliedScope FIRST + only when scoped, so a bare call omits the whole
+      // block and its serialized response stays byte-identical to pre-fix.
+      ...(appliedScope !== null ? { appliedScope } : {}),
       entries: sorted,
       entriesByObject: byObject,
       summary: {
@@ -352,15 +437,23 @@ export const outboundMessageCatalogHandler = async (
         entriesWithKnownInvokers,
       },
       coverageStatus,
-      // A zero-entry result is only a determinate "the org defines no
-      // outbound messages" when the backing WorkflowRule family is fully
-      // covered; otherwise it is inconclusive. Phrasing this distinction
-      // here stops the host from defaulting to a "coverage gap / refresh
-      // the vault" framing on an org that simply has none.
+      // Two independent axes, and BOTH have to be right:
+      //  - coverage decides determinate-negative vs inconclusive (a zero is
+      //    only "the org has none" when the backing WorkflowRule family is
+      //    fully covered), which stops a "refresh the vault" framing on an
+      //    org that simply has none;
+      //  - SCOPE decides what the negative is ABOUT. `sorted.length` is the
+      //    count AFTER the `objectFilter` narrowing, so the org-wide wording
+      //    is reachable ONLY on a bare call. A scoped answer — empty or not —
+      //    always says so.
       disclosure:
-        sorted.length === 0
-          ? buildEmptyDisclosure(coverageStatus)
-          : OUTBOUND_MESSAGE_DISCLOSURE,
+        scopedObject !== null
+          ? sorted.length === 0
+            ? buildScopedEmptyDisclosure(scopedObject, coverageStatus)
+            : scopedPrefix(scopedObject) + OUTBOUND_MESSAGE_DISCLOSURE
+          : sorted.length === 0
+            ? buildEmptyDisclosure(coverageStatus)
+            : OUTBOUND_MESSAGE_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

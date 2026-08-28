@@ -4,6 +4,7 @@ import {
   detectPicklistLiteralMismatch,
   extractEqualityLiterals,
   scanSoqlForPicklistMismatches,
+  scanSoqlForValidationGaps,
 } from '../../src/tools/picklist-literal-check.js';
 
 describe('extractEqualityLiterals', () => {
@@ -139,5 +140,114 @@ describe('scanSoqlForPicklistMismatches', () => {
       lookup,
     );
     expect(out).toHaveLength(0);
+  });
+});
+
+describe('scanSoqlForValidationGaps — GlobalValueSet-backed picklists', () => {
+  // How the vault stores a GVS-backed picklist: the CustomField node EXISTS,
+  // `picklistValues` is null (custom-field.ts only fills it from an inline
+  // <valueSetDefinition>), and `valueSetName` carries the discriminator.
+  const gvsBacked = {
+    present: true,
+    picklistValues: null,
+    valueSetName: 'CountryValueSet',
+  };
+  const soql =
+    "SELECT COUNT() FROM Account WHERE Country__c = 'Untied States'";
+
+  it('discloses a gap for a vault-known picklist whose values live in a GlobalValueSet', () => {
+    const gaps = scanSoqlForValidationGaps(soql, () => gvsBacked);
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]?.field).toBe('Country__c');
+    expect(gaps[0]?.disclosure).toMatch(/VALUE MISMATCH/);
+    expect(gaps[0]?.disclosure).toMatch(/CountryValueSet/);
+  });
+
+  it('neither scanner sees a GVS-backed picklist today (the silent-pass hole)', () => {
+    const mismatches = scanSoqlForPicklistMismatches(
+      soql,
+      () => gvsBacked.picklistValues,
+    );
+    const gaps = scanSoqlForValidationGaps(soql, () => gvsBacked);
+    expect(mismatches.length + gaps.length).toBeGreaterThan(0);
+  });
+});
+
+describe('scanSoqlForValidationGaps — the other three classifications', () => {
+  const soql =
+    "SELECT COUNT() FROM Account WHERE Country__c = 'Untied States'";
+
+  it('still reports an ABSENT node as a gap (managed-package / not-modeled)', () => {
+    const gaps = scanSoqlForValidationGaps(soql, () => ({ present: false }));
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]?.disclosure).toMatch(/not in the vault/);
+  });
+
+  it('keeps the legacy boolean predicate behaving exactly as before', () => {
+    expect(scanSoqlForValidationGaps(soql, () => true)).toHaveLength(0);
+    expect(scanSoqlForValidationGaps(soql, () => false)).toHaveLength(1);
+  });
+
+  it('stays silent for a present field that is genuinely NOT a picklist', () => {
+    const gaps = scanSoqlForValidationGaps(soql, () => ({
+      present: true,
+      picklistValues: null,
+    }));
+    expect(gaps).toHaveLength(0);
+  });
+
+  it('stays silent when the caller RESOLVED the global value set', () => {
+    // What live_count gets back from resolveGlobalValueSetValues.
+    const gaps = scanSoqlForValidationGaps(soql, () => ({
+      present: true,
+      picklistValues: null,
+      valueSetName: 'CountryValueSet',
+      resolvedValueSetValues: [
+        { value: 'United States', isActive: true },
+        { value: 'Canada', isActive: true },
+      ],
+    }));
+    expect(gaps).toHaveLength(0);
+  });
+
+  it('stays silent for an inline picklist even when a valueSetName is also present', () => {
+    const gaps = scanSoqlForValidationGaps(soql, () => ({
+      present: true,
+      picklistValues: [{ value: 'United States', isActive: true }],
+      valueSetName: 'CountryValueSet',
+    }));
+    expect(gaps).toHaveLength(0);
+  });
+
+  it('treats an EMPTY resolved value set as resolved, not as a gap (the mismatch scanner owns it)', () => {
+    const gaps = scanSoqlForValidationGaps(soql, () => ({
+      present: true,
+      picklistValues: null,
+      valueSetName: 'CountryValueSet',
+      resolvedValueSetValues: [],
+    }));
+    expect(gaps).toHaveLength(0);
+    // ...and the mismatch scanner does flag the literal against an empty set.
+    const mismatches = scanSoqlForPicklistMismatches(soql, () => []);
+    expect(mismatches).toHaveLength(1);
+  });
+
+  it('does not let a blank/whitespace valueSetName manufacture a gap', () => {
+    expect(
+      scanSoqlForValidationGaps(soql, () => ({
+        present: true,
+        picklistValues: null,
+        valueSetName: '   ',
+      })),
+    ).toHaveLength(0);
+  });
+
+  it('once resolved, a wrong-CASE literal is NOT reported as a mismatch', () => {
+    // Casing is a false alarm; only a different spelling is a real mismatch.
+    const mismatches = scanSoqlForPicklistMismatches(
+      "SELECT COUNT() FROM Account WHERE Country__c = 'united states'",
+      () => [{ value: 'United States', isActive: true }],
+    );
+    expect(mismatches).toHaveLength(0);
   });
 });

@@ -235,9 +235,21 @@ const FIX_KEY =
 /** Keys whose string value is a concrete NEXT step / action. */
 const NEXT_KEY = /^(nextAction|nextStep|nextSteps|action|suggestion)$/i;
 
+/**
+ * Cap on the PUBLISHED `citations` list only. The grounding SET (`out.ids`) is
+ * deliberately UNCAPPED: it is the membership oracle behind
+ * `hallucinatedIds`/`groundedIds`, and a capped oracle turns an id the caller
+ * copied verbatim out of the payload into a fabricated accusation of
+ * fabrication. When the published list is short, `citationsTruncated` +
+ * `citationsTotal` (and a caveat) say so — the list is capped, the check is not.
+ */
 const MAX_CITATIONS = 200;
 const MAX_BULLETS = 60;
-const MAX_CAVEATS = 40;
+/**
+ * Cap on the absence-claim sentences lifted OUT OF THE DRAFT (host-authored
+ * prose, not source evidence). NOT a cap on `caveats` — see {@link pushCaveat}.
+ */
+const MAX_ABSENCE_CLAIMS = 40;
 
 const DISCLOSURE =
   'This answer skeleton is composed ONLY from the JSON supplied in `input`: ' +
@@ -248,6 +260,11 @@ const DISCLOSURE =
   '`provenance` rolls up the source output’s trust provenance ' +
   '(offline_snapshot / live_org / hybrid) so the host can stamp the answer’s ' +
   'origin and never let a vault claim read as a live one. ' +
+  '`citationsTotal` is the true number of distinct ids found and ' +
+  '`citationsTruncated` says whether `citations` had to be capped — the ' +
+  'grounding check always runs against ALL of them, so a short `citations` ' +
+  'list is never evidence that an id was missing from the source. Caveats are ' +
+  'carried in full and are never capped. ' +
   'Prose wording is the caller’s job; this tool guarantees grounding, not ' +
   'sentences.';
 
@@ -283,6 +300,22 @@ export interface SynthesizeAnswerOutput {
   readonly summary: string;
   readonly bullets: readonly string[];
   readonly citations: readonly Citation[];
+  /**
+   * The TRUE number of distinct canonical ids found in the source, whether or
+   * not `citations` could list them all. Never a length — a total.
+   */
+  readonly citationsTotal: number;
+  /**
+   * `true` when `citations` is a capped prefix of `citationsTotal` ids. The
+   * grounding check still ran against every id, so an id missing from
+   * `citations` is NOT evidence that the source lacked it.
+   */
+  readonly citationsTruncated: boolean;
+  /**
+   * Every honesty/caveat string carried from the source — UNCAPPED (see
+   * {@link pushCaveat}); `caveats` is a disclosure list, and a silently
+   * shortened one leaves a host more confident than the evidence allows.
+   */
   readonly caveats: readonly string[];
   /** Canonical ids in `draft` NOT found in the source; present only with a `draft`. */
   readonly hallucinatedIds?: readonly string[];
@@ -384,13 +417,33 @@ const pushCapped = (arr: string[], s: string, cap: number): void => {
 };
 
 /**
+ * Push a CAVEAT (deduped, never capped).
+ *
+ * `caveats` is a `HONESTY_LIST_KEYS` member in `tool-dispatch.ts`: the global
+ * response-budget trimmer refuses to shorten it, because a host that reads a
+ * silently shortened blind-spot list ends up MORE confident than the evidence
+ * allows, and an oversize payload is refused outright instead. This tool —
+ * whose whole job is carrying those caveats verbatim — must not re-introduce
+ * that trim below the guard, so caveat 41 is no longer dropped on the floor.
+ * Dedup still applies: uncapped is not unbounded duplication.
+ */
+const pushCaveat = (arr: string[], s: string): void => {
+  if (!arr.includes(s)) arr.push(s);
+};
+
+/**
  * Single recursive pass over the input. `key` is the property name the current
  * `value` sits under (null at the root / for array elements), which drives the
  * caveat- and fact-key matching.
  */
 const collect = (value: unknown, key: string | null, out: Collected): void => {
   if (typeof value === 'string') {
-    if (out.ids.size < MAX_CITATIONS && CANONICAL_ID_WHOLE.test(value)) {
+    // The grounding SET is UNCAPPED on purpose (see {@link MAX_CITATIONS}).
+    // It is the membership oracle for `hallucinatedIds`/`groundedIds`, so
+    // capping it here would make an id the caller copied verbatim out of this
+    // very payload come back flagged as fabricated. Only the PUBLISHED
+    // `citations` list is capped, and it says so when it is.
+    if (CANONICAL_ID_WHOLE.test(value)) {
       out.ids.add(value);
     }
     if (key !== null && PROVENANCE_KEY.test(key) && value.trim().length > 0) {
@@ -407,7 +460,7 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
       out.coverageIncomplete = true;
     }
     if (key !== null && CAVEAT_KEY.test(key) && value.trim().length > 0) {
-      pushCapped(out.caveats, value, MAX_CAVEATS);
+      pushCaveat(out.caveats, value);
     } else if (key !== null && FACT_KEY.test(key)) {
       pushCapped(out.bullets, `${key}: ${value}`, MAX_BULLETS);
       // FALSE-PREMISE PATH (SYNTH bundle): a `disposition`/`falsePremise`
@@ -419,7 +472,7 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
         (DISPOSITION_KEY.test(key) && /^none$/i.test(value.trim())) ||
         (FALSE_PREMISE_KEY.test(key) && /^(true|false-premise|rejected)$/i.test(value.trim()))
       ) {
-        pushCapped(out.caveats, FALSE_PREMISE_CAVEAT, MAX_CAVEATS);
+        pushCaveat(out.caveats, FALSE_PREMISE_CAVEAT);
       }
     }
     // Grounded evidence-template hints (independent of the caveat/fact branch —
@@ -442,7 +495,7 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
       // Boolean false-premise signal (`premiseRejected: true` /
       // `falsePremise: true`) — same explicit caveat as the string form.
       if (value === true && FALSE_PREMISE_KEY.test(key)) {
-        pushCapped(out.caveats, FALSE_PREMISE_CAVEAT, MAX_CAVEATS);
+        pushCaveat(out.caveats, FALSE_PREMISE_CAVEAT);
       }
     }
     return;
@@ -456,7 +509,7 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
     if (key !== null && CAVEAT_KEY.test(key)) {
       for (const item of value) {
         if (typeof item === 'string' && item.trim().length > 0) {
-          pushCapped(out.caveats, item, MAX_CAVEATS);
+          pushCaveat(out.caveats, item);
         }
       }
     } else if (key !== null && COUNT_ARRAY_KEY.test(key)) {
@@ -501,12 +554,11 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
         parts.push(`${rb.stringsSlimmed} long string(s) trimmed`);
       }
       if (parts.length > 0) {
-        pushCapped(
+        pushCaveat(
           out.caveats,
           `Tool input was REDUCED to fit the response byte budget (${parts.join(
             ', ',
           )}) — a row absent from this synthesis may still exist in the org; re-query with limit/offset or a narrower scope for complete data.`,
-          MAX_CAVEATS,
         );
       }
       return;
@@ -558,13 +610,12 @@ const applyStructuralCaveats = (value: unknown, out: Collected): void => {
 
     // DETECTOR 1 — PAGINATION: `hasMore: true` means the list was not exhaustive.
     if (o['hasMore'] === true) {
-      pushCapped(
+      pushCaveat(
         out.caveats,
         'INCOMPLETE RETRIEVAL: the source tool returned hasMore=true — this response ' +
           'covers only the first page of results. Conclusions about which values, members, ' +
           'or rules are present (or absent) in the full family may be wrong. Paginate with ' +
           'offset/nextCursor or narrow the query before drawing family-wide conclusions.',
-        MAX_CAVEATS,
       );
     }
 
@@ -576,13 +627,12 @@ const applyStructuralCaveats = (value: unknown, out: Collected): void => {
       for (const countKey of ['count', 'total', 'totalCount'] as const) {
         const stated = o[countKey];
         if (typeof stated === 'number' && stated !== actualLen) {
-          pushCapped(
+          pushCaveat(
             out.caveats,
             `COUNT MISMATCH: the input states ${countKey}=${stated} but the enumerated ` +
               `'components' array contains ${actualLen} item(s). The stated total may be ` +
               `a synthesis or off-by-one error — use the enumerated count (${actualLen}) ` +
               `as the authoritative figure; do not repeat the stated total uncritically.`,
-            MAX_CAVEATS,
           );
           break; // one mismatch caveat per object node is enough
         }
@@ -596,14 +646,13 @@ const applyStructuralCaveats = (value: unknown, out: Collected): void => {
     if (o['active'] === false) {
       const hasApprovalId = [...out.ids].some((id) => id.startsWith('ApprovalProcess:'));
       if (hasApprovalId) {
-        pushCapped(
+        pushCaveat(
           out.caveats,
           'INACTIVE APPROVAL PROCESS: the cited ApprovalProcess has active=false. ' +
             'The sibling active processes on the same object were NOT retrieved by this ' +
             'cascade — they may provide the current routing logic, successor entry criteria, ' +
             'and active step assignments. Call list_components on the same parent object ' +
             'to retrieve the full version family before drawing conclusions about active routing.',
-          MAX_CAVEATS,
         );
       }
     }
@@ -615,7 +664,7 @@ const applyStructuralCaveats = (value: unknown, out: Collected): void => {
     const bf = o['booleanFilter'];
     const mm = o['matchingMethods'];
     if (typeof bf === 'string' && bf.length > 0 && typeof mm === 'string' && mm.length > 0) {
-      pushCapped(
+      pushCaveat(
         out.caveats,
         'MATCHING RULE — two independent dimensions: ' +
           `(1) booleanFilter="${bf}" controls which field-combination sets are sufficient ` +
@@ -625,7 +674,6 @@ const applyStructuralCaveats = (value: unknown, out: Collected): void => {
           'works (precision — FirstName/LastName are fuzzy; Exact is not). ' +
           'Do not attribute per-field fuzziness to the OR structure in booleanFilter; ' +
           'fuzziness comes from matchingMethod values only.',
-        MAX_CAVEATS,
       );
     }
 
@@ -947,7 +995,7 @@ const findAbsenceClaims = (draft: string): string[] => {
     if (sentence.length === 0) continue;
     if (ABSENCE_PATTERNS.some((p) => p.test(sentence))) found.add(sentence);
   }
-  return [...found].sort().slice(0, MAX_CAVEATS);
+  return [...found].sort().slice(0, MAX_ABSENCE_CLAIMS);
 };
 
 export const synthesizeAnswerHandler = async (
@@ -1003,24 +1051,24 @@ export const synthesizeAnswerHandler = async (
   // for interpretation-free inputs (both lists are empty).
   for (const it of interp.list) {
     if (it.coverageCaveat !== null && it.coverageCaveat.trim().length > 0) {
-      pushCapped(out.caveats, it.coverageCaveat, MAX_CAVEATS);
+      pushCaveat(out.caveats, it.coverageCaveat);
     }
   }
-  for (const cav of interp.payloadCaveats) pushCapped(out.caveats, cav, MAX_CAVEATS);
+  for (const cav of interp.payloadCaveats) pushCaveat(out.caveats, cav);
 
   // RM-3 (step 3e / absence-honesty guardrail): an interpret payload that fired
   // NOTHING is disclosed as "no concept rule fired", so the empty result can
   // never be read as a "safe"/"no-dependency" verdict. Only when the collector
   // saw a real interpret payload AND lifted zero interpretations.
   if (interp.list.length === 0 && interp.emptyPayloadSeen) {
-    pushCapped(out.caveats, EMPTY_INTERPRETATION_CAVEAT, MAX_CAVEATS);
+    pushCaveat(out.caveats, EMPTY_INTERPRETATION_CAVEAT);
   }
   // FIX-F3: a reasoning payload whose interpretations could NOT be parsed
   // (shape drift) is DISCLOSED, never swallowed — so the reasoning result never
   // resolves silently to nothing. Distinct from the fired-nothing caveat above.
   // Byte-neutral for interpretation-free inputs (`shapeDriftSeen` is false).
   if (interp.shapeDriftSeen) {
-    pushCapped(out.caveats, SHAPE_DRIFT_INTERPRETATION_CAVEAT, MAX_CAVEATS);
+    pushCaveat(out.caveats, SHAPE_DRIFT_INTERPRETATION_CAVEAT);
   }
   // The interpret-EXPLICIT incompleteness signal for the I3c absence guard
   // below. Preferred over the heuristic coverage scan, but LAYERED as an
@@ -1133,10 +1181,27 @@ export const synthesizeAnswerHandler = async (
   // never fires for interpretation-free inputs (byte-identical) or when a
   // remediation / scraped fix IS present.
   if (interp.list.length > 0 && !remediationSurfaced && scrapedFixCount === 0) {
-    pushCapped(out.caveats, NO_REMEDIATION_CAVEAT, MAX_CAVEATS);
+    pushCaveat(out.caveats, NO_REMEDIATION_CAVEAT);
   }
 
-  const citations = [...out.ids].sort().map(parseCitation);
+  // Sort FIRST, then cap: the published slice is a deterministic alphabetical
+  // prefix, not "whichever 200 the caller's JSON key order happened to reach
+  // first". `citationsTotal` is the true number of distinct canonical ids the
+  // source carried — always, capped or not.
+  const allIds = [...out.ids].sort();
+  const citationsTotal = allIds.length;
+  const citationsTruncated = citationsTotal > MAX_CITATIONS;
+  const citations = allIds.slice(0, MAX_CITATIONS).map(parseCitation);
+  if (citationsTruncated) {
+    pushCaveat(
+      out.caveats,
+      `CITATIONS TRUNCATED: the source carried ${citationsTotal} distinct canonical ` +
+        `id(s); \`citations\` lists only the first ${MAX_CITATIONS} in alphabetical ` +
+        'order. An id absent from that list is NOT absent from the source — the ' +
+        'grounding check (`hallucinatedIds` / `groundedIds`) ran against ALL of ' +
+        'them, so do not read a short citation list as a complete component set.',
+    );
+  }
 
   // Roll the source output's trust provenance up for the host to stamp.
   const provSources = [...out.provenances].sort();
@@ -1221,7 +1286,11 @@ export const synthesizeAnswerHandler = async (
       : '';
   const summary =
     `${qPrefix}Grounded in the supplied tool output: ` +
-    `${citations.length} component(s) cited, ${out.bullets.length} key fact(s), ` +
+    `${citations.length} component(s) cited` +
+    (citationsTruncated
+      ? ` (of ${citationsTotal} — citation list truncated)`
+      : '') +
+    `, ${out.bullets.length} key fact(s), ` +
     `${out.caveats.length} caveat(s)` +
     // SYNTHESIZE-BURIES-INTERPRET-CLAIMS: acknowledge the promoted reasoning
     // claim(s) in the summary so a host that reads only the summary knows the
@@ -1337,6 +1406,8 @@ export const synthesizeAnswerHandler = async (
       summary,
       bullets: out.bullets,
       citations,
+      citationsTotal,
+      citationsTruncated,
       caveats: out.caveats,
       evidence,
       ...(input.draft !== undefined

@@ -61,7 +61,7 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById } from '@sf-intelligence/graph';
 import {
   apexClassOfSignature,
   debugLogCoverage,
@@ -82,6 +82,8 @@ import type { Context } from '../server.js';
 
 import { mergeInputAliases } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 // ---------------------------------------------------------------------------
 // Caps — every list is byte-budgeted, every cap is reported
@@ -115,10 +117,6 @@ const MAX_LIMIT_ROWS = 60;
 const MAX_SLOWEST = 10;
 /** Distinct component names resolved against the graph. */
 const MAX_RESOLUTIONS = 60;
-/** Nodes scanned per page when building the Flow-label / rule-name indexes. */
-const FLOW_LABEL_SCAN_PAGE = 500;
-/** Pages scanned before an index is declared capped. */
-const FLOW_LABEL_SCAN_MAX_PAGES = 8;
 
 /** Verbatim honesty disclosure, surfaced on every response. */
 const TRACE_DEBUG_LOG_DISCLOSURE =
@@ -584,25 +582,15 @@ export const traceDebugLogHandler = async (
   );
   if (interviewLabels.size > 0) {
     const labelIndex = new Map<string, ComponentId[]>();
-    let scanned = 0;
-    let scanCapped = false;
-    for (let page = 0; page < FLOW_LABEL_SCAN_MAX_PAGES; page += 1) {
-      const flowsR = await listNodesByType(ctx.graph, 'Flow', {
-        limit: FLOW_LABEL_SCAN_PAGE,
-        offset: page * FLOW_LABEL_SCAN_PAGE,
-      });
-      if (!flowsR.ok) return err({ kind: 'internal', message: flowsR.error.message });
-      for (const node of flowsR.value) {
-        const key = (node.label ?? node.apiName).trim().toLowerCase();
-        labelIndex.set(key, [...(labelIndex.get(key) ?? []), node.id]);
-      }
-      scanned += flowsR.value.length;
-      if (flowsR.value.length < FLOW_LABEL_SCAN_PAGE) break;
-      if (page === FLOW_LABEL_SCAN_MAX_PAGES - 1) scanCapped = true;
+    const flowsR = await scanAllNodesOfTypes(ctx.graph, ['Flow']);
+    if (!flowsR.ok) return err({ kind: 'internal', message: flowsR.error.message });
+    for (const node of flowsR.value.nodes) {
+      const key = (node.label ?? node.apiName).trim().toLowerCase();
+      labelIndex.set(key, [...(labelIndex.get(key) ?? []), node.id]);
     }
-    if (scanCapped) {
+    if (flowsR.value.scanIncomplete) {
       boundaries.push(
-        `The Flow label index was capped at ${scanned} Flow nodes, so a flow beyond that cap would report not-in-vault even if it exists in this org.`,
+        `${fullScanTruncationNote(flowsR.value.incompleteTypes)} A flow beyond that cap reports not-in-vault even if it exists in this org.`,
       );
     }
     for (const label of interviewLabels) {
@@ -660,17 +648,16 @@ export const traceDebugLogHandler = async (
   const soleObject = triggerObjects.size === 1 ? [...triggerObjects][0] : undefined;
   if (ruleNames.size > 0) {
     const bySuffix = new Map<string, ComponentId[]>();
-    for (let page = 0; page < FLOW_LABEL_SCAN_MAX_PAGES; page += 1) {
-      const rulesR = await listNodesByType(ctx.graph, 'ValidationRule', {
-        limit: FLOW_LABEL_SCAN_PAGE,
-        offset: page * FLOW_LABEL_SCAN_PAGE,
-      });
-      if (!rulesR.ok) return err({ kind: 'internal', message: rulesR.error.message });
-      for (const node of rulesR.value) {
-        const short = (node.apiName.split('.').pop() ?? node.apiName).trim().toLowerCase();
-        bySuffix.set(short, [...(bySuffix.get(short) ?? []), node.id]);
-      }
-      if (rulesR.value.length < FLOW_LABEL_SCAN_PAGE) break;
+    const rulesR = await scanAllNodesOfTypes(ctx.graph, ['ValidationRule']);
+    if (!rulesR.ok) return err({ kind: 'internal', message: rulesR.error.message });
+    for (const node of rulesR.value.nodes) {
+      const short = (node.apiName.split('.').pop() ?? node.apiName).trim().toLowerCase();
+      bySuffix.set(short, [...(bySuffix.get(short) ?? []), node.id]);
+    }
+    if (rulesR.value.scanIncomplete) {
+      boundaries.push(
+        `${fullScanTruncationNote(rulesR.value.incompleteTypes)} A rule beyond that cap reports not-in-vault even if it exists in this org.`,
+      );
     }
     for (const name of ruleNames) {
       if (seenNames.has(name) || resolutions.length >= MAX_RESOLUTIONS) continue;
