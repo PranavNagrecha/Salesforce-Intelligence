@@ -191,6 +191,13 @@ jobs:
   # stricter, never looser, without that test failing.
   windows-build-test:
     runs-on: windows-latest
+    # The hard-gated Windows package list lives HERE, once, and is consumed by
+    # both the hard-gate step's `--filter` list and the attestation step's
+    # machine-readable report. test/ci-workflow-invariants.test.ts asserts the
+    # two agree exactly, so the report can never claim coverage the gate did
+    # not actually run.
+    env:
+      WIN_HARD_TIER_PACKAGES: core,tooling-api,renderers,parsers,patterns,vault,extractors
     steps:
       - uses: actions/checkout@v4
         # No fetch-depth: 0 — this job doesn't run the org-leak history scan.
@@ -232,6 +239,7 @@ jobs:
       # an advisory step where a packages/mcp crash could mask a regression
       # here.
       - name: Unit tests (hard gate — no-DuckDB packages)
+        id: win_hard_gate
         # PATH filters — see the note on the advisory step below for why a
         # name filter is unsafe here too.
         run: pnpm --filter './packages/core' --filter './packages/tooling-api' --filter './packages/renderers' --filter './packages/parsers' --filter './packages/patterns' --filter './packages/vault' --filter './packages/extractors' -r test
@@ -271,6 +279,7 @@ jobs:
       # TO PROMOTE TO A HARD GATE: close WIN-1, then delete the two
       # `continue-on-error` lines below (this step and the graph step).
       - name: Unit tests (advisory — all packages except graph)
+        id: win_advisory_all
         # PATH filters, not name filters: the repo root and packages/cli are both
         # named `sf-intelligence`, so a name filter would let the ROOT package
         # through — and the root's `test` script also runs test:integration,
@@ -305,8 +314,120 @@ jobs:
       # the debt is tracked, instead of being silently filtered the way this
       # whole job used to be. Promote to the hard gate above once WIN-2 closes.
       - name: Unit tests (advisory — graph, see comment)
+        id: win_advisory_graph
         run: pnpm --filter './packages/graph' test
         continue-on-error: true
+
+      # ── THE JOB SAYING WHAT ITS OWN GREEN TICK MEANS ──────────────────────
+      # Everything above this line can pass while `packages/mcp` aborts with
+      # 0xC0000409 and `packages/graph` fails outright, because those two steps
+      # are advisory. That is a deliberate tier and it stays. What was wrong is
+      # that the tier was invisible downstream: publish.yml gates the npm
+      # release on this workflow concluding `success`, and `success` here meant
+      # either "Windows passed" or "Windows was allowed to fail" with no way to
+      # tell the two apart. A release gate that fails closed on an unreadable
+      # API was, at the same time, asserting a platform result it had not
+      # checked.
+      #
+      # So the job now emits its own scope. `steps.<id>.outcome` is the result
+      # BEFORE `continue-on-error` is applied — the honest one — so this report
+      # records what each tier actually did, not what the tick was allowed to
+      # say. publish.yml downloads it and refuses to publish if it is missing,
+      # unreadable, or says the hard tier did not pass; when an advisory tier
+      # is red it still publishes (advisory is a real tier) but stamps the
+      # partial coverage into the GitHub release body, permanently, instead of
+      # into a log line nobody reads afterwards.
+      #
+      # `if: always()` on purpose: the report is most needed exactly when
+      # something above failed. It does not rescue a failed hard gate — this
+      # step exiting 0 cannot un-fail an earlier step.
+      - name: Windows tier attestation (what a green tick on this job covers)
+        id: win_attestation
+        if: always()
+        shell: bash
+        env:
+          WIN_HARD_GATE_OUTCOME: ${{ steps.win_hard_gate.outcome }}
+          WIN_ADVISORY_ALL_OUTCOME: ${{ steps.win_advisory_all.outcome }}
+          WIN_ADVISORY_GRAPH_OUTCOME: ${{ steps.win_advisory_graph.outcome }}
+        run: |
+          set -euo pipefail
+
+          node - > windows-tier-report.json <<'NODE'
+          const env = process.env;
+          const outcome = (v) => (v && v.length > 0 ? v : 'unknown');
+          const hardGate = {
+            id: 'win_hard_gate',
+            step: 'Unit tests (hard gate - no-DuckDB packages)',
+            packages: (env.WIN_HARD_TIER_PACKAGES || '').split(',').map((p) => p.trim()).filter(Boolean),
+            outcome: outcome(env.WIN_HARD_GATE_OUTCOME),
+          };
+          const advisory = [
+            {
+              id: 'win_advisory_all',
+              step: 'Unit tests (advisory - all packages except graph)',
+              blocker: 'WIN-1',
+              outcome: outcome(env.WIN_ADVISORY_ALL_OUTCOME),
+            },
+            {
+              id: 'win_advisory_graph',
+              step: 'Unit tests (advisory - graph)',
+              blocker: 'WIN-2',
+              outcome: outcome(env.WIN_ADVISORY_GRAPH_OUTCOME),
+            },
+          ];
+          const notGreen = advisory.filter((a) => a.outcome !== 'success');
+          process.stdout.write(
+            JSON.stringify(
+              {
+                schema: 1,
+                job: 'windows-build-test',
+                runner: 'windows-latest',
+                repository: env.GITHUB_REPOSITORY,
+                sha: env.GITHUB_SHA,
+                runId: env.GITHUB_RUN_ID,
+                runAttempt: env.GITHUB_RUN_ATTEMPT,
+                hardGate,
+                advisory,
+                advisoryNotGreen: notGreen.map((a) => a.blocker + '=' + a.outcome),
+                windowsFullyVerified: hardGate.outcome === 'success' && notGreen.length === 0,
+              },
+              null,
+              2,
+            ) + '\n',
+          );
+          NODE
+
+          cat windows-tier-report.json
+
+          FULLY="$(node -p "require('./windows-tier-report.json').windowsFullyVerified")"
+          {
+            echo "### Windows tier attestation"
+            echo
+            echo "| tier | blocker | outcome (before continue-on-error) |"
+            echo "| --- | --- | --- |"
+            echo "| hard gate: ${WIN_HARD_TIER_PACKAGES} | - | ${WIN_HARD_GATE_OUTCOME} |"
+            echo "| advisory: all packages except graph | WIN-1 | ${WIN_ADVISORY_ALL_OUTCOME} |"
+            echo "| advisory: graph | WIN-2 | ${WIN_ADVISORY_GRAPH_OUTCOME} |"
+            echo
+            echo "\`windowsFullyVerified\`: **${FULLY}**"
+            echo
+            echo "A green tick on this job does NOT by itself mean Windows passed:"
+            echo "the advisory tiers above may be red. publish.yml reads this report"
+            echo "(artifact \`windows-tier-report\`) rather than the tick."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # publish.yml's Windows-scope gate downloads this by name and FAILS
+      # CLOSED if it is absent — deleting this step does not make the release
+      # gate lenient, it makes it refuse. `if-no-files-found: error` so an
+      # empty upload cannot masquerade as a present one.
+      - name: Upload the Windows tier attestation (publish.yml reads this)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tier-report
+          path: windows-tier-report.json
+          if-no-files-found: error
+          retention-days: 90
 
   # #11: the dev box is macOS and darwin-arm64/darwin-x64 are shipped DuckDB
   # native binaries (@duckdb/node-bindings-darwin-arm64 / -darwin-x64 are

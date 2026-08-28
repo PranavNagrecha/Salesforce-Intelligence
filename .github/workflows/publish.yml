@@ -68,6 +68,7 @@ jobs:
       # every query is by ${{ github.repository }} + $GITHUB_SHA. Runs before
       # install/build so an ungated tag burns seconds, not a publish.
       - name: Require a green CI run on the tagged commit
+        id: ci_gate
         timeout-minutes: 40
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -96,6 +97,15 @@ jobs:
               echo "\`bypass_ci_check=true\` was passed to a manual \`workflow_dispatch\`."
               echo "Commit \`${SHA}\` is being published **without** a verified green CI run."
             } >> "${GITHUB_STEP_SUMMARY}"
+            # Carried forward as an OUTPUT, not only a ::warning: the bypass has
+            # to survive past this log into the published artefact's own release
+            # notes. A warning annotation is gone the moment the run scrolls
+            # away; the release body is what anyone reads afterwards.
+            {
+              echo "bypassed=true"
+              echo "run_id="
+              echo "run_url="
+            } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -188,7 +198,16 @@ jobs:
           fi
 
           latest_url="$(jq -r '.workflow_runs | sort_by((.run_started_at // .created_at), .id) | last | .html_url' <<<"${runs_json}")"
+          latest_id="$(jq -r '.workflow_runs | sort_by((.run_started_at // .created_at), .id) | last | .id' <<<"${runs_json}")"
           echo "CI is GREEN on ${SHA} — ${latest_url}"
+
+          # The NEXT step asks that exact run what it actually gated. "Green"
+          # is not the whole answer — see the Windows-scope gate below.
+          {
+            echo "bypassed=false"
+            echo "run_id=${latest_id}"
+            echo "run_url=${latest_url}"
+          } >> "${GITHUB_OUTPUT}"
 
           # Informational only (never fatal): the wider check-run picture for
           # this commit, so a red third-party check is at least visible in the
@@ -203,6 +222,144 @@ jobs:
             echo
             echo "Commit \`${SHA}\` has a green \`${WORKFLOW_FILE}\` run: ${latest_url}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      # ── WINDOWS-SCOPE GATE — WHAT THAT GREEN TICK ACTUALLY COVERED ────────
+      # The step above proves a ci.yml run for this SHA concluded `success`.
+      # That is not the same claim as "CI passed on every platform", and on the
+      # published 0.3.2 it was demonstrably not: ci.yml's windows-build-test job
+      # carried `continue-on-error: true` on BOTH of its unit-test steps, so
+      # packages/mcp died with exit 3221226505 and printed no summary at all
+      # while the job — and therefore the run, and therefore this gate — stayed
+      # green. `success` meant either "Windows passed" or "Windows was allowed
+      # to fail", and nothing here could tell the two apart. A gate that fails
+      # closed on an unreadable API while silently accepting an unchecked
+      # platform is asserting something it did not check; that is the same
+      # defect class as a confident answer over an un-scanned corpus.
+      #
+      # The fix is not to ban advisory tiers — a platform that cannot be
+      # reproduced locally has earned one, and that is this repo's recorded
+      # doctrine. The fix is that the release gate must READ the tier structure
+      # instead of inferring it from a colour. ci.yml's windows job now emits
+      # `windows-tier-report` (see its attestation step), recording each tier's
+      # outcome BEFORE `continue-on-error` was applied.
+      #
+      #   report missing / unreadable / wrong schema -> HARD FAIL (cannot
+      #       verify == no, exactly as for an unreadable API above). Deleting
+      #       the attestation from ci.yml therefore BLOCKS releases; it cannot
+      #       quietly restore the old ambiguity.
+      #   hard tier not `success`                    -> HARD FAIL, even though
+      #       the run said green. This is the specific lie being closed.
+      #   an advisory tier red                       -> PUBLISH, but the
+      #       partial coverage is stamped into the GitHub release body below,
+      #       permanently and by name of blocker.
+      - name: Verify what that green CI run actually gated on Windows
+        id: win_scope
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RUN_ID: ${{ steps.ci_gate.outputs.run_id }}
+          CI_RUN_URL: ${{ steps.ci_gate.outputs.run_url }}
+          CI_BYPASSED: ${{ steps.ci_gate.outputs.bypassed }}
+          ARTIFACT_NAME: windows-tier-report
+          REQUIRE_WINDOWS_FULLY_VERIFIED: ${{ vars.REQUIRE_WINDOWS_FULLY_VERIFIED }}
+        run: |
+          set -euo pipefail
+
+          REPO="${GITHUB_REPOSITORY}"
+
+          emit() {
+            {
+              echo "scope<<SFI_SCOPE_EOF"
+              printf '%s\n' "$1"
+              echo "SFI_SCOPE_EOF"
+              echo "windows_fully_verified=$2"
+            } >> "${GITHUB_OUTPUT}"
+            {
+              echo "### Verification scope of this publish"
+              echo
+              printf '%s\n' "$1"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+
+          if [ "${CI_BYPASSED:-}" = "true" ]; then
+            emit "**CI VERIFICATION BYPASSED.** This build was published via a manual \`workflow_dispatch\` with \`bypass_ci_check=true\`. No CI run was verified on this commit, on any platform. Windows coverage: UNKNOWN." "unknown"
+            echo "::warning title=Publishing without verified CI::bypass_ci_check=true — the release notes will say so."
+            exit 0
+          fi
+
+          if [ -z "${CI_RUN_ID:-}" ]; then
+            echo "::error title=Cannot verify Windows scope::The CI-green gate did not report a run id. Refusing to publish an unverifiable build."
+            exit 1
+          fi
+
+          DEST="$(mktemp -d)"
+          downloaded=0
+          for attempt in 1 2 3; do
+            if gh run download "${CI_RUN_ID}" -R "${REPO}" -n "${ARTIFACT_NAME}" -D "${DEST}" >/dev/null 2>&1; then
+              downloaded=1
+              break
+            fi
+            echo "Could not download artifact '${ARTIFACT_NAME}' from run ${CI_RUN_ID} (attempt ${attempt}/3)."
+            if [ "${attempt}" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+
+          if [ "${downloaded}" -ne 1 ]; then
+            echo "::error title=Cannot verify Windows scope::CI run ${CI_RUN_ID} (${CI_RUN_URL}) is green but published no '${ARTIFACT_NAME}' artifact — the windows job's attestation step was removed, never ran, or the artifact has aged out of retention. A green tick with no recorded scope is exactly the ambiguity this gate exists to remove, so it is treated as a NO. Re-run CI on this commit, or re-drive the release with bypass_ci_check (which will say so in the release notes)."
+            exit 1
+          fi
+
+          REPORT="${DEST}/windows-tier-report.json"
+          if [ ! -s "${REPORT}" ]; then
+            echo "::error title=Cannot verify Windows scope::Artifact '${ARTIFACT_NAME}' contains no windows-tier-report.json. Refusing to publish."
+            exit 1
+          fi
+
+          echo "Windows tier report from CI run ${CI_RUN_ID}:"
+          cat "${REPORT}"
+
+          schema="$(jq -r '.schema // "none"' "${REPORT}")"
+          if [ "${schema}" != "1" ]; then
+            echo "::error title=Cannot verify Windows scope::windows-tier-report.json declares schema '${schema}', not 1. This gate does not know how to read it, and a gate that cannot read its evidence must not pass. Refusing to publish."
+            exit 1
+          fi
+
+          hard_outcome="$(jq -r '.hardGate.outcome // "unknown"' "${REPORT}")"
+          hard_packages="$(jq -r '(.hardGate.packages // []) | join(", ")' "${REPORT}")"
+          fully="$(jq -r '.windowsFullyVerified // false' "${REPORT}")"
+          advisory_red="$(jq -r '(.advisoryNotGreen // []) | join(", ")' "${REPORT}")"
+
+          if [ "${hard_outcome}" != "success" ]; then
+            echo "::error title=Windows hard tier did not pass::CI run ${CI_RUN_ID} concluded 'success', but its Windows hard-gated tier reported '${hard_outcome}'. A run whose colour and whose content disagree is the exact failure this gate exists to catch. Refusing to publish."
+            exit 1
+          fi
+
+          if [ "${fully}" = "true" ]; then
+            emit "Windows: **fully verified**. Hard-gated tier (${hard_packages}) passed, and no advisory tier was red, on CI run ${CI_RUN_URL}." "true"
+          else
+            # THE SWITCH THAT MAKES THIS A DECISION RATHER THAN A DEFAULT.
+            #
+            # Everything above removes the AMBIGUITY — a green tick can no
+            # longer mean two things. It does not, on its own, stop a release
+            # going out while the advisory Windows suites are red, because
+            # advisory is a deliberate tier and blocking every release on a
+            # crash nobody can reproduce off-Windows would be its own kind of
+            # dishonesty.
+            #
+            # But that IS a policy choice, and it should be the maintainer's to
+            # make explicitly rather than one inherited from whichever commit
+            # last touched this file. Set the repository variable
+            # REQUIRE_WINDOWS_FULLY_VERIFIED=true (Settings -> Secrets and
+            # variables -> Actions -> Variables) and a partially-verified build
+            # stops publishing instead of publishing with a caveat. Unset — the
+            # default, and what ships today — behaviour is unchanged.
+            if [ "${REQUIRE_WINDOWS_FULLY_VERIFIED:-}" = "true" ]; then
+              echo "::error title=Windows not fully verified::REQUIRE_WINDOWS_FULLY_VERIFIED=true and the advisory tiers were not green (${advisory_red}). Refusing to publish. Unset the repository variable to publish with a recorded caveat instead."
+              exit 1
+            fi
+            emit "Windows: **partially verified**. The hard-gated tier (${hard_packages}) passed. Advisory tiers were NOT green: ${advisory_red} — those suites did not report a pass on Windows for this build and were not allowed to block it. See CI run ${CI_RUN_URL}." "false"
+            echo "::warning title=Windows coverage is partial::Advisory tiers not green: ${advisory_red}. Publishing anyway (advisory by design, and REQUIRE_WINDOWS_FULLY_VERIFIED is not set), and saying so in the release notes."
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -330,9 +487,15 @@ jobs:
       # every previous release had to be created by hand — a tag would publish to
       # npm and GitHub would keep showing an older release as "Latest". Notes are
       # lifted from the matching CHANGELOG section so they cannot drift from it.
+      # The release body carries the verification scope from the gate above.
+      # A `::warning` annotation lives only in a run log; this is what anyone
+      # who installs the release actually reads, so it is where a partial or
+      # bypassed verification has to be stated.
       - name: Create or update the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERIFICATION_SCOPE: ${{ steps.win_scope.outputs.scope }}
+          RELEASE_CI_RUN_URL: ${{ steps.ci_gate.outputs.run_url }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           case "$TAG" in
@@ -366,14 +529,48 @@ jobs:
             } >> "$TRIMMED"
             mv "$TRIMMED" "$NOTES_FILE"
           fi
+          # Whether a CHANGELOG section existed at all is decided HERE, before
+          # the scope block is appended — otherwise the append would make the
+          # file non-empty and the generated-notes fallback below unreachable.
+          NOTES_FROM_CHANGELOG=1
+          if [ ! -s "$NOTES_FILE" ]; then
+            NOTES_FROM_CHANGELOG=0
+          fi
+
+          # The permanent mark. Stamped AFTER any truncation so it can never be
+          # the part that gets cut (~600 chars against the 1,000 that LIMIT
+          # leaves under GitHub's 125,000 cap). Kept in its own file because the
+          # generated-notes branch below has to re-stamp it onto a body it did
+          # not write: EVERY published release states its own verification
+          # scope, or it does not go out with one silently missing.
+          SCOPE_FILE="$(mktemp)"
+          {
+            printf '\n\n---\n\n### Verification scope\n\n'
+            if [ -n "${RELEASE_VERIFICATION_SCOPE:-}" ]; then
+              printf '%s\n' "${RELEASE_VERIFICATION_SCOPE}"
+            else
+              printf '%s\n' '**Not recorded.** This release was cut without the Windows-scope gate reporting — treat its platform coverage as unverified.'
+            fi
+            if [ -n "${RELEASE_CI_RUN_URL:-}" ]; then
+              printf '\nCI run: %s\n' "${RELEASE_CI_RUN_URL}"
+            fi
+          } > "$SCOPE_FILE"
+          cat "$SCOPE_FILE" >> "$NOTES_FILE"
+
           SBOM_ARGS=()
           if [ -f sbom.cdx.json ]; then
             SBOM_ARGS+=(sbom.cdx.json)
           fi
-          if [ ! -s "$NOTES_FILE" ]; then
+          if [ "$NOTES_FROM_CHANGELOG" -eq 0 ]; then
             echo "No CHANGELOG section for $VERSION — falling back to generated notes."
             gh release create "$TAG" --title "$TAG" --generate-notes --latest "${SBOM_ARGS[@]}" || \
               gh release edit "$TAG" --title "$TAG" --latest
+            # --generate-notes has GitHub write the body, discarding ours, so the
+            # scope block is re-stamped onto whatever body came back.
+            STAMPED="$(mktemp)"
+            gh release view "$TAG" --json body -q .body > "$STAMPED"
+            cat "$SCOPE_FILE" >> "$STAMPED"
+            gh release edit "$TAG" --notes-file "$STAMPED"
           else
             gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest "${SBOM_ARGS[@]}" || \
               gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --latest
