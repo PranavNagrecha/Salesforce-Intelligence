@@ -2128,6 +2128,9 @@ const EVENT_SUBSCRIBERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       eventId: { type: 'string', minLength: 1 },
       eventApiName: { type: 'string', minLength: 1, description: 'Platform Event API name' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -3248,6 +3251,9 @@ const COMPONENT_CHANGE_ATTRIBUTION_INPUT_SCHEMA: Readonly<Record<string, unknown
         maximum: 200,
         description: 'Max matched SetupAuditTrail rows to return (default 50).',
       },
+      offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     anyOf: atLeastOneOf('componentId', 'objectApiName'),
   });

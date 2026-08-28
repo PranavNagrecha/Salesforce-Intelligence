@@ -43,6 +43,8 @@ import { collectPiiInventoryFields } from './pii-inventory.js';
 import {
   processBuilderMigrationCandidatesHandler,
 } from './process-builder-migration-candidates.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 import {
   techDebtScoreHandler,
   type TechDebtScoreOutput,
@@ -1156,8 +1158,17 @@ const SYSTEM_PERMISSION_SEVERITY: Readonly<
   PasswordNeverExpires: 'medium',
 };
 
-/** Upper bound on Profile + PermissionSet nodes scanned for over-privilege. */
-const PRIVILEGE_SCAN_CAP = 500;
+/**
+ * CR-CENSUS: the over-privilege scan is a CENSUS, not a page. It walks EVERY
+ * Profile / PermissionSet / PermissionSetGroup via `scanAllNodesOfTypes`, which
+ * windows the SQL `OFFSET` forward past the graph's 500-row per-page ceiling to
+ * `FULL_SCAN_MAX_NODES`. A single `listNodesByType` page hid every container
+ * that sorted past node 500 (id ASC), so a permission set named late in the
+ * alphabet holding `ModifyAllData` never reached `modifyAllDataGrantors` and
+ * the tool that answers "who has god mode" rendered an UNCHECKED container as a
+ * CHECKED absence. Any residual incompleteness is now disclosed on
+ * `privilege.scanTruncated` + `privilege.scanBoundaryNote`.
+ */
 /** Per-grantor example object ids carried as finding evidence. */
 const ESCALATION_EXAMPLE_CAP = 5;
 /** Upper bound on each god-mode roster (keeps the response bounded). */
@@ -1176,6 +1187,15 @@ export interface PrivilegeSummary {
     readonly permissionSets: number;
     readonly permissionSetGroups: number;
   };
+  /**
+   * True when a scanned type stopped at the full-scan residual cap with more
+   * nodes behind it, i.e. the rosters may be INCOMPLETE. ALWAYS present: a
+   * missing flag would make an unchecked container read as a checked absence,
+   * which is the exact defect this field exists to prevent.
+   */
+  readonly scanTruncated: boolean;
+  /** The verbatim truncation disclosure when `scanTruncated`; null otherwise. */
+  readonly scanBoundaryNote: string | null;
 }
 
 /** Build the aggregated over-privilege finding for one grantor, or null. */
@@ -1223,7 +1243,9 @@ const grantorFinding = (
 const analyzeOverPrivilege = async (
   ctx: Context,
   limit: number,
-): Promise<{ findings: RankedFinding[]; privilege: PrivilegeSummary }> => {
+): Promise<
+  Result<{ findings: RankedFinding[]; privilege: PrivilegeSummary }, McpError>
+> => {
   const findings: RankedFinding[] = [];
   const modifyAllDataGrantors: ComponentId[] = [];
   const viewAllDataGrantors: ComponentId[] = [];
@@ -1243,14 +1265,27 @@ const analyzeOverPrivilege = async (
   // per-type loop scanned them, so the accumulation pass below reproduces
   // node-iteration order exactly — the ROSTER_CAP roster and the per-node
   // ESCALATION_EXAMPLE_CAP examples are order-sensitive.
-  const scanNodes: { readonly type: 'Profile' | 'PermissionSet'; readonly node: Node }[] = [];
-  for (const type of ['Profile', 'PermissionSet'] as const) {
-    const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: PRIVILEGE_SCAN_CAP,
+  // CENSUS, not a page: walk EVERY container of all three types. A graph
+  // failure is an ERROR, never an empty roster — a swallowed read here used to
+  // render "nobody has god mode" out of a DuckDB failure.
+  const scan = await scanAllNodesOfTypes(ctx.graph, [
+    'Profile',
+    'PermissionSet',
+    'PermissionSetGroup',
+  ]);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
     });
-    if (!nodesResult.ok) continue;
-    for (const node of nodesResult.value) {
-      scanNodes.push({ type, node });
+  }
+  const scanNodes: { readonly type: 'Profile' | 'PermissionSet'; readonly node: Node }[] = [];
+  const psgNodes: Node[] = [];
+  for (const node of scan.value.nodes) {
+    if (node.type === 'Profile' || node.type === 'PermissionSet') {
+      scanNodes.push({ type: node.type, node });
+    } else if (node.type === 'PermissionSetGroup') {
+      psgNodes.push(node);
     }
   }
 
@@ -1345,100 +1380,99 @@ const analyzeOverPrivilege = async (
   // extractor as `references` edges + `properties.permissionSets`). Aggregate
   // them so the god-mode roster includes users who get it via a GROUP. Muting
   // is noted but NOT subtracted (a v1 honesty boundary).
-  const psgResult = await listNodesByType(ctx.graph, 'PermissionSetGroup', {
-    limit: PRIVILEGE_SCAN_CAP,
-  });
-  if (psgResult.ok) {
-    for (const psg of psgResult.value) {
-      scanned.permissionSetGroups += 1;
-      // CR-CAP-04: membership RESOLUTION is delegated to the shared helper —
-      // its `memberPermissionSetIds` are `PermissionSet:<name>` ids, identical
-      // to the old inline `PermissionSet:${member}` reconstruction, so the
-      // `permsetRisk` lookup key and this risk aggregation are UNCHANGED.
-      const expanded = await expandPermissionSetGroup(ctx, psg.id);
-      if (!expanded.ok || expanded.value === null) continue;
-      const conferred = new Set<string>();
-      let aggModAll = 0;
-      let aggViewAll = 0;
-      const riskyMembers: string[] = [];
-      for (const memberId of expanded.value.memberPermissionSetIds) {
-        const risk = permsetRisk.get(memberId);
-        if (risk === undefined) continue;
-        if (risk.perms.length === 0 && risk.modAll === 0 && risk.viewAll === 0) {
-          continue;
-        }
-        for (const perm of risk.perms) conferred.add(perm);
-        aggModAll += risk.modAll;
-        aggViewAll += risk.viewAll;
-        if (riskyMembers.length < ESCALATION_EXAMPLE_CAP) {
-          riskyMembers.push(memberId);
-        }
+  for (const psg of psgNodes) {
+    scanned.permissionSetGroups += 1;
+    // CR-CAP-04: membership RESOLUTION is delegated to the shared helper —
+    // its `memberPermissionSetIds` are `PermissionSet:<name>` ids, identical
+    // to the old inline `PermissionSet:${member}` reconstruction, so the
+    // `permsetRisk` lookup key and this risk aggregation are UNCHANGED.
+    const expanded = await expandPermissionSetGroup(ctx, psg.id);
+    if (!expanded.ok || expanded.value === null) continue;
+    const conferred = new Set<string>();
+    let aggModAll = 0;
+    let aggViewAll = 0;
+    const riskyMembers: string[] = [];
+    for (const memberId of expanded.value.memberPermissionSetIds) {
+      const risk = permsetRisk.get(memberId);
+      if (risk === undefined) continue;
+      if (risk.perms.length === 0 && risk.modAll === 0 && risk.viewAll === 0) {
+        continue;
       }
-      if (conferred.size === 0 && aggModAll === 0 && aggViewAll === 0) continue;
-
-      let worst: RankedFinding['severity'] = 'medium';
-      if (conferred.has('ModifyAllData') || conferred.has('ViewAllData')) {
-        worst = 'critical';
-      } else if (
-        aggModAll > 0 ||
-        [...conferred].some((p) => SYSTEM_PERMISSION_SEVERITY[p] === 'high')
-      ) {
-        worst = 'high';
+      for (const perm of risk.perms) conferred.add(perm);
+      aggModAll += risk.modAll;
+      aggViewAll += risk.viewAll;
+      if (riskyMembers.length < ESCALATION_EXAMPLE_CAP) {
+        riskyMembers.push(memberId);
       }
-      if (
-        conferred.has('ModifyAllData') &&
-        modifyAllDataGrantors.length < ROSTER_CAP
-      ) {
-        modifyAllDataGrantors.push(psg.id);
-      }
-      if (
-        conferred.has('ViewAllData') &&
-        viewAllDataGrantors.length < ROSTER_CAP
-      ) {
-        viewAllDataGrantors.push(psg.id);
-      }
-
-      // Muting is NOTED but NOT subtracted (a v1 honesty boundary) — the helper
-      // surfaces `hasMuting` from the same `mutingPermissionSets` property.
-      const hasMuting = expanded.value.hasMuting;
-      const parts: string[] = [];
-      if (conferred.size > 0) {
-        parts.push(`system perms: ${[...conferred].sort().join(', ')}`);
-      }
-      if (aggModAll > 0) {
-        parts.push(`Modify All on ${aggModAll} object(s) (aggregate)`);
-      }
-      if (aggViewAll > 0) {
-        parts.push(`View All on ${aggViewAll} object(s) (aggregate)`);
-      }
-      findings.push({
-        rank: 0,
-        severity: worst,
-        category: 'over-privilege',
-        summary:
-          `PermissionSetGroup ${psg.apiName} confers via member permission ` +
-          `set(s) ${parts.join('; ')}` +
-          (hasMuting
-            ? ' (has a muting permission set, not subtracted in this god-mode roster — effective perms may be lower; use sfi.effective_permissions for the muting-correct net grant, R6-06)'
-            : ''),
-        evidence: [psg.id, ...riskyMembers],
-        confidence: 'declared',
-      });
     }
+    if (conferred.size === 0 && aggModAll === 0 && aggViewAll === 0) continue;
+
+    let worst: RankedFinding['severity'] = 'medium';
+    if (conferred.has('ModifyAllData') || conferred.has('ViewAllData')) {
+      worst = 'critical';
+    } else if (
+      aggModAll > 0 ||
+      [...conferred].some((p) => SYSTEM_PERMISSION_SEVERITY[p] === 'high')
+    ) {
+      worst = 'high';
+    }
+    if (
+      conferred.has('ModifyAllData') &&
+      modifyAllDataGrantors.length < ROSTER_CAP
+    ) {
+      modifyAllDataGrantors.push(psg.id);
+    }
+    if (
+      conferred.has('ViewAllData') &&
+      viewAllDataGrantors.length < ROSTER_CAP
+    ) {
+      viewAllDataGrantors.push(psg.id);
+    }
+
+    // Muting is NOTED but NOT subtracted (a v1 honesty boundary) — the helper
+    // surfaces `hasMuting` from the same `mutingPermissionSets` property.
+    const hasMuting = expanded.value.hasMuting;
+    const parts: string[] = [];
+    if (conferred.size > 0) {
+      parts.push(`system perms: ${[...conferred].sort().join(', ')}`);
+    }
+    if (aggModAll > 0) {
+      parts.push(`Modify All on ${aggModAll} object(s) (aggregate)`);
+    }
+    if (aggViewAll > 0) {
+      parts.push(`View All on ${aggViewAll} object(s) (aggregate)`);
+    }
+    findings.push({
+      rank: 0,
+      severity: worst,
+      category: 'over-privilege',
+      summary:
+        `PermissionSetGroup ${psg.apiName} confers via member permission ` +
+        `set(s) ${parts.join('; ')}` +
+        (hasMuting
+          ? ' (has a muting permission set, not subtracted in this god-mode roster — effective perms may be lower; use sfi.effective_permissions for the muting-correct net grant, R6-06)'
+          : ''),
+      evidence: [psg.id, ...riskyMembers],
+      confidence: 'declared',
+    });
   }
 
   const ranked = [...findings].sort(
     (a, b) => rankSeverity(b.severity) - rankSeverity(a.severity),
   );
-  return {
+  return ok({
     findings: ranked.slice(0, limit),
     privilege: {
       modifyAllDataGrantors: [...modifyAllDataGrantors].sort(),
       viewAllDataGrantors: [...viewAllDataGrantors].sort(),
       overPrivilegedGrantorCount: findings.length,
       scanned,
+      scanTruncated: scan.value.scanIncomplete,
+      scanBoundaryNote: scan.value.scanIncomplete
+        ? fullScanTruncationNote(scan.value.incompleteTypes)
+        : null,
     },
-  };
+  });
 };
 
 /**
@@ -1528,6 +1562,9 @@ const scopedProfileReport = async (
         viewAllDataGrantors: [...viewAllDataGrantors].sort(),
         overPrivilegedGrantorCount: findings.length,
         scanned: { profiles: 1, permissionSets: 0, permissionSetGroups: 0 },
+        // One already-resolved node: nothing was capped.
+        scanTruncated: false,
+        scanBoundaryNote: null,
       },
       profileFilter: {
         requested,
@@ -1631,25 +1668,35 @@ const editDistance = (a: string, b: string): number => {
 const resolveProfileFilter = async (
   ctx: Context,
   requested: string,
-): Promise<{
-  readonly matched: Node | null;
-  readonly profiles: readonly Node[];
-}> => {
-  const nodesResult = await listNodesByType(ctx.graph, 'Profile', {
-    limit: PRIVILEGE_SCAN_CAP,
-  });
-  const profiles = nodesResult.ok ? nodesResult.value : [];
+): Promise<
+  Result<
+    { readonly matched: Node | null; readonly profiles: readonly Node[] },
+    McpError
+  >
+> => {
+  // CENSUS: walk EVERY Profile (windows past the 500-row page), so a profile
+  // that sorts late is resolved instead of declared nonexistent. A FAILED read
+  // is an error — swallowing it to `[]` made the caller state, verbatim, that
+  // the requested profile does not exist in this vault.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['Profile']);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
+    });
+  }
+  const profiles = scan.value.nodes;
   const wanted = normalizeProfileName(requested);
   // 1) Exact normalised match on apiName or label.
   for (const node of profiles) {
     if (normalizeProfileName(node.apiName) === wanted) {
-      return { matched: node, profiles };
+      return ok({ matched: node, profiles });
     }
     if (typeof node.label === 'string' && normalizeProfileName(node.label) === wanted) {
-      return { matched: node, profiles };
+      return ok({ matched: node, profiles });
     }
   }
-  return { matched: null, profiles };
+  return ok({ matched: null, profiles });
 };
 
 /** Name of the profile closest to `requested` (for a false-premise caveat). */
@@ -1704,10 +1751,9 @@ export const permissionRiskReportHandler = async (
   // closest existing profile) rather than silently dropping the filter and
   // dumping the full org-wide report.
   if (input.profileFilter !== undefined) {
-    const { matched, profiles } = await resolveProfileFilter(
-      ctx,
-      input.profileFilter,
-    );
+    const resolved = await resolveProfileFilter(ctx, input.profileFilter);
+    if (!resolved.ok) return resolved;
+    const { matched, profiles } = resolved.value;
     if (matched === null) {
       const closest = closestProfileName(input.profileFilter, profiles);
       const caveat =
@@ -1725,6 +1771,10 @@ export const permissionRiskReportHandler = async (
             viewAllDataGrantors: [],
             overPrivilegedGrantorCount: 0,
             scanned: { profiles: 0, permissionSets: 0, permissionSetGroups: 0 },
+            // The profile roster WAS read successfully (a failed read is an
+            // `internal` error, not this branch) — nothing was capped away.
+            scanTruncated: false,
+            scanBoundaryNote: null,
           },
           profileFilter: {
             requested: input.profileFilter,
@@ -1748,7 +1798,9 @@ export const permissionRiskReportHandler = async (
   // Over-privilege: god-mode system perms + object-level View All / Modify All,
   // read straight from the extracted profile / permission-set metadata. This is
   // the headline of a permission-risk report, so it leads the findings.
-  const overPriv = await analyzeOverPrivilege(ctx, limit);
+  const overPrivResult = await analyzeOverPrivilege(ctx, limit);
+  if (!overPrivResult.ok) return overPrivResult;
+  const overPriv = overPrivResult.value;
   findings.push(...overPriv.findings);
 
   const unassigned = await unassignedPermissionSetsHandler(ctx, { limit });
@@ -1799,7 +1851,12 @@ export const permissionRiskReportHandler = async (
       privilege: overPriv.privilege,
       ...(dataShape !== undefined ? { dataShape } : {}),
       trust: coverageTrust(ctx),
-      disclosure: SYNTHESIS_DISCLOSURE,
+      // A capped census must SAY it was capped — the roster is otherwise read
+      // as a complete answer to "who has god mode".
+      disclosure:
+        overPriv.privilege.scanBoundaryNote !== null
+          ? `${overPriv.privilege.scanBoundaryNote} ${SYNTHESIS_DISCLOSURE}`
+          : SYNTHESIS_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

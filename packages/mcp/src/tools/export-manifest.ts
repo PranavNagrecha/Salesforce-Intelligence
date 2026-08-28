@@ -21,9 +21,18 @@ const SF_API_VERSION = '62.0';
 
 /**
  * ComponentType → the deployable metadata `<name>` for the types whose
- * package.xml name differs from the graph ComponentType. KEEP IN SYNC with
- * `packages/cli/src/commands/refresh.ts` `METADATA_API_NAME` (the retrieve
- * manifest uses the same mapping). Anything not listed maps to itself.
+ * package.xml name differs from the graph ComponentType. Anything not listed
+ * maps to itself.
+ *
+ * This is the same alias table the retrieve manifest uses
+ * (`packages/cli/src/commands/refresh.ts` `METADATA_API_NAME`), and for a
+ * while a comment saying "KEEP IN SYNC" was the only thing holding the two
+ * together. It did not: the retrieve side grew the three settings singletons
+ * below and this copy did not, so `export_manifest` emitted
+ * `<name>SecuritySettings</name>` — not a Metadata API xmlName — and reported
+ * it packaged cleanly. The comment is no longer the guard; the drift test in
+ * `packages/mcp/test/tools/export-manifest.test.ts` parses the alias literal
+ * out of BOTH files and fails when this table stops covering that one.
  */
 const METADATA_API_NAME: Readonly<Record<string, string>> = Object.freeze({
   VisualforcePage: 'ApexPage',
@@ -35,6 +44,34 @@ const METADATA_API_NAME: Readonly<Record<string, string>> = Object.freeze({
   MatchingRule: 'MatchingRules',
   WorkflowRule: 'Workflow',
   CustomMetadataRecord: 'CustomMetadata',
+  // The org describe exposes no top-level `SessionSettings` /
+  // `SecuritySettings` / `FieldServiceSettings` xmlName — only the umbrella
+  // `Settings` container, one file per feature under `settings/`. See the
+  // matching entries in refresh.ts for the describe evidence.
+  SessionSettings: 'Settings',
+  SecuritySettings: 'Settings',
+  FieldServiceSettings: 'Settings',
+});
+
+/**
+ * ComponentType → the `<members>` text for the org-level settings singletons.
+ *
+ * The graph ids these types carry are `{Type}:default`, but `default` names no
+ * settings file: a `Settings` entry's member is the `[FeatureName]` of the
+ * `[FeatureName].settings` file it deploys. Mapping only the `<name>` above
+ * and leaving `<members>default</members>` would still be an undeployable
+ * package.xml reported as packaged cleanly, so the member is mapped here too.
+ *
+ * `SessionSettings` deliberately folds onto `Security`: Salesforce emits no
+ * `Session.settings-meta.xml` (the session block is nested inside
+ * `Security.settings-meta.xml`, which is why one extractor co-emits both
+ * nodes). Passing both singleton ids therefore yields ONE member, not two —
+ * they are the same deployable file.
+ */
+const SETTINGS_MEMBER_NAME: Readonly<Record<string, string>> = Object.freeze({
+  SecuritySettings: 'Security',
+  SessionSettings: 'Security',
+  FieldServiceSettings: 'FieldService',
 });
 
 /** Synthetic graph node types that are not deployable metadata — skipped. */
@@ -44,6 +81,14 @@ const NON_DEPLOYABLE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 const toMetadataName = (type: string): string => METADATA_API_NAME[type] ?? type;
+
+/**
+ * The `<members>` text for one id. Everything except the org-level settings
+ * singletons packages its ApiName verbatim (this tool packages exactly the ids
+ * you pass); those three name the settings FILE they deploy instead.
+ */
+const toMemberName = (type: string, member: string): string =>
+  SETTINGS_MEMBER_NAME[type] ?? member;
 
 /**
  * Escape the five XML special characters so member/name text stays well-formed.
@@ -74,6 +119,14 @@ export interface ExportManifestSkipped {
 
 /** Per-metadata-type rollup in the manifest summary. */
 export interface ExportManifestTypeBucket {
+  /**
+   * The graph ComponentType behind this `<types>` block — or, when SEVERAL
+   * ComponentTypes deploy under one `<name>` (the settings singletons all
+   * deploy as `Settings`), that shared metadata name. One `<types>` block is
+   * one bucket, so this never splits a block in two. The bucket shape is
+   * pinned by the published `docs/schemas/proposal.schema.json`
+   * (`additionalProperties: false`), so it takes no new field here.
+   */
   readonly type: string;
   readonly metadataName: string;
   readonly members: number;
@@ -93,7 +146,7 @@ export interface ExportManifestOutput {
 }
 
 const DISCLOSURE =
-  'export_manifest groups the component ids you pass into a well-formed package.xml by metadata type (each member is the id’s ApiName; the <name> uses the deployable metadata-type name). It PROPOSES a manifest to hand to Gearset / Copado / `sf project deploy` and NEVER deploys or writes to the org. It does not verify the ids exist in the org or vault — it packages exactly what you pass; synthetic graph nodes (e.g. ConditionalContext) and malformed ids are skipped and listed in `skipped`.';
+  'export_manifest groups the component ids you pass into a well-formed package.xml by metadata type (each member is the id’s ApiName and the <name> is the deployable metadata-type name — the one exception is the org-level settings singletons, which deploy as members of the umbrella `Settings` type named after their `[FeatureName].settings` file, so SecuritySettings and SessionSettings are ONE member, `Security`). It PROPOSES a manifest to hand to Gearset / Copado / `sf project deploy` and NEVER deploys or writes to the org. It does not verify the ids exist in the org or vault — it packages exactly what you pass; synthetic graph nodes (e.g. ConditionalContext) and malformed ids are skipped and listed in `skipped`.';
 
 const sortStrings = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -109,7 +162,7 @@ const sortStrings = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 
 export interface ManifestGrouping {
   /** Fully rendered `  <types>…</types>` lines, ready to splice into a Package. */
   readonly typesXml: readonly string[];
-  /** Per-type rollup (type, deployable metadata name, member count). */
+  /** Per-`<types>`-block rollup (label, deployable metadata name, member count). */
   readonly byType: readonly ExportManifestTypeBucket[];
   /** Total members across all types (post de-dupe). */
   readonly memberCount: number;
@@ -127,7 +180,14 @@ export interface ManifestGrouping {
 export const groupComponentIds = (
   componentIds: readonly string[],
 ): ManifestGrouping => {
-  const byType = new Map<string, Set<string>>();
+  // Keyed by the DEPLOYABLE metadata name, not the graph ComponentType: a
+  // package.xml `<types>` block is identified by its `<name>`, and several
+  // ComponentTypes can deploy under one (the settings singletons all deploy as
+  // `Settings`). Keying by ComponentType emitted a separate `<types>` block per
+  // ComponentType — duplicate `<name>Settings</name>` blocks naming the same
+  // file, and a de-dupe that could not see across them.
+  const byMetadataName = new Map<string, Set<string>>();
+  const contributingTypes = new Map<string, Set<string>>();
   const skipped: ExportManifestSkipped[] = [];
 
   for (const id of componentIds) {
@@ -145,27 +205,38 @@ export const groupComponentIds = (
       });
       continue;
     }
-    const members = byType.get(type) ?? new Set<string>();
-    members.add(member);
-    byType.set(type, members);
+    const metadataName = toMetadataName(type);
+    const members = byMetadataName.get(metadataName) ?? new Set<string>();
+    members.add(toMemberName(type, member));
+    byMetadataName.set(metadataName, members);
+    const sources = contributingTypes.get(metadataName) ?? new Set<string>();
+    sources.add(type);
+    contributingTypes.set(metadataName, sources);
   }
 
-  const sortedTypes = [...byType.keys()].sort(sortStrings);
-  const typesXml = sortedTypes.flatMap((type) => {
-    const members = [...(byType.get(type) ?? new Set<string>())].sort(sortStrings);
+  const sortedNames = [...byMetadataName.keys()].sort(sortStrings);
+  const typesXml = sortedNames.flatMap((metadataName) => {
+    const members = [...(byMetadataName.get(metadataName) ?? new Set<string>())].sort(
+      sortStrings,
+    );
     return [
       '  <types>',
       ...members.map((m) => `    <members>${escapeXml(m)}</members>`),
-      `    <name>${escapeXml(toMetadataName(type))}</name>`,
+      `    <name>${escapeXml(metadataName)}</name>`,
       '  </types>',
     ];
   });
 
-  const byTypeSummary: ExportManifestTypeBucket[] = sortedTypes.map((type) => ({
-    type,
-    metadataName: toMetadataName(type),
-    members: (byType.get(type) ?? new Set<string>()).size,
-  }));
+  const byTypeSummary: ExportManifestTypeBucket[] = sortedNames.map((metadataName) => {
+    const sources = [...(contributingTypes.get(metadataName) ?? new Set<string>())].sort(
+      sortStrings,
+    );
+    return {
+      type: sources.length === 1 ? (sources[0] as string) : metadataName,
+      metadataName,
+      members: (byMetadataName.get(metadataName) ?? new Set<string>()).size,
+    };
+  });
   const memberCount = byTypeSummary.reduce((n, b) => n + b.members, 0);
 
   return { typesXml, byType: byTypeSummary, memberCount, skipped };

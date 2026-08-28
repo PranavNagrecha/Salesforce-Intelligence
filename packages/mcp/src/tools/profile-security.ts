@@ -14,7 +14,12 @@
  *   - Profile-scoped: `loginIpRanges` (already extracted into
  *     `properties.loginIpRanges`, previously unsurfaced) + `loginHoursByDay`
  *     (the per-weekday `<loginHours>` windows, extracted into
- *     `properties.loginHours`).
+ *     `properties.loginHours`). ALSO REFRESH-GATED: a Profile node that carries
+ *     no `loginIpRanges` property was built before that extractor, so the whole
+ *     login axis is `null` + `loginRestrictionsExtracted: false` (disclosed in
+ *     `boundaryNote`) — never `[] / 0 / false`, which would read as a verified
+ *     "this profile is unrestricted" for a profile locked to a corporate
+ *     network.
  *   - Org-wide: `sessionSecuritySettings` from the single `SessionSettings:default`
  *     node (required-MFA, strong-auth, session-timeout). REFRESH-GATED — a vault
  *     built before the SessionSettings type shipped carries no such node, so this
@@ -35,6 +40,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { coercePrefix } from './coerce-id.js';
 import { firstNonEmpty } from './input-aliases.js';
 import {
@@ -48,6 +54,21 @@ import {
 const SESSION_SETTINGS_ID = 'SessionSettings:default' as ComponentId;
 
 const PROFILE_PREFIX = 'Profile:';
+
+/**
+ * The property the profile extractor ALWAYS writes when it ran at all.
+ *
+ * `collectLoginRestrictions` (`packages/extractors/src/profile.ts`) emits
+ * `{ loginIpRanges, loginHoursDefined, loginHours }` as one object on every
+ * Profile — `{ loginIpRanges: [] }` when the profile declares no restriction —
+ * precisely "so a consumer can tell 'extracted, none' from 'never extracted'".
+ * A node that carries no such key was built by a refresh predating that
+ * extractor, so its login axis is NOT MODELED, never a verified "unrestricted".
+ * Read with {@link familyWasExtracted} (a `hasOwnProperty` check): the
+ * checked-and-clean case writes `[]` / `false`, which are real answers and are
+ * both falsy, so truthiness cannot tell the two apart.
+ */
+const LOGIN_RESTRICTIONS_SENTINEL = 'loginIpRanges';
 
 /**
  * Zod schema for the `sfi.profile_security` tool input.
@@ -115,16 +136,29 @@ export interface SessionSecuritySettings {
 export interface ProfileSecurityOutput {
   readonly profileId: ComponentId;
   readonly profileLabel: string;
-  /** The profile's declared login-IP-range windows (may be empty). */
-  readonly loginIpRanges: readonly LoginIpRange[];
-  readonly loginIpRangeCount: number;
+  /**
+   * Whether THIS vault's refresh extracted the login-restriction family at all
+   * (the {@link LOGIN_RESTRICTIONS_SENTINEL} property is present on the node).
+   * `false` mutes every field below it to `null` — nothing was checked.
+   */
+  readonly loginRestrictionsExtracted: boolean;
+  /**
+   * The profile's declared login-IP-range windows (`[]` = checked, none), or
+   * `null` when the family was never extracted (see
+   * {@link loginRestrictionsExtracted}).
+   */
+  readonly loginIpRanges: readonly LoginIpRange[] | null;
+  /** Count of the above; `null` — never `0` — when nothing was checked. */
+  readonly loginIpRangeCount: number | null;
   /**
    * Login-hours per-weekday windows (`[]` when the profile declares no
    * `<loginHours>` restriction). `loginHoursRestricted` reports whether ANY
    * login-hours window is defined (from the extracted `loginHoursDefined` flag).
+   * Both are `null` — never `[]` / `false` — when the family was never
+   * extracted.
    */
-  readonly loginHoursByDay: readonly LoginHourWindow[];
-  readonly loginHoursRestricted: boolean;
+  readonly loginHoursByDay: readonly LoginHourWindow[] | null;
+  readonly loginHoursRestricted: boolean | null;
   /**
    * Org-wide MFA / session policy (single `SessionSettings:default` node), or
    * `null` when that node is not in the vault (refresh-gated).
@@ -183,9 +217,23 @@ export const profileSecurityHandler = async (
   }
   const node = nodeResult.value;
 
-  const loginIpRanges = readLoginIpRanges(node.properties);
-  const loginHoursByDay = readLoginHours(node.properties);
-  const loginHoursRestricted = node.properties['loginHoursDefined'] === true;
+  // TYPED ABSENCE: decide by the SENTINEL PROPERTY, never by the array's shape.
+  // `readLoginIpRanges` returns `[]` for a missing key and for a declared-empty
+  // one alike, which is exactly how a profile locked to a corporate network
+  // reads as "not IP-restricted" on a vault predating the extractor.
+  const loginRestrictionsExtracted = familyWasExtracted(
+    node.properties,
+    LOGIN_RESTRICTIONS_SENTINEL,
+  );
+  const loginIpRanges = loginRestrictionsExtracted
+    ? readLoginIpRanges(node.properties)
+    : null;
+  const loginHoursByDay = loginRestrictionsExtracted
+    ? readLoginHours(node.properties)
+    : null;
+  const loginHoursRestricted = loginRestrictionsExtracted
+    ? node.properties['loginHoursDefined'] === true
+    : null;
 
   // Org-wide session settings: read the single SessionSettings:default node.
   // Absent → null (a vault refreshed before the type shipped; refresh-gated).
@@ -203,8 +251,23 @@ export const profileSecurityHandler = async (
     };
   }
 
+  // The not-extracted sentence LEADS the note: it mutes the whole login axis,
+  // so it must not sit behind the sentences describing what those fields mean.
+  const notExtractedSentence = loginRestrictionsExtracted
+    ? ''
+    : notExtractedFamilyDisclosure({
+        subject: 'Login restrictions',
+        verb: 'checked',
+        pluralSubject: true,
+        sentinelProperty: LOGIN_RESTRICTIONS_SENTINEL,
+        containers: [profileId],
+        surface: '`loginIpRanges` / `loginIpRangeCount` / `loginHoursByDay` / `loginHoursRestricted`',
+        zeroReading: '"this profile is not IP- or hours-restricted"',
+      }) + ' ';
+
   const boundaryNote =
-    'Login IP ranges are declared Profile metadata (the user must be ASSIGNED this profile at runtime to be restricted by them, and IP ranges combine with org-wide network access). Login-hours weekday windows (`loginHoursByDay`) are the declared `<loginHours>` start/end minutes-since-midnight (GMT) per restricted weekday; a weekday absent from the list is unrestricted. '
+    notExtractedSentence
+    + 'Login IP ranges are declared Profile metadata (the user must be ASSIGNED this profile at runtime to be restricted by them, and IP ranges combine with org-wide network access). Login-hours weekday windows (`loginHoursByDay`) are the declared `<loginHours>` start/end minutes-since-midnight (GMT) per restricted weekday; a weekday absent from the list is unrestricted. '
     + (sessionSecuritySettings === null
       ? 'Org-wide MFA / session settings are NOT in this vault (`sessionSecuritySettings: null`) — the SessionSettings type is refresh-gated; re-run `/sfi-refresh` to pull it.'
       : 'Org-wide MFA / session settings come from the single SessionSettings:default node (declared, org-level).');
@@ -213,8 +276,9 @@ export const profileSecurityHandler = async (
     data: {
       profileId: profileId as ComponentId,
       profileLabel: node.label ?? node.apiName,
+      loginRestrictionsExtracted,
       loginIpRanges,
-      loginIpRangeCount: loginIpRanges.length,
+      loginIpRangeCount: loginIpRanges === null ? null : loginIpRanges.length,
       loginHoursByDay,
       loginHoursRestricted,
       sessionSecuritySettings,

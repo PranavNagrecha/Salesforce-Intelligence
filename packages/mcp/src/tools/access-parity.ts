@@ -56,11 +56,13 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByIds, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges, listNodesByIds } from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
 
 import type { ChangeKind } from './review-change.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Types the parity check applies to — a field's FLS / an object's CRUD grants. */
 const PARITY_TYPES: ReadonlySet<string> = new Set(['CustomField', 'CustomObject']);
@@ -68,8 +70,18 @@ const PARITY_TYPES: ReadonlySet<string> = new Set(['CustomField', 'CustomObject'
 /** The grantor node types whose `grantedBy` edge carries an access grant. */
 const GRANTOR_TYPES: ReadonlySet<string> = new Set(['Profile', 'PermissionSet']);
 
-/** Max Profile / PermissionSet nodes fetched for the system-perm scan (query cap). */
-const GRANTOR_SCAN_LIMIT = 500;
+/**
+ * The node types walked by the org-wide system-perm scan, in scan order.
+ *
+ * The scan is EXHAUSTIVE (`scanAllNodesOfTypes`), not a single capped page: the
+ * precision guard it feeds ("no Profile / PermissionSet holds ViewAllData /
+ * ModifyAllData") is a claim about the WHOLE org, and a single
+ * `listNodesByType` page is served as `ORDER BY id ASC LIMIT 500 OFFSET 0` — so
+ * in an org with more than 500 grantors the alphabetical tail was never read
+ * and a sole ModifyAllData holder past node 500 minted a false "ships for
+ * nobody" alarm.
+ */
+const GRANTOR_SCAN_TYPES = ['Profile', 'PermissionSet'] as const;
 
 /** One added/modified field or object that resolves to ZERO modeled grants. */
 export interface AccessParityFinding {
@@ -81,10 +93,27 @@ export interface AccessParityFinding {
   readonly reason: string;
 }
 
-/** Count of ViewAllData / ModifyAllData holders across all Profiles / PermissionSets. */
+/**
+ * Count of ViewAllData / ModifyAllData holders across all Profiles /
+ * PermissionSets, or `null` per count when the org-wide scan NEVER RAN.
+ *
+ * The scan is lazy — it fires only when some component reaches the zero-explicit-
+ * grant branch. A changeset whose every entry is explicitly granted (or is a
+ * standard component) therefore never scans, and `null` says so. `0` is reserved
+ * for a CHECKED zero: the org WAS scanned and holds no blanket-access grantor.
+ * The two cannot share a value — a bare `0` reads as the security fact "nobody
+ * in this org holds ModifyAllData", which nothing established.
+ */
 export interface SystemPermHolders {
-  readonly viewAllData: number;
-  readonly modifyAllData: number;
+  readonly viewAllData: number | null;
+  readonly modifyAllData: number | null;
+}
+
+/** The org-wide grantor scan's outcome: the counts plus its residual-cap honesty. */
+interface SystemPermScan {
+  readonly holders: SystemPermHolders;
+  /** Grantor types whose exhaustive walk stopped at the residual full-scan cap. */
+  readonly incompleteTypes: readonly string[];
 }
 
 /** The additive `accessParity` section `review_change` emits when asked. */
@@ -103,8 +132,20 @@ export interface AccessParityResult {
   readonly systemPermCovered: number;
   /** NOT flagged — a STANDARD (non-`__c`) field/object with default access. */
   readonly standardDefault: number;
-  /** ViewAllData / ModifyAllData holder counts (informational precision context). */
+  /**
+   * ViewAllData / ModifyAllData holder counts (informational precision context).
+   * Each count is `null` when the lazy org-wide scan never ran — NOT-CHECKED,
+   * not a checked zero. See {@link SystemPermHolders}.
+   */
   readonly systemPermHolders: SystemPermHolders;
+  /**
+   * True when the org-wide grantor walk stopped at the residual full-scan cap
+   * with grantors still behind it — the "no blanket-access holder" precision
+   * guard is then NOT PROVEN and a `shipsForNobody` entry is correspondingly
+   * weaker. False both when the walk exhausted every grantor AND when the lazy
+   * scan never ran (nothing depended on it).
+   */
+  readonly scanTruncated: boolean;
   /** Vault last-refresh timestamp — a stale grant graph must not mint a false alarm. */
   readonly stamp: string;
   /** Grants are declared Profile / PermissionSet metadata. */
@@ -123,6 +164,8 @@ export const ACCESS_PARITY_BOUNDARIES: readonly string[] = [
   'Every parity verdict is stamped with the vault last-refresh time (`stamp`): a STALE grant graph must not mint a false "invisible" alarm — re-run `sfi refresh` before trusting a "ships for nobody" flag.',
   'Precision guards against false positives: a component is NOT flagged when any Profile / PermissionSet holds ViewAllData (read) or ModifyAllData (read + edit) — a system perm conferring blanket access — or when it is a STANDARD (non-`__c`) field/object with default access. System-perm coverage is a declared-metadata heuristic (field-level security can still narrow a ViewAll/ModifyAll holder), so confirm the intended business audience regardless.',
   'This is the "ships for NOBODY" (zero-grant) direction ONLY. The "ships for EVERYBODY" question — how many users actually HOLD a granting permission set / profile — is per-user LIVE assignment data the offline vault cannot answer; it is deferred to the live plane (`sfi.live_permset_holders`).',
+  'The ViewAllData / ModifyAllData precision guard scans EVERY Profile and PermissionSet in the vault (the walk pages the graph offset forward until each type is exhausted); if it ever stops at the residual full-scan cap, `scanTruncated` is true and an extra boundary line says so — a zero holder count is then "not fully scanned", not proven "none".',
+  '`systemPermHolders` is `null` per count when the org-wide ViewAllData / ModifyAllData scan NEVER RAN — the scan is lazy and fires only when some component reaches the zero-explicit-grant branch, so a changeset whose every entry is explicitly granted never pays for it. `0` means the org WAS scanned and holds no blanket-access grantor; `null` means NOTHING WAS CHECKED. Do not read a `null` as "nobody in this org holds ModifyAllData".',
   'Absence of a grant is only as strong as the coverage behind Profile / PermissionSet retrieval: if those families were not fully retrieved, a zero-grant result is "not checked", not proven "none" — cross-check `sfi.coverage_report`.',
   'This is a changeset grant-COMPLETENESS check (did the release ship the permissions), NOT the `sfi.crud_fls_audit` Apex-security heuristic (whether Apex enforces CRUD/FLS) — they answer different questions.',
 ];
@@ -174,26 +217,34 @@ const objectEdgeConfersAccess = (props: Readonly<Record<string, unknown>>): bool
   return !anyPresent;
 };
 
-/** Count ViewAllData / ModifyAllData holders across all Profiles + PermissionSets. */
+/**
+ * Count ViewAllData / ModifyAllData holders across EVERY Profile + PermissionSet
+ * in the vault, by adopting the shared full-scan helper
+ * (`scanAllNodesOfTypes`), which windows the SQL `OFFSET` forward until each
+ * type is exhausted. Its residual `FULL_SCAN_MAX_NODES` cap is returned as
+ * `incompleteTypes` rather than hidden, so a scan that genuinely stopped short
+ * is disclosed instead of being read as "no holder exists".
+ */
 const scanSystemPermHolders = async (
   ctx: Context,
-): Promise<Result<SystemPermHolders, McpError>> => {
+): Promise<Result<SystemPermScan, McpError>> => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, [...GRANTOR_SCAN_TYPES]);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  }
   let viewAllData = 0;
   let modifyAllData = 0;
-  for (const type of ['Profile', 'PermissionSet'] as const) {
-    const nodesRes = await listNodesByType(ctx.graph, type, { limit: GRANTOR_SCAN_LIMIT });
-    if (!nodesRes.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${nodesRes.error.message}` });
-    }
-    for (const node of nodesRes.value) {
-      const perms = node.properties['userPermissions'];
-      if (!Array.isArray(perms)) continue;
-      // ModifyAllData implies read+edit on all data; count each holder once.
-      if (perms.includes('ModifyAllData')) modifyAllData += 1;
-      if (perms.includes('ViewAllData')) viewAllData += 1;
-    }
+  for (const node of scan.value.nodes) {
+    const perms = node.properties['userPermissions'];
+    if (!Array.isArray(perms)) continue;
+    // ModifyAllData implies read+edit on all data; count each holder once.
+    if (perms.includes('ModifyAllData')) modifyAllData += 1;
+    if (perms.includes('ViewAllData')) viewAllData += 1;
   }
-  return ok({ viewAllData, modifyAllData });
+  return ok({
+    holders: { viewAllData, modifyAllData },
+    incompleteTypes: scan.value.incompleteTypes,
+  });
 };
 
 /**
@@ -254,11 +305,13 @@ export const resolveAccessParity = async (
   // actually reaches the zero-explicit-grant branch (lazy — a changeset whose
   // every field is explicitly granted never pays for the org-wide scan).
   let systemPermHolders: SystemPermHolders | null = null;
+  let scanIncompleteTypes: readonly string[] = [];
   const ensureHolders = async (): Promise<Result<SystemPermHolders, McpError>> => {
     if (systemPermHolders !== null) return ok(systemPermHolders);
     const res = await scanSystemPermHolders(ctx);
     if (!res.ok) return res;
-    systemPermHolders = res.value;
+    systemPermHolders = res.value.holders;
+    scanIncompleteTypes = res.value.incompleteTypes;
     return ok(systemPermHolders);
   };
 
@@ -285,7 +338,9 @@ export const resolveAccessParity = async (
     // ModifyAllData) held by anyone? If so it is covered, not "for nobody".
     const holdersRes = await ensureHolders();
     if (!holdersRes.ok) return holdersRes;
-    if (holdersRes.value.viewAllData > 0 || holdersRes.value.modifyAllData > 0) {
+    const { viewAllData, modifyAllData } = holdersRes.value;
+    // Reached only via ensureHolders(), so both counts are CHECKED numbers here.
+    if ((viewAllData ?? 0) > 0 || (modifyAllData ?? 0) > 0) {
       systemPermCovered += 1;
       continue;
     }
@@ -301,9 +356,14 @@ export const resolveAccessParity = async (
     });
   }
 
-  // If nothing reached the zero-grant branch the org-wide scan was skipped;
-  // report zero holders (no component depended on the count).
-  const holders = systemPermHolders ?? { viewAllData: 0, modifyAllData: 0 };
+  // If nothing reached the zero-grant branch the org-wide scan was SKIPPED —
+  // publish the NOT-CHECKED sentinel (`null` per count), never a checked zero:
+  // `{ viewAllData: 0, modifyAllData: 0 }` reads as the security fact "no
+  // container in this org holds ViewAllData / ModifyAllData", which nothing
+  // established.
+  const holders: SystemPermHolders =
+    systemPermHolders ?? { viewAllData: null, modifyAllData: null };
+  const scanTruncated = scanIncompleteTypes.length > 0;
 
   return ok({
     shipsForNobody: [...shipsForNobody].sort((a, b) =>
@@ -314,9 +374,12 @@ export const resolveAccessParity = async (
     systemPermCovered,
     standardDefault,
     systemPermHolders: holders,
+    scanTruncated,
     stamp: ctx.manifest.refreshedAt,
     confidence: 'declared',
     disclosure: ACCESS_PARITY_DISCLOSURE,
-    boundaries: ACCESS_PARITY_BOUNDARIES,
+    boundaries: scanTruncated
+      ? [...ACCESS_PARITY_BOUNDARIES, fullScanTruncationNote(scanIncompleteTypes)]
+      : ACCESS_PARITY_BOUNDARIES,
   });
 };

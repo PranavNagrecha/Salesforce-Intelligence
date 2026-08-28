@@ -60,8 +60,21 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * structure reader, and the precise re-inline guard (antlr refs) stayed green
  * through all of it. Re-set this ONCE against a measured merged bundle rather
  * than granting it again per lane.
+ *
+ * RAISED AT INTEGRATION (6_800_000 -> 7_400_000), third round, and for the
+ * reason this comment keeps naming: an integration wave, not a branch. The
+ * honesty campaign landed typed-absence disclosure, verified object scope and
+ * resume pointers across ~40 tool files plus an at-least-one-of contract on 22
+ * advertised schemas, and put the bundle at 6_858_134 — 58 KB over. The PRECISE
+ * re-inline guard stayed green throughout (the worker still carries the
+ * external `@apexdevtools/apex-parser` import string, antlr refs well under
+ * their ceiling), which is exactly the split this comment describes: that guard
+ * catches a re-inline, this number tracks feature growth. Headroom is again
+ * deliberate (~540 KB) so the next wave does not restart the per-branch ratchet
+ * the paragraph above calls the anti-pattern, and 7.4 MB is still ~3 MB below a
+ * re-inlined bundle.
  */
-const MAX_BYTES = 6_800_000;
+const MAX_BYTES = 7_400_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */

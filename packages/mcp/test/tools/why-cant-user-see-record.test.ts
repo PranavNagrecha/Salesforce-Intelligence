@@ -3315,3 +3315,331 @@ describe('whyCantUserSeeRecordHandler — a PSG member absent from the vault', (
     expect(r.value.data.verdict).toBe('restricted');
   });
 });
+
+// =============================================================================
+// R1 — the child-rule scan must not be an alphabetically-capped org-wide page.
+//
+// `listObjectChildRules` used to fetch ONE `listNodesByType(ruleType, {limit:
+// 500})` page ORG-WIDE and post-filter by `parentId` in memory. Any
+// RestrictionRule / ScopingRule whose id sorts after the 500th rule of that
+// type in the whole org was never fetched, and the stage then emitted a
+// CHECKED negative — `restricted` / "no restriction rules attached to this
+// object" — for a scan that never looked at the object's own rule. The same
+// helper backs the god-mode branch, where the miss flips an honest `unknown`
+// ("an active restriction rule can still filter specific users") into a
+// confident `visible`.
+//
+// The seed puts 500 decoy rules of each type on a DECOY object whose ids sort
+// FIRST, and one real rule on the queried object whose id sorts LAST.
+// =============================================================================
+
+const CAP_OBJ = 'CustomObject:ZzCapObj';
+const CAP_DECOY_OBJ = 'CustomObject:AaDecoyObj';
+/** A third object carrying NO rules at all — the control for over-correction. */
+const CAP_CLEAN_OBJ = 'CustomObject:ZzCleanObj';
+const CAP_PS = 'PermissionSet:ZzCapPS';
+const CAP_GOD_PS = 'PermissionSet:ZzCapGodPS';
+/** Exactly the graph's `LIST_MAX_LIMIT`, so the target rule falls off the page. */
+const CAP_DECOY_COUNT = 500;
+
+const capScanSeed = (): ExtractionResult => {
+  const nodes: Node[] = [
+    makeNode({ id: CAP_OBJ, apiName: 'ZzCapObj', properties: { sharingModel: 'Private' } }),
+    makeNode({
+      id: CAP_DECOY_OBJ,
+      apiName: 'AaDecoyObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: CAP_CLEAN_OBJ,
+      apiName: 'ZzCleanObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({ id: CAP_PS, type: 'PermissionSet', apiName: 'ZzCapPS' }),
+    makeNode({
+      id: CAP_GOD_PS,
+      type: 'PermissionSet',
+      apiName: 'ZzCapGodPS',
+      properties: { userPermissions: ['ModifyAllData'] },
+    }),
+    // The rules that actually belong to the queried object. Ids sort AFTER
+    // every decoy (`Zz…` > `Aa…`).
+    makeNode({
+      id: 'RestrictionRule:ZzCapObj.Hide_All',
+      type: 'RestrictionRule',
+      apiName: 'ZzCapObj.Hide_All',
+      parentId: CAP_OBJ,
+    }),
+    makeNode({
+      id: 'ScopingRule:ZzCapObj.Scope_Mine',
+      type: 'ScopingRule',
+      apiName: 'ZzCapObj.Scope_Mine',
+      parentId: CAP_OBJ,
+    }),
+  ];
+  for (let i = 0; i < CAP_DECOY_COUNT; i += 1) {
+    const n = String(i).padStart(4, '0');
+    nodes.push(
+      makeNode({
+        id: `RestrictionRule:AaDecoyObj.R${n}`,
+        type: 'RestrictionRule',
+        apiName: `AaDecoyObj.R${n}`,
+        parentId: CAP_DECOY_OBJ,
+      }),
+      makeNode({
+        id: `ScopingRule:AaDecoyObj.S${n}`,
+        type: 'ScopingRule',
+        apiName: `AaDecoyObj.S${n}`,
+        parentId: CAP_DECOY_OBJ,
+      }),
+    );
+  }
+  return {
+    nodes,
+    edges: [
+      makeEdge({
+        fromId: CAP_PS,
+        toId: CAP_OBJ,
+        edgeType: 'grantedBy',
+        properties: { allowRead: true },
+      }),
+    ],
+  };
+};
+
+describe('whyCantUserSeeRecordHandler — child-rule scan is not alphabetically capped', () => {
+  let capDir: string;
+  let capStore: GraphStore;
+  let capCtx: Context;
+
+  beforeAll(async () => {
+    capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-cap-scan-'));
+    const opened = await openGraph(join(capDir, 'cap.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    capStore = opened.value;
+    const imported = await importExtractionResults(capStore, [capScanSeed()]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    capCtx = { vaultRoot: capDir, manifest: FIXTURE_MANIFEST, graph: capStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(capStore);
+    rmSync(capDir, { recursive: true, force: true });
+  });
+
+  it('finds a RestrictionRule on the queried object even when 500 other-object rules sort ahead of it', async () => {
+    const r = await whyCantUserSeeRecordHandler(capCtx, {
+      componentId: CAP_OBJ,
+      userContext: { permissionSetIds: [CAP_PS] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const rr = r.value.data.reasoning.find((s) => s.stage === 'RestrictionRule');
+    expect(rr).toBeDefined();
+    // FAIL-BEFORE: verdict `restricted`, reason "no restriction rules attached
+    // to this object" — a CHECKED negative from a scan that never looked.
+    expect(rr?.reason).not.toContain('no restriction rules attached');
+    expect(rr?.verdict).toBe('unknown');
+    expect(rr?.reason).toContain('RestrictionRule:ZzCapObj.Hide_All');
+  });
+
+  it('finds a ScopingRule on the queried object even when 500 other-object rules sort ahead of it', async () => {
+    const r = await whyCantUserSeeRecordHandler(capCtx, {
+      componentId: CAP_OBJ,
+      userContext: { permissionSetIds: [CAP_PS] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sr = r.value.data.reasoning.find((s) => s.stage === 'ScopingRule');
+    expect(sr).toBeDefined();
+    expect(sr?.reason).not.toContain('no scoping rules attached');
+    expect(sr?.verdict).toBe('unknown');
+    expect(sr?.reason).toContain('ScopingRule:ZzCapObj.Scope_Mine');
+  });
+
+  it('god-mode stays `unknown` (not a confident `visible`) when the object’s restriction rule sorts past the scan cap', async () => {
+    const r = await whyCantUserSeeRecordHandler(capCtx, {
+      componentId: CAP_OBJ,
+      userContext: { permissionSetIds: [CAP_GOD_PS] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sp = r.value.data.reasoning.find((s) => s.stage === 'SystemPermission');
+    expect(sp).toBeDefined();
+    // FAIL-BEFORE: `visible` — "grants access to all records regardless of
+    // OWD/sharing", with the object's own restriction rule never fetched.
+    expect(sp?.verdict).toBe('unknown');
+    expect(sp?.reason).toContain('restriction rule');
+  });
+
+  // The previous control pointed at CAP_DECOY_OBJ, which carries 500 rules of
+  // each type — asserting `unknown` there passes just as happily WITH the bug,
+  // so it constrained nothing. The honest control is a third object that owns
+  // NO rules: the checked negative must survive the fix, or "always say
+  // unknown" would have been a passing over-correction.
+  it('CONTROL — an object with NO rules of its own still reports the honest checked negative', async () => {
+    const r = await whyCantUserSeeRecordHandler(capCtx, {
+      componentId: CAP_CLEAN_OBJ,
+      userContext: { permissionSetIds: [CAP_PS] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const rr = r.value.data.reasoning.find((s) => s.stage === 'RestrictionRule');
+    expect(rr?.verdict).toBe('restricted');
+    expect(rr?.reason).toContain('no restriction rules attached');
+    const sr = r.value.data.reasoning.find((s) => s.stage === 'ScopingRule');
+    expect(sr?.verdict).toBe('restricted');
+    expect(sr?.reason).toContain('no scoping rules attached');
+  });
+
+  // The per-object page can STILL come back at the cap (an object with more
+  // rules of one type than the clamped scan limit). `scanHitCap` /
+  // `scanTruncationNote` exist so that page never reads as a complete
+  // enumeration; nothing exercised that path, so a silent regression to
+  // "page == everything" would have gone unnoticed.
+  it('discloses the cap when the per-object page itself comes back full', async () => {
+    const prior = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    try {
+      const r = await whyCantUserSeeRecordHandler(capCtx, {
+        componentId: CAP_DECOY_OBJ,
+        userContext: { permissionSetIds: [CAP_PS] },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const rr = r.value.data.reasoning.filter((s) => s.stage === 'RestrictionRule');
+      expect(rr.length).toBeGreaterThan(0);
+      expect(rr[rr.length - 1]?.reason).toContain('Scan capped at 1 nodes per type');
+      expect(rr[rr.length - 1]?.reason).toContain('INCOMPLETE');
+    } finally {
+      if (prior === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prior;
+    }
+  });
+
+  it('CONTROL — an uncapped page carries NO truncation note', async () => {
+    const r = await whyCantUserSeeRecordHandler(capCtx, {
+      componentId: CAP_OBJ,
+      userContext: { permissionSetIds: [CAP_PS] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const rr = r.value.data.reasoning.find((s) => s.stage === 'RestrictionRule');
+    expect(rr?.reason).not.toContain('Scan capped at');
+  });
+});
+
+// =============================================================================
+// R6 — object-alias resolution must be the SHARED one, case-folding included.
+//
+// The handler hand-rolled object resolution (a Set + two `coercePrefix` calls)
+// and so skipped the CASE-CANONICALISATION half that `input-aliases.ts` exists
+// for. Salesforce api names are case-insensitive, and an LLM host echoing an
+// object name out of a user's sentence lower-cases it, so the org's central
+// security-explainer refused (`component-not-found`) a name that `object_360`
+// and four other object-scoped tools answer happily. It also had no defence
+// against two vault objects differing ONLY by case.
+// =============================================================================
+
+describe('whyCantUserSeeRecordHandler — object alias case-folding', () => {
+  it('answers a lower-cased objectApiName instead of refusing it', async () => {
+    // FAIL-BEFORE: `CustomObject:restrictionobj` — an id no vault holds —
+    // straight to `component-not-found`.
+    const lower = await whyCantUserSeeRecordHandler(ctx, {
+      objectApiName: 'restrictionobj',
+      userContext: { permissionSetIds: [RESTRICTION_PS] },
+    });
+    expect(lower.ok).toBe(true);
+    if (!lower.ok) return;
+    const exact = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RESTRICTION_OBJ,
+      userContext: { permissionSetIds: [RESTRICTION_PS] },
+    });
+    expect(exact.ok).toBe(true);
+    if (!exact.ok) return;
+    expect(lower.value.data.verdict).toBe(exact.value.data.verdict);
+    expect(lower.value.data.reasoning).toEqual(exact.value.data.reasoning);
+    // `appliedScope` must echo the VAULT's casing, never the caller's, or the
+    // response asserts a component id that does not exist.
+    expect(lower.value.data.appliedScope.object).toBe(RESTRICTION_OBJ);
+  });
+
+  it('answers an UPPER-cased bare componentId too', async () => {
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: 'RESTRICTIONOBJ',
+      userContext: { permissionSetIds: [RESTRICTION_PS] },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.object).toBe(RESTRICTION_OBJ);
+  });
+
+  it('CONTROL — a name matching nothing in any casing is still component-not-found', async () => {
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      objectApiName: 'nosuchobjectanywhere',
+      userContext: { profileId: ADMIN_PROFILE },
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+});
+
+// Two objects that differ ONLY by case: case-insensitive RESOLUTION must never
+// become case-insensitive IDENTITY. Picking one silently is how a reader ends
+// up holding a security answer about the other object.
+const CASE_A = 'CustomObject:CaseObj';
+const CASE_B = 'CustomObject:CASEOBJ';
+const caseAmbiguitySeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: CASE_A, apiName: 'CaseObj', properties: { sharingModel: 'Private' } }),
+    makeNode({ id: CASE_B, apiName: 'CASEOBJ', properties: { sharingModel: 'Read' } }),
+  ],
+  edges: [],
+};
+
+describe('whyCantUserSeeRecordHandler — two objects differing only by case', () => {
+  let ambDir: string;
+  let ambStore: GraphStore;
+  let ambCtx: Context;
+
+  beforeAll(async () => {
+    ambDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-case-amb-'));
+    const opened = await openGraph(join(ambDir, 'amb.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    ambStore = opened.value;
+    const imported = await importExtractionResults(ambStore, [caseAmbiguitySeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    ambCtx = { vaultRoot: ambDir, manifest: FIXTURE_MANIFEST, graph: ambStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(ambStore);
+    rmSync(ambDir, { recursive: true, force: true });
+  });
+
+  it('refuses rather than silently picking one of two case-variant objects', async () => {
+    // FAIL-BEFORE: `CustomObject:caseobj` missed both, so the tool answered
+    // `component-not-found` — no ambiguity defence at all.
+    const r = await whyCantUserSeeRecordHandler(ambCtx, {
+      objectApiName: 'caseobj',
+      userContext: { profileId: 'Profile:Whoever' },
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('differ only by CASE');
+    expect(r.error.message).toContain(CASE_A);
+    expect(r.error.message).toContain(CASE_B);
+  });
+
+  it('an EXACT componentId still resolves to that exact object', async () => {
+    const r = await whyCantUserSeeRecordHandler(ambCtx, {
+      componentId: CASE_B,
+      userContext: { profileId: 'Profile:Whoever' },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.object).toBe(CASE_B);
+  });
+});

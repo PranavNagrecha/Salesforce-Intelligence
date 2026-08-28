@@ -132,20 +132,34 @@ const systemPermAccessLabel = (
  * read/edit on the regulated field), so a god-mode principal with no FLS on
  * the field is never emitted (no over-report). The broader system label is
  * preferred when a grantor matches both paths.
+ *
+ * FAILS CLOSED (R1). Returns `Result` so a FAILED graph read propagates as
+ * `err({ kind: 'internal' })` exactly like every sibling read in this handler
+ * (the per-field access audit, the sharing-model `getNodeById`). An earlier
+ * revision returned a bare array and swallowed a failed read into `[]`, which
+ * rendered the section's all-clear sentence plus `Object+FLS exposure pairs: 0`
+ * — a clean bill of health for a state that was never checked. An ABSENT node
+ * ROW (`value === null`) is a different thing and is still tolerated with a
+ * `continue`: that is the documented sparse-graph case, not a failed read.
  */
 const findObjectFlsExposures = async (
   ctx: Context,
   field: PiiField,
   grantorIdsWithFlsRead: ReadonlySet<string>,
-): Promise<readonly ObjectFlsExposure[]> => {
+): Promise<Result<readonly ObjectFlsExposure[], McpError>> => {
   const parentApi = parseFieldParentObjectApiName(field.id);
-  if (parentApi === null || grantorIdsWithFlsRead.size === 0) return [];
+  if (parentApi === null || grantorIdsWithFlsRead.size === 0) return ok([]);
   const parentObjectId = `CustomObject:${parentApi}` as ComponentId;
   const objectGrants = await listEdges(ctx.graph, parentObjectId, {
     direction: 'in',
     edgeType: 'grantedBy',
   });
-  if (!objectGrants.ok) return [];
+  if (!objectGrants.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${objectGrants.error.message}`,
+    });
+  }
   // Track which FLS-read grantors we have already emitted via the edge path so
   // the system-perm pass below only adds grantors NOT matched by an edge.
   const emittedViaEdge = new Set<string>();
@@ -155,7 +169,13 @@ const findObjectFlsExposures = async (
     const access = objectAccessLabel(edge.properties);
     if (access === null) continue;
     const grantorResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!grantorResult.ok || grantorResult.value === null) continue;
+    if (!grantorResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${grantorResult.error.message}`,
+      });
+    }
+    if (grantorResult.value === null) continue;
     const grantor = grantorResult.value;
     // Prefer the broader god-mode label when this grantor ALSO holds it.
     const sysLabel = systemPermAccessLabel(grantor.properties);
@@ -174,7 +194,13 @@ const findObjectFlsExposures = async (
   for (const grantorId of grantorIdsWithFlsRead) {
     if (emittedViaEdge.has(grantorId)) continue;
     const grantorResult = await getNodeById(ctx.graph, grantorId);
-    if (!grantorResult.ok || grantorResult.value === null) continue;
+    if (!grantorResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${grantorResult.error.message}`,
+      });
+    }
+    if (grantorResult.value === null) continue;
     const grantor = grantorResult.value;
     const sysLabel = systemPermAccessLabel(grantor.properties);
     if (sysLabel === null) continue;
@@ -186,7 +212,7 @@ const findObjectFlsExposures = async (
       objectAccess: sysLabel,
     });
   }
-  return exposures;
+  return ok(exposures);
 };
 
 /**
@@ -256,7 +282,8 @@ export const generateComplianceReportHandler = async (
       field,
       entry.flsReadGrantorIds,
     );
-    objectFlsExposures.push(...exposures);
+    if (!exposures.ok) return err(exposures.error);
+    objectFlsExposures.push(...exposures.value);
   }
 
   const sharingMap = new Map<string, string>();

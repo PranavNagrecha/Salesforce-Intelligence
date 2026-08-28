@@ -219,6 +219,106 @@ if (existsSync(join(root, pluginRel))) {
   }
 }
 
+// --- 1f. The launch contract in PROSE, not just in config ---
+//
+// 1d gates the machine-readable surfaces (server.json, plugin.json). It does
+// not gate the surfaces a HUMAN copies from, and those drifted apart: the npm
+// package page was corrected to pass an absolute `--vault`, while
+// website/src/pages/getting-started.astro went on printing the same command
+// without one — in three separate snippets. Whichever page the reader lands on
+// decides whether their install works, and the website is the copy a crawler
+// quotes.
+//
+// Matched shapes are the two unambiguous LAUNCHES of the real server:
+//   `sf-intelligence mcp …`            (command line)
+//   `"sf-intelligence", "mcp"`         (JSON args array)
+// `demo` is not matched — `sfi demo` manages its own cached vault and must NOT
+// be given one. HTML tags and entities are stripped first so an Astro snippet
+// broken into <span> tokens reads the same as the plain-text one.
+const LAUNCH_PROSE_FILES = [
+  'packages/cli/README.md',
+  'website/src/pages/getting-started.astro',
+  'docs/guides/mcp-hosts.md',
+];
+const stripMarkup = (line) =>
+  line
+    .replace(/<[^>]*>/g, '')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+for (const rel of LAUNCH_PROSE_FILES) {
+  if (!existsSync(join(root, rel))) {
+    errors.push(`${rel} is listed as an install surface but does not exist`);
+    continue;
+  }
+  // THE UNIT IS THE SNIPPET, NOT THE LINE — and not a fixed lookahead either.
+  //
+  // First cut read one line at a time and called four correct snippets in
+  // docs/guides/mcp-hosts.md defects: a JSON args array wraps, and the binding
+  // lands on the next line (`"--vault", "C:\\...\\org-kb"`) or in a sibling
+  // `env` block. Second cut used a 3-line lookahead and went VACUOUS — proved
+  // by deleting the vault from the website's install command and watching the
+  // gate stay green, because the window had slid into the following PARAGRAPH,
+  // which mentions `--vault` in prose. A gate that reads the prose explaining a
+  // command as if it were the command certifies whatever it is pointed at.
+  //
+  // So the enclosing code block is the unit: a fenced ``` block in Markdown, a
+  // <pre> element in Astro. A launch outside any block is prose and is judged on
+  // its own line.
+  const raw = readText(rel);
+  const lines = raw.split('\n');
+  const isAstro = rel.endsWith('.astro');
+  // blockId[i] = identifier of the code block line i belongs to, or null.
+  const blockId = new Array(lines.length).fill(null);
+  if (isAstro) {
+    let open = null;
+    lines.forEach((line, i) => {
+      if (open === null && /<pre\b/.test(line)) open = i;
+      if (open !== null) blockId[i] = `pre@${open}`;
+      if (open !== null && /<\/pre>/.test(line)) open = null;
+    });
+  } else {
+    let open = null;
+    lines.forEach((line, i) => {
+      const fence = /^\s*```/.test(line);
+      if (fence && open === null) {
+        open = i;
+        blockId[i] = `fence@${open}`;
+        return;
+      }
+      if (fence && open !== null) {
+        blockId[i] = `fence@${open}`;
+        open = null;
+        return;
+      }
+      if (open !== null) blockId[i] = `fence@${open}`;
+    });
+  }
+  const textOf = (id, i) =>
+    id === null
+      ? stripMarkup(lines[i])
+      : lines.filter((_, j) => blockId[j] === id).map(stripMarkup).join('\n');
+  const naked = [];
+  lines.forEach((rawLine, i) => {
+    const line = stripMarkup(rawLine);
+    const launches =
+      /sf-intelligence\s+mcp\b/.test(line) ||
+      /"sf-intelligence"\s*,\s*"mcp"/.test(line);
+    if (!launches) return;
+    const scope = textOf(blockId[i], i);
+    if (scope.includes('--vault') || scope.includes('SFI_VAULT')) return;
+    naked.push(`  ${rel}:${i + 1}  ${line.trim().slice(0, 120)}`);
+  });
+  if (naked.length > 0) {
+    errors.push(
+      `${rel} teaches ${naked.length} install(s) that launch the server with no vault ` +
+        'binding. An MCP host is almost never launched inside the Salesforce project, so ' +
+        '`./org-kb` resolves against the host\'s launch directory and the user meets an ' +
+        'empty server on first contact:\n' +
+        naked.join('\n'),
+    );
+  }
+}
+
 // --- 1e. SECURITY.md supported-versions must track the shipped minor ---
 //
 // It read "0.2.x (current public release)" for three releases after 0.3.0

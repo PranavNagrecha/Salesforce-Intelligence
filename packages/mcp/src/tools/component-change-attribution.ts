@@ -17,7 +17,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { McpError, McpResponse, Node } from '@sf-intelligence/contracts';
+import type { McpError, McpResponse, Node, PageInfo } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById } from '@sf-intelligence/graph';
 import { vaultPaths } from '@sf-intelligence/vault';
@@ -26,9 +26,17 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { resolveExistingObjectScope } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 
 /** Same filename the CLI persist pass writes. */
 export const SETUP_AUDIT_TRAIL_FILENAME = 'setup-audit-trail.jsonl';
+
+/** Roster name — the cursor binding stamps it so a token cannot cross tools. */
+const TOOL_NAME = 'sfi.component_change_attribution';
+
+/** Default page size when the caller omits `limit`. */
+const DEFAULT_LIMIT = 50;
 
 const ENABLE_HINT =
   'This vault has no persisted SetupAuditTrail — run `sfi refresh --with-audit-trail` once (requires an authenticated target org); subsequent refreshes with the flag append new rows, and coverage accrues from that point.';
@@ -42,6 +50,10 @@ export const componentChangeAttributionInputSchema = z
     /** Object API name (e.g. `Account`, `Invoice__c`) when correlating by object rather than a single component. */
     objectApiName: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(200).optional(),
+    /** Resume offset into the FULL matched set (see `nextOffset`). */
+    offset: z.number().int().min(0).optional(),
+    /** Opaque continuation token echoed back from a truncated page's `nextCursor`. */
+    cursor: z.string().min(1).optional(),
   })
   .refine((v) => v.componentId !== undefined || v.objectApiName !== undefined, {
     message: 'Provide componentId and/or objectApiName',
@@ -70,10 +82,30 @@ export interface ComponentChangeAttributionOutput {
   readonly componentId: string | null;
   readonly objectApiName: string | null;
   readonly apiName: string | null;
+  /** THIS PAGE of matched rows — see `totalMatched` for the full count. */
   readonly changes: readonly AttributedSetupChange[];
+  /**
+   * The count of ALL rows that matched, across every page — NOT
+   * `changes.length`. Publishing the page length here understated an
+   * attribution figure by however much the cap hid.
+   */
   readonly totalMatched: number;
   readonly totalPersisted: number;
   readonly confidence: 'heuristic';
+  /** Page size actually applied. */
+  readonly limit: number;
+  /** Resume offset this page started at. */
+  readonly offset: number;
+  /** True when matched rows remain past this page. */
+  readonly truncated: boolean;
+  /** Next `offset` to ask for — present ONLY when `truncated`. */
+  readonly nextOffset?: number;
+  /** Opaque continuation token — present ONLY when this page was truncated. */
+  readonly nextCursor?: string;
+  /** Structured page info — present ONLY when this page was truncated. */
+  readonly pageInfo?: PageInfo;
+  /** Present when the page was byte-trimmed below `limit`. */
+  readonly note?: string;
   readonly remedy?: string;
   readonly disclosure: string;
 }
@@ -153,11 +185,20 @@ export const attributionNeedles = (args: {
 /**
  * Heuristic correlation: case-insensitive substring match of any needle against
  * Display or Section. Exported for unit tests.
+ *
+ * COMPONENT-CHANGE-ATTRIBUTION-CAPPED-TOTAL-NO-RESUME: `limit` is OPTIONAL and
+ * the handler no longer passes one. It used to stop the scan AT the cap, so the
+ * caller could only ever learn `min(matches, limit)` — and the handler published
+ * that page length as `totalMatched`, an under-count of an attribution figure
+ * with nothing marking it capped. The full matched set is now computed here and
+ * PAGED by the shared cursor protocol, so `totalMatched` is the true total and
+ * the tail is reachable. The cap survives only for callers that genuinely want
+ * a bounded scan (the pure unit tests); it is never used to answer a question.
  */
 export const correlateAuditRows = (
   rows: readonly PersistedRow[],
   needles: readonly { readonly needle: string; readonly matchedOn: string }[],
-  limit: number,
+  limit?: number,
 ): readonly AttributedSetupChange[] => {
   if (needles.length === 0) return [];
   const matched: AttributedSetupChange[] = [];
@@ -184,7 +225,7 @@ export const correlateAuditRows = (
       confidence: 'heuristic',
       matchedOn: hit.matchedOn,
     });
-    if (matched.length >= limit) break;
+    if (limit !== undefined && matched.length >= limit) break;
   }
   return matched;
 };
@@ -223,7 +264,7 @@ export const componentChangeAttributionHandler = async (
     sourceTreeHash: ctx.manifest.sourceTreeHash,
     refreshedAt: ctx.manifest.refreshedAt,
   };
-  const limit = input.limit ?? 50;
+  const limit = input.limit ?? DEFAULT_LIMIT;
 
   let apiName: string | null = null;
   let objectApiName: string | null = input.objectApiName ?? null;
@@ -259,6 +300,11 @@ export const componentChangeAttributionHandler = async (
           totalMatched: 0,
           totalPersisted: 0,
           confidence: 'heuristic',
+          limit,
+          offset: input.offset ?? 0,
+          // Nothing was ever captured, so nothing is withheld — this `false` is
+          // a MEASURED exhaustion of an empty set, not an absence marker.
+          truncated: false,
           remedy: ENABLE_HINT,
           disclosure: ATTRIBUTION_DISCLOSURE,
         },
@@ -296,7 +342,46 @@ export const componentChangeAttributionHandler = async (
 
   const rows = parsePersistedAuditRows(raw);
   const needles = attributionNeedles({ apiName, objectApiName, type });
-  const changes = correlateAuditRows(rows, needles, limit);
+  // The FULL matched set. `correlateAuditRows` already returns it newest-first
+  // with `row.id` unique (`parsePersistedAuditRows` de-duplicates on id), which
+  // is the total order the cursor protocol requires.
+  const allMatched = correlateAuditRows(rows, needles);
+
+  // COMPONENT-CHANGE-ATTRIBUTION-CAPPED-TOTAL-NO-RESUME: page the full set
+  // through the shared CR-22 continuation protocol (`paginateLegacy`) instead
+  // of truncating the scan and publishing the page length as the total. The
+  // fingerprint binds a minted cursor to THIS question, so a token cannot be
+  // replayed against a different component / object scope.
+  const fingerprint = argsFingerprint({
+    ...(componentId !== null ? { componentId } : {}),
+    ...(objectApiName !== null ? { objectApiName } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL_NAME,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const windowSize = allMatched.slice(offset, offset + limit).length;
+  const paged = paginateLegacy(allMatched, {
+    offset,
+    limit,
+    byteBudget: toolLocalPayloadBudgetBytes(),
+    binding: {
+      tool: TOOL_NAME,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+    keyOf: (change) => change.id,
+  });
+  const changes = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
     data: {
@@ -305,9 +390,25 @@ export const componentChangeAttributionHandler = async (
       objectApiName,
       apiName,
       changes,
-      totalMatched: changes.length,
+      // The TRUE match count across every page — never `changes.length`.
+      totalMatched: allMatched.length,
       totalPersisted: rows.length,
       confidence: 'heuristic',
+      limit,
+      offset,
+      truncated,
+      ...(truncated ? { nextOffset: offset + changes.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
+      ...(paged.byteTrimmed
+        ? {
+            note:
+              `Response trimmed to ${String(changes.length)} of ${String(windowSize)} ` +
+              `matched SetupAuditTrail rows to stay under the MCP response limit. ` +
+              `Advance with offset += ${String(changes.length)} (or echo nextCursor) for the rest.`,
+          }
+        : {}),
       disclosure: ATTRIBUTION_DISCLOSURE,
     },
     vaultState,

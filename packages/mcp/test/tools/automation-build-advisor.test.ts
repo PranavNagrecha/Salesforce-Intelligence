@@ -416,3 +416,128 @@ describe('automationBuildAdvisorHandler — bounded graph queries (perObject)', 
     expect(large.nodeQueries).toBeLessThanOrEqual(4);
   });
 });
+
+// =============================================================================
+// R6 / full-scan adoption — the org-wide `flow-only-objects` mode used to read
+// ONE `listNodesByType(type, { limit: 500 })` page per type, which
+// `packages/graph/src/queries.ts` serves as `ORDER BY id ASC LIMIT 500
+// OFFSET 0`. That is not a scan, it is an ALPHABETICAL FIRST PAGE, and this
+// mode computes a SET DIFFERENCE over it, so the cap produced FALSE POSITIVES
+// in BOTH directions:
+//
+//   - trigger side: an object whose ONLY Apex trigger sorts past node 500 lost
+//     its guard from `objectsWithTrigger`, so a GUARDED object was reported in
+//     `flowOnlyObjects` with the recommendation that it 'run active
+//     record-triggered Flow logic with NO Apex trigger guard' and, when it is a
+//     master-detail child, that 'cascade-delete on the parent runs their Flow
+//     logic with no trigger to intercept'. A fabricated hazard on an object
+//     that is in fact guarded.
+//   - flow side: an object whose ONLY record-triggered Flow sorts past node 500
+//     never entered `flowCountByObject`, so a REAL gap was silently dropped.
+//
+// Neither was disclosed: `boundaries[]` carried a static 500-cap sentence on
+// EVERY response whether or not the cap bit, and the payload had no structural
+// truncation field at all. Per house doctrine a boundary string is a comment,
+// not a guard.
+//
+// The fixture below is the smallest one that crosses the real ceiling:
+// `LIST_MAX_LIMIT` is 500 and is the graph's HARD cap, so the tail can only be
+// reached by windowing the SQL OFFSET forward — which is exactly what the
+// shared `scanAllNodesOfTypes` helper does.
+// =============================================================================
+const PAD = 500;
+const pad = (i: number): string => String(i).padStart(3, '0');
+
+/**
+ * Guarded__c: active record-triggered Flow AND an active Apex trigger whose id
+ *   (`ApexTrigger:zzGuard`) sorts AFTER all 500 filler triggers → it must be
+ *   EXCLUDED from the gap set. Under the single-page scan it was included.
+ * LateFlow__c: active record-triggered Flow whose id (`Flow:zzLateFlow`) sorts
+ *   AFTER all 500 filler flows → it IS a real flow-only gap. Under the
+ *   single-page scan it was missing entirely.
+ */
+const tailSeed: ExtractionResult = {
+  nodes: [
+    node('CustomObject:Guarded__c', 'CustomObject'),
+    node('CustomObject:LateFlow__c', 'CustomObject'),
+    // Sorts BEFORE the Zpad fillers, so it is inside the first page — only the
+    // TRIGGER for this object is in the tail.
+    node('Flow:GuardedFlow', 'Flow', { status: 'Active' }),
+    // Sorts AFTER every filler flow (lowercase z > uppercase Z) → in the tail.
+    node('Flow:zzLateFlow', 'Flow', { status: 'Active' }),
+    // Sorts AFTER every filler trigger → in the tail.
+    node('ApexTrigger:zzGuard', 'ApexTrigger', { status: 'Active' }),
+    ...Array.from({ length: PAD }, (_, i) =>
+      node(`Flow:Zpad${pad(i)}`, 'Flow', { status: 'Active' }),
+    ),
+    ...Array.from({ length: PAD }, (_, i) =>
+      node(`ApexTrigger:Tpad${pad(i)}`, 'ApexTrigger', { status: 'Active' }),
+    ),
+  ],
+  edges: [
+    edge('Flow:GuardedFlow', 'CustomObject:Guarded__c', 'triggersOn', { recordTriggerType: 'Create' }),
+    edge('ApexTrigger:zzGuard', 'CustomObject:Guarded__c', 'triggersOn', {}),
+    edge('Flow:zzLateFlow', 'CustomObject:LateFlow__c', 'triggersOn', { recordTriggerType: 'Update' }),
+  ],
+};
+
+describe('automationBuildAdvisorHandler — flow-only-objects scans the WHOLE corpus', () => {
+  let tailDir: string;
+  let tailStore: GraphStore;
+  let tailCtx: Context;
+
+  beforeAll(async () => {
+    tailDir = mkdtempSync(join(tmpdir(), 'sfi-adv-tail-'));
+    const opened = await openGraph(join(tailDir, 'tail.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    tailStore = opened.value;
+    const imported = await importExtractionResults(tailStore, [tailSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    tailCtx = { vaultRoot: tailDir, manifest: FIXTURE_MANIFEST, graph: tailStore } as Context;
+  });
+
+  afterAll(async () => {
+    await closeGraph(tailStore);
+    rmSync(tailDir, { recursive: true, force: true });
+  });
+
+  it('does NOT fabricate a flow-only gap for an object whose Apex trigger sorts past the 500-node page', async () => {
+    const r = await automationBuildAdvisorHandler(tailCtx, { scope: 'flow-only-objects' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'flow-only-objects') return;
+    const d = r.value.data;
+    // Diagnostic first, so a regression NAMES the fabricated row + its advice.
+    expect(
+      d.flowOnlyObjects.some((o) => o.apiName === 'Guarded__c')
+        ? JSON.stringify({
+            fabricated: d.flowOnlyObjects.filter((o) => o.apiName === 'Guarded__c'),
+            recommendations: d.recommendations,
+          })
+        : 'guarded object correctly excluded',
+    ).toBe('guarded object correctly excluded');
+    expect(d.flowOnlyObjects.map((o) => o.apiName)).not.toContain('Guarded__c');
+  });
+
+  it('finds a real gap whose record-triggered Flow sorts past the 500-node page', async () => {
+    const r = await automationBuildAdvisorHandler(tailCtx, { scope: 'flow-only-objects' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'flow-only-objects') return;
+    const d = r.value.data;
+    expect(d.flowOnlyObjects.map((o) => o.apiName)).toContain('LateFlow__c');
+    expect(d.summary.orgCustomCount).toBe(1);
+  });
+
+  it('carries a STRUCTURAL truncation sentinel, not a static boundary sentence', async () => {
+    const r = await automationBuildAdvisorHandler(tailCtx, { scope: 'flow-only-objects' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'flow-only-objects') return;
+    const d = r.value.data;
+    // A completed scan says so structurally...
+    expect(d.scanTruncated).toBe(false);
+    expect(d.incompleteTypes).toEqual([]);
+    // ...and no longer asserts the old unconditional "read up to 500 nodes
+    // each" claim on a response where the corpus WAS exhausted.
+    expect(d.boundaries.some((b) => /up to 500 nodes/.test(b))).toBe(false);
+    expect(d.boundaries.some((b) => /deterministic prefix/.test(b))).toBe(false);
+  });
+});

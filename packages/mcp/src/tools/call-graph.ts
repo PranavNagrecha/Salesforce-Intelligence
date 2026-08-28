@@ -44,10 +44,19 @@
  *     shortest-path distance from the root in hop count).
  *   - Edge identity is `(fromId, toId, edgeType, source)` to dedupe
  *     edges that both the upstream and downstream walks observed.
- *   - Unknown rootId is NOT an error — the BFS finds no edges and the
- *     response carries `{ nodes: [rootNode-or-missing], edges: [],
- *     cycleDetected: false, maxDepthReached: 0 }`. This mirrors
- *     `sfi.get_impact`'s tolerance for unknown ids.
+ *   - A rootId with NO node row is not answered as an empty walk. Two
+ *     different truths hide behind "no row", and they are told apart:
+ *     with NO incident edge either, the id names nothing in this vault and
+ *     surfaces as `component-not-found` (worded by the shared
+ *     `phantomAwareNotFoundMessage`, so a standard / managed-package id is
+ *     not reported absent from the ORG); with incident edges, it is a
+ *     PHANTOM — referenced here but never retrieved — which still answers,
+ *     with `disclosure` saying the definition is missing (mirroring
+ *     `sfi.get_subgraph`'s rootPhantomNote). Without that split, a typo
+ *     ("who calls DeprecatedSevice?") returned `edges: []` beside an
+ *     `otherUsageInEdges` count of 0 that this payload's own contract calls
+ *     a CHECKED zero — i.e. it asserted that nothing calls a class that does
+ *     not exist.
  *   - The prefix validation only rejects ids that are NEITHER
  *     `ApexClass:` NOR `ApexTrigger:` — those are not call-graph
  *     candidates by construction. CustomObject / Flow / etc. surface
@@ -66,6 +75,7 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   isHiddenUnresolved,
+  listEdges,
   listEdgesForNodes,
   listNodesByIds,
 } from '@sf-intelligence/graph';
@@ -79,6 +89,7 @@ import {
 } from './apex-reachability.js';
 import { coercePrefix } from './coerce-id.js';
 import { mergeInputAliases } from './input-aliases.js';
+import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { soundnessForReachabilityWalk, type Soundness } from './soundness.js';
 
 /** Inclusive upper bound on `maxDepth`. */
@@ -597,6 +608,51 @@ export const callGraphHandler = async (
   // `nodes`. Belt-and-braces: layer 1 (walk-time) handles the reported phantom;
   // this final filter guarantees the invariant against any remaining dangler.
   const nodeIds = new Set(sortedNodes.map((n) => n.id));
+  // ROOT-NOT-FOUND-IS-NOT-A-CHECKED-ZERO. `resolveNodes` drops any id with no
+  // row, and `coercePrefix` above promotes ANY bare word to `ApexClass:<word>`,
+  // so a misspelled root used to answer `nodes: [] / edges: [] /
+  // otherUsageInEdges: { count: 0 }` — a shape this payload's own contract
+  // reads as a CHECKED zero. Split the two truths hiding behind "no row":
+  //   - no node AND no incident edge → the id names nothing here. Refuse with
+  //     `component-not-found`, worded by the SHARED
+  //     `phantomAwareNotFoundMessage` (phantom-node.ts) so a standard-object /
+  //     managed-package id is not reported absent from the ORG.
+  //   - no node BUT incident edges → a PHANTOM: referenced by this vault, its
+  //     own definition never retrieved. Those edges are real evidence, so this
+  //     still answers — and says so in `disclosure`, mirroring get_subgraph's
+  //     rootPhantomNote. (The edges themselves are dropped just below by the
+  //     self-contained-slice filter, which is exactly why the sentence is
+  //     needed: the empty result must not read as "nothing calls it".)
+  let rootPhantomNote = '';
+  if (!nodeIds.has(rootId)) {
+    const incident = await listEdges(ctx.graph, rootId, { direction: 'both' });
+    if (!incident.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${incident.error.message}`,
+      });
+    }
+    if (incident.value.length === 0) {
+      return err({
+        kind: 'component-not-found',
+        message: await phantomAwareNotFoundMessage(
+          ctx,
+          rootId,
+          'ApexClass or ApexTrigger',
+        ),
+        path: rootId,
+      });
+    }
+    rootPhantomNote =
+      ` ROOT DEFINITION MISSING: \`${rootId}\` is a PHANTOM — ` +
+      `${incident.value.length.toString()} edge(s) in this vault reference it, but its own ` +
+      `ApexClass/ApexTrigger definition was never retrieved here (typically a ` +
+      `managed-package class, or one outside the retrieve scope), so this walk had ` +
+      `no root node to start from. An empty nodes/edges result therefore means ` +
+      `"the root's definition is missing", NEVER "nothing calls it" — run ` +
+      `\`sfi refresh\` if it should be retrievable, or read \`sfi.get_edges\` on the ` +
+      `same id for the references themselves.`;
+  }
   const sortedEdges = mergedEdges
     .filter((e) => nodeIds.has(e.fromId) && nodeIds.has(e.toId))
     .sort(compareEdges);
@@ -626,7 +682,7 @@ export const callGraphHandler = async (
       // zero, which is the whole point of the field.
       otherUsageInEdges: unwalkedRes.value,
       soundness,
-      disclosure: `${CALL_GRAPH_DISCLOSURE} ${CALL_GRAPH_UNWALKED_DISCLOSURE}`,
+      disclosure: `${CALL_GRAPH_DISCLOSURE} ${CALL_GRAPH_UNWALKED_DISCLOSURE}${rootPhantomNote}`,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

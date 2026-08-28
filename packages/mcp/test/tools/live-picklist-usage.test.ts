@@ -46,6 +46,7 @@ const TEXT_FIELD = 'CustomField:Case.Notes__c';
 // one DEACTIVATED value. readDefinedValues must read .value off objects (the
 // old typeof==='string' filter emptied the defined set to []).
 const OBJ_PICKLIST = 'CustomField:Case.Stage__c';
+const MULTI_PICKLIST = 'CustomField:Case.Tags__c';
 const seed: ExtractionResult = {
   nodes: [
     baseNode({ id: 'CustomObject:Case', type: 'CustomObject', apiName: 'Case' }),
@@ -68,6 +69,13 @@ const seed: ExtractionResult = {
           { value: 'Retired', isActive: false },
         ],
       },
+    }),
+    baseNode({
+      id: MULTI_PICKLIST,
+      type: 'CustomField',
+      apiName: 'Tags__c',
+      parentId: 'CustomObject:Case',
+      properties: { dataType: 'MultiselectPicklist', picklistValues: ['A', 'B', 'C'] },
     }),
     baseNode({
       id: TEXT_FIELD,
@@ -197,5 +205,157 @@ describe('livePicklistUsageHandler (P6-live-picklist-usage)', () => {
     expect([...r.value.data.unusedDefinedValues].sort()).toEqual(
       ['Closed', 'Escalated', 'New', 'Working'],
     );
+  });
+  // ---------------------------------------------------------------------
+  // R1 / CRITICAL — the GROUP BY is capped at `limit` distinct value-groups
+  // ordered by count DESC. A defined value that falls BELOW the cutoff was
+  // NEVER SCANNED; reporting it in `unusedDefinedValues` collapses
+  // never-scanned into scanned-and-clean and vouches for it as a cleanup /
+  // restrict-to-active candidate.
+  // ---------------------------------------------------------------------
+
+  /**
+   * An exec that behaves like a real org: it has FOUR distinct groups, all of
+   * them in active use, and honors whatever `LIMIT n` the handler asked for
+   * (ordered by count desc). A handler that asks for fewer groups than exist
+   * gets a truncated distribution — exactly what the org does.
+   */
+  const cappedExec = (
+    seen: { soql: string | null },
+    groups: readonly (readonly [string | null, number])[],
+  ): ExecCommand => async (_b, args) => {
+    if (args.includes('--use-tooling-api')) {
+      return { stdout: JSON.stringify({ result: { totalSize: 0 } }), stderr: '' };
+    }
+    const soql = args[args.indexOf('--query') + 1] ?? '';
+    seen.soql = soql;
+    const m = /LIMIT (\d+)\s*$/.exec(soql);
+    const n = m === null ? groups.length : Number(m[1]);
+    const rows = [...groups]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, n)
+      .map(([value, cnt]) => ({ Status__c: value, cnt }));
+    return { stdout: JSON.stringify({ result: { records: rows } }), stderr: '' };
+  };
+
+  const ALL_USED = [
+    ['New', 50],
+    ['Working', 30],
+    ['Escalated', 20],
+    ['Closed', 10],
+  ] as const;
+
+  it('R1: a CAPPED distribution never reports below-cutoff defined values as unused', async () => {
+    const seen = { soql: null as string | null };
+    const r = await livePicklistUsageHandler(
+      ctx,
+      { fieldId: PICKLIST, liveEnabled: true, limit: 2 },
+      cappedExec(seen, ALL_USED),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Escalated (20 records) and Closed (10 records) are BELOW the top-2 cutoff.
+    // They were never scanned — they must NOT be vouched for as unused.
+    expect(d.unusedDefinedValues).toEqual([]);
+    expect([...d.undeterminedDefinedValues].sort()).toEqual(['Closed', 'Escalated']);
+    expect(d.distributionCapped).toBe(true);
+  });
+
+  it('R1: a CAPPED distribution is completeness partial, not complete', async () => {
+    const seen = { soql: null as string | null };
+    const r = await livePicklistUsageHandler(
+      ctx,
+      { fieldId: PICKLIST, liveEnabled: true, limit: 2 },
+      cappedExec(seen, ALL_USED),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.trust.completeness.status).toBe('partial');
+    expect(d.trust.limitations.some((l) => /capped/i.test(l) && /INCOMPLETE/.test(l))).toBe(true);
+    // totalRecords is the sum of the SURVIVING groups only — narrate it as a floor.
+    expect(d.interpretation).toMatch(/at least/i);
+  });
+
+  it('R1: the cap probe asks for limit+1 so EXACTLY-limit groups is not a false cap', async () => {
+    const seen = { soql: null as string | null };
+    const r = await livePicklistUsageHandler(
+      ctx,
+      { fieldId: PICKLIST, liveEnabled: true, limit: 4 },
+      cappedExec(seen, ALL_USED),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(seen.soql).toMatch(/LIMIT 5$/);
+    expect(d.distributionCapped).toBe(false);
+    expect(d.trust.completeness.status).toBe('complete');
+    expect(d.usage?.length).toBe(4);
+    expect(d.unusedDefinedValues).toEqual([]);
+    expect(d.undeterminedDefinedValues).toEqual([]);
+  });
+
+  it('R1: a capped answer never returns MORE than `limit` groups (the probe row is trimmed)', async () => {
+    const seen = { soql: null as string | null };
+    const r = await livePicklistUsageHandler(
+      ctx,
+      { fieldId: PICKLIST, liveEnabled: true, limit: 3 },
+      cappedExec(seen, ALL_USED),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.usage?.length).toBe(3);
+    expect(r.value.data.usage?.map((u) => u.value)).toEqual(['New', 'Working', 'Escalated']);
+    expect(r.value.data.distributionCapped).toBe(true);
+  });
+
+  it('R1: an uncapped answer still names the genuinely-unused defined values', async () => {
+    const seen = { soql: null as string | null };
+    const r = await livePicklistUsageHandler(
+      ctx,
+      { fieldId: PICKLIST, liveEnabled: true },
+      cappedExec(seen, [
+        ['New', 50],
+        ['Working', 30],
+        [null, 10],
+      ] as const),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.distributionCapped).toBe(false);
+    expect([...d.unusedDefinedValues].sort()).toEqual(['Closed', 'Escalated']);
+    expect(d.undeterminedDefinedValues).toEqual([]);
+    expect(d.trust.completeness.status).toBe('complete');
+    expect(d.blankCount).toBe(10);
+  });
+
+  it('R1: the offline (no-consent) answer carries the typed cap fields too', async () => {
+    await revokeLiveConsent('test');
+    const r = await livePicklistUsageHandler(ctx, { fieldId: PICKLIST }, liveExec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.distributionCapped).toBe(false);
+    expect(r.value.data.undeterminedDefinedValues).toEqual([]);
+  });
+  it('R1: the MultiselectPicklist note says `limit` caps distinct COMBINATIONS, not values', async () => {
+    // GROUP BY on a multiselect groups by the whole semicolon-joined combo, so
+    // the cap bites on combinations — a value present only in a below-cutoff
+    // combination is silently uncounted.
+    const msExec: ExecCommand = async (_b, args) => {
+      if (args.includes('--use-tooling-api')) {
+        return { stdout: JSON.stringify({ result: { totalSize: 0 } }), stderr: '' };
+      }
+      return {
+        stdout: JSON.stringify({ result: { records: [{ Tags__c: 'A;B', cnt: 7 }] } }),
+        stderr: '',
+      };
+    };
+    const r = await livePicklistUsageHandler(ctx, { fieldId: MULTI_PICKLIST, liveEnabled: true }, msExec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.multiselectNote).toMatch(/COMBINATION/);
+    expect(r.value.data.trust.limitations.some((l) => /COMBINATION/.test(l))).toBe(true);
   });
 });

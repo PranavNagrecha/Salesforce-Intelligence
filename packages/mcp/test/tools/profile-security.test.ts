@@ -48,7 +48,16 @@ const seedNoSession: ExtractionResult = {
         { startTime: '0', endTime: '100' },
       ],
     } }),
+    // NEVER EXTRACTED: a Profile node built by a refresh that predates
+    // login-restriction extraction carries NO `loginIpRanges` key at all.
     node({ id: 'Profile:Open', type: 'Profile', apiName: 'Open', label: 'Open Profile', properties: {} }),
+    // EXTRACTED AND CLEAN: the extractor always writes the trio (empty when the
+    // profile declares no restriction) — this is a VERIFIED zero.
+    node({ id: 'Profile:Unrestricted', type: 'Profile', apiName: 'Unrestricted', label: 'Unrestricted Profile', properties: {
+      loginIpRanges: [],
+      loginHoursDefined: false,
+      loginHours: [],
+    } }),
     node({ id: 'PermissionSet:Custom', type: 'PermissionSet', apiName: 'Custom', properties: {} }),
   ],
   edges: [],
@@ -118,12 +127,36 @@ describe('profileSecurityHandler', () => {
     expect(r.value.data.boundaryNote).toContain('refresh-gated');
   });
 
-  it('reports empty login restrictions for a profile with none', async () => {
+  // The old single case here asserted `[] / 0 / false` for `Profile:Open`, whose
+  // properties are EMPTY — i.e. it pinned the never-extracted vault as a verified
+  // "this profile is not restricted". Split into the two honest cases.
+  it('reports a VERIFIED zero for a profile the extractor checked and found unrestricted', async () => {
+    const r = await profileSecurityHandler(ctx, { profileId: 'Profile:Unrestricted' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.loginRestrictionsExtracted).toBe(true);
+    expect(d.loginIpRanges).toEqual([]);
+    expect(d.loginIpRangeCount).toBe(0);
+    expect(d.loginHoursByDay).toEqual([]);
+    expect(d.loginHoursRestricted).toBe(false);
+    // A checked-and-clean profile must NOT carry the not-extracted disclosure.
+    expect(d.boundaryNote).not.toContain('NOT checked');
+  });
+
+  it('does NOT report a profile from a pre-extraction refresh as unrestricted (typed absence)', async () => {
     const r = await profileSecurityHandler(ctx, { profileId: 'Profile:Open' });
     expect(r.ok).toBe(true); if (!r.ok) return;
-    expect(r.value.data.loginIpRanges).toEqual([]);
-    expect(r.value.data.loginIpRangeCount).toBe(0);
-    expect(r.value.data.loginHoursRestricted).toBe(false);
+    const d = r.value.data;
+    // null, never [] / 0 / false — an absent sentinel is "not modeled", and a
+    // profile locked to a corporate network must never read as unrestricted.
+    expect(d.loginIpRangeCount).toBeNull();
+    expect(d.loginHoursRestricted).toBeNull();
+    expect(d.loginRestrictionsExtracted).toBe(false);
+    expect(d.loginIpRanges).toBeNull();
+    expect(d.loginHoursByDay).toBeNull();
+    expect(d.boundaryNote).toContain('NOT checked');
+    expect(d.boundaryNote).toContain('loginIpRanges');
+    expect(d.boundaryNote).toContain('/sfi-refresh');
   });
 
   it('coerces a bare profile apiName to a Profile: id', async () => {

@@ -73,15 +73,32 @@ export interface FlowConditionReaderScanResult {
   /** One reader per Flow (deduped), sorted by `flowId`. */
   readonly readers: readonly FlowConditionFieldReader[];
   /**
-   * True when the ConditionalContext walk stopped at its residual ceiling with
-   * more nodes still behind it — a flow-condition reader in the un-scanned tail
-   * may be MISSED, so `field_360` must disclose the cap rather than imply a
-   * complete reconstruction.
+   * True when the ConditionalContext walk did NOT cover every node: it stopped
+   * at its residual ceiling with more nodes still behind it, OR the graph query
+   * FAILED outright ({@link scanFailed}). Either way a flow-condition reader in
+   * the un-scanned tail is MISSED, so `field_360` must disclose the incomplete
+   * scan rather than imply a complete reconstruction, and an empty `readers`
+   * under `truncated: true` is UNCHECKED — never a proven "no flow-condition
+   * readers".
    */
   readonly truncated: boolean;
+  /**
+   * True when the walk FAILED (graph query error) rather than merely stopping
+   * at the ceiling. NOTHING was scanned: `scannedCount` is 0 and `readers` is
+   * empty because the question was never asked, not because the answer is none.
+   * Distinct from a ceiling cap (which DID scan `scannedCount` nodes) so a
+   * caller can word its disclosure honestly.
+   */
+  readonly scanFailed: boolean;
+  /** The graph error message when {@link scanFailed}; `null` otherwise. */
+  readonly scanError: string | null;
   /** ConditionalContext nodes actually scanned (N in the "N of M" disclosure). */
   readonly scannedCount: number;
-  /** Total ConditionalContext nodes in the vault (M). Computed only when truncated. */
+  /**
+   * Total ConditionalContext nodes in the vault (M). Computed only when the
+   * scan was incomplete (ceiling cap or failure); equals `scannedCount` on a
+   * complete walk, and falls back to 0 when the count query fails too.
+   */
   readonly totalCount: number;
 }
 
@@ -91,7 +108,12 @@ export interface FlowConditionReaderScanResult {
  * first ≤500), returns one row PER Flow (a Flow that references the field in
  * several conditions collapses to one reader), deterministically sorted by
  * `flowId`, and reports whether the scan was truncated at the residual ceiling.
- * Best-effort: a query error yields an empty, non-truncated result.
+ * NOT best-effort: a graph query error yields an empty result flagged
+ * `scanFailed` + `truncated`, never a finished, complete zero. That zero used
+ * to be indistinguishable from a clean scan, so a transient graph failure
+ * silently turned "this field is filtered on by N Flows" into "no flow reads"
+ * — with no flag for `field_360` to disclose and nothing to stop
+ * `safe_to_delete_field` from dropping its `blocking` verdict.
  */
 export const scanFlowConditionFieldReaders = async (
   ctx: Context,
@@ -100,7 +122,23 @@ export const scanFlowConditionFieldReaders = async (
   const maxNodes = conditionScanCeiling();
   const scan = await scanAllNodesOfTypes(ctx.graph, ['ConditionalContext'], maxNodes);
   if (!scan.ok) {
-    return { readers: [], truncated: false, scannedCount: 0, totalCount: 0 };
+    // CONDITION-SCAN-FAILURE-IS-NOT-A-CLEAN-ZERO: the walk asked the question
+    // and got an ERROR, so zero readers is UNCHECKED, not "none". Returning
+    // `truncated: false` here presented a failure as a finished, complete
+    // enumeration — the exact silent under-reporting this module exists to
+    // eliminate. Mirrors the sibling `scanSupplementalFlowFieldWriters`.
+    // The true total (M) still makes the "0 of M" disclosure honest when the
+    // count query survives; if it fails too, M stays 0 and `scanFailed` alone
+    // carries the disclosure.
+    const total = await countNodesByType(ctx.graph, 'ConditionalContext');
+    return {
+      readers: [],
+      truncated: true,
+      scanFailed: true,
+      scanError: scan.error.message,
+      scannedCount: 0,
+      totalCount: total.ok ? total.value : 0,
+    };
   }
 
   const byFlow = new Map<ComponentId, FlowConditionFieldReader>();
@@ -136,5 +174,5 @@ export const scanFlowConditionFieldReaders = async (
     if (total.ok) totalCount = total.value;
   }
 
-  return { readers, truncated, scannedCount, totalCount };
+  return { readers, truncated, scanFailed: false, scanError: null, scannedCount, totalCount };
 };

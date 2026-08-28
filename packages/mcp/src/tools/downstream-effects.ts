@@ -75,6 +75,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  edgeTargetMissing,
+  unresolvedTargetsDisclosure,
+} from './absence-disclosure.js';
 import { edgeMethods } from './calls-apex-methods.js';
 import { coercePrefix } from './coerce-id.js';
 import { mergeInputAliases } from './input-aliases.js';
@@ -113,6 +117,36 @@ const PARENTED_AUTOMATION_TYPES = new Set<ComponentType>(['ApprovalProcess']);
  */
 const EMPTY_EFFECTS_NOTE =
   ' EMPTY effects list = no MODELED effects found — NOT "this code has no side effects": Apex email (Messaging.sendEmail), HTTP callouts, and DML deletes are all invisible to the modeled effect edges, so a class doing any of those reports zero effects here. Read the class source before concluding it is side-effect-free.';
+
+/**
+ * Appended whenever the `callsApex` BFS exits with classes still unexpanded at
+ * `maxDepth`. Their own outgoing calls were never followed, so every effect
+ * originating below the cap is ABSENT — the list is a lower bound, and saying
+ * so is the difference between a bounded answer and a wrong one.
+ */
+const depthCapNote = (maxDepth: number, unexplored: number): string =>
+  ` DEPTH-CAPPED: the callsApex walk stopped at maxDepth=${maxDepth} with ${unexplored} reachable class(es) whose OWN outgoing calls were never followed, so classes they call — and every effect those classes produce — are ABSENT from this answer. \`effects\` and \`summary\` are a LOWER BOUND, not the complete downstream surface.${maxDepth < DOWNSTREAM_EFFECTS_MAX_DEPTH ? ` Re-run with a higher \`maxDepth\` (max ${DOWNSTREAM_EFFECTS_MAX_DEPTH}) to widen the walk.` : ` maxDepth is already at its ceiling (${DOWNSTREAM_EFFECTS_MAX_DEPTH}); deeper chains cannot be walked here — follow them with \`sfi.call_graph\` from a class at the cap.`}`;
+
+/** Static note: the cap exists on EVERY call, whether or not it bit. */
+const DEPTH_CAP_NOTE =
+  ` The walk is depth-capped (\`maxDepth\`, default ${DOWNSTREAM_EFFECTS_DEFAULT_DEPTH}, max ${DOWNSTREAM_EFFECTS_MAX_DEPTH}); \`depthLimit\` / \`depthTruncated\` / \`unexploredClassCount\` report whether the cap bit.`;
+
+/**
+ * Appended when the walk saw MODELED effect edges whose target is not a node in
+ * this vault. Those rows are kept out of `effects` (a null-named field-write
+ * would over-report a resolvable surface) but never discarded: they are carried
+ * in `unresolvedEffects` and counted here via the shared
+ * {@link unresolvedTargetsDisclosure} contract sentence, so an under-reported
+ * `summary` can never be read as a verified zero.
+ */
+const unresolvedEffectsNote = (count: number): string =>
+  ' ' +
+  unresolvedTargetsDisclosure({
+    count,
+    targetKind: 'effect-edge',
+    surface: '`unresolvedEffects`',
+  }) +
+  ' They are EXCLUDED from `effects` and from every `summary` counter, so treat the counts as a LOWER BOUND.';
 
 const DOWNSTREAM_DISCLOSURE =
   'downstream_effects walks downstream callsApex from the root. Optional `method` narrows the root\'s DIRECT outgoing calls to edges whose `methods[]` (P4-C5) include that target method — e.g. `method: "deleteRecord"` follows only callees invoked via `deleteRecord` from the root class; deeper hops are unfiltered (their methods belong to other targets). The CALLER-side method (which method of the root body performs each call) is available on AST-extracted callsApex edges via `callerMethods` (surfaced by call_graph) but downstream_effects does NOT surface it here. HTTP callouts (Http.send, HTTPRequest invocation) are NOT recognized as effects. Of the three effect edges, only field writes and async dispatch originate from Apex; the `sendsEmail` edge is DECLARATIVE-only (WorkflowRule / ApprovalProcess / AutoResponseRule / AssignmentRule / EscalationRule → EmailTemplate), so Apex email via `Messaging.sendEmail()` is INVISIBLE here — an Apex-rooted walk reports email:0 even for a class that sends email. DML record deletes are likewise not modeled. The async-dispatch category now includes CLASS-GRANULAR `@future` edges (CR-CAP-09, `properties.dispatchMechanism: "future"`, `granularity: "class"`, heuristic): they fire when the called class has SOME `@future` method, not necessarily the invoked one, so async-dispatch may OVER-attribute a `@future` hop to a synchronous call. Cross-check the class source for `Messaging.sendEmail`, deletes, and callouts before treating the effect list as complete.';
@@ -168,6 +202,14 @@ export interface DownstreamEffect {
   readonly targetApiName: string | null;
   readonly edgeType: EdgeType;
   readonly edgeSource: string;
+  /**
+   * True when the edge's target is not a node in this vault (the importer's
+   * `targetMissing` marker, read via the shared `edgeTargetMissing`). ALWAYS
+   * written — a row without the key would make "checked and resolvable" and
+   * "never checked" render the same. Rows carrying `true` live in
+   * `unresolvedEffects`, never in `effects`.
+   */
+  readonly targetMissing: boolean;
 }
 
 /** Per-category counter across the full effects slice. */
@@ -192,7 +234,29 @@ export interface DownstreamEffectsOutput {
   readonly rootId: ComponentId;
   readonly reachableClassCount: number;
   readonly effects: readonly DownstreamEffect[];
+  /**
+   * MODELED effect edges whose target is not a node in this vault
+   * (`targetMissing`). The apex scanner emits heuristic `writesTo` edges to
+   * `CustomField:<unresolved-receiver>.<field>` when it cannot resolve the
+   * receiver's object; the WRITE is real, only the field is unnameable here.
+   * These rows are excluded from `effects` and from every `summary` counter
+   * (a null-named field-write would over-report a resolvable surface) but they
+   * are NEVER discarded — a class whose every field write goes through an
+   * unresolved receiver would otherwise report a confident `fieldWrite: 0`.
+   * Empty when every effect target resolved.
+   */
+  readonly unresolvedEffects: readonly DownstreamEffect[];
   readonly summary: DownstreamEffectsSummary;
+  /** The applied `maxDepth` (the caller's, or the default). */
+  readonly depthLimit: number;
+  /**
+   * True when the BFS exited with classes still unexpanded at `depthLimit`:
+   * their own outgoing `callsApex` edges were never followed, so effects
+   * originating below the cap are ABSENT and `summary` is a lower bound.
+   */
+  readonly depthTruncated: boolean;
+  /** How many reachable classes sat at the cap unexpanded (0 when complete). */
+  readonly unexploredClassCount: number;
   readonly disclosure: string;
   /**
    * Present only when `rootId` is a `CustomObject:` id (RTG-04).
@@ -270,10 +334,26 @@ const collectAutomationNodesForObject = async (
   );
 };
 
+/** What one bounded downstream walk saw, INCLUDING what it did not see. */
+interface ReachabilityWalk {
+  /** Every class id reached (including the root). */
+  readonly visited: Set<ComponentId>;
+  /** Classes whose OWN outgoing calls were followed. */
+  readonly expanded: Set<ComponentId>;
+  /**
+   * The residual frontier at `maxDepth`: reached, but never expanded. A
+   * non-empty residual means there are classes below the cap the walk never
+   * examined, so the caller's effect list is a LOWER BOUND. Returning it
+   * (rather than discarding it at the `return`) is what lets the handler
+   * disclose the cap — mirrors `scan-all-nodes.ts`'s `scanIncomplete`.
+   */
+  readonly unexplored: Set<ComponentId>;
+}
+
 /**
  * BFS downstream from `rootId` over outgoing `callsApex` edges; returns
- * the set of reachable class ids (including the root). Bounded by
- * `maxDepth`; visited set prevents cycles.
+ * the set of reachable class ids (including the root) ALONGSIDE the residual
+ * frontier the `maxDepth` bound cut off. Visited set prevents cycles.
  */
 const collectReachableClasses = async (
   ctx: Context,
@@ -281,8 +361,9 @@ const collectReachableClasses = async (
   maxDepth: number,
   /** P15: narrow root's direct callsApex edges to those invoking this method. */
   method: string | undefined,
-): Promise<Result<Set<ComponentId>, string>> => {
+): Promise<Result<ReachabilityWalk, string>> => {
   const visited = new Set<ComponentId>([rootId]);
+  const expanded = new Set<ComponentId>();
   let frontier: ComponentId[] = [rootId];
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
     const next: ComponentId[] = [];
@@ -298,6 +379,7 @@ const collectReachableClasses = async (
     });
     if (!edgeBatch.ok) return err(edgeBatch.error.message);
     for (const id of frontier) {
+      expanded.add(id);
       for (const edge of edgeBatch.value.get(id) ?? []) {
         if (
           id === rootId &&
@@ -313,7 +395,7 @@ const collectReachableClasses = async (
     }
     frontier = next;
   }
-  return ok(visited);
+  return ok({ visited, expanded, unexplored: new Set(frontier) });
 };
 
 /** Translate an edge type into its effect category, or null when it isn't a tracked effect. */
@@ -323,6 +405,13 @@ const categoryOf = (edgeType: EdgeType): DownstreamEffectCategory | null => {
   if (edgeType === 'sendsEmail') return 'email';
   return null;
 };
+
+/** Both halves of one effect sweep: resolvable rows and marked-unresolvable ones. */
+interface CollectedEffects {
+  readonly effects: DownstreamEffect[];
+  /** Rows whose target is not a node in this vault; each carries `targetMissing: true`. */
+  readonly unresolved: DownstreamEffect[];
+}
 
 /**
  * Batched form: for EVERY (class id, apiName) entry, collect every outgoing
@@ -334,15 +423,16 @@ const categoryOf = (edgeType: EdgeType): DownstreamEffectCategory | null => {
  * effect-edge targets — replacing the former per-class `listEdges` + per-edge
  * `getNodeById` double N+1. Each per-class bucket is sorted by the FULL
  * (to_id, edge_type, from_id, source) order (from_id fixed per bucket), matching
- * the old per-class `listEdges(out)` order; the null-target skip is preserved
- * via a Map miss. The caller sorts (and, for the object path, dedupes) the
- * result, so effect order across classes is normalised regardless.
+ * the old per-class `listEdges(out)` order. A target the Map misses is not a
+ * missing ROW: it is routed to the `unresolved` half of the result, marked
+ * `targetMissing: true`. The caller sorts (and, for the object path, dedupes)
+ * both halves, so effect order across classes is normalised regardless.
  */
 const collectEffectsForClasses = async (
   ctx: Context,
   entries: readonly { readonly id: ComponentId; readonly apiName: string }[],
-): Promise<Result<DownstreamEffect[], string>> => {
-  if (entries.length === 0) return ok([]);
+): Promise<Result<CollectedEffects, string>> => {
+  if (entries.length === 0) return ok({ effects: [], unresolved: [] });
   const edgeBatch = await listEdgesForNodes(
     ctx.graph,
     entries.map((e) => e.id),
@@ -362,6 +452,7 @@ const collectEffectsForClasses = async (
   const targetById = new Map(targetsRes.value.map((n) => [n.id, n]));
 
   const effects: DownstreamEffect[] = [];
+  const unresolved: DownstreamEffect[] = [];
   for (const entry of entries) {
     for (const edge of edgeBatch.value.get(entry.id) ?? []) {
       const category = categoryOf(edge.edgeType);
@@ -369,26 +460,30 @@ const collectEffectsForClasses = async (
       const target = targetById.get(edge.toId);
       // Sparse-graph / unresolved-target case: the v0.3 apex-scanner emits
       // heuristic `writesTo` / `readsFrom` edges to `CustomField:<localVar>.*`
-      // when it cannot resolve the receiver's object (the edge carries
-      // `targetMissing: true`); that target node does not exist in the graph.
-      // Mirror `what_if_disable_trigger`'s null-target handling and drop these
-      // rather than surfacing a downstream effect with a null
-      // `targetType`/`targetApiName` — counting a "field-write" to a field
-      // that isn't in the graph over-reports the downstream surface.
-      if (target === undefined) continue;
-      effects.push({
+      // when it cannot resolve the receiver's object; the importer stamps
+      // `targetMissing: true` on such an edge and no node exists for the id.
+      // The WRITE is declared and real — only the TARGET is unnameable here —
+      // so the row is DIVERTED, never dropped: keeping it out of `effects`
+      // stops a null-named field-write from over-reporting a resolvable
+      // surface, and carrying it in `unresolved` stops the missing rows from
+      // silently under-reporting `summary`. `edgeTargetMissing` is the shared
+      // authority; the Map miss additionally covers a vault built before the
+      // marker existed.
+      const missing = target === undefined || edgeTargetMissing(edge);
+      (missing ? unresolved : effects).push({
         sourceClassId: entry.id,
         sourceClassApiName: entry.apiName,
         category,
         targetId: edge.toId,
-        targetType: target.type,
-        targetApiName: target.apiName,
+        targetType: missing ? null : (target?.type ?? null),
+        targetApiName: missing ? null : (target?.apiName ?? null),
         edgeType: edge.edgeType,
         edgeSource: edge.source,
+        targetMissing: missing,
       });
     }
   }
-  return ok(effects);
+  return ok({ effects, unresolved });
 };
 
 /** Comparator: sourceClassId, category, targetId. */
@@ -427,6 +522,28 @@ const dedupeEffects = (
     out.push(e);
   }
   return out;
+};
+
+/**
+ * Assemble the response disclosure from the base text plus every sentinel the
+ * walk actually earned. Built in ONE place so the two root paths (Apex and
+ * CustomObject) can never disagree about which caveats a bounded answer carries.
+ */
+const buildDisclosure = (parts: {
+  readonly effectCount: number;
+  readonly unresolvedCount: number;
+  readonly depthLimit: number;
+  readonly unexploredCount: number;
+}): string => {
+  let text = DOWNSTREAM_DISCLOSURE + DEPTH_CAP_NOTE;
+  if (parts.unexploredCount > 0) {
+    text += depthCapNote(parts.depthLimit, parts.unexploredCount);
+  }
+  if (parts.unresolvedCount > 0) {
+    text += unresolvedEffectsNote(parts.unresolvedCount);
+  }
+  if (parts.effectCount === 0) text += EMPTY_EFFECTS_NOTE;
+  return text;
 };
 
 /** Fold the effects list into per-category counters. */
@@ -533,7 +650,10 @@ export const downstreamEffectsHandler = async (
     const automationNodes = automationRes.value;
 
     const allEffects: DownstreamEffect[] = [];
+    const allUnresolved: DownstreamEffect[] = [];
     const reachableUnion = new Set<ComponentId>();
+    const expandedUnion = new Set<ComponentId>();
+    const unexploredUnion = new Set<ComponentId>();
 
     // Direct declarative side effects (Flow writes, WorkflowRule /
     // ApprovalProcess emails, etc.) for every non-ApexTrigger firer, batched.
@@ -551,7 +671,8 @@ export const downstreamEffectsHandler = async (
         message: `graph query failed: ${directRes.error}`,
       });
     }
-    allEffects.push(...directRes.value);
+    allEffects.push(...directRes.value.effects);
+    allUnresolved.push(...directRes.value.unresolved);
 
     for (const node of automationNodes) {
       const reachableRes = await collectReachableClasses(
@@ -566,8 +687,15 @@ export const downstreamEffectsHandler = async (
           message: `graph query failed: ${reachableRes.error}`,
         });
       }
-      for (const id of reachableRes.value) reachableUnion.add(id);
+      for (const id of reachableRes.value.visited) reachableUnion.add(id);
+      for (const id of reachableRes.value.expanded) expandedUnion.add(id);
+      for (const id of reachableRes.value.unexplored) unexploredUnion.add(id);
     }
+    // A class left at the cap by ONE firer's walk may have been expanded by
+    // another's; only what NO walk expanded is genuinely unexamined.
+    const unexplored = [...unexploredUnion].filter(
+      (id) => !expandedUnion.has(id),
+    );
 
     const apiNameByClass = new Map<ComponentId, string>();
     const namesRes = await resolveApiNames(ctx, reachableUnion, apiNameByClass);
@@ -591,26 +719,35 @@ export const downstreamEffectsHandler = async (
         message: `graph query failed: ${reachableEffectsRes.error}`,
       });
     }
-    allEffects.push(...reachableEffectsRes.value);
+    allEffects.push(...reachableEffectsRes.value.effects);
+    allUnresolved.push(...reachableEffectsRes.value.unresolved);
 
     const dedupedEffects = dedupeEffects(allEffects);
     dedupedEffects.sort(compareEffects);
+    const dedupedUnresolved = dedupeEffects(allUnresolved);
+    dedupedUnresolved.sort(compareEffects);
 
     return ok({
       data: {
         rootId,
         reachableClassCount: countApexReachable(reachableUnion),
         effects: dedupedEffects,
+        unresolvedEffects: dedupedUnresolved,
         summary: buildSummary(dedupedEffects),
+        depthLimit: maxDepth,
+        depthTruncated: unexplored.length > 0,
+        unexploredClassCount: unexplored.length,
         automationNodes: automationNodes.map((n) => ({
           id: n.id,
           type: n.type,
           apiName: n.apiName,
         })),
-        disclosure:
-          dedupedEffects.length === 0
-            ? DOWNSTREAM_DISCLOSURE + EMPTY_EFFECTS_NOTE
-            : DOWNSTREAM_DISCLOSURE,
+        disclosure: buildDisclosure({
+          effectCount: dedupedEffects.length,
+          unresolvedCount: dedupedUnresolved.length,
+          depthLimit: maxDepth,
+          unexploredCount: unexplored.length,
+        }),
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -632,7 +769,11 @@ export const downstreamEffectsHandler = async (
       message: `graph query failed: ${reachableRes.error}`,
     });
   }
-  const reachable = reachableRes.value;
+  const reachable = reachableRes.value.visited;
+  // The residual frontier the depth bound cut off: reached but never expanded.
+  const unexplored = [...reachableRes.value.unexplored].filter(
+    (id) => !reachableRes.value.expanded.has(id),
+  );
 
   // Resolve each reachable class's apiName so the per-class effect
   // entries can cite it without a roundtrip.
@@ -659,19 +800,27 @@ export const downstreamEffectsHandler = async (
       message: `graph query failed: ${effectsRes.error}`,
     });
   }
-  const allEffects = [...effectsRes.value];
+  const allEffects = [...effectsRes.value.effects];
   allEffects.sort(compareEffects);
+  const unresolvedEffects = [...effectsRes.value.unresolved];
+  unresolvedEffects.sort(compareEffects);
 
   return ok({
     data: {
       rootId,
       reachableClassCount: reachable.size,
       effects: allEffects,
+      unresolvedEffects,
       summary: buildSummary(allEffects),
-      disclosure:
-        allEffects.length === 0
-          ? DOWNSTREAM_DISCLOSURE + EMPTY_EFFECTS_NOTE
-          : DOWNSTREAM_DISCLOSURE,
+      depthLimit: maxDepth,
+      depthTruncated: unexplored.length > 0,
+      unexploredClassCount: unexplored.length,
+      disclosure: buildDisclosure({
+        effectCount: allEffects.length,
+        unresolvedCount: unresolvedEffects.length,
+        depthLimit: maxDepth,
+        unexploredCount: unexplored.length,
+      }),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

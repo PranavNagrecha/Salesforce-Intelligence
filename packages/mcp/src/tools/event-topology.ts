@@ -92,7 +92,6 @@ import {
   getNodeById,
   listEdgesForNodes,
   listNodesByIds,
-  listNodesByType,
 } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
@@ -100,6 +99,8 @@ import type { Context } from '../server.js';
 
 import { familyAbsence } from './action-chain-model.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Canonical id prefix for every event entity — Platform Events and Change Events alike. */
 const OBJECT_ID_PREFIX = 'CustomObject:';
@@ -123,18 +124,23 @@ const CUSTOM_OBJECT_SUFFIX = '__c';
  */
 const STANDARD_CHANGE_EVENTS_CHANNEL = 'ChangeEvents';
 
-/** Page size for the CustomObject sweep (the graph layer's own maximum). */
-const OBJECT_PAGE_SIZE = 500;
-
 /**
- * Ceiling on the CustomObject sweep. 20 pages = 10,000 objects, far above any
- * real org; hitting it sets `coverage.objectScanTruncated` rather than
- * silently returning a partial inventory.
+ * EVENT-TOPOLOGY-SINGLE-PAGE-EVENT-PLANE-SCAN. Every node sweep in this file
+ * now runs through the shared {@link scanAllNodesOfTypes}, which pages the SQL
+ * `OFFSET` forward until the type is exhausted and reports
+ * `incompleteTypes` when it stops at the residual `FULL_SCAN_MAX_NODES` cap.
+ *
+ * The channel and member sweeps used to be a SINGLE `listNodesByType` page
+ * capped at 500 with no offset and no cap detection, and the object sweep was
+ * a hand-rolled re-implementation of the shared walker. On an org whose CDC
+ * members sort past the cap, the capped member scan returned no Change-Event
+ * selection at all — and the module header's definition of VERIFIED NONE
+ * ("requested, retrieved without error, and no retrieved member selects a
+ * Change Event") then stamped an UNCHECKED zero with the words "This is a
+ * CHECKED zero, not an unchecked one". There is exactly one scan helper now,
+ * and its incompleteness is reported as `coverage.eventPlaneScanTruncated` /
+ * `coverage.objectScanTruncated` AND demotes the CDC zero to unverified.
  */
-const MAX_OBJECT_PAGES = 20;
-
-/** Defensive ceiling on the channel / member sweeps. */
-const CHANNEL_SCAN_LIMIT = 500;
 
 /** Referrer ids listed per referenced-but-not-retrieved event before capping. */
 const PHANTOM_REFERRER_SAMPLE = 5;
@@ -235,6 +241,13 @@ export const eventTopologyInputSchema = z.object({
 
 /** Parsed input shape, inferred from {@link eventTopologyInputSchema}. */
 export type EventTopologyInput = z.infer<typeof eventTopologyInputSchema>;
+
+/**
+ * Every input key that names an object scope. ALL of them are forwarded to the
+ * shared resolver so two that disagree are refused rather than silently
+ * decided by a `??`.
+ */
+const OBJECT_SCOPE_KEYS = ['objectApiName', 'object'] as const;
 
 /** One component that participates in an event, with the edge that says so. */
 export interface EventParticipant {
@@ -355,6 +368,13 @@ export interface EventTopologyCoverage {
   readonly objectNodesScanned: number;
   readonly objectScanTruncated: boolean;
   /**
+   * True when the `PlatformEventChannelMember` / `PlatformEventChannel` walk
+   * stopped at the shared full-scan residual cap with nodes still behind it.
+   * While it is true, EVERY count and list below was computed over a partial
+   * event plane and the CDC zero is reported as UNCHECKED, never as verified.
+   */
+  readonly eventPlaneScanTruncated: boolean;
+  /**
    * The manifest's own verdict on whether a zero here is a checked none.
    * `verified-none` means `PlatformEventChannelMember` was requested and
    * retrieved without error.
@@ -455,10 +475,10 @@ const referencedNotRetrievedDisclosure = (
 const byId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * Sweep every CustomObject node, paging to the graph layer's maximum, and
- * split them into Platform Events and Change Events. Returns the scan size and
- * whether the ceiling was hit so the caller can report it rather than imply a
- * complete inventory.
+ * Sweep every CustomObject node via the shared full-scan walker and split them
+ * into Platform Events and Change Events. Returns the scan size and the
+ * walker's own `incompleteTypes` so the caller reports the residual cap rather
+ * than implying a complete inventory.
  */
 const sweepObjectNodes = async (
   ctx: Context,
@@ -469,36 +489,32 @@ const sweepObjectNodes = async (
       readonly changeEvents: readonly Node[];
       readonly scanned: number;
       readonly truncated: boolean;
+      readonly incompleteTypes: readonly string[];
     },
     string
   >
 > => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomObject']);
+  if (!scan.ok) return err(scan.error.message);
   const platformEvents: Node[] = [];
   const changeEvents: Node[] = [];
-  let scanned = 0;
-  let truncated = false;
-  for (let page = 0; page < MAX_OBJECT_PAGES; page += 1) {
-    const result = await listNodesByType(ctx.graph, 'CustomObject', {
-      limit: OBJECT_PAGE_SIZE,
-      offset: page * OBJECT_PAGE_SIZE,
-    });
-    if (!result.ok) return err(result.error.message);
-    const batch = result.value;
-    scanned += batch.length;
-    for (const node of batch) {
-      if (
-        node.properties['isPlatformEvent'] === true ||
-        isPlatformEventApiName(node.apiName)
-      ) {
-        platformEvents.push(node);
-      } else if (isChangeEventApiName(node.apiName)) {
-        changeEvents.push(node);
-      }
+  for (const node of scan.value.nodes) {
+    if (
+      node.properties['isPlatformEvent'] === true ||
+      isPlatformEventApiName(node.apiName)
+    ) {
+      platformEvents.push(node);
+    } else if (isChangeEventApiName(node.apiName)) {
+      changeEvents.push(node);
     }
-    if (batch.length < OBJECT_PAGE_SIZE) return ok({ platformEvents, changeEvents, scanned, truncated });
   }
-  truncated = true;
-  return ok({ platformEvents, changeEvents, scanned, truncated });
+  return ok({
+    platformEvents,
+    changeEvents,
+    scanned: scan.value.nodes.length,
+    truncated: scan.value.scanIncomplete,
+    incompleteTypes: scan.value.incompleteTypes,
+  });
 };
 
 /**
@@ -563,6 +579,17 @@ interface MemberRow {
 }
 
 /**
+ * The member sweep's rows PLUS the walker's residual-cap verdict. The verdict
+ * travels with the rows on purpose: a caller that reads the rows without it
+ * cannot tell a complete zero from a capped one, which is the exact confusion
+ * this tool exists to remove.
+ */
+interface MemberScan {
+  readonly rows: readonly MemberRow[];
+  readonly incompleteTypes: readonly string[];
+}
+
+/**
  * Read every `PlatformEventChannelMember` and join each to its channel. The
  * join is member-centric on purpose: a member is always present when a
  * selection exists, while the platform's built-in `ChangeEvents` channel has
@@ -571,17 +598,15 @@ interface MemberRow {
  */
 const collectMembers = async (
   ctx: Context,
-): Promise<Result<readonly MemberRow[], string>> => {
-  const membersResult = await listNodesByType(
-    ctx.graph,
+): Promise<Result<MemberScan, string>> => {
+  const membersResult = await scanAllNodesOfTypes(ctx.graph, [
     'PlatformEventChannelMember',
-    { limit: CHANNEL_SCAN_LIMIT },
-  );
+  ]);
   if (!membersResult.ok) return err(membersResult.error.message);
 
   const rows: MemberRow[] = [];
   const channelCache = new Map<ComponentId, Node | null>();
-  for (const node of membersResult.value) {
+  for (const node of membersResult.value.nodes) {
     const selected = node.properties['selectedEntity'];
     if (typeof selected !== 'string' || selected.length === 0) continue;
     const channelId = node.parentId;
@@ -610,7 +635,7 @@ const collectMembers = async (
     });
   }
   rows.sort((a, b) => byId(a.memberId, b.memberId));
-  return ok(rows);
+  return ok({ rows, incompleteTypes: membersResult.value.incompleteTypes });
 };
 
 /**
@@ -688,31 +713,42 @@ const collectReferencedNotRetrieved = async (
  * object REFUSES; a real object typed in the wrong case is corrected to the
  * vault's exact casing before the Change Event name is derived from it.
  *
+ * EVENT-TOPOLOGY-ALIAS-DISAGREEMENT: the normalization above is applied to
+ * EVERY alias the caller supplied and all of them are handed to the shared
+ * resolver together. `input.objectApiName ?? input.object` used to pick one
+ * silently, so `{objectApiName: 'Contact', object: 'Account'}` — the shape a
+ * host or router produces when two slots bind — returned a confident CDC
+ * answer about Contact with `appliedScope.object: 'Contact'` and no word about
+ * Account. The shared resolver already refuses disagreeing aliases; it just
+ * has to SEE them.
+ *
  * Accepts a bare object apiName, the Change Event name itself, or a
- * `CustomObject:` id.
+ * `CustomObject:` id, in any of those keys.
  */
 const resolveObjectScope = async (
   ctx: Context,
   input: EventTopologyInput,
 ): Promise<
   Result<
-    { readonly raw: string; readonly entity: string; readonly changeEventName: string } | null,
+    { readonly entity: string; readonly changeEventName: string } | null,
     McpError
   >
 > => {
-  const raw = input.objectApiName ?? input.object;
-  if (raw === undefined) return ok(null);
-  const bare = raw.startsWith(OBJECT_ID_PREFIX)
-    ? raw.slice(OBJECT_ID_PREFIX.length)
-    : raw;
-  const entityGuess = isChangeEventApiName(bare) ? changeEventToEntity(bare) : bare;
-  const resolved = await resolveExistingObjectScope(ctx.graph, {
-    objectApiName: entityGuess,
-  });
+  const aliases: Record<string, string> = {};
+  for (const key of OBJECT_SCOPE_KEYS) {
+    const raw = input[key];
+    if (raw === undefined) continue;
+    const bare = raw.startsWith(OBJECT_ID_PREFIX)
+      ? raw.slice(OBJECT_ID_PREFIX.length)
+      : raw;
+    aliases[key] = isChangeEventApiName(bare) ? changeEventToEntity(bare) : bare;
+  }
+  if (Object.keys(aliases).length === 0) return ok(null);
+  const resolved = await resolveExistingObjectScope(ctx.graph, aliases);
   if (!resolved.ok) return resolved;
   const scope = resolved.value;
   if (scope === null) {
-    // Unreachable: `entityGuess` is always a non-empty string here, so
+    // Unreachable: at least one alias is a non-empty string here, so
     // `resolveExistingObjectScope` always either resolves or refuses.
     return err({
       kind: 'invalid-query',
@@ -721,7 +757,6 @@ const resolveObjectScope = async (
     });
   }
   return ok({
-    raw,
     entity: scope.object,
     changeEventName: entityToChangeEvent(scope.object),
   });
@@ -758,7 +793,7 @@ export const eventTopologyHandler = async (
   if (!members.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${members.error}` });
   }
-  const memberRows = members.value;
+  const memberRows = members.value.rows;
 
   const phantoms = await collectReferencedNotRetrieved(ctx);
   if (!phantoms.ok) {
@@ -851,16 +886,17 @@ export const eventTopologyHandler = async (
     })
     .sort((a, b) => byId(a.changeEventName, b.changeEventName));
 
-  const channelsResult = await listNodesByType(ctx.graph, 'PlatformEventChannel', {
-    limit: CHANNEL_SCAN_LIMIT,
-  });
+  const channelsResult = await scanAllNodesOfTypes(ctx.graph, [
+    'PlatformEventChannel',
+  ]);
   if (!channelsResult.ok) {
     return err({
       kind: 'internal',
       message: `graph query failed: ${channelsResult.error.message}`,
     });
   }
-  const channelEntries: EventChannelEntry[] = channelsResult.value
+  const channelNodes = channelsResult.value.nodes;
+  const channelEntries: EventChannelEntry[] = channelNodes
     .map((channel) => {
       const own = memberRows.filter((m) => m.channelId === channel.id);
       const rawType = channel.properties['channelType'];
@@ -884,7 +920,24 @@ export const eventTopologyHandler = async (
     })
     .sort((a, b) => byId(a.channelId, b.channelId));
 
+  // The event plane is only as complete as the two sweeps that read it. Keep
+  // the walker's own type names so the disclosure can NAME what was capped.
+  const eventPlaneIncompleteTypes = [
+    ...members.value.incompleteTypes,
+    ...channelsResult.value.incompleteTypes,
+  ];
+  const eventPlaneScanTruncated = eventPlaneIncompleteTypes.length > 0;
+  const scanIncompleteTypes = [
+    ...sweep.value.incompleteTypes,
+    ...eventPlaneIncompleteTypes,
+  ];
+
   const memberFamily = familyAbsence(ctx, 'PlatformEventChannelMember');
+  // A capped member sweep cannot support a CHECKED zero no matter what the
+  // manifest coverage row says: the manifest attests the RETRIEVE, this flag
+  // attests the READ. Both must hold.
+  const cdcZeroVerified =
+    memberFamily.resolution === 'verified-none' && !eventPlaneScanTruncated;
   const phantomEvents = phantoms.value.filter((p) => p.kind === 'platform-event');
   const phantomChangeEvents = phantoms.value.filter((p) => p.kind === 'change-event');
 
@@ -893,7 +946,7 @@ export const eventTopologyHandler = async (
     platformEventsReferencedNotRetrieved: phantomEvents.length,
     changeEventNodesModeled: changeEventNodes.length,
     changeEventsReferencedNotRetrieved: phantomChangeEvents.length,
-    platformEventChannelsModeled: channelsResult.value.length,
+    platformEventChannelsModeled: channelNodes.length,
     platformEventChannelMembersModeled: memberRows.length,
     cdcChannelMembersModeled: cdcMembers.length,
     platformEventChannelMembersModeledForEvents: eventMembers.length,
@@ -903,25 +956,26 @@ export const eventTopologyHandler = async (
     platformEventFactsExtracted: factsExtracted,
     objectNodesScanned: sweep.value.scanned,
     objectScanTruncated: sweep.value.truncated,
+    eventPlaneScanTruncated,
     channelMemberFamily: memberFamily.resolution,
   };
 
   // Disclosures are ADDITIVE and PATH-SPECIFIC: the two always-on lines, plus
   // one line per absence kind that actually fired on this call.
   const boundaries: string[] = [RECOGNITION_DISCLOSURE, RECORD_PLANE_DISCLOSURE];
+  if (scanIncompleteTypes.length > 0) {
+    boundaries.push(fullScanTruncationNote(scanIncompleteTypes));
+  }
   if (filter === 'all' || filter === 'cdc') {
     if (cdcEntries.length === 0) {
       // The org-wide claim is only true when NOTHING was narrowed away.
       boundaries.push(
         scope === null
-          ? cdcEmptyDisclosure(
-              memberFamily.basis,
-              memberFamily.resolution === 'verified-none',
-            )
+          ? cdcEmptyDisclosure(memberFamily.basis, cdcZeroVerified)
           : cdcEmptyForScopeDisclosure(
               scope.entity,
               memberFamily.basis,
-              memberFamily.resolution === 'verified-none',
+              cdcZeroVerified,
             ),
       );
     }

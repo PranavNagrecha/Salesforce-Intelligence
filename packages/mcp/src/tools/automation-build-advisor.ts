@@ -35,13 +35,14 @@ import {
   listEdges,
   listEdgesForNodes,
   listNodesByIds,
-  listNodesByType,
 } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { resolveExistingObjectScope, toCustomObjectId } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * Zod schema for the `sfi.automation_build_advisor` tool input.
@@ -147,6 +148,17 @@ export interface FlowOnlyObjectsOutput {
   };
   /** Sorted by id; org-custom objects only (standard + managed excluded). */
   readonly flowOnlyObjects: readonly FlowOnlyObject[];
+  /**
+   * STRUCTURAL truncation sentinel for the corpus scan behind the set
+   * difference. `false` means BOTH the Flow and the ApexTrigger corpus were
+   * read to exhaustion, so the set difference is complete; `true` means a type
+   * hit the residual `FULL_SCAN_MAX_NODES` ceiling and the difference may
+   * contain FALSE POSITIVES (a guard that was never read) as well as misses.
+   * A machine reader must branch on this, never on a boundary sentence.
+   */
+  readonly scanTruncated: boolean;
+  /** The component types whose walk stopped at the residual cap. */
+  readonly incompleteTypes: readonly string[];
   readonly recommendations: readonly string[];
   readonly boundaries: readonly string[];
 }
@@ -160,7 +172,7 @@ const FLOW_ONLY_BOUNDARIES: readonly string[] = Object.freeze([
   'Org-wide set difference: objects with >=1 ACTIVE record-triggered Flow MINUS objects with >=1 ACTIVE Apex trigger. Standard objects (no `__c` suffix) and managed-package objects (namespaced API names) are EXCLUDED — only org-custom objects are listed.',
   'A record-triggered Flow is one whose incoming `triggersOn` edge carries a `recordTriggerType`; "active" reads the Flow node `status` (Active, or unset). Apex-trigger activity reads the ApexTrigger node `status`.',
   'Relationship role is derived from master-detail `lookupTo` edges on the object’s own fields (relationshipType === "MasterDetail"): one parent = master-detail child, two+ = junction. These flow-only objects run cascade-delete-time Flow logic with NO Apex trigger guard. Conditions are not evaluated and Flow Trigger Order is out of scope; treat as "verify".',
-  'The Flow and ApexTrigger scans read up to 500 nodes each (the graph list cap); on an org with more than 500 of either, the gap set is computed over a deterministic prefix — re-verify on very large orgs.',
+  'The Flow and ApexTrigger corpora are scanned to EXHAUSTION (the SQL OFFSET is windowed forward past the 500-row page cap), so the set difference is computed over every node of both types. `scanTruncated` reports structurally whether any type stopped short at the residual full-scan ceiling.',
 ]);
 
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
@@ -432,16 +444,44 @@ const flowOnlyObjectsHandler = async (
   const fail = (m: string): Result<never, McpError> =>
     err({ kind: 'internal', message: `graph query failed: ${m}` });
 
-  // 1) Every record-triggered Flow and Apex trigger, in one type scan each.
-  const flowsRes = await listNodesByType(ctx.graph, 'Flow', { limit: 500 });
+  // 1) Every record-triggered Flow and Apex trigger.
+  //
+  // FLOW-ONLY-OBJECTS-SCANNED-ONE-ALPHABETICAL-PAGE.
+  //
+  // These two reads used to be a single-page `listNodesByType` per type at
+  // `{ limit: 500 }`, which
+  // `packages/graph/src/queries.ts` serves as `ORDER BY id ASC LIMIT 500
+  // OFFSET 0` — an alphabetical FIRST PAGE, not a scan, with 500 the graph's
+  // HARD ceiling (`LIST_MAX_LIMIT`) so no larger limit could reach the tail.
+  // This mode computes an org-wide SET DIFFERENCE over those two corpora, so
+  // the cap did not merely miss rows, it INVERTED answers in both directions:
+  //   - a trigger past the page never entered `objectsWithTrigger`, so a
+  //     GUARDED object was reported as flow-only and told the reader its Flow
+  //     logic runs with 'NO Apex trigger guard' — a fabricated hazard;
+  //   - a record-triggered Flow past the page never entered
+  //     `flowCountByObject`, so a REAL gap was silently dropped, and an empty
+  //     result still issued the clean bill 'no flow-only automation gap
+  //     detected in the vault'.
+  // The old 500-cap boundary SENTENCE was printed on every response whether or
+  // not the cap bit; a boundary string is a comment, not a guard.
+  //
+  // `scanAllNodesOfTypes` is the shared helper (adopted by test_coverage_gaps,
+  // integration_map, org_overview, endpoint_catalog, generate_admin_handbook):
+  // it windows the SQL OFFSET forward until each type is exhausted and reports
+  // residual incompleteness STRUCTURALLY.
+  const flowsRes = await scanAllNodesOfTypes(ctx.graph, ['Flow']);
   if (!flowsRes.ok) return fail(flowsRes.error.message);
-  const triggersRes = await listNodesByType(ctx.graph, 'ApexTrigger', { limit: 500 });
+  const triggersRes = await scanAllNodesOfTypes(ctx.graph, ['ApexTrigger']);
   if (!triggersRes.ok) return fail(triggersRes.error.message);
+  const incompleteTypes = [
+    ...flowsRes.value.incompleteTypes,
+    ...triggersRes.value.incompleteTypes,
+  ];
 
   // Active automation nodes only — drop deactivated ones up front so the set
   // difference reflects what actually fires.
-  const activeFlows = flowsRes.value.filter((n) => isActiveFlow(str(n.properties['status'])));
-  const activeTriggers = triggersRes.value.filter((n) =>
+  const activeFlows = flowsRes.value.nodes.filter((n) => isActiveFlow(str(n.properties['status'])));
+  const activeTriggers = triggersRes.value.nodes.filter((n) =>
     isActiveTrigger(str(n.properties['status'])),
   );
 
@@ -551,8 +591,13 @@ const flowOnlyObjectsHandler = async (
 
   const recommendations: string[] = [];
   if (flowOnlyObjects.length === 0) {
+    // An empty set difference is a CLEAN BILL, and a clean bill over an
+    // unfinished scan is the fabrication this mode is most exposed to. Only
+    // issue it when both corpora were exhausted.
     recommendations.push(
-      'No org-custom objects run an active record-triggered Flow without an Apex trigger — no flow-only automation gap detected in the vault.',
+      incompleteTypes.length > 0
+        ? `No flow-only automation gap was found, but the scan did NOT finish (${[...new Set(incompleteTypes)].sort().join(' / ')} hit the full-scan ceiling) — this is NOT a clean bill; re-run narrowed before relying on it.`
+        : 'No org-custom objects run an active record-triggered Flow without an Apex trigger — no flow-only automation gap detected in the vault.',
     );
   } else {
     recommendations.push(
@@ -579,8 +624,13 @@ const flowOnlyObjectsHandler = async (
         junctionCount,
       },
       flowOnlyObjects,
+      scanTruncated: incompleteTypes.length > 0,
+      incompleteTypes,
       recommendations,
-      boundaries: FLOW_ONLY_BOUNDARIES,
+      boundaries:
+        incompleteTypes.length > 0
+          ? [...FLOW_ONLY_BOUNDARIES, fullScanTruncationNote(incompleteTypes)]
+          : FLOW_ONLY_BOUNDARIES,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -1,10 +1,26 @@
 /// <reference types="vitest/globals" />
 
-import type { ComponentId, ComponentType, Node } from '@sf-intelligence/contracts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import type {
+  ComponentId,
+  ComponentType,
+  ExtractionResult,
+  Node,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
 
 import {
   soundnessForImpactWalk,
   soundnessForReachabilityWalk,
+  soundnessFromIds,
   soundnessFromNodes,
   soundnessFromDynamicApexIds,
   UNWALKED_EDGE_TYPE_NOTE,
@@ -213,5 +229,99 @@ describe('soundnessForReachabilityWalk', () => {
     const s = soundnessForReachabilityWalk([apexNode('ApexClass:Dyn', [DYNAMIC_ISSUE])], ['callsApex'], USAGE);
     expect(s.blindSpots.some((b) => b.kind === 'dynamic-apex')).toBe(true);
     expect(s.blindSpots.some((b) => b.kind === 'unwalked-edge-type')).toBe(true);
+  });
+});
+
+/**
+ * The `soundnessFromIds` path, over a REAL graph store — this is the read
+ * `sfi.find_dead_code` and `sfi.test_coverage_for_method` use (they hold ids,
+ * not nodes). The same three-state predicate backs it, so a vault whose Apex
+ * nodes were never scanned must NOT come back `complete: true` /
+ * `staticCoverage: 'full'` on the tool that issues DELETE verdicts.
+ */
+describe('soundnessFromIds (real graph)', () => {
+  const MANIFEST_NODE = (id: string, properties: Record<string, unknown>): Node => ({
+    id: id as ComponentId,
+    type: 'ApexClass' as ComponentType,
+    apiName: id.split(':')[1] ?? id,
+    label: null,
+    parentId: null,
+    sourcePath: `src/${id}.cls`,
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties,
+  });
+
+  const seed: ExtractionResult = {
+    nodes: [
+      // Scanned and clean: carries the KEY with an empty array.
+      MANIFEST_NODE('ApexClass:ScannedClean', { qualityIssues: [] }),
+      // Never scanned: the KEY is absent entirely (a pre-recognizer vault).
+      MANIFEST_NODE('ApexClass:NeverScanned', {}),
+      // Scanned and dynamic.
+      MANIFEST_NODE('ApexClass:Dynamic', { qualityIssues: [DYNAMIC_ISSUE] }),
+    ],
+    edges: [],
+  };
+
+  let tempDir: string;
+  let store: GraphStore;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-soundness-'));
+    const opened = await openGraph(join(tempDir, 'soundness.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('a scanned-clean id is complete/full', async () => {
+    const s = await soundnessFromIds(store, ['ApexClass:ScannedClean' as ComponentId]);
+    expect(s.complete).toBe(true);
+    expect(s.staticCoverage).toBe('full');
+    expect(s.blindSpots).toEqual([]);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: an id whose node carries NO qualityIssues KEY is quality-scan-not-run, never complete', async () => {
+    const s = await soundnessFromIds(store, ['ApexClass:NeverScanned' as ComponentId]);
+    expect(s.complete).toBe(false);
+    expect(s.staticCoverage).toBe('partial');
+    const spot = s.blindSpots.find((b) => b.kind === 'quality-scan-not-run');
+    expect(spot).toBeDefined();
+    expect(spot?.componentIds).toEqual(['ApexClass:NeverScanned']);
+    expect(spot?.note).toMatch(/NOT proof they are clean/);
+  });
+
+  it('an unscanned id POISONS a mixed batch — one unchecked node is enough to lose full coverage', async () => {
+    const s = await soundnessFromIds(store, [
+      'ApexClass:ScannedClean' as ComponentId,
+      'ApexClass:NeverScanned' as ComponentId,
+    ]);
+    expect(s.complete).toBe(false);
+    expect(s.blindSpots.map((b) => b.kind)).toEqual(['quality-scan-not-run']);
+  });
+
+  it('reports BOTH blind spots when a batch mixes a dynamic node and an unscanned one', async () => {
+    const s = await soundnessFromIds(store, [
+      'ApexClass:Dynamic' as ComponentId,
+      'ApexClass:NeverScanned' as ComponentId,
+    ]);
+    expect(s.blindSpots.map((b) => b.kind).sort()).toEqual([
+      'dynamic-apex',
+      'quality-scan-not-run',
+    ]);
+  });
+
+  it('an id absent from the vault is skipped, not counted as unscanned', async () => {
+    const s = await soundnessFromIds(store, ['ApexClass:DoesNotExist' as ComponentId]);
+    expect(s.complete).toBe(true);
+    expect(s.blindSpots).toEqual([]);
   });
 });

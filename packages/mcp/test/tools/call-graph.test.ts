@@ -283,13 +283,65 @@ describe('callGraphHandler', () => {
     expect(r.error.kind).toBe('invalid-query');
   });
 
-  it('returns an empty walk for an unknown but well-formed rootId', async () => {
+  // ROOT-NOT-FOUND-IS-NOT-A-CHECKED-ZERO. The test this replaces asserted
+  // `r.ok === true` for `ApexClass:Nonexistent` and checked only
+  // `cycleDetected`/`maxDepthReached` — it ENCODED the bug: a root that does
+  // not exist answered with `nodes: []`, `edges: []` and
+  // `otherUsageInEdges: {count: 0}`, a field whose own payload comment calls a
+  // zero there "a CHECKED zero". Nothing in the response said the root was
+  // never found, so "who calls DeprecatedSevice?" (a typo) read as "nothing
+  // does". Split into the two honest cases: no node AND no incident edge is
+  // `component-not-found`; a node-less id that edges DO reference is a phantom
+  // and is answered with a disclosure that says so (below, ctx4).
+  it('a well-formed rootId with no node and no incident edge is component-not-found, NOT an empty walk', async () => {
     const r = await callGraphHandler(ctx, {
       rootId: 'ApexClass:Nonexistent',
       direction: 'downstream',
     });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.message).toContain('ApexClass:Nonexistent');
+    expect(r.error.path).toBe('ApexClass:Nonexistent');
+  });
+
+  it('a TYPO of a real class is component-not-found, not a zero-caller answer', async () => {
+    // The census case: `A` exists, `Ae` does not. Upstream is the dangerous
+    // direction — "who calls this?" answered with an empty edge set next to a
+    // count of 0 reads as "nobody", which for a misspelling is a lie.
+    const r = await callGraphHandler(ctx, {
+      rootId: 'ApexClass:Ae',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('a BARE-WORD typo (coercePrefix turns any word into an ApexClass id) is component-not-found', async () => {
+    // `coercePrefix` promotes any bare word to `ApexClass:<word>`, so a typed
+    // word that names nothing must not be answered as a real root.
+    const r = await callGraphHandler(ctx, {
+      rootId: 'NotAClassAtAll',
+      direction: 'both',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.message).toContain('ApexClass:NotAClassAtAll');
+  });
+
+  it('a REAL root with no callers still answers ok (the not-found guard is not over-broad)', async () => {
+    // D is a real leaf: it exists, it calls nothing downstream. That zero IS a
+    // checked zero and must stay a successful answer.
+    const r = await callGraphHandler(ctx, {
+      rootId: 'ApexClass:D',
+      direction: 'downstream',
+    });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
+    expect(r.value.data.nodes.map((n) => n.id)).toEqual(['ApexClass:D']);
+    expect(r.value.data.edges).toEqual([]);
     expect(r.value.data.cycleDetected).toBe(false);
     expect(r.value.data.maxDepthReached).toBe(0);
   });
@@ -697,6 +749,29 @@ describe('callGraphHandler: phantom targetMissing edges (D5 edge-without-node)',
       expect(ids.has(e.fromId)).toBe(true);
       expect(ids.has(e.toId)).toBe(true);
     }
+  });
+
+  // PHANTOM-ROOT-IS-NOT-A-CHECKED-ZERO. The mirror image of the
+  // component-not-found case above: this id has NO node row of its own but IS
+  // named by an edge in the vault. `nodes`/`edges` come back empty (the
+  // self-contained-slice filter drops an edge whose endpoint has no node), so
+  // without a word about the root the answer is indistinguishable from "this
+  // class exists and nothing calls it". Sibling `get_subgraph` already emits a
+  // rootPhantomNote for exactly this condition.
+  it('a PHANTOM root (referenced by an edge, no node row) answers ok and SAYS the definition is missing', async () => {
+    const r = await callGraphHandler(ctx4, {
+      rootId: PHANTOM_ID,
+      direction: 'both',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.nodes).toEqual([]);
+    expect(r.value.data.edges).toEqual([]);
+    // The whole finding: the empty walk must not stand alone.
+    expect(r.value.data.disclosure).toContain(PHANTOM_ID);
+    expect(r.value.data.disclosure).toMatch(/PHANTOM/);
+    expect(r.value.data.disclosure).toMatch(/never retrieved|not retrieved/);
   });
 });
 

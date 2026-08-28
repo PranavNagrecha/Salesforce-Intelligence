@@ -970,3 +970,357 @@ describe('flowFaultAuditHandler — resume pointer describes DELIVERED rows', ()
     }
   });
 });
+
+// =============================================================================
+// FLOW-FAULT-AUDIT-SWALLOWS-A-FAILED-SCAN (0.3.3).
+//
+// The scan was a hand-rolled `listNodesByType` window loop whose only reaction
+// to a graph error was `break`. A DuckDB failure on window 3 of 10 produced a
+// confident, fully-formed audit computed over a third of the org's flows, with
+// `scanTruncated: false` (that flag is only set on the page-ceiling path) and
+// every honesty field claiming a complete scan. A failure on window ONE was
+// worse still: zero flows scanned reads as `propertyAvailable: false`, i.e.
+// "fault coverage is not in this vault yet — run /sfi-refresh", an answer about
+// the vault's AGE in response to a broken query.
+//
+// Every sibling error path in this file returns `err({kind:'internal'})`.
+// =============================================================================
+
+/** Enough flows to force a SECOND scan window at the 500-row page size. */
+const WINDOW_FLOW_COUNT = 501;
+
+const windowFlowName = (i: number): string =>
+  `Window_Scan_Probe_Flow_${String(i).padStart(4, '0')}`;
+
+const windowSeed: ExtractionResult = {
+  nodes: Array.from({ length: WINDOW_FLOW_COUNT }, (_, i) =>
+    makeFlow({
+      id: `Flow:${windowFlowName(i)}`,
+      apiName: windowFlowName(i),
+      properties: {
+        processType: 'AutoLaunchedFlow',
+        triggerType: 'RecordAfterSave',
+        status: 'Active',
+        faultableElementCount: 2,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+      },
+    }),
+  ),
+  edges: [],
+};
+
+/**
+ * Wrap a real store so a `listNodesByType` page whose bound OFFSET satisfies
+ * `failAtOffset` throws. `listNodesByType` catches and returns
+ * `err(query-failed)` — the exact shape a corrupt / locked graph produces.
+ * `listNodesByType` binds `[type, …, limit, offset]`, so the offset is the last
+ * parameter and the type is the first.
+ */
+const withNodeScanFailure = (
+  real: GraphStore,
+  failAtOffset: (offset: number) => boolean,
+): GraphStore => {
+  const connection = new Proxy(real.connection, {
+    get(target, prop) {
+      if (prop === 'runAndReadAll') {
+        return async (sql: string, params: readonly unknown[] = []) => {
+          const offset = Number(params[params.length - 1]);
+          if (
+            sql.includes('FROM nodes') &&
+            params[0] === 'Flow' &&
+            Number.isFinite(offset) &&
+            failAtOffset(offset)
+          ) {
+            throw new Error('injected node-scan failure');
+          }
+          return await (
+            target as never as {
+              runAndReadAll: (s: string, p: readonly unknown[]) => Promise<unknown>;
+            }
+          ).runAndReadAll(sql, params);
+        };
+      }
+      const v = Reflect.get(target, prop, target) as unknown;
+      return typeof v === 'function'
+        ? (v as (...a: unknown[]) => unknown).bind(target)
+        : v;
+    },
+  });
+  return { connection, instance: real.instance } as GraphStore;
+};
+
+describe('flowFaultAuditHandler — a failed scan is never a confident audit', () => {
+  let winDir: string;
+  let winStore: GraphStore;
+  let winCtx: Context;
+
+  beforeAll(async () => {
+    winDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ffa-win-'));
+    const opened = await openGraph(join(winDir, 'ffa-win.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    winStore = opened.value;
+    const imp = await importExtractionResults(winStore, [windowSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    winCtx = { vaultRoot: winDir, manifest: FIXTURE_MANIFEST, graph: winStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(winStore);
+    rmSync(winDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a failure on a LATER window propagates, never a partial audit', async () => {
+    const broken: Context = {
+      ...winCtx,
+      graph: withNodeScanFailure(winStore, (o) => o > 0),
+    };
+    const r = await flowFaultAuditHandler(broken, {});
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('internal');
+    expect(r.error.message).toContain('graph query failed');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a failure on the FIRST window is not "no fault coverage in this vault"', async () => {
+    const broken: Context = {
+      ...ctx,
+      graph: withNodeScanFailure(store, () => true),
+    };
+    const r = await flowFaultAuditHandler(broken, {});
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('internal');
+    // The pre-fix answer was an ok() response whose rendered text told the user
+    // to re-run a refresh. Never again on a broken query.
+    expect(r.error.message).toContain('graph query failed');
+  });
+
+  it('the healthy store still answers over EVERY window (501 > one 500-row page)', async () => {
+    const r = await flowFaultAuditHandler(winCtx, { limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalFlows).toBe(WINDOW_FLOW_COUNT);
+    expect(r.value.data.flowsWithUnhandledFaults).toBe(WINDOW_FLOW_COUNT);
+    expect(r.value.data.scanTruncated).toBe(false);
+  });
+});
+
+// =============================================================================
+// FLOW-FAULT-AUDIT-CERTIFIES-COVERAGE-FROM-ONE-NODE (0.3.3).
+//
+// `propertyAvailable` was an ORG-LEVEL `.some()`: one flow carrying
+// `faultableElementCount` certified every other flow as scanned. On a mixed
+// vault (an incremental refresh, or a partially re-extracted flow set) the
+// flows with NO fault-coverage key silently contributed `faultable: 0,
+// without: 0`, never set `hasUnhandledFaults`, and were counted CLEAN. The
+// answer read `flowsWithUnhandledFaultsActive: 1` where the truth was
+// "1, plus 3 flows that were never checked".
+//
+// The Flow extractor writes all three fault-coverage keys UNCONDITIONALLY
+// (packages/extractors/src/flow.ts — the only `type: 'Flow'` node site), so an
+// absent key means the vault predates that extractor: never-scanned, not clean.
+// =============================================================================
+
+const mixedSeed: ExtractionResult = {
+  nodes: [
+    // Re-extracted: carries the coverage keys. One flagged, one clean.
+    makeFlow({
+      id: 'Flow:Rescanned_Flagged',
+      apiName: 'Rescanned_Flagged',
+      properties: {
+        processType: 'AutoLaunchedFlow',
+        triggerType: 'RecordAfterSave',
+        status: 'Active',
+        faultableElementCount: 3,
+        elementsWithoutFault: 2,
+        hasUnhandledFaults: true,
+      },
+    }),
+    makeFlow({
+      id: 'Flow:Rescanned_Clean',
+      apiName: 'Rescanned_Clean',
+      properties: {
+        processType: 'AutoLaunchedFlow',
+        triggerType: 'RecordAfterSave',
+        status: 'Active',
+        faultableElementCount: 4,
+        elementsWithoutFault: 0,
+        hasUnhandledFaults: false,
+      },
+    }),
+    // Stale half of the vault: NO fault-coverage key at all. Their zero is
+    // UNCHECKED, and each one is an Active record-triggered flow.
+    ...Array.from({ length: 3 }, (_, i) =>
+      makeFlow({
+        id: `Flow:Never_Scanned_${i}`,
+        apiName: `Never_Scanned_${i}`,
+        properties: {
+          processType: 'AutoLaunchedFlow',
+          triggerType: 'RecordAfterSave',
+          status: 'Active',
+        },
+      }),
+    ),
+  ],
+  edges: [],
+};
+
+describe('flowFaultAuditHandler — fault coverage is censused PER NODE', () => {
+  let mixDir: string;
+  let mixStore: GraphStore;
+  let mixCtx: Context;
+
+  beforeAll(async () => {
+    mixDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ffa-mixed-'));
+    const opened = await openGraph(join(mixDir, 'ffa-mixed.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    mixStore = opened.value;
+    const imp = await importExtractionResults(mixStore, [mixedSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    mixCtx = { vaultRoot: mixDir, manifest: FIXTURE_MANIFEST, graph: mixStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(mixStore);
+    rmSync(mixDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: flows carrying no coverage key are COUNTED, not called clean', async () => {
+    const r = await flowFaultAuditHandler(mixCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.totalFlows).toBe(5);
+    expect(d.flowsWithFaultCoverage).toBe(2);
+    expect(d.flowsMissingFaultCoverage).toBe(3);
+    // The invariant: every scanned flow is on exactly one side of the census.
+    expect(d.flowsWithFaultCoverage + d.flowsMissingFaultCoverage).toBe(
+      d.totalFlows,
+    );
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: the rendered answer NAMES the unchecked flows', async () => {
+    const r = await flowFaultAuditHandler(mixCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.rendered).toMatch(/NOT CHECKED IN THIS VAULT/);
+    expect(r.value.data.rendered).toMatch(/3 of 5/);
+    expect(r.value.data.rendered).toMatch(/not "clean"/i);
+  });
+
+  it('an unchecked flow contributes NOTHING to the element totals', async () => {
+    const r = await flowFaultAuditHandler(mixCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Only the two re-scanned flows: 3 + 4 faultable, 2 + 0 unhandled.
+    expect(d.totalFaultableElements).toBe(7);
+    expect(d.totalUnhandledElements).toBe(2);
+    expect(d.flowsWithUnhandledFaults).toBe(1);
+    expect(d.flowsWithUnhandledFaultsActive).toBe(1);
+  });
+
+  it('a FULLY re-scanned vault emits no gap and no gap sentence', async () => {
+    // The top-level `seed` fixture: every flow carries the coverage keys.
+    const r = await flowFaultAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.flowsMissingFaultCoverage).toBe(0);
+    expect(r.value.data.rendered).not.toMatch(/NOT CHECKED IN THIS VAULT/);
+  });
+});
+
+// =============================================================================
+// FLOW-FAULT-AUDIT-HAND-ROLLED-SCAN-CEILING (0.3.3, R6).
+//
+// The window loop set `scanTruncated` from `i === MAX_PAGES - 1` — a full final
+// page, which is TRUE for an org holding exactly PAGE * MAX_PAGES flows even
+// though nothing is behind the cap. `scanAllNodesOfTypes` already resolves that
+// boundary with one bounded probe (CR-P3). `SFI_FLOW_FAULT_SCAN_MAX` exposes the
+// residual ceiling so the boundary is testable without seeding 20 000 nodes,
+// mirroring `SFI_FLOW_WRITER_SCAN_MAX` on the sibling flow scan.
+// =============================================================================
+
+const ceilingSeed = (count: number): ExtractionResult => ({
+  nodes: Array.from({ length: count }, (_, i) =>
+    makeFlow({
+      id: `Flow:Ceiling_Probe_${String(i).padStart(3, '0')}`,
+      apiName: `Ceiling_Probe_${String(i).padStart(3, '0')}`,
+      properties: {
+        processType: 'AutoLaunchedFlow',
+        triggerType: 'RecordAfterSave',
+        status: 'Active',
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+      },
+    }),
+  ),
+  edges: [],
+});
+
+describe('flowFaultAuditHandler — the scan ceiling is probed, not assumed', () => {
+  const openCtx = async (
+    count: number,
+  ): Promise<{ dir: string; store: GraphStore; ctx: Context }> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ffa-cap-'));
+    const opened = await openGraph(join(dir, 'ffa-cap.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const imp = await importExtractionResults(opened.value, [ceilingSeed(count)]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    return {
+      dir,
+      store: opened.value,
+      ctx: { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: opened.value },
+    };
+  };
+
+  const withCaps = async <T>(
+    windowSize: string,
+    ceiling: string,
+    fn: () => Promise<T>,
+  ): Promise<T> => {
+    const prevWindow = process.env['SFI_NODE_SCAN_LIMIT'];
+    const prevCeiling = process.env['SFI_FLOW_FAULT_SCAN_MAX'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = windowSize;
+    process.env['SFI_FLOW_FAULT_SCAN_MAX'] = ceiling;
+    try {
+      return await fn();
+    } finally {
+      if (prevWindow === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prevWindow;
+      if (prevCeiling === undefined) delete process.env['SFI_FLOW_FAULT_SCAN_MAX'];
+      else process.env['SFI_FLOW_FAULT_SCAN_MAX'] = prevCeiling;
+    }
+  };
+
+  it('EXACTLY at the ceiling is COMPLETE — nothing is behind it', async () => {
+    const { dir, store: s, ctx: c } = await openCtx(6);
+    try {
+      const r = await withCaps('3', '6', () => flowFaultAuditHandler(c, {}));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalFlows).toBe(6);
+      expect(r.value.data.scanTruncated).toBe(false);
+      expect(r.value.data.rendered).not.toMatch(/flow ceiling/i);
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: one flow PAST the ceiling discloses scanTruncated', async () => {
+    const { dir, store: s, ctx: c } = await openCtx(7);
+    try {
+      const r = await withCaps('3', '6', () => flowFaultAuditHandler(c, {}));
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.scanTruncated).toBe(true);
+      expect(r.value.data.rendered).toMatch(/flow ceiling/i);
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

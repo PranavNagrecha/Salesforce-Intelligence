@@ -83,12 +83,69 @@ import type { Context } from '../server.js';
 
 import { isUnresolvedFieldReceiver } from './apex-receiver.js';
 import { resolveObjectAliasInVault } from './input-aliases.js';
-import { argsFingerprint, paginate, type PaginateBinding } from './page-cursor.js';
+import {
+  argsFingerprint,
+  paginate,
+  type PaginateBinding,
+  type PaginateResult,
+} from './page-cursor.js';
+import { responseReductionCap } from './response-budget.js';
 import { isActiveSoeFirer } from './soe-active.js';
 
 /** Default and max number of collisions / cycles returned per list. */
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/**
+ * Bytes this tool reserves for everything in `data` that is NOT one of the two
+ * findings lists: `object`, `appliedScope`, the two booleans, `summary`, and
+ * the six-plus `boundaries` strings (~5 KB of prose on a worst-case answer).
+ */
+const NON_LIST_RESERVE_BYTES = 8_000;
+
+/**
+ * The byte budget the two findings lists share, DERIVED from the global
+ * response budget rather than declared beside it.
+ *
+ * AUTOMATION-COLLISIONS-TWO-LISTS-ONE-ENVELOPE. `collisions` and `cycles` were
+ * each paged against `paginate`'s default 38 000-byte budget while both travel
+ * in ONE envelope the global guard reduces to {@link responseReductionCap}
+ * (38 976 by default). A densely-automated object therefore produced ~78 KB of
+ * `data`, and `jsonResult` tail-trimmed the SECOND list — while `cyclesTruncated`
+ * and the `boundaries` count (which `tool-dispatch` protects from that trim)
+ * still described the list before the trim. A per-list budget that is bigger
+ * than the whole envelope is not a budget; deriving the shared one from
+ * `response-budget.ts` keeps it correct at every value of
+ * `SFI_MAX_RESPONSE_BYTES` instead of pinning a constant that drifts.
+ */
+const listsByteBudget = (): number =>
+  Math.max(2_000, responseReductionCap() - NON_LIST_RESERVE_BYTES);
+
+/**
+ * The truncation disclosure for one findings list.
+ *
+ * Two things it must not get wrong, both of which it used to:
+ *
+ *   - the count is the number of rows ACTUALLY SHIPPED (`page.items.length`),
+ *     never `limit`. `collisionsTruncated` fires on a BYTE trim as well as a
+ *     limit cut, and a byte-trimmed page is SHORTER than `limit` — so the old
+ *     sentence read "truncated to 200 of 150 fields" above an 89-row list, a
+ *     count that is not even arithmetically possible;
+ *   - "raise `limit`" is only true when `limit` is what cut the page. On a byte
+ *     trim a bigger `limit` returns exactly the same rows, so the advice points
+ *     at the one knob that cannot help.
+ */
+const truncationNote = (
+  label: string,
+  unit: string,
+  page: PaginateResult<unknown>,
+  total: number,
+): string => {
+  const shipped = page.items.length;
+  return page.byteTrimmed
+    ? `${label} truncated to ${shipped} of ${total} ${unit} — this response hit its BYTE budget, not \`limit\`, so raising \`limit\` returns the same rows; narrow the question to a less densely-automated object.`
+    : `${label} truncated to ${shipped} of ${total} ${unit} — raise \`limit\` (max ${MAX_LIMIT}) to see more.`;
+};
 
 /** Bounded-walk knobs for the recursion-cycle search (see BOUNDARY_DEPTH_CAP). */
 const CYCLE_DEPTH_CAP = 4;
@@ -727,8 +784,24 @@ export const automationCollisionsHandler = async (
     vaultHash: ctx.manifest.sourceTreeHash,
     argsFingerprint: argsFingerprint({ object: objectApiName }),
   };
-  const collisionsPage = paginate(allCollisions, { limit, binding });
-  const cyclesPage = paginate(allCycles, { limit, binding });
+  // ONE budget across BOTH lists (see `listsByteBudget`). `collisions` is paged
+  // against half of it — a floor, so a fat collisions list can never starve
+  // `cycles` to nothing — and `cycles` then claims the WHOLE remainder,
+  // reclaiming whatever `collisions` left unspent. Both pages together are
+  // therefore under the shared budget by construction, so the global
+  // `jsonResult` guard has nothing left to tail-trim behind a `truncated: false`.
+  const sharedBudget = listsByteBudget();
+  const collisionsPage = paginate(allCollisions, {
+    limit,
+    binding,
+    byteBudget: Math.max(1_000, Math.floor(sharedBudget / 2)),
+  });
+  const collisionsBytes = Buffer.byteLength(JSON.stringify(collisionsPage.items), 'utf8');
+  const cyclesPage = paginate(allCycles, {
+    limit,
+    binding,
+    byteBudget: Math.max(1_000, sharedBudget - collisionsBytes),
+  });
   const collisionsTruncated = collisionsPage.pageInfo.hasMore || collisionsPage.byteTrimmed;
   const cyclesTruncated = cyclesPage.pageInfo.hasMore || cyclesPage.byteTrimmed;
 
@@ -744,14 +817,10 @@ export const automationCollisionsHandler = async (
     );
   }
   if (collisionsTruncated) {
-    boundaries.push(
-      `Collisions truncated to ${limit} of ${allCollisions.length} fields — raise \`limit\` (max ${MAX_LIMIT}) to see more.`,
-    );
+    boundaries.push(truncationNote('Collisions', 'fields', collisionsPage, allCollisions.length));
   }
   if (cyclesTruncated) {
-    boundaries.push(
-      `Cycles truncated to ${limit} of ${allCycles.length} — raise \`limit\` (max ${MAX_LIMIT}) to see more.`,
-    );
+    boundaries.push(truncationNote('Cycles', 'cycles', cyclesPage, allCycles.length));
   }
 
   return ok({

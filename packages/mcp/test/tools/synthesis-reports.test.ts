@@ -991,3 +991,114 @@ describe('automationRiskReportHandler — FIX 9 composition manifest', () => {
     expect(d.boundaries?.[0]).toContain('composes TWO analyses');
   });
 });
+
+describe('permissionRiskReportHandler — the scan is a CENSUS, not a page', () => {
+  const dirs: string[] = [];
+  const stores: GraphStore[] = [];
+
+  const node = (o: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'PermissionSet',
+    apiName: 'Anon',
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...o,
+  });
+
+  /** A graph whose every read FAILS — a broken container, not an empty one. */
+  const brokenCtx: Context = {
+    vaultRoot: '/nonexistent',
+    manifest: MANIFEST,
+    graph: {
+      connection: {
+        runAndReadAll: () => {
+          throw new Error('fixture: graph read failed');
+        },
+        run: () => {
+          throw new Error('fixture: graph read failed');
+        },
+      },
+      instance: {},
+    } as unknown as GraphStore,
+  };
+
+  let bigCtx: Context;
+
+  beforeAll(async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-synth-bigps-'));
+    dirs.push(dir);
+    const opened = await openGraph(join(dir, 'big.duckdb'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    stores.push(opened.value);
+    // 500 benign permission sets whose ids sort BEFORE the god-mode one, so a
+    // single `ORDER BY id ASC LIMIT 500 OFFSET 0` page never reaches it.
+    const nodes: Node[] = [];
+    for (let i = 0; i < 500; i += 1) {
+      const n = String(i).padStart(3, '0');
+      nodes.push(
+        node({
+          id: `PermissionSet:Aaa_Benign_${n}`,
+          apiName: `Aaa_Benign_${n}`,
+          properties: { userPermissions: ['ApiEnabled'] },
+        }),
+      );
+    }
+    nodes.push(
+      node({
+        id: 'PermissionSet:Zz_Emergency_Admin',
+        apiName: 'Zz_Emergency_Admin',
+        properties: { userPermissions: ['ModifyAllData'] },
+      }),
+    );
+    const imp = await importExtractionResults(opened.value, [
+      { nodes, edges: [] },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    bigCtx = { vaultRoot: dir, manifest: MANIFEST, graph: opened.value };
+  });
+
+  afterAll(async () => {
+    for (const s of stores) await closeGraph(s);
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('finds a god-mode permission set that sorts past the 500-row page', async () => {
+    const r = await permissionRiskReportHandler(bigCtx, { limit: 200 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { privilege } = r.value.data;
+    expect(privilege.modifyAllDataGrantors).toContain(
+      'PermissionSet:Zz_Emergency_Admin',
+    );
+    expect(privilege.scanned.permissionSets).toBe(501);
+  });
+
+  it('a FAILED Profile read is an error, never "that profile does not exist"', async () => {
+    const r = await permissionRiskReportHandler(brokenCtx, {
+      profileFilter: 'System Administrator',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      // The exact false claim the swallow produced.
+      expect(JSON.stringify(r.value.data)).not.toContain('exists in this vault');
+      return;
+    }
+    expect(r.error.kind).toBe('internal');
+    expect(r.error.message).toContain('graph query failed');
+  });
+
+  it('a FAILED org-wide scan is an error, never an empty god-mode roster', async () => {
+    const r = await permissionRiskReportHandler(brokenCtx, { limit: 50 });
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      expect(r.value.data.privilege.scanned.profiles).not.toBe(0);
+      return;
+    }
+    expect(r.error.kind).toBe('internal');
+    expect(r.error.message).toContain('graph query failed');
+  });
+});

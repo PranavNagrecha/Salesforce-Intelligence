@@ -256,3 +256,110 @@ describe('apexBuildAdvisorInputSchema', () => {
     expect(apexBuildAdvisorInputSchema.safeParse({ apiName: 'SvcA' }).success).toBe(true);
   });
 });
+
+// =============================================================================
+// GUARD (APEX-BUILD-ADVISOR-CLEAN-BILL-FROM-FAILED-SCANS): each composed
+// sub-scan was guarded by `if (gov.ok)` / `if (cov.ok)` / `if (fls.ok)` with NO
+// else branch, and the object edge probe by `if (edges.ok)`. A FAILED scan left
+// its section `null`, appended nothing to `recommendations` and nothing to
+// `boundaries` — so three failures produced an EMPTY `recommendations`, and the
+// fallback then manufactured "Existing Apex looks clean on the measured axes":
+// a clean bill of health assembled out of three failures. The module JSDoc and
+// the roster description both promise "its section is null with a NOTE rather
+// than failing the brief"; no code wrote that note. A null section is an
+// UNMEASURED axis and must say so.
+
+/**
+ * A GraphStore that delegates to `real` but rejects the SQL reads matching
+ * `shouldFail` — the only way to drive the composed sub-scans down their error
+ * branch without a fake vault.
+ */
+const withFailingReads = (
+  real: GraphStore,
+  shouldFail: (sql: string, params: readonly unknown[]) => boolean,
+): GraphStore => {
+  type Conn = GraphStore['connection'];
+  const target: Conn = real.connection;
+  const connection = new Proxy(target, {
+    get(t, prop) {
+      if (prop === 'runAndReadAll') {
+        return (...args: Parameters<Conn['runAndReadAll']>) => {
+          const [sql, params] = args;
+          if (shouldFail(String(sql), Array.isArray(params) ? (params as unknown[]) : [])) {
+            return Promise.reject(new Error('simulated duckdb read failure'));
+          }
+          return t.runAndReadAll(...args);
+        };
+      }
+      const v = Reflect.get(t, prop) as unknown;
+      return typeof v === 'function' ? (v as (...a: never[]) => unknown).bind(t) : v;
+    },
+  });
+  return { instance: real.instance, connection };
+};
+
+describe('apexBuildAdvisorHandler — failed sub-scans (guard)', () => {
+  it('three failed sub-scans do NOT become "existing Apex looks clean"', async () => {
+    const brokenCtx = { ...ctx, graph: withFailingReads(store, () => true) } as Context;
+    const r = await apexBuildAdvisorHandler(brokenCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.governorPitfalls).toBeNull();
+    expect(d.testExpectations).toBeNull();
+    expect(d.flsCrudNorms).toBeNull();
+    // Diagnostic first: on a regression the failure prints the clean bill of
+    // health that was assembled out of three failures.
+    expect(d.recommendations.join(' | ')).not.toMatch(/looks clean/i);
+    expect([...(d.unavailableSections ?? [])].map((u) => u.section).sort()).toEqual([
+      'flsCrudNorms',
+      'governorPitfalls',
+      'testExpectations',
+    ]);
+    // The note has to name the failed scan, not just the section.
+    expect(
+      d.unavailableSections?.find((u) => u.section === 'governorPitfalls')?.note,
+    ).toContain('governor_limit_risks');
+    expect(d.boundaries.join(' | ')).toMatch(/INCOMPLETE/);
+    expect(d.recommendations.join(' | ')).toMatch(/INCOMPLETE/);
+  });
+
+  it('every null section carries a matching unavailableSections note', async () => {
+    const brokenCtx = {
+      ...ctx,
+      graph: withFailingReads(store, (sql) => sql.includes('FROM nodes WHERE type = ')),
+    } as Context;
+    const r = await apexBuildAdvisorHandler(brokenCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Whichever sections died, every null section must carry a note.
+    const nulls = (
+      ['governorPitfalls', 'testExpectations', 'flsCrudNorms'] as const
+    ).filter((k) => d[k] === null);
+    expect(nulls.length).toBeGreaterThan(0);
+    expect([...(d.unavailableSections ?? [])].map((u) => u.section).sort()).toEqual(
+      [...nulls].sort(),
+    );
+  });
+
+  it('a failed object edge probe is NOT "no Apex touches this object"', async () => {
+    const brokenCtx = {
+      ...ctx,
+      graph: withFailingReads(
+        store,
+        (sql, params) => sql.includes('FROM edges') && params.includes('CustomObject:Foo__c'),
+      ),
+    } as Context;
+    const r = await apexBuildAdvisorHandler(brokenCtx, { objectApiName: 'Foo__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Diagnostic first: on a regression this prints
+    // `{"objectApiName":"Foo__c","apexTouchingObject":[]}` — an unchecked zero
+    // that reads as "nothing touches this object yet, go ahead and build".
+    expect(JSON.stringify(d.similarLogic ?? null)).toBe('null');
+    expect([...(d.unavailableSections ?? [])].map((u) => u.section)).toContain('similarLogic');
+    expect(d.recommendations.join(' | ')).toMatch(/INCOMPLETE/);
+  });
+});

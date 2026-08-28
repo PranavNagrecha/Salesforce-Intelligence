@@ -108,7 +108,7 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.find_hardcoded_values_anywhere': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.find_clone_patterns': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   'sfi.integration_map': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
-  'sfi.event_subscribers': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.event_subscribers': { bound: 'paginated', note: 'offset + CR-22 cursor over the catalog AND the single-event subscriber list; the scan itself now walks every page (scanAllNodesOfTypes) instead of one 500-node listNodesByType (0.3.3)' },
   'sfi.diff_snapshots': { bound: 'paginated', note: 'section cursor: pages the largest of added/removed/modified + discloses the others (CR-22)' },
   'sfi.domain_clusters': { bound: 'paginated', note: 'per-cluster member section cursor + cluster-count byte budget + CR-RV12 candidateTruncated (CR-22)' },
   'sfi.org_history': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },

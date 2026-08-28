@@ -37,7 +37,11 @@
  *   `scanTruncated` (CR-RV12) is present ONLY when the org has more than 50
  *   matching CustomObjects — the OBJECT_SCAN_CAP silently dropped the rest
  *   BEFORE this tool existed to say so. `totalMatchingObjects` carries the
- *   TRUE count alongside it. The same disclosure also appears inline in
+ *   TRUE count alongside it (a `COUNT(*)` on the unfiltered path, never the
+ *   length of a capped page: every type here is walked to exhaustion by the
+ *   shared `scanAllNodesOfTypes`, so a SharingRule / RestrictionRule / Role /
+ *   CustomObject past id-ASC node 500 is no longer silently unread). The
+ *   same disclosure also appears inline in
  *   `document.body`'s Overview line ("N of M matching (capped...)") and as a
  *   verbatim entry in `document.boundaries` — a reader scanning the rendered
  *   markdown sees it without inspecting the structured fields.
@@ -59,7 +63,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -76,12 +80,11 @@ import {
 } from './generate-data-dictionary.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Per-scan cap on the number of objects covered. */
 const OBJECT_SCAN_CAP = 50;
-
-/** Per-type scan cap matching the graph layer's `LIST_MAX_LIMIT`. */
-const TYPE_SCAN_CAP = 500;
 
 /**
  * Honest disclosure of the sharing dimensions this summary does NOT model, so
@@ -152,7 +155,10 @@ export interface GenerateSharingSummaryOutput {
   /**
    * CR-RV12: TRUE when the `OBJECT_SCAN_CAP` (50) slice dropped matching
    * CustomObjects BEFORE the per-object sharing entries were built — so the
-   * document covers only the first 50 (by return order). Present ONLY when
+   * document covers only the first 50 (by return order). Also TRUE when the
+   * full multi-window type walk (`scanAllNodesOfTypes`) stopped at its residual
+   * `FULL_SCAN_MAX_NODES` ceiling, which leaves a type's tail unread; that case
+   * carries `fullScanTruncationNote` in `document.boundaries`. Present ONLY when
    * actually true, mirroring `unassigned-permission-sets.ts`'s `scanTruncated`
    * shape, so a ≤50-object org's golden response is byte-identical.
    */
@@ -540,58 +546,57 @@ export const generateSharingSummaryHandler = async (
   ctx: Context,
   input: GenerateSharingSummaryInput,
 ): Promise<Result<McpResponse<GenerateSharingSummaryOutput>, McpError>> => {
-  // Fetch CustomObjects + SharingRules + Roles once.
-  const objectsResult = await listNodesByType(ctx.graph, 'CustomObject', {
-    limit: TYPE_SCAN_CAP,
-  });
-  if (!objectsResult.ok) {
+  // FULL-TYPE-SCAN-CAPPED-AT-500: every type this security document depends on
+  // is now walked to EXHAUSTION through the shared `scanAllNodesOfTypes`
+  // (advancing SQL `OFFSET`, window by window), not read from ONE
+  // `listNodesByType` page.
+  //
+  // What this replaced: four single-page fetches at `limit: 500` — the graph's
+  // HARD `LIST_MAX_LIMIT` — with no offset and no sentinel. Any node past
+  // id-ASC #500 was NEVER fetched, and NONE of this file's honesty apparatus
+  // fires for that cap: `sharingRuleNotRetrieved` consults the MANIFEST, which
+  // correctly reports SharingRule AS retrieved. So an object whose rules sort
+  // late rendered an EMPTY "Sharing Rules" table and an EMPTY "Restriction &
+  // Scoping Rules" section, with zero disclosure — read exactly as "OWD is the
+  // whole story, nobody else can see these records". Worse for
+  // RestrictionRule / ScopingRule: those rules NARROW visibility, so dropping
+  // them invents a WIDER posture than the org has, and the boundary below
+  // asserts the opposite reading ("an empty ... section means none were
+  // retrieved for that object").
+  //
+  // The walk's only residual ceiling is `FULL_SCAN_MAX_NODES` (20 000/type),
+  // and when THAT bites it is disclosed via `fullScanTruncationNote` below.
+  const scan = await scanAllNodesOfTypes(ctx.graph, [
+    'CustomObject',
+    'SharingRule',
+    'Role',
+    // RESTRICTION-RULE-MISSING-OBJECT-GRAPH-AND-SHARING-SUMMARY: Restriction /
+    // Scoping rules narrow record visibility on top of OWD + sharing rules; the
+    // summary previously never mentioned them, inventing OWD-only visibility.
+    // Both types are walked (Scoping enforcement may live under either).
+    'RestrictionRule',
+    'ScopingRule',
+  ]);
+  if (!scan.ok) {
     return err({
       kind: 'internal',
-      message: `graph query failed: ${objectsResult.error.message}`,
+      message: `graph query failed: ${scan.error.message}`,
     });
   }
-  const sharingRulesResult = await listNodesByType(ctx.graph, 'SharingRule', {
-    limit: TYPE_SCAN_CAP,
-  });
-  if (!sharingRulesResult.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${sharingRulesResult.error.message}`,
-    });
-  }
-  const rolesResult = await listNodesByType(ctx.graph, 'Role', {
-    limit: TYPE_SCAN_CAP,
-  });
-  if (!rolesResult.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${rolesResult.error.message}`,
-    });
-  }
-  // RESTRICTION-RULE-MISSING-OBJECT-GRAPH-AND-SHARING-SUMMARY: Restriction /
-  // Scoping rules narrow record visibility on top of OWD + sharing rules; the
-  // summary previously never mentioned them, inventing OWD-only visibility.
-  // Fetch both types (Scoping enforcement may live under either type) and index
-  // by `parentId` — the extractor stamps it from `<targetEntity>`, so this
-  // surfaces on the CURRENT vault without a re-extract.
+  const allObjects = scan.value.nodes.filter((n) => n.type === 'CustomObject');
+  const allSharingRules = scan.value.nodes.filter((n) => n.type === 'SharingRule');
+  const allRoles = scan.value.nodes.filter((n) => n.type === 'Role');
+  // Index restriction / scoping rules by `parentId` — the extractor stamps it
+  // from `<targetEntity>`, so this surfaces on the CURRENT vault without a
+  // re-extract.
   const restrictionByParent = new Map<string, Node[]>();
-  for (const rrType of ['RestrictionRule', 'ScopingRule'] as const) {
-    const rrResult = await listNodesByType(ctx.graph, rrType, {
-      limit: TYPE_SCAN_CAP,
-    });
-    if (!rrResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${rrResult.error.message}`,
-      });
-    }
-    for (const rule of rrResult.value) {
-      const parentId = rule.parentId;
-      if (typeof parentId !== 'string' || parentId.length === 0) continue;
-      const list = restrictionByParent.get(parentId) ?? [];
-      list.push(rule);
-      restrictionByParent.set(parentId, list);
-    }
+  for (const rule of scan.value.nodes) {
+    if (rule.type !== 'RestrictionRule' && rule.type !== 'ScopingRule') continue;
+    const parentId = rule.parentId;
+    if (typeof parentId !== 'string' || parentId.length === 0) continue;
+    const list = restrictionByParent.get(parentId) ?? [];
+    list.push(rule);
+    restrictionByParent.set(parentId, list);
   }
 
   // GENERATE-SHARING-SUMMARY-ALIAS-SKEW: treat `objectFilter`, `objectApiName`,
@@ -651,7 +656,7 @@ export const generateSharingSummaryHandler = async (
   }
 
   // Apply the optional filter.
-  let scanObjects = objectsResult.value;
+  let scanObjects = allObjects;
   const filterName = appliedScope;
   if (filterName !== undefined) {
     const filter = filterName;
@@ -660,12 +665,31 @@ export const generateSharingSummaryHandler = async (
   // CR-RV12: capture the TRUE matching count BEFORE the architect-tier
   // OBJECT_SCAN_CAP slice, so a >50-object org's summary discloses that it
   // covers only the first 50 rather than silently reading as complete.
-  const totalMatchingObjects = scanObjects.length;
+  //
+  // FULL-TYPE-SCAN-CAPPED-AT-500: this number USED to be measured on the
+  // already-capped 500-node page, so the truncation disclosure's own figure was
+  // itself truncated — a 520-object org read "50 of 500 matching". `scanObjects`
+  // is now a FULL walk, so its length is exact; the UNFILTERED path additionally
+  // derives the total from `countNodesByType`'s `COUNT(*)` (whose JSDoc states
+  // verbatim that a caller needing a true tally must never measure a capped
+  // page's `.length`), so the figure stays exact even if the residual
+  // FULL_SCAN_MAX_NODES ceiling ever bit.
+  let totalMatchingObjects = scanObjects.length;
+  if (filterName === undefined) {
+    const objectCount = await countNodesByType(ctx.graph, 'CustomObject');
+    if (!objectCount.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${objectCount.error.message}`,
+      });
+    }
+    totalMatchingObjects = objectCount.value;
+  }
   const objectScanTruncated = totalMatchingObjects > OBJECT_SCAN_CAP;
   scanObjects = scanObjects.slice(0, OBJECT_SCAN_CAP);
 
   // Build per-object sharing entries.
-  const sharingIndex = buildSharingRulesIndex(sharingRulesResult.value);
+  const sharingIndex = buildSharingRulesIndex(allSharingRules);
   const entries: ObjectSharing[] = [];
   // CR-CAP-05b: doc-level disclosure flags — set if any rule's subordinate-role
   // subtree was incomplete, or any recipient was roleAndSubordinatesInternal.
@@ -758,7 +782,7 @@ export const generateSharingSummaryHandler = async (
     '',
     objectSections,
     '',
-    renderRoleHierarchySection(rolesResult.value, roleNotRetrieved),
+    renderRoleHierarchySection(allRoles, roleNotRetrieved),
     '',
     renderFooter(
       refreshedAt,
@@ -791,6 +815,13 @@ export const generateSharingSummaryHandler = async (
     boundaries.push(
       `Object scan capped: showing the first ${OBJECT_SCAN_CAP.toString()} of ${totalMatchingObjects.toString()} matching CustomObject(s) — the rest are NOT covered by this summary (not "no sharing", simply not scanned). Narrow with \`objectFilter\` to a single object for full coverage, or run \`sfi.who_can_access_object\` per object for the ones this summary omitted.`,
     );
+  }
+  // FULL-TYPE-SCAN-CAPPED-AT-500: the multi-window walk exhausts each type, so
+  // this fires ONLY at the pathological `FULL_SCAN_MAX_NODES` residual ceiling —
+  // but when it does, the missing tail is disclosed instead of rendering as an
+  // empty (and therefore reassuring) sharing / restriction table.
+  if (scan.value.scanIncomplete) {
+    boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
   }
   if (targetMissing !== undefined) {
     boundaries.push(
@@ -832,7 +863,7 @@ export const generateSharingSummaryHandler = async (
     ...sortedEntries.map((e) => e.object.id),
     ...sortedEntries.flatMap((e) => e.sharingRules.map((r) => r.id)),
     ...sortedEntries.flatMap((e) => e.restrictionRules.map((r) => r.id)),
-    ...rolesResult.value.map((r) => r.id),
+    ...allRoles.map((r) => r.id),
   ];
 
   // CR-08: fit the assembled doc (with the already-mutated CR-02/CR-04
@@ -859,7 +890,9 @@ export const generateSharingSummaryHandler = async (
     data: {
       document,
       ...(targetMissing !== undefined ? { targetMissing } : {}),
-      ...(objectScanTruncated ? { scanTruncated: true, totalMatchingObjects } : {}),
+      ...(objectScanTruncated || scan.value.scanIncomplete
+        ? { scanTruncated: true, totalMatchingObjects }
+        : {}),
     },
     vaultState: {
       sourceTreeHash,

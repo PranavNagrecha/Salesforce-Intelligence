@@ -66,6 +66,9 @@ const seed: ExtractionResult = {
     makeNode({ id: 'ApexClass:B', apiName: 'B' }),
     makeNode({ id: 'ApexClass:C', apiName: 'C' }),
     makeNode({ id: 'ApexClass:AsyncJob', apiName: 'AsyncJob' }),
+    // Isolated root (NOT reachable from Root) used by the unresolved-target
+    // cases: one RESOLVABLE write plus two phantom writes.
+    makeNode({ id: 'ApexClass:Mixed', apiName: 'Mixed' }),
     makeNode({
       id: 'CustomField:Account.Industry__c',
       type: 'CustomField',
@@ -122,6 +125,25 @@ const seed: ExtractionResult = {
       edgeType: 'writesTo',
       properties: { targetMissing: true },
     }),
+    // Mixed: one resolvable write + two phantom writes. The census case —
+    // "one resolvable effect and five dropped ones" — in miniature.
+    makeEdge({
+      fromId: 'ApexClass:Mixed',
+      toId: 'CustomField:Account.Industry__c',
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: 'ApexClass:Mixed',
+      toId: 'CustomField:ghostA.One__c',
+      edgeType: 'writesTo',
+      properties: { targetMissing: true },
+    }),
+    makeEdge({
+      fromId: 'ApexClass:Mixed',
+      toId: 'CustomField:ghostB.Two__c',
+      edgeType: 'writesTo',
+      properties: { targetMissing: true },
+    }),
   ],
 };
 
@@ -174,14 +196,14 @@ describe('downstreamEffectsHandler', () => {
     expect(fieldWrite?.sourceClassId).toBe('ApexClass:Root');
   });
 
-  it('drops unresolved/phantom writesTo targets (apex-scanner targetMissing) instead of surfacing a null-named field-write', async () => {
+  it('keeps unresolved/phantom writesTo targets (apex-scanner targetMissing) OUT of effects — and out of nothing else', async () => {
     // ApexClass:C carries a writesTo edge to CustomField:localVar.Ghost__c,
     // a target with no node in the graph (the apex scanner could not
     // resolve the receiver object; the edge is flagged targetMissing:true).
-    // It must NOT appear as a downstream effect — surfacing it over-reports
-    // a field-write to a field that isn't in the graph, with a null
-    // targetType/targetApiName. Mirrors what_if_disable_trigger, which
-    // already drops null-target out-edges.
+    // It must NOT appear in `effects` — a null-named field-write over-reports
+    // a resolvable surface. This case previously ended there, which is the
+    // R6 honesty break: the row was DISCARDED with no sentinel. It is now
+    // diverted to `unresolvedEffects` and counted in the disclosure.
     const r = await downstreamEffectsHandler(ctx, {
       classApiName: 'ApexClass:Root',
       maxDepth: 5,
@@ -189,7 +211,7 @@ describe('downstreamEffectsHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const effects = r.value.data.effects;
-    // The phantom target is excluded entirely.
+    // The phantom target is excluded from `effects`.
     expect(
       effects.some((e) => e.targetId === 'CustomField:localVar.Ghost__c'),
     ).toBe(false);
@@ -197,8 +219,23 @@ describe('downstreamEffectsHandler', () => {
     expect(
       effects.every((e) => e.targetType !== null && e.targetApiName !== null),
     ).toBe(true);
-    // C's only out-edge was the phantom write, so it contributes nothing.
+    expect(effects.every((e) => e.targetMissing === false)).toBe(true);
+    // C contributes no RESOLVABLE effect...
     expect(effects.some((e) => e.sourceClassId === 'ApexClass:C')).toBe(false);
+    // ...but the row it does have is carried, marked, not lost.
+    expect(
+      r.value.data.unresolvedEffects.map((e) => ({
+        sourceClassId: e.sourceClassId,
+        targetId: e.targetId,
+        targetMissing: e.targetMissing,
+      })),
+    ).toEqual([
+      {
+        sourceClassId: 'ApexClass:C',
+        targetId: 'CustomField:localVar.Ghost__c',
+        targetMissing: true,
+      },
+    ]);
   });
 
   it('reports a non-empty summary with per-category counts', async () => {
@@ -324,6 +361,121 @@ describe('downstreamEffectsHandler', () => {
     if (!r.ok) return;
     const emails = r.value.data.effects.filter((e) => e.category === 'email');
     expect(emails.length).toBe(1);
+  });
+});
+
+// R6 — the phantom (`targetMissing`) effect edges the walk cannot resolve must
+// be COUNTED and DISCLOSED, never silently discarded. Dropping them without a
+// sentinel ships a confident under-report: a class whose every field write goes
+// through an unresolved receiver reads `fieldWrite: 0`.
+describe('downstreamEffectsHandler — unresolved effect targets (R6)', () => {
+  it('surfaces dropped targetMissing effect edges in unresolvedEffects instead of discarding them', async () => {
+    const r = await downstreamEffectsHandler(ctx, {
+      classApiName: 'ApexClass:Mixed',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The one resolvable write is still the only row in `effects`.
+    expect(d.effects.length).toBe(1);
+    expect(d.summary.fieldWrite).toBe(1);
+    // The two phantom writes are NOT lost: each is carried, marked.
+    expect(d.unresolvedEffects.map((e) => e.targetId).sort()).toEqual([
+      'CustomField:ghostA.One__c',
+      'CustomField:ghostB.Two__c',
+    ]);
+    expect(d.unresolvedEffects.every((e) => e.targetMissing === true)).toBe(true);
+    expect(
+      d.unresolvedEffects.every(
+        (e) => e.targetType === null && e.targetApiName === null,
+      ),
+    ).toBe(true);
+    expect(d.unresolvedEffects.every((e) => e.category === 'field-write')).toBe(
+      true,
+    );
+  });
+
+  it('discloses the unresolved-target count so the effects list is not read as complete', async () => {
+    const r = await downstreamEffectsHandler(ctx, {
+      classApiName: 'ApexClass:Mixed',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosure).toMatch(/2 effect-edge/);
+    expect(r.value.data.disclosure).toMatch(/targetMissing/);
+    expect(r.value.data.disclosure).toMatch(/NOT in this vault/);
+  });
+
+  it('an all-phantom class is NOT reported as a confident zero (summary 0 + effects [] carries the unresolved sentinel)', async () => {
+    // ApexClass:C's ONLY effect edge is a phantom write. The census case:
+    // `summary: {fieldWrite: 0, ...}` with `effects: []` read as "this class
+    // writes no fields", when the scanner DID see a write it could not name.
+    const r = await downstreamEffectsHandler(ctx, { classApiName: 'ApexClass:C' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.effects).toEqual([]);
+    expect(d.summary.fieldWrite).toBe(0);
+    expect(d.unresolvedEffects.length).toBe(1);
+    expect(d.unresolvedEffects[0]?.targetId).toBe('CustomField:localVar.Ghost__c');
+    // The empty framing alone is NOT enough: it blames unmodeled edge types.
+    // The answer must also say a MODELED edge was seen and not resolved.
+    expect(d.disclosure).toMatch(/1 effect-edge/);
+  });
+
+  it('reports no unresolved sentinel when every effect target resolves', async () => {
+    const r = await downstreamEffectsHandler(ctx, {
+      classApiName: 'ApexClass:A',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.unresolvedEffects).toEqual([]);
+    expect(r.value.data.disclosure).not.toMatch(/effect-edge/);
+  });
+});
+
+// R1 — a BFS that exits with a non-empty frontier left reachable classes
+// unexamined. That residual must be reported, not discarded at the return.
+describe('downstreamEffectsHandler — depth-cap truncation (R1)', () => {
+  it('flags depthTruncated when the walk exits with classes still unexpanded', async () => {
+    const r = await downstreamEffectsHandler(ctx, {
+      classApiName: 'ApexClass:Root',
+      maxDepth: 1,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.depthLimit).toBe(1);
+    expect(d.depthTruncated).toBe(true);
+    // A and C sat at the cap; their own callsApex edges were never followed,
+    // so B (and B's email) are absent from this answer.
+    expect(d.unexploredClassCount).toBe(2);
+    expect(d.effects.some((e) => e.category === 'email')).toBe(false);
+  });
+
+  it('discloses the depth cap verbatim when it bites', async () => {
+    const r = await downstreamEffectsHandler(ctx, {
+      classApiName: 'ApexClass:Root',
+      maxDepth: 1,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosure).toMatch(/DEPTH-CAPPED/);
+    expect(r.value.data.disclosure).toMatch(/maxDepth=1/);
+    expect(r.value.data.disclosure).toMatch(/LOWER BOUND/);
+  });
+
+  it('does NOT flag truncation when the whole call chain was exhausted', async () => {
+    const r = await downstreamEffectsHandler(ctx, {
+      classApiName: 'ApexClass:Root',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.depthTruncated).toBe(false);
+    expect(r.value.data.unexploredClassCount).toBe(0);
+    expect(r.value.data.disclosure).not.toMatch(/DEPTH-CAPPED/);
   });
 });
 

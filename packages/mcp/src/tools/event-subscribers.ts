@@ -75,6 +75,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
@@ -83,13 +84,20 @@ import {
   listEdges,
   listEdgesForNodes,
   listNodesByIds,
-  listNodesByType,
 } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  argsFingerprint,
+  decodeCursor,
+  DEFAULT_PAGE_BYTE_BUDGET,
+  paginateLegacy,
+} from './page-cursor.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the
@@ -174,6 +182,16 @@ export const eventSubscribersInputSchema = z.object({
     .min(1)
     .max(EVENT_SUBSCRIBERS_MAX_LIMIT)
     .optional(),
+  // R2 resume knobs. `limit` alone was a top-N truncator: the catalog and the
+  // single-event subscriber list were both cut with `.slice(0, limit)` and the
+  // payload said nothing, so 50 of 60 events shipped as a finished inventory
+  // and the tail was unreachable by ANY argument. `offset` pages the SAME
+  // ordered list; `cursor` is the opaque CR-22 continuation minted on a
+  // truncated page (it wins over `offset` when both are supplied) and is bound
+  // to the tool + vault hash + the mode/event it was minted for, so a catalog
+  // cursor cannot be replayed against a single-event call.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `eventSubscribersInputSchema`. */
@@ -320,6 +338,27 @@ export interface EventSubscribersOutput {
    * caller can name what is missing instead of only counting it.
    */
   readonly referencedNotRetrievedEvents?: readonly ComponentId[];
+  /**
+   * R2 paging, published on EVERY response so a cut list can never read as a
+   * finished one. In catalog mode these describe `events[]`; in single-event
+   * mode they describe `subscribers[]`. `totalCount` is the WHOLE list before
+   * the page was cut, `hasMore` says rows were dropped, and `nextOffset` is the
+   * `offset` that fetches them (null when exhausted).
+   */
+  readonly totalCount: number;
+  /** True when rows past this page remain — see {@link totalCount}. */
+  readonly hasMore: boolean;
+  /** The `offset` that resumes this list, or `null` when it is exhausted. */
+  readonly nextOffset: number | null;
+  /**
+   * Opaque CR-22 continuation token, emitted ONLY on a truncated page (over
+   * `limit` or over the byte budget). Bound to this tool, this vault hash and
+   * this mode/event, so replaying it against a different query is refused with
+   * `invalid-query` rather than silently answering about another list.
+   */
+  readonly nextCursor?: string;
+  /** Structured page metadata, emitted alongside {@link nextCursor}. */
+  readonly pageInfo?: PageInfo;
   /** §C3 honesty: heuristic-detection + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
 }
@@ -367,6 +406,13 @@ const EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE =
  * org cannot blow the response budget while still being told how many it has.
  */
 const MAX_NAMED_PHANTOM_EVENTS = 25;
+
+/**
+ * The tool name every minted cursor is bound to (and checked against on
+ * resume). A single constant so the mint and the decode cannot drift.
+ */
+const EVENT_SUBSCRIBERS_TOOL = 'sfi.event_subscribers';
+
 
 /**
  * EVENT-SUBSCRIBERS-CANNOT-SEE-UNRETRIEVED-EVENTS: single-event mode used to run
@@ -646,12 +692,17 @@ export const eventSubscribersHandler = async (
   // (CustomObject ending in `__e`) with its subscriber count, so
   // "what platform events does this org publish?" is answerable in one call.
   if (requestedEventId === undefined) {
-    const nodesResult = await listNodesByType(ctx.graph, 'CustomObject', {
-      limit: EVENT_SUBSCRIBERS_MAX_LIMIT,
-    });
-    if (!nodesResult.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${nodesResult.error.message}` });
+    // R1: `CustomObject` is the LARGEST node type in any org and the `__e`
+    // filter runs AFTER the fetch, so ONE `listNodesByType` page (the graph's
+    // hard 500-row `ORDER BY id ASC LIMIT 500 OFFSET 0` ceiling) silently
+    // dropped every Platform Event whose id sorted past the 500th object — a
+    // caller asking whether the event exists was told it does not. Adopt the
+    // shared multi-window scan so the walk reaches row 501+ and completes.
+    const scanResult = await scanAllNodesOfTypes(ctx.graph, ['CustomObject']);
+    if (!scanResult.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${scanResult.error.message}` });
     }
+
     // Batched catalog: replace the former per-event `listEdges` + per-subscriber
     // / per-publisher `getNodeById` org-wide nested N+1 (O(events x fan-out)
     // serial DuckDB queries) with THREE round-trips total — one
@@ -661,7 +712,7 @@ export const eventSubscribersHandler = async (
     // edge_type, from_id, source) order (to_id + edge_type fixed per bucket), so
     // the DISTINCT-subscriber Set and the per-edge publisher count are byte-
     // identical to the old per-event walk.
-    const eventNodes = nodesResult.value.filter((node) =>
+    const eventNodes = scanResult.value.nodes.filter((node) =>
       node.apiName.endsWith(EVENT_API_NAME_SUFFIX),
     );
     const eventIds = eventNodes.map((node) => node.id);
@@ -736,29 +787,77 @@ export const eventSubscribersHandler = async (
       (id) => id.startsWith(EVENT_ID_PREFIX) && id.endsWith(EVENT_API_NAME_SUFFIX),
     );
     const namedPhantoms = phantomEventIds.slice(0, MAX_NAMED_PHANTOM_EVENTS);
+
+    // Both catalog-mode disclosures apply, and neither subsumes the other:
+    // the SCOPE line says what this catalog is silent about (CDC, channels,
+    // unretrieved events) and names the front door that is not; the PARTIAL
+    // line then names how many such events THIS vault has and which. The
+    // residual full-scan cap is a THIRD, different statement: it fires only for
+    // a pathological org past FULL_SCAN_MAX_NODES CustomObjects, where the walk
+    // above really did stop short.
+    const catalogBoundaries = [
+      EVENT_SUB_HEURISTIC_DISCLOSURE,
+      EVENT_SUB_CATALOG_SCOPE_DISCLOSURE,
+      ...(phantomEventIds.length > 0
+        ? [catalogPartialDisclosure(phantomEventIds.length, namedPhantoms)]
+        : []),
+      ...(scanResult.value.scanIncomplete
+        ? [fullScanTruncationNote(scanResult.value.incompleteTypes)]
+        : []),
+    ];
+
+    // R2: page `events[]` instead of `slice(0, limit)`-ing it away. The
+    // boundaries + the named-phantom list ride in the SAME envelope, so charge
+    // them against the page budget rather than letting the global guard trim
+    // the page underneath a pointer that still claims the old length.
+    const catalogDisclosureBytes = Buffer.byteLength(
+      JSON.stringify({
+        boundaries: catalogBoundaries,
+        referencedNotRetrievedEvents: namedPhantoms,
+      }),
+      'utf8',
+    );
+    const catalogFingerprint = argsFingerprint({ mode: 'catalog' });
+    let catalogOffset = input.offset ?? 0;
+    if (input.cursor !== undefined) {
+      const decoded = decodeCursor(input.cursor, {
+        tool: EVENT_SUBSCRIBERS_TOOL,
+        vaultHash: ctx.manifest.sourceTreeHash,
+        argsFingerprint: catalogFingerprint,
+      });
+      if (!decoded.ok) return err(decoded.error);
+      catalogOffset = decoded.value.o;
+    }
+    const pagedEvents = paginateLegacy(events, {
+      offset: catalogOffset,
+      limit,
+      keyOf: (e) => e.eventId,
+      byteBudget: Math.max(8_000, DEFAULT_PAGE_BYTE_BUDGET - catalogDisclosureBytes),
+      binding: {
+        tool: EVENT_SUBSCRIBERS_TOOL,
+        vaultHash: ctx.manifest.sourceTreeHash,
+        argsFingerprint: catalogFingerprint,
+      },
+    });
+
     return ok({
       data: {
         subscribers: [],
         eventApiName: null,
-        events: events.slice(0, limit),
+        events: pagedEvents.items,
+        totalCount: pagedEvents.totalCount,
+        hasMore: pagedEvents.hasMore,
+        nextOffset: pagedEvents.nextOffset,
+        ...(pagedEvents.nextCursor !== null
+          ? { nextCursor: pagedEvents.nextCursor, pageInfo: pagedEvents.pageInfo }
+          : {}),
         ...(phantomEventIds.length > 0
           ? {
               referencedNotRetrievedEventCount: phantomEventIds.length,
               referencedNotRetrievedEvents: namedPhantoms,
             }
           : {}),
-        // Both catalog-mode disclosures apply, and neither subsumes the other:
-        // the SCOPE line says what this catalog is silent about (CDC, channels,
-        // unretrieved events) and names the front door that is not; the PARTIAL
-        // line then names how many such events THIS vault has and which.
-        boundaries:
-          phantomEventIds.length > 0
-            ? [
-                EVENT_SUB_HEURISTIC_DISCLOSURE,
-                EVENT_SUB_CATALOG_SCOPE_DISCLOSURE,
-                catalogPartialDisclosure(phantomEventIds.length, namedPhantoms),
-              ]
-            : [EVENT_SUB_HEURISTIC_DISCLOSURE, EVENT_SUB_CATALOG_SCOPE_DISCLOSURE],
+        boundaries: catalogBoundaries,
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -835,7 +934,21 @@ export const eventSubscribersHandler = async (
       byId.set(resolved.id, mergeSubscriber(existing, resolved));
     }
   }
-  const sorted = [...byId.values()].sort(compareSubscribers).slice(0, limit);
+  // R2: page the subscriber list instead of truncating it. `.slice(0, limit)`
+  // reported 50 of an event's 60 subscribers with no count, no flag and no way
+  // to reach the other 10 — a finished-looking answer over a cut list.
+  const sortedAll = [...byId.values()].sort(compareSubscribers);
+  const detailFingerprint = argsFingerprint({ eventId: requestedEventId });
+  let detailOffset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: EVENT_SUBSCRIBERS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: detailFingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    detailOffset = decoded.value.o;
+  }
 
   // CR-CAP-18: resolve the publish-side channel routing for this event.
   const channelsResult = await resolveChannelBindings(ctx, requestedEventId);
@@ -858,7 +971,7 @@ export const eventSubscribersHandler = async (
   const publishers = publishersResult.value;
 
   const baseBoundaries =
-    sorted.length === 0
+    sortedAll.length === 0
       ? [
           EVENT_SUB_HEURISTIC_DISCLOSURE,
           EVENT_SUB_CHANNEL_DISCLOSURE,
@@ -884,12 +997,41 @@ export const eventSubscribersHandler = async (
       ]
     : baseBoundaries;
 
+  // `channels`, `publishers` and the boundaries ride in the SAME envelope as
+  // the paged subscribers, so charge them against the page budget — otherwise
+  // the global guard trims `subscribers` beneath a pointer that still claims
+  // the pre-trim length (page-cursor.ts `reconcileHandlerPageAfterGlobalTrim`).
+  const detailDisclosureBytes = Buffer.byteLength(
+    JSON.stringify({ channels, publishers, boundaries }),
+    'utf8',
+  );
+  const pagedSubscribers = paginateLegacy(sortedAll, {
+    offset: detailOffset,
+    limit,
+    keyOf: (sub) => sub.id,
+    byteBudget: Math.max(8_000, DEFAULT_PAGE_BYTE_BUDGET - detailDisclosureBytes),
+    binding: {
+      tool: EVENT_SUBSCRIBERS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: detailFingerprint,
+    },
+  });
+
   return ok({
     data: {
-      subscribers: sorted,
+      subscribers: pagedSubscribers.items,
       eventApiName: apiName,
       channels,
       publishers,
+      totalCount: pagedSubscribers.totalCount,
+      hasMore: pagedSubscribers.hasMore,
+      nextOffset: pagedSubscribers.nextOffset,
+      ...(pagedSubscribers.nextCursor !== null
+        ? {
+            nextCursor: pagedSubscribers.nextCursor,
+            pageInfo: pagedSubscribers.pageInfo,
+          }
+        : {}),
       ...(eventNodeMissing ? { eventRetrieved: false as const } : {}),
       boundaries,
     },

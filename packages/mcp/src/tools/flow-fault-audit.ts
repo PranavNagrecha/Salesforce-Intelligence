@@ -6,6 +6,11 @@
  * flags flows where a faultable element has no fault path. Read-only,
  * offline. A vault built before the extractor captured fault coverage reports
  * `propertyAvailable: false` (re-`/sfi-refresh` to populate) — honest, not zero.
+ * Coverage is censused PER FLOW, not probed from one node: a MIXED vault (an
+ * incremental refresh) reports `flowsWithFaultCoverage` /
+ * `flowsMissingFaultCoverage`, and the flows carrying no coverage property are
+ * excluded from every total and named in the rendered boundary rather than
+ * counted clean.
  *
  * IMPORTANT — an unhandled fault is NOT silent. Salesforce surfaces it:
  *   - Screen flows show the running user a flow error screen (the interview
@@ -28,19 +33,42 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { mdTable } from '../answer-render.js';
 import type { Context } from '../server.js';
 
+import { familyWasExtracted } from './absence-disclosure.js';
 import { offlineTrust } from './coverage-trust.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES } from './scan-cap.js';
 
-const PAGE = 500;
-const MAX_PAGES = 40;
+/**
+ * The node property the Flow extractor writes when it measures fault coverage.
+ * `packages/extractors/src/flow.ts` writes it UNCONDITIONALLY on the one and
+ * only `type: 'Flow'` node site, so its ABSENCE means this flow was extracted
+ * before fault coverage existed — never-measured, NOT measured-and-clean. That
+ * is the whole reason the census below is per node and reads the KEY
+ * (`familyWasExtracted`) rather than probing one node's value.
+ */
+const FAULT_COVERAGE_PROPERTY = 'faultableElementCount';
+
+/**
+ * Residual ceiling on the FULL Flow scan, defaulting to the shared
+ * {@link FULL_SCAN_MAX_NODES} (20 000 — the same effective ceiling the
+ * hand-rolled 500x40 window loop had, so no vault sees a behaviour change).
+ * `SFI_FLOW_FAULT_SCAN_MAX` overrides it so a test can exercise the cap
+ * boundary without seeding 20 000 nodes, and an operator on a pathological
+ * vault can raise it. Read at CALL time. Mirrors `SFI_FLOW_WRITER_SCAN_MAX` on
+ * the sibling flow scan.
+ */
+const flowFaultScanCeiling = (): number => {
+  const v = Number(process.env['SFI_FLOW_FAULT_SCAN_MAX']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
+};
 
 /** Tool name the CR-22 continuation cursor is bound to. */
 const FLOW_FAULT_AUDIT_TOOL = 'sfi.flow_fault_audit';
@@ -172,8 +200,27 @@ export interface FlowFaultAuditOutput {
     readonly object: string;
     readonly mode: 'component';
   };
+  /**
+   * True when AT LEAST ONE flow in scope carries the fault-coverage property.
+   * It is NOT a completeness claim — read it with
+   * {@link FlowFaultAuditOutput.flowsMissingFaultCoverage}, which names how
+   * many flows in the SAME scope carry none.
+   */
   readonly propertyAvailable: boolean;
   readonly totalFlows: number;
+  /**
+   * Flows in scope that CARRY the fault-coverage property — the ones this
+   * audit actually measured. `flowsWithFaultCoverage + flowsMissingFaultCoverage
+   * === totalFlows`, always.
+   */
+  readonly flowsWithFaultCoverage: number;
+  /**
+   * Flows in scope carrying NO fault-coverage property, so the audit never
+   * examined them (FLOW-FAULT-AUDIT-CERTIFIES-COVERAGE-FROM-ONE-NODE). They
+   * contribute to no total and to no clean count: a zero for them is NOT
+   * CHECKED, never "clean". A `sfi refresh` closes this gap.
+   */
+  readonly flowsMissingFaultCoverage: number;
   readonly flowsWithUnhandledFaults: number;
   /**
    * FLOW-AUDITS-IGNORE-ACTIVATION-STATUS. Flagged flows whose status is
@@ -213,10 +260,14 @@ export interface FlowFaultAuditOutput {
    */
   readonly truncated: boolean;
   /**
-   * True when the Flow scan stopped at the internal ceiling
-   * (`PAGE * MAX_PAGES` flows) — `totalFlows` and the totals may UNDERCOUNT.
-   * Only conceivable on an extreme vault; disclosed rather than silent. A
-   * DIFFERENT truncation from `truncated` above; never merge the two.
+   * True when the Flow scan stopped at the internal residual ceiling
+   * (`FULL_SCAN_MAX_NODES`, or `SFI_FLOW_FAULT_SCAN_MAX`) with STRICTLY MORE
+   * flows still behind it — `totalFlows` and the totals may UNDERCOUNT. A vault
+   * holding EXACTLY the ceiling is complete, not truncated: `scanAllNodesOfTypes`
+   * settles that boundary with a bounded probe rather than assuming a full final
+   * page means more remains. Only conceivable on an extreme vault; disclosed
+   * rather than silent. A DIFFERENT truncation from `truncated` above; never
+   * merge the two.
    */
   readonly scanTruncated: boolean;
   /**
@@ -329,33 +380,63 @@ export const flowFaultAuditHandler = async (
   if (!scopeResult.ok) return err(scopeResult.error);
   const scope = scopeResult.value;
 
+  // FLOW-FAULT-AUDIT-SWALLOWS-A-FAILED-SCAN: the scan is the shared
+  // `scanAllNodesOfTypes` full-window walk, not a hand-rolled window loop whose
+  // only reaction to a graph error was `break`. Two defects go with that loop:
+  //   1. a failed page was SWALLOWED — the handler carried on over whatever it
+  //      had and returned a fully-formed audit with every honesty field
+  //      claiming a complete scan (a first-page failure even rendered "fault
+  //      coverage is not in this vault yet — run `/sfi-refresh`", an answer
+  //      about the vault's AGE to a broken query). The shared walk propagates
+  //      the error and this handler maps it to `internal`, exactly as every
+  //      other error path in this file already does.
+  //   2. `scanTruncated` came from "the last allowed page came back full",
+  //      which is TRUE for an org holding exactly the ceiling even though
+  //      nothing is behind it. The shared walk settles that boundary with one
+  //      bounded probe (CR-P3) and reports `scanIncomplete` only when STRICTLY
+  //      more nodes remain.
+  const scanCeiling = flowFaultScanCeiling();
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['Flow'], scanCeiling);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
+    });
+  }
+  const scanTruncated = scan.value.scanIncomplete;
+  // Object-scoped: keep only flows that RUN ON the scoped object — a
+  // record-triggered flow's `triggerObject` (bare api name). Screen /
+  // autolaunched / scheduled flows have no `triggerObject` and are correctly
+  // excluded (they don't run on a single object). Bare call: no filter.
   const flows: Node[] = [];
-  let offset = 0;
-  // scanTruncated: the last allowed page came back full, so flows beyond the
-  // PAGE * MAX_PAGES ceiling (if any) were never scanned — disclose, don't hide.
-  let scanTruncated = false;
-  for (let i = 0; i < MAX_PAGES; i += 1) {
-    const r = await listNodesByType(ctx.graph, 'Flow', { limit: PAGE, offset });
-    if (!r.ok) break;
-    // Object-scoped: keep only flows that RUN ON the scoped object — a
-    // record-triggered flow's `triggerObject` (bare api name). Screen /
-    // autolaunched / scheduled flows have no `triggerObject` and are correctly
-    // excluded (they don't run on a single object). Bare call: no filter.
-    for (const flow of r.value) {
-      if (scope !== null && flow.properties['triggerObject'] !== scope.object) {
-        continue;
-      }
-      flows.push(flow);
+  for (const flow of scan.value.nodes) {
+    if (scope !== null && flow.properties['triggerObject'] !== scope.object) {
+      continue;
     }
-    if (r.value.length < PAGE) break;
-    offset += PAGE;
-    if (i === MAX_PAGES - 1) scanTruncated = true;
+    flows.push(flow);
   }
 
-  // Is fault coverage even captured in this vault? (Pre-change vaults have none.)
-  const propertyAvailable = flows.some(
-    (f) => num(f.properties['faultableElementCount']) !== null,
-  );
+  // FLOW-FAULT-AUDIT-CERTIFIES-COVERAGE-FROM-ONE-NODE: census fault coverage
+  // PER NODE, not with one org-level `.some()`. The old probe let a single flow
+  // carrying the property certify every other flow as scanned, so on a mixed
+  // vault (an incremental refresh, or a partially re-extracted flow set) the
+  // flows with NO coverage key contributed `faultable: 0, without: 0`, never
+  // set `hasUnhandledFaults`, and were counted CLEAN. `familyWasExtracted`
+  // reads the KEY: an empty/zero value is a measured zero, an absent key is no
+  // measurement at all, and the defect was treating those two the same.
+  let flowsWithFaultCoverage = 0;
+  let flowsMissingFaultCoverage = 0;
+  for (const f of flows) {
+    if (familyWasExtracted(f.properties, FAULT_COVERAGE_PROPERTY)) {
+      flowsWithFaultCoverage += 1;
+    } else {
+      flowsMissingFaultCoverage += 1;
+    }
+  }
+  // Unchanged meaning: is fault coverage captured in this vault AT ALL? Now
+  // derived from the same per-node census, so `propertyAvailable: true` with
+  // `flowsMissingFaultCoverage > 0` is the mixed vault stating itself.
+  const propertyAvailable = flowsWithFaultCoverage > 0;
 
   const entries: FlowFaultEntry[] = [];
   let totalFaultableElements = 0;
@@ -371,7 +452,12 @@ export const flowFaultAuditHandler = async (
   let totalUnhandledElementsActive = 0;
   const notRunnableByStatus = new Map<string, number>();
   for (const f of flows) {
-    const faultable = num(f.properties['faultableElementCount']) ?? 0;
+    // A flow with no coverage key was never measured. It contributes to
+    // NEITHER the totals nor the clean count — it is disclosed by name in
+    // `flowsMissingFaultCoverage` and in the rendered boundary below, so its
+    // zero can never be read as "checked and clean".
+    if (!familyWasExtracted(f.properties, FAULT_COVERAGE_PROPERTY)) continue;
+    const faultable = num(f.properties[FAULT_COVERAGE_PROPERTY]) ?? 0;
     const without = num(f.properties['elementsWithoutFault']) ?? 0;
     const status = readFlowStatus(f.properties);
     const isRunnable = flowIsRunnable(status);
@@ -444,8 +530,15 @@ export const flowFaultAuditHandler = async (
   // never reached some flows, so the totals themselves may undercount. Two
   // flags, two sentences — never merged.
   const scanNote = scanTruncated
-    ? `\n_Flow scan stopped at the internal ${PAGE * MAX_PAGES}-flow ceiling — totals may undercount; narrow the audit or refresh a smaller vault._\n`
+    ? `\n_Flow scan stopped at the internal ${scanCeiling}-flow ceiling — totals may undercount; narrow the audit or refresh a smaller vault._\n`
     : '';
+  // The refresh-closable half of the honesty spine: flows this vault never
+  // measured. Emitted UNCONDITIONALLY when any exist, so it survives every
+  // paging path — the gap is a property of the SCAN, not of the page.
+  const coverageGapNote =
+    flowsMissingFaultCoverage > 0
+      ? `\n_⚠️ NOT CHECKED IN THIS VAULT: ${flowsMissingFaultCoverage} of ${flows.length} flows carry no fault-coverage property, so this audit never examined them. A zero for them is "not checked", NOT "clean" — re-run \`/sfi-refresh\` to close the gap._\n`
+      : '';
   const notRunnableBreakdown = [...notRunnableByStatus.entries()]
     .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : 1))
     .map(([status, count]) => `${count} ${status}`)
@@ -509,7 +602,7 @@ export const flowFaultAuditHandler = async (
       ? `Fault coverage is not in this vault yet — run \`/sfi-refresh\` to populate it (the Flow extractor now records it).\n\n${renderFooter(trust)}`
       : `**${flowsWithUnhandledFaultsActive}** of ${activeFlowCount} ACTIVE flows have at least one DML/action element with no fault path ` +
         `(${totalUnhandledElementsActive} of ${totalFaultableElements} faultable elements unhandled).` +
-        `${notRunnableSentence}${statusUnknownSentence}\n\n${table}\n${pageNote}${scanNote}\n` +
+        `${notRunnableSentence}${statusUnknownSentence}\n\n${table}\n${pageNote}${scanNote}${coverageGapNote}\n` +
         `_Offline — an unhandled fault is **surfaced, not silent**: screen flows show the running user an error screen, ` +
         `and autolaunched/record-triggered flows (including before-save and after-save) raise an unhandled-fault runtime ` +
         `error that rolls back the whole transaction so the triggering save fails with a visible error. Add a fault path ` +
@@ -524,6 +617,8 @@ export const flowFaultAuditHandler = async (
         : {}),
       propertyAvailable,
       totalFlows: flows.length,
+      flowsWithFaultCoverage,
+      flowsMissingFaultCoverage,
       flowsWithUnhandledFaults: entries.length,
       flowsWithUnhandledFaultsActive,
       flowsWithUnhandledFaultsNotRunnable,

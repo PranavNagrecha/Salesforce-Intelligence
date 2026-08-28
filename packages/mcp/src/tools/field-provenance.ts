@@ -10,6 +10,9 @@
  *     `references` edges to NamedCredential / ExternalDataSource),
  *   - ALL Flow writers,
  *   - ALL ApexTrigger writers,
+ *   - ALL remaining writers (`otherWriters`) — WorkflowRule /
+ *     ApprovalProcess field updates, LWC, Visualforce, and any other
+ *     `writesTo` emitter — with their ComponentType and edge confidence,
  *   - `noWritersDetected` boolean,
  *   - boundaries.
  *
@@ -19,14 +22,20 @@
  *
  * Composition (PLAN-v2.9 §14):
  *   - Reads CustomField + `properties.sourceOfTruth`.
- *   - Walks incoming `writesTo` edges, partitioned by source-node type.
+ *   - Walks incoming `writesTo` edges, partitioned by source-node type,
+ *     with no type discarded.
  *   - For each ApexClass writer, walks outgoing `references` edges to
  *     check v2.0a integration tagging (NamedCredential /
  *     ExternalDataSource targets).
  *
  * Honesty axis (PLAN-v2.9 §4):
  *   - "dynamic SOQL, reflective field access, and managed-package
- *     writers may be invisible" — always surfaced.
+ *     writers may be invisible" — always surfaced. It does NOT cover
+ *     the non-canonical writer families, which are modeled and
+ *     declared: those get their own counted disclosure.
+ *   - Writers outside the three canonical arrays are named, counted,
+ *     and disclosed by ComponentType so an empty apex/flow/trigger
+ *     trace is never read as an absence of writers.
  *   - Classification missing → surfaced as a separate boundary; the
  *     trace still emits whatever writers exist so the caller can
  *     verify manually.
@@ -34,18 +43,29 @@
  * Implementation notes:
  *   - Input validation: `fieldId` must start with `CustomField:`.
  *   - Unknown ids surface as `component-not-found`.
- *   - Writers are partitioned into three arrays (apex, flow, trigger);
- *     a writer of any other ComponentType is skipped (the v2.9 trace
- *     surfaces the three canonical writer families). Missing source
- *     nodes (sparse-graph misses) are dropped silently.
- *   - `noWritersDetected` is true when ALL three writer arrays are
- *     empty AND the field has no formula / no auto-number. PLAN-v2.9
- *     Q151 specifies false for formula fields (the formula IS the
- *     source — not absent).
+ *   - Writers are partitioned into the three canonical arrays (apex,
+ *     flow, trigger); a writer of ANY other ComponentType lands in
+ *     `otherWriters` with its `componentType` and edge `confidence`.
+ *     `writesTo` is emitted by ten extractors, not three — dropping the
+ *     other seven made `noWritersDetected` report "nothing writes this
+ *     field" about a field a WorkflowRule field update writes on every
+ *     save, and made this tool contradict `sfi.automation_collisions`
+ *     about the same field by construction. A `writesTo` edge whose
+ *     SOURCE node is absent from the vault (managed package / outside
+ *     the retrieve scope) is COUNTED as `unresolvedWriterCount` — the
+ *     edge survives import and `listEdges` returns it, so dropping it
+ *     silently let `noWritersDetected` read true over an edge list that
+ *     asserted a writer.
+ *   - `noWritersDetected` is true when ALL FOUR writer arrays are empty,
+ *     `unresolvedWriterCount` is 0, AND the field has no formula / no
+ *     auto-number. PLAN-v2.9 Q151
+ *     specifies false for formula fields (the formula IS the source —
+ *     not absent).
  */
 
 import type {
   ComponentId,
+  ConfidenceLevel,
   Edge,
   McpError,
   McpResponse,
@@ -71,6 +91,61 @@ const BOUNDARY_CLASSIFICATION_HEURISTIC =
   'Classification is heuristic on writes-fabric inference — integration-tagged Apex without a references edge may be misclassified.';
 const BOUNDARY_CLASSIFICATION_MISSING =
   'Vocabulary classifier has not run for this vault — sourceOfTruth defaults to unknown. Run `sfi refresh --rebuild-vocabulary` to populate it.';
+
+/** How many writer ids the un-partitioned-writers sentence enumerates. */
+const MAX_ENUMERATED_OTHER_WRITERS = 10;
+
+/**
+ * Build the "writers outside the three canonical arrays" disclosure.
+ *
+ * `writesTo` is emitted by ten extractors — WorkflowRule field updates,
+ * ApprovalProcess field updates, LWC bundles, Visualforce pages and
+ * components, the flow dataflow pass, and the Apex family. The trace
+ * partitions three of those and the other seven used to be dropped on the
+ * floor, which made an empty `apexWriters`/`flowWriters`/`triggerWriters`
+ * read as "nothing writes this field" about a field a workflow writes on
+ * every save. `BOUNDARY_WRITES_INVISIBLE` does NOT cover this case: those
+ * edges are modeled, declared-confidence, and present in the graph — they
+ * were simply not surfaced.
+ */
+/**
+ * Build the "a writer edge names a component this vault does not hold"
+ * disclosure. `listEdges` returns the edge; `getNodeById` on its `fromId`
+ * returns null. Dropping those silently let `noWritersDetected` read true over
+ * an edge list that asserted a writer.
+ */
+const unresolvedWritersBoundary = (
+  writerIds: readonly string[],
+): string => {
+  const shown = writerIds.slice(0, MAX_ENUMERATED_OTHER_WRITERS);
+  const rest = writerIds.length - shown.length;
+  const ids =
+    rest > 0 ? `${shown.join(', ')}, … and ${rest} more` : shown.join(', ');
+  return (
+    `${writerIds.length} \`writesTo\` edge(s) into this field name a writer that is NOT a ` +
+    `component in this vault — a managed-package component, or one this refresh did not ` +
+    `retrieve (${ids}). The WRITE is declared and real; the writer cannot be named here, so ` +
+    '`resolve` / `get_component` on that id returns component-not-found. Surfaced as ' +
+    '`trace.unresolvedWriterCount`, and counted against `noWritersDetected`.'
+  );
+};
+
+const otherWritersBoundary = (
+  writers: readonly FieldProvenanceOtherWriter[],
+): string => {
+  const types = [...new Set(writers.map((w) => w.componentType))].sort();
+  const shown = writers.slice(0, MAX_ENUMERATED_OTHER_WRITERS);
+  const rest = writers.length - shown.length;
+  const ids = shown.map((w) => w.componentId).join(', ');
+  const idList = rest > 0 ? `${ids}, … and ${rest} more` : ids;
+  return (
+    `${writers.length} writer(s) of type(s) ${types.join(', ')} also write this field via ` +
+    '`writesTo` edges but fall OUTSIDE the three canonical writer arrays ' +
+    `(\`apexWriters\` / \`flowWriters\` / \`triggerWriters\`): ${idList}. They are listed in ` +
+    '`trace.otherWriters` with their per-writer confidence — an empty apex/flow/trigger trace ' +
+    'is NOT "nothing writes this field".'
+  );
+};
 
 /**
  * The five-value sourceOfTruth classification per PLAN-v2.9 §3.
@@ -124,6 +199,20 @@ export interface FieldProvenanceTriggerWriter {
   readonly apiName: string;
 }
 
+/**
+ * One writer whose ComponentType is NOT one of the three canonical writer
+ * families — a WorkflowRule / ApprovalProcess field update, an LWC bundle, a
+ * Visualforce page or component, or any other `writesTo` emitter. Carries the
+ * declaring ComponentType and the edge's stored confidence so the caller can
+ * weigh a declared field update differently from a heuristic UI-scanner hit.
+ */
+export interface FieldProvenanceOtherWriter {
+  readonly componentId: ComponentId;
+  readonly apiName: string;
+  readonly componentType: string;
+  readonly confidence: ConfidenceLevel;
+}
+
 /** The provenance trace block per PLAN-v2.9 §4 output schema. */
 export interface FieldProvenanceTrace {
   readonly declaredAsFormula: FieldProvenanceDeclaredFormula | null;
@@ -131,6 +220,23 @@ export interface FieldProvenanceTrace {
   readonly apexWriters: readonly FieldProvenanceApexWriter[];
   readonly flowWriters: readonly FieldProvenanceFlowWriter[];
   readonly triggerWriters: readonly FieldProvenanceTriggerWriter[];
+  /**
+   * Every remaining `writesTo` source, by ComponentType. NEVER dropped: this
+   * array is what stops `noWritersDetected` from being decided by three array
+   * lengths over an edge list that held more.
+   */
+  readonly otherWriters: readonly FieldProvenanceOtherWriter[];
+  /** `otherWriters.length`, surfaced for callers that read counts only. */
+  readonly otherWriterCount: number;
+  /** Distinct ComponentTypes present in `otherWriters`, sorted ASC. */
+  readonly otherWriterTypes: readonly string[];
+  /**
+   * `writesTo` edges whose SOURCE component is not a node in this vault —
+   * a managed-package class, or one this refresh did not retrieve. The edge
+   * is declared and real; the writer cannot be named. Counted, never
+   * dropped: an unnameable writer is still a detected writer.
+   */
+  readonly unresolvedWriterCount: number;
   readonly noWritersDetected: boolean;
 }
 
@@ -276,9 +382,11 @@ const isApexWriterIntegrationTagged = async (
 
 /**
  * Resolve all writers for a field: walk incoming `writesTo` edges,
- * resolve each source node, and partition into the three writer
- * arrays per ComponentType. Sparse-graph misses (a `writesTo` edge
- * whose source node is no longer in the graph) are dropped silently.
+ * resolve each source node, and partition by ComponentType. The three
+ * canonical families keep their dedicated arrays; EVERY OTHER writer type
+ * lands in `otherWriters` rather than being dropped. Sparse-graph misses (a
+ * `writesTo` edge whose source node is no longer in the graph) are dropped
+ * silently.
  */
 const collectWriters = async (
   ctx: Context,
@@ -289,6 +397,8 @@ const collectWriters = async (
       apexWriters: readonly FieldProvenanceApexWriter[];
       flowWriters: readonly FieldProvenanceFlowWriter[];
       triggerWriters: readonly FieldProvenanceTriggerWriter[];
+      otherWriters: readonly FieldProvenanceOtherWriter[];
+      unresolvedWriterIds: readonly string[];
     },
     string
   >
@@ -303,12 +413,20 @@ const collectWriters = async (
   const apex: FieldProvenanceApexWriter[] = [];
   const flow: FieldProvenanceFlowWriter[] = [];
   const trigger: FieldProvenanceTriggerWriter[] = [];
+  const other: FieldProvenanceOtherWriter[] = [];
+  const unresolved: string[] = [];
 
   for (const edge of edges) {
     const fromResult = await getNodeById(ctx.graph, edge.fromId);
     if (!fromResult.ok) return err(fromResult.error.message);
     const fromNode = fromResult.value;
-    if (fromNode === null) continue;
+    if (fromNode === null) {
+      // The edge is real and declared; the writer is simply not a node in
+      // this vault. Counting it is the difference between "no writer" and
+      // "a writer we cannot name".
+      unresolved.push(edge.fromId);
+      continue;
+    }
     if (fromNode.type === 'ApexClass') {
       const taggedResult = await isApexWriterIntegrationTagged(
         ctx,
@@ -324,10 +442,20 @@ const collectWriters = async (
       flow.push({ componentId: fromNode.id, apiName: fromNode.apiName });
     } else if (fromNode.type === 'ApexTrigger') {
       trigger.push({ componentId: fromNode.id, apiName: fromNode.apiName });
+    } else {
+      // `writesTo` is emitted by ten extractors, not three. A WorkflowRule
+      // or ApprovalProcess field update, an LWC, or a Visualforce page is a
+      // real, modeled, declared writer; dropping it here is what made
+      // `noWritersDetected` lie about a field a workflow writes on every
+      // save. The three canonical arrays keep their contract shape and the
+      // remainder is surfaced here instead of on the floor.
+      other.push({
+        componentId: fromNode.id,
+        apiName: fromNode.apiName,
+        componentType: fromNode.type,
+        confidence: edge.confidence,
+      });
     }
-    // Writers of other types (e.g. WorkflowRule field updates) are
-    // not surfaced here — v2.9's three-array trace is the canonical
-    // contract surface (PLAN-v2.9 §4).
   }
 
   // Deterministic sort: componentId ASC per writer array.
@@ -340,11 +468,18 @@ const collectWriters = async (
   trigger.sort((a, b) =>
     a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0,
   );
+  other.sort((a, b) =>
+    a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0,
+  );
+
+  unresolved.sort();
 
   return ok({
     apexWriters: apex,
     flowWriters: flow,
     triggerWriters: trigger,
+    otherWriters: other,
+    unresolvedWriterIds: unresolved,
   });
 };
 
@@ -414,18 +549,39 @@ export const fieldProvenanceHandler = async (
   if (!writersResult.ok) {
     return err({ kind: 'internal', message: writersResult.error });
   }
-  const { apexWriters, flowWriters, triggerWriters } = writersResult.value;
+  const {
+    apexWriters,
+    flowWriters,
+    triggerWriters,
+    otherWriters,
+    unresolvedWriterIds,
+  } = writersResult.value;
+  const otherWriterTypes = [
+    ...new Set(otherWriters.map((w) => w.componentType)),
+  ].sort();
 
   // PLAN-v2.9 Q151: formula fields are NOT noWritersDetected — the
   // formula IS the source. Same for auto-number.
+  //
+  // `otherWriters` is part of this predicate BY CONSTRUCTION: the answer is
+  // "no writer was detected", and a writer the partition declined to bucket
+  // is still a writer that was detected.
   const noWritersDetected =
     declaredAsFormula === null &&
     declaredAsAutoNumber === null &&
     apexWriters.length === 0 &&
     flowWriters.length === 0 &&
-    triggerWriters.length === 0;
+    triggerWriters.length === 0 &&
+    otherWriters.length === 0 &&
+    unresolvedWriterIds.length === 0;
 
   const boundaries: string[] = [BOUNDARY_WRITES_INVISIBLE];
+  if (otherWriters.length > 0) {
+    boundaries.push(otherWritersBoundary(otherWriters));
+  }
+  if (unresolvedWriterIds.length > 0) {
+    boundaries.push(unresolvedWritersBoundary(unresolvedWriterIds));
+  }
   if (classification.classification.confidence === 'heuristic') {
     boundaries.push(BOUNDARY_CLASSIFICATION_HEURISTIC);
   }
@@ -444,6 +600,10 @@ export const fieldProvenanceHandler = async (
         apexWriters,
         flowWriters,
         triggerWriters,
+        otherWriters,
+        otherWriterCount: otherWriters.length,
+        otherWriterTypes,
+        unresolvedWriterCount: unresolvedWriterIds.length,
         noWritersDetected,
       },
       boundaries,

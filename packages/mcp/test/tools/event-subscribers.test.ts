@@ -1226,3 +1226,212 @@ describe('event_subscribers — catalog mode declares its own scope (LANE-E)', (
     expect(result.value.data.boundaries.join(' ')).not.toContain('CATALOG SCOPE');
   });
 });
+
+// =============================================================================
+// CENSUS 024 / R1 + R2 — the catalog read ONE alphabetical page of CustomObject
+// and then cut the result to `limit` with no count, no flag and no resume.
+//
+// R1: `listNodesByType(ctx.graph, 'CustomObject', { limit: 500 })` is a SINGLE
+//     `ORDER BY id ASC LIMIT 500 OFFSET 0` page over the LARGEST node type in
+//     any org, and the `__e` filter runs AFTER it. Every Platform Event whose id
+//     sorts past the 500th CustomObject was absent from `events[]` with zero
+//     disclosure — a caller asking whether the event exists is told it does not.
+//
+// R2: `events.slice(0, limit)` (and the single-event
+//     `.sort(compareSubscribers).slice(0, limit)`) dropped rows with no
+//     `totalCount`, no `hasMore`, no `nextOffset`, no cursor and no `offset`
+//     knob — 50 of 60 events shipped as a finished inventory.
+// =============================================================================
+
+describe('event_subscribers — the catalog is a full scan, and it pages honestly', () => {
+  const withOwnStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context, s: GraphStore) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-evsub-census024-'));
+    const opened = await openGraph(join(dir, 'evsub.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const out = await run(localCtx, s);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  /**
+   * 500 plain CustomObjects whose ids all sort BEFORE the single Platform
+   * Event, so the event lands at row 501 of the id-ASC listing — exactly one
+   * row past the `listNodesByType` hard ceiling.
+   */
+  const pastTheFirstPageSeed = (): ExtractionResult => {
+    const nodes: Node[] = [];
+    for (let i = 0; i < 500; i += 1) {
+      const name = `Aaa_Obj_${String(i).padStart(4, '0')}__c`;
+      nodes.push(makeNode({ id: `CustomObject:${name}`, apiName: name }));
+    }
+    nodes.push(
+      makeNode({
+        id: 'CustomObject:Zzz_Order_Shipped__e',
+        apiName: 'Zzz_Order_Shipped__e',
+      }),
+      makeNode({ id: 'ApexClass:ShipSub', type: 'ApexClass', apiName: 'ShipSub' }),
+    );
+    return {
+      nodes,
+      edges: [
+        makeEdge({
+          fromId: 'ApexClass:ShipSub',
+          toId: 'CustomObject:Zzz_Order_Shipped__e',
+          edgeType: 'listensTo',
+        }),
+      ],
+    };
+  };
+
+  it('R1: lists a Platform Event that sorts past the 500th CustomObject', async () => {
+    const result = await withOwnStore(pastTheFirstPageSeed(), (localCtx) =>
+      eventSubscribersHandler(localCtx, { limit: 500 }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const names = (result.value.data.events ?? []).map((e) => e.eventApiName);
+    // FAIL-BEFORE: [] — the one page of CustomObject was 500 `__c` objects and
+    // the `__e` filter ran after it, so the event was invisible with no note.
+    expect(names).toContain('Zzz_Order_Shipped__e');
+    const shipped = (result.value.data.events ?? []).find(
+      (e) => e.eventApiName === 'Zzz_Order_Shipped__e',
+    );
+    expect(shipped?.subscriberCount).toBe(1);
+  });
+
+  /** `count` Platform Events, each with one subscriber. */
+  const manyEventsSeed = (count: number): ExtractionResult => {
+    const nodes: Node[] = [];
+    const edges: Edge[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const name = `Ev_${String(i).padStart(3, '0')}__e`;
+      nodes.push(makeNode({ id: `CustomObject:${name}`, apiName: name }));
+      nodes.push(makeNode({ id: `ApexClass:S${i}`, type: 'ApexClass', apiName: `S${i}` }));
+      edges.push(
+        makeEdge({
+          fromId: `ApexClass:S${i}`,
+          toId: `CustomObject:${name}`,
+          edgeType: 'listensTo',
+        }),
+      );
+    }
+    return { nodes, edges };
+  };
+
+  it('R2 catalog: a cut inventory publishes totalCount / hasMore / nextOffset', async () => {
+    const result = await withOwnStore(manyEventsSeed(60), (localCtx) =>
+      eventSubscribersHandler(localCtx, {}),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data as unknown as Record<string, unknown>;
+    expect((result.value.data.events ?? []).length).toBe(50);
+    // FAIL-BEFORE: all four undefined — 50 of 60 shipped as a complete list.
+    expect(d['totalCount']).toBe(60);
+    expect(d['hasMore']).toBe(true);
+    expect(d['nextOffset']).toBe(50);
+    expect(typeof d['nextCursor']).toBe('string');
+  });
+
+  it('R2 catalog: the offset knob actually reaches the dropped tail', async () => {
+    const result = await withOwnStore(manyEventsSeed(60), (localCtx) =>
+      eventSubscribersHandler(localCtx, { offset: 50 }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const names = (result.value.data.events ?? []).map((e) => e.eventApiName);
+    // FAIL-BEFORE: `offset` was an unknown key Zod stripped, so this returned
+    // the FIRST 50 again and Ev_059__e was unreachable by any argument.
+    expect(names).toContain('Ev_059__e');
+    expect(names).toHaveLength(10);
+    expect((result.value.data as unknown as Record<string, unknown>)['hasMore']).toBe(false);
+  });
+
+  it('R2 catalog: the minted cursor resumes the same query', async () => {
+    const seed = manyEventsSeed(60);
+    const names = await withOwnStore(seed, async (localCtx) => {
+      const first = await eventSubscribersHandler(localCtx, {});
+      if (!first.ok) throw new Error('first page failed');
+      const cursor = (first.value.data as unknown as Record<string, unknown>)['nextCursor'];
+      const second = await eventSubscribersHandler(localCtx, {
+        cursor: cursor as string,
+      });
+      if (!second.ok) throw new Error('resume failed');
+      return (second.value.data.events ?? []).map((e) => e.eventApiName);
+    });
+    expect(names).toContain('Ev_059__e');
+    expect(names).toHaveLength(10);
+  });
+
+  /** One event with `count` distinct ApexClass subscribers. */
+  const wideEventSeed = (count: number): ExtractionResult => {
+    const EVENT = 'CustomObject:Crowded__e';
+    const nodes: Node[] = [makeNode({ id: EVENT, apiName: 'Crowded__e' })];
+    const edges: Edge[] = [];
+    for (let i = 0; i < count; i += 1) {
+      nodes.push(
+        makeNode({ id: `ApexClass:Sub${String(i).padStart(3, '0')}`, type: 'ApexClass', apiName: `Sub${i}` }),
+      );
+      edges.push(
+        makeEdge({
+          fromId: `ApexClass:Sub${String(i).padStart(3, '0')}`,
+          toId: EVENT,
+          edgeType: 'listensTo',
+        }),
+      );
+    }
+    return { nodes, edges };
+  };
+
+  it('R2 single-event: a cut subscriber list publishes its total and a resume', async () => {
+    const result = await withOwnStore(wideEventSeed(60), (localCtx) =>
+      eventSubscribersHandler(localCtx, { eventId: 'CustomObject:Crowded__e' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data as unknown as Record<string, unknown>;
+    expect(result.value.data.subscribers).toHaveLength(50);
+    // FAIL-BEFORE: 50 of 60 subscribers, no count, no flag, no pointer.
+    expect(d['totalCount']).toBe(60);
+    expect(d['hasMore']).toBe(true);
+    expect(d['nextOffset']).toBe(50);
+  });
+
+  it('R2 single-event: offset reaches the subscribers the first page dropped', async () => {
+    const result = await withOwnStore(wideEventSeed(60), (localCtx) =>
+      eventSubscribersHandler(localCtx, {
+        eventId: 'CustomObject:Crowded__e',
+        offset: 50,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.subscribers.map((s) => s.id);
+    expect(ids).toContain('ApexClass:Sub059');
+    expect(ids).toHaveLength(10);
+  });
+
+  it('R2: a catalog cursor is refused by single-event mode (and vice versa)', async () => {
+    const seed = manyEventsSeed(60);
+    const outcome = await withOwnStore(seed, async (localCtx) => {
+      const first = await eventSubscribersHandler(localCtx, {});
+      if (!first.ok) throw new Error('first page failed');
+      const cursor = (first.value.data as unknown as Record<string, unknown>)['nextCursor'];
+      return eventSubscribersHandler(localCtx, {
+        eventId: 'CustomObject:Ev_000__e',
+        cursor: cursor as string,
+      });
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.kind).toBe('invalid-query');
+  });
+});

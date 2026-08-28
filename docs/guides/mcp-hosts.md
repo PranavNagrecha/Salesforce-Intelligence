@@ -1,7 +1,7 @@
 # Connecting your AI host — Claude, Codex, VS Code + Copilot
 
 `sf-intelligence` is a stdio MCP server. Every AI host launches it the same way
-— `npx -y sf-intelligence mcp` — but each host reads a **different config file**
+— `npx -y sf-intelligence mcp --vault <absolute path to org-kb>` — but each host reads a **different config file**
 in a **different format**, and two of them launch the server from a working
 directory you do not control. Getting those two facts wrong is the single most
 common reason the tools never appear.

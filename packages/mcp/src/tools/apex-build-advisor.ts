@@ -16,7 +16,12 @@
  *
  * Composes `governor_limit_risks`, `apex_test_coverage`, and `crud_fls_audit`
  * (each a real, vault-grounded scan). Every sub-scan degrades gracefully: if
- * one can't run, its section is null with a note rather than failing the brief.
+ * one can't run, its section is null AND a matching `unavailableSections` note
+ * naming the failed scan is emitted, rather than failing the whole brief. A
+ * null section is an UNMEASURED axis, never a clean one: the same failure also
+ * adds an INCOMPLETE line to `boundaries` and to `recommendations`, so the
+ * "looks clean on the measured axes" line can only ever be reached when all
+ * three scans actually ran.
  *
  * **Honesty axis**: all findings are heuristic static analysis over the last
  * refresh; dynamic/reflective code is invisible. Read it as "here's what the
@@ -61,6 +66,26 @@ export const apexBuildAdvisorInputSchema = z.object({
 
 export type ApexBuildAdvisorInput = z.infer<typeof apexBuildAdvisorInputSchema>;
 
+/** The briefing sections that can independently fail to be measured. */
+export type ApexBuildAdvisorSection =
+  | 'governorPitfalls'
+  | 'testExpectations'
+  | 'flsCrudNorms'
+  | 'similarLogic';
+
+/**
+ * A section whose value is `null`/absent because the scan behind it FAILED —
+ * not because the scan ran and found nothing. Mirrors the house shape used by
+ * `blast_radius_live` (a null magnitude carrying a `note` that explains why).
+ */
+export interface ApexBuildAdvisorUnavailableSection {
+  readonly section: ApexBuildAdvisorSection;
+  /** The composed scan (or probe) that failed, by name. */
+  readonly scan: string;
+  /** Why it is null, in one sentence a host can surface verbatim. */
+  readonly note: string;
+}
+
 export interface ApexBuildAdvisorOutput {
   /**
    * The SCOPE actually applied. Present ONLY when the caller passed a
@@ -103,6 +128,19 @@ export interface ApexBuildAdvisorOutput {
     readonly objectApiName: string;
     readonly apexTouchingObject: readonly ComponentId[];
   };
+  /**
+   * The typed sentinel for every section that could NOT be measured — present
+   * only when at least one scan failed, so a fully-successful briefing stays
+   * byte-identical to the pre-fix shape.
+   *
+   * A `null` section on its own is ambiguous between "scanned and clean" and
+   * "never scanned"; this array resolves it. A section named here was NOT
+   * measured, and its `null` must never be read as an absence of risk. The
+   * `similarLogic` section is listed here (and OMITTED from the payload)
+   * when the object edge probe itself failed — an empty `apexTouchingObject`
+   * is only ever emitted for a probe that actually ran.
+   */
+  readonly unavailableSections?: readonly ApexBuildAdvisorUnavailableSection[];
   readonly recommendations: readonly string[];
   readonly boundaries: readonly string[];
 }
@@ -172,6 +210,26 @@ export const apexBuildAdvisorHandler = async (
   input: ApexBuildAdvisorInput,
 ): Promise<Result<McpResponse<ApexBuildAdvisorOutput>, McpError>> => {
   const recommendations: string[] = [];
+  // APEX-BUILD-ADVISOR-CLEAN-BILL-FROM-FAILED-SCANS: every `if (x.ok)` below
+  // used to have NO else branch, so a FAILED scan left its section null and
+  // contributed nothing at all — and three failures fell through to the
+  // "existing Apex looks clean on the measured axes" fallback, a clean bill of
+  // health assembled out of three failures. A failed scan now records a typed
+  // sentinel naming itself, which drives a boundary line AND a recommendation.
+  const unavailableSections: ApexBuildAdvisorUnavailableSection[] = [];
+  const markUnavailable = (
+    section: ApexBuildAdvisorSection,
+    scan: string,
+    reason: string,
+  ): void => {
+    unavailableSections.push({
+      section,
+      scan,
+      note:
+        `\`${section}\` was NOT measured: the composed \`${scan}\` scan failed ` +
+        `(${reason}). Read this section as UNKNOWN, never as "nothing found".`,
+    });
+  };
 
   // Optional CLASS SCOPE (APEX-BUILD-ADVISOR-IGNORES-CLASS-SCOPE). Resolve +
   // validate it UP FRONT so an unresolvable / non-Apex scope surfaces a named
@@ -262,6 +320,8 @@ export const apexBuildAdvisorHandler = async (
           : `Bulkify everything: the org already has ${total} governor risk(s)${top ? ` (top: ${top[0]} ×${top[1]})` : ''}. Never put SOQL or DML inside a loop.`,
       );
     }
+  } else {
+    markUnavailable('governorPitfalls', 'governor_limit_risks', gov.error.message);
   }
 
   // --- test expectations ---
@@ -290,6 +350,8 @@ export const apexBuildAdvisorHandler = async (
           : `${subject} has no covering test yet — write one before deploying (production deploys need 75% coverage). Mirror an existing *Test class's setup pattern.`
         : `Plan the test class up front: production deploys need 75% coverage and ${s.classesWithoutTestReferences} classes already lack a test reference. Mirror an existing *Test class's setup pattern.`,
     );
+  } else {
+    markUnavailable('testExpectations', 'apex_test_coverage', cov.error.message);
   }
 
   // --- FLS/CRUD norms ---
@@ -317,6 +379,8 @@ export const apexBuildAdvisorHandler = async (
           : `Enforce CRUD/FLS in new code (Security.stripInaccessible / WITH SECURITY_ENFORCED / isAccessible()): the org already has ${total} unguarded access finding(s).`,
       );
     }
+  } else {
+    markUnavailable('flsCrudNorms', 'crud_fls_audit', fls.error.message);
   }
 
   // --- similar logic (object-scoped) ---
@@ -324,23 +388,40 @@ export const apexBuildAdvisorHandler = async (
   if (objectScope !== null) {
     const objectId = objectScope.componentId as ComponentId;
     const edges = await listEdges(ctx.graph, objectId, { direction: 'in' });
-    const touching = new Set<ComponentId>();
-    if (edges.ok) {
+    // `if (edges.ok)` with no else turned a FAILED probe into
+    // `apexTouchingObject: []` — an unchecked zero that reads as "no Apex
+    // touches this object yet, go ahead and build". A probe that did not run
+    // emits no list at all; it emits a sentinel naming itself.
+    if (!edges.ok) {
+      markUnavailable('similarLogic', 'object edge probe', edges.error.message);
+    } else {
+      const touching = new Set<ComponentId>();
       for (const e of edges.value) {
         if (APEX_PREFIXES.some((p) => e.fromId.startsWith(p))) touching.add(e.fromId);
       }
-    }
-    const apexTouchingObject = [...touching].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    // The VAULT's spelling, not the caller's: echoing back `foo__C` would name
-    // an object api name this org does not have.
-    similarLogic = { objectApiName: objectScope.object, apexTouchingObject };
-    if (apexTouchingObject.length > 0) {
-      recommendations.push(
-        `${apexTouchingObject.length} Apex component(s) already touch ${objectScope.object} — review them before adding logic so you reuse the existing handler/service instead of duplicating.`,
-      );
+      const apexTouchingObject = [...touching].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      // The VAULT's spelling, not the caller's: echoing back `foo__C` would
+      // name an object api name this org does not have.
+      similarLogic = { objectApiName: objectScope.object, apexTouchingObject };
+      if (apexTouchingObject.length > 0) {
+        recommendations.push(
+          `${apexTouchingObject.length} Apex component(s) already touch ${objectScope.object} — review them before adding logic so you reuse the existing handler/service instead of duplicating.`,
+        );
+      }
     }
   }
 
+  // The INCOMPLETE line goes in FIRST, so a briefing with a failed scan can
+  // never fall through to the "looks clean" fallback below.
+  if (unavailableSections.length > 0) {
+    const named = unavailableSections.map((u) => u.section).join(', ');
+    recommendations.push(
+      `This briefing is INCOMPLETE: ${unavailableSections.length.toString()} section(s) could not be measured (${named}) because the scan(s) behind them failed. Do NOT read a null section as "no risk found" — re-run after a successful refresh before relying on it.`,
+    );
+  }
+
+  // Reachable ONLY when all three scans ran (a failure pushed the INCOMPLETE
+  // line above) and each of them genuinely found nothing.
   if (recommendations.length === 0) {
     recommendations.push(
       'Existing Apex looks clean on the measured axes; still follow the org conventions and write a test before deploying.',
@@ -366,8 +447,17 @@ export const apexBuildAdvisorHandler = async (
       testExpectations,
       flsCrudNorms,
       ...(similarLogic !== undefined ? { similarLogic } : {}),
+      ...(unavailableSections.length > 0 ? { unavailableSections } : {}),
       recommendations,
-      boundaries: BOUNDARIES,
+      boundaries:
+        unavailableSections.length > 0
+          ? [
+              ...BOUNDARIES,
+              `INCOMPLETE BRIEFING: ${unavailableSections.length.toString()} of the composed scans failed (${unavailableSections
+                .map((u) => u.scan)
+                .join(', ')}); their sections are null because they were NOT measured, not because they are clean. See \`unavailableSections\`.`,
+            ]
+          : BOUNDARIES,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

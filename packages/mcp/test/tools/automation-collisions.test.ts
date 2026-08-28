@@ -17,6 +17,7 @@ import {
   automationCollisionsHandler,
   automationCollisionsInputSchema,
 } from '../../src/tools/automation-collisions.js';
+import { responseReductionCap } from '../../src/tools/response-budget.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -738,5 +739,112 @@ describe('automationCollisionsHandler — unresolvable object scope', () => {
     const edgeOnlyBoundary = d.boundaries.find((b) => b.includes('EdgeOnly__c'));
     expect(edgeOnlyBoundary).toBeDefined();
     expect(edgeOnlyBoundary).toContain('NO CustomObject node');
+  });
+});
+
+// --- R2 byte-budget honesty ------------------------------------------------
+//
+// A SECOND, deliberately fat vault: one object whose two after-save Flows each
+// write 150 fields. That is 150 save-path field collisions AND 300 self-write
+// cycles on ONE object — enough for either list, on its own, to overflow the
+// per-page byte budget, which is exactly the shape the two defects need:
+//
+//   1. the truncation sentence printed `limit`, not the number of rows it
+//      actually shipped, so a BYTE trim announced "truncated to 200 of 150"
+//      over a 90-row page (and "200 of 150" is not even arithmetically
+//      possible);
+//   2. each list was paged against the FULL default 38 000-byte budget while
+//      both travel in ONE ~39 000-byte envelope, so the two pages together
+//      overflowed it and `jsonResult` tail-trimmed the SECOND list — while its
+//      own `cyclesTruncated` flag, and the count in `boundaries` (which is
+//      honesty-protected from that trim), still claimed the untrimmed number.
+describe('automationCollisionsHandler — byte-budget honesty (R2)', () => {
+  const BIG_FIELD_COUNT = 150;
+  let bigDir: string;
+  let bigStore: GraphStore;
+  let bigCtx: Context;
+
+  beforeAll(async () => {
+    const nodes: Node[] = [
+      node('CustomObject:BigBoth__c', 'CustomObject'),
+      node('Flow:BigCollisionFlowAlpha', 'Flow', { status: 'Active' }),
+      node('Flow:BigCollisionFlowBeta', 'Flow', { status: 'Active' }),
+    ];
+    const edges: Edge[] = [
+      edge('Flow:BigCollisionFlowAlpha', 'CustomObject:BigBoth__c', 'triggersOn', 'declared', {
+        recordTriggerType: 'Update',
+        triggerType: 'RecordAfterSave',
+      }),
+      edge('Flow:BigCollisionFlowBeta', 'CustomObject:BigBoth__c', 'triggersOn', 'declared', {
+        recordTriggerType: 'Update',
+        triggerType: 'RecordAfterSave',
+      }),
+    ];
+    for (let i = 0; i < BIG_FIELD_COUNT; i += 1) {
+      const fieldId = `CustomField:BigBoth__c.Field${String(i).padStart(3, '0')}__c`;
+      for (const flow of ['Flow:BigCollisionFlowAlpha', 'Flow:BigCollisionFlowBeta']) {
+        edges.push(edge(flow, fieldId, 'writesTo', 'parsed', { operation: 'recordUpdate' }));
+      }
+    }
+    bigDir = mkdtempSync(join(tmpdir(), 'sfi-collide-big-'));
+    const opened = await openGraph(join(bigDir, 'big.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    bigStore = opened.value;
+    const imported = await importExtractionResults(bigStore, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`big seed import failed: ${imported.error.message}`);
+    bigCtx = { vaultRoot: bigDir, manifest: FIXTURE_MANIFEST, graph: bigStore } as Context;
+  });
+
+  afterAll(async () => {
+    await closeGraph(bigStore);
+    rmSync(bigDir, { recursive: true, force: true });
+  });
+
+  it('the truncation sentence counts the rows actually SHIPPED, never `limit`', async () => {
+    const r = await automationCollisionsHandler(bigCtx, { object: 'BigBoth__c', limit: 200 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The byte budget, not `limit`, is the binding constraint here.
+    expect(d.summary.collisionsTruncated).toBe(true);
+    expect(d.collisions.length).toBeLessThan(BIG_FIELD_COUNT);
+    const note = d.boundaries.find((b) => b.startsWith('Collisions truncated'));
+    expect(note).toBeDefined();
+    expect(note).toContain(`to ${d.collisions.length} of ${BIG_FIELD_COUNT}`);
+    // "200 of 150" is not a number of shipped rows — it is the requested cap.
+    expect(note).not.toContain('to 200 of');
+
+    const cycleNote = d.boundaries.find((b) => b.startsWith('Cycles truncated'));
+    expect(cycleNote).toBeDefined();
+    expect(cycleNote).toContain(`to ${d.cycles.length} of ${d.summary.cyclesFound}`);
+    expect(cycleNote).not.toContain('to 200 of');
+  });
+
+  it('a BYTE-trimmed page never tells the caller that raising `limit` returns more', async () => {
+    const r = await automationCollisionsHandler(bigCtx, { object: 'BigBoth__c', limit: 200 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // 150 collisions were found and `limit` was 200: `limit` did not cut this
+    // page, the byte budget did, so "raise `limit`" is advice that cannot work.
+    expect(d.summary.fieldsWithMultipleWriters).toBeLessThan(200);
+    const note = d.boundaries.find((b) => b.startsWith('Collisions truncated'));
+    expect(note).toBeDefined();
+    expect(note).not.toMatch(/raise `limit`/);
+  });
+
+  it('both lists share ONE byte budget, so the envelope never silently tail-trims the second', async () => {
+    const r = await automationCollisionsHandler(bigCtx, { object: 'BigBoth__c', limit: 200 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const payloadBytes = Buffer.byteLength(JSON.stringify(r.value.data), 'utf8');
+    // Pre-fix each list was paged against the FULL default 38 000-byte budget,
+    // so the two together were ~76 KB inside one ~39 KB envelope: `jsonResult`
+    // dropped the tail of `cycles` while `cyclesTruncated` and the boundary
+    // count still described the untrimmed list.
+    expect(payloadBytes).toBeLessThanOrEqual(responseReductionCap());
+    // Both lists still ship something — a shared budget must not starve one.
+    expect(r.value.data.collisions.length).toBeGreaterThan(0);
+    expect(r.value.data.cycles.length).toBeGreaterThan(0);
   });
 });

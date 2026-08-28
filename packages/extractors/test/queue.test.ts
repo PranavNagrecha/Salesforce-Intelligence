@@ -249,6 +249,12 @@ describe('extractQueue', () => {
           sobjectTypeCount: 0,
           memberCount: 0,
           memberEmails: [],
+          // A queue with no <queueMembers> at all was still SCANNED across
+          // every channel: `memberChannels: []` is the sentinel that says so.
+          queueMembersDeclared: false,
+          queueMembersUnparsed: false,
+          memberChannels: [],
+          memberSource: 'user-direct',
         });
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -390,6 +396,300 @@ describe('extractQueue', () => {
           'User:jsherman@neutral-org.example',
           'User:tlackraj@neutral-org.example',
         ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // MEMBER CHANNELS — a queue staffed by a role or a group is NOT an empty queue
+  //
+  // `<queueMembers>` is a container of one WRAPPER ELEMENT PER MEMBER CHANNEL,
+  // not a flat user list. Real Queue XML retrieved from a live org carries both
+  // `<users><user>…</user></users>` and `<roles><role>…</role></roles>`, and one
+  // queue in that corpus declares `<roles>` with NO `<users>` at all. Counting
+  // only the `users` channel reported that queue as `memberCount: 0`, which
+  // `sfi.empty_queues_and_groups` renders as "empty — review for deletion".
+  // That is the opposite of the truth.
+  //
+  // The extractor therefore counts EVERY channel the XML declares (a deny-list,
+  // not an allow-list of element names) and publishes `memberChannels` so a
+  // consumer can tell "0 because there are none" from "0 because we only looked
+  // at users": a node that carries `memberChannels` was scanned across every
+  // channel; a node with no such property came from a users-only refresh.
+  // ───────────────────────────────────────────────────────────────────────────
+  describe('member channels', () => {
+    interface Channel {
+      readonly channel: string;
+      readonly memberKind: string;
+      readonly memberCount: number;
+      readonly topologyAsserted: boolean;
+    }
+    const channelsOf = (props: Record<string, unknown>): readonly Channel[] =>
+      props['memberChannels'] as readonly Channel[];
+
+    it('a queue whose ONLY members are a role does NOT report zero members', async () => {
+      // The real-org shape, verbatim: <queueMembers><roles><role>…</role></roles>
+      // with no <users> block whatsoever.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <doesIncludeBosses>false</doesIncludeBosses>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <name>Role Staffed Queue</name>
+    <queueMembers>
+        <roles>
+            <role>Regional_Reviewer</role>
+        </roles>
+    </queueMembers>
+    <queueSobject>
+        <sobjectType>Case</sobjectType>
+    </queueSobject>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('Role_Staffed_Queue.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        // THE BUG: this was 0, and `empty_queues_and_groups` called the queue empty.
+        expect(node.properties['memberCount']).toBe(1);
+        // No user is fabricated out of a role member.
+        expect(node.properties['memberEmails']).toEqual([]);
+        expect(channelsOf(node.properties)).toEqual([
+          { channel: 'roles', memberKind: 'role', memberCount: 1, topologyAsserted: true },
+        ]);
+        // The role topology is asserted as a hasMember edge, exactly as the
+        // Group extractor's `Role` variant does.
+        const memberEdges = result.value.edges.filter((e) => e.edgeType === 'hasMember');
+        expect(memberEdges).toHaveLength(1);
+        expect(memberEdges[0]?.toId).toBe('Role:Regional_Reviewer');
+        expect(memberEdges[0]?.properties).toEqual({ memberKind: 'role' });
+        expect(memberEdges[0]?.confidence).toBe('declared');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a queue whose ONLY members are a public group does NOT report zero members', async () => {
+      // The wrapper element name for the group channel is NOT hardcoded by the
+      // extractor, so this case cannot become a false zero if the schema spells
+      // it differently than a reader expects. Both spellings must count.
+      for (const wrapper of [
+        '<groups><group>Support_Team</group></groups>',
+        '<publicGroups><publicGroup>Support_Team</publicGroup></publicGroups>',
+      ]) {
+        const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <doesIncludeBosses>false</doesIncludeBosses>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <name>Group Staffed Queue</name>
+    <queueMembers>
+        ${wrapper}
+    </queueMembers>
+    <queueSobject>
+        <sobjectType>Case</sobjectType>
+    </queueSobject>
+</Queue>`;
+        const { dir, path } = await writeTempQueueXml('Group_Staffed_Queue.queue-meta.xml', xml);
+        try {
+          const result = await extractQueue(path);
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          const node = result.value.nodes[0];
+          expect(node).toBeDefined();
+          if (!node) return;
+          expect(node.properties['memberCount']).toBe(1);
+          const channels = channelsOf(node.properties);
+          expect(channels).toHaveLength(1);
+          expect(channels[0]?.memberCount).toBe(1);
+          // Counted honestly, but the membership topology is NOT asserted for a
+          // channel this extractor has no verified id shape for — mirroring the
+          // Group extractor's "counted, but topology not asserted" rule.
+          expect(channels[0]?.topologyAsserted).toBe(false);
+          expect(result.value.edges.filter((e) => e.edgeType === 'hasMember')).toEqual([]);
+          // ...and the node says so, so a consumer never reads the silence as
+          // "this queue has only these members".
+          expect(node.properties['memberSource']).toBe('unknown');
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it('counts roles AND users on a queue that declares both', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <doesIncludeBosses>false</doesIncludeBosses>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <name>Mixed Queue</name>
+    <queueMembers>
+        <roles>
+            <role>Regional_Reviewer</role>
+        </roles>
+        <users>
+            <user>first.reviewer@neutral-org.example</user>
+            <user>second.reviewer@neutral-org.example</user>
+        </users>
+    </queueMembers>
+    <queueSobject>
+        <sobjectType>Case</sobjectType>
+    </queueSobject>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('Mixed_Queue.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        // 1 role + 2 users. The old code answered 2 and silently dropped the role.
+        expect(node.properties['memberCount']).toBe(3);
+        expect(node.properties['memberEmails']).toEqual([
+          'first.reviewer@neutral-org.example',
+          'second.reviewer@neutral-org.example',
+        ]);
+        expect(channelsOf(node.properties)).toEqual([
+          { channel: 'roles', memberKind: 'role', memberCount: 1, topologyAsserted: true },
+          { channel: 'users', memberKind: 'user', memberCount: 2, topologyAsserted: true },
+        ]);
+        expect(node.properties['memberSource']).toBe('role-resolved');
+        const targets = result.value.edges
+          .filter((e) => e.edgeType === 'hasMember')
+          .map((e) => e.toId)
+          .sort();
+        expect(targets).toEqual([
+          'Role:Regional_Reviewer',
+          'User:first.reviewer@neutral-org.example',
+          'User:second.reviewer@neutral-org.example',
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('publishes memberChannels even when there is no <queueMembers> at all (typed absence)', async () => {
+      // R1 in spirit: whether every channel was scanned is decided by whether
+      // the node CARRIES `memberChannels`, never by whether it is empty. This
+      // queue was scanned across every channel and genuinely holds none.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Truly Empty Queue</name>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('Truly_Empty_Queue.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(Object.keys(node.properties)).toContain('memberChannels');
+        expect(channelsOf(node.properties)).toEqual([]);
+        expect(node.properties['queueMembersDeclared']).toBe(false);
+        expect(node.properties['memberCount']).toBe(0);
+        // A confirmed-clean queue must NOT be poisoned into 'unknown' — that
+        // would break the one tool whose job is to find empty queues.
+        expect(node.properties['memberSource']).toBe('user-direct');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('counts EVERY <queueMembers> block, not just the first', async () => {
+      // `unwrapSingle` kept `value[0]` and dropped the rest. A second block's
+      // channels vanishing is the same "we only looked at one place" defect as
+      // the users-only count, so the walk must aggregate across blocks.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Two Block Queue</name>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <queueMembers>
+        <roles>
+            <role>Regional_Reviewer</role>
+        </roles>
+    </queueMembers>
+    <queueMembers>
+        <users>
+            <user>second.block@neutral-org.example</user>
+        </users>
+    </queueMembers>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('Two_Block_Queue.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.properties['memberCount']).toBe(2);
+        expect(node.properties['memberEmails']).toEqual(['second.block@neutral-org.example']);
+        expect(channelsOf(node.properties)).toEqual([
+          { channel: 'roles', memberKind: 'role', memberCount: 1, topologyAsserted: true },
+          { channel: 'users', memberKind: 'user', memberCount: 1, topologyAsserted: true },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses to call a queue empty off a <queueMembers> block it could not read', async () => {
+      // Well-formed XML, schema-invalid content. A `memberCount: 0` derived
+      // from a block we did not understand is a CONFIDENT ZERO — the exact
+      // thing `sfi.empty_queues_and_groups` must never be handed.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Unreadable Members Queue</name>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <queueMembers>unexpected text</queueMembers>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('Unreadable_Members_Queue.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.properties['queueMembersUnparsed']).toBe(true);
+        expect(node.properties['memberSource']).toBe('unknown');
+        expect(node.properties['memberCount']).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('distinguishes an EMPTY <users/> channel from an absent <queueMembers>', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Declared Empty Queue</name>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <queueMembers>
+        <users/>
+    </queueMembers>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('Declared_Empty_Queue.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.properties['queueMembersDeclared']).toBe(true);
+        expect(node.properties['queueMembersUnparsed']).toBe(false);
+        expect(channelsOf(node.properties)).toEqual([
+          { channel: 'users', memberKind: 'user', memberCount: 0, topologyAsserted: true },
+        ]);
+        expect(node.properties['memberCount']).toBe(0);
+        // An empty wrapper for an UNMODELED channel must not flip the verdict
+        // either — nothing was dropped, so nothing is unknown.
+        expect(node.properties['memberSource']).toBe('user-direct');
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

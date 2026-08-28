@@ -531,3 +531,117 @@ describe('event_topology — object scope honesty', () => {
     expect(data.platformEvents.length).toBeGreaterThan(0);
   });
 });
+
+// =============================================================================
+// EVENT-TOPOLOGY-ALIAS-DISAGREEMENT (R4, second half). The existence check
+// above resolves ONE name, but the name it resolved was picked by a bare
+// `input.objectApiName ?? input.object` — so a caller (or a router binding two
+// slots) that passed two DIFFERENT objects got a confident answer about
+// whichever key happened to win, with `appliedScope.object` echoing only that
+// one. The shared resolver already refuses disagreeing aliases; the tool has
+// to hand it BOTH keys for that refusal to fire.
+// =============================================================================
+
+describe('event_topology — disagreeing object aliases', () => {
+  it('FAIL-BEFORE/PASS-AFTER: refuses when objectApiName and object name different targets', async () => {
+    const parsed = eventTopologyInputSchema.parse({
+      objectApiName: 'Contact',
+      object: 'Account',
+    });
+    const result = await eventTopologyHandler(ctx, parsed);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toMatch(/object aliases name different targets/i);
+  });
+
+  it('still accepts two AGREEING aliases, including one in ChangeEvent form', async () => {
+    const data = await run({ objectApiName: 'Contact', object: 'ContactChangeEvent' });
+    expect(data.appliedScope.object).toBe('Contact');
+    expect(data.cdcEntities.map((e) => e.entity)).toEqual(['Contact']);
+  });
+});
+
+// =============================================================================
+// EVENT-TOPOLOGY-SINGLE-PAGE-EVENT-PLANE-SCAN (R1). `collectMembers` and the
+// channel enumeration each issued ONE `listNodesByType` capped at 500 with no
+// SQL OFFSET and no cap detection, while the module header defines VERIFIED
+// NONE as "requested, retrieved without error, and no retrieved member selects
+// a Change Event". On an org whose CDC members sort past the cap the scan
+// never reached them, so `cdcEntities` came back empty wearing the
+// "This is a CHECKED zero, not an unchecked one" disclosure, and
+// `coverage.platformEventChannelMembersModeled` / `platformEventChannelsModeled`
+// reported the cap as if it were the whole org.
+// =============================================================================
+
+/** One bulk channel + one bulk member per index, id-sorted BEFORE `ChangeEvents`. */
+const BULK_CHANNEL_COUNT = 500;
+
+const bulkChannelSeed: ExtractionResult = {
+  nodes: Array.from({ length: BULK_CHANNEL_COUNT }, (_, i) => {
+    const tag = `Bulk_${String(i).padStart(4, '0')}`;
+    return [
+      makeNode({
+        id: `PlatformEventChannel:${tag}__chn`,
+        type: 'PlatformEventChannel',
+        apiName: `${tag}__chn`,
+        properties: { channelType: 'event' },
+      }),
+      makeNode({
+        id: `PlatformEventChannelMember:${tag}`,
+        type: 'PlatformEventChannelMember',
+        apiName: tag,
+        parentId: `PlatformEventChannel:${tag}__chn`,
+        properties: { eventChannel: `${tag}__chn`, selectedEntity: `${tag}__c` },
+      }),
+    ];
+  }).flat(),
+  edges: [],
+};
+
+describe('event_topology — the event-plane scan reaches past the 500-node page', () => {
+  let bulkDir: string;
+  let bulkStore: GraphStore;
+  let bulkCtx: Context;
+
+  beforeAll(async () => {
+    bulkDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-event-bulk-'));
+    const opened = await openGraph(join(bulkDir, 'bulk.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    bulkStore = opened.value;
+    const imported = await importExtractionResults(bulkStore, [
+      bulkChannelSeed,
+      cdcSeed,
+      baseObjectSeed,
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    bulkCtx = { vaultRoot: bulkDir, manifest: RETRIEVED_MANIFEST, graph: bulkStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(bulkStore);
+    rmSync(bulkDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: finds a CDC member that sorts past the first page', async () => {
+    const result = await eventTopologyHandler(bulkCtx, {});
+    if (!result.ok) throw new Error(result.error.message);
+    const data = result.value.data;
+    expect(data.cdcEntities.map((e) => e.entity)).toEqual(['Contact']);
+    // The capped scan used to emit the org-wide CHECKED-zero line here.
+    expect(data.boundaries.join(' ')).not.toContain('CHECKED zero');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: counts every member and channel, not just the first page', async () => {
+    const result = await eventTopologyHandler(bulkCtx, {});
+    if (!result.ok) throw new Error(result.error.message);
+    const data = result.value.data;
+    expect(data.coverage.platformEventChannelMembersModeled).toBe(
+      BULK_CHANNEL_COUNT + 1,
+    );
+    expect(data.coverage.platformEventChannelsModeled).toBe(BULK_CHANNEL_COUNT + 1);
+    expect(data.coverage.cdcChannelMembersModeled).toBe(1);
+    // A complete walk is NOT a truncated one — the residual cap sits far above.
+    expect(data.coverage.eventPlaneScanTruncated).toBe(false);
+  });
+});

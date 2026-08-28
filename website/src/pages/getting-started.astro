@@ -91,16 +91,16 @@ const jsonld = [
 
         <h2 id="install">2. Install - register the MCP server</h2>
         <p><strong>Claude Code</strong> - from your DX repo, register it project-scoped (writes a <code>.mcp.json</code> at the repo root, which you can commit so your team shares it):</p>
-        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</pre></div>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp --vault &quot;$PWD/org-kb&quot;</pre></div>
         <p>Use <code>--scope user</code> to make it available in every project on your machine, or <code>--scope local</code> (the default) for just this project, private to you.</p>
 
-        <p><strong>Claude Desktop, or any other MCP client</strong> - add this block to the client's MCP config (Claude Desktop on macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>), then restart the client:</p>
+        <p><strong>Claude Desktop, or any other MCP client</strong> - add this block to the client's MCP config (Claude Desktop on macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>), then restart the client. Pass an <strong>absolute <code>--vault</code> path</strong>: an MCP host is almost never launched inside your Salesforce project, so without it the server looks for <code>./org-kb</code> relative to whatever directory the host happened to start in and finds no org to answer about.</p>
         <div class="code-block"><div class="cb-head"><span class="fname">claude_desktop_config.json</span></div><pre>{'{'}
   <span class="tok-s">"mcpServers"</span>: {'{'}
     <span class="tok-s">"sf-intelligence"</span>: {'{'}
       <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
       <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
-      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>]
+      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>, <span class="tok-s">"--vault"</span>, <span class="tok-s">"/abs/path/to/org-kb"</span>]
     {'}'}
   {'}'}
 {'}'}</pre></div>
@@ -113,7 +113,7 @@ const jsonld = [
     <span class="tok-s">"sf-intelligence"</span>: {'{'}
       <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
       <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
-      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>],
+      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>, <span class="tok-s">"--vault"</span>, <span class="tok-s">"/abs/path/to/org-kb"</span>],
       <span class="tok-s">"env"</span>: {'{'} <span class="tok-s">"SFI_TOOL_PROFILE"</span>: <span class="tok-s">"full"</span> {'}'}
     {'}'}
   {'}'}

@@ -833,3 +833,191 @@ describe('generateSharingSummaryHandler — object scope existence (honesty)', (
     expect(r.value.data.targetMissing).toBeUndefined();
   });
 });
+
+// =============================================================================
+// FULL-TYPE-SCAN (0.3.3) — the single-page `listNodesByType(limit: 500)` fetch.
+//
+// SharingRule / RestrictionRule / ScopingRule / Role / CustomObject were each
+// fetched with ONE `listNodesByType` call at the graph's HARD `LIST_MAX_LIMIT`
+// (500) and NO advancing SQL `OFFSET`. Every node past id-ASC #500 was never
+// fetched, so an object whose rules sort late rendered an EMPTY "Sharing Rules"
+// table and an EMPTY "Restriction & Scoping Rules" section — read by a security
+// reviewer as "OWD is the whole story". None of the file's honesty flags fires
+// for that cap: `sharingRuleNotRetrieved` consults the MANIFEST, which
+// correctly reports SharingRule as retrieved.
+// =============================================================================
+describe('generateSharingSummaryHandler — rules past the 500-node id-ASC cap', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  const FILLER_RULES = 504;
+  const lateSeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: 'CustomObject:Aaa_Filler__c',
+        type: 'CustomObject',
+        apiName: 'Aaa_Filler__c',
+        label: 'Aaa Filler',
+        properties: { sharingModel: 'Private' },
+      }),
+      makeNode({
+        id: 'CustomObject:Zzz_Target__c',
+        type: 'CustomObject',
+        apiName: 'Zzz_Target__c',
+        label: 'Zzz Target',
+        properties: { sharingModel: 'Private' },
+      }),
+      // 504 SharingRules that sort BEFORE the target's rule (id ASC), so the
+      // target's rule is node #505 of the type — past the 500 cap.
+      ...Array.from({ length: FILLER_RULES }, (_, i) =>
+        makeNode({
+          id: `SharingRule:Aaa_Filler__c.R${String(i).padStart(4, '0')}`,
+          type: 'SharingRule',
+          apiName: `Aaa_Filler__c.R${String(i).padStart(4, '0')}`,
+          parentId: 'CustomObject:Aaa_Filler__c',
+          properties: { accessLevel: 'Read', ruleType: 'owner' },
+        }),
+      ),
+      makeNode({
+        id: 'SharingRule:Zzz_Target__c.LateOwnerRule',
+        type: 'SharingRule',
+        apiName: 'Zzz_Target__c.LateOwnerRule',
+        parentId: 'CustomObject:Zzz_Target__c',
+        properties: { accessLevel: 'Edit', ruleType: 'owner' },
+      }),
+      // Same shape for the NARROWING plane: 504 filler RestrictionRules, then
+      // the target's restriction rule at #505.
+      ...Array.from({ length: FILLER_RULES }, (_, i) =>
+        makeNode({
+          id: `RestrictionRule:Aaa_Filler__c.RR${String(i).padStart(4, '0')}`,
+          type: 'RestrictionRule',
+          apiName: `Aaa_Filler__c.RR${String(i).padStart(4, '0')}`,
+          parentId: 'CustomObject:Aaa_Filler__c',
+          properties: { enforcementType: 'Restrict', active: 'true', recordFilter: 'OwnerId=$User.Id' },
+        }),
+      ),
+      makeNode({
+        id: 'RestrictionRule:Zzz_Target__c.LateRestriction',
+        type: 'RestrictionRule',
+        apiName: 'Zzz_Target__c.LateRestriction',
+        parentId: 'CustomObject:Zzz_Target__c',
+        properties: { enforcementType: 'Restrict', active: 'true', recordFilter: 'OwnerId=$User.Id' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('late-rules.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [lateSeed]);
+    if (!imported.ok) throw new Error(`late seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('surfaces a SharingRule that sorts past node 500 (never "(no sharing rules)")', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'Zzz_Target__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('Zzz_Target__c.LateOwnerRule');
+    expect(body).not.toContain('_(no sharing rules)_');
+  });
+
+  it('surfaces a RestrictionRule that sorts past node 500 (a NARROWING rule must never vanish)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'Zzz_Target__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.document.body).toContain('Zzz_Target__c.LateRestriction');
+  });
+});
+
+// =============================================================================
+// TRUE-OBJECT-TOTAL (0.3.3) — `totalMatchingObjects` was measured on the
+// already-capped 500-node page, so the truncation disclosure's OWN number was
+// truncated ("50 of 500" on a 520-object org). And an object sorting past #500
+// was never in the page to be filtered to, so a REAL, fully-extracted object
+// rendered "_(no CustomObjects matched the filter)_".
+// =============================================================================
+describe('generateSharingSummaryHandler — objects past the 500-node id-ASC cap', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  const FILLER_OBJECTS = 519;
+  const TOTAL_OBJECTS = FILLER_OBJECTS + 1;
+  const bigSeed: ExtractionResult = {
+    nodes: [
+      ...Array.from({ length: FILLER_OBJECTS }, (_, i) => {
+        const api = `Cap_Object_${String(i).padStart(3, '0')}__c`;
+        return makeNode({
+          id: `CustomObject:${api}`,
+          type: 'CustomObject',
+          apiName: api,
+          label: api,
+          properties: { sharingModel: 'Private' },
+        });
+      }),
+      makeNode({
+        id: 'CustomObject:Zzz_Late_Object__c',
+        type: 'CustomObject',
+        apiName: 'Zzz_Late_Object__c',
+        label: 'Zzz Late Object',
+        properties: { sharingModel: 'ControlledByParent' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('object-cap-tail.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [bigSeed]);
+    if (!imported.ok) throw new Error(`big seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('reports the TRUE matching-object total, not the 500-node page length', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanTruncated).toBe(true);
+    expect(result.value.data.totalMatchingObjects).toBe(TOTAL_OBJECTS);
+    expect(result.value.data.document.body).toContain(`50 of ${TOTAL_OBJECTS} matching`);
+  });
+
+  it('answers an objectFilter for a REAL object that sorts past node 500', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'Zzz_Late_Object__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).not.toContain('no CustomObjects matched the filter');
+    expect(body).not.toContain('never retrieved into the vault');
+    expect(body).toContain('(`Zzz_Late_Object__c`)');
+    expect(body).toContain('`ControlledByParent`');
+  });
+
+  it('a WRONG-CASE name for an object past node 500 still answers (never a confident empty)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'zzz_late_object__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).not.toContain('no CustomObjects matched the filter');
+    expect(body).toContain('(`Zzz_Late_Object__c`)');
+  });
+});

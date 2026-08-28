@@ -1071,3 +1071,149 @@ describe('guestExposureReportHandler — unresolvable object scope', () => {
     expect(d.findings.some((f) => f.kind === 'apex-enabled')).toBe(true);
   });
 });
+
+// =============================================================================
+// GUEST-SHARING-RULE-SCAN-STOPS-AT-ONE-PAGE (R6).
+//
+// The SharingRule scan was ONE `listNodesByType` page — `ORDER BY id ASC LIMIT
+// <cap> OFFSET 0` over the whole type — while CustomSite and Network in the
+// same handler were drained window-by-window. Any org whose SharingRule count
+// exceeds the per-type cap (routine) had every guest rule past id-rank <cap>
+// dropped: no finding, no `orphanGuestRules` row, not in `summary.totalFindings`
+// — and the tail was unreachable from ANY call, because `limit`/`offset`/
+// `cursor` page `findings` and `orphanOffset` pages the orphan OUTPUT rows.
+// Nothing advanced the scan. The `scanTruncated` flag named an answer no caller
+// could complete, on the highest-stakes surface this tool has: record-level
+// grants to unauthenticated internet visitors.
+//
+// The cap is env-overridable precisely so this can be exercised without 500+
+// fixture nodes. Guest rules are seeded at the id-ASC TAIL, behind a window of
+// non-guest rules, so a single-page scan cannot see them.
+// =============================================================================
+describe('guestExposureReportHandler — the SharingRule scan reaches past the first page', () => {
+  const WINDOW = 2;
+  let tailStore: GraphStore;
+  let tailDir: string;
+  let tailCtx: Context;
+  let priorLimit: string | undefined;
+
+  const rule = (id: string, ruleType: string) =>
+    node({
+      id,
+      type: 'SharingRule',
+      apiName: id.slice('SharingRule:'.length),
+      properties: {
+        ruleType,
+        accessLevel: 'Edit',
+        siteName: 'NoSuchSite',
+        sObjectType: id.slice('SharingRule:'.length).split('.')[0],
+      },
+    });
+
+  beforeAll(async () => {
+    priorLimit = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = String(WINDOW);
+    tailDir = mkdtempSync(join(tmpdir(), 'sfi-guest-scan-tail-'));
+    const opened = await openGraph(join(tailDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    tailStore = opened.value;
+    const imported = await importExtractionResults(tailStore, [
+      {
+        nodes: [
+          // id-ASC ranks 0..1 — a full first window, and NOT guest rules.
+          rule('SharingRule:Account.Criteria_A', 'criteriaBased'),
+          rule('SharingRule:Account.Criteria_B', 'criteriaBased'),
+          // id-ASC ranks 2..3 — the guest rules, behind the first window.
+          rule('SharingRule:Case.Guest_Tail_One', 'guest'),
+          rule('SharingRule:Order.Guest_Tail_Two', 'guest'),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    tailCtx = { vaultRoot: tailDir, manifest: MANIFEST, graph: tailStore } as unknown as Context;
+  });
+
+  afterAll(async () => {
+    await closeGraph(tailStore);
+    rmSync(tailDir, { recursive: true, force: true });
+    if (priorLimit === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = priorLimit;
+  });
+
+  it('finds guest rules that sort BEHIND the first scan window', async () => {
+    const r = await guestExposureReportHandler(tailCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect((d.orphanGuestRules ?? []).map((o) => o.ruleId)).toEqual([
+      'SharingRule:Case.Guest_Tail_One',
+      'SharingRule:Order.Guest_Tail_Two',
+    ]);
+    expect(d.orphanGuestRulesPage?.totalCount).toBe(2);
+    // A criteria rule is not a guest rule — the extra windows must not smuggle
+    // non-guest rules into a record-level-exposure bucket.
+    expect((d.orphanGuestRules ?? []).some((o) => o.ruleId.includes('Criteria'))).toBe(false);
+  });
+
+  // The community corpora had their own walker (`drainType`) until this file
+  // adopted the shared helper for all three types. This pins that the swap did
+  // not cost them their multi-window reach: a site behind the first window is
+  // still audited, not silently dropped from `communities`.
+  it('still reaches a CustomSite that sorts BEHIND the first scan window', async () => {
+    const siteDir = mkdtempSync(join(tmpdir(), 'sfi-guest-site-tail-'));
+    const opened = await openGraph(join(siteDir, 'g.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    try {
+      const site = (name: string) =>
+        node({
+          id: `CustomSite:${name}`,
+          type: 'CustomSite',
+          apiName: name,
+          label: name,
+          properties: {
+            active: true,
+            siteType: 'Visualforce',
+            masterLabel: name,
+            guestProfileName: `${name} Profile`,
+          },
+        });
+      const imported = await importExtractionResults(opened.value, [
+        { nodes: [site('Aaa_Portal'), site('Bbb_Portal'), site('Zzz_Portal')], edges: [] },
+      ]);
+      expect(imported.ok).toBe(true);
+      const siteCtx = {
+        vaultRoot: siteDir,
+        manifest: MANIFEST,
+        graph: opened.value,
+      } as unknown as Context;
+      const r = await guestExposureReportHandler(siteCtx, {});
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.communities.map((c) => c.communityId)).toEqual([
+        'CustomSite:Aaa_Portal',
+        'CustomSite:Bbb_Portal',
+        'CustomSite:Zzz_Portal',
+      ]);
+      expect(d.summary.communities).toBe(3);
+      expect(d.scanTruncated).toBe(false);
+    } finally {
+      await closeGraph(opened.value);
+      rmSync(siteDir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops claiming truncation once the type is exhausted, and drops the dead-end note', async () => {
+    const r = await guestExposureReportHandler(tailCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The whole type was read across windows, so the count is the org's number
+    // — not a floor. `At least N` would now understate what was established.
+    expect(d.scanTruncated).toBe(false);
+    expect(d.disclosures.some((s) => s.includes('At least'))).toBe(false);
+    expect(d.disclosures.some((s) => s.includes('SFI_NODE_SCAN_LIMIT'))).toBe(false);
+  });
+});

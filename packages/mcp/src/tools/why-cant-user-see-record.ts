@@ -210,6 +210,7 @@ import type { Context } from '../server.js';
 import { coercePrefix } from './coerce-id.js';
 import { declaredOnlyDependencyDisclosure } from './declared-only-disclosure.js';
 import { expandGroupMembership } from './group-membership.js';
+import { resolveObjectAliasInVault } from './input-aliases.js';
 import {
   expandPermissionSetGroup,
   loadMutingPermissions,
@@ -217,6 +218,7 @@ import {
   type LoadedMuting,
   type MutingObjectFlag,
 } from './permission-set-group.js';
+import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 /**
  * The set of OWD values that imply records are private and access
@@ -1584,7 +1586,7 @@ const evaluateSystemPermissions = async (
   // God-mode present — but an active restriction rule can still filter this user.
   const restrictionResult = await listObjectChildRules(ctx, componentId, 'RestrictionRule');
   if (!restrictionResult.ok) return err(restrictionResult.error);
-  if (restrictionResult.value.length > 0) {
+  if (restrictionResult.value.rules.length > 0) {
     return ok(
       step(
         'SystemPermission',
@@ -2148,18 +2150,69 @@ const evaluateTerritoryAndGuestRules = (
   return steps;
 };
 
+/** What a child-rule scan found, plus whether the page itself was capped. */
+interface ChildRuleScan {
+  readonly rules: readonly Node[];
+  /** True when the page came back AT the cap — more rules may exist. */
+  readonly truncated: boolean;
+  /** The page size actually used, for the disclosure wording. */
+  readonly limit: number;
+}
+
 /**
  * List child rules of a given type parented by `componentId`. Restriction
  * and scoping rules attach via `parentId` on the node (enterprise extractor).
+ *
+ * CHILD-RULE-SCAN-WAS-ALPHABETICALLY-CAPPED: this used to fetch ONE org-wide
+ * `listNodesByType(ruleType, {limit: 500})` page with no `OFFSET` and
+ * post-filter by `parentId` in memory. `listNodesByType` serves
+ * `ORDER BY id ASC`, so on an org with more than 500 rules of the type a rule
+ * belonging to THIS object but sorting past the 500th was never fetched — and
+ * the caller then emitted a CHECKED negative ("no restriction rules attached
+ * to this object") for a scan that never looked, or, on the god-mode branch,
+ * flipped an honest `unknown` into a confident `visible`. A RestrictionRule is
+ * precisely the thing that hides records a user would otherwise see, so that
+ * was the wrong answer to this tool's headline question.
+ *
+ * The fix is cheaper than the bug: `listNodesByType` takes a `parentId` option
+ * that filters at the DB layer (correct pagination, not a post-filtered page),
+ * so the whole org's rule count no longer competes for the page. The page size
+ * comes from the shared {@link clampedNodeScanLimit} rather than a hardcoded
+ * literal, and a page that still comes back AT the cap is disclosed via
+ * {@link scanHitCap} / {@link scanTruncationNote} instead of being read as a
+ * complete enumeration.
  */
 const listObjectChildRules = async (
   ctx: Context,
   componentId: ComponentId,
   ruleType: 'RestrictionRule' | 'ScopingRule',
-): Promise<Result<readonly Node[], string>> => {
-  const nodesResult = await listNodesByType(ctx.graph, ruleType, { limit: 500 });
+): Promise<Result<ChildRuleScan, string>> => {
+  const limit = clampedNodeScanLimit();
+  const nodesResult = await listNodesByType(ctx.graph, ruleType, {
+    parentId: componentId,
+    limit,
+  });
   if (!nodesResult.ok) return err(nodesResult.error.message);
-  return ok(nodesResult.value.filter((node) => node.parentId === componentId));
+  const rules = nodesResult.value;
+  return ok({ rules, truncated: scanHitCap(rules.length, limit), limit });
+};
+
+/**
+ * Append the scan-cap disclosure to the LAST rule step when the per-object page
+ * came back at the cap, so an enumeration that may be short never reads as
+ * exhaustive. Every rule step is already `unknown`, so this changes wording,
+ * not the verdict.
+ */
+const withChildRuleScanDisclosure = (
+  steps: readonly AccessReasoningStep[],
+  scan: ChildRuleScan,
+  ruleType: 'RestrictionRule' | 'ScopingRule',
+): readonly AccessReasoningStep[] => {
+  if (!scan.truncated || steps.length === 0) return steps;
+  const note = scanTruncationNote([ruleType], scan.limit);
+  return steps.map((s, i) =>
+    i === steps.length - 1 ? { ...s, reason: `${s.reason} — ${note}` } : s,
+  );
 };
 
 /**
@@ -2172,8 +2225,9 @@ const evaluateRestrictionRules = async (
   componentId: ComponentId,
 ): Promise<Result<readonly AccessReasoningStep[], string>> => {
   const rulesResult = await listObjectChildRules(ctx, componentId, 'RestrictionRule');
-  if (!rulesResult.ok) return rulesResult;
-  if (rulesResult.value.length === 0) {
+  if (!rulesResult.ok) return err(rulesResult.error);
+  const scan = rulesResult.value;
+  if (scan.rules.length === 0) {
     return ok([
       step(
         'RestrictionRule',
@@ -2183,12 +2237,16 @@ const evaluateRestrictionRules = async (
     ]);
   }
   return ok(
-    rulesResult.value.map((rule) =>
-      step(
-        'RestrictionRule',
-        'unknown',
-        `restriction rule ${rule.id} may hide records from this user; record-level criteria evaluation required`,
+    withChildRuleScanDisclosure(
+      scan.rules.map((rule) =>
+        step(
+          'RestrictionRule',
+          'unknown',
+          `restriction rule ${rule.id} may hide records from this user; record-level criteria evaluation required`,
+        ),
       ),
+      scan,
+      'RestrictionRule',
     ),
   );
 };
@@ -2202,8 +2260,9 @@ const evaluateScopingRules = async (
   componentId: ComponentId,
 ): Promise<Result<readonly AccessReasoningStep[], string>> => {
   const rulesResult = await listObjectChildRules(ctx, componentId, 'ScopingRule');
-  if (!rulesResult.ok) return rulesResult;
-  if (rulesResult.value.length === 0) {
+  if (!rulesResult.ok) return err(rulesResult.error);
+  const scan = rulesResult.value;
+  if (scan.rules.length === 0) {
     return ok([
       step(
         'ScopingRule',
@@ -2213,12 +2272,16 @@ const evaluateScopingRules = async (
     ]);
   }
   return ok(
-    rulesResult.value.map((rule) =>
-      step(
-        'ScopingRule',
-        'unknown',
-        `scoping rule ${rule.id} may limit visible records; record-level evaluation required`,
+    withChildRuleScanDisclosure(
+      scan.rules.map((rule) =>
+        step(
+          'ScopingRule',
+          'unknown',
+          `scoping rule ${rule.id} may limit visible records; record-level evaluation required`,
+        ),
       ),
+      scan,
+      'ScopingRule',
     ),
   );
 };
@@ -2427,8 +2490,6 @@ const aggregateVerdict = (
   return 'restricted';
 };
 
-/** Canonical id prefix for the object being checked (`objectApiName` coerces to it). */
-const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
 /** Canonical-id prefixes for the four userContext id families. */
 const PROFILE_PREFIX = 'Profile:';
 const PERMISSION_SET_PREFIX = 'PermissionSet:';
@@ -2858,32 +2919,41 @@ export const whyCantUserSeeRecordHandler = async (
   input: WhyCantUserSeeRecordInput,
 ): Promise<Result<McpResponse<WhyCantUserSeeRecordOutput>, McpError>> => {
   // Resolve the object being checked from the `componentId` / `objectApiName`
-  // aliases. The tool is object-only, so a bare name coerces to
-  // `CustomObject:{name}`; aliases that disagree are `invalid-query` (never a
-  // silent pick). This is the router→tool contract fix — `objectApiName` used to
-  // be Zod-stripped and the tool hard-failed with `componentId: Required`.
-  const objectIds = new Set<string>();
-  if (input.componentId !== undefined) {
-    objectIds.add(coercePrefix(input.componentId, [CUSTOM_OBJECT_PREFIX]));
-  }
-  if (input.objectApiName !== undefined) {
-    objectIds.add(coercePrefix(input.objectApiName, [CUSTOM_OBJECT_PREFIX]));
-  }
-  if (objectIds.size === 0) {
+  // aliases through the SHARED resolver. The tool is object-only, so a bare
+  // name coerces to `CustomObject:{name}`; aliases that disagree are
+  // `invalid-query` (never a silent pick). This is the router→tool contract fix
+  // — `objectApiName` used to be Zod-stripped and the tool hard-failed with
+  // `componentId: Required`.
+  //
+  // WHY-CANT-USER-SEE-HAND-ROLLED-OBJECT-ALIAS: this used to be a private
+  // re-implementation (a `Set` plus two `coercePrefix` calls). It got the
+  // refusal axis right but skipped the CASE-CANONICALISATION half the shared
+  // resolver exists for, so `route_question("why can't Sam see a contact?")`
+  // binding `{objectApiName: 'contact'}` became `CustomObject:contact` — an id
+  // no vault holds — and the org's central security-explainer died on
+  // `component-not-found` for a name half the tool surface answers. Salesforce
+  // api names are case-insensitive and a host echoing a name out of a user's
+  // sentence lower-cases it, so that was the COMMON input, not an edge case.
+  // `resolveObjectAliasInVault` also brings the two-variants-differing-only-by
+  // -case refusal, which the hand-rolled version had no defence against.
+  // `unhandledPrefix: 'refuse'` names a non-object `componentId` (this tool has
+  // no reverse branch) instead of letting it fall through as an object id.
+  const scopeResult = await resolveObjectAliasInVault(ctx.graph, input, {
+    required: true,
+    bareComponentIdIsObject: true,
+    unhandledPrefix: 'refuse',
+  });
+  if (!scopeResult.ok) return err(scopeResult.error);
+  if (scopeResult.value === null) {
     return err({
       kind: 'invalid-query',
       message: 'provide componentId or objectApiName',
       path: 'componentId',
     });
   }
-  if (objectIds.size > 1) {
-    return err({
-      kind: 'invalid-query',
-      message: `componentId and objectApiName name different objects (${[...objectIds].join(', ')}); pass one`,
-      path: 'componentId',
-    });
-  }
-  const componentId = [...objectIds][0] as ComponentId;
+  // Always the vault's EXACT casing (or the caller's id verbatim when nothing
+  // matched, so the `component-not-found` below still names what they passed).
+  const componentId = scopeResult.value.componentId as ComponentId;
 
   // Fold the `userContext.profileApiName` alias into `profileId` so the whole
   // cascade (coerceUserContext, the object-CRUD precondition, PermissionGrant,

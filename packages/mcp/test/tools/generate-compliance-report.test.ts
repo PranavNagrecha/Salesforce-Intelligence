@@ -421,3 +421,263 @@ describe('generateComplianceReportHandler — god-mode in Object+FLS (F4/R2-2)',
     expect(boundaries).toMatch(/ModifyAllData|ViewAllData|god-mode/i);
   });
 });
+
+// =============================================================================
+// R1 (CRITICAL): a FAILED graph read inside the Object + FLS exposure pass must
+// NOT be laundered into "no exposure". `findObjectFlsExposures` used to
+// `return []` on a failed `listEdges` and `continue` on a failed
+// `getNodeById`, so a graph error rendered the all-clear sentence
+// ("_(no profile/perm-set holds object-level access ...)_") plus
+// "Object+FLS exposure pairs: 0" in the Executive Summary — a CLEAN BILL OF
+// HEALTH for a state that was never checked. Every sibling read in the same
+// handler (the sharing-model `getNodeById`, the per-field access audit)
+// propagates `err({ kind: 'internal' })`; only the pass that decides whether a
+// read-only principal can see an EncryptedText identifier failed OPEN.
+//
+// NOTE ON ISOLATION: all FLS grants below are READ-ONLY (`editable: false`) on
+// purpose. `field-access-audit` only issues its own parent-object
+// `grantedBy` scan when the field has FLS-EDIT grantors, so with read-only
+// grants the ONLY (objectId, 'grantedBy') edge query in the whole handler is
+// the one on line 144 — the injected failure cannot be absorbed by an
+// upstream tool and pass for the wrong reason.
+// =============================================================================
+
+const VENDOR = 'CustomObject:Vendor__c';
+const TAX_ID = 'CustomField:Vendor__c.Tax_Id__c';
+const EDGE_READER = 'Profile:EdgeReader';
+const GOD_READER = 'Profile:GodReader';
+
+const failOpenSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: VENDOR,
+      type: 'CustomObject',
+      apiName: 'Vendor__c',
+      label: 'Vendor',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: TAX_ID,
+      type: 'CustomField',
+      apiName: 'Tax_Id__c',
+      label: 'Tax Id',
+      parentId: VENDOR,
+      properties: { label: 'Tax Id', dataType: 'EncryptedText' },
+    }),
+    // Reaches records through an explicit object-permission edge.
+    makeNode({
+      id: EDGE_READER,
+      type: 'Profile',
+      apiName: 'EdgeReader',
+      label: 'Edge Reader',
+      properties: {},
+    }),
+    // Reaches records through org-wide ViewAllData, no object edge.
+    makeNode({
+      id: GOD_READER,
+      type: 'Profile',
+      apiName: 'GodReader',
+      label: 'God Reader',
+      properties: { userPermissions: ['ViewAllData'] },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: VENDOR, toId: TAX_ID, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: EDGE_READER,
+      toId: TAX_ID,
+      edgeType: 'grantedBy',
+      properties: { readable: true, editable: false },
+    }),
+    makeEdge({
+      fromId: EDGE_READER,
+      toId: VENDOR,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+    makeEdge({
+      fromId: GOD_READER,
+      toId: TAX_ID,
+      edgeType: 'grantedBy',
+      properties: { readable: true, editable: false },
+    }),
+  ],
+};
+
+describe('generateComplianceReportHandler — exposure pass must not fail open (R1)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('failopen.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [failOpenSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  /**
+   * Wrap the live store so a chosen read throws. `failEdgeScanFor` kills ONLY
+   * the `(objectId, 'grantedBy')` edge query; `failNodeReadForAfterEdgeScan`
+   * kills node reads for one grantor id but ONLY once that edge query has
+   * already run — i.e. exactly the `getNodeById` calls made INSIDE
+   * `findObjectFlsExposures`, never the identical read `field-access-audit`
+   * performs earlier.
+   */
+  const withInjectedFailure = (
+    real: GraphStore,
+    opts: {
+      readonly failEdgeScanFor?: string;
+      readonly failNodeReadForAfterEdgeScan?: string;
+      readonly emptyNodeReadForAfterEdgeScan?: string;
+      readonly edgeScanGate?: string;
+    },
+  ): GraphStore => {
+    let edgeScanSeen = false;
+    const connection = new Proxy(real.connection, {
+      get(target, prop) {
+        if (prop === 'runAndReadAll') {
+          return async (sql: string, params: readonly unknown[] = []) => {
+            const isGrantedByEdgeScan =
+              sql.includes('FROM edges') && params.includes('grantedBy');
+            if (
+              isGrantedByEdgeScan &&
+              opts.failEdgeScanFor !== undefined &&
+              params.includes(opts.failEdgeScanFor)
+            ) {
+              throw new Error('injected object-grant scan failure');
+            }
+            if (
+              isGrantedByEdgeScan &&
+              opts.edgeScanGate !== undefined &&
+              params.includes(opts.edgeScanGate)
+            ) {
+              edgeScanSeen = true;
+            }
+            if (
+              edgeScanSeen &&
+              sql.includes('FROM nodes') &&
+              opts.failNodeReadForAfterEdgeScan !== undefined &&
+              params.includes(opts.failNodeReadForAfterEdgeScan)
+            ) {
+              throw new Error('injected grantor node-read failure');
+            }
+            if (
+              edgeScanSeen &&
+              sql.includes('FROM nodes') &&
+              opts.emptyNodeReadForAfterEdgeScan !== undefined &&
+              params.includes(opts.emptyNodeReadForAfterEdgeScan)
+            ) {
+              // A SUCCESSFUL read that finds no row — the sparse-graph case.
+              // Distinct from a throw; the handler must NOT treat it as an error.
+              return { getRowObjectsJS: () => [] };
+            }
+            return await (
+              target as never as {
+                runAndReadAll: (s: string, p: readonly unknown[]) => Promise<unknown>;
+              }
+            ).runAndReadAll(sql, params);
+          };
+        }
+        const v = Reflect.get(target, prop, target) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    return { connection, instance: real.instance } as GraphStore;
+  };
+
+  it('BASELINE: with no injected failure both exposure paths are reported', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    expect(body).toContain('Edge Reader');
+    expect(body).toContain('God Reader');
+    expect(body).toContain('Object+FLS exposure pairs: 2');
+  });
+
+  it('propagates a FAILED object-grant edge scan instead of printing the all-clear', async () => {
+    const failing = {
+      ...ctx,
+      graph: withInjectedFailure(store, { failEdgeScanFor: VENDOR }),
+    } as Context;
+    const r = await generateComplianceReportHandler(failing, {});
+    if (r.ok) {
+      // Surface the exact false clean-bill-of-health in the failure message.
+      const body = r.value.data.document.body;
+      const exec = /Object\+FLS exposure pairs: \d+/.exec(body)?.[0] ?? '(missing)';
+      const allClear = body.includes('no profile/perm-set holds object-level access');
+      expect(
+        `ok=true rendered "${exec}" allClearSentence=${String(allClear)}`,
+      ).toBe('err({ kind: "internal" }) — an unchecked read is not a clean bill of health');
+      return;
+    }
+    expect(r.error.kind).toBe('internal');
+    expect(r.error.message).toContain('graph query failed');
+  });
+
+  it('propagates a FAILED grantor node read on the object-edge exposure path', async () => {
+    const failing = {
+      ...ctx,
+      graph: withInjectedFailure(store, {
+        edgeScanGate: VENDOR,
+        failNodeReadForAfterEdgeScan: EDGE_READER,
+      }),
+    } as Context;
+    const r = await generateComplianceReportHandler(failing, {});
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      expect(r.value.data.document.body).toContain('Edge Reader');
+      return;
+    }
+    expect(r.error.kind).toBe('internal');
+    expect(r.error.message).toContain('graph query failed');
+  });
+
+  it('propagates a FAILED grantor node read on the god-mode exposure path', async () => {
+    const failing = {
+      ...ctx,
+      graph: withInjectedFailure(store, {
+        edgeScanGate: VENDOR,
+        failNodeReadForAfterEdgeScan: GOD_READER,
+      }),
+    } as Context;
+    const r = await generateComplianceReportHandler(failing, {});
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      expect(r.value.data.document.body).toContain('God Reader');
+      return;
+    }
+    expect(r.error.kind).toBe('internal');
+    expect(r.error.message).toContain('graph query failed');
+  });
+
+  it('a missing grantor ROW (sparse graph) is still tolerated — NOT an error', async () => {
+    // Guard against OVER-correcting the fail-open bug. Absence of a node row is
+    // a SUCCESSFUL read that found nothing — the documented sparse-graph case
+    // every sibling tool `continue`s past. Only `!ok` (the read itself failed)
+    // may propagate. Collapsing the two would turn a tolerable sparse graph
+    // into a hard internal error, so this asserts the exact opposite of the
+    // two node-read cases above using the exact same injection point.
+    const sparse = {
+      ...ctx,
+      graph: withInjectedFailure(store, {
+        edgeScanGate: VENDOR,
+        emptyNodeReadForAfterEdgeScan: GOD_READER,
+      }),
+    } as Context;
+    const r = await generateComplianceReportHandler(sparse, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    // The god-mode row is dropped (its node vanished) but the edge path — and
+    // the report itself — survive.
+    expect(body).toContain('Edge Reader');
+    expect(body).not.toContain('God Reader');
+    expect(body).toContain('Object+FLS exposure pairs: 1');
+  });
+});

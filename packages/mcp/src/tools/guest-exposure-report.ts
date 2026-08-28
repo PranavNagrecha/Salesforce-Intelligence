@@ -51,7 +51,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { guestProfileNameForSite } from '@sf-intelligence/extractors';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -62,7 +62,8 @@ import { offlineTrust } from './coverage-trust.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { collectPiiInventoryFields, type PiiField } from './pii-inventory.js';
-import { clampedNodeScanLimit, scanHitCap } from './scan-cap.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 const CUSTOM_SITE_PREFIX = 'CustomSite:';
 const NETWORK_PREFIX = 'Network:';
@@ -76,8 +77,6 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 /** Per-response byte budget for the paged `findings` list; below the ~45 KB guard. */
 const FINDINGS_BYTE_BUDGET = 36_000;
-/** Page size when draining a node type. */
-const SCAN_PAGE_SIZE = 500;
 /**
  * Per-response row cap for the `orphanGuestRules` bucket, and its own byte
  * budget. The bucket shipped with NO contract at all: on a vault holding 600
@@ -501,23 +500,6 @@ const orphanListingSentence = (page: OrphanRulePage): string => {
   }.`;
 };
 
-/** Drain every node of a type (paginating past the graph's 500-row cap). */
-const drainType = async (
-  ctx: Context,
-  type: Node['type'],
-): Promise<Result<readonly Node[], string>> => {
-  const all: Node[] = [];
-  let offset = 0;
-  for (;;) {
-    const page = await listNodesByType(ctx.graph, type, { limit: SCAN_PAGE_SIZE, offset });
-    if (!page.ok) return err(page.error.message);
-    all.push(...page.value);
-    if (page.value.length < SCAN_PAGE_SIZE) break;
-    offset += SCAN_PAGE_SIZE;
-  }
-  return ok(all);
-};
-
 /** The guest profile id a CustomSite implies via the naming convention. */
 const guestProfileIdForSite = (site: Node): string => {
   const declared = stringProp(site.properties, 'guestProfileName');
@@ -659,16 +641,23 @@ export const guestExposureReportHandler = async (
     mode: scopeMode,
   };
 
-  const sitesResult = await drainType(ctx, 'CustomSite');
-  if (!sitesResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${sitesResult.error}` });
+  // ONE full multi-window scan for all three corpora, through the shared
+  // `scanAllNodesOfTypes`. This file used to hold its OWN walker (`drainType`,
+  // a hand-rolled OFFSET loop on a hardcoded 500 page size) AND, thirty lines
+  // below it, a single-page `listNodesByType` for SharingRule — so the two
+  // community types were drained while the HIGHEST-STAKES type was not. A
+  // second copy of a corpus walk is exactly the drift that produced that
+  // split; there is now one call and no local walker to diverge from it.
+  const scanResult = await scanAllNodesOfTypes(ctx.graph, [
+    'CustomSite',
+    'Network',
+    'SharingRule',
+  ]);
+  if (!scanResult.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scanResult.error.message}` });
   }
-  const networksResult = await drainType(ctx, 'Network');
-  if (!networksResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${networksResult.error}` });
-  }
-  const allSites = sitesResult.value;
-  const allNetworks = networksResult.value;
+  const allSites = scanResult.value.nodes.filter((n) => n.type === 'CustomSite');
+  const allNetworks = scanResult.value.nodes.filter((n) => n.type === 'Network');
 
   const vaultState = {
     sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -685,13 +674,31 @@ export const guestExposureReportHandler = async (
   // `orphanGuestRules` bucket, no per-rule naming, `totalFindings: 0`. That is
   // the silent drop this bucket exists to end, on the highest-stakes surface
   // this tool has, and the early return was reintroducing it.
-  const scanLimit = clampedNodeScanLimit();
-  let scanTruncated = false;
-  const rulesResult = await listNodesByType(ctx.graph, 'SharingRule', { limit: scanLimit });
-  if (!rulesResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${rulesResult.error.message}` });
-  }
-  if (scanHitCap(rulesResult.value.length, scanLimit)) scanTruncated = true;
+  //
+  // SCANNED ACROSS EVERY WINDOW, not one page. This was a single
+  // `listNodesByType` call — `ORDER BY id ASC LIMIT <=500 OFFSET 0` over the
+  // whole SharingRule type — while CustomSite and Network thirty lines above
+  // were drained window-by-window. An org with more sharing rules than the
+  // per-type cap (routine) had every guest rule past id-rank 500 dropped: no
+  // finding, no `orphanGuestRules` row, absent from `summary.totalFindings` —
+  // and unreachable from ANY call, because `limit`/`offset`/`cursor` page
+  // `findings` and `orphanOffset` pages the orphan OUTPUT rows. Nothing
+  // advanced the SCAN, so the `scanTruncated` flag named an answer no caller
+  // could complete, on the highest-stakes surface this tool has: record-level
+  // grants to unauthenticated internet visitors. `scanAllNodesOfTypes` walks
+  // the SQL OFFSET forward to exhaust the type, and reports incompleteness
+  // only at the far residual cap with a BOUNDED PROBE — so a type whose count
+  // lands exactly on a window boundary is no longer over-disclosed as
+  // truncated the way `scanHitCap(len, cap)` reported it.
+  const incompleteTypes = scanResult.value.incompleteTypes;
+  const scanTruncated = scanResult.value.scanIncomplete;
+  /**
+   * Whether the SHARING-RULE corpus specifically fell short. The orphan
+   * bucket's count is a FLOOR only when ITS type was capped; hedging that
+   * total on a CustomSite cap would understate a number that was in fact
+   * fully established.
+   */
+  const ruleScanTruncated = incompleteTypes.includes('SharingRule');
   const guestRulesBySite = new Map<string, Node[]>();
   // Every guest rule seen, attributable or not. A rule whose declared `siteName`
   // hits none of the three keys a community is matched on (site apiName, site
@@ -702,7 +709,8 @@ export const guestExposureReportHandler = async (
   // dropping one without saying so is the "checked and found nothing" vs "did
   // not check" conflation.
   const allGuestRules: Node[] = [];
-  for (const rule of rulesResult.value) {
+  for (const rule of scanResult.value.nodes) {
+    if (rule.type !== 'SharingRule') continue;
     if (stringProp(rule.properties, 'ruleType') !== 'guest') continue;
     allGuestRules.push(rule);
     const siteName = stringProp(rule.properties, 'siteName');
@@ -738,12 +746,12 @@ export const guestExposureReportHandler = async (
     ];
     if (orphanRulePage.totalCount > 0) {
       failClosedDisclosures.push(
-        `${orphanCountPhrase(orphanRulePage.totalCount, scanTruncated)} guest sharing rule(s) ARE modeled in this vault and NONE of them could be attributed to a community — there is no modeled CustomSite or Network to attribute them to. They are declared record-level grants to unauthenticated visitors, each row carrying its object and \`accessLevel\`. ${orphanListingSentence(orphanRulePage)} None of them are counted in \`summary.totalFindings\`, which stays 0 because no community surface was audited. Never read \`findings: []\` here as "no guest exposure".`,
+        `${orphanCountPhrase(orphanRulePage.totalCount, ruleScanTruncated)} guest sharing rule(s) ARE modeled in this vault and NONE of them could be attributed to a community — there is no modeled CustomSite or Network to attribute them to. They are declared record-level grants to unauthenticated visitors, each row carrying its object and \`accessLevel\`. ${orphanListingSentence(orphanRulePage)} None of them are counted in \`summary.totalFindings\`, which stays 0 because no community surface was audited. Never read \`findings: []\` here as "no guest exposure".`,
       );
     }
     if (scanTruncated) {
       failClosedDisclosures.push(
-        'A SharingRule scan hit the per-type node cap (SFI_NODE_SCAN_LIMIT) — some guest sharing rules may be missing from `orphanGuestRules`.',
+        `${fullScanTruncationNote(incompleteTypes)} Some guest sharing rules may therefore be missing from \`orphanGuestRules\`.`,
       );
     }
     return ok({
@@ -1169,7 +1177,7 @@ export const guestExposureReportHandler = async (
     );
   }
   if (orphanRulePage.totalCount > 0) {
-    const unattributable = `${orphanCountPhrase(orphanRulePage.totalCount, scanTruncated)} guest sharing rule(s) could NOT be attributed to ANY modeled community — each declares a site name that matches no CustomSite api name, site label, or Network api name in this vault (or declares none at all). They ARE declared record-level grants to unauthenticated visitors and are NOT counted in any community's \`findingCount\``;
+    const unattributable = `${orphanCountPhrase(orphanRulePage.totalCount, ruleScanTruncated)} guest sharing rule(s) could NOT be attributed to ANY modeled community — each declares a site name that matches no CustomSite api name, site label, or Network api name in this vault (or declares none at all). They ARE declared record-level grants to unauthenticated visitors and are NOT counted in any community's \`findingCount\``;
     // REMEDY. When this same payload already names Networks whose CustomSite is
     // not modeled, that IS the diagnosed cause of an unmatched site name —
     // sending the operator to Setup to "confirm each rule's site" would point
@@ -1186,7 +1194,7 @@ export const guestExposureReportHandler = async (
   }
   if (scanTruncated) {
     disclosures.push(
-      'A SharingRule scan hit the per-type node cap (SFI_NODE_SCAN_LIMIT) — some guest sharing-rule findings may be missing.',
+      `${fullScanTruncationNote(incompleteTypes)} Some guest sharing-rule findings may therefore be missing.`,
     );
   }
 
