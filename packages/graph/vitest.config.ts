@@ -1,5 +1,12 @@
 import { defineConfig } from 'vitest/config';
 
+/**
+ * One budget for both clocks. Written once because two matching literals agree
+ * only until somebody edits one of them — which is exactly how packages/mcp
+ * ended up at 45000 / 20000 under a comment claiming they were equal.
+ */
+const TIMEOUT_MS = 60_000;
+
 // eslint-disable-next-line import/no-default-export -- vitest config files require a default export.
 export default defineConfig({
   test: {
@@ -7,7 +14,7 @@ export default defineConfig({
     globals: true,
     pool: 'threads',
     // Large batched import tests can exceed the default 5s on busy CI hosts.
-    testTimeout: 60_000,
+    testTimeout: TIMEOUT_MS,
     // GRAPH-QUERIES-BEFOREALL-FLAKE: `testTimeout` was raised but `hookTimeout`
     // was not, so hooks kept vitest's 10s DEFAULT (`hookTimeout ??= 1e4`). A
     // `beforeAll` that opens DuckDB and seeds a fixture is doing the SAME work
@@ -17,7 +24,7 @@ export default defineConfig({
     // red, which invites re-running until green. Keep the two budgets equal by
     // construction: setup gets the same headroom as the tests it sets up. This
     // only extends how long setup MAY take; a genuinely hung hook still fails.
-    hookTimeout: 60_000,
+    hookTimeout: TIMEOUT_MS,
     // Shell package — no tests yet. Phase D's graph-* tasks add the real
     // tests. Avoid vitest exiting non-zero in the meantime.
     passWithNoTests: true,

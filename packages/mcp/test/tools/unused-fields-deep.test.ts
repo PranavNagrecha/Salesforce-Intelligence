@@ -20,6 +20,7 @@ import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
+import { usageSourceFamiliesFor } from '../../src/tools/coverage-trust.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 import {
   LIVE_CROSS_CHECK_CAP,
@@ -1990,6 +1991,76 @@ describe('unused_fields_deep — real-org regressions', () => {
           /this response carries 2 of 5/i,
         );
       },
+    );
+  });
+
+  // --- D4: a truncated page is not a COMPLETE analysis ----------------------
+  //
+  // UNUSED-FIELDS-DEEP-CERTIFIES-COMPLETENESS-IT-DID-NOT-EARN, residual.
+  // D3 fixed the RETRIEVE-COVERAGE half: on the vault the persona used, two
+  // analytics families were capped, so `completeness` now reads `partial` and
+  // the contradiction is gone THERE. But `completeness` was still derived from
+  // retrieve coverage ALONE, so on a fully-retrieved vault a 25-of-177 page
+  // still certified `status: 'complete'` — "complete" next to `truncated: true`
+  // in the same envelope. `completeness` is the field a host keys on for a
+  // go/no-go over DELETION candidates; a page that withheld most of its own
+  // rows has not completely answered "what can I get rid of".
+  const FULL_COVERAGE_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverageComputedAt: '2026-05-27T14:40:00.000Z',
+    coverage: usageSourceFamiliesFor('CustomField').map((type) => ({
+      type,
+      requested: true,
+      retrieved: 3,
+      errored: false,
+      neverModeled: false,
+    })),
+  } as VaultManifest;
+
+  const seedFivePadFields = async (): Promise<ExtractionResult> => {
+    const nodes: Node[] = [makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' })];
+    const edges: Edge[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const id = `CustomField:Obj_A__c.Pad_${i}__c`;
+      nodes.push(
+        makeNode({ id, apiName: `Pad_${i}__c`, parentId: OBJ, properties: { dataType: 'Text' } }),
+      );
+      edges.push(makeEdge({ fromId: OBJ, toId: id, edgeType: 'parentOf' }));
+    }
+    return { nodes, edges };
+  };
+
+  it('D4: a TRUNCATED page never certifies completeness as `complete`, even on a fully-retrieved vault', async () => {
+    await withVault(
+      seedFivePadFields,
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, {
+          objectApiName: 'Obj_A__c',
+          limit: 2,
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect(r.value.data.truncated).toBe(true);
+        // Retrieve coverage is genuinely complete here — the ONLY thing standing
+        // between this answer and a complete one is the page boundary.
+        expect(r.value.data.trust.completeness.status).toBe('partial');
+        expect(r.value.data.trust.limitations.join(' ')).toMatch(/this response carries 2 of 5/i);
+      },
+      FULL_COVERAGE_MANIFEST,
+    );
+  });
+
+  it('D4 control: an UNTRUNCATED page on a fully-retrieved vault still reads `complete`', async () => {
+    await withVault(
+      seedFivePadFields,
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, { objectApiName: 'Obj_A__c' });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect(r.value.data.truncated).toBe(false);
+        expect(r.value.data.trust.completeness.status).toBe('complete');
+      },
+      FULL_COVERAGE_MANIFEST,
     );
   });
 });

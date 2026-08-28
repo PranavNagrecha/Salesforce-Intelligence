@@ -1,5 +1,16 @@
 import { defineConfig } from 'vitest/config';
 
+/**
+ * ONE budget for both clocks.
+ *
+ * `testTimeout` and `hookTimeout` must not drift apart: a `beforeAll` that
+ * builds a DuckDB fixture routinely does MORE work than the tests that read it,
+ * so giving the hook the smaller budget starves precisely the heaviest step.
+ * Derived rather than written twice — that is what let 45000 and 20000 sit
+ * under a comment claiming they were equal.
+ */
+const TIMEOUT_MS = 45_000;
+
 // eslint-disable-next-line import/no-default-export -- vitest config files require a default export.
 export default defineConfig({
   test: {
@@ -43,7 +54,7 @@ export default defineConfig({
     // concurrent change to src/knowledge/). `pool` was left at 'threads'.
     // Tracked as WIN-1 in .github/workflows/ci.yml; do not re-attempt `forks`
     // without a way to measure it on an actual Windows runner.
-    testTimeout: 45000,
+    testTimeout: TIMEOUT_MS,
     // Same root cause as packages/graph (GRAPH-QUERIES-BEFOREALL-FLAKE):
     // `testTimeout` was raised for the DuckDB-backed suites but `hookTimeout`
     // silently kept vitest's 10s default, so the `beforeAll` that OPENS the
@@ -51,7 +62,29 @@ export default defineConfig({
     // parallel pool that surfaced as an intermittent setup failure in a
     // different package each run — a false red, never a real one. Equal
     // budgets; a hook that truly hangs still fails.
-    hookTimeout: 20000,
+    //
+    // 0.3.3 — THAT COMMENT WAS NOT TRUE OF THIS FILE. It says "equal budgets"
+    // and the two numbers were 45000 and 20000. A parity claim written beside
+    // values that do not match is the same defect this whole release is about,
+    // and it had a cost: the Windows job dies at `field-lineage.test.ts`, whose
+    // `beforeAll` does the heaviest fixture work in the package (401 nodes and
+    // 400 edges imported into DuckDB) on the SMALLER of the two clocks, while
+    // the tests that merely query that fixture get the larger one. When vitest
+    // kills a hook mid-DuckDB-call the Napi layer aborts the process
+    // (0xC0000409) instead of failing softly, and the whole run's results —
+    // 300+ files — are lost with it. Locally that file completes in 985ms; it
+    // only exceeds 20s under thread-pool contention on a loaded runner, which
+    // is exactly why it never reproduced here.
+    //
+    // Both now DERIVE from one constant, so "equal budgets" is enforced by the
+    // code rather than asserted by a comment that drifted.
+    //
+    // NOT VERIFIED ON WINDOWS, and it cannot be from this machine: there is no
+    // Windows runner here. This removes the asymmetry that starves the hook. It
+    // does NOT make a killed DuckDB call fail softly — if the abort recurs with
+    // equal budgets, the next move is isolating the DuckDB-backed suites so one
+    // abort cannot erase the other 300 files' results, not another raise.
+    hookTimeout: TIMEOUT_MS,
     passWithNoTests: true,
   },
 });

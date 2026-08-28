@@ -124,9 +124,15 @@ import {
   toCustomObjectId,
 } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  buildUnscannedNodesNote,
+  censusQualityScanCoverage,
+  type QualityScanTypeCoverage,
+} from './quality-scan-coverage.js';
 import { REPORT_DASHBOARD_USAGE_CAVEAT } from './report-dashboard-usage.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { grepVaultSource } from './search-apex-source.js';
-import { soundnessFromIds, type Soundness } from './soundness.js';
+import { soundnessFromNodes, type Soundness } from './soundness.js';
 
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 100;
@@ -155,6 +161,40 @@ const CUSTOM_FIELD_DISCLOSURE =
 const UNPROVEN_REGISTRATION_VERDICT_DISCLOSURE =
   'dynamic registration: such a class is reported `uncertain`, never `definitely_dead` — its ' +
   `emptiness is expected, not evidence. ${UNPROVEN_REGISTRATION_DISCLOSURE}`;
+
+/**
+ * The Apex SOURCE surface — the corpus the code-quality recognizers run over,
+ * and the corpus every dead-code verdict is an absence claim ABOUT. A dead
+ * verdict says "no retrieved caller references this"; any ApexClass or
+ * ApexTrigger is a potential caller, and whether one of them reaches the
+ * component at RUNTIME (dynamic SOQL, `Type.forName`, reflective describe) is
+ * knowable only from the `qualityIssues` scan on that caller. A node carrying
+ * no scan is therefore an UNREAD referrer, not a clean one.
+ */
+const APEX_REFERRER_TYPES: readonly ComponentType[] = ['ApexClass', 'ApexTrigger'];
+
+/**
+ * Appended after {@link buildUnscannedNodesNote} whenever the census finds an
+ * unread Apex node, so the shared sentence ("not checked, NOT clean") is tied to
+ * what it means HERE: the unread nodes are the referrer surface this tool's
+ * verdicts rest on.
+ */
+const UNSCANNED_REFERRER_DISCLOSURE =
+  'what that gap means for a DELETE verdict: the unread nodes above are part of the CALLER surface every verdict on this response is an absence claim about. The dynamic-Apex signal — the only thing that says whether a caller builds its references at runtime — lives on the scan those nodes never received, so their status is UNKNOWN rather than clean. The `soundness` envelope names them under `quality-scan-not-run` and reports `complete: false` for exactly this reason; do not read a `definitely_dead` row as cleared by them. Re-run `sfi refresh`, then re-run this tool, before deleting.';
+
+/**
+ * Fail-CLOSED text for the case the referrer census itself could not be read.
+ * An unreadable corpus is an UNKNOWN corpus, never an empty one — the whole
+ * defect class this envelope exists to prevent.
+ */
+const REFERRER_CENSUS_UNREADABLE_NOTE =
+  'The Apex referrer surface (ApexClass / ApexTrigger) could not be enumerated on this call, so the code-quality scan coverage of the callers these verdicts are an absence claim about is UNKNOWN. This result is NOT proof anything listed is unreferenced.';
+const REFERRER_CENSUS_UNREADABLE_DISCLOSURE =
+  `quality-scan coverage UNKNOWN: ${REFERRER_CENSUS_UNREADABLE_NOTE} \`qualityScanCoverage\` is omitted from this response for that reason, and \`soundness\` is reported partial rather than complete.`;
+
+/** Residual-cap disclosure for a pathologically large Apex corpus. */
+const REFERRER_SCAN_INCOMPLETE_DISCLOSURE =
+  'the Apex referrer census stopped at the residual node-scan cap, so `qualityScanCoverage` counts a PREFIX of the Apex corpus rather than all of it. Nodes behind the cap were neither censused nor considered by the `soundness` envelope.';
 
 const STATIC_TYPE_USAGE_DISCLOSURE =
   'static-type-usage re-check: before an ApexClass is reported definitely_dead its api name is grep-searched (whole-word) across non-test production .cls/.trigger source. A class referenced only via a static-field or type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) — which the parser does NOT model as an inbound graph edge — is downgraded to `uncertain` (suppressed unless includeUncertain) instead of reported dead. Residual blind spots: the grep is line-literal (a class name in a comment or string could over-suppress), and dynamic `Type.forName(\'Other\')` references stay invisible.';
@@ -360,7 +400,31 @@ export interface FindDeadCodeOutput {
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
   readonly pageInfo?: PageInfo;
-  /** Static-analysis blind spots: `complete: false` when a candidate class uses dynamic Apex. */
+  /**
+   * Per-type census of the Apex REFERRER surface: how many ApexClass /
+   * ApexTrigger nodes the vault holds, and how many of those carry a
+   * `qualityIssues` scan at all. Emitted on EVERY successful response — a
+   * clean sweep is exactly the shape a never-scanned corpus produces, so it is
+   * the answer that most needs to state how much was actually read. Absent only
+   * when the corpus could not be enumerated, in which case `boundaries[]` says
+   * so and `soundness` is partial.
+   *
+   * This is the same block `code_quality_audit` / `crud_fls_audit` /
+   * `governor_limit_risks` / `find_hardcoded_values` / `tech_debt_score`
+   * publish off the same property; this tool omitted it while being the only
+   * one of the family that renders a DELETE verdict.
+   */
+  readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
+  /**
+   * Static-analysis blind spots over the APEX REFERRER SURFACE (every
+   * ApexClass / ApexTrigger in the vault — a superset of the Apex candidates,
+   * so a dynamic-Apex CANDIDATE still downgrades it). `complete: false` when
+   * any of them uses dynamic Apex (`dynamic-apex`) or carries no code-quality
+   * scan at all (`quality-scan-not-run`).
+   *
+   * Deliberately NOT computed over the rendered page: the certificate must not
+   * change when a DISPLAY option changes.
+   */
   readonly soundness: Soundness;
   /**
    * Present when a CALLER family this dead-code claim depends on has
@@ -1253,12 +1317,56 @@ export const findDeadCodeHandler = async (
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);
   }
 
-  // A "dead" class that uses dynamic Apex may actually be reached reflectively
-  // — flag those candidates as a static-analysis blind spot, never silently.
-  const soundness = await soundnessFromIds(
-    ctx.graph,
-    listed.map((c) => c.componentId),
-  );
+  // DEAD-CODE-SOUNDNESS-CERTIFIED-THE-RENDERED-PAGE.
+  //
+  // This envelope used to be `soundnessFromIds(ctx.graph, listed.map(...))` —
+  // `listed` is the POST-suppression listing. The default `includeUncertain:
+  // false` withholds precisely the rows that carry the blind-spot signal, so a
+  // call whose page was entirely suppressed certified `complete: true` /
+  // `staticCoverage: 'full'` over an EMPTY id set, while the identical query one
+  // display flag away returned `complete: false` with the blind spots named.
+  // `byVerdict` and `byType` were byte-identical across that flip: the analyzed
+  // corpus never changed, only the certificate. A certificate that moves with a
+  // display option is not a certificate.
+  //
+  // The corpus is now the APEX REFERRER SURFACE, not the page and not merely the
+  // candidate set. "X is dead" is an absence claim about CALLERS; every
+  // ApexClass / ApexTrigger is a potential caller whose runtime references the
+  // edge walk cannot see. That set is a SUPERSET of the Apex candidates, so it
+  // still downgrades the envelope when a candidate class uses dynamic Apex, and
+  // it also covers the case the old read missed entirely: a CustomField-only
+  // scan, where no Apex row is a candidate at all and every Apex node is
+  // nonetheless an invisible potential referrer of the field being called dead.
+  const apexReferrerScan = await scanAllNodesOfTypes(ctx.graph, APEX_REFERRER_TYPES);
+  let qualityScanCoverage: readonly QualityScanTypeCoverage[] | undefined;
+  let soundness: Soundness;
+  if (!apexReferrerScan.ok) {
+    // Fail CLOSED. An unreadable referrer surface is an UNKNOWN one; certifying
+    // completeness over a corpus we could not open is the defect itself.
+    soundness = {
+      complete: false,
+      blindSpots: [
+        {
+          kind: 'quality-scan-not-run',
+          componentIds: [],
+          note: REFERRER_CENSUS_UNREADABLE_NOTE,
+        },
+      ],
+      staticCoverage: 'partial',
+    };
+    boundaries.push(REFERRER_CENSUS_UNREADABLE_DISCLOSURE);
+  } else {
+    qualityScanCoverage = censusQualityScanCoverage(apexReferrerScan.value.nodes);
+    soundness = soundnessFromNodes(apexReferrerScan.value.nodes);
+    const unscannedNote = buildUnscannedNodesNote(qualityScanCoverage);
+    if (unscannedNote !== undefined) {
+      boundaries.push(unscannedNote);
+      boundaries.push(UNSCANNED_REFERRER_DISCLOSURE);
+    }
+    if (apexReferrerScan.value.scanIncomplete) {
+      boundaries.push(REFERRER_SCAN_INCOMPLETE_DISCLOSURE);
+    }
+  }
 
   // Dead-code is an absence claim about CALLERS: incomplete coverage of any
   // calling surface (errored retrieve, scoped refresh, mid-staged-build
@@ -1284,6 +1392,7 @@ export const findDeadCodeHandler = async (
       ...(emitCursor
         ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),
+      ...(qualityScanCoverage !== undefined ? { qualityScanCoverage } : {}),
       soundness,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },

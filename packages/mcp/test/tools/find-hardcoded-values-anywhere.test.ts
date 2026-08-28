@@ -1078,3 +1078,247 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 partially-read source cor
     expect(joined).toContain('Locked.cls');
   });
 });
+
+/**
+ * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED.
+ *
+ * ## The measured defect (real production vault)
+ *
+ * `{category: 'id'}` returned `totalCount: 50`, `truncated: false`, and a
+ * `bySource` roster over six corpora — none of them Flow. `boundaries[]`
+ * carried exactly two lines: the key-prefix allowlist, and an explicit
+ * "NOT SCANNED IN THIS VAULT: N of N ApexTrigger node(s) …" for the Apex
+ * gap. Flow was named NOWHERE: not in the scope enum, not in `bySource`,
+ * not in `boundaries[]`.
+ *
+ * The vault's own flow definitions on disk carried hardcoded RecordType,
+ * Group/Queue and User ids inside `<stringValue>` elements — every one of
+ * them on the tool's own 36-prefix allowlist. The response certified an
+ * untruncated inventory over a corpus it never opened.
+ *
+ * The asymmetry is what makes it a defect rather than a scope limit: the
+ * SAME response emits a NOT-CHECKED boundary for a 22-node corpus while
+ * staying silent about a several-hundred-file one, under a tool named
+ * `_anywhere`. Selective disclosure inside `boundaries[]` reads as coverage.
+ *
+ * Two fixes, both required:
+ *   (a) the flow definition corpus is now actually scanned — raw
+ *       `.flow-meta.xml` literal-bearing elements, the same shape catalog
+ *       every other corpus gets; and
+ *   (b) the scan reports its OUTCOME (`flowSourceScan`) and a
+ *       `boundaries[]` line, so a vault with no retrieved flows says
+ *       NOT SCANNED instead of contributing a silent zero.
+ */
+describe('findHardcodedValuesAnywhereHandler — FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED', () => {
+  let flowDir: string;
+  let flowStore: GraphStore;
+  let flowCtx: Context;
+
+  // Placeholder api names — never a real component name from any org.
+  const FLOW_A = 'Flow_A';
+  const FLOW_B = 'Flow_B';
+  const RECORD_TYPE_ID = '012000000000001AAA'; // RecordType key prefix, 18 chars
+  const QUEUE_ID = '00G000000000002AAA'; // Group/Queue key prefix, 18 chars
+
+  beforeAll(async () => {
+    flowDir = mkdtempSync(join(tmpdir(), 'sfi-fhva-flow-'));
+    const opened = await openGraph(join(flowDir, 'graph.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    flowStore = opened.value;
+    const imported = await importExtractionResults(flowStore, [
+      {
+        nodes: [
+          makeNode({
+            id: `Flow:${FLOW_A}`,
+            type: 'Flow',
+            apiName: FLOW_A,
+            properties: { status: 'Active' },
+          }),
+          makeNode({
+            id: `Flow:${FLOW_B}`,
+            type: 'Flow',
+            apiName: FLOW_B,
+            properties: { status: 'Active' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    flowCtx = { vaultRoot: flowDir, manifest: MANIFEST, graph: flowStore };
+
+    const flowsDir = join(flowDir, 'source', 'main', 'default', 'flows');
+    mkdirSync(flowsDir, { recursive: true });
+    writeFileSync(
+      join(flowsDir, `${FLOW_A}.flow-meta.xml`),
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+        '    <decisions>',
+        '        <name>Check_Record_Type</name>',
+        '        <rules>',
+        '            <conditions>',
+        '                <leftValueReference>$Record.RecordTypeId</leftValueReference>',
+        '                <operator>EqualTo</operator>',
+        '                <value>',
+        `                    <stringValue>${RECORD_TYPE_ID}</stringValue>`,
+        '                </value>',
+        '            </conditions>',
+        '        </rules>',
+        '    </decisions>',
+        '    <status>Active</status>',
+        '</Flow>',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(flowsDir, `${FLOW_B}.flow-meta.xml`),
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+        '    <recordUpdates>',
+        '        <name>Assign_To_Queue</name>',
+        '        <inputAssignments>',
+        '            <field>OwnerId</field>',
+        '            <value>',
+        `                <stringValue>${QUEUE_ID}</stringValue>`,
+        '            </value>',
+        '        </inputAssignments>',
+        '    </recordUpdates>',
+        '    <status>Active</status>',
+        '</Flow>',
+      ].join('\n'),
+    );
+  });
+
+  afterAll(async () => {
+    await closeGraph(flowStore);
+    rmSync(flowDir, { recursive: true, force: true });
+  });
+
+  it('a hardcoded RecordType id inside a flow definition is REPORTED, not silently dropped', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(flowCtx, {
+      category: 'id',
+      limit: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const hit = r.value.data.matches.find(
+      (m) => m.matchedValue === RECORD_TYPE_ID,
+    );
+    expect(hit).toBeDefined();
+    expect(hit?.source).toBe('flow');
+    expect(hit?.componentType).toBe('Flow');
+    expect(hit?.componentId).toBe(`Flow:${FLOW_A}`);
+    expect(hit?.category).toBe('id');
+    expect(hit?.confidence).toBe('heuristic');
+  });
+
+  it('the flow rows are counted in bySource, so the roster is not read as the whole corpus', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(flowCtx, {
+      category: 'id',
+      limit: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.bySource.flow).toBe(2);
+    expect(
+      r.value.data.matches.filter((m) => m.source === 'flow').length,
+    ).toBe(2);
+  });
+
+  it('boundaries name the flow corpus and what inside a flow was NOT read', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(flowCtx, {
+      category: 'id',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('Flow');
+    expect(joined).toContain('literal-bearing');
+    expect(r.value.data.flowSourceScan).toEqual({
+      filesDiscovered: 2,
+      filesRead: 2,
+      unreadablePaths: [],
+    });
+  });
+
+  it('an exact-value search finds the literal in the flow corpus too', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(flowCtx, {
+      value: QUEUE_ID,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const hit = r.value.data.matches.find((m) => m.source === 'flow');
+    expect(hit?.componentId).toBe(`Flow:${FLOW_B}`);
+    expect(hit?.confidence).toBe('declared');
+  });
+
+  it('a caller who excludes the flow scope gets no flow rows and no flow disclosure', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(flowCtx, {
+      category: 'id',
+      scope: ['apex'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches.some((m) => m.source === 'flow')).toBe(false);
+    expect(r.value.data.flowSourceScan).toBeUndefined();
+  });
+});
+
+/**
+ * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED — the ABSENT-corpus half.
+ *
+ * A vault whose `source/` tree was never retrieved (or is gitignored, the
+ * normal shape of a fresh clone) yields zero flow rows. Without the census
+ * that zero is indistinguishable from "every flow was read and none holds a
+ * hardcoded id" — which is exactly the certification this finding is about.
+ */
+describe('findHardcodedValuesAnywhereHandler — flow corpus absent from the vault', () => {
+  let noFlowDir: string;
+  let noFlowStore: GraphStore;
+  let noFlowCtx: Context;
+
+  beforeAll(async () => {
+    noFlowDir = mkdtempSync(join(tmpdir(), 'sfi-fhva-noflow-'));
+    const opened = await openGraph(join(noFlowDir, 'graph.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    noFlowStore = opened.value;
+    const imported = await importExtractionResults(noFlowStore, [
+      {
+        nodes: [
+          makeNode({
+            id: 'Flow:Flow_C',
+            type: 'Flow',
+            apiName: 'Flow_C',
+            properties: { status: 'Active' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    noFlowCtx = { vaultRoot: noFlowDir, manifest: MANIFEST, graph: noFlowStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(noFlowStore);
+    rmSync(noFlowDir, { recursive: true, force: true });
+  });
+
+  it('says NOT SCANNED for the flow corpus rather than contributing a silent zero', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(noFlowCtx, {
+      category: 'id',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.flowSourceScan).toEqual({
+      filesDiscovered: 0,
+      filesRead: 0,
+      unreadablePaths: [],
+    });
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('NOT SCANNED');
+    expect(joined).toContain('Flow');
+    expect(joined).toContain('not checked');
+  });
+});

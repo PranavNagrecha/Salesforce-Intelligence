@@ -391,6 +391,13 @@ describe('endpointCatalogHandler', () => {
       expect(d.namedCredentials).toEqual([]);
       expect(d.omniRestEndpoints).toEqual([]);
       expect(d.referencedNamedCredentials).toEqual([]);
+      expect(d.remoteSiteSettings).toEqual([]);
+      expect(d.cspTrustedSites).toEqual([]);
+      expect(d.summary.byKind).toEqual({});
+      // An empty ORG still gets the scope boundary — the disclosure is about
+      // what the tool does not look at, never about what it happened to find.
+      expect(d.boundaries.length).toBeGreaterThan(0);
+      expect(d.notCovered.length).toBeGreaterThan(0);
     } finally {
       await closeGraph(opened.value);
       rmSync(tdir, { recursive: true, force: true });
@@ -642,7 +649,13 @@ describe('endpointCatalogHandler — full per-category scan (G2)', () => {
     // from an endpoint that does not exist.
     expect(d.summary.totalEndpoints).toBe(2);
     expect(d.summary.inboundCount).toBe(2);
-    expect(d.boundaries).toEqual([]);
+    // THIS ASSERTION USED TO READ `toEqual([])` — it pinned the very contract
+    // the real-org finding killed: an empty `boundaries[]` as the certificate
+    // that nothing was omitted. What this case actually proves is that NO
+    // FULL-SCAN TRUNCATION note fires (the scan completed); the always-on scope
+    // boundary is a separate, permanent statement and must still be there.
+    expect(d.boundaries.some((b) => b.includes('Full scan capped'))).toBe(false);
+    expect(d.boundaries.some((b) => b.includes('notCovered'))).toBe(true);
   });
 });
 
@@ -708,5 +721,179 @@ describe('endpointCatalogHandler — past the 500-row page boundary (G2)', () =>
       '/services/apexrest/webhook',
     ]);
     expect(d.summary.totalEndpoints).toBe(2);
+  });
+});
+
+// =============================================================================
+// CERTIFIED-COMPLETENESS-OVER-A-NARROW-CORPUS (real-org finding, HIGH ×3).
+//
+// The catalog's contract is "every URL / endpoint participating in an
+// integration", `summary.totalEndpoints` is documented as "a TRUE total", and
+// `boundaries[]` is documented as empty in the normal case. On a real vault it
+// returned 34 endpoints with `boundaries: []` while the SAME graph held two
+// further fully-extracted, URL-bearing outbound families that appeared in no
+// section and in no boundary:
+//
+//   * RemoteSiteSetting  — the outbound-callout allowlist. `url` is a REQUIRED
+//                          element in the extractor, so every node carries one.
+//   * CspTrustedSite     — the browser-side external-host allowlist.
+//                          `endpointUrl` is likewise REQUIRED.
+//
+// The sibling `sfi.integration_map` returns both families as first-class rows
+// on the same vault, so this is not "the product does not model them". A
+// security reviewer asking "every external host this org can reach" was handed
+// a certified total that omitted the entire allowlist.
+//
+// Two fixes are asserted here:
+//   (a) both families are enumerated as first-class sections; and
+//   (b) `boundaries[]` / `notCovered[]` are NEVER empty — the URL surfaces that
+//       are genuinely not modeled (Apex literals, markup, config data) are
+//       named in a typed field instead of being certified away.
+// =============================================================================
+
+const RSS_ACTIVE = 'RemoteSiteSetting:Site_A';
+const RSS_INACTIVE = 'RemoteSiteSetting:Site_B';
+const CSP_SITE = 'CspTrustedSite:Csp_C';
+
+const allowlistSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RSS_ACTIVE,
+      type: 'RemoteSiteSetting',
+      apiName: 'Site_A',
+      properties: {
+        url: 'https://vendor-a.example.com',
+        isActive: true,
+        disableProtocolSecurity: false,
+        description: null,
+      },
+    }),
+    makeNode({
+      id: RSS_INACTIVE,
+      type: 'RemoteSiteSetting',
+      apiName: 'Site_B',
+      properties: {
+        url: 'https://vendor-b.example.com',
+        isActive: false,
+        disableProtocolSecurity: false,
+        description: null,
+      },
+    }),
+    makeNode({
+      id: CSP_SITE,
+      type: 'CspTrustedSite',
+      apiName: 'Csp_C',
+      properties: {
+        endpointUrl: 'https://cdn-c.example.com',
+        isActive: true,
+        context: 'All',
+      },
+    }),
+  ],
+  edges: [],
+};
+
+describe('endpointCatalogHandler — outbound allowlist families (RemoteSiteSetting / CspTrustedSite)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-endpoint-allowlist-'));
+    const opened = await openGraph(join(dir, 'allowlist.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [allowlistSeed]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('enumerates every RemoteSiteSetting URL as a first-class outbound entry', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.remoteSiteSettings.map((e) => e.url).sort()).toEqual([
+      'https://vendor-a.example.com',
+      'https://vendor-b.example.com',
+    ]);
+    for (const e of d.remoteSiteSettings) {
+      expect(e.endpointKind).toBe('remote-site');
+      expect(e.direction).toBe('outbound');
+    }
+    // An INACTIVE allowlist entry is still listed — dropping it would be a
+    // second silent omission — but its state is carried so a reviewer can tell.
+    const inactive = d.remoteSiteSettings.find(
+      (e) => e.sourceComponentId === RSS_INACTIVE,
+    );
+    expect(inactive?.isActive).toBe(false);
+    const active = d.remoteSiteSettings.find(
+      (e) => e.sourceComponentId === RSS_ACTIVE,
+    );
+    expect(active?.isActive).toBe(true);
+  });
+
+  it('enumerates every CspTrustedSite endpointUrl as a first-class entry', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.cspTrustedSites).toHaveLength(1);
+    expect(d.cspTrustedSites[0]?.url).toBe('https://cdn-c.example.com');
+    expect(d.cspTrustedSites[0]?.endpointKind).toBe('csp-trusted-site');
+    expect(d.cspTrustedSites[0]?.sourceComponentId).toBe(CSP_SITE);
+  });
+
+  it('counts the allowlist families in summary.totalEndpoints (the "TRUE total" claim)', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // 2 RemoteSiteSettings + 1 CspTrustedSite and nothing else in this store.
+    expect(d.summary.totalEndpoints).toBe(3);
+    expect(d.summary.outboundCount).toBe(3);
+    expect(d.summary.inboundCount).toBe(0);
+  });
+
+  it('breaks the total down by endpointKind so an allowlist entry cannot read as a callsite', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.byKind['remote-site']).toBe(2);
+    expect(d.summary.byKind['csp-trusted-site']).toBe(1);
+  });
+});
+
+describe('endpointCatalogHandler — the total is never certified as every URL in the org', () => {
+  it('boundaries[] is NEVER empty: the un-modeled URL surfaces are always named', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.boundaries.length).toBeGreaterThan(0);
+    expect(d.boundaries.join(' ')).toContain('notCovered');
+  });
+
+  it('notCovered[] is a TYPED field naming the Apex-literal callout surface', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const notCovered = r.value.data.notCovered.join(' ');
+    expect(notCovered).toContain('setEndpoint');
+    expect(notCovered).toContain('Apex');
+  });
+
+  it('the disclosure says an allowlist entry is an authorization, not a proven callout', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosure).toContain('ALLOWLIST authorizations');
+    expect(r.value.data.disclosure).toContain('not evidence that any code reaches it');
   });
 });

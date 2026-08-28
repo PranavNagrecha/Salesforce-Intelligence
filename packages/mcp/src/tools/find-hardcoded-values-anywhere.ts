@@ -153,6 +153,34 @@ const HARDCODED_APEX_RULES: ReadonlySet<string> = new Set([
 const APEX_SOURCE_SUFFIXES = ['.cls', '.trigger'] as const;
 
 /**
+ * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. Flow definition file suffixes.
+ *
+ * Flow bodies are NOT in the graph as scannable text: a Flow node carries
+ * decision `conditions[].expression`, `actionCalls`, and status metadata, but
+ * not the literal values assigned inside record-create / record-update
+ * elements — which is exactly where a hardcoded RecordType, Queue or User id
+ * lives. So the flow corpus is read the way the Apex source fallback reads
+ * `.cls`: off the retrieved metadata on disk.
+ */
+const FLOW_SOURCE_SUFFIXES = ['.flow-meta.xml', '.flow'] as const;
+
+/**
+ * The elements of Flow metadata XML that carry a LITERAL rather than a
+ * reference. Restricting the scan to these is what keeps it a hardcoded-value
+ * scan: `<elementReference>` names a variable, `<name>` / `<label>` name the
+ * element, and `<description>` is prose. Scanning the whole document would
+ * report an id mentioned in a developer note as a hardcoded id.
+ *
+ * The converse — the values this pass CANNOT see — is stated verbatim to the
+ * caller in {@link FLOW_LITERAL_SCAN_DISCLOSURE}.
+ */
+const FLOW_LITERAL_ELEMENTS = [
+  'stringValue',
+  'expression',
+  'filterFormula',
+] as const;
+
+/**
  * CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. What the raw-source email
  * pass actually READ, so the disclosure can report the scan's OUTCOME rather
  * than the fact it was attempted.
@@ -270,6 +298,119 @@ const scanApexSourceForEmails = async (
   };
 };
 
+/**
+ * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. What the flow definition pass
+ * actually READ, so the disclosure can report its OUTCOME rather than the fact
+ * that a flow scope exists.
+ *
+ * `filesDiscovered === 0` is the never-retrieved / gitignored `source/` tree:
+ * not one flow was opened, and the zero says nothing about the org's flows.
+ * `unreadablePaths` are files the walk found but could not open; they are NOT
+ * part of the scanned-and-clean count.
+ */
+export interface FlowSourceScanCoverage {
+  /** Flow definition files the walk over `{vaultRoot}/source/` found. */
+  readonly filesDiscovered: number;
+  /** Of those, the ones actually opened and scanned. */
+  readonly filesRead: number;
+  /** Vault-relative paths discovered but not readable — never compared. */
+  readonly unreadablePaths: readonly string[];
+}
+
+interface FlowSourceScanCensus extends FlowSourceScanCoverage {
+  readonly hits: readonly HardcodedValueAnywhereMatch[];
+}
+
+/** `Flow_A.flow-meta.xml` -> `Flow_A`. */
+const flowApiNameFromFile = (fileName: string): string => {
+  for (const suffix of FLOW_SOURCE_SUFFIXES) {
+    if (fileName.endsWith(suffix)) return fileName.slice(0, -suffix.length);
+  }
+  return fileName;
+};
+
+/**
+ * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. Scans the retrieved Flow definition
+ * XML for the SAME pattern catalog every other corpus gets (`id` / `email` /
+ * `date` / `numeric` shape, or an exact `value`), restricted to the
+ * literal-bearing elements listed in {@link FLOW_LITERAL_ELEMENTS}.
+ *
+ * Returns a CENSUS, never a bare array — for the reason
+ * {@link scanApexSourceForEmails} returns one. A bare `[]` collapses
+ * scanned-and-clean, `source/` tree absent, and every-file-unreadable into one
+ * indistinguishable answer, and the tool then tallies that zero into a
+ * `bySource` roster a caller reads as the corpus it searched.
+ */
+const scanFlowSourceForLiterals = async (
+  vaultRoot: string,
+  category: 'id' | 'email' | 'date' | 'numeric' | undefined,
+  valueFilter: string | undefined,
+): Promise<FlowSourceScanCensus> => {
+  let files: Awaited<ReturnType<typeof collectVaultSourceFiles>>;
+  try {
+    files = await collectVaultSourceFiles(vaultRoot, {
+      suffixes: FLOW_SOURCE_SUFFIXES,
+    });
+  } catch {
+    // The walk itself failed. NOT the same as "no flow held a literal" —
+    // report zero discovered so the caller discloses a NOT-SCANNED corpus.
+    return { hits: [], filesDiscovered: 0, filesRead: 0, unreadablePaths: [] };
+  }
+  const hits: HardcodedValueAnywhereMatch[] = [];
+  const unreadablePaths: string[] = [];
+  let filesRead = 0;
+  for (const file of files) {
+    let xml: string;
+    try {
+      xml = await readFile(file.absolutePath, 'utf-8');
+    } catch {
+      // Discovered but unreadable: never compared against anything, so it must
+      // stay out of the scanned-and-clean count.
+      unreadablePaths.push(file.vaultRelativePath);
+      continue;
+    }
+    filesRead += 1;
+    const apiName = flowApiNameFromFile(basename(file.absolutePath));
+    const componentId = `Flow:${apiName}` as ComponentId;
+    for (const element of FLOW_LITERAL_ELEMENTS) {
+      const elementRe = new RegExp(
+        `<${element}>([\\s\\S]*?)</${element}>`,
+        'g',
+      );
+      let em: RegExpExecArray | null;
+      while ((em = elementRe.exec(xml)) !== null) {
+        const body = em[1] ?? '';
+        // Offset of the element BODY inside the document: `<tag>` is the tag
+        // name plus the two angle brackets. Keeping absolute offsets is what
+        // lets the line number and the snippet come off the real document.
+        const bodyStart = em.index + element.length + 2;
+        for (const hit of scanText(body, category, valueFilter)) {
+          const absIdx = bodyStart + hit.index;
+          const lineNum = xml.slice(0, absIdx).split('\n').length;
+          hits.push({
+            componentId,
+            componentType: 'Flow',
+            apiName,
+            source: 'flow',
+            location: `line ${String(lineNum)} (<${element}>)`,
+            matchedValue: hit.value,
+            confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
+            category: hit.matchedCategory,
+            contextSnippet: snippetAround(xml, absIdx, hit.value.length),
+            inTestClass: false,
+          });
+        }
+      }
+    }
+  }
+  return {
+    hits,
+    filesDiscovered: files.length,
+    filesRead,
+    unreadablePaths: unreadablePaths.sort(),
+  };
+};
+
 const NUMERIC_FP_DISCLOSURE =
   'the numeric category has very high false-positive rate — loop counters, array indices, and arithmetic constants all match. The category is suppressed from default searches; opt in explicitly only when looking for specific hardcoded numbers.';
 const ID_FP_DISCLOSURE =
@@ -316,6 +457,45 @@ const apexSourceEmailScanDisclosure = (
 };
 
 /**
+ * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. What the flow pass can and cannot
+ * see, stated to the caller. The scan reads literal-bearing elements only, so
+ * anything that reaches a flow indirectly is outside it — and a caller planning
+ * an id-remapping workstream has to know that before treating the row count as
+ * the population.
+ */
+const FLOW_LITERAL_SCAN_DISCLOSURE =
+  'Flow definitions are read as raw metadata XML and only their literal-bearing elements (`<stringValue>`, `<expression>`, `<filterFormula>`) are scanned. A value that reaches a flow indirectly — through an input variable, a formula resource assembled at run time, a subflow input, or a referenced Custom Label or Custom Metadata record — is NOT visible to this pass. Flow matches are heuristic.';
+
+/**
+ * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. Renders the flow disclosure from
+ * what the pass READ.
+ *
+ * The defect this replaces: the tool answered `{category: 'id'}` with an
+ * untruncated `totalCount` and a six-corpus `bySource` roster that did not
+ * include Flow, while the SAME response carried an explicit NOT-SCANNED
+ * boundary for the (much smaller) ApexTrigger gap. Naming one blind corpus and
+ * staying silent about a larger one makes the silence read as coverage, which
+ * is worse than either a bare zero or an honest refusal.
+ */
+const flowSourceScanDisclosure = (coverage: FlowSourceScanCoverage): string => {
+  if (coverage.filesDiscovered === 0) {
+    return (
+      'NOT SCANNED: no Flow definition file (`.flow-meta.xml` / `.flow`) was found under the vault `source/` tree, so not one flow was read for this query. ' +
+      'Zero flow rows here is "not checked", NOT "no flow hardcodes a value" — hardcoded RecordType, Queue and User ids inside flow decisions and record assignments are among the most common survivors of a sandbox refresh or an org migration, and they fail at run time rather than at deploy time. ' +
+      'An empty source tree is typical for a fresh clone where it is gitignored; run a vault refresh that retrieves Flow and ask again before reading this as an absence.'
+    );
+  }
+  const scanned =
+    `Flow: read ${String(coverage.filesRead)} of ${String(coverage.filesDiscovered)} Flow definition file(s) under the vault \`source/\` tree. ` +
+    FLOW_LITERAL_SCAN_DISCLOSURE;
+  if (coverage.unreadablePaths.length === 0) return scanned;
+  return (
+    `PARTIAL: ${String(coverage.unreadablePaths.length)} of ${String(coverage.filesDiscovered)} discovered Flow definition file(s) could not be read (${coverage.unreadablePaths.join(', ')}), so their literals were never scanned. ` +
+    scanned
+  );
+};
+
+/**
  * Zod schema for the `sfi.find_hardcoded_values_anywhere` tool input.
  *
  *   - `value`: optional exact substring to match across all corpora.
@@ -342,6 +522,8 @@ const findHardcodedValuesAnywhereInputBaseSchema = z.object({
         // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL.
         'restriction-rule',
         'custom-label',
+        // FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED.
+        'flow',
       ]),
     )
     .optional(),
@@ -374,7 +556,10 @@ export interface HardcodedValueAnywhereMatch {
     // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL: RestrictionRule /
     // ScopingRule `userCriteria` + `recordFilter`, and CustomLabel `value`.
     | 'restriction-rule'
-    | 'custom-label';
+    | 'custom-label'
+    // FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED: literal-bearing elements of the
+    // retrieved Flow definition XML.
+    | 'flow';
   readonly location: string;
   readonly matchedValue: string;
   readonly confidence: 'declared' | 'heuristic';
@@ -401,6 +586,7 @@ export interface FindHardcodedValuesAnywhereOutput {
     'workflow-rule': number;
     'restriction-rule': number;
     'custom-label': number;
+    flow: number;
   }>;
   /**
    * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of the Apex nodes
@@ -419,6 +605,14 @@ export interface FindHardcodedValuesAnywhereOutput {
    * file, so the email zero rests on the graph alone.
    */
   readonly apexSourceScan?: ApexSourceScanCoverage;
+  /**
+   * FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. What the Flow definition pass
+   * actually read. Present ONLY when the `flow` scope ran (it is in the default
+   * scope set); absent when the caller excluded it. `filesDiscovered: 0` means
+   * the vault `source/` tree held no flow definition, so the flow zero is NOT
+   * CHECKED rather than clean.
+   */
+  readonly flowSourceScan?: FlowSourceScanCoverage;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
   /**
@@ -646,6 +840,10 @@ export const findHardcodedValuesAnywhereHandler = async (
       // longer invisible to Id-hygiene queries.
       'restriction-rule',
       'custom-label',
+      // FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED: Flow is in the DEFAULT set.
+      // Leaving it opt-in would have kept the certified-zero shape for every
+      // caller who does not already know the corpus was missing.
+      'flow',
     ],
   );
   const valueFilter = input.value;
@@ -662,6 +860,10 @@ export const findHardcodedValuesAnywhereHandler = async (
   // This used to be a boolean set BEFORE the walk, so the disclosure claimed
   // coverage the walk never delivered.
   let apexSourceScan: ApexSourceScanCoverage | null = null;
+
+  // FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. Null until the Flow definition
+  // pass RUNS; then it holds what that pass actually read.
+  let flowSourceScan: FlowSourceScanCoverage | null = null;
 
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type coverage of the Apex nodes
   // this call actually read, populated only when the `apex` scope runs.
@@ -932,6 +1134,23 @@ export const findHardcodedValuesAnywhereHandler = async (
     }
   }
 
+  // --- Flow scope: scan the retrieved Flow definition XML. ---
+  // FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. The graph's Flow nodes do not
+  // carry the assigned literal values, so this pass reads the metadata on disk.
+  if (scope.has('flow')) {
+    const flowScan = await scanFlowSourceForLiterals(
+      ctx.vaultRoot,
+      categoryFilter,
+      valueFilter,
+    );
+    flowSourceScan = {
+      filesDiscovered: flowScan.filesDiscovered,
+      filesRead: flowScan.filesRead,
+      unreadablePaths: flowScan.unreadablePaths,
+    };
+    collected.push(...flowScan.hits);
+  }
+
   const sorted = collected.sort(compareMatches);
 
   const byCategory = { id: 0, email: 0, date: 0, numeric: 0, string: 0 };
@@ -942,6 +1161,7 @@ export const findHardcodedValuesAnywhereHandler = async (
     'workflow-rule': 0,
     'restriction-rule': 0,
     'custom-label': 0,
+    flow: 0,
   };
   for (const m of sorted) {
     byCategory[m.category] += 1;
@@ -1000,6 +1220,12 @@ export const findHardcodedValuesAnywhereHandler = async (
   // QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Lives OUTSIDE the
   // `sorted.length > 0` gate above because the zero-match response IS the
   // false-clean one.
+  // FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED. Outside every `sorted.length > 0`
+  // gate: the zero-match response IS the one that certified a corpus it never
+  // opened.
+  if (flowSourceScan !== null) {
+    boundaries.push(flowSourceScanDisclosure(flowSourceScan));
+  }
   const unscannedApexNote = buildUnscannedNodesNote(apexQualityScanCoverage);
   if (unscannedApexNote !== undefined) boundaries.push(unscannedApexNote);
 
@@ -1019,6 +1245,7 @@ export const findHardcodedValuesAnywhereHandler = async (
         ? { qualityScanCoverage: apexQualityScanCoverage }
         : {}),
       ...(apexSourceScan !== null ? { apexSourceScan } : {}),
+      ...(flowSourceScan !== null ? { flowSourceScan } : {}),
       boundaries,
       truncated,
       ...(isPaged ? { limit, offset } : {}),

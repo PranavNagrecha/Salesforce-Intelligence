@@ -23,6 +23,13 @@ import { defineConfig } from 'vitest/config';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * One budget for both clocks. Written once because two matching literals agree
+ * only until somebody edits one of them — which is exactly how packages/mcp
+ * ended up at 45000 / 20000 under a comment claiming they were equal.
+ */
+const TIMEOUT_MS = 600_000;
+
 // eslint-disable-next-line import/no-default-export -- vitest config files require a default export.
 export default defineConfig({
   // Pin `root` to this directory so vitest's test discovery does not
@@ -42,8 +49,8 @@ export default defineConfig({
     // laptops (the batched-import commit cadence is the dominant cost).
     // 600s gives headroom for slower CI environments without masking a
     // real hang.
-    testTimeout: 600_000,
-    hookTimeout: 600_000,
+    testTimeout: TIMEOUT_MS,
+    hookTimeout: TIMEOUT_MS,
     // Each integration test file holds open its own copy of the fixture
     // and its own DuckDB graph. Running them in parallel would multiply
     // peak memory and disk usage without speeding up wall time —

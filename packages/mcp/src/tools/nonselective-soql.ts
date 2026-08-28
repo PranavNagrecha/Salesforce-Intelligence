@@ -37,7 +37,13 @@
  *     indexes) + general Salesforce knowledge (the standard table).** Never
  *     presented as heuristic-certain.
  *   - **Dynamic SOQL is invisible.** `Database.query(str)` / `getQueryLocator(str)`
- *     and any string-built query are never seen — a disclosed recall gap.
+ *     and any string-built query are never seen — and that recall gap is a NAMED,
+ *     COUNTED blind spot in `soundness` and in `trust.limitations`, not prose
+ *     alone. The census is ADOPTED from `soundness.ts` (`soundnessFromNodes`),
+ *     the same one `governor_limit_risks` publishes, so the two tools cannot
+ *     hand a caller opposite completeness certificates over one Apex corpus.
+ *     A component the recognizer never scanned is `quality-scan-not-run`
+ *     (UNKNOWN), never silently clean.
  *   - **A file that does not parse is a NAMED blind spot** (`soundness`), never a
  *     silent "clean".
  *   - **Test classes are excluded** — a non-selective query in an `@isTest` class
@@ -72,6 +78,7 @@ import { offlineTrust } from './coverage-trust.js';
 import { packToByteBudget } from './limit-headroom-report.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+import { soundnessFromNodes, type SoundnessBlindSpot } from './soundness.js';
 
 // ---------------------------------------------------------------------------
 // The curated GENERAL Salesforce standard-index table.
@@ -377,6 +384,34 @@ const OBJECT_UNKNOWN_DISCLOSURE =
 const UNPARSED_APEX_NOTE =
   'Source could not be parsed for these Apex components, so their SOQL was NOT analyzed — an empty finding for them is "not checked", not proven clean.';
 
+/**
+ * The MEASURED dynamic-SOQL recall sentence. Every number in it is DERIVED from
+ * the census that produced `soundness.blindSpots` — there is no second copy of
+ * the count to drift from the certificate.
+ */
+const dynamicSoqlGapNote = (
+  dynamicCount: number,
+  unscannedCount: number,
+  inScopeCount: number,
+): string => {
+  const parts: string[] = [];
+  if (dynamicCount > 0) {
+    parts.push(
+      `${dynamicCount.toString()} of the ${inScopeCount.toString()} in-scope (non-test) Apex components carry the dynamic-Apex signal (string-built / reflective queries)`,
+    );
+  }
+  if (unscannedCount > 0) {
+    parts.push(
+      `${unscannedCount.toString()} of the ${inScopeCount.toString()} in-scope (non-test) Apex components were never reached by the code-quality recognizer, so their dynamic-Apex status is UNKNOWN`,
+    );
+  }
+  return `DYNAMIC-SOQL RECALL GAP, MEASURED ON THIS VAULT: ${parts.join('; and ')}. Their string-built queries were NOT parsed by this scan, so "no finding" for them means NOT SEEN — never "selective". Their ids are named in \`soundness.blindSpots\`; read those sources by hand before treating this list as the complete selectivity backlog.`;
+};
+
+/** The `trust.limitations` entry mirroring the unparsed-source blind spot. */
+const UNPARSED_LIMITATION =
+  'Some Apex sources could not be parsed, so their SOQL was not analyzed at all (see soundness.blindSpots[kind=unparsed-apex]).';
+
 /** One flagged query. */
 export interface NonSelectiveFinding {
   readonly rule: NonSelectiveRule;
@@ -397,11 +432,31 @@ export interface NonSelectiveClassEntry {
 }
 
 /** A named blind spot: an Apex component whose source could not be parsed. */
-export interface NonSelectiveBlindSpot {
+export interface UnparsedApexBlindSpot {
   readonly kind: 'unparsed-apex';
   readonly componentIds: readonly ComponentId[];
   readonly note: string;
 }
+
+/**
+ * NONSELECTIVE-DYNAMIC-SOQL-NOT-IN-CERTIFICATE.
+ *
+ * The blind spots this tool can carry. `unparsed-apex` is local (a source file
+ * the SOQL walker could not parse); the rest come VERBATIM from the shared
+ * `soundness.ts` census, so the dynamic-SOQL recall gap this tool documents in
+ * prose is also present in the MACHINE-READABLE certificate.
+ *
+ * It was not. `soundness` was a ternary over parse failures ALONE, so a corpus
+ * in which a quarter of the scanned classes assemble their WHERE clauses as
+ * strings still answered `{complete: true, blindSpots: [], staticCoverage:
+ * 'full'}` — while `boundaries[]`, in the same payload, stated that exactly
+ * those queries are "never parsed as queries" and that an empty result there is
+ * "not seen", not "all selective". A host reads the certificate, not the prose,
+ * and reports the flagged set as the WHOLE exposure. String-built queries are
+ * disproportionately the non-selective ones, so the certificate pointed
+ * confidence at the worst-covered part of the corpus.
+ */
+export type NonSelectiveBlindSpot = UnparsedApexBlindSpot | SoundnessBlindSpot;
 
 /** Uniform soundness envelope (mirrors the static-analysis blind-spot shape). */
 export interface NonSelectiveSoundness {
@@ -620,9 +675,15 @@ export const nonselectiveSoqlHandler = async (
   let totalFindingCount = 0;
   let sawUnknownObject = false;
 
+  // Every non-test Apex component the certificate speaks FOR. The dynamic-SOQL
+  // census below is taken over exactly this set — not over the whole corpus —
+  // so an excluded @isTest class never manufactures a blind spot.
+  const inScopeNodes: Node[] = [];
+
   for (const node of apexScan.value.nodes) {
     // Exclude test classes — a non-selective query there never hits prod volume.
     if (node.properties['isTest'] === true) continue;
+    inScopeNodes.push(node);
     const audited = await auditOneComponent(
       ctx,
       node,
@@ -656,20 +717,42 @@ export const nonselectiveSoqlHandler = async (
   );
 
   // 3. Soundness + boundaries.
+  //
+  // NONSELECTIVE-DYNAMIC-SOQL-NOT-IN-CERTIFICATE. Two independent gaps, both
+  // named, never collapsed into one boolean:
+  //   - `unparsed-apex`  — the SOQL walker could not read/parse the source.
+  //   - the shared dynamic-Apex census (`dynamic-apex` +
+  //     `quality-scan-not-run`) — the component's queries are built at RUNTIME,
+  //     or the recognizer never ran over it so that is UNKNOWN.
+  // The second was previously invisible to the certificate even though the tool
+  // stated it in prose. It is ADOPTED here from `soundness.ts` rather than
+  // re-derived, so this tool and `governor_limit_risks` cannot disagree about
+  // the same corpus (they did: `complete: true` here, `complete: false` there,
+  // same vault, same Apex).
+  const dynamicSoundness = soundnessFromNodes(inScopeNodes);
+  const blindSpots: NonSelectiveBlindSpot[] = [
+    ...(unparsedIds.length > 0
+      ? [
+          {
+            kind: 'unparsed-apex' as const,
+            componentIds: [...unparsedIds].sort(),
+            note: UNPARSED_APEX_NOTE,
+          },
+        ]
+      : []),
+    ...dynamicSoundness.blindSpots,
+  ];
   const soundness: NonSelectiveSoundness =
-    unparsedIds.length === 0
+    blindSpots.length === 0
       ? { complete: true, blindSpots: [], staticCoverage: 'full' }
-      : {
-          complete: false,
-          blindSpots: [
-            {
-              kind: 'unparsed-apex',
-              componentIds: [...unparsedIds].sort(),
-              note: UNPARSED_APEX_NOTE,
-            },
-          ],
-          staticCoverage: 'partial',
-        };
+      : { complete: false, blindSpots, staticCoverage: 'partial' };
+
+  const dynamicCount =
+    dynamicSoundness.blindSpots.find((b) => b.kind === 'dynamic-apex')?.componentIds
+      .length ?? 0;
+  const unscannedCount =
+    dynamicSoundness.blindSpots.find((b) => b.kind === 'quality-scan-not-run')
+      ?.componentIds.length ?? 0;
 
   const boundaries: string[] = [
     STATIC_SHAPE_DISCLOSURE,
@@ -689,12 +772,34 @@ export const nonselectiveSoqlHandler = async (
     boundaries.push(scanTruncationNote(incomplete, clampedNodeScanLimit()));
   }
   if (unparsedIds.length > 0) boundaries.push(UNPARSED_APEX_NOTE);
+  // The MEASURED sentence goes in the prose a host reads aloud, not only in the
+  // structured block a host may summarise away.
+  if (dynamicCount > 0 || unscannedCount > 0) {
+    boundaries.push(
+      dynamicSoqlGapNote(dynamicCount, unscannedCount, inScopeNodes.length),
+    );
+  }
 
+  // `trust` is DERIVED from the same blind-spot list. `limitations: []` beside a
+  // named blind spot is the machine-readable half of the same overclaim.
+  const missingCoverage: string[] = [];
+  const limitations: string[] = [];
+  if (unparsedIds.length > 0) {
+    missingCoverage.push('ApexClass / ApexTrigger (unparseable source)');
+    limitations.push(UNPARSED_LIMITATION);
+  }
+  if (dynamicCount > 0 || unscannedCount > 0) {
+    missingCoverage.push('ApexClass / ApexTrigger (queries built at runtime — not parsed)');
+    limitations.push(dynamicSoqlGapNote(dynamicCount, unscannedCount, inScopeNodes.length));
+  }
   const completeness: TrustSummary['completeness'] =
-    unparsedIds.length === 0
-      ? { status: 'complete' }
-      : { status: 'partial', missingCoverage: ['ApexClass / ApexTrigger (unparseable source)'] };
-  const trust = offlineTrust(ctx, completeness);
+    missingCoverage.length === 0 ? { status: 'complete' } : { status: 'partial', missingCoverage };
+  const trust = offlineTrust(
+    ctx,
+    completeness,
+    undefined,
+    limitations.length > 0 ? limitations : undefined,
+  );
   const vaultState = {
     sourceTreeHash: ctx.manifest.sourceTreeHash,
     refreshedAt: ctx.manifest.refreshedAt,

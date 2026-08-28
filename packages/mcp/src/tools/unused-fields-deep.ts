@@ -175,13 +175,33 @@ const UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE: readonly string[] =
 
 const completenessForUnusedFieldsDeep = (
   ctx: Context,
+  /**
+   * Whether THIS response withheld rows it had already computed. A page
+   * boundary is a completeness fact in its own right — see
+   * {@link completenessForUnusedFieldsDeep} usage note below.
+   */
+  truncated: boolean,
 ): TrustSummary['completeness'] => {
   const coverage = summarizeCoverage(
     ctx.manifest,
     UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE,
   );
+  // UNUSED-FIELDS-DEEP-CERTIFIES-COMPLETENESS-IT-DID-NOT-EARN, residual half.
+  //
+  // `completeness` used to be derived from RETRIEVE COVERAGE ALONE. On the vault
+  // the persona used that already reads `partial` (two analytics families were
+  // capped), so the contradiction was invisible there — but on a fully-retrieved
+  // vault a 25-of-177 page still certified `status: 'complete'`, sitting beside
+  // `truncated: true` in the same envelope. This is a list of DELETION
+  // candidates: a host that reads `complete` and stops paging tells the user the
+  // whole cleanup set is on the screen when most of it is not.
+  //
+  // A withheld page is a completeness gap, so it downgrades the status. It is
+  // NOT a `missingCoverage` entry — that list names metadata FAMILIES the vault
+  // never retrieved, and a page boundary is neither — so the resume instruction
+  // stays where it already is, in `trust.limitations` (see the trust build).
   if (coverage.status === 'complete') {
-    return { status: 'complete' };
+    return truncated ? { status: 'partial' } : { status: 'complete' };
   }
   return {
     status: coverage.status === 'partial' ? 'partial' : 'unknown',
@@ -1902,7 +1922,7 @@ export const unusedFieldsDeepHandler = async (
   // usage-source family list (see UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE).
   const trust = offlineTrust(
     ctx,
-    completenessForUnusedFieldsDeep(ctx),
+    completenessForUnusedFieldsDeep(ctx, truncated),
     UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE,
     [
       ...(truncated

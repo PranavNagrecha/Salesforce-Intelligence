@@ -4402,6 +4402,13 @@ const FIND_HARDCODED_VALUES_ANYWHERE_INPUT_SCHEMA: Readonly<
         // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL: the last two
         // shipped on the validator and the handler but never here, so the two
         // scopes added to close a blind spot were themselves unrequestable.
+        //
+        // AND IT HAPPENED AGAIN, same file, same shape:
+        // FLOW-CORPUS-NEVER-SCANNED-NOR-DISCLOSED added `'flow'` to the Zod enum
+        // and not to this one, so the scope that closes the Flow blind spot was
+        // itself unrequestable by a schema-driven host. Twice is a pattern, not
+        // an accident — the advertised-schema-parity gate is what caught both,
+        // and it caught this one within the hour rather than a release later.
         enum: [
           'apex',
           'formula',
@@ -4409,6 +4416,7 @@ const FIND_HARDCODED_VALUES_ANYWHERE_INPUT_SCHEMA: Readonly<
           'workflow-rule',
           'restriction-rule',
           'custom-label',
+          'flow',
         ],
       },
     },

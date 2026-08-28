@@ -1927,3 +1927,163 @@ describe('find_dead_code — byVerdict tallies the FULL set, `suppressed` names 
     expect(d.suppressed.note).toContain('CHECKED zero');
   });
 });
+
+describe('find_dead_code — soundness certifies the ANALYZED corpus, not the rendered page', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-fdc-sound-'));
+    const opened = await openGraph(join(dir, 'fdc.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const st = opened.value;
+    const imported = await importExtractionResults(st, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const out = await run({ vaultRoot: dir, manifest: MANIFEST, graph: st } as Context);
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  /**
+   * A vault shaped like a real one: every ApexClass carries a quality scan
+   * (`qualityIssues` present, one of them flagged `dynamic-apex`), and NO
+   * ApexTrigger carries the property at all — the trigger recognizers never ran.
+   * A trigger is its own entry point, so every trigger row is `uncertain` and
+   * the default `includeUncertain: false` listing hides all of them.
+   */
+  const seedUnscannedTriggers: ExtractionResult = {
+    nodes: [
+      makeNode({
+        type: 'ApexTrigger',
+        id: 'ApexTrigger:Trigger_A',
+        apiName: 'Trigger_A',
+        properties: {},
+      }),
+      makeNode({
+        type: 'ApexTrigger',
+        id: 'ApexTrigger:Trigger_B',
+        apiName: 'Trigger_B',
+        properties: {},
+      }),
+      makeNode({
+        type: 'ApexClass',
+        id: 'ApexClass:Class_C',
+        apiName: 'Class_C',
+        properties: {
+          isTest: false,
+          isSchedulable: true,
+          qualityIssues: [
+            {
+              rule: 'dynamic-apex',
+              severity: 'info',
+              location: 'Class_C.cls:1',
+              explanation: 'builds a SOQL string at runtime',
+              confidence: 'heuristic',
+            },
+          ],
+        },
+      }),
+      makeNode({
+        type: 'CustomObject',
+        id: 'CustomObject:Obj_A__c',
+        apiName: 'Obj_A__c',
+      }),
+      makeNode({
+        type: 'CustomField',
+        id: 'CustomField:Obj_A__c.Field_D__c',
+        apiName: 'Obj_A__c.Field_D__c',
+        parentId: 'CustomObject:Obj_A__c',
+        properties: {},
+      }),
+    ],
+    edges: [],
+  };
+
+  it('the soundness certificate does not flip when a DISPLAY flag changes', async () => {
+    const [dflt, withUncertain] = await withStore(seedUnscannedTriggers, async (c) => [
+      await findDeadCodeHandler(c, { types: ['ApexTrigger'], limit: 500 }),
+      await findDeadCodeHandler(c, {
+        types: ['ApexTrigger'],
+        includeUncertain: true,
+        limit: 500,
+      }),
+    ]);
+    expect(dflt.ok && withUncertain.ok).toBe(true);
+    if (!dflt.ok || !withUncertain.ok) return;
+    // The analyzed corpus is provably identical across the flag flip.
+    expect(dflt.value.data.byVerdict).toEqual(withUncertain.value.data.byVerdict);
+    expect(dflt.value.data.byType).toEqual(withUncertain.value.data.byType);
+    // ... so the certificate over that corpus must be identical too. Pre-fix the
+    // default call returned complete:true/full because every row was suppressed.
+    expect(dflt.value.data.soundness).toEqual(withUncertain.value.data.soundness);
+    expect(dflt.value.data.soundness.complete).toBe(false);
+    expect(dflt.value.data.soundness.staticCoverage).toBe('partial');
+  });
+
+  it('a never-scanned Apex referrer family is a TYPED blind spot on the default org-wide call', async () => {
+    const r = await withStore(seedUnscannedTriggers, (c) =>
+      findDeadCodeHandler(c, { limit: 500 }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // A dead field is listed and certified — this is the delete-verdict path.
+    expect(d.byVerdict.definitely_dead).toBeGreaterThan(0);
+    // The census the five sibling quality tools already publish.
+    expect(d.qualityScanCoverage).toEqual([
+      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexTrigger', nodes: 2, scanned: 0 },
+    ]);
+    expect(d.boundaries.some((b) => b.includes('NOT SCANNED IN THIS VAULT'))).toBe(true);
+    // And the machine-readable certificate agrees with the prose.
+    expect(d.soundness.complete).toBe(false);
+    expect(d.soundness.staticCoverage).toBe('partial');
+    const kinds = d.soundness.blindSpots.map((b) => b.kind).sort();
+    expect(kinds).toEqual(['dynamic-apex', 'quality-scan-not-run']);
+    const unscanned = d.soundness.blindSpots.find((b) => b.kind === 'quality-scan-not-run');
+    expect(unscanned?.componentIds).toEqual([
+      'ApexTrigger:Trigger_A',
+      'ApexTrigger:Trigger_B',
+    ]);
+  });
+
+  it('a CustomField-only scan still discloses the unscanned Apex REFERRER surface', async () => {
+    const r = await withStore(seedUnscannedTriggers, (c) =>
+      findDeadCodeHandler(c, { types: ['CustomField'], limit: 500 }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.byType).toEqual({ CustomField: 1 });
+    // No Apex row is in the candidate set at all, yet every one of those Apex
+    // nodes is a potential invisible REFERRER of the field being called dead.
+    expect(d.soundness.complete).toBe(false);
+    expect(d.qualityScanCoverage?.some((c) => c.type === 'ApexTrigger' && c.scanned === 0)).toBe(
+      true,
+    );
+  });
+
+  it('a fully-scanned vault with no dynamic Apex still reports a CHECKED census', async () => {
+    const r = await withStore(
+      {
+        nodes: [
+          makeNode({
+            type: 'ApexClass',
+            id: 'ApexClass:Class_E',
+            apiName: 'Class_E',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+        ],
+        edges: [],
+      },
+      (c) => findDeadCodeHandler(c, { types: ['ApexClass'], limit: 500 }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.qualityScanCoverage).toEqual([{ type: 'ApexClass', nodes: 1, scanned: 1 }]);
+    expect(d.soundness).toEqual({ complete: true, blindSpots: [], staticCoverage: 'full' });
+    expect(d.boundaries.some((b) => b.includes('NOT SCANNED IN THIS VAULT'))).toBe(false);
+  });
+});

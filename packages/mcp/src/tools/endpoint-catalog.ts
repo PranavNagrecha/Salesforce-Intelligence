@@ -37,6 +37,27 @@
  *      distinct referenced aliases are rolled up into
  *      `referencedNamedCredentials`.
  *
+ *   6. **RemoteSiteSetting allowlist** — `url` property on
+ *      RemoteSiteSetting nodes. The canonical Salesforce declaration
+ *      of an outbound-callout allowlist entry: the external host an
+ *      Apex `Http.request` to a HARDCODED URL is permitted to reach.
+ *      `url` is a REQUIRED element in the extractor, so every node
+ *      carries one. Each entry also carries `isActive`.
+ *
+ *   7. **CspTrustedSite allowlist** — `endpointUrl` property on
+ *      CspTrustedSite nodes. The browser-side external-host allowlist
+ *      an Experience/Lightning page is permitted to load from.
+ *      `endpointUrl` is likewise a REQUIRED element.
+ *
+ * Categories 6 and 7 are AUTHORIZATIONS, not proven callsites — the
+ * host is reachable, not necessarily reached. That distinction is
+ * stated verbatim in `disclosure` and the entries carry their own
+ * `endpointKind` so `summary.byKind` keeps them separable from a
+ * NamedCredential or an OutboundMessage destination. They were absent
+ * for eight versions: a real org returned `totalEndpoints: 34` with
+ * `boundaries: []` while 35 allowlist URLs sat in the same vault and
+ * were surfaced, on the same call, by `sfi.integration_map`.
+ *
  * Implementation notes:
  *   - Every category is scanned to EXHAUSTION (`scanAllNodesOfTypes`
  *     windows the SQL `OFFSET` past the graph layer's 500-row per-page
@@ -45,7 +66,17 @@
  *     `@RestResource` sorting past position 500 by id was silently
  *     absent with nothing in the payload to distinguish it from an
  *     endpoint that does not exist. `boundaries` discloses the residual
- *     `FULL_SCAN_MAX_NODES` ceiling and is empty otherwise.
+ *     `FULL_SCAN_MAX_NODES` ceiling when it bites, and ALWAYS carries the
+ *     scope boundary pointing at `notCovered[]`.
+ *   - `summary.totalEndpoints` is a true total OF THE DECLARED, URL-BEARING
+ *     METADATA FAMILIES ABOVE — never of "every URL in the org". It is not a
+ *     certificate. The URL surfaces this catalog does NOT enumerate are named
+ *     in the TYPED `notCovered[]` field (Apex literals passed to
+ *     `HttpRequest.setEndpoint`, URLs in LWC/Aura/Visualforce markup,
+ *     ConnectedApp callback URLs, WebLink targets, URLs stored as Custom
+ *     Setting / Custom Metadata data). An EMPTY `boundaries[]` used to be the
+ *     signal that nothing was omitted, which inverted the signal precisely
+ *     when the answer was most incomplete.
  *   - Each category surfaces a `direction` field (inbound | outbound)
  *     so the renderer can render two sections.
  *   - The catalog is intentionally URL-centric — no edges, no
@@ -113,8 +144,10 @@ export type EndpointDirection = 'inbound' | 'outbound';
 /**
  * Endpoint kind discriminator. Matches the composing categories:
  * `rest`/`aura`/`invocable` (inbound APIs), `outbound-message`,
- * `external-data-source`, `named-credential`, and `omni-rest`
- * (OmniStudio Integration Procedure Rest Action callouts).
+ * `external-data-source`, `named-credential`, `omni-rest`
+ * (OmniStudio Integration Procedure Rest Action callouts), and the two
+ * ALLOWLIST kinds `remote-site` / `csp-trusted-site` (a host the org is
+ * AUTHORIZED to reach — not evidence that anything reaches it).
  */
 export type EndpointKind =
   | 'rest'
@@ -123,7 +156,9 @@ export type EndpointKind =
   | 'outbound-message'
   | 'external-data-source'
   | 'named-credential'
-  | 'omni-rest';
+  | 'omni-rest'
+  | 'remote-site'
+  | 'csp-trusted-site';
 
 /**
  * One endpoint entry.
@@ -158,6 +193,14 @@ export interface EndpointEntry {
    * retrieve captured", not a guarantee of zero runtime use.
    */
   readonly orphaned?: boolean;
+  /**
+   * For the allowlist kinds (`remote-site` / `csp-trusted-site`) only: the
+   * node's declared `isActive`. An INACTIVE allowlist entry is still LISTED —
+   * silently dropping it would repeat the omission this field exists to
+   * disclose — but a reviewer needs to tell a live authorization from a
+   * dormant one. Absent for every other kind.
+   */
+  readonly isActive?: boolean;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -183,17 +226,57 @@ export interface EndpointCatalogOutput {
    * one.
    */
   readonly referencedNamedCredentials: readonly string[];
+  /**
+   * The outbound-callout ALLOWLIST: one entry per RemoteSiteSetting, `url`
+   * verbatim, `isActive` carried. This is the artifact a security review asks
+   * for by name ("every external host this org can talk to") and the one a
+   * migration must re-create in the target org — an Apex callout to a host
+   * with no RemoteSiteSetting throws at runtime. An entry authorizes a host;
+   * it does not prove a callout exists.
+   */
+  readonly remoteSiteSettings: readonly EndpointEntry[];
+  /**
+   * The browser-side external-host allowlist: one entry per CspTrustedSite,
+   * `endpointUrl` verbatim as `url`, `isActive` carried.
+   */
+  readonly cspTrustedSites: readonly EndpointEntry[];
   readonly summary: {
+    /**
+     * The total across the enumerated families BELOW — not "every URL in the
+     * org". Read it with {@link EndpointCatalogOutput.notCovered}, which names
+     * the URL surfaces this catalog does not model at all.
+     */
     readonly totalEndpoints: number;
     readonly inboundCount: number;
     readonly outboundCount: number;
+    /**
+     * `endpointKind` → count. Present so an allowlist AUTHORIZATION
+     * (`remote-site` / `csp-trusted-site`) can never be read as a callsite,
+     * and so a caller can decompose `totalEndpoints` without re-counting the
+     * arrays. Every kind with at least one entry appears; kinds with none are
+     * omitted (a missing key and a `0` both mean "none of that kind here",
+     * which is a scanned, not an unchecked, zero — every family above is
+     * walked to exhaustion on every call).
+     */
+    readonly byKind: Readonly<Record<string, number>>;
   };
   readonly disclosure: string;
   /**
-   * Scope disclosures for this response. EMPTY in the normal case: every
-   * category is scanned to exhaustion, so `summary.totalEndpoints` is a TRUE
-   * total. Non-empty only when a type hit the residual `FULL_SCAN_MAX_NODES`
-   * ceiling — the one case where "every URL" is still short, and it says so.
+   * URL surfaces this catalog does NOT enumerate, always non-empty.
+   *
+   * A TYPED field rather than prose because the failure it prevents is a
+   * machine one: a host LLM read `boundaries: []` as "nothing was omitted" and
+   * told a security reviewer that a certified `totalEndpoints` was the complete
+   * outbound surface. Each entry names the surface and the tool that DOES
+   * enumerate it, so the gap is actionable rather than merely admitted.
+   */
+  readonly notCovered: readonly string[];
+  /**
+   * Scope disclosures for this response. NEVER empty: the first entry always
+   * points at {@link EndpointCatalogOutput.notCovered}, because
+   * `summary.totalEndpoints` counts the DECLARED URL-bearing metadata families
+   * and not every URL the org can reach. A further entry appears when a type
+   * hit the residual `FULL_SCAN_MAX_NODES` ceiling.
    */
   readonly boundaries: readonly string[];
 }
@@ -202,7 +285,38 @@ export interface EndpointCatalogOutput {
  * Verbatim honesty disclosure surfaced ALWAYS in the response.
  */
 const ENDPOINT_CATALOG_DISCLOSURE =
-  'URLs are captured verbatim from the source metadata; v2.8 does NOT probe, does NOT validate, and does NOT confirm that the destination exists or that the system is currently reachable. Runtime registrations (e.g., a NamedCredential resolved via custom metadata at runtime) may carry a stored URL that differs from the actual production destination.';
+  'URLs are captured verbatim from the source metadata; this tool does NOT probe, does NOT validate, and does NOT confirm that the destination exists or that the system is currently reachable. Runtime registrations (e.g., a NamedCredential resolved via custom metadata at runtime) may carry a stored URL that differs from the actual production destination. `remoteSiteSettings` and `cspTrustedSites` are ALLOWLIST authorizations — a host the org is PERMITTED to reach, which is not evidence that any code reaches it — so read them via `summary.byKind` rather than as callsites. `summary.totalEndpoints` totals the families enumerated in this response ONLY; it is NOT a certificate that the org has no other URLs. Read `notCovered[]` before treating this as the complete external surface.';
+
+/**
+ * URL surfaces this catalog does not model, named verbatim in `notCovered[]`
+ * on EVERY response.
+ *
+ * These are not oversights that a future scan closes cheaply — each needs a
+ * subsystem this tool does not have (an Apex expression evaluator, a markup
+ * parser, a data-plane read). What was a defect is having claimed a TRUE total
+ * while they were silently missing. Each entry names the surface AND the tool
+ * that can enumerate it, so the caller is handed a next step rather than a
+ * shrug.
+ */
+const UNCOVERED_URL_SURFACES: readonly string[] = [
+  'Hardcoded URL literals inside Apex — `HttpRequest.setEndpoint(\'https://…\')` / `Http.request` to a literal host. The CALLSITE is not modeled as a URL-bearing node, so these URLs are absent from every count here; the RemoteSiteSetting that authorizes them usually is present, in `remoteSiteSettings`. Enumerate the callsites with `sfi.search_apex_source(\'setEndpoint\')` or `sfi.find_code_usages` on `HttpRequest`.',
+  'URLs embedded in LWC / Aura / Visualforce markup, and in static resources — not parsed for URLs.',
+  'ConnectedApp OAuth callback URLs and WebLink / custom-button targets — modeled as node properties but NOT part of this URL axis; `sfi.integration_map` returns ConnectedApps as first-class rows.',
+  'URLs stored as DATA rather than metadata — Custom Setting / Custom Metadata rows, environment config resolved at runtime. An offline vault holds the metadata, not the row values.',
+];
+
+/**
+ * The boundary that is ALWAYS emitted. It exists because the previous contract
+ * ("`boundaries[]` is empty in the normal case") made the empty array read as a
+ * completeness certificate, which inverted the signal exactly when the answer
+ * was most incomplete.
+ */
+const SCOPE_BOUNDARY =
+  '`summary.totalEndpoints` counts the DECLARED, URL-bearing metadata families ' +
+  'enumerated in this response — it is NOT every URL the org can reach. ' +
+  `${String(UNCOVERED_URL_SURFACES.length)} further URL surface(s) are NOT enumerated here ` +
+  'and are named in `notCovered[]`; read them before signing off an integration ' +
+  'or security inventory.';
 
 /**
  * Read a string property defensively. Returns the verbatim value
@@ -454,6 +568,41 @@ const collectOmniRestEndpoints = async (
 };
 
 /**
+ * Collect one URL-bearing ALLOWLIST family (RemoteSiteSetting /
+ * CspTrustedSite) into endpoint entries.
+ *
+ * Both families have the same shape — one node, one required URL element, one
+ * `isActive` flag — so they share ONE collector rather than a second
+ * near-identical copy (the duplication that lets two spellings of the same walk
+ * drift apart). The URL property name differs per type and is passed in.
+ *
+ * The URL element is REQUIRED by both extractors, so `readOptionalString`
+ * returning `null` here means a MALFORMED or pre-extractor node, not "this
+ * allowlist entry names no host". Such a row is still LISTED with `url: null`:
+ * dropping it would be the same silent omission this whole family exists to
+ * close.
+ */
+const collectAllowlistFamily = async (
+  ctx: Context,
+  type: 'RemoteSiteSetting' | 'CspTrustedSite',
+  urlProperty: string,
+  endpointKind: EndpointKind,
+): Promise<Result<CollectedCategory, string>> => {
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, [type]);
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  return ok({
+    entries: (nodesResult.value.nodes as readonly Node[]).map((node) => ({
+      endpointKind,
+      direction: 'outbound' as const,
+      sourceComponentId: node.id,
+      url: readOptionalString(node.properties, urlProperty),
+      isActive: node.properties['isActive'] === true,
+    })),
+    incompleteTypes: nodesResult.value.incompleteTypes,
+  });
+};
+
+/**
  * Deterministic entry comparator: sourceComponentId ASC, then url
  * ASC (nulls first). Stable across runs.
  */
@@ -536,12 +685,38 @@ export const endpointCatalogHandler = async (
       message: `graph query failed: ${omniRestResult.error}`,
     });
   }
+  const remoteSiteResult = await collectAllowlistFamily(
+    ctx,
+    'RemoteSiteSetting',
+    'url',
+    'remote-site',
+  );
+  if (!remoteSiteResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${remoteSiteResult.error}`,
+    });
+  }
+  const cspResult = await collectAllowlistFamily(
+    ctx,
+    'CspTrustedSite',
+    'endpointUrl',
+    'csp-trusted-site',
+  );
+  if (!cspResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${cspResult.error}`,
+    });
+  }
 
   const inbound = [...inboundResult.value.entries].sort(compareEntries);
   const outboundMsg = [...outboundMsgResult.value.entries].sort(compareEntries);
   const externalDS = [...externalDSResult.value.entries].sort(compareEntries);
   const namedCred = [...namedCredResult.value.entries].sort(compareEntries);
   const omniRest = [...omniRestResult.value.entries].sort(compareEntries);
+  const remoteSites = [...remoteSiteResult.value.entries].sort(compareEntries);
+  const cspSites = [...cspResult.value.entries].sort(compareEntries);
 
   // Residual full-scan cap across the five categories. Empty in the normal
   // case; when it fires, `summary.totalEndpoints` is an undercount and must not
@@ -552,9 +727,17 @@ export const endpointCatalogHandler = async (
     ...externalDSResult.value.incompleteTypes,
     ...namedCredResult.value.incompleteTypes,
     ...omniRestResult.value.incompleteTypes,
+    ...remoteSiteResult.value.incompleteTypes,
+    ...cspResult.value.incompleteTypes,
   ];
+  // ALWAYS-ON scope boundary first. `boundaries: []` used to mean "nothing was
+  // omitted", which is the reading that let a certified `totalEndpoints: 34`
+  // stand while 35 allowlist URLs in the same vault went unmentioned. The
+  // residual full-scan cap, when it bites, is appended after it.
   const boundaries =
-    incompleteTypes.length > 0 ? [fullScanTruncationNote(incompleteTypes)] : [];
+    incompleteTypes.length > 0
+      ? [SCOPE_BOUNDARY, fullScanTruncationNote(incompleteTypes)]
+      : [SCOPE_BOUNDARY];
 
   // The distinct, sorted host aliases the OmniStudio callout surface
   // references — surfaced so an architect can reconcile them against the
@@ -569,7 +752,27 @@ export const endpointCatalogHandler = async (
 
   const inboundCount = inbound.length;
   const outboundCount =
-    outboundMsg.length + externalDS.length + namedCred.length + omniRest.length;
+    outboundMsg.length +
+    externalDS.length +
+    namedCred.length +
+    omniRest.length +
+    remoteSites.length +
+    cspSites.length;
+
+  // DERIVED from the emitted rows, never from a parallel tally — a hand-kept
+  // second count is how `totalEndpoints` and the arrays drift apart.
+  const byKind: Record<string, number> = {};
+  for (const entry of [
+    ...inbound,
+    ...outboundMsg,
+    ...externalDS,
+    ...namedCred,
+    ...omniRest,
+    ...remoteSites,
+    ...cspSites,
+  ]) {
+    byKind[entry.endpointKind] = (byKind[entry.endpointKind] ?? 0) + 1;
+  }
 
   return ok({
     data: {
@@ -579,12 +782,16 @@ export const endpointCatalogHandler = async (
       namedCredentials: namedCred,
       omniRestEndpoints: omniRest,
       referencedNamedCredentials,
+      remoteSiteSettings: remoteSites,
+      cspTrustedSites: cspSites,
       summary: {
         totalEndpoints: inboundCount + outboundCount,
         inboundCount,
         outboundCount,
+        byKind,
       },
       disclosure: ENDPOINT_CATALOG_DISCLOSURE,
+      notCovered: UNCOVERED_URL_SURFACES,
       boundaries,
     },
     vaultState: {
