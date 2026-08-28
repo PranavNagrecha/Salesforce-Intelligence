@@ -130,7 +130,7 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.get_subgraph': { bound: 'graph-payload-budget', note: 'hops + 200 nodes / 400 edges + byte trim' },
   'sfi.get_impact': { bound: 'graph-payload-budget', note: 'incoming-only BFS + same caps' },
   // --- Handler-internal hard caps (no caller limit knob) ---
-  'sfi.scheduled_job_catalog': { bound: 'handler-capped', note: '500-class ceiling' },
+  'sfi.scheduled_job_catalog': { bound: 'handler-capped', note: 'no caller limit knob; the corpus is walked to exhaustion (scanAllNodesOfTypes) and the output is bounded by the count of Schedulable classes, not by a page. The 500-class ceiling this note used to name was removed in 0.3.3 (0.3.3)' },
   'sfi.outbound_message_catalog': { bound: 'handler-capped', note: '500-entry ceiling' },
   'sfi.endpoint_catalog': { bound: 'handler-capped', note: '500/category ceiling' },
   // --- Global jsonResult budget + high-fanout smoke required ---
