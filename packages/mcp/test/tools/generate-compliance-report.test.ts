@@ -953,3 +953,118 @@ describe('generateComplianceReportHandler — the report must be able to emit a 
     expect(r.value.data.document.body).toContain('objectApiName');
   });
 });
+
+// =============================================================================
+// REAL-ORG (HIGH): the Object + FLS Exposure section certified a zero over a
+// set it never examined.
+//
+// The document defines "regulated" ONCE, in its own Executive Summary:
+// `pii || sensitive`. The page, the access audit and the Risk Flags pass all
+// use that definition. The Object + FLS pass did NOT — it was gated on a
+// private, NARROWER predicate (EncryptedText / identifier / protected-class /
+// sensitive / protected) that silently excludes the single largest regulated
+// class, ordinary `pii` fields in the `contact` category (phone, email,
+// address). On a real org EVERY field on page one was of that class, so the
+// pass examined ZERO fields — and the report still printed
+// `Object+FLS exposure pairs: 0 (over the N field(s) access-audited on this
+// page)` plus an all-clear sentence saying no principal held both object reach
+// and FLS read. Principals holding both DID exist, in quantity.
+//
+// The fix runs the pass over exactly the fields the page audited — the same
+// one window every other section uses — and bounds the RENDERED rows with an
+// explicit "showing X of Y" disclosure instead of a silent narrowing.
+// =============================================================================
+
+const OBJ_C = 'CustomObject:Obj_C__c';
+const CONTACT_PII = 'CustomField:Obj_C__c.Contact_Phone__c';
+const BOTH_PROFILE = 'Profile:BothGrants';
+
+const contactPiiSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: OBJ_C,
+      type: 'CustomObject',
+      apiName: 'Obj_C__c',
+      label: 'Obj C',
+      properties: { sharingModel: 'Private' },
+    }),
+    // Ordinary PII: classification `pii`, category `contact`. NOT EncryptedText,
+    // NOT an identifier — i.e. exactly the class the old gate dropped.
+    makeNode({
+      id: CONTACT_PII,
+      type: 'CustomField',
+      apiName: 'Contact_Phone__c',
+      label: 'Contact Phone',
+      parentId: OBJ_C,
+      properties: { label: 'Contact Phone', dataType: 'Phone' },
+    }),
+    makeNode({
+      id: BOTH_PROFILE,
+      type: 'Profile',
+      apiName: 'BothGrants',
+      label: 'Both Grants Profile',
+      properties: {},
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: OBJ_C, toId: CONTACT_PII, edgeType: 'parentOf' }),
+    // The exposure combination: object-level read AND FLS read on the field.
+    makeEdge({
+      fromId: BOTH_PROFILE,
+      toId: OBJ_C,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+    makeEdge({
+      fromId: BOTH_PROFILE,
+      toId: CONTACT_PII,
+      edgeType: 'grantedBy',
+      properties: { readable: true, editable: false },
+    }),
+  ],
+};
+
+describe('generateComplianceReportHandler — Object+FLS must cover the page it claims', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('contact-pii-exposure.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [contactPiiSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('the field IS on the audited page and IS counted as regulated', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.document.body).toContain(
+      'Regulated (PII/sensitive) fields in scope: 1',
+    );
+    expect(r.value.data.document.body).toContain('Fields audited for access: 1');
+  });
+
+  it('reports the principal holding BOTH object read and FLS read on an ordinary PII field', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    expect(body).toContain('Both Grants Profile');
+    expect(body).toContain('Object+FLS exposure pairs: 1');
+  });
+
+  it('does NOT print the all-clear sentence over a set it never examined', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.document.body).not.toContain(
+      'no profile/perm-set holds object-level access',
+    );
+  });
+});

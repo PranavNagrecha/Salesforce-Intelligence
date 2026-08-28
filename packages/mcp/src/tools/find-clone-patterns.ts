@@ -136,6 +136,32 @@ const FLOW_TRIGGER_ONLY_DISCLOSURE =
   "this seed flow carries NO callsApex, readsFrom, or writesTo edges — its record-triggered object is the only dimension left that can score anything. That dimension is weighted 0.20, so NO candidate can score above 0.20 however similar the two flows really are, and at the default minScore of 0.30 an empty match list is a mathematical guarantee rather than evidence of uniqueness. Any row listed here means only 'also triggered on the same object', not 'structurally similar' — lower minScore to see them, and inspect the flow definitions directly.";
 const HEURISTIC_DISCLOSURE =
   'clone detection by structural fingerprint is heuristic; AST-level clone detection is deferred to a future milestone. Verify any high-similarity result by inspecting the source.';
+/**
+ * A RESULT-SIZE FIELD THAT CONTRADICTS THE RESPONSE IT IS IN (0.3.3 real-org
+ * finding). Cluster mode used to emit a hardcoded `totalCount: 0` beside a
+ * fully populated `clusters` array. `totalCount` is this product's
+ * CONVENTIONAL result-size field — the PII, field-cleanup, flow-fault,
+ * dead-code, CRUD/FLS and guest-exposure surfaces all use it as the honest
+ * total — so a caller that has learned the envelope grammar and short-circuits
+ * on `totalCount === 0` (or on an empty `matches`) read a CERTIFIED ZERO off a
+ * response that carried real results.
+ *
+ * The count itself is now derived from the payload ({@link
+ * FindClonePatternsOutput.totalCount} = `clusters.length` in this branch), so
+ * the number can no longer disagree with the array. This disclosure covers what
+ * the number alone cannot: `matches` is still `[]` here, and an empty array
+ * under this product's grammar otherwise means SEARCHED-AND-CLEAN. It is
+ * emitted UNCONDITIONALLY in cluster mode — including on a genuinely
+ * clone-free scan, where it is the sentence that tells a reader `clusterCount`
+ * is the field carrying the checked zero.
+ *
+ * It also states that `limit` is not applied here. The cluster branch never
+ * reads `input.limit` (it lists every cluster at or above `minScore`), and
+ * silently ignoring a caller-supplied cap is the same class of defect as the
+ * count: the response looked as though the cap had been honoured.
+ */
+const CLUSTER_ENVELOPE_DISCLOSURE =
+  "cluster mode does not use the seed-mode envelope: `matches` is EMPTY BY CONSTRUCTION here — ranked pairwise matches are a seed-mode shape and none were computed — so an empty `matches` is NOT 'no clones found'. The answer to this call is the `clusters` array, and `totalCount` counts those clusters (it always equals `clusterCount`), NOT rows in `matches`. `limit` is a seed-mode cap and is IGNORED in cluster mode — every cluster at or above `minScore` is listed. Read a genuine zero off `clusterCount === 0`, never off `matches`.";
 
 /**
  * R6 (0.3.3 honesty census): residual ceiling on the per-type full scan in
@@ -228,9 +254,19 @@ export interface CloneCluster {
 export interface FindClonePatternsOutput {
   /** Which mode produced this payload. */
   readonly mode: 'seed' | 'clusters';
-  /** Ranked matches (seed mode); `[]` in cluster mode. */
+  /**
+   * Ranked matches. In cluster mode this is `[]` BY CONSTRUCTION — pairwise
+   * ranked matches are a seed-mode shape and none are computed — never
+   * because no clones were found. The cluster-mode answer is {@link clusters},
+   * and {@link CLUSTER_ENVELOPE_DISCLOSURE} says so in `boundaries`.
+   */
   readonly matches: readonly CloneMatch[];
-  /** Count of seed-mode matches; `0` in cluster mode. */
+  /**
+   * How many results this payload carries: `matches.length` before `limit` in
+   * seed mode, and `clusters.length` (== {@link clusterCount}) in cluster
+   * mode. It is DERIVED from the array it describes in both branches, so it
+   * can never read 0 beside a populated response.
+   */
   readonly totalCount: number;
   // ---- seed mode only (componentId given) ----
   readonly seedId?: ComponentId;
@@ -561,7 +597,11 @@ export const findClonePatternsHandler = async (
       return err({ kind: 'internal', message: `graph query failed: ${result.error}` });
     }
     const { clusters, scanned, capped } = result.value;
-    const boundaries: string[] = [APEX_FINGERPRINT_DISCLOSURE, HEURISTIC_DISCLOSURE];
+    const boundaries: string[] = [
+      APEX_FINGERPRINT_DISCLOSURE,
+      HEURISTIC_DISCLOSURE,
+      CLUSTER_ENVELOPE_DISCLOSURE,
+    ];
     if (capped) {
       boundaries.push(
         `cluster scan capped at the first ${MAX_CLUSTER_NODES} ${type} nodes (O(n²) bound) — re-run seeded for components beyond the cap.`,
@@ -570,8 +610,13 @@ export const findClonePatternsHandler = async (
     return ok({
       data: {
         mode: 'clusters',
+        // Empty BY CONSTRUCTION, and disclosed as such — see
+        // CLUSTER_ENVELOPE_DISCLOSURE, pushed unconditionally above.
         matches: [],
-        totalCount: 0,
+        // DERIVED from the array this payload actually carries, not a
+        // hardcoded 0. `clusterCount` below reads the same expression, so the
+        // two result-size fields cannot drift apart.
+        totalCount: clusters.length,
         type,
         scannedCount: scanned,
         clusters,

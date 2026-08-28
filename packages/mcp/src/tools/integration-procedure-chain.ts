@@ -18,14 +18,16 @@
  *          `namedCredential` carried alongside.
  *        - `DataRaptor Extract/Transform/Load Action` →
  *          kind `'dataraptor'`; target = the `bundle` field; `targetId`
- *          resolves to the OmniDataTransform node when present.
- *          `targetResolution` tells "not in this vault" apart from
- *          "the graph lookup itself failed" — see `ExternalEndpoint`.
+ *          resolves to the OmniDataTransform node whose
+ *          `properties.name` matches (the node id is the VERSIONED
+ *          filename stem, so the bundle name is not it).
  *        - `Integration Procedure Action` →
  *          kind `'integration-procedure'`; target = the
  *          `integrationProcedureKey`; `targetId` resolves to the IP
- *          node whose `properties.omniProcessKey` matches; same
- *          `targetResolution` disclosure as `dataraptor`.
+ *          node whose `properties.omniProcessKey` matches (the node id
+ *          is the filename stem, so the key is not it).
+ *          Both kinds carry `targetResolution` +
+ *          `targetCandidateIds` — see `ExternalEndpoint`.
  *        - `Remote Action` → kind `'remote-action'`; target =
  *          `{remoteClass}.{remoteMethod}`. No `targetId` resolution —
  *          Apex→OmniProcess edges are the v3.3
@@ -52,14 +54,19 @@
  *     `propertySetConfig` blobs by emitting `null` rather than
  *     failing.
  *   - The `dataraptor` and `integration-procedure` targets are
- *     resolved against the graph: a present node lets the response
- *     carry a canonical `targetId`; a missing one surfaces as
- *     `targetId: null` (a dangling reference — common for managed-
- *     package or cross-namespace targets). A graph QUERY FAILURE also
- *     nulls `targetId` but is NOT an org fact about the target; the
- *     two are told apart via `targetResolution` (`'not-in-vault'` vs
- *     `'lookup-failed'`) so a failed read is never published as a
- *     claim that the target lives outside the vault.
+ *     resolved against the graph by scanning the target node type and
+ *     matching the PROPERTY the caller names it by — never by
+ *     string-templating the caller's name onto the type's id prefix,
+ *     which misses a present target whenever the node id (filename
+ *     stem) and the callable name differ, as they ordinarily do.
+ *     `targetId` is populated only when exactly ONE node answers;
+ *     `targetResolution` says why it is `null` otherwise — a proven
+ *     absence (`'not-in-vault'`), several versions answering to one
+ *     key (`'ambiguous'`, with every candidate in
+ *     `targetCandidateIds`), an unread scan tail (`'unresolved'`), or
+ *     a failed graph read (`'lookup-failed'`). Only `'not-in-vault'`
+ *     asserts anything about the org, and it is emitted only after a
+ *     COMPLETE scan of the type.
  *   - Per the task's honesty boundaries, REST endpoint URLs are
  *     documented as `parsed` confidence (not verified). The
  *     `endpointConfidence` field on each `externalEndpoint` carries
@@ -72,6 +79,7 @@ import { readFile } from 'node:fs/promises';
 
 import type {
   ComponentId,
+  ComponentType,
   McpError,
   McpResponse,
   Node,
@@ -85,6 +93,8 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES } from './scan-cap.js';
 
 /** Canonical id prefix for the OmniIntegrationProcedure node type. */
 const IP_PREFIX = 'OmniIntegrationProcedure:';
@@ -218,28 +228,53 @@ export interface ExternalEndpoint {
   readonly target: string;
   readonly targetId: ComponentId | null;
   /**
-   * Tells apart the two reasons `targetId` can be `null`, plus the
-   * two kinds (`rest`, `remote-action`) that never attempt a lookup:
-   *   - `'resolved'` — the graph lookup found the target; `targetId`
-   *     is populated.
-   *   - `'not-in-vault'` — the lookup ran and came back empty: a
-   *     genuine dangling reference (managed package, cross-namespace,
-   *     or a target the refresh never retrieved).
-   *   - `'lookup-failed'` — the graph query itself errored. This is
-   *     NOT an org fact; it must never be read as "not in this
-   *     vault". See `notExtractedFamilyDisclosure`'s reasoning in
+   * Why `targetId` looks the way it does. Every reason a `targetId`
+   * can be `null` is a DIFFERENT claim, and only one of them is an
+   * affirmative fact about the org:
+   *   - `'resolved'` — exactly one node in the vault answers to this
+   *     target name; `targetId` is populated.
+   *   - `'ambiguous'` — MORE THAN ONE node answers to it (the normal
+   *     shape for a versioned IP: every version file carries the same
+   *     `omniProcessKey`). Which one runs is decided at RUNTIME by
+   *     activation state, which the vault cannot settle, so `targetId`
+   *     stays `null` and every candidate is listed in
+   *     {@link ExternalEndpoint.targetCandidateIds}.
+   *   - `'not-in-vault'` — the COMPLETE scan of the target's node type
+   *     came back with no match: a genuine dangling reference (managed
+   *     package, cross-namespace, or a target the refresh never
+   *     retrieved). This is the only value that asserts absence, and
+   *     it is emitted only when absence was actually proven.
+   *   - `'unresolved'` — no match, but the scan stopped at its
+   *     residual node cap, so nodes behind the cap were never read.
+   *     Absence is NOT established; do not render this as "missing".
+   *   - `'lookup-failed'` — the graph query itself errored. NOT an org
+   *     fact; it must never be read as "not in this vault". See
+   *     `notExtractedFamilyDisclosure`'s reasoning in
    *     `absence-disclosure.ts` for why the two are kept apart.
    *   - `'not-applicable'` — `rest` / `remote-action` kinds, which
    *     never attempt a `targetId` lookup at all.
    */
-  readonly targetResolution:
-    | 'resolved'
-    | 'not-in-vault'
-    | 'lookup-failed'
-    | 'not-applicable';
+  readonly targetResolution: TargetResolution;
+  /**
+   * Every vault node that answers to `target`, id-ASC. Length 1 when
+   * `targetResolution` is `'resolved'` (and its single entry equals
+   * `targetId`), ≥2 when `'ambiguous'`, and empty for every other
+   * value. Always present, so an empty array is never load-bearing on
+   * its own — `targetResolution` carries the reason.
+   */
+  readonly targetCandidateIds: readonly ComponentId[];
   readonly namedCredential: string | null;
   readonly endpointConfidence: 'parsed';
 }
+
+/** @see ExternalEndpoint.targetResolution */
+export type TargetResolution =
+  | 'resolved'
+  | 'ambiguous'
+  | 'not-in-vault'
+  | 'unresolved'
+  | 'lookup-failed'
+  | 'not-applicable';
 
 /**
  * The response shape parsed from the terminal `Response Action`'s
@@ -688,80 +723,228 @@ const walkActions = (
 };
 
 /**
- * Resolve each endpoint seed against the graph: `dataraptor` targets
- * look up the OmniDataTransform node whose `apiName` matches the
- * bundle name; `integration-procedure` targets look up the IP node
- * whose `properties.omniProcessKey` matches. `rest` and
- * `remote-action` kinds never resolve — REST URLs are external,
+ * The node property each resolvable endpoint kind is named BY. Neither
+ * is the node's api-name, and that is the whole point of this module:
+ *
+ *   - A nested-IP step names its target with `integrationProcedureKey`,
+ *     which is the target IP's `omniProcessKey`. `omni-integration-
+ *     procedure.ts` states it verbatim — "the downstream target id uses
+ *     the IP's `omniProcessKey` (the lookup key callers invoke), NOT its
+ *     file-level `uniqueName`" — while the same extractor mints the IP
+ *     NODE id from the FILENAME stem.
+ *   - A DataRaptor step names its target with `bundle`, which matches
+ *     the DataRaptor's `<name>`, while `omni-data-transform.ts` mints
+ *     the node id from the filename stem — the VERSIONED `<uniqueName>`
+ *     form (`..._2`).
+ *
+ * So `${prefix}${target}` is NOT the id of a present target whenever the
+ * two forms differ, which is the ordinary case rather than the edge one.
+ * Resolving by string-templating the prefix therefore misses live
+ * components; the resolution below reads the property instead.
+ */
+const TARGET_KEY_PROPERTY = {
+  'integration-procedure': 'omniProcessKey',
+  dataraptor: 'name',
+} as const;
+
+/** The node type each resolvable endpoint kind resolves against. */
+const TARGET_NODE_TYPE: Record<'integration-procedure' | 'dataraptor', ComponentType> = {
+  'integration-procedure': 'OmniIntegrationProcedure',
+  dataraptor: 'OmniDataTransform',
+};
+
+/** Which node-id prefix a resolvable kind's conventional id form uses. */
+const TARGET_ID_PREFIX = {
+  'integration-procedure': IP_PREFIX,
+  dataraptor: DATA_TRANSFORM_PREFIX,
+} as const;
+
+/** A resolvable endpoint kind — the two that attempt a `targetId`. */
+type ResolvableKind = keyof typeof TARGET_KEY_PROPERTY;
+
+/**
+ * One node type's resolution index, or the fact that it could not be
+ * read. `complete` is the honesty hinge: a miss against an INCOMPLETE
+ * index proves nothing, so it may not be published as `'not-in-vault'`.
+ */
+type TargetIndex =
+  | {
+      readonly ok: true;
+      /** Every canonical node id of the type, for the conventional form. */
+      readonly byId: ReadonlySet<string>;
+      /** Key-property value → every node id carrying it. */
+      readonly byKey: ReadonlyMap<string, readonly ComponentId[]>;
+      /** False when the walk stopped at its residual node cap. */
+      readonly complete: boolean;
+    }
+  | { readonly ok: false };
+
+/**
+ * Residual ceiling on ONE target-type walk. `SFI_OMNI_TARGET_SCAN_MAX`
+ * overrides {@link FULL_SCAN_MAX_NODES} so a test can reach the
+ * capped-walk path without seeding twenty thousand nodes — the same
+ * per-tool override `tech-debt-score.ts` and `history-tracking-gaps.ts`
+ * carry, and the only reason the `'unresolved'` state is exercised by a
+ * TOOL-level test rather than by a helper in isolation. This is the
+ * PER-TYPE total, not the per-window page size (`SFI_NODE_SCAN_LIMIT`,
+ * which `scanAllNodesOfTypes` reads internally).
+ */
+const targetScanCeiling = (): number => {
+  const v = Number(process.env['SFI_OMNI_TARGET_SCAN_MAX']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
+};
+
+/**
+ * Walk EVERY node of one type and index it both ways. Adopts the shared
+ * {@link scanAllNodesOfTypes} rather than a single `listNodesByType`
+ * page: that call is capped at 500 id-ASC rows, so an alphabetically
+ * late IP would have been invisible and reported absent (R6).
+ */
+const buildTargetIndex = async (
+  ctx: Context,
+  kind: ResolvableKind,
+): Promise<TargetIndex> => {
+  const scan = await scanAllNodesOfTypes(
+    ctx.graph,
+    [TARGET_NODE_TYPE[kind]],
+    targetScanCeiling(),
+  );
+  if (!scan.ok) return { ok: false };
+
+  const keyProperty = TARGET_KEY_PROPERTY[kind];
+  const byId = new Set<string>();
+  const byKey = new Map<string, ComponentId[]>();
+  for (const node of scan.value.nodes) {
+    byId.add(node.id);
+    const keyValue = node.properties[keyProperty];
+    if (typeof keyValue !== 'string') continue;
+    const trimmed = keyValue.trim();
+    if (trimmed.length === 0) continue;
+    const bucket = byKey.get(trimmed);
+    if (bucket === undefined) byKey.set(trimmed, [node.id]);
+    else bucket.push(node.id);
+  }
+  return { ok: true, byId, byKey, complete: !scan.value.scanIncomplete };
+};
+
+/** The derived resolution state of ONE endpoint seed. */
+interface ResolvedTarget {
+  readonly targetId: ComponentId | null;
+  readonly targetResolution: TargetResolution;
+  readonly targetCandidateIds: readonly ComponentId[];
+}
+
+/** `rest` / `remote-action`: no lookup is attempted, ever. */
+const NOT_APPLICABLE: ResolvedTarget = {
+  targetId: null,
+  targetResolution: 'not-applicable',
+  targetCandidateIds: [],
+};
+
+/**
+ * Classify ONE target name against a built index. Written ONCE and
+ * called by BOTH resolvable kinds — the previous shape spelled this
+ * mapping out twice, byte-identically, and only one copy was covered by
+ * a test, so a regression on the other was invisible.
+ *
+ * Candidates are the union of the conventional id form and every node
+ * carrying the key property, so a vault where both happen to hit yields
+ * one candidate rather than a false ambiguity.
+ */
+const classifyTarget = (
+  target: string,
+  index: TargetIndex,
+  prefix: string,
+): ResolvedTarget => {
+  if (!index.ok) {
+    return {
+      targetId: null,
+      targetResolution: 'lookup-failed',
+      targetCandidateIds: [],
+    };
+  }
+  const seen = new Set<string>();
+  const candidates: ComponentId[] = [];
+  for (const id of index.byKey.get(target) ?? []) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    candidates.push(id);
+  }
+  const conventionalId = `${prefix}${target}`;
+  if (index.byId.has(conventionalId) && !seen.has(conventionalId)) {
+    candidates.push(conventionalId as ComponentId);
+  }
+  candidates.sort();
+
+  const only = candidates[0];
+  if (candidates.length === 1 && only !== undefined) {
+    return { targetId: only, targetResolution: 'resolved', targetCandidateIds: candidates };
+  }
+  if (candidates.length > 1) {
+    // Do not pick one. Which version runs is a RUNTIME activation fact
+    // the vault does not carry; naming a single `targetId` here would
+    // certify a choice nothing in the retrieved metadata makes.
+    return { targetId: null, targetResolution: 'ambiguous', targetCandidateIds: candidates };
+  }
+  return {
+    targetId: null,
+    // A miss is only ABSENCE when the whole type was read. Behind a
+    // residual cap it is merely unread.
+    targetResolution: index.complete ? 'not-in-vault' : 'unresolved',
+    targetCandidateIds: [],
+  };
+};
+
+/**
+ * Resolve each endpoint seed against the graph. `dataraptor` targets
+ * name an OmniDataTransform by its `<name>`; `integration-procedure`
+ * targets name an IP by its `omniProcessKey` — in both cases a PROPERTY,
+ * not the node id, which the extractors derive from the filename. `rest`
+ * and `remote-action` kinds never resolve — REST URLs are external, and
  * Remote Action class.method targets are the v3.3
  * `implementsOmniInterface` follow-up.
  *
- * A missing target surfaces `targetId: null` (a dangling reference —
- * common when the named target lives in a managed package or another
- * vault). The endpoint's `target` (the verbatim name) is always
- * present so the renderer can flag the dangling reference. Per-seed
- * `targetResolution` tells that genuine absence apart from a graph
- * query FAILURE, which also nulls `targetId` but is never an org
- * fact — see the field's JSDoc on `ExternalEndpoint`.
+ * Each node type is walked at most ONCE per call, and only when a seed
+ * of that kind is present, so an IP with no DataRaptor steps pays for no
+ * DataRaptor scan.
+ *
+ * The endpoint's `target` (the verbatim name) is always present so the
+ * renderer can flag an unresolved reference, and `targetResolution` says
+ * WHICH of the four non-resolutions applies — a proven absence, an
+ * ambiguity across versions, an unread tail, or a failed read. Only the
+ * first is an assertion about the org.
  */
 const resolveExternalEndpoints = async (
   ctx: Context,
   seeds: readonly EndpointSeed[],
 ): Promise<readonly ExternalEndpoint[]> => {
   const resolved: ExternalEndpoint[] = [];
+  const indexes = new Map<ResolvableKind, TargetIndex>();
+  const indexFor = async (kind: ResolvableKind): Promise<TargetIndex> => {
+    const cached = indexes.get(kind);
+    if (cached !== undefined) return cached;
+    const built = await buildTargetIndex(ctx, kind);
+    indexes.set(kind, built);
+    return built;
+  };
 
   for (const seed of seeds) {
-    let targetId: ComponentId | null = null;
-    let targetResolution: ExternalEndpoint['targetResolution'] = 'not-applicable';
-
-    if (seed.kind === 'dataraptor') {
-      // The extractor keys edges by `OmniDataTransform:{bundle}`
-      // because the bundle name IS the DataTransform's apiName in
-      // every well-formed Native fixture (PLAN-v3.2 §3 — the
-      // OmniDataTransform node id is `OmniDataTransform:{apiName}`).
-      const candidateId = `${DATA_TRANSFORM_PREFIX}${seed.target}` as ComponentId;
-      const lookup = await getNodeById(ctx.graph, candidateId);
-      if (!lookup.ok) {
-        targetResolution = 'lookup-failed';
-      } else if (lookup.value !== null) {
-        targetId = lookup.value.id;
-        targetResolution = 'resolved';
-      } else {
-        targetResolution = 'not-in-vault';
-      }
-    } else if (seed.kind === 'integration-procedure') {
-      // IP edges resolve by `omniProcessKey` (the callable lookup key
-      // — NOT the file-level uniqueName). The graph carries the IP
-      // node keyed by its file-level apiName; we resolve by scanning
-      // for the IP whose `properties.omniProcessKey` matches via a
-      // direct `getNodeById` against the conventional id form first.
-      const candidateId = `${IP_PREFIX}${seed.target}` as ComponentId;
-      const lookup = await getNodeById(ctx.graph, candidateId);
-      if (!lookup.ok) {
-        targetResolution = 'lookup-failed';
-      } else if (lookup.value !== null) {
-        targetId = lookup.value.id;
-        targetResolution = 'resolved';
-      } else {
-        targetResolution = 'not-in-vault';
-      }
-      // Note: `OmniIntegrationProcedure:{omniProcessKey}` is the id
-      // form used by the extractor when emitting `dispatchesOmniAction`
-      // edges (see omni-integration-procedure.ts JSDoc). Tools that
-      // index IPs by their file-level `apiName` instead surface a
-      // dangling reference here; that surfaces correctly as
-      // `targetId: null` / `targetResolution: 'not-in-vault'` because
-      // the lookup misses cleanly rather than erroring.
-    }
-    // `rest` and `remote-action` kinds never resolve a `targetId`;
-    // `targetResolution` stays `'not-applicable'`.
+    const target =
+      seed.kind === 'dataraptor' || seed.kind === 'integration-procedure'
+        ? classifyTarget(
+            seed.target,
+            await indexFor(seed.kind),
+            TARGET_ID_PREFIX[seed.kind],
+          )
+        : NOT_APPLICABLE;
 
     resolved.push({
       stepName: seed.stepName,
       kind: seed.kind,
       target: seed.target,
-      targetId,
-      targetResolution,
+      targetId: target.targetId,
+      targetResolution: target.targetResolution,
+      targetCandidateIds: target.targetCandidateIds,
       namedCredential: seed.namedCredential,
       endpointConfidence: 'parsed',
     });

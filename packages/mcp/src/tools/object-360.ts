@@ -122,6 +122,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { NOT_USAGE_EDGE_TYPES } from './apex-reachability.js';
 import { coercePrefix } from './coerce-id.js';
 import {
   buildEmptyTraversalCoverageCaveat,
@@ -202,7 +203,10 @@ const BYTE_FIT_STEPS: readonly { readonly cap: number; readonly sample: number }
  * proportion to its own size) and `grantedBy` is ACCESS, not usage. Both tiers
  * are still REPORTED, in `owns` and `permissions` respectively.
  */
-const NON_USAGE_EDGE_TYPES: ReadonlySet<string> = new Set(['parentOf', 'grantedBy']);
+// R6: DERIVED from the canonical tuple rather than re-typed. Two hand-kept
+// copies of "which edge types are not usage" is how a family silently starts
+// counting as usage in one tool and not in its sibling.
+const NON_USAGE_EDGE_TYPES: ReadonlySet<string> = new Set(NOT_USAGE_EDGE_TYPES);
 
 /**
  * Edge types that mean "automation fires on this object". `triggersOn` is the

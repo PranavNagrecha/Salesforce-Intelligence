@@ -47,12 +47,21 @@ import type { Context } from '../server.js';
  *                to it.
  *
  * Hand-copied to `object-360.ts` and `find-component-usages.ts` (each as
- * `NON_USAGE_EDGE_TYPES`). All three copies are now drift-guarded:
- * `find_dead_code` imports this constant and generates its SQL exclusions from
+ * `NON_USAGE_EDGE_TYPES`). All three copies are drift-guarded:
+ * `find_dead_code` imports this constant and GENERATES its SQL exclusions from
  * it (pinned by `find-dead-code.test.ts`, "non-usage edge-type drift guard"),
- * and the other two are pinned by source-text comparison in
- * `apex-reachability.test.ts` — an edit to this list that is not mirrored into
- * either copy fails CI instead of drifting silently.
+ * and the other two are pinned by `apex-reachability.test.ts` in two layers —
+ * a source-text comparison of their literals, and a BEHAVIOURAL guard that
+ * drives `object360Handler` and `findComponentUsagesHandler` over a graph
+ * seeded with one edge per member of this list and asserts each tool still
+ * counts exactly one usage edge. An edit here that is not mirrored into either
+ * copy fails CI instead of drifting silently.
+ *
+ * The behavioural layer is the one that matters longest: it reads no source
+ * text, so it keeps holding after a copy adopts the import (at which point the
+ * text comparison has no literal left to read), and it covers the three
+ * separate places the list is APPLIED — a list that is correct but no longer
+ * applied at one call site is invisible to a text comparison.
  *
  * The remaining debt is ADOPTION, not drift: those two files still declare
  * their own literal rather than importing this one, so they inherit nothing

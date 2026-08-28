@@ -180,6 +180,32 @@ const buildClassEdges = (
 };
 
 /**
+ * Emit one `grantedBy` edge per `<pageAccesses>` entry with `<enabled>` true —
+ * the Visualforce pages this permission set lets a user LOAD.
+ *
+ * GUEST-PAGE-ACCESS parity with the profile extractor: `<pageAccesses>` was the
+ * one access element neither container walked, so no `grantedBy` edge to a
+ * `VisualforcePage` existed anywhere in the graph and no consumer could answer
+ * "who can load this page". A Visualforce page RUNS its controller Apex, so the
+ * grant is a code-reachability grant, not a cosmetic one. Same shape and the
+ * same `<enabled>` gate as `classAccesses` above; an empty `<apexPage>` is
+ * dropped rather than minting a nameless id.
+ */
+const buildPageEdges = (
+  rootObj: Record<string, unknown>,
+  fromId: string,
+): Edge[] => {
+  const edges: Edge[] = [];
+  for (const entry of iterEntries(rootObj, 'pageAccesses')) {
+    if (!coerceBoolean(unwrapSingle(entry['enabled']))) continue;
+    const apexPage = String(unwrapSingle(entry['apexPage']) ?? '');
+    if (apexPage.length === 0) continue;
+    edges.push(grantedByEdge(fromId, `VisualforcePage:${apexPage}`, { enabled: true }));
+  }
+  return edges;
+};
+
+/**
  * Emit one `grantedBy` edge per `<flowAccesses>` entry with `<enabled>` true —
  * the flows this permission set lets a user RUN (`flowAccess: true` marker).
  * (P11-USER-ability-run)
@@ -327,6 +353,7 @@ interface GrantCounts {
   readonly objectGrantCount: number;
   readonly fieldGrantCount: number;
   readonly classGrantCount: number;
+  readonly pageGrantCount: number;
   readonly userPermissions: readonly string[];
   readonly recordTypeVisibilities: readonly RecordTypeVisibilityEntry[];
   readonly applicationVisibilities: readonly { application: string; default: boolean; visible: boolean }[];
@@ -428,6 +455,7 @@ export const extractPermissionSet = async (
   if (!fieldEdgesResult.ok) return fieldEdgesResult;
   const fieldEdges = fieldEdgesResult.value;
   const classEdges = buildClassEdges(rootObj, nodeId);
+  const pageEdges = buildPageEdges(rootObj, nodeId);
   const flowEdges = buildFlowEdges(rootObj, nodeId);
   const customPermissionEdges = buildCustomPermissionEdges(rootObj, nodeId);
   const userPermissions = collectEnabledUserPermissions(rootObj);
@@ -435,7 +463,14 @@ export const extractPermissionSet = async (
   const applicationVisibilities = collectApplicationVisibilities(rootObj);
   const tabVisibilities = collectTabVisibilities(rootObj);
 
-  const edges: Edge[] = [...objectEdges, ...fieldEdges, ...classEdges, ...flowEdges, ...customPermissionEdges].sort(
+  const edges: Edge[] = [
+    ...objectEdges,
+    ...fieldEdges,
+    ...classEdges,
+    ...pageEdges,
+    ...flowEdges,
+    ...customPermissionEdges,
+  ].sort(
     (a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0),
   );
 
@@ -453,6 +488,7 @@ export const extractPermissionSet = async (
       objectGrantCount: objectEdges.length,
       fieldGrantCount: fieldEdges.length,
       classGrantCount: classEdges.length,
+      pageGrantCount: pageEdges.length,
       userPermissions,
       recordTypeVisibilities,
       applicationVisibilities,

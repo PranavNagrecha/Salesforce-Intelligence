@@ -19,6 +19,7 @@ import type {
   EvidenceAbsenceV2,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { buildCoverageEntries, collectVaultSourceFiles } from '@sf-intelligence/vault';
@@ -31,11 +32,30 @@ import {
   buildEnumerationCoverageCaveatFor,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const SEARCH_APEX_SOURCE_MAX_LIMIT = 200;
 const SEARCH_APEX_SOURCE_DEFAULT_LIMIT = 50;
 
 const APEX_SUFFIXES = ['.cls', '.trigger'] as const;
+
+/** Tool name minted onto / checked against a continuation cursor. */
+const SEARCH_APEX_SOURCE_TOOL = 'sfi.search_apex_source';
+
+/**
+ * Ceiling on how many DISTINCT match lines one call will collect before it
+ * stops walking the corpus.
+ *
+ * WHY A CAP AT ALL: `totalCount` is computed by grepping the WHOLE corpus, not
+ * by counting one page, so a pathological query (a single punctuation
+ * character) would otherwise materialise one object per source line. The cap
+ * bounds that. WHY IT IS DISCLOSED: once it bites, `totalCount` is a LOWER
+ * BOUND, and a lower bound presented as a total is precisely the certification
+ * this tool is not allowed to make — so `scanCap` is emitted as a typed field
+ * (`totalIsLowerBound: true`) that a machine consumer cannot skip, alongside
+ * prose in `note`.
+ */
+export const SEARCH_APEX_SOURCE_SCAN_CAP = 5_000;
 
 export const searchApexSourceInputSchema = z.object({
   query: z.string().min(1),
@@ -46,6 +66,21 @@ export const searchApexSourceInputSchema = z.object({
     .min(1)
     .max(SEARCH_APEX_SOURCE_MAX_LIMIT)
     .optional(),
+  /**
+   * Zero-based page offset over the FULL ordered match list. Before this
+   * existed the object was non-strict, so a caller who passed `offset` — the
+   * convention every other paged tool in this product uses — had it SILENTLY
+   * STRIPPED and got page one back again, byte-identical, with no error: a
+   * false paging illusion that reads as "I reached the end".
+   */
+  offset: z.number().int().nonnegative().optional(),
+  /**
+   * CR-22 continuation cursor: the opaque token from a prior truncated page's
+   * `nextCursor`. Supplies the resume offset and is bound to this tool, this
+   * vault hash and this query's narrowing args; a stale or foreign token is
+   * refused with `invalid-query` rather than silently paging the wrong list.
+   */
+  cursor: z.string().min(1).optional(),
 });
 
 export type SearchApexSourceInput = z.infer<typeof searchApexSourceInputSchema>;
@@ -119,14 +154,71 @@ export interface SearchApexAbsence extends EvidenceAbsenceV2 {
   readonly coverageCaveat?: CoverageCaveat;
 }
 
+/**
+ * Emitted when the corpus walk stopped at {@link SEARCH_APEX_SOURCE_SCAN_CAP}
+ * before running out of matching lines. Its presence is the ONLY thing that
+ * makes `totalCount` a lower bound rather than a total, so it is a typed field
+ * rather than a sentence in prose a machine consumer would skip.
+ */
+export interface SearchApexScanCap {
+  /** The ceiling that bit. */
+  readonly cap: number;
+  /** Always `true` — `totalCount` is a floor, not the number of matching lines. */
+  readonly totalIsLowerBound: true;
+  /** Host-readable prose saying the count is a floor and how to narrow it. */
+  readonly note: string;
+}
+
 export interface SearchApexSourceOutput {
   readonly matches: readonly SearchApexSourceMatch[];
+  /**
+   * Back-compat flag: TRUE when matches remain past this page. It describes the
+   * PAGE and nothing else — `truncated: false` is never an absence marker (see
+   * `tests/integration/envelope-honesty.ts`) and it never says how many were
+   * withheld. `totalCount` / `pageInfo` are what answer that.
+   */
   readonly truncated: boolean;
+  /**
+   * Total DISTINCT matching lines across the whole vaulted Apex corpus, before
+   * `offset` / `limit`. A LOWER BOUND — not a total — whenever `scanCap` is
+   * present. Before this key existed the payload carried `matches` and
+   * `truncated` alone, so a caller could neither learn that a remainder existed
+   * nor how big it was, and a 200-row page read as an org-wide inventory.
+   */
+  readonly totalCount: number;
+  /** Zero-based offset of THIS page into the full ordered match list. */
+  readonly offset: number;
+  /** Page size actually applied (echoed so the page is readable without guessing). */
+  readonly limit: number;
+  /** True when matches remain past this page. */
+  readonly hasMore: boolean;
+  /** Offset to pass next, or `null` when the list is exhausted. */
+  readonly nextOffset: number | null;
+  /**
+   * Opaque CR-22 continuation token, present ONLY on a truncated page. Echo it
+   * back verbatim as `cursor`. Never parse or construct it.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata; `nextCursor` is `null` when exhausted. */
+  readonly pageInfo: PageInfo;
+  /**
+   * Present ONLY when `hasMore`: prose a host will read aloud saying this page
+   * is not the inventory and how to advance. A host relaying a capped page as
+   * "here are the N matches in your org" is the failure this exists to stop.
+   */
+  readonly note?: string;
+  /** Present only when the corpus walk hit its own ceiling — see the type. */
+  readonly scanCap?: SearchApexScanCap;
   /** Present when zero matches — grep-only; graph tools may still find references. */
   readonly boundaryNote?: string;
   /**
    * Present when zero matches: WHICH kind of empty this is. A bare `[]` is
    * indistinguishable from an unretrieved Apex corpus; this says which.
+   *
+   * Attached ONLY when `totalCount` is 0. An empty PAGE at an offset past the
+   * end is an EXHAUSTED page, not a searched-and-clean corpus; certifying
+   * `proven-none` there would be a fresh instance of the defect the typed
+   * absence exists to remove.
    */
   readonly absence?: SearchApexAbsence;
 }
@@ -363,50 +455,129 @@ export const searchApexSourceHandler = async (
   const limit = input.limit ?? SEARCH_APEX_SOURCE_DEFAULT_LIMIT;
 
   const needles = apexSearchNeedles(input.query);
-  const matches: SearchApexSourceMatch[] = [];
+  // SCAN THE WHOLE CORPUS, NOT ONE PAGE. The walk used to stop at the caller's
+  // `limit`, which meant the handler never knew how many matches existed — so
+  // the payload could not publish a total, and a 200-row page was
+  // indistinguishable from an org-wide inventory. The walk is now bounded by
+  // SEARCH_APEX_SOURCE_SCAN_CAP (disclosed when it bites), not by the page size.
+  const all: SearchApexSourceMatch[] = [];
+  const seen = new Set<string>();
   // Every needle greps the SAME corpus, so `filesAvailable` is identical across
   // passes and the unreadable set is a union rather than a sum. Both are read
   // off the walk, never inferred from `matches.length` — the whole point is
   // that the two are independent.
   let filesSearched = 0;
   const unreadable = new Set<string>();
-  let truncated = false;
+  let scanCapped = false;
   for (const needle of needles) {
-    if (matches.length >= limit) break;
+    if (all.length >= SEARCH_APEX_SOURCE_SCAN_CAP) {
+      scanCapped = true;
+      break;
+    }
     const grep = await grepVaultSource(ctx, {
       query: needle,
       regex: input.regex,
-      limit: limit - matches.length,
+      limit: SEARCH_APEX_SOURCE_SCAN_CAP - all.length,
       suffixes: APEX_SUFFIXES,
     });
     if (!grep.ok) return grep;
     filesSearched = Math.max(filesSearched, grep.value.filesAvailable);
     for (const path of grep.value.unreadablePaths) unreadable.add(path);
     for (const hit of grep.value.matches) {
-      if (matches.some((m) => m.path === hit.path && m.line === hit.line)) continue;
-      matches.push(hit);
-      if (matches.length >= limit) {
-        truncated = true;
-        break;
-      }
+      const key = `${hit.path}\u0000${String(hit.line)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      all.push(hit);
     }
-    truncated = truncated || grep.value.truncated;
+    // `truncated` here means the walk stopped at the SCAN CAP, not at a page
+    // boundary — the page limit is no longer what bounds it.
+    if (grep.value.truncated) scanCapped = true;
   }
+
+  // TOTAL ORDER before paging. Needles are searched in sequence, so a
+  // `Field__c` hit could land after a `field` hit from a later file; a resume
+  // over an order that is not total can dup or skip. (path ASC, line ASC) is
+  // unique after dedupe and is the order this tool already documented.
+  const ordered = all.sort((a, b) => {
+    if (a.path !== b.path) return a.path < b.path ? -1 : 1;
+    return a.line - b.line;
+  });
+
+  // R2: resolve the resume offset — an echoed cursor wins over an explicit
+  // `offset`. A stale or foreign token (different query, different tool, vault
+  // refreshed under the caller) is REFUSED with `invalid-query` rather than
+  // used to slice this list at another list's offsets.
+  const fingerprint = argsFingerprint({
+    query: input.query,
+    ...(input.regex !== undefined ? { regex: input.regex } : {}),
+  });
+  const binding = {
+    tool: SEARCH_APEX_SOURCE_TOOL,
+    vaultHash: ctx.manifest.sourceTreeHash,
+    argsFingerprint: fingerprint,
+  };
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, binding);
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget: page on `limit` only and let the global
+  // `jsonResult` guard (which reconciles this handler's own page pointer) do
+  // the byte work, so an in-budget page keeps the shape it had before.
+  const paged = paginateLegacy(ordered, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding,
+  });
+  const matches = paged.items;
+  const total = paged.totalCount;
+  const hasMore = paged.hasMore;
+
+  const scanCap: SearchApexScanCap | undefined = scanCapped
+    ? {
+        cap: SEARCH_APEX_SOURCE_SCAN_CAP,
+        totalIsLowerBound: true,
+        note:
+          `SCAN CAPPED: the corpus walk stopped after ${String(SEARCH_APEX_SOURCE_SCAN_CAP)} distinct matching line(s), ` +
+          'so `totalCount` is a LOWER BOUND and the remainder was never collected. Narrow the query before reading this as a count.',
+    }
+    : undefined;
+
+  const note = hasMore
+    ? `Showing ${String(matches.length)} of ${scanCapped ? 'at least ' : ''}${String(total)} matching Apex line(s) (offset=${String(offset)}). ` +
+      `MORE remain — advance with offset=${String(paged.nextOffset ?? 0)} or by echoing \`nextCursor\`. ` +
+      'This page is INCOMPLETE; do not narrate it as the org\u2019s full set of matches.'
+    : undefined;
 
   // `boundaryNote` is DERIVED from the classification rather than being a fixed
   // string, because the fixed string opened with "Searched retrieved Apex .cls
   // and .trigger files under the vault source/ tree — No matches." A vault
   // holding no Apex at all got that same sentence, which is the lie this fix
   // exists to remove: it is only true on the `checked-empty` path.
+  //
+  // Keyed off the TOTAL, never off this page: an empty page at an offset past
+  // the end has been read and paged, not searched-and-found-nothing.
   const absence =
-    matches.length === 0
-      ? classifyEmptySearch(ctx, filesSearched, [...unreadable].sort(), truncated)
+    total === 0
+      ? classifyEmptySearch(ctx, filesSearched, [...unreadable].sort(), false)
       : null;
 
   return ok({
     data: {
       matches,
-      truncated,
+      truncated: hasMore,
+      totalCount: total,
+      offset,
+      limit,
+      hasMore,
+      nextOffset: paged.nextOffset,
+      ...(paged.nextCursor !== null ? { nextCursor: paged.nextCursor } : {}),
+      pageInfo: paged.pageInfo,
+      ...(note !== undefined ? { note } : {}),
+      ...(scanCap !== undefined ? { scanCap } : {}),
       ...(absence !== null
         ? {
             boundaryNote:

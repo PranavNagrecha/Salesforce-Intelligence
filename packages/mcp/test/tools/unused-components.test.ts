@@ -1244,3 +1244,218 @@ describe('unusedComponentsHandler — a certified zero its own graph contradicts
     expect(entry?.note).toContain('checked zero');
   });
 });
+
+// =============================================================================
+// UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS.
+//
+// Measured on a real production vault. `unused_components` returned
+// `byType.CustomField: 1646` with a `coverageCaveat` reading "Unused status
+// cannot be confirmed ... Un-retrieved families: Dashboard, Report", i.e.
+// "treat absence of dependencies in those families as 'not checked', not
+// 'none'".
+//
+// Two things were wrong with that answer at once.
+//
+// (a) THE ANALYSIS DID NOT COVER WHAT IT COULD. The refresh folds each
+//     retrieved report's / dashboard's field usage ONTO the `CustomField` node
+//     as `usedInReport` / `usedInDashboard` plus the NAMED lists
+//     `usedInReports` / `usedInDashboards` (see `report-dashboard-usage.ts`).
+//     236 of those 1,646 "unused" fields carried that stamp with named reports.
+//     `sfi.safe_to_delete_field` reads the same stamp and returned `blocking`
+//     with named reports for a field this tool had just called unused — the
+//     product held the true statement and the false one and shipped the false
+//     one on the tool a migration inventory is built from.
+//
+// (b) THE CAVEAT MISDESCRIBED THE CAUSE, so a reader discounts it. It says the
+//     VAULT lacks Report coverage and therefore points at a refresh as the
+//     remedy. The vault holds a partially-folded analytics index; what was
+//     missing was this tool CONSULTING it. A hedge that names the wrong remedy
+//     reads as boilerplate — and this one rides on every response.
+//
+// The fix must do both: exclude what the index names, and describe the
+// RESIDUAL gap (the part of the analytics corpus the index does not cover)
+// truthfully, in a typed field a machine consumer cannot skip.
+// =============================================================================
+describe('unusedComponentsHandler — the folded report/dashboard index is consulted', () => {
+  const OBJ_A = 'CustomObject:Obj_A__c';
+  /** Stamped by the fold with two NAMED reports — this tool called it unused. */
+  const FIELD_IN_REPORT = 'CustomField:Obj_A__c.Field_B__c';
+  /** Stamped with a NAMED dashboard. */
+  const FIELD_IN_DASHBOARD = 'CustomField:Obj_A__c.Field_C__c';
+  /** No stamp, no incoming usage edge — genuinely unused, must STILL be listed. */
+  const FIELD_TRULY_UNUSED = 'CustomField:Obj_A__c.Field_D__c';
+  /** Referenced by automation — was never in the list, must stay out. */
+  const FIELD_USED_BY_FLOW = 'CustomField:Obj_A__c.Field_E__c';
+  const FLOW_F = 'Flow:Flow_F';
+
+  /**
+   * The real vault's analytics coverage shape: the report/dashboard pull is
+   * BOUNDED (a usage-ranked cap), so a real, non-zero count landed and the
+   * family still is not `complete`. That is precisely the state in which the
+   * folded index is worth consulting AND is not the whole truth.
+   */
+  const cappedAnalyticsManifest = (): VaultManifest => ({
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      {
+        type: 'Report',
+        requested: true,
+        retrieved: 1959,
+        pending: true,
+        errored: false,
+        neverModeled: false,
+      },
+      {
+        type: 'Dashboard',
+        requested: true,
+        retrieved: 75,
+        pending: true,
+        errored: false,
+        neverModeled: false,
+      },
+    ],
+  });
+
+  let analyticsDir: string;
+  let analyticsStore: GraphStore;
+  let analyticsCtx: Context;
+
+  beforeAll(async () => {
+    analyticsDir = mkdtempSync(join(tmpdir(), 'sfi-unused-analytics-'));
+    const opened = await openGraph(join(analyticsDir, 'analytics.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    analyticsStore = opened.value;
+    const imported = await importExtractionResults(analyticsStore, [
+      {
+        nodes: [
+          makeNode({ id: OBJ_A, type: 'CustomObject', apiName: 'Obj_A__c' }),
+          makeNode({
+            id: FIELD_IN_REPORT,
+            type: 'CustomField',
+            apiName: 'Field_B__c',
+            parentId: OBJ_A,
+            properties: {
+              usedInReport: true,
+              usedInReports: ['Report_G', 'Report_H'],
+            },
+          }),
+          makeNode({
+            id: FIELD_IN_DASHBOARD,
+            type: 'CustomField',
+            apiName: 'Field_C__c',
+            parentId: OBJ_A,
+            properties: {
+              usedInDashboard: true,
+              usedInDashboards: ['Dashboard_I'],
+            },
+          }),
+          makeNode({
+            id: FIELD_TRULY_UNUSED,
+            type: 'CustomField',
+            apiName: 'Field_D__c',
+            parentId: OBJ_A,
+            properties: {},
+          }),
+          makeNode({
+            id: FIELD_USED_BY_FLOW,
+            type: 'CustomField',
+            apiName: 'Field_E__c',
+            parentId: OBJ_A,
+            properties: {},
+          }),
+          makeNode({
+            id: FLOW_F,
+            type: 'Flow',
+            apiName: 'Flow_F',
+            properties: { status: 'Active' },
+          }),
+        ],
+        edges: [
+          makeEdge({ fromId: OBJ_A, toId: FIELD_IN_REPORT, edgeType: 'parentOf' }),
+          makeEdge({ fromId: OBJ_A, toId: FIELD_IN_DASHBOARD, edgeType: 'parentOf' }),
+          makeEdge({ fromId: OBJ_A, toId: FIELD_TRULY_UNUSED, edgeType: 'parentOf' }),
+          makeEdge({ fromId: OBJ_A, toId: FIELD_USED_BY_FLOW, edgeType: 'parentOf' }),
+          makeEdge({ fromId: FLOW_F, toId: FIELD_USED_BY_FLOW, edgeType: 'references' }),
+        ],
+      },
+    ]);
+    if (!imported.ok) throw new Error('importExtractionResults failed');
+    analyticsCtx = {
+      vaultRoot: analyticsDir,
+      manifest: cappedAnalyticsManifest(),
+      graph: analyticsStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(analyticsStore);
+    rmSync(analyticsDir, { recursive: true, force: true });
+  });
+
+  it("does NOT list a field the vault's own folded report index names", async () => {
+    const r = await unusedComponentsHandler(analyticsCtx, { types: ['CustomField'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.components.map((c) => c.id);
+    expect(ids).not.toContain(FIELD_IN_REPORT);
+    expect(ids).not.toContain(FIELD_IN_DASHBOARD);
+  });
+
+  it('still lists the field nothing at all references — the filter is not a blanket suppression', async () => {
+    const r = await unusedComponentsHandler(analyticsCtx, { types: ['CustomField'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.components.map((c) => c.id);
+    expect(ids).toEqual([FIELD_TRULY_UNUSED]);
+    // The tally a caller renders as "N fields you can delete" must agree.
+    expect(r.value.data.byType['CustomField']).toBe(1);
+  });
+
+  it('reports in a TYPED field how many rows the analytics index removed, and how far that index reaches', async () => {
+    const r = await unusedComponentsHandler(analyticsCtx, { types: ['CustomField'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const check = r.value.data.analyticsIndexCheck;
+    expect(check).toBeDefined();
+    expect(check?.excludedAsUsed).toBe(2);
+    expect(check?.excludedByType).toEqual({ CustomField: 2 });
+    expect(check?.consultedTypes).toEqual(['CustomField']);
+    // The residual gap is a PARTIAL index, not an absent family.
+    expect(check?.indexCoverage).toBe('partial');
+    expect(check?.note).toMatch(/not checked/i);
+  });
+
+  it('the prose a host reads aloud says the index WAS consulted, not that reports were never retrieved', async () => {
+    const r = await unusedComponentsHandler(analyticsCtx, { types: ['CustomField'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const message = r.value.data.coverageCaveat?.message ?? '';
+    expect(message).toMatch(/report\/dashboard field-usage index/i);
+    expect(message).toContain('2');
+  });
+
+  it('the per-row note no longer claims report columns are invisible when they were checked', async () => {
+    const r = await unusedComponentsHandler(analyticsCtx, { types: ['CustomField'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const entry = r.value.data.components.find((c) => c.id === FIELD_TRULY_UNUSED);
+    expect(entry).toBeDefined();
+    // The shipped sentence was "…and report column references are invisible to
+    // the v1.x extractors." — false for every field the fold stamped, and the
+    // reason a reader ignores the row-level caveat entirely.
+    expect(entry?.invisibleReferencesNote).not.toContain(
+      'report column references are invisible',
+    );
+    expect(entry?.invisibleReferencesNote).toMatch(/folded report\/dashboard/i);
+  });
+
+  it('a type the fold never stamps is unchanged — no analyticsIndexCheck, no new prose', async () => {
+    const r = await unusedComponentsHandler(analyticsCtx, { types: ['ApexClass'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.analyticsIndexCheck).toBeUndefined();
+    expect(r.value.data.coverageCaveat?.message ?? '').not.toMatch(
+      /report\/dashboard field-usage index/i,
+    );
+  });
+});

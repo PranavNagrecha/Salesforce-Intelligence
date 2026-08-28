@@ -576,8 +576,16 @@ export interface NodeIdentity {
  * Hard ceiling on one identity scan. The CI scale budget is 10k nodes; this
  * leaves an order of magnitude of headroom while still bounding a pathological
  * vault so a scan can't detonate the caller.
+ *
+ * EXPORTED because a caller cannot tell a capped scan from a complete one
+ * without it: {@link listNodeIdentities} returns a bare array, so the only
+ * truncation signal is `result.length >= IDENTITY_SCAN_MAX`. While this was
+ * module-private every such caller hand-copied the literal, and a copy that
+ * drifts low makes a truncated scan report itself COMPLETE — the caller then
+ * answers "no dependencies found" off a scan that never saw the tail. Import
+ * this constant rather than re-typing the number.
  */
-const IDENTITY_SCAN_MAX = 100_000;
+export const IDENTITY_SCAN_MAX = 100_000;
 
 /**
  * Project EVERY node down to its identity (`id`, `type`, `apiName`,

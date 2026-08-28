@@ -9,11 +9,11 @@
  * a member list, is what identifies them. `InstalledPackage` nodes ARE modelled
  * when the vault retrieved that family, and this tool uses them for two things:
  * the 2-segment `Ns__Leaf` managed-member pass (see below) and, when the
- * manifest reports that family COMPLETE, the roster of namespaces this org
- * actually has (`collectPackageNamespaces` -> `known`). What the tool reports is
- * the BOUNDARY: which of your components reference the package's components (the
- * uninstall blast radius), and which of your components were grafted onto the
- * package's objects.
+ * manifest reports that family's coverage `status: 'complete'`, the roster of
+ * namespaces this org actually has (`collectPackageNamespaces` -> `known`).
+ * What the tool reports is the BOUNDARY: which of your components reference the
+ * package's components (the uninstall blast radius), and which of your
+ * components were grafted onto the package's objects.
  *
  * **Two modes** (presence of a package selector chooses IMPACT):
  *   - INVENTORY (no `namespace` / `packageId` / `componentId`): scan every
@@ -44,9 +44,11 @@
  *     (phantom targets included) on a scan that ran to completion, the namespace
  *     does not exist in this org (PACKAGE-IMPACT-UNRECOGNIZED-NAMESPACE). "Not
  *     installed" is then said out loud rather than dressed as the soft
- *     `no-detected-dependencies`. Coverage that is errored / capped / pending /
- *     scoped-out makes the roster non-authoritative, so no refusal is issued
- *     there — an incomplete roster must never deny a package the org has.
+ *     `no-detected-dependencies`. Any coverage `status` other than `complete`
+ *     — errored / capped / pending / scoped-out, or simply UNKNOWN on a
+ *     manifest that carries no coverage rows at all — makes the roster
+ *     non-authoritative, so no refusal is issued there: an unverified roster
+ *     must never deny a package the org has.
  *
  * **Namespace heuristic** (`namespaceOf`): a Salesforce API name carries a
  * namespace iff its leaf component name splits into >= 3 `__`-delimited
@@ -93,12 +95,12 @@ import {
   listNodeIdentities,
   type NodeIdentity,
 } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import {
-  buildEnumerationCoverageCaveat,
   buildUsageSourceCoverageCaveat,
   type CoverageCaveat,
 } from './coverage-trust.js';
@@ -127,10 +129,10 @@ const PACKAGE_IMPACT_DISCLOSURE =
  *   - `namespace`: optional. Absent → INVENTORY mode (list every package).
  *     Present → IMPACT mode for that namespace (case-insensitive match).
  *   - `packageId` / `componentId` / `namespacePrefix`: optional package SELECTOR
- *     aliases — a bare namespace (`APXTConga4`) or an `InstalledPackage:<namespace>`
+ *     aliases — a bare namespace (`Pkg_Alpha4`) or an `InstalledPackage:<namespace>`
  *     id (exactly what `sfi.installed_package_catalog` returns). `namespacePrefix`
  *     is the Salesforce-shaped synonym a host reaches for (`{ namespacePrefix:
- *     'hed' }`); it used to be Zod-stripped, silently falling back to the full
+ *     'Pkg_Beta' }`); it used to be Zod-stripped, silently falling back to the full
  *     org-wide INVENTORY (PACKAGE-IMPACT-IGNORES-NAMESPACEPREFIX). All three are
  *     resolved to `namespace` (IMPACT mode) in the handler, so the impact-mode
  *     `namespace` + `mode: 'impact'` echo IS the applied-scope signal; an
@@ -155,8 +157,8 @@ const INSTALLED_PACKAGE_PREFIX = 'InstalledPackage:';
  * Resolve a `packageId` / `componentId` selector to a package namespace, or
  * `null` when it is not a package selector this tool can honor.
  *
- *   - `InstalledPackage:APXTConga4` → `APXTConga4` (the catalog id shape).
- *   - `APXTConga4` (a bare token, no `:`) → `APXTConga4`.
+ *   - `InstalledPackage:Pkg_Alpha4` → `Pkg_Alpha4` (the catalog id shape).
+ *   - `Pkg_Alpha4` (a bare token, no `:`) → `Pkg_Alpha4`.
  *   - `CustomObject:X` / any other typed id → `null` (caller gets `invalid-query`,
  *     never a silent full-inventory fallback).
  */
@@ -181,8 +183,8 @@ export interface PackageSummary {
    * added to `NS__Object__c`). A package with `componentCount` 0 but
    * `extensionCount` > 0 IS installed — its own components were just never
    * retrieved (managed internals, or the package object is a phantom). Without
-   * this signal a heavily-used package (e.g. HEDA `hed`, whose objects come
-   * down as phantoms) reads as "not present" in the inventory.
+   * this signal a heavily-used package whose own objects come
+   * down as phantoms reads as "not present" in the inventory.
    */
   readonly extensionCount: number;
   readonly sampleComponentIds: readonly ComponentId[];
@@ -522,7 +524,7 @@ const buildImpact = async (
       if (edge.edgeType === 'parentOf') continue; // containment, not a dependency
       const fromNs = namespaceOfWithKnownPackages(edge.fromId, known);
       if ((fromNs ?? '').toLowerCase() === targetLc) continue; // intra-package edge
-      const key = `${edge.fromId} ${edge.edgeType} ${node.id}`;
+      const key = `${edge.fromId}\u0000${edge.edgeType}\u0000${node.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
       dependencies.push({
@@ -627,35 +629,56 @@ const buildImpact = async (
   const scanIncomplete = scanTruncated || edgeScanTruncated;
 
   // R4 (PACKAGE-IMPACT-UNRECOGNIZED-NAMESPACE). An IMPACT call naming a
-  // namespace this org does not have — most often a near-miss typo (`APXTConga`
-  // for the real `APXTConga4`) — used to fall all the way through to the bare
+  // namespace this org does not have — most often a near-miss typo (`Pkg_Alpha`
+  // for the real `Pkg_Alpha4`) — used to fall all the way through to the bare
   // `no-detected-dependencies`, the ONE soft verdict the whole staged policy
   // exists to protect: "we cannot find that package at all" and "that package is
   // installed and nothing touches it" rendered IDENTICALLY to a host keying an
   // uninstall decision on the enum. Refuse instead — but ONLY when the refusal
-  // is provable, which needs four conditions to hold at once:
+  // is provable, which needs FIVE conditions to hold at once (each one has a
+  // mutation test: delete that conjunct alone and a case in the R4 block of
+  // `package-impact.test.ts` goes red):
   //
-  //   1. `installedPackagesAuthoritative` — the manifest says the
+  //   1. `installedPackagesAuthoritative` — the manifest AFFIRMATIVELY says the
   //      `InstalledPackage` family retrieved COMPLETELY, so `known` really is
-  //      every package installed here. This is the ADOPTED predicate
-  //      (`buildEnumerationCoverageCaveat`, coverage-trust.ts), the same one the
-  //      sibling `sfi.installed_package_catalog` uses for this exact family — NOT
-  //      a hand-rolled `known.size > 0`, which is TRUE on an `errored` / `capped`
-  //      / `pending` / scoped-`--types` refresh whose InstalledPackage rows are
-  //      stale or half-retrieved. On such a vault `known` is INCOMPLETE, and
-  //      refusing would invent a NEW confident-wrong answer: a flat denial that a
-  //      genuinely-installed package exists. There the honest soft/`review`
-  //      verdict is kept. (`known.size > 0` remains a necessary condition — a
-  //      vault modelling no InstalledPackage at all can prove nothing either way
-  //      and keeps the pre-existing prefix-heuristic behaviour unchanged.)
+  //      every package installed here. The predicate is the shared
+  //      `summarizeCoverage(ctx.manifest, ['InstalledPackage']).status ===
+  //      'complete'` (@sf-intelligence/vault — the primitive coverage-trust.ts
+  //      is itself built on) — NOT a hand-rolled `known.size > 0`, which is TRUE
+  //      on an `errored` / `capped` / `pending` / scoped-`--types` refresh whose
+  //      InstalledPackage rows are stale or half-retrieved.
+  //
+  //      It is deliberately NOT `buildEnumerationCoverageCaveat(...) ===
+  //      undefined`. That helper answers "should I NAG about this inventory?"
+  //      and abstains (returns undefined) on a manifest carrying NO coverage
+  //      rows at all, precisely so pre-v4 / legacy vaults are not false-flagged.
+  //      Read as "coverage is authoritative" it silently promotes UNKNOWN to
+  //      COMPLETE, and a legacy vault would then get a flat `invalid-query`
+  //      denying a package off a roster nobody ever verified — the exact
+  //      certified-unchecked answer this refusal exists to remove.
+  //      `summarizeCoverage` keeps `complete` / `partial` / `unknown` as three
+  //      states, and only `complete` may deny.
+  //
+  //      On any non-`complete` vault `known` is (or may be) INCOMPLETE, so the
+  //      honest soft/`review` verdict is kept instead. (`known.size > 0` remains
+  //      a necessary condition — a vault modelling no InstalledPackage at all
+  //      can prove nothing either way and keeps the pre-existing
+  //      prefix-heuristic behaviour unchanged.)
   //   2. `!membersPresent` — no component in the graph carries the namespace.
+  //      A PACKAGING org holds `Ns__Obj__c` components under its OWN registered
+  //      prefix with no `InstalledPackage` record behind it, so the roster can
+  //      be complete and still not name a namespace the graph is holding.
   //   3. `!hasInbound` — no extension and no dependency, INCLUDING the
   //      phantom-target (`targetMissing`) kind: a reference to an unretrieved
   //      managed component IS positive evidence the namespace is real.
   //   4. `!scanIncomplete` — a truncated node/edge scan may simply not have
   //      reached the namespace's members yet; that stays `incomplete-scan`.
+  //   5. `!known.has(targetLc)` — the namespace is genuinely absent from the
+  //      roster. An INSTALLED-but-unused package is recognized here and keeps
+  //      its soft verdict; only a name nothing in the vault knows is refused.
   const installedPackagesAuthoritative =
-    known.size > 0 && buildEnumerationCoverageCaveat(ctx, 'InstalledPackage') === undefined;
+    known.size > 0 &&
+    summarizeCoverage(ctx.manifest, ['InstalledPackage']).status === 'complete';
   if (!hasInbound && !membersPresent && !scanIncomplete && installedPackagesAuthoritative && !known.has(targetLc)) {
     const knownList = [...known.values()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     return err({
@@ -721,10 +744,13 @@ const buildImpact = async (
  *     namespace is absent from that roster, and a COMPLETE scan found no member,
  *     extension, or dependency (phantom targets included) carrying it. The error
  *     message names the real installed namespaces so a near-miss typo is
- *     self-correcting. When `InstalledPackage` coverage is errored / capped /
- *     pending / scoped-out — or the family is not modelled at all — the roster
- *     cannot prove absence, so the honest soft/`review` verdict is returned
- *     instead of a refusal.
+ *     self-correcting. "COMPLETE" here is the manifest's own
+ *     `summarizeCoverage(...).status === 'complete'`, never merely "the roster
+ *     is non-empty": whenever that status is `partial` (errored / capped /
+ *     pending / scoped-out / family absent from a coverage-carrying manifest) or
+ *     `unknown` (a manifest with no coverage rows at all), the roster cannot
+ *     prove absence, so the honest soft/`review` verdict is returned instead of
+ *     a refusal.
  *
  * @example
  *   const r = await packageImpactHandler(ctx, { namespace: 'SBQQ' });
@@ -742,6 +768,15 @@ export const packageImpactHandler = async (
   }
   const identities = idRes.value;
   // listNodeIdentities caps at its own ceiling; surface that as scanTruncated.
+  // R6 FOLLOW-UP: `IDENTITY_SCAN_MAX` is now EXPORTED from
+  // packages/graph/src/queries.ts (and re-exported from its index), so this
+  // literal can finally be replaced by `identities.length >= IDENTITY_SCAN_MAX`
+  // with the constant imported from '@sf-intelligence/graph'. That swap is
+  // BUILD-GATED and not made here: packages/mcp resolves @sf-intelligence/graph
+  // through its built `dist/src`, so the import reads `undefined` (and
+  // scanTruncated silently goes permanently false) until `pnpm -r build` runs.
+  // Make the swap and the build in one commit; the drift guard in
+  // package-impact.test.ts binds the two numbers until then.
   const scanTruncated = identities.length >= 100_000;
   // Namespaces of the InstalledPackage markers in this vault — enables the
   // 2-segment `Namespace__Leaf` managed-member pass
@@ -776,7 +811,7 @@ export const packageImpactHandler = async (
           kind: 'invalid-query',
           message:
             `${selectorKey} '${selector}' is not a package selector — pass a namespace ` +
-            `(e.g. 'APXTConga4') or an 'InstalledPackage:<namespace>' id, or set 'namespace' directly.`,
+            `(e.g. 'Pkg_Alpha4') or an 'InstalledPackage:<namespace>' id, or set 'namespace' directly.`,
           path: selectorKey,
         });
       }

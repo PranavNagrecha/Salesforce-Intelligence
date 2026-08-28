@@ -152,3 +152,134 @@ describe('retrieveBlindspotReportHandler', () => {
     expect(parsed.includeLowSignal).toBe(true);
   });
 });
+
+/**
+ * REMEDY-CERTIFIES-AN-UNVERIFIED-CAUSE.
+ *
+ * Measured on a real vault: two sub-component families were both stamped
+ * `coverageStatus: 'absent'` with the remedy "is never retrieved (not modeled /
+ * not in the retrieve manifest) ... widen the retrieve manifest and run
+ * /sfi-refresh". Both classifications were contradicted by the vault:
+ *
+ *   (1) One of the two families had DOZENS of real nodes in the graph — the
+ *       family is modeled and only a handful of specific members dangle. The
+ *       report already has the right word for that (`covered`, "specific
+ *       components not in the vault"), and it used it correctly for two OTHER
+ *       types in the same answer. Widening the manifest for a family that is
+ *       already modeled cannot change anything.
+ *
+ *   (2) The other family had zero nodes AND no manifest coverage row — because
+ *       the retrieve manifest only enumerates TOP-LEVEL metadata families, so a
+ *       sub-component stored inside a parent file can never appear in it. The
+ *       members were physically present in files the refresh had ALREADY pulled;
+ *       the extractor simply does not model that family. `entries.find(...) ===
+ *       undefined ? 'absent'` collapsed NEVER-CHECKED into CHECKED-AND-MISSING,
+ *       and the remedy then prescribed hours of org refresh that returns the
+ *       identical zero.
+ *
+ * The handler cannot tell (2) from a genuine retrieve gap — nothing in the graph
+ * or the manifest distinguishes them. It CAN tell (1), and it must stop
+ * certifying a single cause for (2).
+ *
+ * Fixtures are synthetic; the two families below stand in for the real pair.
+ */
+const SUBCOMPONENT_MANIFEST: VaultManifest = {
+  ...MANIFEST,
+  // Deliberately NO row for either workflow sub-component family: the retrieve
+  // manifest enumerates top-level families only, which is exactly why "no row"
+  // must not be read as "never retrieved".
+  coverage: [
+    { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false },
+  ],
+};
+
+const SUBCOMPONENT_SEED: ExtractionResult = {
+  nodes: [
+    node('CustomObject:Obj_A__c', 'CustomObject'),
+    // The family IS modeled: three real nodes the extractor emitted.
+    node('WorkflowAlert:Obj_A__c.Alert_B', 'WorkflowAlert'),
+    node('WorkflowAlert:Obj_A__c.Alert_C', 'WorkflowAlert'),
+    node('WorkflowAlert:Obj_A__c.Alert_D', 'WorkflowAlert'),
+  ],
+  edges: [
+    // Resolved reference into the modeled family.
+    edge('WorkflowRule:Obj_A__c.Rule_E', 'references', 'WorkflowAlert:Obj_A__c.Alert_B', 'declared'),
+    // ONE member of the modeled family dangles (a parent file outside scope).
+    edge('WorkflowRule:Obj_A__c.Rule_F', 'references', 'WorkflowAlert:Obj_Z__c.Alert_G', 'declared'),
+    // A family with NO node and NO manifest row: cause genuinely undetermined.
+    edge(
+      'ApprovalProcess:Obj_A__c.Proc_H',
+      'references',
+      'WorkflowFieldUpdate:Obj_A__c.Fu_I',
+      'declared',
+    ),
+    edge(
+      'ApprovalProcess:Obj_A__c.Proc_J',
+      'references',
+      'WorkflowFieldUpdate:Obj_A__c.Fu_K',
+      'declared',
+    ),
+  ],
+};
+
+describe('retrieveBlindspotReportHandler — the remedy must not certify an unverified cause', () => {
+  let subDir: string;
+  let subStore: GraphStore;
+  let subCtx: Context;
+
+  beforeAll(async () => {
+    subDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-blindspot-sub-'));
+    const opened = await openGraph(join(subDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    subStore = opened.value;
+    const imp = await importExtractionResults(subStore, [SUBCOMPONENT_SEED]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    subCtx = { vaultRoot: subDir, manifest: SUBCOMPONENT_MANIFEST, graph: subStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(subStore);
+    rmSync(subDir, { recursive: true, force: true });
+  });
+
+  it('a family the GRAPH models is never reported as a whole-family retrieve gap', async () => {
+    const r = await retrieveBlindspotReportHandler(subCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = r.value.data.blindspots.find((x) => x.targetType === 'WorkflowAlert');
+    expect(b).toBeDefined();
+    // The graph holds three nodes of this family — it is NOT absent from the vault.
+    expect(b?.modeledNodes).toBe(3);
+    expect(b?.coverageStatus).not.toBe('absent');
+    expect(b?.remedy).not.toMatch(/never retrieved/i);
+    expect(b?.remedy).not.toMatch(/widen the retrieve manifest/i);
+    // The cause here IS established: the family is modeled, only members dangle.
+    expect(b?.causeVerified).toBe(true);
+  });
+
+  it('a family with no manifest row and no node names BOTH causes instead of certifying one', async () => {
+    const r = await retrieveBlindspotReportHandler(subCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = r.value.data.blindspots.find((x) => x.targetType === 'WorkflowFieldUpdate');
+    expect(b).toBeDefined();
+    expect(b?.modeledNodes).toBe(0);
+    // Nothing in the vault establishes WHY it is missing.
+    expect(b?.causeVerified).toBe(false);
+    // It must NOT assert the retrieve-gap cause as fact...
+    expect(b?.remedy).not.toMatch(/is never retrieved/i);
+    // ...and it must name the extraction-gap alternative a refresh cannot fix.
+    expect(b?.remedy).toMatch(/extract/i);
+    expect(b?.remedy).toMatch(/not established|cannot be established|undetermined/i);
+  });
+
+  it('an unverified cause is surfaced in a typed field and in trust.limitations', async () => {
+    const r = await retrieveBlindspotReportHandler(subCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.causeUnverifiedTypes).toEqual(['WorkflowFieldUpdate']);
+    expect(d.trust.limitations.some((l) => l.includes('WorkflowFieldUpdate'))).toBe(true);
+    expect(d.trust.completeness.status).not.toBe('complete');
+  });
+});

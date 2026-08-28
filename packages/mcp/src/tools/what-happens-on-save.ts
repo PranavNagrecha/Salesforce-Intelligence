@@ -155,6 +155,7 @@ import {
   soeRefGroundingNotCheckedNote,
   type SoeUngroundedRef,
 } from './order-of-execution.js';
+import { responseReductionCap } from './response-budget.js';
 import {
   buildInactiveSummary,
   type InactiveConfiguredFirer,
@@ -649,6 +650,29 @@ export interface WhatHappensOnSaveOutput {
    * NOTHING WAS CHECKED — never "clean".
    */
   readonly conceptReasoning?: ConceptReasoningEnvelope;
+  /**
+   * TYPED ABSENCE for {@link conceptReasoning} — present EXACTLY when that key
+   * is absent, and never at the same time as it. Read it before concluding
+   * anything from a missing reasoning block: `checked: false` means no concept
+   * layer ran, which is "not checked", never "nothing found". See
+   * {@link ConceptReasoningOmission}.
+   */
+  readonly conceptReasoningOmitted?: ConceptReasoningOmission;
+  /**
+   * Present ONLY when the composed payload is over {@link responseReductionCap}
+   * — the ceiling the GLOBAL response reducer trims to — so it will cut steps
+   * from the tail of `soe` and NO argument of this tool can page past the cut.
+   * Carries the tool's real accepted-argument list and, depending on whether
+   * `phase` is still unspent, either the phases worth re-querying or an
+   * executable enumeration for the phase already asked for. See
+   * {@link SoeRecoveryPath} — and read it INSTEAD of any generic "re-query with
+   * a smaller limit" note in the envelope, which does not apply to this tool.
+   *
+   * ABSENT on a payload that fits: this block must never be the thing that
+   * pushes an answer over the reducer's trigger, because the reducer HALVES
+   * what it trims.
+   */
+  readonly recoveryPath?: SoeRecoveryPath;
 }
 
 /**
@@ -661,11 +685,19 @@ const PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE =
   'Concept reasoning is off by default on a phase-filtered query so the whole budget goes to the requested phase; pass includeConceptReasoning: true to force it.';
 
 /**
- * F4. Room kept back from the SOE budget for the honesty prose appended AFTER
- * `enforceSoeByteBudget` has measured `data` — the truncation note, the
- * phase-shortfall sentence, and the concept-reasoning notes below. The longest
- * combination observed on a real org runs under 1 KB; 2 KB is the reserve, so
- * the prose can grow without pushing the payload back over the ceiling.
+ * F4. Room kept back from the SOE budget for the honesty scaffolding appended
+ * AFTER `enforceSoeByteBudget` has measured `data` — the truncation note, the
+ * phase-shortfall sentence, `phasesOmitted`, the concept-reasoning notes and
+ * {@link ConceptReasoningOmission}. The longest combination observed on a real
+ * org runs under 1 KB; 2 KB is the reserve, so the scaffolding can grow without
+ * pushing the payload back over the ceiling.
+ *
+ * It is passed to `enforceSoeByteBudget` as `budgetBytes` — the module's own
+ * documented reserve seam. It used to be subtracted ONLY from the
+ * concept-reasoning allowance, which left the enforcement pass fitting `data`
+ * to the full `soeBudgetBytes()` and the scaffolding pushing it back over
+ * afterwards (measured: fitted to 37 976, delivered at 38 763). A named
+ * reserve that the pass it is named for never sees is a comment, not a guard.
  */
 const POST_ENFORCEMENT_DISCLOSURE_HEADROOM_BYTES = 2_000;
 
@@ -1109,6 +1141,346 @@ const TRIGGER_TYPES: ReadonlySet<ComponentType> = new Set(['ApexTrigger']);
 
 /** Allowed types for the post-save-workflows phase. */
 const WORKFLOW_TYPES: ReadonlySet<ComponentType> = new Set(['WorkflowRule']);
+
+/**
+ * RECOVERY-PATH-NAMES-KNOBS-THIS-TOOL-DOES-NOT-HAVE.
+ *
+ * ## The measured defect
+ *
+ * On a real org's busiest object the `pre-save-validation` phase holds 100
+ * active rules. The composed payload is ~65 KB against a ~38 KB budget, so the
+ * GLOBAL response reducer tail-truncates `soe` to 50 steps. Everything about
+ * that was disclosed honestly EXCEPT the way out. Three separate sentences told
+ * the caller how to recover and all three were dead ends for THIS tool:
+ *
+ *   - the envelope's shared `responseBudget.note`: "re-query with a smaller
+ *     limit";
+ *   - {@link filteredPhaseShortfallNote}: "narrow further with limit/offset, or
+ *     pass includeConceptReasoning: false";
+ *   - {@link CONCEPT_REASONING_NO_HEADROOM_NOTE} / the cross-phase note:
+ *     "re-query one `phase` at a time".
+ *
+ * `sfi.what_happens_on_save` is `.strict()` and accepts NO `limit`, `offset` or
+ * `cursor` — following the first two returns `invalid-query: Unknown argument`.
+ * `includeConceptReasoning` is ALREADY false on a phase-filtered call, so
+ * re-passing it changes nothing. And the third is false precisely when it is
+ * needed: a phase-filtered call on that object returns 50 of 100 as well,
+ * because ONE phase is itself over budget. The other 50 rules that can block a
+ * save were unreachable through the tool that models them.
+ *
+ * Those three sentences are shared prose: two live in `soe-payload-bounds.ts`
+ * (used by `order_of_execution` too, which DOES accept limit/offset/cursor, so
+ * they are true THERE) and one in the dispatcher's envelope. This module cannot
+ * rewrite them. What it can do — and what {@link SoeRecoveryPath} does — is
+ * state the truth for THIS tool in a TYPED field a machine consumer cannot skip
+ * and in prose a host reads aloud: name every argument the tool really accepts,
+ * say that the narrowest scope has already been applied when it has, and hand
+ * back an EXECUTABLE, resumable enumeration that does reach the full roster.
+ *
+ * ## What it must never cost
+ *
+ * The reducer HALVES the list it trims, so a disclosure block bolted onto an
+ * over-budget payload can cost fifty percent of the delivered steps — and a
+ * block bolted onto a payload that FIT can cause the trim outright. Both were
+ * measured on a real org and both are now designed out: the block is gated on
+ * {@link responseReductionCap} (never on this tool's stricter local cap), it is
+ * capped at {@link RECOVERY_PATH_BYTE_CEILING}, and it enumerates ONE phase —
+ * the one already asked for — rather than all eleven. See
+ * {@link buildPhaseEnumeration}.
+ *
+ * ## Why the enumerations are trustworthy
+ *
+ * They are DERIVED from the same `ComponentType` sets the phase collectors
+ * filter on, and from the same `parentOf` / `triggersOn` split the collectors
+ * walk — not a second hand-maintained copy free to drift. A phase whose firers
+ * reach this object by neither route gets an EMPTY `enumerateWith` and a stated
+ * `unenumerableReason` rather than a call that would answer a different
+ * question.
+ */
+const PARENT_SCOPED_PHASE_TYPES: ReadonlyMap<
+  Exclude<SoePhase, 'save'>,
+  ReadonlySet<ComponentType>
+> = new Map([
+  ['pre-save-validation', VALIDATION_TYPES],
+  ['duplicate-rules', DUPLICATE_RULE_TYPES],
+  ['post-save-assignment', ASSIGNMENT_TYPES],
+  ['post-save-approval', APPROVAL_TYPES],
+]);
+
+/**
+ * Phases whose firers reach the target object by an INCOMING `triggersOn` edge
+ * (see {@link fetchTriggersOnFirers}). Their full roster is reachable with
+ * `sfi.get_edges`, which pages with a resumable cursor.
+ */
+const TRIGGERS_ON_PHASES: ReadonlySet<Exclude<SoePhase, 'save'>> = new Set([
+  'before-save-flows',
+  'pre-save-triggers',
+  'after-triggers',
+  'post-save-workflows',
+  'post-save-flows',
+]);
+
+/** One executable, resumable call that enumerates a phase's candidate roster. */
+export interface SoePhaseEnumeration {
+  readonly tool: 'sfi.list_components' | 'sfi.get_edges';
+  readonly arguments: Readonly<Record<string, string | number>>;
+  /**
+   * ALWAYS `true`, and stated rather than implied: every enumeration named here
+   * is a SUPERSET of the phase. It ignores the DML `event` filter and the
+   * active/inactive filter this composition applies, and the `triggersOn` one
+   * spans all five edge-driven phases at once. It answers "what is the complete
+   * roster this phase is drawn from", never "what fires on this event".
+   */
+  readonly superset: true;
+}
+
+/**
+ * TYPED, MACHINE-READABLE recovery contract for the ONE state in which this
+ * tool has genuinely run out of exits.
+ *
+ * Emitted when BOTH hold:
+ *
+ *   1. `data` is over {@link responseReductionCap}, so the global reducer will
+ *      cut steps from `soe` after this handler returns; and
+ *   2. `phase` was supplied — the narrowest scope the tool has is SPENT.
+ *
+ * Condition 2 is not thrift, it is the definition of the defect. An UNFILTERED
+ * over-budget answer already carries `crossPhaseShortfallNote`'s "re-query with
+ * the `phase` filter to see the full roster", which names a knob this tool
+ * really has and really does narrow with — a working exit, not a dead end. It
+ * is the PHASE-FILTERED answer whose shared tail says "narrow further with
+ * limit/offset, or pass includeConceptReasoning: false", and every one of those
+ * is refused or already in force. So the correction goes exactly where the
+ * false advice is, the chain terminates (unfiltered → `phase` → this block →
+ * the complete roster), and the answer that has no headroom to spare does not
+ * pay for a paragraph it does not need.
+ *
+ * See {@link PARENT_SCOPED_PHASE_TYPES} for the defect this closes, and
+ * {@link RECOVERY_PATH_BYTE_CEILING} for why it is this small.
+ */
+export interface SoeRecoveryPath {
+  /** Literal `false`: no argument of this tool can resume this response. */
+  readonly resumable: false;
+  readonly reason: 'over-budget-and-tool-accepts-no-paging-arguments';
+  /**
+   * Size of the COMPOSED payload — what this handler built, BEFORE the global
+   * reducer trimmed it. It is deliberately not the size of what you received:
+   * the reducer runs after this handler returns and this number is the evidence
+   * that it had to. Read `soe.length` against `summary.phaseCounts` for what
+   * actually arrived.
+   */
+  readonly composedPayloadBytes: number;
+  /** {@link responseReductionCap} — the ceiling `composedPayloadBytes` is over. */
+  readonly reducerCapBytes: number;
+  /**
+   * Every argument this tool accepts. The SAME tuple that drives the
+   * `.strict()` refusal message, so the refusal and this list can never
+   * disagree. `accepted arguments track the input schema` pins it to
+   * {@link whatHappensOnSaveInputSchema}'s own shape — the tuple is
+   * hand-maintained, so a drift test, not a comment, is what holds it there.
+   */
+  readonly acceptedArguments: readonly string[];
+  /** The finest scope this tool offers. There is nothing narrower. */
+  readonly narrowestScope: 'phase';
+  /**
+   * Literal `true`. The block exists ONLY in the state where `phase` was
+   * already applied and the single phase STILL did not fit — see
+   * {@link SoeRecoveryPath} for why an unfiltered answer does not get one.
+   */
+  readonly narrowestScopeApplied: true;
+  /**
+   * The way out, as calls a host can run. Empty ONLY when no single call
+   * reaches the phase, in which case {@link unenumerableReason} says why rather
+   * than leaving a bare `[]` to be read as "nothing to enumerate".
+   */
+  readonly enumerateWith: readonly SoePhaseEnumeration[];
+  /** Present exactly when {@link enumerateWith} is empty. */
+  readonly unenumerableReason?: string;
+}
+
+/**
+ * Phases no single call enumerates, each with the reason IN ITS OWN WORDS.
+ * `covers every automation phase` asserts that these three maps
+ * ({@link PARENT_SCOPED_PHASE_TYPES}, {@link TRIGGERS_ON_PHASES}, this one)
+ * partition `AUTOMATION_PHASES` exactly, so a new phase cannot silently inherit
+ * another phase's excuse.
+ */
+const UNENUMERABLE_PHASE_REASONS: ReadonlyMap<Exclude<SoePhase, 'save'>, string> =
+  new Map([
+    [
+      'post-save-async',
+      'reached by a dispatchesAsync edge FROM each earlier-phase firer, not from this object — enumerate per firer with sfi.get_edges.',
+    ],
+    [
+      'post-save-rollup-recalc',
+      'matched by a property scan over parent Summary fields, not by an edge from this object — no single call enumerates it.',
+    ],
+  ]);
+
+/** Page size named in an emitted `sfi.list_components` recovery call. */
+const LIST_COMPONENTS_PAGE_LIMIT = 100;
+
+/** Page size named in an emitted `sfi.get_edges` recovery call. */
+const GET_EDGES_PAGE_LIMIT = 100;
+
+/**
+ * The three routes' phase keys, exported ONLY so a drift test can prove they
+ * partition {@link AUTOMATION_PHASES}. A comment claiming full coverage is what
+ * this replaces — R6: a parity comment is not a guard.
+ */
+export const RECOVERY_PHASE_ROUTES: {
+  readonly parentScoped: readonly string[];
+  readonly triggersOn: readonly string[];
+  readonly unenumerable: readonly string[];
+} = {
+  parentScoped: [...PARENT_SCOPED_PHASE_TYPES.keys()],
+  triggersOn: [...TRIGGERS_ON_PHASES],
+  unenumerable: [...UNENUMERABLE_PHASE_REASONS.keys()],
+};
+
+/**
+ * MEASURED CEILING for the whole recovery block, prose included.
+ *
+ * The global reducer HALVES a list to make room (`keep = max(10, floor(len/2))`
+ * in `tool-dispatch.ts`), so on an over-budget payload every byte this block
+ * costs can cost fifty percent of the delivered steps. The first shape of this
+ * block enumerated all eleven phases and ran 1.6-2.8 KB; measured on a real
+ * org through the FULL pipeline that turned a 54-step answer into 27 and a
+ * 60-step answer into 30. `stays inside its byte ceiling` pins the current
+ * shape so a future field cannot quietly buy itself half an answer.
+ *
+ * 1 500 is set against the SMALLEST slack measured on the only path that emits
+ * the block: on a real org's busiest object a phase-filtered answer arrives
+ * with ~3 100 bytes to spare under the reducer's trigger, and the block as
+ * shipped costs ~1 370 of them. Roughly a factor of two in hand, and a test
+ * that fails long before the block can start buying steps.
+ */
+export const RECOVERY_PATH_BYTE_CEILING = 1_500;
+
+/**
+ * The ONE phase enumeration a phase-filtered over-budget answer hands back.
+ *
+ * Only the phase-filtered path gets enumerations, and only for its own phase.
+ * An unfiltered answer's cheap recovery is a narrower re-query (`retryPhases`),
+ * and enumerating every phase up front is what made the first version of this
+ * block cost half the answer — see {@link RECOVERY_PATH_BYTE_CEILING}.
+ *
+ * DERIVED from the same `ComponentType` sets the phase collectors filter on and
+ * the same `parentOf` / `triggersOn` split they walk, so an enumeration cannot
+ * describe a different roster than the phase it names.
+ *
+ * Exported so `every phase route resolves to the call that actually reaches it`
+ * can exercise all three routes directly. Only a phase-filtered over-budget
+ * answer emits one, and fixturing that state for every phase would test the
+ * budget arithmetic rather than the routing.
+ */
+export const buildPhaseEnumeration = (
+  objectId: ComponentId,
+  phase: Exclude<SoePhase, 'save'>,
+): { readonly calls: readonly SoePhaseEnumeration[]; readonly reason?: string } => {
+  const parentTypes = PARENT_SCOPED_PHASE_TYPES.get(phase);
+  if (parentTypes !== undefined) {
+    return {
+      calls: [...parentTypes].map((type) => ({
+        tool: 'sfi.list_components' as const,
+        arguments: { type, parentId: objectId, limit: LIST_COMPONENTS_PAGE_LIMIT },
+        superset: true as const,
+      })),
+    };
+  }
+  if (TRIGGERS_ON_PHASES.has(phase)) {
+    return {
+      calls: [
+        {
+          tool: 'sfi.get_edges' as const,
+          arguments: {
+            nodeId: objectId,
+            direction: 'in',
+            edgeType: 'triggersOn',
+            limit: GET_EDGES_PAGE_LIMIT,
+          },
+          superset: true as const,
+        },
+      ],
+    };
+  }
+  return {
+    calls: [],
+    // Keyed, never a fall-through `else`. A phase added to `AUTOMATION_PHASES`
+    // but to none of the three maps would otherwise inherit whichever sentence
+    // the `else` happened to hold — a fabricated reason, which is the defect
+    // this whole block exists to remove. It gets the neutral sentence instead,
+    // and `covers every automation phase` fails so the gap is fixed rather
+    // than shipped.
+    reason:
+      UNENUMERABLE_PHASE_REASONS.get(phase) ??
+      'this phase is reached by neither a parentOf nor a triggersOn edge from this object, and this tool names no enumeration for it.',
+  };
+};
+
+/**
+ * Verbatim recovery prose. It must contradict the shared boilerplate BY NAME —
+ * a host that has just read "re-query with a smaller limit" needs to be told
+ * that sentence does not apply here, not merely offered an alternative. Every
+ * clause is DERIVED from the block beside it, so the sentence a host reads
+ * aloud and the field a machine reads can never state two different things, and
+ * it names no key this response did not populate.
+ */
+const recoveryPathNote = (path: SoeRecoveryPath): string =>
+  `RECOVERY PATH. The composed payload was ${path.composedPayloadBytes} byte(s) against a ` +
+  `${path.reducerCapBytes} byte reducer cap, so steps were cut from the END of \`soe\` after ` +
+  'this tool returned — any phase where `soe` holds fewer steps than `summary.phaseCounts` ' +
+  'declares was CUT, never absent. This tool accepts NO `limit`, `offset` or `cursor`, and ' +
+  '`phase` — its narrowest scope — is already applied, so every "narrow further with ' +
+  'limit/offset", "re-query with a smaller limit" or "pass includeConceptReasoning: false" ' +
+  'note elsewhere in this response is generic boilerplate that DOES NOT APPLY here: those ' +
+  'arguments are refused as unknown, and reasoning is already off. ' +
+  (path.enumerateWith.length > 0
+    ? "Run `recoveryPath.enumerateWith` for this phase's COMPLETE roster (resumable; each is a " +
+      'SUPERSET, ignoring the `event` and active filters applied here).'
+    : 'No single call enumerates this phase — `recoveryPath.unenumerableReason` says why.');
+
+/**
+ * TYPED ABSENCE for the concept-reasoning block (R1).
+ *
+ * `conceptReasoning` is documented DEFAULT ON, so a host that finds the key
+ * missing has no way to tell "the reasoning engine ran and flagged nothing"
+ * from "no concept layer was checked at all" — and the block's own contract
+ * (`completeness.noRuleCoversComponentType`) exists precisely to stop that
+ * misreading. Measured on a real org: the key is present on four light objects
+ * and absent on the two heavy ones, i.e. absent exactly where the answer is
+ * least complete. The prose said so; nothing TYPED did, and a machine consumer
+ * reading `data` cannot be asked to regex a paragraph.
+ *
+ * So absence is now decided by a property the payload CARRIES. `checked` is the
+ * literal `false` — this object is emitted ONLY when the block is missing.
+ */
+export interface ConceptReasoningOmission {
+  /** Literal `false`. An absent `conceptReasoning` is never "checked and clean". */
+  readonly checked: false;
+  readonly reason:
+    | 'caller-opted-out'
+    | 'phase-filter-default'
+    | 'no-budget-headroom'
+    | 'build-unavailable';
+  /**
+   * Bytes left for the block after the steps were fitted. Never negative.
+   *
+   * ABSENT — not zero — on `caller-opted-out` and `phase-filter-default`, where
+   * the block was never attempted and no headroom was ever measured. A `0`
+   * beside {@link minimumHeadroomBytes} reads as a MEASUREMENT saying "no room
+   * was left", which is a different (and false) claim from "no one looked". A
+   * typed-absence field that invents a number is the exact shape this field
+   * exists to prevent, so it is omitted instead.
+   */
+  readonly headroomBytes?: number;
+  /**
+   * {@link CONCEPT_REASONING_MIN_HEADROOM_BYTES} at the time of measurement.
+   * Present exactly when {@link headroomBytes} is — the two are only readable
+   * together.
+   */
+  readonly minimumHeadroomBytes?: number;
+}
 
 /**
  * The `sfi.what_happens_on_save` MCP tool. Returns the ordered SOE
@@ -1649,6 +2021,8 @@ export const whatHappensOnSaveHandler = async (
     entitlementProcessNotes?: readonly EntitlementProcessNote[];
     entitlementProcessNotesTruncated?: boolean;
     conceptReasoning?: ConceptReasoningEnvelope;
+    conceptReasoningOmitted?: ConceptReasoningOmission;
+    recoveryPath?: SoeRecoveryPath;
     withinPhaseOrder?: SoeWithinPhaseOrder;
     coverageCaveat?: typeof TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
   } = {
@@ -1780,17 +2154,52 @@ export const whatHappensOnSaveHandler = async (
     input.phase !== undefined && input.includeConceptReasoning === undefined;
   const wantConceptReasoning =
     input.includeConceptReasoning ?? input.phase === undefined;
+  // R1 — TYPED ABSENCE. Every path that leaves `conceptReasoning` off the
+  // payload also records WHY, in a field, not only in prose. A host that reads
+  // `data` and finds neither key would otherwise be free to read the missing
+  // block as "the reasoning engine found nothing", which is the one reading the
+  // block exists to prevent. Set here for the opt-out paths and below for the
+  // two budget paths; attached at the end, and only when `conceptReasoning`
+  // itself is absent, so the two keys can never both appear.
+  let conceptReasoningOmitted: ConceptReasoningOmission | undefined;
   if (!wantConceptReasoning) {
-    data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_SKIPPED_NOTE}`;
-    if (conceptReasoningOffByPhaseDefault) {
-      data.disclosure = `${data.disclosure} ${PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE}`;
-    }
+    const skipNote = conceptReasoningOffByPhaseDefault
+      ? `${CONCEPT_REASONING_SKIPPED_NOTE} ${PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE}`
+      : CONCEPT_REASONING_SKIPPED_NOTE;
+    data.disclosure = `${data.disclosure} ${skipNote}`;
+    // NO `headroomBytes` / `minimumHeadroomBytes` here. The block was never
+    // attempted on this path, so there is no measurement to report and a `0`
+    // would read as one. `reason` carries the whole truth; the sentence is in
+    // `disclosure`.
+    conceptReasoningOmitted = {
+      checked: false,
+      reason: conceptReasoningOffByPhaseDefault
+        ? 'phase-filter-default'
+        : 'caller-opted-out',
+    };
   }
 
+  // RESERVE the post-enforcement additions instead of bolting them on after.
+  //
+  // `POST_ENFORCEMENT_DISCLOSURE_HEADROOM_BYTES` already existed and already
+  // said what it was for, but it was only ever subtracted from the CONCEPT
+  // REASONING allowance — the enforcement pass itself never knew about it. So
+  // the pass fitted `data` to exactly `soeBudgetBytes()` and the notes,
+  // `phasesOmitted` and typed-absence blocks appended afterwards pushed it back
+  // over: measured on a real org, a payload fitted to 37 976 was delivered at
+  // 38 763. That is inside the reducer's trigger band, where a few hundred more
+  // bytes cost half the steps. `enforceSoeByteBudget` documents `budgetBytes`
+  // for exactly this ("a caller that appends HONESTY scaffolding to the payload
+  // AFTER enforcement passes a value BELOW soeBudgetBytes to reserve headroom"),
+  // so the honesty scaffolding is now paid for out of the trim ladder — which
+  // sheds ACTION tails and, under `allowStepDrop: false`, can never cost a step.
   const budget = enforceSoeByteBudget(
     data,
     [visibleSoe] as unknown as BoundableStep[][],
-    { allowStepDrop: false },
+    {
+      allowStepDrop: false,
+      budgetBytes: soeBudgetBytes() - POST_ENFORCEMENT_DISCLOSURE_HEADROOM_BYTES,
+    },
   );
   if (budget.truncated) {
     data.truncated = true;
@@ -1822,13 +2231,25 @@ export const whatHappensOnSaveHandler = async (
       // R3 — a MISSING block must never be silent. `null` covers both a
       // component that did not resolve and a graph read that failed, so the
       // note attributes neither.
-      data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_UNAVAILABLE_NOTE(objectId)}`;
+      const note = CONCEPT_REASONING_UNAVAILABLE_NOTE(objectId);
+      data.disclosure = `${data.disclosure} ${note}`;
+      conceptReasoningOmitted = {
+        checked: false,
+        reason: 'build-unavailable',
+        headroomBytes: Math.max(0, headroom),
+        minimumHeadroomBytes: CONCEPT_REASONING_MIN_HEADROOM_BYTES,
+      };
     } else {
       // Built but too big for what the steps left, or never attempted because
       // the headroom was already below the floor. Same outcome, same sentence.
-      data.disclosure = `${data.disclosure} ${CONCEPT_REASONING_NO_HEADROOM_NOTE(
-        Math.max(0, headroom),
-      )}`;
+      const note = CONCEPT_REASONING_NO_HEADROOM_NOTE(Math.max(0, headroom));
+      data.disclosure = `${data.disclosure} ${note}`;
+      conceptReasoningOmitted = {
+        checked: false,
+        reason: 'no-budget-headroom',
+        headroomBytes: Math.max(0, headroom),
+        minimumHeadroomBytes: CONCEPT_REASONING_MIN_HEADROOM_BYTES,
+      };
     }
   }
 
@@ -1868,6 +2289,67 @@ export const whatHappensOnSaveHandler = async (
   // Attach LAST — after every budget/trim pass has measured `data` without it.
   if (conceptReasoning !== undefined) {
     data.conceptReasoning = conceptReasoning;
+  } else if (conceptReasoningOmitted !== undefined) {
+    // Mutually exclusive by construction: the omission marker exists only on
+    // the paths that produced no envelope, and this branch is the only writer.
+    data.conceptReasoningOmitted = conceptReasoningOmitted;
+  }
+
+  // RECOVERY PATH — measured LAST, gated on the cap the GLOBAL REDUCER actually
+  // uses, and emitted ONLY where the tool's own exits are spent.
+  //
+  // Two measured mistakes are designed out here.
+  //
+  // (1) The gate used to be `soeBudgetBytes()` (37 976). That is the TOOL-LOCAL
+  // cap, derived to sit `TOOL_LOCAL_BUDGET_MARGIN_BYTES` BELOW what the reducer
+  // trims to — so a payload inside that margin was over the tool's cap and
+  // still perfectly deliverable. The block fired on it anyway and its own bytes
+  // then pushed the envelope past the reducer's trigger. Because the reducer
+  // HALVES (`keep = max(10, floor(len/2))` in `tool-dispatch.ts`), that cost
+  // 50% of the steps: measured through the full pipeline on a real org, a
+  // 60-step answer that had been delivered COMPLETE came back with 30, losing
+  // every duplicate rule, every after-trigger and all eight post-save flows. A
+  // warning that manufactures the truncation it warns about is worse than no
+  // warning. The gate is now the SHARED `responseReductionCap()`, measured on
+  // `data` WITH everything else attached and WITHOUT this block, so a payload
+  // that fits is byte-identical to one built without this code path.
+  //
+  // (2) It fired on unfiltered answers too, where the same halving turned 54
+  // delivered steps into 27 — to repeat advice the response already had. An
+  // unfiltered over-budget answer carries `crossPhaseShortfallNote`'s "re-query
+  // with the `phase` filter", which is TRUE and names a knob this tool has. The
+  // dead end is one step later, on the phase-filtered answer, whose shared tail
+  // recommends limit/offset/includeConceptReasoning — all refused or already in
+  // force. So the block goes there, where it is both needed and affordable.
+  // See {@link SoeRecoveryPath}.
+  const composedPayloadBytes = Buffer.byteLength(JSON.stringify(data), 'utf8');
+  const reducerCapBytes = responseReductionCap();
+  if (input.phase !== undefined && composedPayloadBytes > reducerCapBytes) {
+    const enumeration = buildPhaseEnumeration(objectId, input.phase);
+    const recoveryPath: SoeRecoveryPath = {
+      resumable: false,
+      reason: 'over-budget-and-tool-accepts-no-paging-arguments',
+      composedPayloadBytes,
+      reducerCapBytes,
+      // The SAME tuple that drives the `.strict()` refusal, so the refusal and
+      // this list cannot disagree. It is hand-maintained rather than read off
+      // the Zod shape, which is why `accepted arguments track the input schema`
+      // pins the two together — a comment would not have.
+      acceptedArguments: [...WHAT_HAPPENS_ON_SAVE_ACCEPTED_KEYS],
+      narrowestScope: 'phase',
+      narrowestScopeApplied: true,
+      enumerateWith: enumeration.calls,
+      ...(enumeration.reason !== undefined
+        ? { unenumerableReason: enumeration.reason }
+        : {}),
+    };
+    data.recoveryPath = recoveryPath;
+    // The prose is DERIVED from the block, so the sentence a host reads aloud
+    // and the field a machine reads can never state two different things, and
+    // it names no key this response did not populate. It lives in `disclosure`
+    // only — a second copy inside `data` would cost this already-over-budget
+    // payload more steps to say it twice.
+    data.disclosure = `${data.disclosure} ${recoveryPathNote(recoveryPath)}`;
   }
 
   return ok({

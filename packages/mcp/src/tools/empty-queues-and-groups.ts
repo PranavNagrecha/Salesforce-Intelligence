@@ -31,12 +31,31 @@
  * opt-in live plane (roster follow-up); today it stays vault-only and defers
  * the confirmation to `live_group_members`.
  *
- * Member-count extraction:
- *   - Queue: reads `properties.memberCount` (the v0.1 extractor
- *     convention) OR walks `properties.queueMembers` array length.
- *     When neither is populated, returns 'unknown'.
- *   - Group: same shape, reading `properties.memberCount` or
- *     `properties.groupMembers`.
+ * **An unmeasured zero is never a measured zero (R1 typed absence)** — the two
+ * shapes that produced a CONFIDENT ZERO with a fabricated `memberSource:
+ * 'user-direct'` provenance label (a positive claim that a direct user
+ * reference was read) over membership this vault never read:
+ *   - Queue: `<queueMembers>` is a container of one wrapper per member CHANNEL
+ *     (`<users>`, `<roles>`, …). A refresh that predates
+ *     {@link QUEUE_MEMBER_CHANNELS_SENTINEL} read `<users>` only, so a queue
+ *     staffed entirely by a role extracted as `memberCount: 0` — and this tool
+ *     then named the one queue in the org that is NOT empty. Whether the family
+ *     was read is decided by whether the node CARRIES `memberChannels`, never
+ *     by the count; without it the row is `'unknown'` with
+ *     `memberCountUnknownReason: 'queue-member-channels-not-extracted'` and a
+ *     boundary from the shared `absence-disclosure` module.
+ *   - Group: the retrieved `Group` metadata carries NO membership element, and
+ *     public-group membership is `GroupMember` DATA that a Metadata API
+ *     retrieve never emits. A declared zero is therefore unmeasurable by
+ *     construction — for every public group, in every org, permanently — so it
+ *     is `'unknown'` with `'group-membership-not-in-metadata'`, and the
+ *     boundary says outright that a re-refresh cannot help and points at
+ *     `sfi.live_group_members`. This is the handling the sibling
+ *     `sfi.unassigned_permission_sets` already gives the identical unknowable.
+ * `confirmedEmptyQueues` / `confirmedEmptyGroups` carry the emptiness headline
+ * — `totalQueues` / `totalGroups` count ROWS, unknown rows included, so they
+ * are not an "empty" count. That is what makes the "unknown counts are NOT
+ * counted toward emptiness" boundary true of a NUMBER, not only of prose.
  *
  * **Name filter (EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS)** — the optional
  * `nameContains` input narrows BOTH the queue and group lists to entries whose
@@ -62,6 +81,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+} from './absence-disclosure.js';
 import {
   buildEnumerationCoverageCaveatFor,
   type CoverageCaveat,
@@ -91,6 +114,28 @@ const EMPTY_QUEUES_DEFAULT_LIMIT = 100;
  * cleanup target.
  */
 const STALE_AGE_MS = 180 * 24 * 60 * 60 * 1000;
+
+/**
+ * The Queue-node property the CURRENT extractor always writes once it has
+ * walked EVERY `<queueMembers>` channel (`<users>`, `<roles>`, …), even when
+ * the queue declares none (`[]`).
+ *
+ * R1 typed absence: whether the member family was read is decided by whether
+ * the node CARRIES this property, never by whether `memberCount` is 0. A node
+ * built by a refresh that predates it read the `<users>` channel ONLY, so its
+ * `memberCount: 0` means "we only looked in one place" — a queue staffed
+ * entirely by a role extracted as zero and this tool, whose job is to name the
+ * EMPTY queues, named the one queue that is not. Verified against
+ * `packages/extractors/src/queue.ts`, which assigns `memberChannels`
+ * unconditionally, so its absence is never "clean", always "never scanned".
+ */
+const QUEUE_MEMBER_CHANNELS_SENTINEL = 'memberChannels';
+
+/**
+ * The Queue-node flag set when a `<queueMembers>` block carried content the
+ * extractor could not read. Its `memberCount` is "we could not tell".
+ */
+const QUEUE_MEMBERS_UNPARSED_PROPERTY = 'queueMembersUnparsed';
 
 /** Verbatim boundary disclosures. */
 const BOUNDARIES: readonly string[] = Object.freeze([
@@ -127,6 +172,49 @@ export type EmptyQueuesAndGroupsInput = z.infer<
 export type MemberSource = 'user-direct' | 'group-resolved' | 'role-resolved' | 'unknown';
 
 /**
+ * WHY a row's member count is `unknown` — a TYPED field so a machine consumer
+ * cannot skip the gap the way it can skip a prose boundary. Present ONLY on a
+ * row whose `memberSource` is `'unknown'`; a measured row omits it entirely.
+ *
+ *  - `queue-member-channels-not-extracted`: the Queue node carries no
+ *    `memberChannels` sentinel, so this vault's refresh read the `<users>`
+ *    channel ONLY. A role-staffed queue extracts as 0 under that refresh.
+ *    Re-run `/sfi-refresh` — the current extractor walks every channel.
+ *  - `queue-member-block-unreadable`: `<queueMembers>` was declared but its
+ *    content could not be parsed (`queueMembersUnparsed`). Not a zero.
+ *  - `group-membership-not-in-metadata`: the retrieved `Group` metadata
+ *    declares NO members. Public-group membership is `GroupMember` DATA, which
+ *    a Metadata API retrieve never emits, so this is NOT-MEASURED for every
+ *    public group in every org — a re-refresh cannot change it. Read the live
+ *    roster with `sfi.live_group_members`.
+ *  - `no-member-data-extracted`: the node carries no member data of any kind.
+ */
+export type MemberCountUnknownReason =
+  | 'queue-member-channels-not-extracted'
+  | 'queue-member-block-unreadable'
+  | 'group-membership-not-in-metadata'
+  | 'no-member-data-extracted';
+
+/**
+ * Prose for the group gap. Deliberately NOT built by
+ * `notExtractedFamilyDisclosure`: that template ends "this vault's refresh
+ * predates … extraction … Re-run `/sfi-refresh`", and for public-group
+ * membership a re-refresh is the WRONG remedy — no Metadata API retrieve can
+ * ever carry it. Pointing an admin at a refresh that cannot help is the same
+ * class of false certainty this fix exists to remove.
+ */
+const groupMembershipNotInMetadataDisclosure = (count: number): string =>
+  'EMPTY-QUEUES-AND-GROUPS-GROUP-MEMBERSHIP-IS-NOT-METADATA: ' +
+  `${count} public group(s) declare NO members in the retrieved Group ` +
+  'metadata, and public-group membership is `GroupMember` DATA that a Metadata ' +
+  'API retrieve never emits — so their `memberCount: 0` is NOT MEASURED, never ' +
+  'a verified "nobody is in it". A re-refresh will not populate it. They are ' +
+  'reported with `memberSource: "unknown"` / `cleanupVerdict: ' +
+  '"unknown-membership"` and are EXCLUDED from `confirmedEmptyGroups`. Read the ' +
+  'live roster with `sfi.live_group_members` before treating any of them as a ' +
+  'cleanup candidate.';
+
+/**
  * The delete-safety verdict for an offline "empty" row (EMPTY-QUEUES-AND-GROUPS-
  * FALSE-EMPTY-LIVE-DRIFT). Vault emptiness is computed from DECLARED membership
  * only (direct-user XML); Setup-UI-managed membership routinely drifts from that
@@ -157,6 +245,12 @@ export interface EmptyQueueEntry {
    * `review-not-delete` (or `unknown-membership`) — confirm live before cleanup.
    */
   readonly cleanupVerdict: CleanupVerdict;
+  /**
+   * WHY this row's count is unknown. Present ONLY when
+   * `memberSource === 'unknown'`; a measured row omits it entirely so a
+   * confirmed-empty golden does not move.
+   */
+  readonly memberCountUnknownReason?: MemberCountUnknownReason;
 }
 
 /** One Group entry. */
@@ -175,6 +269,8 @@ export interface EmptyGroupEntry {
    * (Setup-UI drift), so this is never a bare "safe to delete".
    */
   readonly cleanupVerdict: CleanupVerdict;
+  /** See {@link EmptyQueueEntry.memberCountUnknownReason}. */
+  readonly memberCountUnknownReason?: MemberCountUnknownReason;
 }
 
 /** Output payload. */
@@ -185,6 +281,17 @@ export interface EmptyQueuesAndGroupsOutput {
   readonly totalGroups: number;
   readonly unknownMemberCountQueues: number;
   readonly unknownMemberCountGroups: number;
+  /**
+   * Queues whose emptiness was actually MEASURED — the rows a cleanup
+   * shortlist may act on. `totalQueues` is the ROW COUNT and includes the
+   * `unknown-membership` rows, so it is not an "empty queues" headline;
+   * `confirmedEmptyQueues + unknownMemberCountQueues === totalQueues`. This is
+   * what makes the boundary "unknown counts are NOT counted toward emptiness"
+   * true of a number rather than only of prose.
+   */
+  readonly confirmedEmptyQueues: number;
+  /** See {@link confirmedEmptyQueues}. Groups whose emptiness was MEASURED. */
+  readonly confirmedEmptyGroups: number;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
   /**
@@ -267,47 +374,119 @@ const propertyString = (node: Node, key: string): string => {
   return typeof v === 'string' ? v : '';
 };
 
-const propertyStringArray = (node: Node, key: string): readonly string[] => {
-  const v = node.properties[key];
-  if (!Array.isArray(v)) return [];
-  return v.filter((x): x is string => typeof x === 'string');
+/** Canonical id prefix of an sObject a queue can own. */
+const CUSTOM_OBJECT_ID_PREFIX = 'CustomObject:';
+
+/**
+ * The sObjects a Queue can own, read from the `sharedWith` edges the Queue
+ * extractor emits per distinct `<queueSobject><sobjectType>`.
+ *
+ * This USED to read a `properties.objectTypes` array. No extractor has ever
+ * written that key, so every row published `objectTypes: []` — on the very
+ * rows this tool nominates for cleanup, telling a reader that a queue which
+ * owns Cases owns nothing at all. Same disease as the member counts: an
+ * unpopulated read rendered as a fact. The edges are the extractor's real
+ * output and are already deduped and ordered by it.
+ */
+const resolveObjectTypes = async (
+  ctx: Context,
+  queueId: ComponentId,
+): Promise<Result<readonly string[], string>> => {
+  const r = await listEdges(ctx.graph, queueId, {
+    direction: 'out',
+    edgeType: 'sharedWith',
+  });
+  if (!r.ok) return err(r.error.message);
+  const out: string[] = [];
+  for (const edge of r.value) {
+    if (!edge.toId.startsWith(CUSTOM_OBJECT_ID_PREFIX)) continue;
+    const name = edge.toId.slice(CUSTOM_OBJECT_ID_PREFIX.length);
+    if (!out.includes(name)) out.push(name);
+  }
+  return ok(out);
+};
+
+/** What a resolver decided about one container's membership. */
+interface ResolvedMembers {
+  readonly count: number;
+  readonly source: MemberSource;
+  /** Present only when `source` is `'unknown'`. */
+  readonly unknownReason?: MemberCountUnknownReason;
+}
+
+/**
+ * Read the `memberSource` the extractor stamped, defaulting to `'user-direct'`
+ * when it did not tag one. Only called once the family is known to have been
+ * scanned — a bare default on an UNSCANNED node is precisely the fabricated
+ * provenance ("a direct user reference was read") this module now refuses.
+ */
+const taggedMemberSource = (node: Node): MemberSource => {
+  const sourceProp = node.properties['memberSource'];
+  return sourceProp === 'group-resolved' ||
+    sourceProp === 'role-resolved' ||
+    sourceProp === 'unknown' ||
+    sourceProp === 'user-direct'
+    ? sourceProp
+    : 'user-direct';
 };
 
 /**
- * Resolve the member count for a Queue or Group from its properties.
- * Returns `{ count, source }` where `source` is `'unknown'` if the
- * extractors did not populate any member data.
+ * Resolve a Queue's member count.
  *
- * Resolution order:
- *   1. Numeric `properties.memberCount` (v1.1+ extractor convention).
- *   2. Array length of `properties.queueMembers` /
- *      `properties.groupMembers` (v0.1 fallback).
- *   3. Returns `{ count: 0, source: 'unknown' }`.
+ * R1 typed absence: a `memberCount: 0` is a MEASUREMENT only when the node
+ * carries {@link QUEUE_MEMBER_CHANNELS_SENTINEL} — the marker the extractor
+ * writes once it has walked every `<queueMembers>` channel. Without it the
+ * refresh read `<users>` only, so a zero is "we looked in one place", and the
+ * honest answer is `'unknown'`: a role-staffed queue is otherwise published as
+ * an empty cleanup candidate whose live case routing a delete would stop.
+ *
+ * A POSITIVE legacy count is still a positive fact — those users really are
+ * members, so the queue is not empty either way and never reaches the list.
  */
-const resolveMemberCount = (
-  node: Node,
-  membersKey: 'queueMembers' | 'groupMembers',
-): { count: number; source: MemberSource } => {
+const resolveQueueMemberCount = (node: Node): ResolvedMembers => {
   const explicit = node.properties['memberCount'];
-  if (typeof explicit === 'number') {
-    // Determine the member source from a sibling field. Default to
-    // user-direct when the extractor didn't tag it explicitly.
-    const sourceProp = node.properties['memberSource'];
-    const source: MemberSource =
-      sourceProp === 'group-resolved' ||
-      sourceProp === 'role-resolved' ||
-      sourceProp === 'unknown' ||
-      sourceProp === 'user-direct'
-        ? sourceProp
-        : 'user-direct';
-    return { count: explicit, source };
+  if (typeof explicit !== 'number') {
+    return { count: 0, source: 'unknown', unknownReason: 'no-member-data-extracted' };
   }
-  const members = node.properties[membersKey];
-  if (Array.isArray(members)) {
-    return { count: members.length, source: 'user-direct' };
+  const count = explicit;
+  if (!familyWasExtracted(node.properties, QUEUE_MEMBER_CHANNELS_SENTINEL)) {
+    if (count > 0) return { count, source: taggedMemberSource(node) };
+    return {
+      count: 0,
+      source: 'unknown',
+      unknownReason: 'queue-member-channels-not-extracted',
+    };
   }
-  // Defensive: when no member data exists, the answer is "unknown."
-  return { count: 0, source: 'unknown' };
+  if (node.properties[QUEUE_MEMBERS_UNPARSED_PROPERTY] === true) {
+    return { count, source: 'unknown', unknownReason: 'queue-member-block-unreadable' };
+  }
+  return { count, source: taggedMemberSource(node) };
+};
+
+/**
+ * Resolve a public Group's member count.
+ *
+ * A DECLARED count above zero is a positive fact and is trusted. A declared
+ * ZERO is not a measurement at all: the `Group` metadata a retrieve returns
+ * carries no user-membership element, and public-group membership lives in
+ * `GroupMember` records — data, not metadata. (That gap is why
+ * `sfi.live_group_members` exists and queries `GroupMember` over the API.) So
+ * a zero here is `'unknown'`, held out of the emptiness counters exactly as
+ * `sfi.unassigned_permission_sets` holds its own unknowable assignments out of
+ * `unassignedCount`.
+ */
+const resolveGroupMemberCount = (node: Node): ResolvedMembers => {
+  const explicit = node.properties['memberCount'];
+  if (typeof explicit !== 'number') {
+    return { count: 0, source: 'unknown', unknownReason: 'no-member-data-extracted' };
+  }
+  const count = explicit;
+  if (count > 0) return { count, source: taggedMemberSource(node) };
+  return {
+    count: 0,
+    source: 'unknown',
+    unknownReason: 'group-membership-not-in-metadata',
+  };
 };
 
 /**
@@ -394,6 +573,10 @@ export const emptyQueuesAndGroupsHandler = async (
 
   const queues: EmptyQueueEntry[] = [];
   let unknownMemberCountQueues = 0;
+  // R1: ids whose Queue node carries no `memberChannels` sentinel, so the
+  // members family was never walked for them. Drives the shared
+  // `notExtractedFamilyDisclosure` boundary below.
+  const queuesMissingChannelScan: string[] = [];
   // R6 (BRIEF-084 scan-tail-unreachable): a single un-offset `listNodesByType`
   // page caps the SCAN axis at 500 id-ASC nodes, so a Queue/Group sorted past
   // row 500 was never fetched at all — no cursor could ever reach it, even
@@ -418,15 +601,22 @@ export const emptyQueuesAndGroupsHandler = async (
       const ns = namespacePrefixOf(queue.apiName);
       if (!includeManaged && ns !== null) continue;
       if (!nameMatches(queue, nameNeedle)) continue;
-      const { count, source } = resolveMemberCount(queue, 'queueMembers');
+      const { count, source, unknownReason } = resolveQueueMemberCount(queue);
       const arCountRes = await countAssignmentRuleReferences(ctx, queue.id);
       if (!arCountRes.ok) {
         return err({ kind: 'internal', message: arCountRes.error });
       }
-      const objectTypes = propertyStringArray(queue, 'objectTypes');
+      const objectTypesRes = await resolveObjectTypes(ctx, queue.id);
+      if (!objectTypesRes.ok) {
+        return err({ kind: 'internal', message: objectTypesRes.error });
+      }
+      const objectTypes = objectTypesRes.value;
 
       if (source === 'unknown') {
         unknownMemberCountQueues += 1;
+        if (unknownReason === 'queue-member-channels-not-extracted') {
+          queuesMissingChannelScan.push(queue.id);
+        }
         // Surface in the queues list with the unknown marker so the
         // skill can render it separately, but the count is tracked
         // independently and NEVER counted toward emptiness.
@@ -440,6 +630,9 @@ export const emptyQueuesAndGroupsHandler = async (
           incomingAssignmentRuleCount: arCountRes.value,
           isLikelyStale: false,
           cleanupVerdict: 'unknown-membership',
+          ...(unknownReason !== undefined
+            ? { memberCountUnknownReason: unknownReason }
+            : {}),
         });
         continue;
       }
@@ -462,6 +655,9 @@ export const emptyQueuesAndGroupsHandler = async (
 
   const groups: EmptyGroupEntry[] = [];
   let unknownMemberCountGroups = 0;
+  // Groups whose declared membership is zero — unmeasurable from metadata by
+  // construction (GroupMember is data), not merely unextracted.
+  let groupsWithNoDeclaredMembership = 0;
   let scanGroupsIncomplete = false;
   let totalGroupNodesScanned = 0;
 
@@ -479,7 +675,7 @@ export const emptyQueuesAndGroupsHandler = async (
       const ns = namespacePrefixOf(group.apiName);
       if (!includeManaged && ns !== null) continue;
       if (!nameMatches(group, nameNeedle)) continue;
-      const { count, source } = resolveMemberCount(group, 'groupMembers');
+      const { count, source, unknownReason } = resolveGroupMemberCount(group);
       const refCountRes = await countGroupReferences(ctx, group.id);
       if (!refCountRes.ok) {
         return err({ kind: 'internal', message: refCountRes.error });
@@ -487,6 +683,9 @@ export const emptyQueuesAndGroupsHandler = async (
 
       if (source === 'unknown') {
         unknownMemberCountGroups += 1;
+        if (unknownReason === 'group-membership-not-in-metadata') {
+          groupsWithNoDeclaredMembership += 1;
+        }
         groups.push({
           id: group.id,
           apiName: group.apiName,
@@ -497,6 +696,9 @@ export const emptyQueuesAndGroupsHandler = async (
           incomingReferenceCount: refCountRes.value,
           isLikelyStale: false,
           cleanupVerdict: 'unknown-membership',
+          ...(unknownReason !== undefined
+            ? { memberCountUnknownReason: unknownReason }
+            : {}),
         });
         continue;
       }
@@ -539,6 +741,28 @@ export const emptyQueuesAndGroupsHandler = async (
   const boundaries: string[] = [...BOUNDARIES];
   if (scanTruncated) {
     boundaries.push(fullScanTruncationNote(incompleteScanTypes));
+  }
+  // R1 typed absence, in prose a host will read aloud: this vault's Queue nodes
+  // predate the every-channel member walk, so their zeros are "we only read
+  // `<users>`", not "nobody is in it". Built by the SHARED module so this
+  // wording cannot drift from the other family disclosures.
+  if (queuesMissingChannelScan.length > 0) {
+    boundaries.push(
+      notExtractedFamilyDisclosure({
+        subject: 'Queue member channels (`<roles>` and every non-`<users>` channel)',
+        verb: 'read',
+        pluralSubject: true,
+        sentinelProperty: QUEUE_MEMBER_CHANNELS_SENTINEL,
+        containers: [...queuesMissingChannelScan].sort(),
+        surface: '`memberCount` / `memberSource`',
+        zeroReading: '"the queue is empty"',
+      }),
+    );
+  }
+  if (groupsWithNoDeclaredMembership > 0) {
+    boundaries.push(
+      groupMembershipNotInMetadataDisclosure(groupsWithNoDeclaredMembership),
+    );
   }
 
   // CR-22 section cursor: page ONE designated list (queues by default; groups
@@ -612,6 +836,11 @@ export const emptyQueuesAndGroupsHandler = async (
       totalGroups: sortedGroups.length,
       unknownMemberCountQueues,
       unknownMemberCountGroups,
+      // The emptiness headline. `total*` counts ROWS (unknowns included), so a
+      // host that repeats it would repeat "41 empty groups" over 41 unmeasured
+      // ones; these two are the numbers a cleanup shortlist may act on.
+      confirmedEmptyQueues: sortedQueues.length - unknownMemberCountQueues,
+      confirmedEmptyGroups: sortedGroups.length - unknownMemberCountGroups,
       boundaries,
       truncated,
       // Present ONLY when a name filter was passed, so a bare call stays

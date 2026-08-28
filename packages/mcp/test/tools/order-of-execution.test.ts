@@ -40,6 +40,26 @@ const utf8Bytes = (value: unknown): number =>
   Buffer.byteLength(JSON.stringify(value), 'utf8');
 
 /**
+ * Decode the `offset` a page cursor resumes at, or `-1` when there is no
+ * pointer to decode.
+ *
+ * `-1` is deliberate and is NOT a stand-in for "unbounded": every caller below
+ * pairs it with a SEPARATE assertion about whether a pointer had to exist at
+ * all (see the walk-to-exhaustion case, which asserts a pointer is exposed on
+ * every page that still reports `hasMore`). A `toBeLessThanOrEqual` bound is
+ * about the pointers that ARE handed back — a missing pointer cannot resume
+ * past anything, so it passes that bound trivially, and the "was one owed
+ * here?" question is asked on its own line rather than smuggled into a
+ * sentinel.
+ */
+const offsetOfCursor = (cursor: string | null | undefined): number =>
+  typeof cursor === 'string'
+    ? (JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+        o: number;
+      }).o
+    : -1;
+
+/**
  * FIX 12 made `byEvent` PARTIAL: an event the caller did NOT request is
  * ABSENT rather than present-and-empty, so an empty chain can never be
  * confused with an uncomposed one. Every assertion below calls the tool with
@@ -649,6 +669,99 @@ const legInactiveWf = (i: number): { node: Node; edge: Edge } => {
 const legVrs = Array.from({ length: LEG_VR_COUNT }, (_, i) => legVr(i));
 const legWfs = Array.from({ length: LEG_INACTIVE_WF_COUNT }, (_, i) => legInactiveWf(i));
 
+// =============================================================================
+// Seed (FIX 16b): ASYMMETRIC byte trim across two PAGED events.
+//
+// `AsymPage__c` carries 61 before-INSERT triggers, each with EXACTLY four
+// outgoing `references` edges — `enforceSoeByteBudget` never trims an action
+// list of four or fewer (`KEEP_ALL_AT_OR_BELOW`), so those steps are heavy AND
+// untrimmable — plus 61 before-UPDATE triggers that carry nothing at all.
+//
+// Paged at a limit BELOW 61 both events are truncated pages, so both appear in
+// `paging.byEvent` with a `nextCursor`. The byte budget's Pass 4 then sheds
+// steps from the LARGEST container only, which is always the heavy insert one,
+// so insert's page ends up SHORT while update's page survives whole.
+//
+// That is the shape the symmetric `ShipmentLeg__c` fixture cannot produce: one
+// paged event corrected after the trim and a paged SIBLING that was not. The
+// sibling's untouched pointer still encodes `offset + its own page size`, which
+// is PAST the point the trimmed event reached — following it skips steps.
+// Every name here is invented.
+// =============================================================================
+
+const ASYM_OBJ = 'CustomObject:AsymPage__c';
+const ASYM_TRIGGER_COUNT = 61;
+/** Kept at `KEEP_ALL_AT_OR_BELOW` so the action pass cannot slim these steps. */
+const ASYM_UNTRIMMABLE_ACTIONS = 4;
+
+/**
+ * A SHORT third chain (before-delete) so the walk hits the state the real org
+ * hits: an event that whole-fits at offset 0 (absent from `paging.byEvent` on
+ * page one) but is EXHAUSTED on page two, where the offset has already run
+ * past its `totalCount` and it reports `returnedCount: 0, hasMore: false`.
+ * Folding that 0 into the shared-offset minimum is what turned page two into a
+ * pointer-less dead end.
+ */
+const ASYM_DELETE_TRIGGER_COUNT = 3;
+
+const asymTrigger = (
+  i: number,
+  timing: 'insert' | 'update' | 'delete',
+): { nodes: Node[]; edges: Edge[] } => {
+  const n = String(i).padStart(2, '0');
+  const apiName = `AsymPage_${timing === 'insert' ? 'Ins' : timing === 'update' ? 'Upd' : 'Del'}_${n}`;
+  const id = `ApexTrigger:${apiName}`;
+  const events = [`before ${timing}`];
+  return {
+    nodes: [
+      makeNode({
+        id,
+        type: 'ApexTrigger',
+        apiName,
+        properties: { triggerObject: 'AsymPage__c', events },
+      }),
+    ],
+    edges: [
+      makeEdge({
+        fromId: id,
+        toId: ASYM_OBJ,
+        edgeType: 'triggersOn',
+        properties: { events },
+      }),
+      // Only the INSERT triggers carry the untrimmable action tail.
+      ...(timing === 'insert'
+        ? Array.from({ length: ASYM_UNTRIMMABLE_ACTIONS }, (_, k) =>
+            makeEdge({
+              fromId: id,
+              toId: `CustomField:AsymPage__c.Weighted_Attribute_${n}_${k}__c`,
+              edgeType: 'references',
+            }),
+          )
+        : []),
+    ],
+  };
+};
+
+const asymTriggers = [
+  ...Array.from({ length: ASYM_TRIGGER_COUNT }, (_, i) =>
+    asymTrigger(i, 'insert'),
+  ),
+  ...Array.from({ length: ASYM_TRIGGER_COUNT }, (_, i) =>
+    asymTrigger(i, 'update'),
+  ),
+  ...Array.from({ length: ASYM_DELETE_TRIGGER_COUNT }, (_, i) =>
+    asymTrigger(i, 'delete'),
+  ),
+];
+
+const asymSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: ASYM_OBJ, apiName: 'AsymPage__c' }),
+    ...asymTriggers.flatMap((t) => t.nodes),
+  ],
+  edges: asymTriggers.flatMap((t) => t.edges),
+};
+
 const legSeed: ExtractionResult = {
   nodes: [
     makeNode({ id: LEG_OBJ, apiName: 'ShipmentLeg__c', properties: { sharingModel: 'Private' } }),
@@ -680,6 +793,7 @@ beforeAll(async () => {
     truncSeed,
     receiverGuardSeed,
     legSeed,
+    asymSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -1737,6 +1851,207 @@ describe('orderOfExecutionHandler — FIX 3: budget allocation, paging, and phas
     }
   });
 
+  it('FAIL-BEFORE/PASS-AFTER (R2, asymmetric): a paged event the byte trim never touched must not keep a pointer that runs past the event it did trim', async () => {
+    const limit = 50;
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'AsymPage__c',
+      limit,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const paging = d.paging;
+    expect(paging).toBeDefined();
+    if (paging === undefined) return;
+
+    // Preconditions that make this fixture worth having: BOTH events are
+    // truncated pages, but only the heavy one was shortened by the byte trim.
+    const insert = paging.byEvent.insert;
+    const update = paging.byEvent.update;
+    expect(insert).toBeDefined();
+    expect(update).toBeDefined();
+    expect(insert?.returnedCount).toBeLessThan(limit); // trimmed
+    expect(update?.returnedCount).toBe(limit); // UNtrimmed paged sibling
+    expect(insert?.hasMore).toBe(true);
+    expect(update?.hasMore).toBe(true);
+
+    // The whole point: no pointer the response hands back may resume past the
+    // smallest number of steps any paged event actually delivered. The
+    // untrimmed sibling's own cursor encoded `offset + limit` and was the one
+    // that survived the first reconciliation.
+    const smallestKept = Math.min(
+      ...Object.values(paging.byEvent).map((e) => e.returnedCount),
+    );
+    for (const [event, entry] of Object.entries(paging.byEvent)) {
+      expect(
+        offsetOfCursor(entry.nextCursor),
+        `paging.byEvent.${event}.nextCursor`,
+      ).toBeLessThanOrEqual(paging.offset + smallestKept);
+    }
+    expect(offsetOfCursor(paging.nextCursor)).toBeLessThanOrEqual(
+      paging.offset + smallestKept,
+    );
+
+    // And a host is TOLD in prose, not left to infer it from a null beside
+    // `hasMore: true`.
+    expect(paging.note).toContain(
+      '`paging.nextCursor` is the ONE safe resume pointer',
+    );
+    expect(paging.note).toContain('is NOT exhausted');
+  });
+
+  it('BITE PROOF (R2, asymmetric): following ANY pointer the response exposes skips no step for either paged event', async () => {
+    const limit = 50;
+    const first = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'AsymPage__c',
+      limit,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const d1 = first.value.data;
+    const paging1 = d1.paging;
+    expect(paging1).toBeDefined();
+    if (paging1 === undefined) return;
+    expect(allEvents(d1).insert.soe.length).toBeLessThan(limit); // precondition
+
+    // Every cursor the payload exposes — top level AND per event — is a
+    // pointer `PageInfo` tells callers to echo back verbatim, so every one of
+    // them has to be safe.
+    const exposed: string[] = [
+      paging1.nextCursor,
+      ...Object.values(paging1.byEvent).map((e) => e.nextCursor),
+    ].filter((c): c is string => typeof c === 'string');
+    expect(exposed.length).toBeGreaterThan(0);
+
+    const lastDelivered = new Map<SoeEvent, number>();
+    for (const event of SOE_EVENTS) {
+      const steps = allEvents(d1)[event].soe;
+      const last = steps[steps.length - 1];
+      if (last !== undefined) lastDelivered.set(event, last.stepIndex);
+    }
+
+    for (const cursor of exposed) {
+      const second = await orderOfExecutionHandler(ctx, {
+        objectApiName: 'AsymPage__c',
+        limit,
+        cursor,
+      });
+      expect(second.ok).toBe(true);
+      if (!second.ok) return;
+      for (const event of SOE_EVENTS) {
+        const nextFirst = allEvents(second.value.data)[event].soe[0];
+        const last = lastDelivered.get(event);
+        if (nextFirst === undefined || last === undefined) continue;
+        // A skip puts page 2's first index strictly past the step after the
+        // last one page 1 delivered for THAT event.
+        expect(
+          nextFirst.stepIndex,
+          `resuming on an exposed cursor skipped ${event} steps`,
+        ).toBeLessThanOrEqual(last + 1);
+      }
+    }
+  });
+
+  it('WALK TO EXHAUSTION (R2, asymmetric): a page that still reports `hasMore` always exposes a pointer, and following only exposed pointers delivers EVERY step of EVERY event', async () => {
+    // A one-hop resume assertion cannot see a dead end on hop two, which is
+    // exactly where the first version of this fix put one: page two carried an
+    // EXHAUSTED short chain (`returnedCount: 0, hasMore: false`) whose 0 was
+    // folded into the shared-offset minimum, collapsing the re-minted offset
+    // back onto the page's own offset so NO cursor was minted at all — while
+    // insert and update both still reported `hasMore: true`. On a real org
+    // that stranded 12 insert + 17 update steps behind no pointer. So this
+    // case walks the composition to exhaustion following ONLY what the payload
+    // hands back, and checks the two things a resumable answer owes: a pointer
+    // whenever anything is left, and full coverage at the end.
+    const limit = 30;
+    const MAX_PAGES = 12;
+    const delivered = new Map<SoeEvent, Set<number>>();
+    const totals = new Map<SoeEvent, number>();
+    let args: Record<string, unknown> = { objectApiName: 'AsymPage__c', limit };
+    let sawTrim = false;
+    let sawExhaustedBesideLive = false;
+    let terminated = false;
+
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const r = await orderOfExecutionHandler(ctx, args);
+      expect(r.ok, `page ${page} errored`).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      for (const event of SOE_EVENTS) {
+        const per = d.byEvent[event];
+        if (per === undefined) continue;
+        totals.set(event, per.summary.totalSteps);
+        const seen = delivered.get(event) ?? new Set<number>();
+        for (const step of per.soe) seen.add(step.stepIndex);
+        delivered.set(event, seen);
+      }
+      const paging = d.paging;
+      const entries = Object.values(paging?.byEvent ?? {});
+      // Detect the byte trim STRUCTURALLY, never from the note text — the note
+      // is part of what this fix changed, so keying the precondition on it
+      // would make the case fail-before for a cosmetic reason instead of for
+      // the dead end. A paged event was shortened when it delivered fewer
+      // steps than the page it asked for could hold.
+      for (const event of SOE_EVENTS) {
+        const entry = paging?.byEvent[event];
+        const per = d.byEvent[event];
+        if (entry === undefined || per === undefined || paging === undefined) {
+          continue;
+        }
+        const askedFor = Math.min(
+          paging.limit,
+          Math.max(0, entry.totalCount - paging.offset),
+        );
+        if (per.soe.length < askedFor) sawTrim = true;
+      }
+      if (
+        entries.some((e) => e.hasMore) &&
+        entries.some((e) => !e.hasMore && e.returnedCount === 0)
+      ) {
+        // The real-org shape: a short chain the offset has run past, sitting
+        // beside events that are still paging.
+        sawExhaustedBesideLive = true;
+      }
+      if (!entries.some((e) => e.hasMore)) {
+        terminated = true;
+        break;
+      }
+      // (a) A page that says more remains MUST hand back a way to get it.
+      const exposed: string[] = [
+        paging?.nextCursor,
+        ...entries.map((e) => e.nextCursor),
+      ].filter((c): c is string => typeof c === 'string');
+      expect(
+        exposed.length,
+        `page ${page} reports hasMore for some event but exposes no cursor: ${JSON.stringify(paging)}`,
+      ).toBeGreaterThan(0);
+      args = {
+        objectApiName: 'AsymPage__c',
+        limit,
+        cursor: paging?.nextCursor ?? exposed[0],
+      };
+    }
+
+    expect(terminated, 'walk did not reach exhaustion').toBe(true);
+    // Preconditions — without these the walk proves nothing.
+    expect(sawTrim, 'no page was byte-trimmed; fixture no longer bites').toBe(
+      true,
+    );
+    expect(
+      sawExhaustedBesideLive,
+      'no page carried an exhausted event beside a live one; fixture no longer reproduces the dead-end shape',
+    ).toBe(true);
+
+    // (b) Every step of every event arrived exactly once or more — never never.
+    for (const [event, total] of totals) {
+      const seen = delivered.get(event) ?? new Set<number>();
+      const missing = Array.from({ length: total }, (_, i) => i).filter(
+        (i) => !seen.has(i),
+      );
+      expect(missing, `${event} steps never delivered by any page`).toEqual([]);
+    }
+  });
+
   it('BITE PROOF (R2): resuming at the (corrected) nextCursor after a byte-trimmed page never skips a step for the event it was trimmed hardest on', async () => {
     const limit = 50;
     const first = await orderOfExecutionHandler(ctx, {
@@ -1924,3 +2239,4 @@ describe('orderOfExecutionHandler — FIX 15 (3): the seam partitions condition 
     expect(trimmed).toBeGreaterThan(0);
   });
 });
+

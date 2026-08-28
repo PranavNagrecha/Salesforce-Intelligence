@@ -46,21 +46,61 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import {
+  danglingTargetIdsMatching,
+  getNodeById,
+  listEdges,
+} from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { resolveExistingObjectScope } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 
 /**
- * Hard cap on the per-call scan. Mirrors the
- * `INTEGRATION_MAP_MAX_LIMIT` and `SCHEDULED_JOB_CATALOG_MAX_CLASSES`
- * ceilings so the v2.8 catalog tools share a uniform blast-radius
- * cap.
+ * How many gap objects the prose enumerates before it summarises the rest.
+ * Mirrors `absence-disclosure.ts`'s `MAX_ENUMERATED_CONTAINERS` so two
+ * disclosures on one response cannot disagree about how long a list may be.
  */
-const OUTBOUND_MESSAGE_CATALOG_MAX_ENTRIES = 500;
+const MAX_ENUMERATED_GAP_OBJECTS = 10;
+
+/**
+ * The node types the workflow-rule extractor actually MINTS out of a
+ * `.workflow-meta.xml` file (verified against
+ * `packages/extractors/src/workflow-rule.ts`: `buildWorkflowAlertNodes`,
+ * `buildOutboundMessageNodes`, and the rule nodes themselves).
+ *
+ * This is the POSITIVE evidence set: an object with at least one node of these
+ * types demonstrably had its workflow metadata retrieved AND parsed by this
+ * vault, so a zero-outbound-message answer for it is a scanned zero.
+ */
+const MODELED_WORKFLOW_NODE_TYPES = [
+  'WorkflowRule',
+  'WorkflowAlert',
+  'OutboundMessage',
+] as const;
+
+/**
+ * Id prefixes of the workflow ACTION families that are serialized inside a
+ * `.workflow-meta.xml` alongside `<outboundMessages>`.
+ *
+ * READ THIS BEFORE CHANGING THE PREDICATE BELOW. `WorkflowFieldUpdate:` and
+ * `WorkflowTask:` are NOT `ComponentType`s — no extractor mints a node for
+ * them, so EVERY reference to one dangles on EVERY vault, by design. An
+ * unresolved reference is therefore NOT on its own evidence of a gap; treating
+ * it as one would raise a blind-spot warning on a perfectly covered org. What
+ * these ids are used for here is only their OBJECT prefix: they name the
+ * objects whose workflow metadata this vault is known to NEED.
+ */
+const WORKFLOW_ACTION_ID_PREFIXES = [
+  'WorkflowRule:',
+  'WorkflowAlert:',
+  'WorkflowFieldUpdate:',
+  'WorkflowTask:',
+  'OutboundMessage:',
+] as const;
 
 /**
  * Zod schema for the `sfi.outbound_message_catalog` tool input.
@@ -102,6 +142,51 @@ export interface OutboundMessageCatalogEntry {
   readonly invokedByWorkflowRules: readonly OutboundMessageInvoker[];
 }
 
+/**
+ * The measured blind spot behind an outbound-message answer — the TYPED field
+ * a machine consumer cannot skip, always present (`null` when there is none).
+ *
+ * WHY THIS EXISTS. The zero-entry answer used to be certified on ONE manifest
+ * row (`summarizeCoverage(manifest, ['WorkflowRule'])`) and then closed the
+ * question outright ("do not suggest a refresh"). That row is a per-TYPE
+ * retrieve tally; it does not certify that every object's `.workflow-meta.xml`
+ * reached the vault, and classic SOAP `<outboundMessages>` live inside those
+ * FILES. On a real vault the row read `complete` while retrieved approval
+ * processes referenced workflow actions on an object for which the vault holds
+ * no modeled workflow component at all.
+ */
+export interface OutboundMessageCoverageGap {
+  /**
+   * Object api names that are NAMED by an unresolved workflow-action reference
+   * (`WorkflowRule:` / `WorkflowAlert:` / `WorkflowFieldUpdate:` /
+   * `WorkflowTask:` / `OutboundMessage:`) while this vault holds NO node of a
+   * type the workflow extractor mints for them. Sorted ASC.
+   *
+   * The honest reading is deliberately narrow, because two causes produce
+   * identical offline evidence and the vault cannot separate them: the object's
+   * workflow file never reached this vault, or it reached it and contained only
+   * children this product does not model. Either way this scan has NO positive
+   * evidence that the file was read, so any `<outboundMessages>` inside it is
+   * unscanned — which is all that is claimed.
+   */
+  readonly objectsWithoutModeledWorkflowMetadata: readonly string[];
+  /**
+   * How many DISTINCT unresolved workflow-action ids stand behind that object
+   * list. Counts only ids whose object is in the list above, so a
+   * dangling-BY-DESIGN `WorkflowFieldUpdate:` on a fully-modeled object never
+   * inflates it.
+   */
+  readonly unresolvedWorkflowReferenceCount: number;
+  /** Up to ten of those ids, sorted, so a reader can follow one. */
+  readonly sampleUnresolvedIds: readonly string[];
+  /**
+   * True when the OutboundMessage walk itself stopped at the shared full-scan
+   * residual ceiling with more nodes behind it — a separate axis from the
+   * object list, and false for any real org.
+   */
+  readonly scanIncomplete: boolean;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface OutboundMessageCatalogOutput {
   /**
@@ -141,8 +226,23 @@ export interface OutboundMessageCatalogOutput {
    * call — on an `objectFilter` call it is a determinate negative about
    * THAT OBJECT and says nothing about the rest of the org. `disclosure`
    * already carries that distinction; read it, not `coverageStatus` alone.
+   *
+   * This is the EFFECTIVE status, not the raw manifest row. The manifest's
+   * WorkflowRule tally is a PER-TYPE retrieve count and cannot certify that
+   * every object's `.workflow-meta.xml` reached the vault, so a manifest
+   * `complete` is DOWNGRADED to `partial` whenever {@link
+   * OutboundMessageCoverageGap} is non-null. A manifest row that already reads
+   * `partial` / `unknown` passes through unchanged — the downgrade only ever
+   * lowers the claim.
    */
   readonly coverageStatus: 'complete' | 'partial' | 'unknown';
+  /**
+   * The measured workflow-metadata blind spot, or `null` when the scan found
+   * none. ALWAYS present, so a machine consumer reading `coverageStatus` alone
+   * cannot skip past it. When it is non-null, `coverageStatus` has been
+   * downgraded and `disclosure` says which objects were not scanned.
+   */
+  readonly coverageGap: OutboundMessageCoverageGap | null;
   readonly disclosure: string;
 }
 
@@ -176,10 +276,75 @@ const buildEmptyDisclosure = (
   coverageStatus: 'complete' | 'partial' | 'unknown',
 ): string =>
   coverageStatus === 'complete'
-    ? 'No outbound message definitions exist in this org. The WorkflowRule family — which is where classic SOAP `<outboundMessages>` are serialized — has COMPLETE coverage in this vault, so this is a determinate negative (the org defines none), NOT a coverage gap: do not suggest a refresh to "surface" outbound messages that are not there. ' +
+    ? 'No outbound message definitions exist in this org. The WorkflowRule family — which is where classic SOAP `<outboundMessages>` are serialized — is confirmed-covered in this vault\'s manifest, AND every object named by an unresolved workflow-action reference does carry modeled workflow metadata here, so this reads as a determinate negative (the org defines none) rather than a coverage gap. BOUND ON THAT: it is a per-type manifest tally plus a reference cross-check — an object whose workflow metadata never reached this vault and is referenced by nothing else in it would leave no trace for either check, so confirm against the org before treating this as final for a migration cutover. ' +
       OUTBOUND_MESSAGE_DISCLOSURE
     : 'No outbound message entries were found, BUT the WorkflowRule family that hosts classic `<outboundMessages>` is only partially covered in this vault, so this result is INCONCLUSIVE — outbound message definitions may exist in the org but were not retrieved. Run `/sfi-refresh` (or check `sfi.coverage_report`) before concluding the org has none. ' +
       OUTBOUND_MESSAGE_DISCLOSURE;
+
+/**
+ * Render the gap object list for prose, truncated the same way
+ * `absence-disclosure.ts` truncates its container list.
+ */
+const listGapObjects = (objects: readonly string[]): string => {
+  const shown = objects.slice(0, MAX_ENUMERATED_GAP_OBJECTS);
+  const rest = objects.length - shown.length;
+  return rest > 0 ? `${shown.join(', ')}, … and ${rest} more` : shown.join(', ');
+};
+
+/**
+ * The residual-ceiling sentence. A separate axis from the object list: the
+ * OutboundMessage walk itself ran out of budget, so the ENTRIES are a prefix.
+ */
+const SCAN_INCOMPLETE_SENTENCE =
+  'The OutboundMessage walk stopped at the shared full-scan residual ceiling with more nodes behind it, so `entries` is a PREFIX of this org\'s catalog and the counts are lower bounds. ';
+
+/**
+ * The gap sentence for an ORG-WIDE (bare) answer. `zeroEntries` decides
+ * whether the harm being prevented is a false negative ("the org defines
+ * none") or a false total ("this is the whole catalog").
+ */
+const buildGapSentence = (
+  gap: OutboundMessageCoverageGap,
+  zeroEntries: boolean,
+): string => {
+  const parts: string[] = [];
+  if (gap.objectsWithoutModeledWorkflowMetadata.length > 0) {
+    const objects = listGapObjects(gap.objectsWithoutModeledWorkflowMetadata);
+    const n = gap.unresolvedWorkflowReferenceCount;
+    const m = gap.objectsWithoutModeledWorkflowMetadata.length;
+    parts.push(
+      zeroEntries
+        ? `No outbound message definitions were found in the workflow metadata this vault HOLDS — and that is NOT the same as the org defining none. ${n} unresolved workflow-action reference(s) name ${m} object(s) for which this vault holds no modeled workflow component at all (${objects}): their \`.workflow-meta.xml\` either never reached this vault or produced nothing this product models, so any \`<outboundMessages>\` inside it was NEVER SCANNED. Read this as "none in the workflow files this vault holds", check \`coverageGap\` and \`sfi.retrieve_blindspot_report\`, and re-run \`/sfi-refresh\` before closing an outbound-message re-pointing question. `
+        : `This catalog is NOT exhaustive: ${n} unresolved workflow-action reference(s) name ${m} object(s) for which this vault holds no modeled workflow component at all (${objects}), so outbound messages defined in their workflow metadata are MISSING from the entries above. See \`coverageGap\` and \`sfi.retrieve_blindspot_report\`. `,
+    );
+  }
+  if (gap.scanIncomplete) parts.push(SCAN_INCOMPLETE_SENTENCE);
+  return parts.join('');
+};
+
+/**
+ * The gap sentence for an OBJECT-SCOPED answer whose SCOPED object is itself
+ * one of the unscanned ones. The org-wide wording would overstate the reach of
+ * the warning; the scoped wording must name the object the reader asked about.
+ */
+const buildScopedGapSentence = (
+  objectApiName: string,
+  zeroEntries: boolean,
+): string =>
+  zeroEntries
+    ? `This vault holds NO modeled workflow component for ${objectApiName} while other retrieved metadata references its workflow actions, so ${objectApiName}'s \`.workflow-meta.xml\` was never scanned here and a zero is NOT a checked zero for ${objectApiName}. Re-run \`/sfi-refresh\` (and see \`sfi.retrieve_blindspot_report\`) before concluding ${objectApiName} sends nothing. `
+    : `This vault holds NO modeled workflow component for ${objectApiName} while other retrieved metadata references its workflow actions, so the entries above may be an INCOMPLETE view of what ${objectApiName} sends. See \`coverageGap\`. `;
+
+/**
+ * The note appended to a scoped answer whose OWN object is fully modeled while
+ * OTHER objects are not: the scoped claim stands, and the reader is still told
+ * the org-wide `coverageStatus` downgrade is not about them.
+ */
+const buildScopedElsewhereGapNote = (
+  objectApiName: string,
+  gap: OutboundMessageCoverageGap,
+): string =>
+  `Org-wide note: ${gap.objectsWithoutModeledWorkflowMetadata.length} OTHER object(s) have no modeled workflow metadata in this vault (\`coverageGap\`), which is why \`coverageStatus\` is not \`complete\`; that gap does not affect this ${objectApiName}-scoped answer. `;
 
 /**
  * OUTBOUND-MESSAGE-CATALOG-SCOPED-NEGATIVE-READ-AS-ORG-WIDE: the leading
@@ -202,11 +367,9 @@ const buildScopedEmptyDisclosure = (
   objectApiName: string,
   coverageStatus: 'complete' | 'partial' | 'unknown',
 ): string =>
-  scopedPrefix(objectApiName) +
-  (coverageStatus === 'complete'
-    ? `No outbound message definitions are attached to ${objectApiName}. The WorkflowRule family — which is where classic SOAP \`<outboundMessages>\` are serialized — has COMPLETE coverage in this vault, so this is a determinate negative FOR ${objectApiName} (that object defines none), NOT a coverage gap: do not suggest a refresh to "surface" outbound messages that are not there. Other objects in this org may still define outbound messages. `
-    : `No outbound message entries were found on ${objectApiName}, BUT the WorkflowRule family that hosts classic \`<outboundMessages>\` is only partially covered in this vault, so this result is INCONCLUSIVE — outbound message definitions may exist on ${objectApiName} but were not retrieved. Run \`/sfi-refresh\` (or check \`sfi.coverage_report\`) before concluding ${objectApiName} has none. `) +
-  OUTBOUND_MESSAGE_DISCLOSURE;
+  coverageStatus === 'complete'
+    ? `No outbound message definitions are attached to ${objectApiName}. The WorkflowRule family — which is where classic SOAP \`<outboundMessages>\` are serialized — is confirmed-covered in this vault's manifest, AND nothing in this vault points at workflow metadata for ${objectApiName} that is missing here, so this is a determinate negative FOR ${objectApiName} (that object defines none) rather than a coverage gap. Other objects in this org may still define outbound messages. `
+    : `No outbound message entries were found on ${objectApiName}, BUT the WorkflowRule family that hosts classic \`<outboundMessages>\` is only partially covered in this vault, so this result is INCONCLUSIVE — outbound message definitions may exist on ${objectApiName} but were not retrieved. Run \`/sfi-refresh\` (or check \`sfi.coverage_report\`) before concluding ${objectApiName} has none. `;
 
 /**
  * Read a string property defensively. Returns the verbatim value
@@ -299,6 +462,81 @@ const collectInvokers = async (
 };
 
 /**
+ * The object api name an id like `WorkflowAlert:Obj__c.Notify` is scoped to,
+ * or `null` for a shape the extractors never emit. Every workflow-action
+ * family is object-scoped as `{Prefix}:{ObjectApiName}.{Name}`.
+ */
+const workflowActionIdToObject = (id: string): string | null => {
+  const prefix = WORKFLOW_ACTION_ID_PREFIXES.find((p) => id.startsWith(p));
+  if (prefix === undefined) return null;
+  const tail = id.slice(prefix.length);
+  const dot = tail.indexOf('.');
+  const object = dot === -1 ? tail : tail.slice(0, dot);
+  return object.length === 0 ? null : object;
+};
+
+/**
+ * Measure the workflow-metadata blind spot behind this answer.
+ *
+ * Two sets, and the DIFFERENCE is the finding:
+ *   - NEEDED — every object named by an unresolved workflow-action id, read
+ *     with the shared `danglingTargetIdsMatching` anti-join (the same raw
+ *     signal behind `sfi.retrieve_blindspot_report`). The COMPLETE set, not a
+ *     per-group sample, so a late-sorting object cannot fall out of it.
+ *   - HELD — every object with at least one node of a type the workflow
+ *     extractor actually mints, walked with the shared `scanAllNodesOfTypes`
+ *     so the answer is not an alphabetical first page.
+ *
+ * NEEDED minus HELD is the set this scan has no positive evidence of having
+ * read. The subtraction is what keeps the check honest: an unresolved
+ * `WorkflowFieldUpdate:` alone would flag every vault ever built, because that
+ * family is dangling BY DESIGN.
+ */
+const measureCoverageGap = async (
+  ctx: Context,
+  scanIncomplete: boolean,
+): Promise<Result<OutboundMessageCoverageGap | null, string>> => {
+  const unresolved: string[] = [];
+  for (const prefix of WORKFLOW_ACTION_ID_PREFIXES) {
+    const found = await danglingTargetIdsMatching(ctx.graph, prefix);
+    if (!found.ok) return err(found.error.message);
+    // `danglingTargetIdsMatching` is a LOOSE `ILIKE %needle%` pre-filter by
+    // contract; the authoritative prefix rule is applied here.
+    for (const id of found.value) if (id.startsWith(prefix)) unresolved.push(id);
+  }
+
+  const heldResult = await scanAllNodesOfTypes(ctx.graph, [
+    ...MODELED_WORKFLOW_NODE_TYPES,
+  ]);
+  if (!heldResult.ok) return err(heldResult.error.message);
+  const held = new Set<string>();
+  for (const node of heldResult.value.nodes) {
+    const key = apiNameToObjectKey(node.apiName);
+    if (key.length > 0) held.add(key.toLowerCase());
+  }
+
+  const gapObjects = new Set<string>();
+  const gapIds = new Set<string>();
+  for (const id of unresolved) {
+    const object = workflowActionIdToObject(id);
+    if (object === null) continue;
+    if (held.has(object.toLowerCase())) continue;
+    gapObjects.add(object);
+    gapIds.add(id);
+  }
+
+  if (gapObjects.size === 0 && !scanIncomplete) return ok(null);
+  const objects = [...gapObjects].sort();
+  const ids = [...gapIds].sort();
+  return ok({
+    objectsWithoutModeledWorkflowMetadata: objects,
+    unresolvedWorkflowReferenceCount: ids.length,
+    sampleUnresolvedIds: ids.slice(0, MAX_ENUMERATED_GAP_OBJECTS),
+    scanIncomplete,
+  });
+};
+
+/**
  * Deterministic entry comparator: outboundMessageId ASC.
  */
 const compareEntries = (
@@ -363,9 +601,12 @@ export const outboundMessageCatalogHandler = async (
     }
   }
 
-  const nodesResult = await listNodesByType(ctx.graph, 'OutboundMessage', {
-    limit: OUTBOUND_MESSAGE_CATALOG_MAX_ENTRIES,
-  });
+  // The scan used to be ONE `listNodesByType` page: the graph serves that as
+  // `ORDER BY id ASC LIMIT ? OFFSET 0`, so entry 501+ was unreachable by any
+  // re-slice while the summary counts still read as a whole-org total. The
+  // shared walk windows the OFFSET forward and reports its own residual
+  // ceiling, which is folded into `coverageGap.scanIncomplete`.
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, ['OutboundMessage']);
   if (!nodesResult.ok) {
     return err({
       kind: 'internal',
@@ -375,7 +616,7 @@ export const outboundMessageCatalogHandler = async (
 
   const entries: OutboundMessageCatalogEntry[] = [];
   let entriesWithKnownInvokers = 0;
-  for (const node of nodesResult.value as readonly Node[]) {
+  for (const node of nodesResult.value.nodes as readonly Node[]) {
     const objectKey = apiNameToObjectKey(node.apiName);
     // Salesforce api names are case-INSENSITIVE: `Account` and `account` name
     // the same object, and the OutboundMessage apiName prefix is whatever the
@@ -419,10 +660,57 @@ export const outboundMessageCatalogHandler = async (
     byObject[key] = bucket;
   }
 
-  const coverageStatus = summarizeCoverage(
+  // OUTBOUND-MESSAGE-CATALOG-CERTIFIES-AN-UNCHECKED-WORKFLOW-CORPUS: the
+  // manifest's WorkflowRule row is a PER-TYPE retrieve tally and was being read
+  // as proof that every object's `.workflow-meta.xml` reached the vault. It is
+  // not, and classic SOAP `<outboundMessages>` live inside those FILES — so the
+  // certification is now backed by a MEASUREMENT as well, and a manifest
+  // `complete` is downgraded when the measurement finds an unscanned object.
+  const gapResult = await measureCoverageGap(ctx, nodesResult.value.scanIncomplete);
+  if (!gapResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${gapResult.error}`,
+    });
+  }
+  const coverageGap = gapResult.value;
+  const manifestCoverage = summarizeCoverage(
     ctx.manifest,
     OUTBOUND_COVERAGE_TYPES,
   ).status;
+  // The downgrade only ever LOWERS the claim; a row that already reads
+  // `partial` / `unknown` passes through untouched.
+  const coverageStatus: 'complete' | 'partial' | 'unknown' =
+    coverageGap !== null && manifestCoverage === 'complete'
+      ? 'partial'
+      : manifestCoverage;
+
+  // Is the gap ABOUT the object the caller scoped to? An org-wide gap does not
+  // license hedging a scoped answer for an object that IS fully modeled — that
+  // would be the opposite over-correction, a warning the reader cannot act on.
+  const scopeIsUnscanned =
+    scopedObject !== null &&
+    coverageGap !== null &&
+    coverageGap.objectsWithoutModeledWorkflowMetadata.some(
+      (o) => o.toLowerCase() === scopedObject.toLowerCase(),
+    );
+
+  const empty = sorted.length === 0;
+  const scopedBody = (): string => {
+    if (scopedObject === null) return '';
+    if (scopeIsUnscanned) return buildScopedGapSentence(scopedObject, empty);
+    // `manifestCoverage`, NOT the downgraded `coverageStatus`: the downgrade
+    // was caused by OTHER objects, and hedging this object's answer on it
+    // would both misstate what is known about this object and hand the reader
+    // a warning they cannot act on. The org-wide note below carries the
+    // downgrade instead, where it is true.
+    const base = empty
+      ? buildScopedEmptyDisclosure(scopedObject, manifestCoverage)
+      : '';
+    return coverageGap === null
+      ? base
+      : base + buildScopedElsewhereGapNote(scopedObject, coverageGap);
+  };
 
   return ok({
     data: {
@@ -437,23 +725,25 @@ export const outboundMessageCatalogHandler = async (
         entriesWithKnownInvokers,
       },
       coverageStatus,
-      // Two independent axes, and BOTH have to be right:
-      //  - coverage decides determinate-negative vs inconclusive (a zero is
-      //    only "the org has none" when the backing WorkflowRule family is
-      //    fully covered), which stops a "refresh the vault" framing on an
-      //    org that simply has none;
+      coverageGap,
+      // Three axes, and ALL THREE have to be right:
+      //  - the MEASURED gap decides whether a zero is a checked zero at all. It
+      //    outranks the manifest: an unscanned object means the corpus behind
+      //    the answer was never read, so no coverage row can certify it;
+      //  - coverage then decides determinate-negative vs inconclusive, which
+      //    stops a "refresh the vault" framing on an org that simply has none;
       //  - SCOPE decides what the negative is ABOUT. `sorted.length` is the
       //    count AFTER the `objectFilter` narrowing, so the org-wide wording
       //    is reachable ONLY on a bare call. A scoped answer — empty or not —
       //    always says so.
       disclosure:
         scopedObject !== null
-          ? sorted.length === 0
-            ? buildScopedEmptyDisclosure(scopedObject, coverageStatus)
-            : scopedPrefix(scopedObject) + OUTBOUND_MESSAGE_DISCLOSURE
-          : sorted.length === 0
-            ? buildEmptyDisclosure(coverageStatus)
-            : OUTBOUND_MESSAGE_DISCLOSURE,
+          ? scopedPrefix(scopedObject) + scopedBody() + OUTBOUND_MESSAGE_DISCLOSURE
+          : coverageGap !== null
+            ? buildGapSentence(coverageGap, empty) + OUTBOUND_MESSAGE_DISCLOSURE
+            : empty
+              ? buildEmptyDisclosure(coverageStatus)
+              : OUTBOUND_MESSAGE_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

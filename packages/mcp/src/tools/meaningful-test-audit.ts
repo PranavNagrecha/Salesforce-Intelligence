@@ -56,9 +56,15 @@
  *     cover every test class — a test sorted past row 500 used to be silently
  *     dropped from both. A pathological ApexClass count past the walk's
  *     residual ceiling discloses `scanIncomplete` via `fullScanTruncationNote`
- *     instead of scanning unbounded with no way to say so. The `classFilter`
- *     scope does not run that walk at all (it resolves ids directly), so its
- *     answer is complete and carries no truncation note.
+ *     instead of scanning unbounded with no way to say so — in the prose
+ *     `disclosure` AND in the typed `scanTruncated` key, so a consumer reading
+ *     `totalTestClassCount` (or an empty `tests[]`) cannot mistake a capped
+ *     floor for a checked total. The `classFilter` scope does not run that walk
+ *     at all (it resolves ids directly), so its answer is complete and carries
+ *     neither the note nor the key.
+ *   - Covering-tests mode drops a self `callsApex` edge: a class is never its
+ *     own covering test, and `coveringTestCount` would otherwise certify the
+ *     inflated number.
  */
 
 import type {
@@ -226,13 +232,31 @@ export type MeaningfulTestAuditScope =
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface MeaningfulTestAuditOutput {
-  /** FULL count of scored test classes, ALWAYS the whole set — never the page. */
+  /**
+   * FULL count of scored test classes across the scope — never the page.
+   *
+   * It is the whole set UNLESS `scanTruncated` is present, in which case the
+   * org-wide walk hit its residual ceiling and this number is a FLOOR, not the
+   * org total. Read the two fields together.
+   */
   readonly totalTestClassCount: number;
   /** The PAGE of scored test classes (the whole set unless `truncated`). */
   readonly tests: readonly MeaningfulTestEntry[];
   /** The scope actually applied — always present so the target is never silently ignored. */
   readonly appliedScope: MeaningfulTestAuditScope;
   readonly disclosure: string;
+  /**
+   * Present (and always `true`) ONLY when the org-wide / name-filter walk hit
+   * its residual scan ceiling, so `totalTestClassCount` is a floor and an empty
+   * `tests[]` is an UNCHECKED zero rather than a checked one. Absent — never
+   * `false` — on a complete answer, which keeps the byte-identical shape for
+   * every org under the ceiling. The same gap is stated verbatim in
+   * `disclosure`; this is the machine-readable half a consumer cannot skip.
+   *
+   * The `class-filter` and `covering-tests` scopes resolve by id / by edge and
+   * never run that walk, so they never carry this key.
+   */
+  readonly scanTruncated?: true;
   /**
    * True when this page does not reach the end of the ranking (cut by `limit`
    * OR by the byte budget). Emitted ONLY on a paged response, so an org whose
@@ -626,14 +650,20 @@ export const meaningfulTestAuditHandler = async (
     scoped.value.truncationNote !== null
       ? `${paged.value.disclosure} ${scoped.value.truncationNote}`
       : paged.value.disclosure;
+  // DERIVED from the one truncation fact, never a second hand-kept flag that
+  // could drift from the prose (R6).
+  const truncationFields =
+    scoped.value.truncationNote !== null ? { scanTruncated: true as const } : {};
 
   return ok({
     data: {
-      // The FULL count, never the page — the paging note points back at it.
+      // The FULL count of what was SCANNED, never the page — a floor whenever
+      // `scanTruncated` is present, and the paging note points back at it.
       totalTestClassCount: entries.length,
       tests: paged.value.page,
       appliedScope,
       disclosure,
+      ...truncationFields,
       ...paged.value.pagingFields,
     },
     vaultState: {
@@ -696,6 +726,12 @@ const coveringTestsMode = async (
   const seen = new Set<ComponentId>();
   const coveringNodes: Node[] = [];
   for (const edge of inbound.value) {
+    // MEANINGFUL-TEST-AUDIT-TARGET-COVERS-ITSELF (R3): the apex scanner records
+    // a self `callsApex` edge for a class that references its own members. A
+    // component is never its own caller, so counting it would put the target in
+    // its own `tests[]` and inflate the CERTIFIED `coveringTestCount`.
+    const isSelfEdge = edge.fromId === targetId;
+    if (isSelfEdge) continue;
     if (seen.has(edge.fromId)) continue;
     seen.add(edge.fromId);
     const src = await getNodeById(ctx.graph, edge.fromId);

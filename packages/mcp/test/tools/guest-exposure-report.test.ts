@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { guestExposureReportHandler } from '../../src/tools/guest-exposure-report.js';
+import {
+  guestExposureReportHandler,
+  type ExposureFinding,
+} from '../../src/tools/guest-exposure-report.js';
 import { V01_TOOLS } from '../../src/tools/index.js';
 
 const MANIFEST: VaultManifest = {
@@ -1380,5 +1383,246 @@ describe('guestExposureReportHandler — protected-class bucket', () => {
     if (!r.ok) return;
     const objFinding = r.value.data.findings.find((f) => f.kind === 'object-crud');
     expect(objFinding?.guestReadablePiiFieldCount).toBe(2);
+  });
+});
+
+// =============================================================================
+// GUEST-APEX-RANKED-FLAT and GUEST-VF-PAGE-ZERO-CERTIFIED-COMPLETE.
+//
+// Two real-org symptoms, placeholder names throughout.
+//
+// (1) Scoped to one live self-registration community the report returned 19
+//     `apex-enabled` findings, EVERY one severity `low`, every one carrying the
+//     identical sentence "review it enforces CRUD/FLS (guest context runs
+//     without a user)" — an open question the vault had already answered NO to
+//     on the very node the finding cites. Two of the 19 were `without sharing`
+//     `@AuraEnabled` controllers whose own `qualityIssues[]` carried
+//     `missing-fls-check` at severity HIGH with line numbers, and a third
+//     carried a `critical`. Ranked identically to the stock login/password
+//     boilerplate beside them, on a report whose entire value is ranking.
+//
+// (2) Scoped to an ACTIVE public Visualforce site the report returned
+//     `findings: []`, `summary.totalFindings: 0`, `trust.completeness.status:
+//     'complete'` — while a prose disclosure in the SAME envelope said
+//     Visualforce-page guest access is not modelled and "a guest-exposed VF
+//     page will not appear as a finding". The site's guest profile granted no
+//     object CRUD and no Apex, and its ONLY guest surface was enabled VF pages.
+//     The structured trust channel certified the opposite of the prose.
+// =============================================================================
+
+const APEX_SITE = 'CustomSite:Site_R';
+const APEX_PROFILE = 'Profile:Site_R Profile';
+const QUIET_SITE = 'CustomSite:Site_S';
+const QUIET_PROFILE = 'Profile:Site_S Profile';
+
+const issue = (
+  rule: string,
+  severity: string,
+  line: number,
+): Record<string, unknown> => ({
+  rule,
+  severity,
+  location: `line ${line}`,
+  explanation: 'fixture explanation',
+  confidence: 'heuristic',
+});
+
+const apexClassNode = (
+  apiName: string,
+  props: Record<string, unknown>,
+): Node =>
+  node({
+    id: `ApexClass:${apiName}`,
+    type: 'ApexClass',
+    apiName,
+    properties: {
+      status: 'Active',
+      isTest: false,
+      isRestResource: false,
+      hasAuraEnabledMethod: false,
+      hasInvocableMethod: false,
+      ...props,
+    },
+  });
+
+const apexSeed: ExtractionResult = {
+  nodes: [
+    node({
+      id: APEX_SITE,
+      type: 'CustomSite',
+      apiName: 'Site_R',
+      label: 'Site_R',
+      properties: {
+        active: true,
+        siteType: 'ChatterNetwork',
+        masterLabel: 'Site_R',
+        guestProfileName: 'Site_R Profile',
+      },
+    }),
+    node({ id: APEX_PROFILE, type: 'Profile', apiName: 'Site_R Profile', properties: { userPermissions: [] } }),
+    // A second, genuinely quiet site: guest profile resolves, grants NOTHING.
+    // This is the zero the HIGH finding is about.
+    node({
+      id: QUIET_SITE,
+      type: 'CustomSite',
+      apiName: 'Site_S',
+      label: 'Site_S',
+      properties: {
+        active: true,
+        siteType: 'Visualforce',
+        masterLabel: 'Site_S',
+        guestProfileName: 'Site_S Profile',
+      },
+    }),
+    node({ id: QUIET_PROFILE, type: 'Profile', apiName: 'Site_S Profile', properties: { userPermissions: [] } }),
+    // Stock boilerplate: sharing-enforced, scanned, clean.
+    apexClassNode('Class_Boiler', { sharingModel: 'with sharing', qualityIssues: [] }),
+    // Guest-callable, sharing-bypassing, FLS-less.
+    apexClassNode('Class_C', {
+      sharingModel: 'without sharing',
+      hasAuraEnabledMethod: true,
+      qualityIssues: [issue('without-sharing-no-comment', 'medium', 1), issue('missing-fls-check', 'high', 22)],
+    }),
+    // Undeclared sharing keyword + a critical recognizer hit.
+    apexClassNode('Class_D', {
+      sharingModel: null,
+      hasAuraEnabledMethod: true,
+      qualityIssues: [issue('soql-injection', 'critical', 9), issue('missing-crud-check', 'high', 40)],
+    }),
+    // The SAME critical, on an @isTest class — not invocable in production.
+    apexClassNode('Class_D_Test', {
+      sharingModel: null,
+      isTest: true,
+      qualityIssues: [issue('soql-injection', 'critical', 9)],
+    }),
+    // NEVER SCANNED: the node carries no `qualityIssues` KEY at all.
+    apexClassNode('Class_E', { sharingModel: 'without sharing', hasAuraEnabledMethod: true }),
+    // Visualforce pages the vault DOES hold — the family whose guest grant edge
+    // the profile extractor never emits.
+    node({ id: 'VisualforcePage:Page_F', type: 'VisualforcePage', apiName: 'Page_F' }),
+    node({ id: 'VisualforcePage:Page_G', type: 'VisualforcePage', apiName: 'Page_G' }),
+  ],
+  edges: [
+    edge({ fromId: APEX_PROFILE, toId: 'ApexClass:Class_Boiler', edgeType: 'grantedBy', properties: { enabled: true } }),
+    edge({ fromId: APEX_PROFILE, toId: 'ApexClass:Class_C', edgeType: 'grantedBy', properties: { enabled: true } }),
+    edge({ fromId: APEX_PROFILE, toId: 'ApexClass:Class_D', edgeType: 'grantedBy', properties: { enabled: true } }),
+    edge({ fromId: APEX_PROFILE, toId: 'ApexClass:Class_D_Test', edgeType: 'grantedBy', properties: { enabled: true } }),
+    edge({ fromId: APEX_PROFILE, toId: 'ApexClass:Class_E', edgeType: 'grantedBy', properties: { enabled: true } }),
+    // Granted a class this vault does NOT hold — never rate what was not read.
+    edge({ fromId: APEX_PROFILE, toId: 'ApexClass:Class_H', edgeType: 'grantedBy', properties: { enabled: true } }),
+  ],
+};
+
+describe('guestExposureReportHandler — guest-reachable Apex is ranked on the facts the vault already holds', () => {
+  let apexDir: string;
+  let apexStore: GraphStore;
+  let apexCtx: Context;
+
+  beforeAll(async () => {
+    apexDir = mkdtempSync(join(tmpdir(), 'sfi-guest-exposure-apex-'));
+    const opened = await openGraph(join(apexDir, 'ga.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    apexStore = opened.value;
+    const imported = await importExtractionResults(apexStore, [apexSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    apexCtx = { vaultRoot: apexDir, manifest: MANIFEST, graph: apexStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(apexStore);
+    rmSync(apexDir, { recursive: true, force: true });
+  });
+
+  const apexFindings = async (): Promise<Map<string, ExposureFinding>> => {
+    const r = await guestExposureReportHandler(apexCtx, { communityId: APEX_SITE, limit: 200 });
+    if (!r.ok) throw new Error(`handler failed: ${r.error.kind}`);
+    return new Map(
+      r.value.data.findings.filter((f) => f.kind === 'apex-enabled').map((f) => [f.nodeId, f]),
+    );
+  };
+
+  it('does not rank a sharing-bypassing guest endpoint identically to the login boilerplate', async () => {
+    const byId = await apexFindings();
+    expect(byId.get('ApexClass:Class_Boiler')?.severity).toBe('low');
+    expect(byId.get('ApexClass:Class_C')?.severity).toBe('high');
+    expect(byId.get('ApexClass:Class_D')?.severity).toBe('critical');
+    // The whole point: the ranking must SEPARATE them.
+    expect(byId.get('ApexClass:Class_C')?.severity).not.toBe(
+      byId.get('ApexClass:Class_Boiler')?.severity,
+    );
+  });
+
+  it('cites the facts it ranked on instead of asking the reader to go and check', async () => {
+    const byId = await apexFindings();
+    const c = byId.get('ApexClass:Class_C');
+    expect(c?.apex?.qualityScanned).toBe(true);
+    expect(c?.apex?.sharingModel).toBe('without sharing');
+    expect(c?.apex?.remotelyInvocable).toBe(true);
+    expect(c?.apex?.qualityIssueCounts?.high).toBe(1);
+    expect(c?.apex?.securityRules).toContain('missing-fls-check');
+    expect(c?.detail).toMatch(/missing-fls-check/);
+  });
+
+  it('caps an @isTest class at low — it is not invocable in production', async () => {
+    const byId = await apexFindings();
+    const t = byId.get('ApexClass:Class_D_Test');
+    expect(t?.severity).toBe('low');
+    expect(t?.apex?.isTest).toBe(true);
+    expect(t?.detail).toMatch(/@isTest/i);
+  });
+
+  it('NEVER-SCANNED is not CLEAN: a class with no qualityIssues property is disclosed, not rated safe', async () => {
+    const byId = await apexFindings();
+    const e = byId.get('ApexClass:Class_E');
+    expect(e?.apex?.nodeResolved).toBe(true);
+    expect(e?.apex?.qualityScanned).toBe(false);
+    expect(e?.apex?.qualityIssueCounts).toBeUndefined();
+    expect(e?.detail).toMatch(/NOT SCANNED|never ran/i);
+  });
+
+  it('never rates a granted class this vault does not hold', async () => {
+    const byId = await apexFindings();
+    const h = byId.get('ApexClass:Class_H');
+    expect(h?.apex?.nodeResolved).toBe(false);
+    expect(h?.severity).toBe('low');
+    expect(h?.detail).toMatch(/not in this vault|was not read/i);
+  });
+
+  it('names the unchecked Visualforce guest-page plane in a TYPED field, not only in prose', async () => {
+    const r = await guestExposureReportHandler(apexCtx, { communityId: APEX_SITE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const vf = r.value.data.uncheckedGuestSurfaces.find((s) => s.surface === 'VisualforcePage');
+    expect(vf).toBeDefined();
+    expect(vf?.kind).toBe('extractor-blind');
+    expect(vf?.modeledNodeCount).toBe(2);
+    expect(vf?.guestGrantEdgeCount).toBe(0);
+  });
+
+  it('a site whose ONLY guest surface is unmodelled never certifies its zero as complete', async () => {
+    const r = await guestExposureReportHandler(apexCtx, { communityId: QUIET_SITE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The zero itself is real for the planes that WERE read.
+    expect(d.findings).toEqual([]);
+    expect(d.summary.totalFindings).toBe(0);
+    // …and it must not be certified.
+    expect(d.trust.completeness.status).not.toBe('complete');
+    expect(d.trust.limitations.join(' ')).toMatch(/Visualforce/i);
+    expect(d.uncheckedGuestSurfaces.length).toBeGreaterThan(0);
+    expect(d.boundaryNote).toMatch(/Visualforce/i);
+  });
+
+  it('tells the reader the page grants ARE in the retrieved profile XML, so they can go and look', async () => {
+    const r = await guestExposureReportHandler(apexCtx, { communityId: QUIET_SITE });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const prose = r.value.data.disclosures.join(' ');
+    expect(prose).toMatch(/pageAccesses/);
+    // The old wording said the access is "NOT in the offline metadata model",
+    // which sent the reader away from a file the vault actually ships.
+    expect(prose).not.toMatch(/NOT in the offline metadata model/);
+    expect(prose).toMatch(/profile XML|\.profile-meta\.xml/i);
   });
 });

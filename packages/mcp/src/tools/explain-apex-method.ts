@@ -13,6 +13,14 @@
  * a future v2.7 method-scoped narrative. The tool does NOT subset the
  * class's outgoing edges by method in v2.0f — that would require an
  * Apex AST (the v2.0a scope was deliberately heuristic-only).
+ * METHOD-SCOPE-NEVER-APPLIED: the bare echo used to be the ONLY trace of
+ * that, which reads as "honoured" — the payload underneath still described
+ * the whole class, so mirrored `qualityIssues[].location` line numbers
+ * pointed at methods the caller never asked about. The echo now travels with
+ * a typed {@link ExplainApexMethodScope} block (`applied: false`) and, when a
+ * method WAS named, a verbatim `disclosure` paragraph that says the line
+ * numbers are class-wide and names `sfi.apex_structure` as the tool whose
+ * `method` parameter actually narrows.
  *
  * The structured payload covers six axes:
  *
@@ -145,15 +153,40 @@ const RECEIVER_VERIFIED_SUFFIX =
   ' Every `readsFrom`/`writesTo` receiver behind fieldAccess is VERIFIED against this vault: a `CustomField:` id is claimed ONLY when its receiver names an SObject node here. Anything else is a raw token in unresolvedFieldAccess with a typed reason (see unresolvedFieldAccessReasons) — demoted and named, never dropped and never claimed.';
 
 /**
+ * METHOD-SCOPE-NEVER-APPLIED. The tool named `methodName` in its signature,
+ * echoed it back at the top of the payload, and then narrowed NOTHING: on a
+ * ~580-line class every mirrored `qualityIssues[].location` line number landed
+ * in some OTHER method than the one asked about, and no field of the response
+ * said the narrowing had been declined. The echo alone reads as "honoured".
+ *
+ * It cannot be honoured here. This tool narrates the class from graph NODE
+ * PROPERTIES, and an ApexClass node carries no per-method line ranges — only
+ * `sfi.apex_structure`, which re-parses the source with the Apex grammar, has
+ * a `line`/`endLine` span per method. So the fix is DISCLOSURE, not analysis:
+ * {@link ExplainApexMethodOutput.methodScope} is the typed half a machine
+ * consumer cannot skip, and this suffix is the half a host reads aloud.
+ */
+const METHOD_SCOPE_NARROWER_TOOL = 'sfi.apex_structure';
+
+/** Why {@link ExplainApexMethodScope.applied} is always `false`. */
+const METHOD_SCOPE_NOT_APPLIED_REASON =
+  'this tool narrates the class from graph node properties, which carry no per-method line ranges, so it cannot subset any section by method';
+
+const methodScopeNotAppliedSuffix = (classId: string, methodName: string): string =>
+  ` METHOD SCOPE NOT APPLIED: you passed methodName '${methodName}' and it was NOT used to narrow this answer — it is echoed back verbatim only (see \`methodScope.applied: false\`). EVERY section below describes the WHOLE class: lineCount, calls, fieldAccess, qualityIssues and conceptReasoning. In particular the \`location\` line numbers on qualityIssues are CLASS-WIDE and will usually fall inside OTHER methods — do NOT report them as findings in '${methodName}'. Reason: ${METHOD_SCOPE_NOT_APPLIED_REASON}. For method-level granularity — each method with its line/endLine span and each SOQL/DML site attributed to its enclosing method — call \`${METHOD_SCOPE_NARROWER_TOOL}\` with { classRef: '${classId}', method: '${methodName}' } — an unknown method name is refused there, naming the methods the class DOES declare.`;
+
+/**
  * Zod schema for the `sfi.explain_apex_method` tool input.
  *
  *   - `classApiName`: required, non-empty string. The canonical
  *     ApexClass id (`ApexClass:{ClassName}`) or ApexTrigger id
  *     (`ApexTrigger:{TriggerName}`). Other prefixes surface as
  *     `invalid-query` from the handler.
- *   - `methodName`: optional. Carried verbatim into the response so
- *     callers can pass it through to a future v2.7 method-scoped
- *     narrative. v2.0f does NOT subset by method.
+ *   - `methodName`: optional. ACCEPTED BUT NEVER APPLIED — carried verbatim
+ *     into the response so callers can pass it through to a future v2.7
+ *     method-scoped narrative. Nothing is subset by method, and the response
+ *     says so in the typed `methodScope` block and in `disclosure` rather than
+ *     letting the echo read as "honoured".
  */
 const explainApexMethodInputBaseSchema = z.object({
   classApiName: z.string().min(1),
@@ -312,11 +345,47 @@ export interface ExplainApexQualityIssue {
   readonly explanation: string;
 }
 
+/**
+ * What the `methodName` input actually did to this answer — nothing.
+ *
+ * Present on EVERY response (not only when a method was named), because a
+ * caller diffing two responses has to be able to read the scope off the payload
+ * without inferring it from which keys are missing.
+ *
+ * `applied` is the literal type `false`, not `boolean`: it is a compile-time
+ * promise that no code path here can claim a narrowing it did not perform.
+ * When method-level granularity actually lands, widening this type is the
+ * deliberate edit that makes the claim.
+ */
+export interface ExplainApexMethodScope {
+  /** The `methodName` the caller passed, verbatim. `null` when none was. */
+  readonly requested: string | null;
+  /** ALWAYS false — see {@link METHOD_SCOPE_NOT_APPLIED_REASON}. */
+  readonly applied: false;
+  /** What every section of this payload describes. Always the whole class. */
+  readonly scope: 'class';
+  /** Why `applied` is false. Always populated, whether or not one was asked for. */
+  readonly reason: string;
+  /** The tool that DOES narrow to one method (its `method` parameter). */
+  readonly narrowerTool: string;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ExplainApexMethodOutput {
   readonly classApiName: ComponentId;
   readonly apiName: string;
+  /**
+   * The requested method name, echoed verbatim. READ
+   * {@link ExplainApexMethodOutput.methodScope} BESIDE IT: this echo does NOT
+   * mean the answer was narrowed to that method. It never is.
+   */
   readonly methodName: string | null;
+  /**
+   * METHOD-SCOPE-NEVER-APPLIED — the typed statement that `methodName` narrowed
+   * nothing, so a machine consumer cannot skip past it the way it can skip
+   * prose. `applied` is always `false` and `scope` is always `'class'`.
+   */
+  readonly methodScope: ExplainApexMethodScope;
   readonly type: ComponentType;
   /**
    * For an ApexTrigger, the SObject it fires on (bare api name, e.g.
@@ -944,6 +1013,13 @@ export const explainApexMethodHandler = async (
     classApiName: classId,
     apiName: node.apiName,
     methodName: input.methodName ?? null,
+    methodScope: {
+      requested: input.methodName ?? null,
+      applied: false,
+      scope: 'class',
+      reason: METHOD_SCOPE_NOT_APPLIED_REASON,
+      narrowerTool: METHOD_SCOPE_NARROWER_TOOL,
+    },
     type: node.type,
     triggerObject: readNullableString(node, 'triggerObject'),
     events: readStringArray(node, 'events'),
@@ -995,7 +1071,13 @@ export const explainApexMethodHandler = async (
       (Object.hasOwn(node.properties, 'qualityIssues')
         ? ''
         : QUALITY_NOT_SCANNED_SUFFIX) +
-      (sharingRead.source === 'not-read' ? SHARING_NOT_READ_SUFFIX : ''),
+      (sharingRead.source === 'not-read' ? SHARING_NOT_READ_SUFFIX : '') +
+      // Said ONLY when a method was actually named. A caller who asked no
+      // method-scoped question is not misreading anything, and adding the
+      // paragraph to every response would train hosts to skip it.
+      (input.methodName !== undefined
+        ? methodScopeNotAppliedSuffix(classId, input.methodName)
+        : ''),
   };
 
   const annotations = await annotationsBlockFor(ctx, classId);

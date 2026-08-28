@@ -36,6 +36,7 @@ import type { Context } from '../server.js';
 
 import { listValidationRuleDocsForParent } from './component-doc-fallback.js';
 import { buildEnumerationCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
+import { resolveExistingObjectScope, toCustomObjectId } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, encodeCursor, PAGE_CURSOR_VERSION } from './page-cursor.js';
 
 const LIST_COMPONENTS_TOOL = 'sfi.list_components';
@@ -410,9 +411,56 @@ const coercedOptionalBoolean = z
   )
   .optional();
 
-export const listComponentsInputSchema = z.object({
+/**
+ * LIST-COMPONENTS-SILENTLY-DROPS-OBJECT-SCOPE — the refusal message for an
+ * argument this tool does not accept.
+ *
+ * Product copy, byte-for-byte the sentence `sfi.what_happens_on_save`,
+ * `sfi.order_of_execution` and `sfi.lifecycle_process` already state. It is the
+ * doctrine half of this fix: a scope-shaped argument that reaches a tool with no
+ * key for it used to be stripped by Zod and the org-wide answer returned as
+ * though it were the scoped one.
+ *
+ * The accepted-key list is DERIVED from the shape below rather than hand-listed
+ * (the three sibling tools each maintain a second copy of their own key tuple,
+ * which is free to drift from the shape it describes; this one cannot).
+ */
+const strictKeyErrorMap =
+  (accepted: readonly string[]): z.ZodErrorMap =>
+  (issue, ctx) => {
+    if (issue.code === z.ZodIssueCode.unrecognized_keys) {
+      return {
+        message: `Unknown argument '${issue.keys.join("', '")}'. This tool accepts: ${accepted.join(', ')}. Refusing rather than ignoring it — a silently-dropped argument returns a confident answer to a question you did not ask.`,
+      };
+    }
+    return { message: ctx.defaultError };
+  };
+
+const listComponentsShape = {
   type: z.enum(COMPONENT_TYPES).optional(),
   parentId: z.string().min(1).optional(),
+  /**
+   * LIST-COMPONENTS-SILENTLY-DROPS-OBJECT-SCOPE. `objectApiName` is the
+   * canonical object-scope key across the rest of the product, so it is exactly
+   * what a host LLM passes to narrow an enumeration to one object — and it was
+   * not a key here, so Zod stripped it and the ORG-WIDE list came back
+   * certified with a scoped `totalCount`. Resolved through the shared
+   * `resolveExistingObjectScope`, which VERIFIES the object exists in the vault
+   * (a typo is refused, not answered org-wide) and corrects its casing
+   * (Salesforce api names are case-insensitive). The narrow it applies is
+   * `parentId = CustomObject:<resolved>`; the applied id is echoed as
+   * `appliedScope`.
+   */
+  // `.trim()` runs BEFORE `.min(1)`: `min` measures the RAW string, so a
+  // whitespace-only scope (`'   '`) would clear a bare `.min(1)`, then get
+  // trimmed to nothing downstream and resolve to NO scope — returning the
+  // ORG-WIDE list under a scoped question. That is this tool's own defect
+  // surviving on a degenerate input, so the scope keys are refused, not widened.
+  objectApiName: z.string().trim().min(1).optional(),
+  /** `objectApiName` alias — same resolver, same narrow. */
+  object: z.string().trim().min(1).optional(),
+  /** `objectApiName` alias — same resolver, same narrow. */
+  objectId: z.string().trim().min(1).optional(),
   limit: z.number().int().min(1).max(LIST_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   // CR-22 continuation cursor from a prior page's nextCursor. `o` already IS the
@@ -447,7 +495,13 @@ export const listComponentsInputSchema = z.object({
   missingDescription: coercedOptionalBoolean,
   /** Keep only components that HAVE a non-empty `properties.description`. */
   hasDescription: coercedOptionalBoolean,
-});
+};
+
+export const listComponentsInputSchema = z
+  .object(listComponentsShape, {
+    errorMap: strictKeyErrorMap(Object.keys(listComponentsShape)),
+  })
+  .strict();
 
 /** Parsed input shape, inferred from `listComponentsInputSchema`. */
 export type ListComponentsInput = z.infer<typeof listComponentsInputSchema>;
@@ -534,6 +588,45 @@ export interface ListComponentsOutput {
    * explicit (per-field, `properties.isFormula === true` flags the same fields).
    */
   readonly formulaFieldCount?: number;
+  /**
+   * LIST-COMPONENTS-SILENTLY-DROPS-OBJECT-SCOPE. Present ONLY when the caller
+   * named an object (`objectApiName` / `object` / `objectId`) and it resolved.
+   * `componentId` is the id the narrow was actually applied with — the VAULT's
+   * exact casing, which may differ from what was passed (`resolvedFrom` records
+   * the caller's spelling when it did). A bare, unscoped call omits the key
+   * entirely, so a caller can always tell a scoped answer from an org-wide one
+   * rather than having to trust that its argument was honored.
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly componentId: string;
+    /** The mechanism: an object scope becomes a `nodes.parent_id` narrow. */
+    readonly narrowedBy: 'parentId';
+    readonly resolvedFrom?: string;
+  };
+  /**
+   * Present ONLY when a parent narrow (explicit `parentId` or a resolved object
+   * scope) matched ZERO nodes while the type HAS nodes elsewhere in the vault.
+   *
+   * The narrow is PARENT-based, and whole metadata families are top-level in
+   * the graph — ApexTrigger, ApexClass, Flow, Profile and friends carry no
+   * `CustomObject:` parent — so a `CustomObject:` narrow can never match one.
+   * The product's own router suggests `{ type: 'ApexTrigger', parentId:
+   * 'CustomObject:<X>' }`, and on a real vault that returned an empty list
+   * stamped "this is 'none in the org'" for an org holding 22 triggers.
+   *
+   * This is the TYPED half of that disclosure — `countWithoutParentNarrow` is
+   * what the SAME query (every other filter intact) returns with the parent
+   * narrow removed, so a machine consumer sees the zero is scoped rather than
+   * absolute without having to parse `retrievalHint`.
+   */
+  readonly scopeCaveat?: {
+    readonly parentId: string;
+    readonly narrowedBy: 'parentId';
+    readonly countWithoutParentNarrow: number;
+    /** Always `true`: the zero above is a PARENT-scoped zero, not an org-wide one. */
+    readonly parentScopedOnly: true;
+  };
 }
 
 /**
@@ -583,6 +676,56 @@ export const listComponentsHandler = async (
         ? 'present'
         : undefined;
 
+  // LIST-COMPONENTS-SILENTLY-DROPS-OBJECT-SCOPE (R4). `objectApiName` /
+  // `object` / `objectId` are the canonical object-scope keys everywhere else
+  // in the product, so a host narrowing an enumeration to one object passes
+  // one of them here. They used to be stripped at the Zod boundary and the
+  // ORG-WIDE list came back with a `totalCount` a reader takes for the scoped
+  // one. Route them through the SHARED resolver rather than string-templating
+  // `CustomObject:${name}`: it VERIFIES the object exists in this vault (a typo
+  // is an `invalid-query`, never a confident empty answer), corrects casing
+  // (Salesforce api names are case-insensitive), and refuses two selectors that
+  // name different objects. A bare call resolves to `null` with no graph
+  // round-trip, so the unscoped response shape is untouched.
+  const objectScopeResult = await resolveExistingObjectScope(ctx.graph, input);
+  if (!objectScopeResult.ok) return err(objectScopeResult.error);
+  const objectScope = objectScopeResult.value;
+  if (
+    objectScope !== null &&
+    input.parentId !== undefined &&
+    input.parentId !== objectScope.componentId
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `parentId '${input.parentId}' and the object scope '${objectScope.componentId}' name ` +
+        'DIFFERENT parents. Refusing rather than picking one — a silently-dropped narrow ' +
+        'returns a confident answer to a question you did not ask. Pass exactly one.',
+      path: 'parentId',
+    });
+  }
+  // The single parent narrow every branch below reads. `parentId` and a
+  // resolved object scope are the SAME axis, so they are folded here once
+  // instead of each call site deciding again.
+  const effectiveParentId = objectScope?.componentId ?? input.parentId;
+  // The caller's own spelling, when the vault spells it differently. Coerced
+  // with the shared `toCustomObjectId` so this cannot drift from the resolver's
+  // own coercion.
+  const suppliedObjectName = input.objectApiName ?? input.object ?? input.objectId;
+  const suppliedObjectId =
+    suppliedObjectName === undefined ? undefined : toCustomObjectId(suppliedObjectName);
+  const appliedScope =
+    objectScope === null
+      ? undefined
+      : {
+          object: objectScope.object,
+          componentId: objectScope.componentId,
+          narrowedBy: 'parentId' as const,
+          ...(suppliedObjectId !== undefined && suppliedObjectId !== objectScope.componentId
+            ? { resolvedFrom: suppliedObjectId }
+            : {}),
+        };
+
   const limit = input.limit ?? LIST_DEFAULT_LIMIT;
   const recordTriggered = input.recordTriggered === true;
 
@@ -591,7 +734,7 @@ export const listComponentsHandler = async (
   // type / parentId / property filter.
   const fingerprint = argsFingerprint({
     type: input.type,
-    ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+    ...(effectiveParentId !== undefined ? { parentId: effectiveParentId } : {}),
     ...(input.triggerObject !== undefined ? { triggerObject: input.triggerObject } : {}),
     ...(input.status !== undefined ? { status: input.status } : {}),
     ...(recordTriggered ? { recordTriggered: true } : {}),
@@ -631,14 +774,21 @@ export const listComponentsHandler = async (
   if (input.status !== undefined) propertyStringEquals.status = input.status;
   const hasStringPropertyFilter = Object.keys(propertyStringEquals).length > 0;
 
-  const graphNarrow = {
-    ...(input.parentId !== undefined
-      ? { parentId: input.parentId as ComponentId }
-      : {}),
+  // Every narrow EXCEPT the parent one. Counting with this is what tells a
+  // parent-scoped zero apart from an absolute one, and deriving `graphNarrow`
+  // FROM it keeps the two from drifting into "the same filters, nearly".
+  const narrowSansParent = {
     ...(hasPropertyFilter ? { propertyEquals } : {}),
     ...(hasStringPropertyFilter ? { propertyStringEquals } : {}),
     ...(recordTriggered ? { recordTriggered: true as const } : {}),
     ...(descriptionPresence !== undefined ? { descriptionPresence } : {}),
+  };
+
+  const graphNarrow = {
+    ...(effectiveParentId !== undefined
+      ? { parentId: effectiveParentId as ComponentId }
+      : {}),
+    ...narrowSansParent,
   };
 
   const queryResult = await listNodesByType(ctx.graph, input.type, {
@@ -660,9 +810,9 @@ export const listComponentsHandler = async (
     pageNodes.length === 0 &&
     offset === 0 &&
     input.type === 'ValidationRule' &&
-    input.parentId !== undefined
+    effectiveParentId !== undefined
   ) {
-    const parentApi = objectApiNameFromParentId(input.parentId);
+    const parentApi = objectApiNameFromParentId(effectiveParentId);
     if (parentApi !== null) {
       const docNodes = await listValidationRuleDocsForParent(ctx.vaultRoot, parentApi, {
         limit,
@@ -708,15 +858,73 @@ export const listComponentsHandler = async (
   // retrieved? Use coverage to say which, so the caller never reads a silent
   // `[]` as "the org has none of these".
   let retrievalHint: string | undefined;
+  // LIST-COMPONENTS-PARENT-NARROW-CERTIFIED-AS-ORG-WIDE. An empty page under a
+  // PARENT narrow has two very different causes and the tool used to certify
+  // only the wrong one: "this parent has none" versus "this type is not
+  // parented by an object at all, so no `CustomObject:` narrow could ever match
+  // one of its nodes". Re-running the SAME query with the parent narrow removed
+  // separates them exactly. Computed OUTSIDE the coverage guard below — it is a
+  // fact about the SCOPE, not about coverage, so a property-filtered scoped
+  // zero gets the same disclosure — and only on the empty-page path, so the
+  // common case pays nothing.
+  //
+  // This is not hypothetical: the product's OWN router suggests
+  // `{ type: 'ApexTrigger', parentId: 'CustomObject:<X>' }`, ApexTrigger nodes
+  // are top-level, and on a real vault that returned `[]` stamped
+  // "this is 'none in the org'" for an org holding 22 of them.
+  let scopeCaveat: ListComponentsOutput['scopeCaveat'];
+  if (offset === 0 && pageNodes.length === 0 && effectiveParentId !== undefined) {
+    const sansParent = await countNodesByType(ctx.graph, input.type, narrowSansParent);
+    if (sansParent.ok && sansParent.value > 0) {
+      scopeCaveat = {
+        parentId: effectiveParentId,
+        narrowedBy: 'parentId',
+        countWithoutParentNarrow: sansParent.value,
+        parentScopedOnly: true,
+      };
+    }
+  }
+  // LIST-COMPONENTS-SCOPE-PROSE-LOST-TO-PROPERTY-FILTER. The parent-scoped-zero
+  // sentence is emitted OUTSIDE the coverage guard for exactly the reason the
+  // typed `scopeCaveat` above is: it is a fact about the SCOPE, not about
+  // coverage. The coverage guard short-circuits whenever a property /
+  // string-property / recordTriggered / description filter is active, so
+  // `{type:'Flow', objectApiName:'<X>', status:'Active'}` used to return the
+  // typed field with NO prose — and a prose-only host renders prose, so the
+  // reader still heard a bare zero. This branch runs ONLY on the filtered path
+  // (the guard below owns the unfiltered path unchanged), so precedence is
+  // untouched. Deliberately NOT extended to the standard-object CustomField
+  // sentence below: that one opens "No CustomField rows for CustomObject:X in
+  // this vault", which is FALSE under a property filter — the rows exist, none
+  // matched the filter. The scoped-zero sentence says "this same query", which
+  // stays true with a filter attached.
+  const parentApi =
+    effectiveParentId !== undefined
+      ? objectApiNameFromParentId(effectiveParentId)
+      : null;
+  const parentScopedZeroSentence = (): string =>
+    `No \`${input.type}\` under \`${effectiveParentId ?? ''}\` — a PARENT-scoped zero, NOT "none in the org": ` +
+    `${scopeCaveat?.countWithoutParentNarrow ?? 0} \`${input.type}\` node(s) match this same query in this vault with the parent narrow removed. ` +
+    'The narrow matches `nodes.parent_id`, and whole metadata families are TOP-LEVEL in the graph ' +
+    '(ApexTrigger, ApexClass, Flow, Profile and friends carry no object parent), so a `CustomObject:` ' +
+    'parent can never match one of those no matter which object is named. Re-run without the parent ' +
+    'narrow to see them, and reach for the association the type actually has: `triggerObject` for ' +
+    'record-triggered Flows, `sfi.what_happens_on_save` / `sfi.object_360` for the automation bound ' +
+    'to an object, `sfi.get_edges` for edge-based rather than parent-based association.';
+  const hasNonScopeFilter =
+    hasPropertyFilter ||
+    hasStringPropertyFilter ||
+    recordTriggered ||
+    descriptionPresence !== undefined;
+  if (offset === 0 && pageNodes.length === 0 && hasNonScopeFilter && scopeCaveat !== undefined) {
+    retrievalHint = parentScopedZeroSentence();
+  }
   // Skip the coverage hint when a property filter is active: an empty result
   // means "no component matched the filter", NOT a type-coverage gap.
   if (
     offset === 0 &&
     pageNodes.length === 0 &&
-    !hasPropertyFilter &&
-    !hasStringPropertyFilter &&
-    !recordTriggered &&
-    descriptionPresence === undefined
+    !hasNonScopeFilter
   ) {
     const cov = summarizeCoverage(ctx.manifest, [input.type]);
     // LIST-COMPONENTS-PENDING-READ-AS-NEVER-PULLED: read the `pending` row
@@ -728,7 +936,22 @@ export const listComponentsHandler = async (
     const pendingRow = buildCoverageEntries(ctx.manifest).find(
       (entry) => entry.type === input.type && entry.pending === true,
     );
-    if (cov.notModeledTypes.includes(input.type)) {
+    // A populated type under an unsatisfiable parent narrow OUTRANKS every
+    // coverage sentence below it: `countWithoutParentNarrow > 0` is direct
+    // proof the type IS in this vault, which contradicts "not modeled" /
+    // "pending" / "not retrieved" outright. The standard-object CustomField
+    // branch stays ahead of it — it is the same disclosure with a more
+    // specific reason.
+    if (
+      input.type === 'CustomField' &&
+      parentApi !== null &&
+      isStandardObjectApiName(parentApi)
+    ) {
+      retrievalHint =
+        `No \`CustomField\` rows for \`CustomObject:${parentApi}\` in this vault — standard-object field inventory is often incomplete (uncustomized standard fields are not emitted as \`.field-meta.xml\`). This is NOT proof the org has no fields on ${parentApi}; use describe-backed refresh overlay or the live plane.`;
+    } else if (scopeCaveat !== undefined) {
+      retrievalHint = parentScopedZeroSentence();
+    } else if (cov.notModeledTypes.includes(input.type)) {
       retrievalHint =
         `No \`${input.type}\` in the vault — this type is NOT modeled by the current build, so its absence means "not analyzed", never "none in the org".`;
     } else if (pendingRow !== undefined) {
@@ -740,20 +963,15 @@ export const listComponentsHandler = async (
     } else if (cov.missingCoverage.includes(input.type)) {
       retrievalHint =
         `No \`${input.type}\` retrieved into this vault — the last refresh did not pull this type (a scoped, errored, or empty retrieve that returned zero rows). A requested-but-empty retrieve is byte-identical to "the org has none", so this is reported as "not retrieved", not proof of absence. Run ${refreshRemedyFor(input.type)} before concluding the org has none.`;
+    } else if (effectiveParentId !== undefined) {
+      // Empty narrow, empty type: the type really is absent from the vault, so
+      // say that — but never as "none in the org" for the OBJECT, which this
+      // query did not measure.
+      retrievalHint =
+        `No \`${input.type}\` under \`${effectiveParentId}\`, and none anywhere else in this vault either — the last refresh retrieved \`${input.type}\` and found zero. That is "none in the org" for the TYPE; this query measured a parent narrow, so it is not separately proof about that parent.`;
     } else {
-      const parentApi =
-        input.parentId !== undefined ? objectApiNameFromParentId(input.parentId) : null;
-      if (
-        input.type === 'CustomField' &&
-        parentApi !== null &&
-        isStandardObjectApiName(parentApi)
-      ) {
-        retrievalHint =
-          `No \`CustomField\` rows for \`CustomObject:${parentApi}\` in this vault — standard-object field inventory is often incomplete (uncustomized standard fields are not emitted as \`.field-meta.xml\`). This is NOT proof the org has no fields on ${parentApi}; use describe-backed refresh overlay or the live plane.`;
-      } else {
-        retrievalHint =
-          `The last refresh retrieved \`${input.type}\` and found none — this is "none in the org", not "not retrieved".`;
-      }
+      retrievalHint =
+        `The last refresh retrieved \`${input.type}\` and found none — this is "none in the org", not "not retrieved".`;
     }
   }
 
@@ -771,7 +989,7 @@ export const listComponentsHandler = async (
   let formulaFieldCount: number | undefined;
   if (input.type === 'CustomField' && !hasPropertyFilter) {
     const formulaRes = await countNodesByType(ctx.graph, input.type, {
-      ...(input.parentId !== undefined ? { parentId: input.parentId as ComponentId } : {}),
+      ...(effectiveParentId !== undefined ? { parentId: effectiveParentId as ComponentId } : {}),
       propertyEquals: { isFormula: true },
     });
     if (formulaRes.ok) formulaFieldCount = formulaRes.value;
@@ -836,6 +1054,8 @@ export const listComponentsHandler = async (
       ...(docFallbackNote !== undefined ? { docFallbackNote } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(formulaFieldCount !== undefined ? { formulaFieldCount } : {}),
+      ...(appliedScope !== undefined ? { appliedScope } : {}),
+      ...(scopeCaveat !== undefined ? { scopeCaveat } : {}),
       ...(propertiesSlimmed ? { propertiesSlimmed: true as const } : {}),
       ...(trimmed
         ? {

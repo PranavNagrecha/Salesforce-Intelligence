@@ -19,6 +19,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { emptyQueuesAndGroupsHandler } from '../../src/tools/empty-queues-and-groups.js';
 import {
   readPriorTechDebtScore,
   techDebtScoreHandler,
@@ -1290,6 +1291,67 @@ describe('techDebtScoreHandler — legacyAutomation scan-truncation honesty (R1)
     expect(joined).not.toContain('run the appropriate refresh command');
     expect(machineExcluded[0]?.reason).toBe('insufficient-data');
   });
+
+  // Moving the reason off `'extractor-not-run'` (correctly — a refresh cannot
+  // lift a page cap) took the axis OUT of the only sentence that mentioned it:
+  // Q115 is keyed on that reason, so the scan-cap exclusion lived in the typed
+  // `excludedCategories` and in NO prose at all. A host reads `boundaries`
+  // aloud; a 0.20-weight axis silently dropped from the weighted mean has to
+  // be said there too, not only in a field a summarizer may never quote.
+  it('names the scan-capped axis in boundaries, not only in excludedCategories', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Selected on the REMEDY, not on the axis name: WEIGHT_SCHEME_DISCLOSURE
+    // also says "legacyAutomation" and sits earlier in the array, so a
+    // name-based `find` would match a sentence that discloses nothing.
+    const capBoundary = r.value.data.boundaries.find((b) =>
+      b.includes('process_builder_migration_candidates'),
+    );
+    expect(capBoundary).toBeDefined();
+    // Which axis, which cap, and which way the composite is wrong.
+    expect(capBoundary).toContain('legacyAutomation');
+    expect(capBoundary).toContain('EXCLUDED');
+    expect(capBoundary).toContain('500-node scan cap');
+    expect(capBoundary).toContain('NOT comparable');
+    // The remedy that works — and NOT the one that does not.
+    expect(capBoundary).not.toMatch(/refresh/i);
+  });
+
+  // Two ways this same sentence can state a number that is not the one that
+  // applied — the exact defect class the R6 half of this lane fixed in the
+  // scan-cap note, reappearing in prose written to disclose the R1 half.
+  //
+  // (a) THE WEIGHT. `weightsApplied` is `DEFAULT_WEIGHTS` overlaid with the
+  //     caller's `weights`. Quoting DEFAULT_WEIGHTS would announce a share the
+  //     run never used to a caller who explicitly re-weighted the axis.
+  // (b) THE ARITHMETIC. `weightedScore` skips an excluded axis in BOTH the
+  //     numerator and the denominator, so the survivors re-normalise over
+  //     their own weights. "Contributes 0" would tell a host the score was
+  //     dragged toward 0 — understating debt — when the axis was removed.
+  it('quotes the APPLIED weight and describes exclusion as removal, not a zero term', async () => {
+    const r = await techDebtScoreHandler(ctx, {
+      weights: { legacyAutomation: 0.5 },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const capBoundary = r.value.data.boundaries.find((b) =>
+      b.includes('process_builder_migration_candidates'),
+    );
+    expect(capBoundary).toBeDefined();
+    // (a) the caller's weight, not the 0.2 default.
+    expect(r.value.data.weightingDisclosure.weightsApplied.legacyAutomation).toBe(0.5);
+    expect(r.value.data.weightingDisclosure.weightsDefault.legacyAutomation).toBe(0.2);
+    expect(capBoundary).toContain('weight 0.5');
+    expect(capBoundary).not.toContain('weight 0.2');
+    // (b) removal from the mean, stated as removal.
+    expect(capBoundary).toContain('REMOVED from the weighted mean');
+    expect(capBoundary).toContain('divisor');
+    expect(capBoundary).not.toContain('contributes 0');
+    // And the typed 0 is explained rather than left to be misread.
+    expect(r.value.data.categories.legacyAutomation.contribution).toBe(0);
+    expect(capBoundary).toContain('NOT because the org scored clean');
+  });
 });
 
 // =============================================================================
@@ -1351,5 +1413,103 @@ describe('techDebtScoreHandler — full-node-scan residual-cap disclosure (R6)',
     expect(r.value.data.boundaries.join(' ')).toContain('Full scan capped');
     expect(r.value.data.boundaries.join(' ')).toContain('ApexClass');
     expect(r.value.data.boundaries.join(' ')).toContain('INCOMPLETE');
+  });
+
+  // The note names the ceiling in its own text. `fullScanTruncationNote`
+  // DEFAULTS that number to the module constant, so a run whose cap was not
+  // the constant announced the wrong limit for itself — "capped at 20000" on a
+  // walk that stopped at 2. The applied cap and the reported cap now come from
+  // one expression, so they cannot disagree.
+  it('reports the cap that actually bit, not the module default', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const note = r.value.data.boundaries.find((b) =>
+      b.includes('Full scan capped'),
+    );
+    expect(note).toBeDefined();
+    expect(note).toContain('Full scan capped at 2 nodes per type');
+    expect(note).not.toContain('20000');
+  });
+});
+
+describe('techDebtScoreHandler — UNMEASURED-CONTAINERS-SCORED-AS-DEAD-WEIGHT', () => {
+  // `sfi.empty_queues_and_groups` reports `totalQueues`/`totalGroups` as ROW
+  // COUNTS that deliberately INCLUDE `unknown-membership` rows — containers
+  // whose membership the vault could not read at all. tech_debt_score summed
+  // those row counts into the unassignedGrants raw count, so a container nobody
+  // had measured was charged to the org's debt score as confirmed dead weight.
+  // This fixture is 1 measured-empty queue + 3 unmeasurable ones: the honest
+  // raw count is 1, the old arithmetic produced 4.
+  const seed: ExtractionResult = {
+    nodes: [
+      // MEASURED empty: the `memberChannels` sentinel proves the members family
+      // was walked for this node, and it declared zero.
+      makeNode({
+        id: 'Queue:Measured_Empty',
+        type: 'Queue',
+        apiName: 'Measured_Empty',
+        properties: { memberCount: 0, memberChannels: [] },
+      }),
+      // UNMEASURED: no `memberChannels` sentinel, so a declared 0 means "never
+      // walked", not "empty" → cleanupVerdict 'unknown-membership'.
+      makeNode({
+        id: 'Queue:Unwalked_A',
+        type: 'Queue',
+        apiName: 'Unwalked_A',
+        properties: { memberCount: 0 },
+      }),
+      makeNode({
+        id: 'Queue:Unwalked_B',
+        type: 'Queue',
+        apiName: 'Unwalked_B',
+        properties: { memberCount: 0 },
+      }),
+      // UNMEASURED: no member data at all.
+      makeNode({
+        id: 'Queue:Fx_No_Member_Data',
+        type: 'Queue',
+        apiName: 'Fx_No_Member_Data',
+        properties: {},
+      }),
+    ],
+    edges: [],
+  };
+
+  it('scores only CONFIRMED-empty containers, never the unknown-membership rows', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-unmeasured-'));
+    const opened = await openGraph(join(tmp, 'x.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const store = opened.value;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const localCtx: Context = {
+      vaultRoot: tmp,
+      manifest: FIXTURE_MANIFEST,
+      graph: store,
+    };
+
+    const eq = await emptyQueuesAndGroupsHandler(localCtx, {});
+    const r = await techDebtScoreHandler(localCtx, {});
+    await closeGraph(store);
+    rmSync(tmp, { recursive: true, force: true });
+
+    expect(eq.ok).toBe(true);
+    if (!eq.ok) return;
+    // Fixture precondition: the row count and the measured count DISAGREE, so
+    // this test can actually tell the two arithmetics apart.
+    expect(eq.value.data.totalQueues).toBe(4);
+    expect(eq.value.data.unknownMemberCountQueues).toBe(3);
+    expect(eq.value.data.confirmedEmptyQueues).toBe(1);
+
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const unassigned = r.value.data.categories.unassignedGrants;
+    // BITE: the old `eq.totalQueues + eq.totalGroups` produced 4 here.
+    expect(unassigned.rawCount).toBe(1);
+    expect(unassigned.details.emptyQueuesCount).toBe(1);
+    // The 3 unmeasured containers are not silently dropped — they are reported
+    // as the honest signal beside the number that excludes them.
+    expect(unassigned.details.unknownMembershipQueuesCount).toBe(3);
   });
 });

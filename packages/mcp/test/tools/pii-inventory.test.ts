@@ -15,6 +15,7 @@ import {
   openGraph,
   type GraphStore,
 } from '@sf-intelligence/graph';
+import { detectPiiClassificationWithReason } from '@sf-intelligence/patterns';
 
 import type { Context } from '../../src/server.js';
 import {
@@ -825,5 +826,311 @@ describe('piiInventoryHandler — object scope existence (honesty)', () => {
     expect('appliedScope' in r.value.data).toBe(false);
     expect(r.value.data.summary.total).toBe(15);
     expect(r.value.data.fields.length).toBe(15);
+  });
+});
+
+// =============================================================================
+// PII-INVENTORY-PUBLISHES-A-HEURISTIC-VERDICT-AS-A-CHECKED-ONE.
+//
+// The recognizer reads a field's API name, declared data type and description —
+// nothing else. A field it cannot place classifies `public` / `unknown`, an
+// UNMATCHED DEFAULT that reads, in the emitted row, exactly like a bucket that
+// was checked and found clean.
+//
+// The default (`format: 'json'`) response used to disclose none of that: its
+// keys were `[fields, summary, limit, offset, truncated, ...]` and the one
+// sentence the product owns about its own method rode ONLY on the non-default
+// csv header. So the encoding a host LLM actually calls was the one with no
+// caveat, while `summary.byCategory` published a `0` for whole regulated
+// categories. These cases pin the disclosure to EVERY response, both encodings,
+// gap or no gap.
+// =============================================================================
+
+describe('pii_inventory — the honesty disclosure rides on every response, not just csv', () => {
+  it('the DEFAULT json response carries boundaries, trust and a prose disclosure', async () => {
+    const result = await piiInventoryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(Array.isArray(data.boundaries)).toBe(true);
+    expect(data.boundaries.length).toBeGreaterThan(0);
+    expect(data.boundaries.join(' ')).toMatch(/heuristic/i);
+    expect(typeof data.disclosure).toBe('string');
+    expect(data.disclosure).toMatch(/heuristic/i);
+    expect(data.trust).toBeDefined();
+  });
+
+  it('names `public` / `unknown` as the UNMATCHED DEFAULT, never a checked negative', async () => {
+    const result = await piiInventoryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const all = result.value.data.boundaries.join(' ');
+    expect(all).toMatch(/unmatched default/i);
+    expect(all).toMatch(/never that the field was verified/i);
+  });
+
+  it('NEVER certifies completeness with an empty limitations list', async () => {
+    const result = await piiInventoryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const trust = result.value.data.trust;
+    expect(trust.completeness.status).not.toBe('complete');
+    expect(trust.limitations.length).toBeGreaterThan(0);
+    // The classification that selects every row is heuristic, so the whole
+    // answer is — a `declared` confidence here would be the certification again.
+    expect(trust.confidence).toBe('heuristic');
+  });
+
+  it('discloses a zero-count bucket as an UNMATCHED-TOKEN zero, by name', async () => {
+    // The seed carries no protected-class field, so that bucket is 0 — the same
+    // shape the real-org report published for a whole regulated category.
+    const result = await piiInventoryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.byCategory['protected-class']).toBe(0);
+    const all = result.value.data.boundaries.join(' ');
+    expect(all).toMatch(/unmatched-token zero/i);
+    expect(all).toMatch(/protected-class/);
+  });
+
+  it('an EMPTY filtered sweep names the filter and calls the zero unmatched-token', async () => {
+    // The real-org shape this reproduces: a category sweep that returns
+    // `{total: 0}` with an all-zero summary and nothing marking the zero as a
+    // heuristic default rather than a checked negative.
+    const result = await piiInventoryHandler(ctx, {
+      classification: 'sensitive',
+      category: 'identifier',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.total).toBe(0);
+    const zero = result.value.data.boundaries.find((b) =>
+      b.startsWith('UNMATCHED-TOKEN ZERO'),
+    );
+    expect(zero).toBeDefined();
+    expect(zero).toContain('classification "sensitive"');
+    expect(zero).toContain('category "identifier"');
+    expect(zero).toMatch(/matched 0 fields/);
+  });
+
+  it('never names the reserved `unknown` CLASSIFICATION as a blind-spot zero', async () => {
+    // The recognizer reserves `classification: "unknown"` and never emits it,
+    // so its zero is structural. Naming it would be a manufactured blind spot —
+    // crying wolf next to the real ones and training a reader to skim past.
+    const result = await piiInventoryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.byClassification.unknown).toBe(0);
+    const zero =
+      result.value.data.boundaries.find((b) =>
+        b.startsWith('UNMATCHED-TOKEN ZERO'),
+      ) ?? '';
+    expect(zero).not.toContain('classification "unknown"');
+    // The category `unknown` bucket is populated here, so it is not listed
+    // either — but the one bucket that IS an unmatched zero must be.
+    expect(zero).toContain('category "protected-class"');
+  });
+
+  it('a filtered call says its summary counts the FILTERED set, not the org', async () => {
+    const result = await piiInventoryHandler(ctx, { classification: 'pii' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.boundaries.join(' ')).toMatch(
+      /filter was applied/i,
+    );
+  });
+
+  // The tool's own contract says EncryptedText "ALWAYS classifies as sensitive".
+  // The recognizer classifies it `pii`. A `classification: 'sensitive'` sweep —
+  // the natural "find every encrypted field" query — therefore returns NONE of
+  // them, and nothing in the response said so.
+  it('a sensitive-only sweep excludes EncryptedText fields AND the response says so', async () => {
+    const result = await piiInventoryHandler(ctx, {
+      classification: 'sensitive',
+      limit: 500,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The behaviour itself, pinned: no EncryptedText row is in the bucket.
+    expect(
+      result.value.data.fields.filter((f) => f.type === 'EncryptedText'),
+    ).toEqual([]);
+    const all = result.value.data.boundaries.join(' ');
+    expect(all).toMatch(/EncryptedText/);
+    expect(all).toMatch(/does NOT classify `sensitive`|not.*`sensitive`/);
+  });
+
+  it('the csv header states the EncryptedText rule the recognizer actually implements', async () => {
+    const result = await piiInventoryHandler(ctx, { format: 'csv' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const csv = result.value.data.csv ?? '';
+    // The old header asserted the opposite of the code.
+    expect(csv).not.toMatch(/EncryptedText always classifies sensitive/);
+  });
+
+  it('the csv disclosures are DERIVED from the json boundaries (no second copy to drift)', async () => {
+    const jsonResult = await piiInventoryHandler(ctx, {});
+    const csvResult = await piiInventoryHandler(ctx, { format: 'csv' });
+    expect(jsonResult.ok && csvResult.ok).toBe(true);
+    if (!jsonResult.ok || !csvResult.ok) return;
+    const csv = csvResult.value.data.csv ?? '';
+    for (const boundary of jsonResult.value.data.boundaries) {
+      expect(csv).toContain(`# ${boundary}`);
+    }
+  });
+});
+
+// =============================================================================
+// The literal-token blind spot, pinned as a DRIFT TEST.
+//
+// The name match USED to be a substring test over the API name with its
+// separators intact, so a multi-word concept only fired when the name spelled
+// it as ONE token, and two fields naming the same concept on the same object
+// landed in different categories. That is now FIXED in the recognizer
+// (`@sf-intelligence/patterns` `pii-detection.ts`): the token is also tested
+// against the name's word segments joined, accepted only where the match STARTS
+// on a word boundary. These cases pin BOTH directions — the separator-spelled
+// concept is caught, and a token that merely straddles two abutting words
+// (`Class_Number__c` -> "classnumber" contains "ssn") is still not — plus the
+// response-level rule that outlived the fix: the boundaries must no longer
+// claim a limitation that has been repaired.
+// =============================================================================
+
+describe('pii_inventory — separator-spelled concepts, and the boundary that had to go', () => {
+  const ONE_TOKEN = 'CustomField:Obj_A__c.Birthdate__c';
+  const SEPARATED = 'CustomField:Obj_A__c.Birth_Date__c';
+  // Squashes to "classnumber", which CONTAINS the `ssn` token. It must not
+  // become an identifier: the boundary-aligned match is the only thing
+  // stopping it, and an unguarded squash would publish it as an SSN.
+  const STRADDLE = 'CustomField:Obj_A__c.Class_Number__c';
+  let dir: string;
+  let store2: GraphStore;
+  let ctx2: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pii-tokens-'));
+    const opened = await openGraph(join(dir, 'tokens.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store2 = opened.value;
+    const imported = await importExtractionResults(store2, [
+      {
+        nodes: [
+          makeNode({
+            id: 'CustomObject:Obj_A__c',
+            type: 'CustomObject',
+            apiName: 'Obj_A__c',
+          }),
+          makeNode({
+            id: ONE_TOKEN,
+            apiName: 'Birthdate__c',
+            parentId: 'CustomObject:Obj_A__c',
+            properties: { dataType: 'Date' },
+          }),
+          makeNode({
+            id: SEPARATED,
+            apiName: 'Birth_Date__c',
+            parentId: 'CustomObject:Obj_A__c',
+            properties: {
+              dataType: 'Date',
+              description: "Date of this individual's birth",
+            },
+          }),
+          makeNode({
+            id: STRADDLE,
+            apiName: 'Class_Number__c',
+            parentId: 'CustomObject:Obj_A__c',
+            properties: { dataType: 'Number' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(`seed failed: ${imported.error.message}`);
+    ctx2 = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store2 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store2);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports exactly what the recognizer says for BOTH spellings — no local override', async () => {
+    // DELIBERATELY DERIVED, not pinned to a literal verdict.
+    //
+    // The separator fix lives in `@sf-intelligence/patterns` src; this package
+    // imports that package's BUILT `dist/`, which this branch does not rebuild
+    // (concurrent `tsc --build` corrupts the shared dist, so agents here never
+    // build). Pinning `pii`/`identifier` for the separated spelling would
+    // therefore assert the state of a build artefact rather than of the code,
+    // and would flip red or green depending on who built last. The flip itself
+    // is pinned where it runs against source:
+    // `packages/patterns/test/pii-detection.test.ts` ->
+    // "separator-spelled multi-word concepts".
+    //
+    // What is this TOOL's to guarantee, and what this case bites on, is that it
+    // publishes the recognizer's verdict unaltered — it holds no second copy of
+    // the classification rules that could drift from them.
+    const result = await piiInventoryHandler(ctx2, { limit: 500 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.fields.map((f) => [f.id, f]));
+    for (const [id, apiName] of [
+      [ONE_TOKEN, 'Birthdate__c'],
+      [SEPARATED, 'Birth_Date__c'],
+    ] as const) {
+      const expected = detectPiiClassificationWithReason({
+        id,
+        type: 'CustomField',
+        apiName,
+        label: apiName,
+        parentId: 'CustomObject:Obj_A__c',
+        sourcePath: `objects/Obj_A__c/fields/${apiName}.field-meta.xml`,
+        lastModifiedDate: null,
+        lastModifiedBy: null,
+        apiVersion: null,
+        properties:
+          id === SEPARATED
+            ? { dataType: 'Date', description: "Date of this individual's birth" }
+            : { dataType: 'Date' },
+      });
+      expect(byId.get(id)?.classification, apiName).toBe(
+        expected.piiClassification,
+      );
+      expect(byId.get(id)?.category, apiName).toBe(expected.piiCategory);
+      expect(byId.get(id)?.reason, apiName).toBe(expected.reason);
+    }
+  });
+
+  it('does not read an identifier out of two words that merely abut', async () => {
+    const result = await piiInventoryHandler(ctx2, { limit: 500 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.fields.map((f) => [f.id, f]));
+    const straddle = byId.get(STRADDLE);
+    expect(straddle?.category, straddle?.reason).not.toBe('identifier');
+    expect(straddle?.classification, straddle?.reason).toBe('public');
+  });
+
+  it('no longer publishes the separator-sensitivity boundary it used to', async () => {
+    // A boundary describing a repaired limitation is the same stale-prose
+    // defect as a csv header asserting the opposite of the code. The
+    // replacement names the limitation that SURVIVED: a finite vocabulary.
+    const result = await piiInventoryHandler(ctx2, { limit: 500 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const prose = result.value.data.boundaries.join(' ');
+    expect(prose).not.toMatch(/separators intact|spells it as one token/i);
+    expect(prose).toMatch(/FIXED vocabulary of concept tokens/);
+    // And the csv header, which is derived from the same array, agrees.
+    const csv = await piiInventoryHandler(ctx2, { limit: 500, format: 'csv' });
+    expect(csv.ok).toBe(true);
+    if (!csv.ok) return;
+    const header = (csv.value.data.csv ?? '')
+      .split('\n')
+      .filter((l) => l.startsWith('#'))
+      .join(' ');
+    expect(header).not.toMatch(/separators intact/i);
+    expect(header).toMatch(/FIXED vocabulary of concept tokens/);
   });
 });

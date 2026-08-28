@@ -31,22 +31,37 @@
  * usage edges and >0 incoming `grantedBy` edges, surfaces its granters in a
  * SEPARATE `grantedBy` section so the grant surface stays answerable.
  */
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import type { ComponentId, Edge, McpError, McpResponse, Node } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, searchNodes, type GraphStore } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { NOT_USAGE_EDGE_TYPES } from './apex-reachability.js';
 import {
   buildEmptyTraversalCoverageCaveat,
   type CoverageCaveat,
   GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
 } from './coverage-trust.js';
+import {
+  describeSupplementalFlowWriterScanBoundary,
+  scanSupplementalFlowFieldWriters,
+  type SupplementalFlowFieldWriter,
+  type SupplementalFlowWriterScanTruncationCause,
+} from './flow-field-writers-scan.js';
 import { grepVaultSource, searchApexSourceHandler } from './search-apex-source.js';
 
-/** Incoming edge types that are NOT usage — access grants + structural parentage. */
-const NON_USAGE_EDGE_TYPES: ReadonlySet<string> = new Set(['grantedBy', 'parentOf']);
+/**
+ * Incoming edge types that are NOT usage — access grants + structural parentage.
+ * R6: DERIVED from apex-reachability's canonical `NOT_USAGE_EDGE_TYPES` rather
+ * than re-typed, so this tool and `object_360` cannot drift apart on what
+ * counts as a use.
+ */
+const NON_USAGE_EDGE_TYPES: ReadonlySet<string> = new Set(NOT_USAGE_EDGE_TYPES);
 
 /** Families whose graph usage tier is weak, so the grep supplement matters most. */
 const GREP_RELIANT_PREFIXES: ReadonlySet<string> = new Set([
@@ -202,8 +217,129 @@ export interface GrantedBySection {
   readonly granters: readonly { readonly id: ComponentId; readonly type: string }[];
 }
 
+/**
+ * FCU-FLOW-FIELD-WRITERS-UNCONSULTED — the third evidence tier, and the only
+ * one that exists because the graph CANNOT carry it.
+ *
+ * A Flow that writes a field through an SObject VARIABLE
+ * (`<assignToReference>Var.Field__c</assignToReference>`) or through a
+ * `<recordCreates>` / `<recordUpdates>` `<inputAssignments>` block mints NO
+ * `writesTo` edge, so the graph tier reports zero referrers; and the grep tier
+ * searches for the QUALIFIED `Object.Field` string, which Flow XML never
+ * writes. Measured on a real vault, this tool answered `graphReferrers: []`,
+ * `hasStaticEvidence: false`, `grepMatchCount: 0` and a `coverageCaveat`
+ * naming two UN-RETRIEVED analytics families as THE reason the empty could be
+ * false — while `safe_to_delete_field` on the identical id returned `blocking`
+ * on an ACTIVE Flow, from a family the vault had retrieved COMPLETELY. The
+ * caveat steered the reader at the one place the answer was not hiding.
+ *
+ * So this tool now runs the SAME supplemental source scan its siblings run
+ * (`flow-field-writers-scan`, shared with `safe_to_delete_field`, `field_360`
+ * and `why_field_changed`) rather than growing a fourth private copy of it.
+ *
+ * Present ONLY when the tier actually ran — a `CustomField:Object.Field`
+ * target whose graph usage tier came back EMPTY, which is the shape where this
+ * plane decides the answer. That gate is NOT narrow: on a real production vault
+ * 1,646 CustomField nodes have an empty graph usage tier, and each such call
+ * pays a full Flow source walk (275 files on that vault) plus one extra source
+ * read per `inputAssignments` candidate for the object re-derivation below.
+ * Its absence is reported in a TYPED field a machine cannot skip:
+ * `summary.supplementalFlowWriterCount` is `null` exactly when this section is
+ * absent OR the scan could not prove its zero.
+ */
+export interface SupplementalFlowWritersSection {
+  readonly tier: 'source-scan';
+  /**
+   * OBJECT-CONFIRMED writers only — every row here was resolved to THIS field's
+   * object (an `assignToReference` through an SObject variable of that type, or
+   * an `inputAssignments` inside a DML whose `<object>` / `<inputReference>`
+   * resolves to it). Rows the shared scan matched on the FIELD NAME ALONE are
+   * NOT here: a resolved but DIFFERENT object is dropped outright, and an
+   * unresolvable one goes to {@link objectUnverified}. Capped at
+   * `GRAPH_REFERRER_SAMPLE` rows — see {@link sampleTruncated}.
+   */
+  readonly writers: readonly {
+    readonly flowId: ComponentId;
+    readonly apiName: string;
+    readonly mechanism: SupplementalFlowFieldWriter['mechanism'];
+  }[];
+  /**
+   * ROW count, not Flow count — the scan emits one row per matching
+   * `<assignToReference>` / `<inputAssignments>` occurrence, so a Flow that
+   * writes the field from four branches contributes four. Measured on a real
+   * vault: 8 rows from 2 distinct Flows, a 4x over-count if read as "8 flows
+   * write this". This is the same edge-count-reads-as-component-count trap
+   * `graphReferrers` already carries `distinctReferrers` for; quote
+   * {@link distinctWriters} to a human.
+   */
+  readonly count: number;
+  /** DISTINCT writing Flows. Always `<= count`. The human-facing number. */
+  readonly distinctWriters: number;
+  /** Flow source files actually READ (N in the "N of M" disclosure). */
+  readonly scannedFlows: number;
+  /** Flow nodes in the vault (M). */
+  readonly totalFlows: number;
+  /**
+   * True when the writer set is NOT proven — the walk was capped, the graph
+   * query failed, or a Flow source file could not be opened. An empty
+   * `writers` under `truncated: true` is UNCHECKED, never "none".
+   */
+  readonly truncated: boolean;
+  /** Which axis fired; `'none'` exactly when {@link truncated} is false. */
+  readonly truncationCause: SupplementalFlowWriterScanTruncationCause;
+  /**
+   * True when either writer list was cut to the `GRAPH_REFERRER_SAMPLE` row
+   * cap. Folded into the payload-level `truncated` exactly as the graph tier's
+   * own sample cap is, so a caller reading one boolean is never told the answer
+   * is complete while a list underneath it is short.
+   */
+  readonly sampleTruncated: boolean;
+  /**
+   * LEADS, NOT EVIDENCE. Flows where the field NAME appears in a
+   * `<recordCreates>`/`<recordUpdates>` `<inputAssignments>` block whose own
+   * object could NOT be resolved from the source, so it is unknown whether the
+   * write lands on THIS object or on a same-named field elsewhere. These never
+   * set `hasStaticEvidence` and never suppress `coverageCaveat`; confirm by
+   * reading the Flow. ALWAYS present — a `count` of 0 is a checked zero, and
+   * omitting the key would make "none to report" indistinguishable from "this
+   * distinction was never drawn".
+   */
+  readonly objectUnverified: {
+    readonly writers: readonly {
+      readonly flowId: ComponentId;
+      readonly apiName: string;
+      readonly mechanism: SupplementalFlowFieldWriter['mechanism'];
+    }[];
+    /** ROW count of unresolved-object name matches. */
+    readonly count: number;
+    /** DISTINCT Flows behind {@link count}. */
+    readonly distinctWriters: number;
+  };
+  /**
+   * Rows the shared scan reported that this tool DROPPED because the enclosing
+   * DML resolved to a DIFFERENT object — a same-named field on another object,
+   * not a reference to this one. Reported as a number so the discrepancy
+   * between this tool and `sfi.safe_to_delete_field` (which does not scope the
+   * match) is visible rather than mysterious.
+   */
+  readonly otherObjectMatchesDropped: number;
+}
+
 export interface FindComponentUsagesOutput {
-  readonly target: { readonly componentId: ComponentId; readonly type: string; readonly apiName: string; readonly retrieved: boolean };
+  readonly target: {
+    readonly componentId: ComponentId;
+    readonly type: string;
+    readonly apiName: string;
+    readonly retrieved: boolean;
+    /**
+     * The id the CALLER passed when it differed from the vault's spelling only
+     * by CASE, else `null`. `componentId` above is always the vault's EXACT
+     * casing — never echo the caller's, or the response asserts a component id
+     * that does not exist. Always present (never `undefined`) so a host cannot
+     * read "no correction" and "field not emitted" as the same thing.
+     */
+    readonly resolvedFrom: string | null;
+  };
   readonly graphReferrers: readonly ReferrerGroup[];
   readonly grepSupplement: {
     readonly tier: 'text-match';
@@ -238,6 +374,8 @@ export interface FindComponentUsagesOutput {
    * normal usage answer is byte-identical to before.
    */
   readonly grantedBy?: GrantedBySection;
+  /** See {@link SupplementalFlowWritersSection}. Absent when the tier did not run. */
+  readonly supplementalFlowWriters?: SupplementalFlowWritersSection;
   readonly summary: {
     /**
      * Total incoming USAGE **edges** — NOT the number of components that use
@@ -249,6 +387,26 @@ export interface FindComponentUsagesOutput {
     /** DISTINCT referring components across all types — the human-facing number. */
     readonly distinctReferrerCount: number;
     readonly grepMatchCount: number;
+    /**
+     * DISTINCT Flows found writing this field by the supplemental source scan
+     * (see {@link SupplementalFlowWritersSection}) — the component count, not
+     * the row count; `null` when that plane was
+     * NOT CHECKED — the tier did not apply (non-`CustomField` target, or the
+     * graph tier already answered), or it ran but could not prove its zero.
+     * `null` is the typed absence marker: a bare `0` here would collapse
+     * "scanned every Flow, found none" into "never looked", which is the
+     * defect this field exists to prevent.
+     */
+    readonly supplementalFlowWriterCount: number | null;
+    /**
+     * DISTINCT Flows in the object-UNVERIFIED bucket — a name-only
+     * `<inputAssignments>` match whose enclosing DML object could not be
+     * resolved. These are LEADS, never evidence: they are excluded from
+     * {@link supplementalFlowWriterCount} and from `hasStaticEvidence`. `null`
+     * exactly when {@link supplementalFlowWriterCount} is `null` (the plane was
+     * NOT CHECKED), so the two absence markers cannot drift apart.
+     */
+    readonly supplementalFlowWriterUnverifiedCount: number | null;
     readonly referrerTypes: readonly string[];
     readonly hasStaticEvidence: boolean;
   };
@@ -272,6 +430,264 @@ const typeOf = (id: string): string => {
 const apiNameOf = (id: string): string => {
   const i = id.indexOf(':');
   return i > 0 ? id.slice(i + 1) : id;
+};
+
+/**
+ * Ceiling on the case-variant probe. The probe is an indexed ILIKE that runs
+ * ONLY after the exactly-cased id has already missed, so the cost is paid once,
+ * on the path that was about to fail anyway. 100 is `searchNodes`' own maximum
+ * and is far above any real fold-collision count: `searchNodes` scores an
+ * ILIKE prefix hit at 2.8 and breaks ties by `length(api_name) ASC`, so a name
+ * that folds EQUAL to the query is the shortest possible prefix match and sorts
+ * to the front of the first page.
+ */
+const CASE_VARIANT_LIMIT = 100;
+
+/** Outcome of the case-variant probe. */
+interface CaseVariantProbe {
+  /** Vault ids that fold to the requested id, sorted. Usually 0 or 1. */
+  readonly variants: readonly string[];
+  /**
+   * True when the probe found NO variant AND its bounded name search came back
+   * FULL — a variant past that window cannot be ruled out. The refusal must say
+   * "not found within a bounded probe", never "there is no case variant": an
+   * unchecked zero wearing a checked zero's clothes is the defect this whole
+   * file is being repaired for.
+   */
+  readonly saturated: boolean;
+}
+
+/**
+ * Vault ids that equal `componentId` IGNORING CASE — in BOTH halves.
+ *
+ * FCU-WRONG-CASE-ID-READS-AS-ABSENT: Salesforce api names are case-insensitive
+ * — in SOQL, in a formula and in the Setup UI — so a caller who types the
+ * lower-case form of a real component is not naming a different component. This
+ * tool is the universal "where is X used?" dispatcher, so it receives whatever
+ * string the user typed (a name read off a spreadsheet, say). Measured on a
+ * real vault, the exactly-cased id returned a full answer while the SAME id
+ * lower-cased returned a `component-not-found` whose kind, message template and
+ * payload size were IDENTICAL to the one a fabricated one-character typo
+ * produced — so a host could not tell "wrong case of something real" from "does
+ * not exist", and the natural recovery is to report an ACTIVE component absent
+ * from the org.
+ *
+ * The search token is the LAST dotted segment of the api-name half, NOT the
+ * half itself, because `nodes.api_name` is the BARE leaf for every child-scoped
+ * family: a `CustomField:Object.Field__c` node stores `api_name` = `Field__c`
+ * (the object lives in the id and the parent link), so searching the qualified
+ * `Object.Field__c` string matches NOTHING — verified against a real vault,
+ * where it silently made every field, record type, validation rule and list
+ * view immune to this repair. The full id is what the filter compares.
+ *
+ * The list is returned rather than a decision because two vault ids that fold
+ * to the same name are TWO components: case-insensitive RESOLUTION must never
+ * become case-insensitive IDENTITY. See {@link caseAmbiguityMessage}.
+ *
+ * Mirrors `input-aliases.ts` `objectIdCaseVariants`, which solved this for the
+ * object-scoped surface; that helper is `CustomObject`-only, this one is
+ * type-parametric because this tool dispatches over every canonical type.
+ */
+const idCaseVariants = async (
+  graph: GraphStore,
+  componentId: string,
+): Promise<Result<CaseVariantProbe, McpError>> => {
+  const apiName = apiNameOf(componentId);
+  const dot = apiName.lastIndexOf('.');
+  const leaf = dot === -1 ? apiName : apiName.slice(dot + 1);
+  if (leaf.length === 0) return ok({ variants: [], saturated: false });
+  // No `types` narrowing: the caller's TYPE PREFIX may itself be mis-cased
+  // (`customfield:` for `CustomField:`), and a SQL `type IN (?)` filter is
+  // case-SENSITIVE, so narrowing there would re-introduce the very miss this
+  // probe exists to catch. The whole id is folded in the filter below instead,
+  // which keeps the fold from ever crossing a type boundary.
+  const hits = await searchNodes(graph, leaf, { limit: CASE_VARIANT_LIMIT });
+  if (!hits.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${hits.error.message}` });
+  }
+  const folded = componentId.toLowerCase();
+  const variants = hits.value
+    .map((h) => h.id as string)
+    .filter((id) => id.toLowerCase() === folded)
+    .sort();
+  return ok({
+    variants,
+    saturated: variants.length === 0 && hits.value.length >= CASE_VARIANT_LIMIT,
+  });
+};
+
+/**
+ * Verbatim refusal when two vault ids differ ONLY by case. Picking one silently
+ * is how a reader ends up holding an answer about the other component.
+ */
+const caseAmbiguityMessage = (componentId: string, ids: readonly string[]): string =>
+  `\`${componentId}\` matches ${ids.length} components in this vault that differ only by CASE ` +
+  `(${ids.join(', ')}). Salesforce api names are case-insensitive, so nothing here can pick ` +
+  'between them — pass the exact `componentId` you mean. No usage answer was computed.';
+
+/**
+ * Split a `CustomField` api name into its object and field halves, or null when
+ * it is not the `Object.Field` shape the supplemental Flow writer scan needs.
+ */
+const splitFieldApiName = (
+  apiName: string,
+): { readonly object: string; readonly field: string } | null => {
+  const dot = apiName.indexOf('.');
+  if (dot <= 0 || dot === apiName.length - 1) return null;
+  return { object: apiName.slice(0, dot), field: apiName.slice(dot + 1) };
+};
+
+/**
+ * Objects whose CUSTOM fields are ONE physical field: `Activity` is the
+ * abstract parent and `Task` / `Event` share its custom field set, so a Flow
+ * that writes `Task.Foo__c` really does write `CustomField:Activity.Foo__c`.
+ * The graph importer already re-points polymorphic Activity references this way
+ * (see `sfi.safe_to_delete_field`'s polymorphic-attribution boundary); the
+ * object-scope check below must not undo that by demanding a literal match.
+ */
+const ACTIVITY_POLYMORPHIC_OBJECTS: ReadonlySet<string> = new Set(['activity', 'task', 'event']);
+
+/** Salesforce object api names are case-insensitive; Activity/Task/Event alias. */
+const sameObjectScope = (a: string, b: string): boolean => {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return (
+    x === y || (ACTIVITY_POLYMORPHIC_OBJECTS.has(x) && ACTIVITY_POLYMORPHIC_OBJECTS.has(y))
+  );
+};
+
+/** `<variables>` blocks in a Flow, as SObject variable name → objectType. */
+const flowSObjectVariableTypes = (xml: string): ReadonlyMap<string, string> => {
+  const out = new Map<string, string>();
+  const block = /<variables>([\s\S]*?)<\/variables>/g;
+  let m: RegExpExecArray | null;
+  while ((m = block.exec(xml)) !== null) {
+    const b = m[1] ?? '';
+    const name = /<name>([^<]+)<\/name>/.exec(b)?.[1];
+    const dataType = /<dataType>([^<]+)<\/dataType>/.exec(b)?.[1];
+    const objectType = /<objectType>([^<]+)<\/objectType>/.exec(b)?.[1];
+    if (name !== undefined && dataType === 'SObject' && objectType !== undefined) {
+      out.set(name, objectType);
+    }
+  }
+  return out;
+};
+
+/** The object a record-triggered Flow's `$Record` refers to, or null. */
+const flowTriggeringObject = (xml: string): string | null => {
+  const start = /<start>[\s\S]*?<\/start>/.exec(xml)?.[0];
+  if (start === undefined) return null;
+  return /<object>([^<]+)<\/object>/.exec(start)?.[1] ?? null;
+};
+
+/**
+ * Whether an `inputAssignments` writer row really writes THIS object's field.
+ *
+ * - `scoped`       — some `<recordCreates>`/`<recordUpdates>` that assigns the
+ *                    field is resolved to `objectApiName`.
+ * - `other-object` — every such DML resolved, and to a DIFFERENT object.
+ * - `unresolved`   — at least one such DML's object could not be resolved.
+ */
+type InputAssignmentsObjectScope = 'scoped' | 'other-object' | 'unresolved';
+
+/**
+ * FCU-INPUTASSIGNMENTS-IS-OBJECT-BLIND.
+ *
+ * `flow-field-writers-scan`'s `inputAssignments` mechanism matches a bare
+ * `<field>NAME</field>` inside ANY `<recordCreates>` / `<recordUpdates>`
+ * WITHOUT looking at the DML's own `<object>`. The field NAME alone is not an
+ * identity: `Name`, `OwnerId`, `Status`, `Description` and `ParentId` exist on
+ * nearly every object, and a custom leaf is routinely defined on two. Measured
+ * on a real vault, `CustomField:Contract.Name` collected TEN "writers", the
+ * first of which contains the string `Contract` zero times (its DML objects are
+ * unrelated), and `CustomField:Case.IsVisibleInSelfService` collected a Flow
+ * that writes that field on a Task.
+ *
+ * In `sfi.safe_to_delete_field` that over-match is CONSERVATIVE — a phantom
+ * writer yields `blocking`, i.e. "do not delete". Here it points the other way:
+ * it would flip `hasStaticEvidence` false→true and DELETE the empty-result
+ * coverage caveat, manufacturing a confident "yes, these Flows use it" out of a
+ * name collision. So this tool re-derives the enclosing DML's object before it
+ * lets an `inputAssignments` row count as evidence.
+ *
+ * The scoping belongs in `flow-field-writers-scan.ts` itself, where all four
+ * callers would inherit it — that module is shared and frozen for this release,
+ * so the predicate lives here and the shared-module edit is reported upward.
+ * `assignToReference` rows are NOT re-checked: the shared scan already resolves
+ * those through the SObject variable's declared `objectType`.
+ *
+ * Exported for unit tests: the resolution ladder (`<object>` → `$Record` via
+ * `<start>` → an SObject `<variables>` entry → unresolved) is the invariant.
+ */
+/**
+ * A Flow's deployed source XML, or `null` when it cannot be read (no node, no
+ * `sourcePath` on record, or nothing readable at that path). `null` must never
+ * be treated as "checked and clean" — the caller routes it to the
+ * object-UNVERIFIED bucket, not to the confirmed one.
+ */
+const readFlowSource = async (ctx: Context, flowId: ComponentId): Promise<string | null> => {
+  const node = await getNodeById(ctx.graph, flowId);
+  if (!node.ok || node.value === null) return null;
+  const sourcePath = node.value.sourcePath;
+  if (typeof sourcePath !== 'string' || sourcePath.length === 0) return null;
+  try {
+    return await readFile(join(ctx.vaultRoot, sourcePath), 'utf-8');
+  } catch {
+    return null;
+  }
+};
+
+export const classifyInputAssignmentsObjectScope = (
+  xml: string,
+  objectApiName: string,
+  fieldApiName: string,
+): InputAssignmentsObjectScope => {
+  const escaped = fieldApiName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fieldTag = new RegExp(`<field>${escaped}</field>`);
+  const sobjectVars = flowSObjectVariableTypes(xml);
+  const triggering = flowTriggeringObject(xml);
+  let sawUnresolved = false;
+  let sawAssigning = false;
+  for (const tag of ['recordCreates', 'recordUpdates'] as const) {
+    const dmlPattern = new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g');
+    let dml: RegExpExecArray | null;
+    while ((dml = dmlPattern.exec(xml)) !== null) {
+      const blk = dml[0];
+      let assignsField = false;
+      const iaPattern = /<inputAssignments>[\s\S]*?<\/inputAssignments>/g;
+      let ia: RegExpExecArray | null;
+      while ((ia = iaPattern.exec(blk)) !== null) {
+        if (fieldTag.test(ia[0])) {
+          assignsField = true;
+          break;
+        }
+      }
+      if (!assignsField) continue;
+      sawAssigning = true;
+      const declared = /<object>([^<]+)<\/object>/.exec(blk)?.[1];
+      if (declared !== undefined) {
+        if (sameObjectScope(declared, objectApiName)) return 'scoped';
+        continue;
+      }
+      const ref = /<inputReference>([^<]+)<\/inputReference>/.exec(blk)?.[1];
+      if (ref === undefined) {
+        sawUnresolved = true;
+        continue;
+      }
+      const head = ref.split('.')[0] ?? '';
+      const resolved = head === '$Record' ? triggering : (sobjectVars.get(head) ?? null);
+      if (resolved === null) {
+        sawUnresolved = true;
+        continue;
+      }
+      if (sameObjectScope(resolved, objectApiName)) return 'scoped';
+    }
+  }
+  if (sawUnresolved) return 'unresolved';
+  // No assigning DML at all means the shared scan and this re-derivation
+  // disagree about the source — treat that as unresolved, never as a clean
+  // "different object", so an unexplained disagreement can never certify.
+  return sawAssigning ? 'other-object' : 'unresolved';
 };
 
 /**
@@ -323,24 +739,60 @@ export const findComponentUsagesHandler = async (
   ctx: Context,
   input: FindComponentUsagesInput,
 ): Promise<Result<McpResponse<FindComponentUsagesOutput>, McpError>> => {
-  const componentId = input.componentId as ComponentId;
-  if (!componentId.includes(':')) {
+  const requestedId = input.componentId;
+  if (!requestedId.includes(':')) {
     return err({
       kind: 'invalid-query',
       message: `componentId must be a canonical id (\`Type:Name\`); got '${input.componentId}'`,
       path: 'componentId',
     });
   }
-  const targetType = typeOf(componentId);
-  const targetApiName = apiNameOf(componentId);
-
   // The node may be a phantom (referenced but not retrieved) — that is fine for a
   // usage query; we still answer from its incoming edges.
-  const nodeRes = await getNodeById(ctx.graph, componentId);
+  const nodeRes = await getNodeById(ctx.graph, requestedId as ComponentId);
   if (!nodeRes.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` });
   }
-  const node: Node | null = nodeRes.value;
+  let node: Node | null = nodeRes.value;
+
+  // FCU-WRONG-CASE-ID-READS-AS-ABSENT: the exactly-cased id missed, so before
+  // refusing, ask whether the vault spells this same api name differently.
+  // Salesforce api names are case-insensitive; a spreadsheet-cased name is not
+  // a different component. Runs ONLY on the path that was about to fail, and
+  // only for a NON-phantom miss is the id rewritten — a phantom (no node, real
+  // incoming edges) keeps its exact id because the edges are keyed by it.
+  let resolvedFrom: string | null = null;
+  let caseProbeSaturated = false;
+  let componentId = requestedId as ComponentId;
+  if (node === null) {
+    const probe = await idCaseVariants(ctx.graph, requestedId);
+    if (!probe.ok) return probe;
+    caseProbeSaturated = probe.value.saturated;
+    if (probe.value.variants.length > 1) {
+      // Case-insensitive RESOLUTION must never become case-insensitive
+      // IDENTITY — refuse by NAME rather than silently answer about one of them.
+      return err({
+        kind: 'invalid-query',
+        message: caseAmbiguityMessage(requestedId, probe.value.variants),
+        path: 'componentId',
+      });
+    }
+    const only = probe.value.variants[0];
+    if (only !== undefined) {
+      componentId = only as ComponentId;
+      resolvedFrom = requestedId;
+      const reRead = await getNodeById(ctx.graph, componentId);
+      if (!reRead.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${reRead.error.message}` });
+      }
+      node = reRead.value;
+    }
+  }
+  // Both halves come from the RESOLVED id: a mis-cased type prefix must not
+  // leak into the type-driven behaviour below (the CustomField writer scan, the
+  // CustomPermission grant section, the per-type empty notes).
+  const targetType = typeOf(componentId);
+  const targetApiName = apiNameOf(componentId);
   const retrieved = node !== null;
 
   // --- GRAPH tier: incoming usage edges (minus access + structural). ---
@@ -429,7 +881,92 @@ export const findComponentUsagesHandler = async (
     selfMatchesExcluded = before - grepMatches.length;
   }
 
-  const hasStaticEvidence = graphReferrerCount > 0 || grepMatches.length > 0;
+  // --- SUPPLEMENTAL FLOW-WRITER tier (FCU-FLOW-FIELD-WRITERS-UNCONSULTED).
+  // A Flow field write routed through an SObject variable / a recordCreates or
+  // recordUpdates `<inputAssignments>` block mints NO `writesTo` edge, and the
+  // grep tier searches the QUALIFIED `Object.Field` string that Flow XML never
+  // contains — so BOTH tiers above are structurally blind to it. Run the SAME
+  // shared scan `safe_to_delete_field` / `field_360` / `why_field_changed`
+  // already run, rather than adding a fourth private copy. Gated to the only
+  // shape where it decides the answer — a `CustomField` whose graph usage tier
+  // is EMPTY — so the full Flow source walk is paid exactly where the tool was
+  // otherwise about to narrate an unchecked absence.
+  const fieldParts = targetType === 'CustomField' ? splitFieldApiName(targetApiName) : null;
+  const runFlowWriterScan = fieldParts !== null && usageEdges.length === 0;
+  const flowWriterScan = runFlowWriterScan
+    ? await scanSupplementalFlowFieldWriters(ctx, fieldParts.object, fieldParts.field)
+    : null;
+  // FCU-INPUTASSIGNMENTS-IS-OBJECT-BLIND: the shared scan's `inputAssignments`
+  // mechanism matches a bare `<field>NAME</field>` in ANY DML without checking
+  // that DML's own object, so a same-named field on another object arrives here
+  // as a "writer". Re-derive the object for exactly those rows before letting
+  // any of them count as evidence. `assignToReference` rows are already
+  // object-resolved by the shared scan (through the SObject variable's declared
+  // `objectType`) and are taken as-is.
+  const confirmedWriters: SupplementalFlowFieldWriter[] = [];
+  const unverifiedWriters: SupplementalFlowFieldWriter[] = [];
+  let otherObjectMatchesDropped = 0;
+  if (flowWriterScan !== null && fieldParts !== null) {
+    for (const w of flowWriterScan.writers) {
+      if (w.mechanism !== 'inputAssignments') {
+        confirmedWriters.push(w);
+        continue;
+      }
+      const xml = await readFlowSource(ctx, w.componentId);
+      if (xml === null) {
+        // Source unreadable at re-derivation time — the object could not be
+        // checked, so this row is a LEAD, never confirmed evidence.
+        unverifiedWriters.push(w);
+        continue;
+      }
+      const scope = classifyInputAssignmentsObjectScope(xml, fieldParts.object, fieldParts.field);
+      if (scope === 'scoped') confirmedWriters.push(w);
+      else if (scope === 'unresolved') unverifiedWriters.push(w);
+      else otherObjectMatchesDropped += 1;
+    }
+  }
+  const distinctOf = (rows: readonly SupplementalFlowFieldWriter[]): number =>
+    new Set(rows.map((r) => r.componentId)).size;
+  const toRow = (w: SupplementalFlowFieldWriter): {
+    flowId: ComponentId;
+    apiName: string;
+    mechanism: SupplementalFlowFieldWriter['mechanism'];
+  } => ({ flowId: w.componentId, apiName: w.apiName, mechanism: w.mechanism });
+
+  let supplementalFlowWriters: SupplementalFlowWritersSection | undefined;
+  if (flowWriterScan !== null) {
+    const confirmedSample = confirmedWriters.slice(0, GRAPH_REFERRER_SAMPLE);
+    const unverifiedSample = unverifiedWriters.slice(0, GRAPH_REFERRER_SAMPLE);
+    supplementalFlowWriters = {
+      tier: 'source-scan',
+      writers: confirmedSample.map(toRow),
+      count: confirmedWriters.length,
+      distinctWriters: distinctOf(confirmedWriters),
+      scannedFlows: flowWriterScan.scannedCount,
+      totalFlows: flowWriterScan.totalCount,
+      truncated: flowWriterScan.truncated,
+      truncationCause: flowWriterScan.truncationCause,
+      sampleTruncated:
+        confirmedWriters.length > confirmedSample.length ||
+        unverifiedWriters.length > unverifiedSample.length,
+      objectUnverified: {
+        writers: unverifiedSample.map(toRow),
+        count: unverifiedWriters.length,
+        distinctWriters: distinctOf(unverifiedWriters),
+      },
+      otherObjectMatchesDropped,
+    };
+  }
+  // TYPED ABSENCE: a bare 0 would read as "scanned every Flow, found none"
+  // whether or not anything was scanned. `null` = NOT CHECKED — the tier did
+  // not apply, or it ran and could not prove its zero.
+  const supplementalFlowWriterCount =
+    flowWriterScan === null || (flowWriterScan.truncated && confirmedWriters.length === 0)
+      ? null
+      : distinctOf(confirmedWriters);
+
+  const hasStaticEvidence =
+    graphReferrerCount > 0 || grepMatches.length > 0 || confirmedWriters.length > 0;
 
   // Access-grant section (grants are NOT usage, so they never count as static
   // evidence): always present for a CustomPermission (an explicit count of 0
@@ -454,7 +991,16 @@ export const findComponentUsagesHandler = async (
   if (!retrieved && graphReferrerCount === 0 && !hasStaticEvidence && grantEdges.length === 0) {
     return err({
       kind: 'component-not-found',
-      message: `no component or referrer matches \`${componentId}\` in this vault`,
+      message:
+        `no component or referrer matches \`${componentId}\` in this vault` +
+        (caseProbeSaturated
+          ? ' — and the CASE-insensitive probe was INCONCLUSIVE: too many components ' +
+            `share this leaf name to enumerate (the probe reads at most ${CASE_VARIANT_LIMIT}), ` +
+            'so a differently-cased match cannot be ruled out. Pass the exact `componentId` ' +
+            '(`sfi.resolve` will give it).'
+          : ' — including a CASE-insensitive match on the api name, so this is NOT a casing ' +
+            'mismatch. The name may be mis-typed, or the vault may predate the component ' +
+            '(`sfi refresh`).'),
       path: componentId,
     });
   }
@@ -464,6 +1010,58 @@ export const findComponentUsagesHandler = async (
     `\`graphReferrerCount\` and each group's \`count\` are EDGE counts, not component counts: one referrer contributes one edge per relationship it has to the target (a Flow that reads, writes AND triggers on an object counts 3). ${graphReferrerCount} edge(s) here come from ${distinctReferrerCount} distinct component(s) — quote \`distinctReferrerCount\` / \`distinctReferrers\` to a human, and note the 25-row \`sample\` cap is on ROWS, so a group with multi-edge referrers shows fewer than 25 distinct components.`,
     'The grep supplement is a literal text match on the api name across Apex AND frontend bundle source — LWC, Aura, Visualforce ($Label / $Resource / @salesforce module references) — (`text-match` tier): it can OVER-match (a substring / a different component sharing the name) and UNDER-match (dynamically built references). Treat it as leads, not proof.',
   ];
+  // FCU-WRONG-CASE-ID-READS-AS-ABSENT: the answer is about a DIFFERENT id than
+  // the caller passed. Say so, and echo the vault's exact casing.
+  if (resolvedFrom !== null) {
+    boundaries.push(
+      `The requested id \`${resolvedFrom}\` does not exist in this vault with that CASING; Salesforce api names are case-insensitive, so it was resolved to the vault's exact spelling \`${componentId}\` and THAT is what this answer describes. Quote \`target.componentId\`, never the id you passed.`,
+    );
+  }
+  // A CustomField's grep query is the QUALIFIED `Object.Field__c` string, which
+  // is not how a reference is usually spelled: Apex writes `record.Field__c`,
+  // LWC writes `Object.Field__c` only inside a `@salesforce/schema` import, and
+  // Flow XML never writes it at all. So `grepMatchCount: 0` on a field is a
+  // WEAK zero, and a host quoting it next to an empty graph tier as if the two
+  // corroborated each other is reading agreement into one tier that never
+  // looked. Say which string was searched, in prose, beside the number.
+  if (targetType === 'CustomField' && grepRan && grepMatches.length === 0) {
+    boundaries.push(
+      `The grep tier searched the QUALIFIED string \`${targetApiName}\` — the form Apex (\`record.${targetApiName.slice(targetApiName.lastIndexOf('.') + 1)}\`), LWC and Flow XML mostly do NOT spell — so its 0 matches are WEAK evidence of absence, not a second independent confirmation of the empty graph tier.`,
+    );
+  }
+  // FCU-FLOW-FIELD-WRITERS-UNCONSULTED: say what the third tier did, in prose,
+  // next to the numbers — and never let the empty-result coverage caveat below
+  // read as though the un-retrieved analytics families were the ONLY way this
+  // answer could be a false empty.
+  if (supplementalFlowWriters !== undefined && flowWriterScan !== null) {
+    const u = supplementalFlowWriters.objectUnverified;
+    if (supplementalFlowWriters.count > 0) {
+      boundaries.push(
+        `${supplementalFlowWriters.distinctWriters} Flow(s) write this field through a path that mints no graph edge — an SObject-variable \`<assignToReference>\`, or a \`<recordCreates>\`/\`<recordUpdates>\` \`<inputAssignments>\` block whose own \`<object>\`/\`<inputReference>\` RESOLVES TO \`${fieldParts?.object ?? targetApiName}\` — reconstructed from Flow source by \`flow-field-writers-scan\` (the same scan \`sfi.safe_to_delete_field\` runs per field), across ${supplementalFlowWriters.count} write site(s): \`count\` is a ROW count, \`distinctWriters\` is the Flow count. This is still SOURCE PATTERN MATCHING, not an execution proof, and it does NOT partition Active automation from Obsolete/Draft Flows — use \`sfi.safe_to_delete_field\` or \`sfi.why_field_changed\` for the runnable/status split before acting.`,
+      );
+    } else if (u.count === 0 && !supplementalFlowWriters.truncated) {
+      boundaries.push(
+        `The Flow field-writer plane WAS checked for this field: \`flow-field-writers-scan\` read ${supplementalFlowWriters.scannedFlows} of ${supplementalFlowWriters.totalFlows} Flow source file(s) and found no SObject-variable \`<assignToReference>\` or object-scoped \`<inputAssignments>\` write to it. That zero is a CHECKED zero — neither the graph tier (such writes mint no \`writesTo\` edge) nor the grep tier (it searches the qualified \`Object.Field\` string, which Flow XML never contains) can see this plane on their own.`,
+      );
+    }
+    if (u.count > 0) {
+      boundaries.push(
+        `\`supplementalFlowWriters.objectUnverified\` holds ${u.count} name-only match(es) in ${u.distinctWriters} Flow(s): the shared scan matches an \`<inputAssignments>\` \`<field>\` tag on the FIELD NAME ALONE, WITHOUT checking the enclosing DML's object, so a same-named field on a DIFFERENT object produces a false writer. For these rows the enclosing \`<recordCreates>\`/\`<recordUpdates>\` object could not be resolved from source, so it is UNKNOWN whether they touch \`${fieldParts?.object ?? targetApiName}\` at all. They are LEADS: they do NOT set \`hasStaticEvidence\` and do NOT suppress \`coverageCaveat\`. Read the Flow to confirm.`,
+      );
+    }
+    if (supplementalFlowWriters.otherObjectMatchesDropped > 0) {
+      boundaries.push(
+        `${supplementalFlowWriters.otherObjectMatchesDropped} further Flow(s) assign a field named \`${fieldParts?.field ?? targetApiName}\` in a \`<recordCreates>\`/\`<recordUpdates>\` that resolves to a DIFFERENT object, and were DROPPED as same-name collisions rather than reported as writers. \`sfi.safe_to_delete_field\` does not apply this object scoping, so it may name them — there a phantom writer only makes the verdict more conservative, whereas here it would manufacture evidence.`,
+      );
+    }
+    if (supplementalFlowWriters.sampleTruncated) {
+      boundaries.push(
+        `The Flow-writer row lists are SAMPLES capped at ${GRAPH_REFERRER_SAMPLE} rows — \`count\` / \`objectUnverified.count\` are the true totals and the payload-level \`truncated\` is set.`,
+      );
+    }
+    const scanBoundary = describeSupplementalFlowWriterScanBoundary(flowWriterScan);
+    if (scanBoundary !== null) boundaries.push(scanBoundary);
+  }
   // FIND-COMPONENT-USAGES-SELF-MATCH: say plainly WHY a raw grep count and
   // the reported `grepMatchCount` differ, so "grep ran and found only its own
   // declaration" (selfMatchesExcluded > 0, matchCount possibly 0) is never
@@ -513,9 +1111,10 @@ export const findComponentUsagesHandler = async (
 
   return ok({
     data: {
-      target: { componentId, type: targetType, apiName: targetApiName, retrieved },
+      target: { componentId, type: targetType, apiName: targetApiName, retrieved, resolvedFrom },
       graphReferrers,
       ...(grantedBySection !== undefined ? { grantedBy: grantedBySection } : {}),
+      ...(supplementalFlowWriters !== undefined ? { supplementalFlowWriters } : {}),
       grepSupplement: {
         tier: 'text-match',
         ran: grepRan,
@@ -529,12 +1128,23 @@ export const findComponentUsagesHandler = async (
         graphReferrerCount,
         distinctReferrerCount,
         grepMatchCount: grepMatches.length,
+        supplementalFlowWriterCount,
+        supplementalFlowWriterUnverifiedCount:
+          supplementalFlowWriterCount === null ? null : distinctOf(unverifiedWriters),
         referrerTypes: graphReferrers.map((g) => g.referrerType),
         hasStaticEvidence,
       },
       boundaries,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
-      truncated: graphTruncated || grepTruncated,
+      // Every tier's incompleteness folds into ONE payload flag: the graph
+      // sample cap, the grep tier, the Flow-writer scan's own truncation AND
+      // its row-sample cap. A caller that reads only this boolean must never be
+      // told the answer is complete while a list underneath it is short.
+      truncated:
+        graphTruncated ||
+        grepTruncated ||
+        (flowWriterScan?.truncated ?? false) ||
+        (supplementalFlowWriters?.sampleTruncated ?? false),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

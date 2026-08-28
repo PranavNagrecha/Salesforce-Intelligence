@@ -61,6 +61,7 @@ export {
   freshnessSummary,
   getNodeById,
   getSubgraph,
+  IDENTITY_SCAN_MAX,
   isHiddenUnresolved,
   listChildren,
   listEdges,

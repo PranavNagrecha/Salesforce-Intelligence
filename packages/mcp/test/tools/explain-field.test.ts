@@ -1127,3 +1127,136 @@ describe('explainFieldHandler — componentId ↔ fieldId alias', () => {
     expect(explainFieldInputSchema.safeParse({}).success).toBe(false);
   });
 });
+
+// =============================================================================
+// WRONG-CASE-FIELD-ID-WAS-A-CONFIDENT-MISS (+ the fabricated standard-field
+// explanation that rode on it).
+//
+// Salesforce api names are CASE-INSENSITIVE; canonical component ids are not.
+// `sfi.resolve` grades a fully-lower-cased `<Object>.<Field>` string
+// `disposition: "exact"` and `sfi.object_360` states the case-insensitivity
+// rule out loud in its `resolutionNote` — while `explain_field` answered
+// `component-not-found` for the SAME field. "no CustomField with id X" reads to
+// a user as evidence about their ORG (go re-refresh), not about the resolver.
+//
+// Worse, one wrong-case shape did not merely refuse: a custom field whose `__c`
+// suffix was typed `__C` fell through a case-SENSITIVE custom-suffix test and
+// collected the standard-field explanation ("Metadata API retrieve does not
+// emit uncustomized standard fields") — a specific, technical, diagnostic-
+// sounding, FALSE causal claim about a custom field this vault holds in full.
+// =============================================================================
+describe('explainFieldHandler — wrong-case field ids (case-insensitive api names)', () => {
+  it('answers about the vault field when BOTH id segments are lower-cased', async () => {
+    const r = await explainFieldHandler(ctx, {
+      fieldId: 'CustomField:account.industry',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The canonical id is echoed, never the caller's casing (an id no vault holds).
+    expect(r.value.data.fieldId).toBe(ACCOUNT_INDUSTRY_ID);
+    expect(r.value.data.label).toBe('Industry');
+    // Typed, un-skippable: a machine consumer cannot miss that the id it asked
+    // about is not the id it was answered about.
+    expect(r.value.data.resolvedFrom).toBe('CustomField:account.industry');
+    expect(r.value.data.resolutionNote).toMatch(/case-insensitive/i);
+    expect(r.value.data.resolutionNote).toContain(ACCOUNT_INDUSTRY_ID);
+  });
+
+  it('answers about the vault field when ONLY the object segment is lower-cased', async () => {
+    const r = await explainFieldHandler(ctx, {
+      fieldId: 'CustomField:account.Industry',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.fieldId).toBe(ACCOUNT_INDUSTRY_ID);
+    expect(r.value.data.resolvedFrom).toBe('CustomField:account.Industry');
+  });
+
+  it('never fabricates a standard-field explanation for a custom field typed with a `__C` suffix', async () => {
+    const r = await explainFieldHandler(ctx, {
+      fieldId: 'CustomField:Account.Payment_Status__C',
+    });
+    // Pre-fix this was `component-not-found` carrying the FALSE claim that the
+    // id names an uncustomized standard field the Metadata API does not emit.
+    if (!r.ok) {
+      expect(r.error.message).not.toMatch(/standard-object field/);
+      expect(r.error.message).not.toMatch(/uncustomized standard fields/);
+    }
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.fieldId).toBe(INLINE_PICKLIST_FIELD_ID);
+    expect(r.value.data.resolvedFrom).toBe('CustomField:Account.Payment_Status__C');
+  });
+
+  it('an exactly-cased id carries NO correction disclosure (the note is never noise)', async () => {
+    const r = await explainFieldHandler(ctx, { fieldId: ACCOUNT_INDUSTRY_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.resolvedFrom).toBeUndefined();
+    expect(r.value.data.resolutionNote).toBeUndefined();
+  });
+
+  it('a genuinely absent id keeps its not-found wording (resolution never invents a hit)', async () => {
+    const r = await explainFieldHandler(ctx, {
+      fieldId: 'CustomField:Account.Fake_Nonexistent__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.path).toBe('CustomField:Account.Fake_Nonexistent__c');
+  });
+
+  it('REFUSES rather than picks when two vault fields differ ONLY by case', async () => {
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ef-case-'));
+    const opened = await openGraph(join(localDir, 'case.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    const imp = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          makeNode({
+            id: 'CustomObject:Obj_A__c',
+            type: 'CustomObject',
+            apiName: 'Obj_A__c',
+            label: 'Obj A',
+          }),
+          makeNode({
+            id: 'CustomField:Obj_A__c.Field_B__c',
+            apiName: 'Field_B__c',
+            label: 'Field B',
+            parentId: 'CustomObject:Obj_A__c',
+            properties: { label: 'Field B', dataType: 'Text', required: false },
+          }),
+          makeNode({
+            id: 'CustomField:Obj_A__c.FIELD_B__c',
+            apiName: 'FIELD_B__c',
+            label: 'Field B upper',
+            parentId: 'CustomObject:Obj_A__c',
+            properties: { label: 'Field B upper', dataType: 'Text', required: false },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) return;
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+    const r = await explainFieldHandler(localCtx, {
+      fieldId: 'CustomField:Obj_A__c.field_b__c',
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.kind).toBe('invalid-query');
+      expect(r.error.message).toMatch(/differ only by CASE/);
+      expect(r.error.message).toContain('CustomField:Obj_A__c.FIELD_B__c');
+      expect(r.error.message).toContain('CustomField:Obj_A__c.Field_B__c');
+    }
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+});

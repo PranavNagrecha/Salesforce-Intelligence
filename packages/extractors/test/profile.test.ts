@@ -209,6 +209,63 @@ describe('extractProfile', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+
+    // GUEST-PAGE-ACCESS: <pageAccesses> was the one access element the profile
+    // extractor walked past, so a Visualforce page a GUEST profile enables
+    // could never become a finding in sfi.guest_exposure_report — that tool
+    // shipped a permanent "extractor emits no Profile -> VisualforcePage grant
+    // edge" disclosure instead of an answer. A Visualforce page RUNS its
+    // controller Apex, so an enabled page on an internet-facing site guest
+    // profile is a real guest-reachable code surface. Same shape and the same
+    // <enabled> continue-guard as classAccesses/flowAccesses above.
+    it('emits a grantedBy edge to VisualforcePage per enabled pageAccesses block (false excluded)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Profile xmlns="http://soap.sforce.com/2006/04/metadata">
+  <userLicense>Guest User License</userLicense>
+  <pageAccesses><apexPage>SelfServiceIntake</apexPage><enabled>true</enabled></pageAccesses>
+  <pageAccesses><apexPage>Disabled_Page</apexPage><enabled>false</enabled></pageAccesses>
+  <pageAccesses><apexPage>NS__Vendor_Page</apexPage><enabled>true</enabled></pageAccesses>
+</Profile>`;
+      const { dir, path } = await writeProfileXml('Fx_PageGrants.profile-meta.xml', xml);
+      try {
+        const result = await extractProfile(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const pageEdges = result.value.edges.filter((e) => e.toId.startsWith('VisualforcePage:'));
+        // Sorted by toId with the rest of the edge list, so assert as a set.
+        expect(pageEdges.map((e) => e.toId).sort()).toEqual([
+          'VisualforcePage:NS__Vendor_Page',
+          'VisualforcePage:SelfServiceIntake',
+        ]);
+        expect(pageEdges.every((e) => e.fromId === 'Profile:Fx_PageGrants')).toBe(true);
+        expect(pageEdges.every((e) => e.edgeType === 'grantedBy')).toBe(true);
+        expect(pageEdges.every((e) => e.confidence === 'declared')).toBe(true);
+        expect(pageEdges.every((e) => e.properties['enabled'] === true)).toBe(true);
+        expect(result.value.nodes[0]?.properties['pageGrantCount']).toBe(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    // "extracted, none" must be distinguishable from "never extracted": a
+    // profile with no <pageAccesses> at all reports 0, not undefined, so a
+    // consumer reading pageGrantCount === 0 knows the walk RAN.
+    it('reports pageGrantCount 0 (not undefined) when the profile declares no pageAccesses', async () => {
+      const xml = `<?xml version="1.0"?>
+<Profile xmlns="http://soap.sforce.com/2006/04/metadata">
+  <userLicense>Salesforce</userLicense>
+</Profile>`;
+      const { dir, path } = await writeProfileXml('NoPages.profile-meta.xml', xml);
+      try {
+        const result = await extractProfile(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['pageGrantCount']).toBe(0);
+        expect(result.value.edges.some((e) => e.toId.startsWith('VisualforcePage:'))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('error cases', () => {

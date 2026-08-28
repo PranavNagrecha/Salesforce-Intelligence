@@ -240,3 +240,72 @@ describe('category + one-liner derivation', () => {
     expect(oneLiner('First sentence. Second sentence.')).toBe('First sentence.');
   });
 });
+
+/**
+ * REAL-ORG FINDING (describe/catalog lane) — CATEGORY-FILTER-FAILED-OPEN.
+ *
+ * `sfi.list_analyses` string-compared the caller's `category` against a
+ * vocabulary it had ALREADY DERIVED and never verified membership. A category
+ * that does not exist — a typo, a plausible-but-wrong word, or a REAL category
+ * in the WRONG CASE — produced `{ analyses: [], total: 0 }` with no error and
+ * no marker, which a host reads aloud as "this server has no analyses of that
+ * kind". The sibling in the SAME FILE, `describe_analysis`, already refuses an
+ * unknown NAME with `invalid-query`; the category filter failed open while the
+ * name filter failed closed.
+ */
+describe('list_analyses category is a VERIFIED filter (R4)', () => {
+  it('refuses a category that is not in the derived vocabulary instead of answering an empty catalog', async () => {
+    const r = await listAnalysesHandler(ctx, { category: 'not_a_real_category' });
+    expect(r.ok).toBe(false);
+    if (r.ok) {
+      throw new Error(
+        `expected invalid-query; got a confident answer: total=${String(r.value.data.total)} analyses=${String(r.value.data.analyses.length)}`,
+      );
+    }
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('category');
+    // The refusal must NAME the offending value and the real vocabulary.
+    expect(r.error.message).toContain('not_a_real_category');
+    expect(r.error.message).toContain('core');
+  });
+
+  it('resolves a REAL category given in the wrong CASE rather than reporting zero', async () => {
+    const lower = await listAnalysesHandler(ctx, { category: 'live', limit: 200 });
+    expect(lower.ok).toBe(true);
+    if (!lower.ok) return;
+    const upper = await listAnalysesHandler(ctx, { category: 'LIVE', limit: 200 });
+    expect(upper.ok).toBe(true);
+    if (!upper.ok) return;
+    expect(upper.value.data.total).toBe(lower.value.data.total);
+    expect(upper.value.data.total).toBeGreaterThan(0);
+    expect(upper.value.data.analyses.map((a) => a.name)).toEqual(
+      lower.value.data.analyses.map((a) => a.name),
+    );
+  });
+
+  it('echoes the canonical appliedCategory on a filtered page so it cannot be read as the whole roster', async () => {
+    const r = await listAnalysesHandler(ctx, { category: 'What-If', limit: 200 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedCategory).toBe('what-if');
+    const unfiltered = await listAnalysesHandler(ctx, { limit: 200 });
+    expect(unfiltered.ok).toBe(true);
+    if (!unfiltered.ok) return;
+    // Absent on an unfiltered call — the pre-fix shape is unchanged there.
+    expect('appliedCategory' in unfiltered.value.data).toBe(false);
+  });
+
+  it('binds a continuation cursor to the CANONICAL category, so a case-variant resume is not rejected', async () => {
+    const first = await listAnalysesHandler(ctx, { category: 'core', limit: 5 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    const resumed = await listAnalysesHandler(ctx, {
+      category: 'CORE',
+      cursor: cursor as string,
+      limit: 5,
+    });
+    expect(resumed.ok).toBe(true);
+  });
+});

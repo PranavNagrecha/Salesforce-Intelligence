@@ -22,6 +22,20 @@
  *    lastModifiedDate / lastModifiedBy / apiVersion for the enriched
  *    types."
  *
+ * **The partial-enrichment axis** — a component can carry SOME freshness
+ * axes and not others. On a vault where the Tooling API enricher has
+ * never run, every component that ships an `<apiVersion>` element in its
+ * own metadata file resolves to `apiVersion: <n>` with
+ * `lastModifiedDate: null` and `lastModifiedBy: null`. `enriched` is
+ * `true` there — that flag answers "do we know ANYTHING?", and it is
+ * pinned by contract — but the flag alone let the response certify
+ * "Freshness fields populated" over two nulls that were never checked.
+ * So the payload also carries `enrichmentState` (`complete` | `partial`
+ * | `none`) and `missingAxes` — the axes that are null because NOTHING
+ * POPULATED THEM. A machine consumer branches on `enrichmentState`; the
+ * `disclosure` prose is DERIVED from `missingAxes`, so the sentence a
+ * host reads aloud and the typed field cannot drift apart.
+ *
  * Per PLAN-v1.7.md §4 condition (1), the disclosure is fixed-form —
  * callers are NOT to paraphrase or estimate dates from prior-art
  * training data.
@@ -82,6 +96,67 @@ export const LAST_MODIFIED_ENRICHED_DISCLOSURE =
   'extractor when the type carries a `<lastModifiedDate>` element).';
 
 /**
+ * The three freshness axes this tool reports on, in the order they are
+ * named in prose. Single source for `missingAxes` and for the derived
+ * partial disclosure — a fourth axis added here is reported by both
+ * without a second edit.
+ */
+export const LAST_MODIFIED_AXES = [
+  'lastModifiedDate',
+  'lastModifiedBy',
+  'apiVersion',
+] as const;
+
+/** One of the freshness axes named in {@link LAST_MODIFIED_AXES}. */
+export type LastModifiedAxis = (typeof LAST_MODIFIED_AXES)[number];
+
+/**
+ * How much of the freshness picture this vault actually holds for the
+ * component — the typed discriminator a machine consumer branches on.
+ *
+ *   - `complete`: every axis carries a value.
+ *   - `partial`:  at least one axis carries a value AND at least one is
+ *                 null because nothing populated it. `missingAxes` names
+ *                 which. A null on a `partial` answer is UNCHECKED, not
+ *                 checked-and-empty.
+ *   - `none`:     no axis carries a value.
+ *
+ * `missingAxes` is empty ONLY on `complete`; on `partial` and `none` it
+ * is non-empty. The pair therefore cannot be read as a clean zero —
+ * `missingAxes: []` never has to stand in for "we did not look".
+ */
+export type LastModifiedEnrichmentState = 'complete' | 'partial' | 'none';
+
+/**
+ * Prose for a PARTIAL answer, DERIVED from the same `missingAxes` array
+ * the payload carries so the sentence a host reads aloud and the typed
+ * field can never disagree.
+ *
+ * This exists because the enriched disclosure was being emitted over
+ * nulls. On an un-enriched vault a component with an `<apiVersion>` in
+ * its metadata file returned `enriched: true` plus "Freshness fields
+ * populated. lastModifiedDate / lastModifiedBy reflect the Tooling API
+ * at enrichment time" — while both of those were null and the Tooling
+ * API had never been asked. That is a certified unchecked zero.
+ */
+export const lastModifiedPartialDisclosure = (
+  missingAxes: readonly LastModifiedAxis[],
+): string => {
+  const named = missingAxes.join(', ');
+  const verb = missingAxes.length === 1 ? 'is' : 'are';
+  return (
+    `PARTIAL — only some freshness axes are known for this component. ` +
+    `${named} ${verb} null because NOTHING POPULATED ${
+      missingAxes.length === 1 ? 'IT' : 'THEM'
+    }, not because the component has no value. Do not read a null axis ` +
+    `as "never modified" or "author unknown" — it is UNCHECKED. Run ` +
+    '`sfi refresh --with-tooling-api --target-org <alias>` to populate ' +
+    'the missing axes for the enriched types (ApexClass, ApexTrigger, ' +
+    'Flow, Layout, CustomField, ValidationRule).'
+  );
+};
+
+/**
  * Zod schema for the `sfi.last_modified` tool input.
  *
  *   - `componentId`: required non-empty string. The canonical
@@ -107,13 +182,22 @@ export type LastModifiedInput = z.infer<typeof lastModifiedInputSchema>;
  *   - `lastModifiedDate`: ISO 8601 timestamp or `null`.
  *   - `lastModifiedBy`: `{ id, name }` or `null`.
  *   - `apiVersion`: numeric API version or `null`.
+ *   - `enrichmentState`: `complete` | `partial` | `none` — the typed
+ *     discriminator. `enriched: true` is TRUE for both `complete` and
+ *     `partial`, so it cannot answer "is this null checked?". This can.
+ *   - `missingAxes`: the axes that are null because nothing populated
+ *     them. Empty ONLY when `enrichmentState` is `complete`.
  *   - `disclosure`: fixed-form string telling the consumer how to read
  *     the result. When `enriched: false`, the disclosure names the
- *     specific CLI command that would populate the missing fields.
+ *     specific CLI command that would populate the missing fields; on a
+ *     `partial` answer it NAMES the unchecked axes and says the nulls
+ *     are unchecked rather than certifying the fields are populated.
  */
 export interface LastModifiedOutput {
   readonly componentId: ComponentId;
   readonly enriched: boolean;
+  readonly enrichmentState: LastModifiedEnrichmentState;
+  readonly missingAxes: readonly LastModifiedAxis[];
   readonly lastModifiedDate: string | null;
   readonly lastModifiedBy: { id: string; name: string } | null;
   readonly apiVersion: number | null;
@@ -174,16 +258,38 @@ export const lastModifiedHandler = async (
   const enriched =
     lastModifiedDate !== null || lastModifiedBy !== null || apiVersion !== null;
 
+  // Which axes are null BECAUSE NOTHING POPULATED THEM. Derived from the
+  // same three values the payload reports, so the typed field cannot
+  // describe a different answer than the one returned.
+  const resolvedByAxis: Readonly<Record<LastModifiedAxis, unknown>> = {
+    lastModifiedDate,
+    lastModifiedBy,
+    apiVersion,
+  };
+  const missingAxes: readonly LastModifiedAxis[] = LAST_MODIFIED_AXES.filter(
+    (axis) => resolvedByAxis[axis] === null,
+  );
+  const enrichmentState: LastModifiedEnrichmentState = !enriched
+    ? 'none'
+    : missingAxes.length > 0
+      ? 'partial'
+      : 'complete';
+
   return ok({
     data: {
       componentId: node.id,
       enriched,
+      enrichmentState,
+      missingAxes,
       lastModifiedDate,
       lastModifiedBy,
       apiVersion,
-      disclosure: enriched
-        ? LAST_MODIFIED_ENRICHED_DISCLOSURE
-        : LAST_MODIFIED_UNENRICHED_DISCLOSURE,
+      disclosure:
+        enrichmentState === 'complete'
+          ? LAST_MODIFIED_ENRICHED_DISCLOSURE
+          : enrichmentState === 'partial'
+            ? lastModifiedPartialDisclosure(missingAxes)
+            : LAST_MODIFIED_UNENRICHED_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

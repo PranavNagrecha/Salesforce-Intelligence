@@ -330,6 +330,57 @@ describe('extractPermissionSet', () => {
       }
     });
 
+    // GUEST-PAGE-ACCESS parity with the profile extractor: <pageAccesses> was
+    // the one access element neither permission container walked, so no
+    // Profile/PermissionSet -> VisualforcePage grant edge existed anywhere in
+    // the graph. A Visualforce page RUNS its controller Apex, so the grant is a
+    // code-reachability grant. Same <enabled> continue-guard as classAccesses.
+    it('emits a grantedBy edge to VisualforcePage per enabled pageAccesses block (false excluded)', async () => {
+      const xml = `<?xml version="1.0"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Test</label>
+  <pageAccesses>
+    <apexPage>SelfServiceIntake</apexPage>
+    <enabled>true</enabled>
+  </pageAccesses>
+  <pageAccesses>
+    <apexPage>Disabled_Page</apexPage>
+    <enabled>false</enabled>
+  </pageAccesses>
+</PermissionSet>`;
+      const { dir, path } = await writePermsetXml('Fx_PageGrants.permissionset-meta.xml', xml);
+      try {
+        const result = await extractPermissionSet(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const pageEdges = result.value.edges.filter((e) => e.toId.startsWith('VisualforcePage:'));
+        expect(pageEdges.map((e) => e.toId)).toEqual(['VisualforcePage:SelfServiceIntake']);
+        expect(pageEdges[0]?.edgeType).toBe('grantedBy');
+        expect(pageEdges[0]?.confidence).toBe('declared');
+        expect(pageEdges[0]?.properties['enabled']).toBe(true);
+        expect(result.value.nodes[0]?.properties['pageGrantCount']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    // "extracted, none" must be distinguishable from "never extracted".
+    it('reports pageGrantCount 0 (not undefined) when no pageAccesses are declared', async () => {
+      const xml = `<?xml version="1.0"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Test</label>
+</PermissionSet>`;
+      const { dir, path } = await writePermsetXml('NoPages.permissionset-meta.xml', xml);
+      try {
+        const result = await extractPermissionSet(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['pageGrantCount']).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('collects only enabled user permissions, sorted alphabetically', async () => {
       const xml = `<?xml version="1.0"?>
 <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">

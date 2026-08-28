@@ -109,6 +109,10 @@ import {
 import { firstNonEmpty, resolveExistingObjectScope } from './input-aliases.js';
 import { COMPONENT_TYPES } from './list-components.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  ANALYTICS_COVERAGE_TYPES,
+  reportDashboardUsageDetail,
+} from './report-dashboard-usage.js';
 import { nodeScanLimit } from './scan-cap.js';
 
 const UNUSED_COMPONENTS_TOOL = 'sfi.unused_components';
@@ -398,6 +402,40 @@ export interface UnusedComponentsOutput {
       | 'coverage-unknown';
     readonly note: string;
   }[];
+  /**
+   * UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS: what this scan did
+   * with the vault's FOLDED report/dashboard field-usage index, and how far
+   * that index reaches.
+   *
+   * Present ONLY when the scan included a type the fold stamps (see
+   * `ANALYTICS_STAMPED_TYPES`); a scan over types it never stamps serialises
+   * byte-identically to before this field existed.
+   *
+   * Why it is typed rather than prose: the shipped answer listed 1,646 unused
+   * fields on a real vault while 236 of them carried this very stamp with
+   * NAMED reports, hedged only by a `coverageCaveat` that blamed the VAULT for
+   * missing Report coverage. That framing points a reader at a refresh, which
+   * changes nothing — the gap was that this tool never consulted the index its
+   * sibling `sfi.safe_to_delete_field` reads. `excludedAsUsed` is the count
+   * this scan removed BECAUSE the index named them; `indexCoverage` is how
+   * much of the org's analytics metadata that index was built from, which is
+   * the honest residual after the removal.
+   */
+  readonly analyticsIndexCheck?: {
+    /** Scanned types whose rows were adjudicated against the index. */
+    readonly consultedTypes: readonly string[];
+    /** Rows the index removed from the unused list (already out of `byType`). */
+    readonly excludedAsUsed: number;
+    /** Per-type breakdown of `excludedAsUsed`. */
+    readonly excludedByType: Readonly<Record<string, number>>;
+    /**
+     * Coverage of the `Report` / `Dashboard` families the index is folded
+     * from. `complete` means a component the index does NOT name is a CHECKED
+     * "no analytics usage"; anything else means it is NOT CHECKED.
+     */
+    readonly indexCoverage: 'complete' | 'partial' | 'unknown';
+    readonly note: string;
+  };
   /** Provenance / completeness for the absence claim. */
   readonly trust: TrustSummary;
 }
@@ -498,11 +536,146 @@ const DEFAULT_INVISIBLE_REFERENCES_NOTE =
   'The v1.x extractors may miss runtime references (dynamic dispatch, reflective access, integration payloads). Spot-check the org before deleting.';
 
 /**
+ * UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS.
+ *
+ * Replaces the shipped `CustomField` note for the rows that WERE adjudicated
+ * against the folded report/dashboard index. The shipped sentence ended
+ * "…and report column references are invisible to the v1.x extractors", which
+ * on a vault carrying the fold is FALSE — the index names the reports, the
+ * sibling `sfi.safe_to_delete_field` quotes them by name, and a reader who
+ * believes the sentence stops looking. What IS still true is the RESIDUAL:
+ * only the analytics metadata actually folded into this vault is covered.
+ */
+const ANALYTICS_CHECKED_NOTES: Readonly<Record<string, string>> = Object.freeze(
+  {
+    CustomField:
+      'Dynamic SOQL (SELECT {fieldName}), LWC record[fieldName] and integration payloads are invisible to the v1.x extractors. Report and dashboard columns were NOT assumed invisible: this scan read the vault\'s folded report/dashboard field-usage index and dropped every field it names, so a field still listed here carries no stamp from the analytics metadata that IS in this vault — see `analyticsIndexCheck` for how far that index reaches before reading it as "no report uses this".',
+  },
+);
+
+/**
  * Look up the invisible-references note for a node type, falling
  * back to the generic default when no specific entry is registered.
+ *
+ * `analyticsChecked` is true only for a type whose rows were actually
+ * adjudicated against the folded report/dashboard index (see
+ * {@link ANALYTICS_STAMPED_TYPES}); those rows get a note that describes what
+ * was checked rather than one that declares the whole analytics plane blind.
  */
-const noteForType = (type: ComponentType): string =>
-  INVISIBLE_REFERENCES_NOTES[type] ?? DEFAULT_INVISIBLE_REFERENCES_NOTE;
+const noteForType = (type: ComponentType, analyticsChecked: boolean): string => {
+  if (analyticsChecked) {
+    const checked = ANALYTICS_CHECKED_NOTES[type];
+    if (checked !== undefined) return checked;
+  }
+  return INVISIBLE_REFERENCES_NOTES[type] ?? DEFAULT_INVISIBLE_REFERENCES_NOTE;
+};
+
+/**
+ * Component types the refresh stamps with FOLDED report / dashboard field
+ * usage — `usedInReport` / `usedInDashboard` plus the named
+ * `usedInReports` / `usedInDashboards` lists (see `report-dashboard-usage.ts`
+ * and the CLI's `applyReportDashboardPersistence`). Only these can be
+ * adjudicated against the analytics index, so only for these does this tool
+ * claim to have consulted it.
+ *
+ * The fold deliberately does NOT persist an analytics -> `CustomField` EDGE
+ * layer (94% of all rows at real-org scale, for an answer the properties
+ * already give), which is exactly why the incoming-edge heuristic this tool is
+ * built on cannot see report usage at all — and why reading the property is
+ * the fix rather than waiting for an edge.
+ */
+const ANALYTICS_STAMPED_TYPES: ReadonlySet<ComponentType> =
+  new Set<ComponentType>(['CustomField']);
+
+/**
+ * True when the vault's folded report/dashboard index names this component.
+ *
+ * Adopts the SHARED `reportDashboardUsageDetail` read (`field_360`,
+ * `field_lineage`, `safe_to_delete_field`, `unused_fields_deep` …) rather than
+ * re-deriving a fourth notion of "an analytics surface uses this field" here:
+ * this tool listing a field as unused while its sibling returns `blocking`
+ * with three NAMED reports off the same property is the defect being fixed.
+ */
+const namedByAnalyticsIndex = (node: Node): boolean => {
+  const usage = reportDashboardUsageDetail(node);
+  return usage.usedInReport || usage.usedInDashboard;
+};
+
+/** How far the folded report/dashboard index this scan consulted reaches. */
+type AnalyticsIndexCoverage = 'complete' | 'partial' | 'unknown';
+
+/**
+ * Tri-state reach of the folded index, read off the SHARED
+ * `ANALYTICS_COVERAGE_TYPES` coverage rows (`report-dashboard-usage.ts`) — the
+ * same two families `field_360`, `field_lineage` and `safe_to_delete_field`
+ * gate their analytics claims on, so this tool cannot drift into a fourth
+ * notion of "the analytics corpus is covered".
+ *
+ * `complete` is the ONLY state in which "the index does not name this
+ * component" is a CHECKED "no report or dashboard uses it". `partial` is the
+ * bounded/staged pull; `unknown` is a vault with no analytics coverage rows to
+ * read at all.
+ */
+const analyticsIndexCoverage = (ctx: Context): AnalyticsIndexCoverage => {
+  const summary = summarizeCoverage(ctx.manifest, ANALYTICS_COVERAGE_TYPES);
+  if (!summary.coverageKnown || summary.status === 'unknown') return 'unknown';
+  return summary.status === 'complete' ? 'complete' : 'partial';
+};
+
+/**
+ * The RESIDUAL clause: what remains unchecked AFTER the index was consulted.
+ * Kept as one function so the typed `analyticsIndexCheck.note` and the prose a
+ * host reads out of `coverageCaveat.message` state the same residual rather
+ * than drifting apart.
+ */
+const analyticsResidualClause = (coverage: AnalyticsIndexCoverage): string => {
+  switch (coverage) {
+    case 'complete':
+      return 'Both analytics families are fully retrieved into this vault, so a component the index does NOT name is a CHECKED "no report or dashboard column references it".';
+    case 'partial':
+      return 'Analytics coverage is PARTIAL (a bounded or staged pull), so a component the index does not name is NOT CHECKED against the reports and dashboards outside that fold — widening the pull widens the index, it does not change that this tool reads it.';
+    default:
+      return 'This vault carries no analytics coverage rows, so how much of the org\'s reports and dashboards the index was folded from cannot be determined — a component the index does not name is NOT CHECKED.';
+  }
+};
+
+/**
+ * Build the typed disclosure of what the folded index did to this scan.
+ *
+ * UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS: `undefined` when the
+ * scan touched no type the fold stamps, so such a response serialises
+ * byte-identically to before this field existed. Never emitted half-populated —
+ * every key is computed from the scan that just ran.
+ */
+const buildAnalyticsIndexCheck = (
+  ctx: Context,
+  consultedTypes: readonly ComponentType[],
+  excludedByType: Readonly<Record<string, number>>,
+):
+  | {
+      readonly consultedTypes: readonly string[];
+      readonly excludedAsUsed: number;
+      readonly excludedByType: Readonly<Record<string, number>>;
+      readonly indexCoverage: AnalyticsIndexCoverage;
+      readonly note: string;
+    }
+  | undefined => {
+  if (consultedTypes.length === 0) return undefined;
+  const excludedAsUsed = Object.values(excludedByType).reduce(
+    (sum, n) => sum + n,
+    0,
+  );
+  const indexCoverage = analyticsIndexCoverage(ctx);
+  return {
+    consultedTypes: [...consultedTypes],
+    excludedAsUsed,
+    excludedByType,
+    indexCoverage,
+    note: `This scan adjudicated ${consultedTypes
+      .map((t) => `\`${t}\``)
+      .join(', ')} against the vault's FOLDED report/dashboard field-usage index (the \`usedInReport\` / \`usedInDashboard\` stamp the refresh writes onto the node, and the same evidence \`sfi.safe_to_delete_field\` cites by report name) and removed ${excludedAsUsed} component(s) the index names from the unused list. ${analyticsResidualClause(indexCoverage)}`,
+  };
+};
 
 /**
  * Entry-point component types fire on their own — on DML, a schedule, or a
@@ -637,6 +810,13 @@ const scanType = async (
        * unchecked zero, not a clean bill of health — see `uncheckedTypes`.
        */
       readonly vaultInstances: number;
+      /**
+       * How many instances the FOLDED report/dashboard index removed from the
+       * unused list — rows the incoming-edge heuristic called unused while the
+       * vault's own analytics stamp names them. Always 0 for a type the fold
+       * does not stamp (see {@link ANALYTICS_STAMPED_TYPES}).
+       */
+      readonly analyticsExcluded: number;
     },
     string
   >
@@ -668,7 +848,8 @@ const scanType = async (
     objectScopeId === null
       ? allNodes
       : allNodes.filter((n) => n.parentId === objectScopeId);
-  const note = noteForType(type);
+  const consultsAnalyticsIndex = ANALYTICS_STAMPED_TYPES.has(type);
+  const note = noteForType(type, consultsAnalyticsIndex);
   const isEntryPoint = ENTRY_POINT_TYPES.has(type);
 
   // Reference types decide "unused" from their INCOMING edges. Fetch every
@@ -691,6 +872,7 @@ const scanType = async (
   }
 
   const out: UnusedComponent[] = [];
+  let analyticsExcluded = 0;
   for (const node of nodes) {
     // Test-class exemption per the v2.0b spec.
     if (type === 'ApexClass' && isTestApexClass(node.properties)) {
@@ -705,6 +887,15 @@ const scanType = async (
       unused = isUnusedFromEdges(incomingByNode.get(node.id) ?? []);
     }
     if (!unused) continue;
+    // UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS. The fold does
+    // not emit an analytics -> field EDGE, so the incoming-edge verdict above
+    // is structurally blind to report/dashboard usage; the stamp on the node
+    // is where that evidence lives, and this tool now reads it before shipping
+    // a delete recommendation its own sibling would refuse.
+    if (consultsAnalyticsIndex && namedByAnalyticsIndex(node)) {
+      analyticsExcluded += 1;
+      continue;
+    }
     out.push({
       id: node.id,
       type: node.type,
@@ -716,6 +907,7 @@ const scanType = async (
   return ok({
     components: [...out].sort(compareById),
     vaultInstances: allNodes.length,
+    analyticsExcluded,
   });
 };
 
@@ -942,6 +1134,13 @@ export const unusedComponentsHandler = async (
 
   const allUnused: UnusedComponent[] = [];
   const byType: Record<string, number> = {};
+  // UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS: which scanned
+  // types were adjudicated against the folded report/dashboard index, and how
+  // many rows it removed from each. Feeds the TYPED `analyticsIndexCheck`
+  // disclosure and the caveat prose, which must never say the index was
+  // consulted without saying by how much it moved the answer.
+  const consultedAnalyticsTypes: ComponentType[] = [];
+  const excludedByType: Record<string, number> = {};
   // UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN: a scanned type with no instances to
   // scan produces `byType[type] = 0` — identical to "checked everything, all in
   // use". Record which zeros were never checked.
@@ -982,12 +1181,26 @@ export const unusedComponentsHandler = async (
     }
     byType[type] = result.value.components.length;
     allUnused.push(...result.value.components);
+    // UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS: record the
+    // per-type adjudication for EVERY consulted type, including the ones the
+    // index named nothing in — "consulted, removed 0" and "never consulted"
+    // are different answers and must not share a shape.
+    if (ANALYTICS_STAMPED_TYPES.has(type)) {
+      consultedAnalyticsTypes.push(type);
+      excludedByType[type] = result.value.analyticsExcluded;
+    }
     if (result.value.vaultInstances === 0) {
       uncheckedTypes.push(
         classifyUncheckedType(ctx, type, referencedButAbsent.get(type)),
       );
     }
   }
+
+  const analyticsIndexCheck = buildAnalyticsIndexCheck(
+    ctx,
+    consultedAnalyticsTypes,
+    excludedByType,
+  );
 
   const sorted = [...allUnused].sort(compareGlobally);
 
@@ -1051,7 +1264,24 @@ export const unusedComponentsHandler = async (
           .join(
             ', ',
           )} while its own references name specific members of ${referrerGaps.length === 1 ? 'that family' : 'those families'} — referenced but never retrieved, so treat absence of a reference FROM ${referrerGaps.length === 1 ? 'it' : 'them'} as "not checked", not "none".`;
-  const coverageCaveat: CoverageCaveat | undefined =
+  // UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS (prose axis). The
+  // shipped caveat named `Report` / `Dashboard` under "Un-retrieved families",
+  // which tells a reader the remedy is a refresh. It is not: the vault ALREADY
+  // held a folded report/dashboard field-usage index (236 of the 1,646 rows
+  // this tool called unused on a real vault carried that stamp, with NAMED
+  // reports its sibling `sfi.safe_to_delete_field` quotes back as `blocking`),
+  // and the tool simply never read it. Now that it does, the caveat must say
+  // so, name how far the answer moved, and describe the RESIDUAL — otherwise
+  // the hedge keeps pointing at the wrong fix and keeps reading as boilerplate.
+  //
+  // Appended to an EXISTING caveat only: a vault with nothing to hedge does not
+  // acquire one, and `analyticsIndexCheck` carries the same facts in a typed
+  // field a machine consumer cannot skip.
+  const analyticsSentence =
+    analyticsIndexCheck === undefined
+      ? ''
+      : ` This answer DID consult the vault's folded report/dashboard field-usage index and removed ${analyticsIndexCheck.excludedAsUsed} component(s) it names from the unused list before reporting, so \`Report\` / \`Dashboard\` above is a RESIDUAL gap, not an unconsulted family. ${analyticsResidualClause(analyticsIndexCheck.indexCoverage)} See \`analyticsIndexCheck\`.`;
+  const coverageCaveatBase: CoverageCaveat | undefined =
     referrerGaps.length === 0
       ? retrieveCaveat
       : retrieveCaveat === undefined
@@ -1077,6 +1307,13 @@ export const unusedComponentsHandler = async (
               ...referrerBlindSpots,
             ],
           };
+  const coverageCaveat: CoverageCaveat | undefined =
+    coverageCaveatBase === undefined || analyticsSentence === ''
+      ? coverageCaveatBase
+      : {
+          ...coverageCaveatBase,
+          message: `${coverageCaveatBase.message}${analyticsSentence}`,
+        };
 
   const scoped = typesExplicit || objectId !== null;
 
@@ -1108,6 +1345,7 @@ export const unusedComponentsHandler = async (
       truncated: true,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(uncheckedTypes.length > 0 ? { uncheckedTypes } : {}),
+      ...(analyticsIndexCheck !== undefined ? { analyticsIndexCheck } : {}),
       trust,
     }),
     'utf8',
@@ -1150,6 +1388,7 @@ export const unusedComponentsHandler = async (
         : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(uncheckedTypes.length > 0 ? { uncheckedTypes } : {}),
+      ...(analyticsIndexCheck !== undefined ? { analyticsIndexCheck } : {}),
       trust,
     },
     vaultState: {

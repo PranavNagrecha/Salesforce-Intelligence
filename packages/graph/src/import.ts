@@ -696,7 +696,7 @@ export const mintPolymorphicActivityFieldEdges = (
   // Every existing (fromId, toId, edgeType) so a real edge is never duplicated.
   const seen = new Set<string>();
   for (const edge of edges) {
-    seen.add(`${edge.fromId} ${edge.toId} ${edge.edgeType}`);
+    seen.add(`${edge.fromId}\u0000${edge.toId}\u0000${edge.edgeType}`);
   }
 
   // Snapshot the length so mirrored edges are not themselves re-mirrored.
@@ -712,7 +712,7 @@ export const mintPolymorphicActivityFieldEdges = (
     if (reps === undefined) continue;
     for (const rep of reps) {
       if (rep === edge.toId) continue;
-      const key = `${edge.fromId} ${rep} ${edge.edgeType}`;
+      const key = `${edge.fromId}\u0000${rep}\u0000${edge.edgeType}`;
       if (seen.has(key)) continue;
       seen.add(key);
       minted.push({
@@ -871,7 +871,7 @@ export const mintFutureDispatchEdges = (
   const existingDispatchPairs = new Set<string>();
   for (const edge of edges) {
     if (edge.edgeType === 'dispatchesAsync') {
-      existingDispatchPairs.add(`${edge.fromId} ${edge.toId}`);
+      existingDispatchPairs.add(`${edge.fromId}\u0000${edge.toId}`);
     }
   }
 
@@ -881,7 +881,7 @@ export const mintFutureDispatchEdges = (
   for (const edge of edges) {
     if (edge.edgeType !== 'callsApex') continue;
     if (!futureClassIds.has(edge.toId)) continue;
-    const pairKey = `${edge.fromId} ${edge.toId}`;
+    const pairKey = `${edge.fromId}\u0000${edge.toId}`;
     if (existingDispatchPairs.has(pairKey)) continue;
     if (!toMint.has(pairKey)) {
       toMint.set(pairKey, { fromId: edge.fromId, toId: edge.toId });

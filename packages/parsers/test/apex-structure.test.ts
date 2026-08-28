@@ -326,7 +326,7 @@ describe('parseApexStructure — failure posture', () => {
   });
 
   it('never throws on garbage input', async () => {
-    await expect(parse('  not apex at all }}}')).resolves.toMatchObject({
+    await expect(parse('\u0000 not apex at all }}}')).resolves.toMatchObject({
       parsed: false,
       structure: null,
     });

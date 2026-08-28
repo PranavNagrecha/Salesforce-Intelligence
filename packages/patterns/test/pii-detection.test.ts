@@ -612,3 +612,158 @@ describe('detectPiiClassification: whole-word-only tokens', () => {
     isPii('Contact', 'Telephone__c');
   });
 });
+
+/**
+ * SEPARATOR-SENSITIVE NAME MATCHING.
+ *
+ * The name vocabulary carries multi-word concepts as ONE concatenated token
+ * (`socialsecurity`, `dateofbirth`, `zipcode`), and the match was a plain
+ * substring test against the api name with its separators INTACT. So the same
+ * concept classified differently depending on how the admin punctuated it:
+ * `SocialSecurity_Number__c` matched, `Social_Security_Number__c` did not and
+ * fell to the unmatched `public` / `unknown` default. Two fields naming the
+ * same regulated concept, on the same object, landing in different buckets is
+ * the failure a compliance sweep cannot see: the miss looks like a clean row.
+ *
+ * The fix matches the token against the api name's word segments joined
+ * (`social` + `security` + `number` -> `socialsecuritynumber`) but ONLY where
+ * the match starts on a segment boundary, so a token cannot straddle two words
+ * that merely happen to abut (see the false-positive block below).
+ */
+describe('detectPiiClassification: separator-spelled multi-word concepts', () => {
+  const identifier = (parent: string, apiName: string): void => {
+    const r = detectPiiClassificationWithReason(field(parent, apiName));
+    expect(r.piiClassification, `${apiName} classification`).toBe('pii');
+    expect(r.piiCategory, `${apiName} category`).toBe('identifier');
+  };
+
+  it('classifies the underscore-spelled social security number', () => {
+    identifier('Contact', 'Social_Security_Number__c');
+  });
+
+  it('classifies the underscore-spelled and long-form date of birth', () => {
+    identifier('Lead', 'Date_of_Birth__c');
+    identifier('Lead', 'Birth_Date__c');
+    identifier('Lead', 'Student_Date_Of_Birth__c');
+  });
+
+  it('classifies the underscore-spelled drivers license', () => {
+    identifier('Contact', 'Drivers_License_Number__c');
+  });
+
+  it('classifies separator-spelled contact concepts', () => {
+    const zip = detectPiiClassificationWithReason(field('Contact', 'Zip_Code__c'));
+    expect(zip.piiClassification).toBe('pii');
+    expect(zip.piiCategory).toBe('contact');
+    const postal = detectPiiClassificationWithReason(
+      field('Contact', 'Postal_Code__c'),
+    );
+    expect(postal.piiClassification).toBe('pii');
+    expect(postal.piiCategory).toBe('contact');
+  });
+
+  it('classifies separator-spelled protected-class and financial concepts', () => {
+    const bank = detectPiiClassificationWithReason(
+      field('Account', 'Bank_Account_Number__c'),
+    );
+    expect(bank.piiClassification).toBe('sensitive');
+    expect(bank.piiCategory).toBe('financial');
+    const card = detectPiiClassificationWithReason(
+      field('Payment__c', 'Credit_Card_Last_Four__c'),
+    );
+    expect(card.piiClassification).toBe('sensitive');
+    expect(card.piiCategory).toBe('financial');
+    const mrec = detectPiiClassificationWithReason(
+      field('Patient__c', 'Medical_Record_Id__c'),
+    );
+    expect(mrec.piiClassification).toBe('sensitive');
+    expect(mrec.piiCategory).toBe('health');
+  });
+});
+
+/**
+ * The naive form of the same fix — squashing the WHOLE api name and running the
+ * unchanged `includes` over it — lets a short token straddle a word boundary.
+ * Every name below squashes to a string that CONTAINS a vocabulary token
+ * (`class`+`number` -> "...ssn...", `record`+`object` -> "...dob...",
+ * `team`+`rn` -> "...mrn...", `address`+`number` -> "...ssn..."), and none of
+ * them holds an identifier. Boundary-aligned matching is what keeps them out.
+ */
+describe('detectPiiClassification: squashed-name straddle false positives', () => {
+  const notIdentifier = (parent: string, apiName: string): void => {
+    const r = detectPiiClassificationWithReason(field(parent, apiName));
+    expect(
+      r.piiCategory,
+      `${apiName} must not classify as an identifier (reason: ${r.reason})`,
+    ).not.toBe('identifier');
+  };
+
+  it('does not read an SSN out of two abutting words', () => {
+    notIdentifier('Course__c', 'Class_Number__c');
+    notIdentifier('Process__c', 'Process_Note__c');
+  });
+
+  it('does not read a DOB or MRN out of two abutting words', () => {
+    notIdentifier('Audit__c', 'Record_Object__c');
+    notIdentifier('Team__c', 'Team_RN_Count__c');
+  });
+
+  it('keeps the whole-word-only tokens out of the squashed form', () => {
+    // `capacity` squashes next to `seating`; `city` must still not fire.
+    const r = detectPiiClassificationWithReason(
+      field('Session__c', 'Seating_Capacity__c'),
+    );
+    expect(r.piiClassification).toBe('public');
+  });
+});
+
+/**
+ * WHAT THE DESCRIPTION LAYER ACTUALLY DOES.
+ *
+ * The tool advertises that the recognizer inspects "API name, declared data
+ * type, AND description text", and a reader takes that to mean the description
+ * can rescue a name-token miss. It cannot, for identifiers: `DESCRIPTION_RULES`
+ * carries compliance-REGIME keywords only (hipaa / protected health / pci /
+ * cardholder / sensitive / internal only / privileged / pii / personally
+ * identifiable / confidential / restricted). It recognizes an admin DECLARING a
+ * regulatory character, not a description that merely names the data.
+ *
+ * The disposition is NARROW THE CLAIM, not add identifier vocabulary — see the
+ * `DESCRIPTION_RULES` JSDoc for the false positives that decision avoids. These
+ * cases pin both halves of the narrowed claim: the layer fires on a declaration,
+ * and the unmatched reason says which three things were checked so the caller is
+ * not left believing a concept mention was consulted.
+ */
+describe('detectPiiClassification: the description layer reads declarations, not concepts', () => {
+  it('fires when the description declares a regime', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Case', 'Notes__c', {
+        description: 'Confidential — treat as PII under the privacy policy.',
+      }),
+    );
+    expect(r.piiClassification).toBe('pii');
+  });
+
+  it('does NOT fire on a description that merely names the concept', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Obj_A__c', 'Enrolment_Marker__c', {
+        dataType: 'Date',
+        description: "Date of this individual's birth.",
+      }),
+    );
+    expect(r.piiClassification).toBe('public');
+  });
+
+  it('names the description in the unmatched reason, so the claim is not overstated', () => {
+    const r = detectPiiClassificationWithReason(
+      field('Obj_A__c', 'Enrolment_Marker__c', {
+        dataType: 'Date',
+        description: "Date of this individual's birth.",
+      }),
+    );
+    // The old text — "no PII signal detected in API name or data type" — named
+    // two of the three layers, so a reader could not tell whether the
+    // description had been consulted and found nothing, or never consulted.
+    expect(r.reason).toMatch(/description/i);
+  });
+});

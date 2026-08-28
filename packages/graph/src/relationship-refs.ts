@@ -227,7 +227,7 @@ export const mintRelationshipTraversalEdges = (
   // two edges would read as two independent consumers when there is one page.
   const seen = new Set<string>();
   for (const edge of edges) {
-    seen.add(`${edge.fromId} ${edge.toId} ${edge.edgeType}`);
+    seen.add(`${edge.fromId}\u0000${edge.toId}\u0000${edge.edgeType}`);
   }
 
   const emit = (
@@ -241,7 +241,7 @@ export const mintRelationshipTraversalEdges = (
     // The dedup key carries the edge TYPE — the same triple the graph is keyed
     // on — so a `readsFrom` minted here is never suppressed by an unrelated
     // `references` already present on the same pair, or vice versa.
-    const key = `${fromId} ${toId} ${edgeType}`;
+    const key = `${fromId}\u0000${toId}\u0000${edgeType}`;
     if (seen.has(key)) return;
     seen.add(key);
     edges.push({

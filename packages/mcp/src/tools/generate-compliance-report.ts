@@ -56,11 +56,28 @@
  * PAGE — one window, not three different caps. Their counts are therefore
  * page-bounded and the Executive Summary says so in the same sentence as the
  * number, so a zero is never readable as an org-wide checked zero.
+ *
+ * OBJECT-FLS-CERTIFIED-A-ZERO-OVER-A-SET-IT-NEVER-EXAMINED.
+ * That "one window" sentence was FALSE for the Object + FLS pass. The document
+ * defines "regulated" once — `pii || sensitive` — and the page, the access
+ * audit and the Risk Flags pass all use it, but the exposure pass was gated on
+ * a private, NARROWER predicate (EncryptedText / identifier / protected-class /
+ * sensitive / protected) that excludes the largest regulated class of all:
+ * ordinary `pii` fields in the `contact` category (phone, email, postal
+ * address). On a real org every field on page one was of that class, so the
+ * pass examined ZERO fields — and the report still printed
+ * `Object+FLS exposure pairs: 0 (over the N field(s) access-audited on this
+ * page)` next to an all-clear sentence saying no principal held both object
+ * reach and FLS read. Principals holding both existed in quantity. The pass now
+ * runs over exactly the fields the page audited, the narrow class survives only
+ * as a RENDER ORDER (highest-risk rows first), and the rendered rows are capped
+ * with an explicit "showing X of Y" disclosure instead of a silent narrowing.
  */
 
 import type {
   ComponentId,
   ConfidenceLevel,
+  Edge,
   McpError,
   McpResponse,
   Node,
@@ -68,6 +85,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { isRegulatedPiiClassification } from '@sf-intelligence/patterns';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -117,6 +135,17 @@ const MAX_REGULATED_PAGE_LIMIT = 100;
  * readable section and printing a remedy this tool cannot honour.
  */
 const REGULATED_PAGE_BYTE_BUDGET = 12_000;
+
+/**
+ * Most Object + FLS exposure ROWS rendered into the table. Widening the pass to
+ * every regulated field on the page turns a handful of pairs into hundreds on a
+ * real org — enough to blow the per-document byte budget and get every readable
+ * section dropped again, which is the defect this file already had to fix once.
+ * The COUNT in the Executive Summary is always the true total; only the table is
+ * capped, and the cap is stated in the table, in the summary and in a boundary
+ * rather than applied silently.
+ */
+const MAX_RENDERED_EXPOSURE_ROWS = 50;
 
 /**
  * The object-alias keys the shared resolver reads. `objectFilter` is NOT one of
@@ -228,7 +257,21 @@ const foldObjectFilterAlias = (
 const escapeCell = (raw: string): string =>
   raw.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 
-const isRegulatedPiiField = (field: PiiField): boolean =>
+/**
+ * The subset of regulated fields a compliance reviewer reads FIRST — encrypted
+ * values, direct identifiers, protected-class attributes, and anything the
+ * recognizer escalated past plain `pii`.
+ *
+ * This is a RENDER ORDER, not a filter. It was previously the GATE on the
+ * Object + FLS exposure pass, which made that section's zero a claim about a
+ * set it had never examined: every other section in the document treats
+ * `pii || sensitive` as regulated, and ordinary `pii`/`contact` fields (phone,
+ * email, address) — the bulk of a real org's regulated population — were
+ * silently dropped before the pass ran. Using it to sort keeps the reviewer's
+ * most important rows at the top of a capped table without letting the table
+ * certify anything about the rows it never looked at.
+ */
+const isHighRiskPiiField = (field: PiiField): boolean =>
   field.type === 'EncryptedText' ||
   field.category === 'identifier' ||
   field.category === 'protected-class' ||
@@ -251,7 +294,34 @@ interface ObjectFlsExposure {
   readonly grantorName: string;
   readonly grantorType: string;
   readonly objectAccess: string;
+  /** True when the field is in the {@link isHighRiskPiiField} class. */
+  readonly highRisk: boolean;
 }
+
+/**
+ * Per-invocation memo for the exposure pass. Widening the pass from "the few
+ * EncryptedText/identifier fields" to "every regulated field on the page" means
+ * the same parent object is scanned once per field on it and the same handful
+ * of Profile/PermissionSet nodes are read over and over. Both are memoized for
+ * the life of ONE report so the widening costs a handful of graph reads instead
+ * of one per (field, grantor) pair.
+ *
+ * Only SUCCESSFUL reads are memoized — a failed read propagates immediately
+ * (R1) and never reaches the map, so caching can never launder an error into a
+ * cached all-clear on a later field.
+ */
+interface ExposureReadCache {
+  /** parent `CustomObject:` id → its inbound `grantedBy` edges. */
+  readonly objectGrants: Map<string, readonly Edge[]>;
+  /** grantor id → its node, or `null` for the tolerated absent-row case. */
+  readonly grantorNodes: Map<string, Node | null>;
+}
+
+/** Fresh memo for one report run. */
+const newExposureReadCache = (): ExposureReadCache => ({
+  objectGrants: new Map<string, readonly Edge[]>(),
+  grantorNodes: new Map<string, Node | null>(),
+});
 
 /**
  * Map an org-wide system permission held by a grantor to its broader
@@ -270,6 +340,34 @@ const systemPermAccessLabel = (
   if (perms.includes('ModifyAllData')) return 'ModifyAllData (system)';
   if (perms.includes('ViewAllData')) return 'ViewAllData (system)';
   return null;
+};
+
+/**
+ * Read one grantor node through the per-report memo.
+ *
+ * FAILS CLOSED (R1) exactly as the inline reads it replaces: a read that FAILS
+ * propagates `err({ kind: 'internal' })` and is NEVER memoized, so a later
+ * field can never be served a cached all-clear for a state that errored. An
+ * ABSENT node ROW (`value === null`) IS memoized — that is the documented
+ * sparse-graph case, a successful read that found nothing, and the callers
+ * `continue` past it.
+ */
+const readGrantor = async (
+  ctx: Context,
+  grantorId: string,
+  cache: ExposureReadCache,
+): Promise<Result<Node | null, McpError>> => {
+  const memo = cache.grantorNodes.get(grantorId);
+  if (memo !== undefined) return ok(memo);
+  const grantorResult = await getNodeById(ctx.graph, grantorId as ComponentId);
+  if (!grantorResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${grantorResult.error.message}`,
+    });
+  }
+  cache.grantorNodes.set(grantorId, grantorResult.value);
+  return ok(grantorResult.value);
 };
 
 /**
@@ -301,37 +399,39 @@ const findObjectFlsExposures = async (
   ctx: Context,
   field: PiiField,
   grantorIdsWithFlsRead: ReadonlySet<string>,
+  cache: ExposureReadCache,
 ): Promise<Result<readonly ObjectFlsExposure[], McpError>> => {
   const parentApi = parseFieldParentObjectApiName(field.id);
   if (parentApi === null || grantorIdsWithFlsRead.size === 0) return ok([]);
   const parentObjectId = `CustomObject:${parentApi}` as ComponentId;
-  const objectGrants = await listEdges(ctx.graph, parentObjectId, {
-    direction: 'in',
-    edgeType: 'grantedBy',
-  });
-  if (!objectGrants.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${objectGrants.error.message}`,
+  const highRisk = isHighRiskPiiField(field);
+  let objectGrantEdges = cache.objectGrants.get(parentObjectId);
+  if (objectGrantEdges === undefined) {
+    const objectGrants = await listEdges(ctx.graph, parentObjectId, {
+      direction: 'in',
+      edgeType: 'grantedBy',
     });
+    if (!objectGrants.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${objectGrants.error.message}`,
+      });
+    }
+    objectGrantEdges = objectGrants.value;
+    cache.objectGrants.set(parentObjectId, objectGrantEdges);
   }
   // Track which FLS-read grantors we have already emitted via the edge path so
   // the system-perm pass below only adds grantors NOT matched by an edge.
   const emittedViaEdge = new Set<string>();
   const exposures: ObjectFlsExposure[] = [];
-  for (const edge of objectGrants.value) {
+  for (const edge of objectGrantEdges) {
     if (!grantorIdsWithFlsRead.has(edge.fromId)) continue;
     const access = objectAccessLabel(edge.properties);
     if (access === null) continue;
-    const grantorResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!grantorResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${grantorResult.error.message}`,
-      });
-    }
-    if (grantorResult.value === null) continue;
-    const grantor = grantorResult.value;
+    const cachedGrantor = await readGrantor(ctx, edge.fromId, cache);
+    if (!cachedGrantor.ok) return err(cachedGrantor.error);
+    if (cachedGrantor.value === null) continue;
+    const grantor = cachedGrantor.value;
     // Prefer the broader god-mode label when this grantor ALSO holds it.
     const sysLabel = systemPermAccessLabel(grantor.properties);
     emittedViaEdge.add(edge.fromId);
@@ -341,6 +441,7 @@ const findObjectFlsExposures = async (
       grantorName: grantor.label ?? grantor.apiName,
       grantorType: grantor.type,
       objectAccess: sysLabel ?? access,
+      highRisk,
     });
   }
   // System-permission path: any FLS-read grantor holding org-wide god-mode that
@@ -348,15 +449,10 @@ const findObjectFlsExposures = async (
   // sibling Array.isArray(perms).includes('ModifyAllData') guard.
   for (const grantorId of grantorIdsWithFlsRead) {
     if (emittedViaEdge.has(grantorId)) continue;
-    const grantorResult = await getNodeById(ctx.graph, grantorId);
-    if (!grantorResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${grantorResult.error.message}`,
-      });
-    }
-    if (grantorResult.value === null) continue;
-    const grantor = grantorResult.value;
+    const cachedGrantor = await readGrantor(ctx, grantorId, cache);
+    if (!cachedGrantor.ok) return err(cachedGrantor.error);
+    if (cachedGrantor.value === null) continue;
+    const grantor = cachedGrantor.value;
     const sysLabel = systemPermAccessLabel(grantor.properties);
     if (sysLabel === null) continue;
     exposures.push({
@@ -365,6 +461,7 @@ const findObjectFlsExposures = async (
       grantorName: grantor.label ?? grantor.apiName,
       grantorType: grantor.type,
       objectAccess: sysLabel,
+      highRisk,
     });
   }
   return ok(exposures);
@@ -403,8 +500,23 @@ export const generateComplianceReportHandler = async (
   if (!collected.ok) return err(collected.error);
   const { fields: allFields, summary: piiSummary } = collected.value;
 
-  const regulatedFields = allFields.filter(
-    (f) => f.classification === 'pii' || f.classification === 'sensitive',
+  // ADOPTED, NOT REWRITTEN. This read
+  //     f.classification === 'pii' || f.classification === 'sensitive'
+  // and `isRegulatedPiiClassification` in @sf-intelligence/patterns already
+  // exists for this, with a doc comment that says in as many words: "Callers
+  // that gate escalations on the classification should use this rather than an
+  // ad-hoc `=== 'pii' || === 'sensitive'` check, SO `protected` IS NEVER
+  // MISSED." The shared predicate was written to prevent this exact bug and
+  // this file did it anyway.
+  //
+  // The cost was structural, not cosmetic: `protected` is the HIGHEST tier
+  // (race, religion, disability, veteran status, citizenship), so excluding it
+  // removed those fields from the audited pool BY CONSTRUCTION and no paging or
+  // cap change downstream could ever surface a protected-class exposure.
+  // Measured on a real org: pii_inventory reports {protected: 50, pii: 266,
+  // sensitive: 39}, and this report's "305 regulated" was exactly 266 + 39.
+  const regulatedFields = allFields.filter((f) =>
+    isRegulatedPiiClassification(f.classification),
   );
 
   // ── Page (R2) ──────────────────────────────────────────────────────────
@@ -483,18 +595,37 @@ export const generateComplianceReportHandler = async (
     });
   }
 
+  // The exposure pass covers EVERY field this page audited — the same window
+  // the inventory, the access audit and the Risk Flags use. It used to be gated
+  // on the narrower `isRegulatedPiiField`, which dropped ordinary `pii`/contact
+  // fields (the bulk of a real org's regulated population) BEFORE the pass ran
+  // while the summary still attributed the resulting zero to the whole audited
+  // page.
+  const exposureCache = newExposureReadCache();
   const objectFlsExposures: ObjectFlsExposure[] = [];
   for (const entry of auditEntries) {
     const field = auditTargets.find((f) => f.id === entry.fieldId);
-    if (field === undefined || !isRegulatedPiiField(field)) continue;
+    if (field === undefined) continue;
     const exposures = await findObjectFlsExposures(
       ctx,
       field,
       entry.flsReadGrantorIds,
+      exposureCache,
     );
     if (!exposures.ok) return err(exposures.error);
     objectFlsExposures.push(...exposures.value);
   }
+  // Render order only: the highest-risk classes first so a capped table keeps
+  // the rows a reviewer opens the report for. Stable within a class (the source
+  // order is the page's own total order), so the cap is deterministic.
+  const orderedExposures = [...objectFlsExposures].sort((a, b) =>
+    a.highRisk === b.highRisk ? 0 : a.highRisk ? -1 : 1,
+  );
+  const renderedExposures = orderedExposures.slice(
+    0,
+    MAX_RENDERED_EXPOSURE_ROWS,
+  );
+  const droppedExposureRows = objectFlsExposures.length - renderedExposures.length;
 
   const sharingMap = new Map<string, string>();
   for (const field of auditTargets) {
@@ -544,12 +675,25 @@ export const generateComplianceReportHandler = async (
     scope !== null
       ? `Scope: \`${escapeCell(scope.componentId)}\` — every count below is for THIS OBJECT ONLY, not the org.  `
       : 'Scope: org-wide (every object in this vault).  ';
-  const nextPageLine = paged.pageInfo.hasMore
-    ? `More regulated fields remain (${regulatedTotal.toString()} in scope). Re-run with ` +
-      '`cursor` set to `pageInfo.nextCursor` for the next page, or narrow with ' +
-      '`objectApiName` / `objectFilter` to report on one object.  '
-    : 'This page covers every regulated field in scope. Narrow with `objectApiName` / ' +
-      '`objectFilter` to report on one object.  ';
+  // WHOLE-SCOPE CLAIM, GATED ON WHOLE SCOPE — not on `hasMore`.
+  //
+  // This read `hasMore ? "more remain" : "this page covers every regulated
+  // field in scope"`. `hasMore` is false at the END of a page walk as well as
+  // when everything fit, so page 2 of 3 and the past-the-end page both printed
+  // a whole-scope certification — the past-the-end one four lines after saying
+  // it covers NO regulated fields. A verifier flagged exactly this and the
+  // report shipped it anyway.
+  //
+  // The honest condition is the one being claimed: this page started at the
+  // beginning AND carries every row in scope.
+  const coversWholeScope = pageOffset === 0 && auditTargets.length === regulatedTotal;
+  const nextPageLine = coversWholeScope
+    ? 'This page covers every regulated field in scope. Narrow with `objectApiName` / ' +
+      '`objectFilter` to report on one object.  '
+    : `PAGE-BOUNDED: this page carries ${auditTargets.length.toString()} of ${regulatedTotal.toString()} regulated field(s) in scope` +
+      `${pageOffset > 0 ? ` (from offset ${pageOffset.toString()})` : ''}. Every count below is FOR THIS PAGE. ` +
+      'Re-run with `cursor` set to `pageInfo.nextCursor` for the next page, or narrow with ' +
+      '`objectApiName` / `objectFilter` to report on one object.  ';
 
   const execBlock = [
     '## Executive Summary',
@@ -568,7 +712,10 @@ export const generateComplianceReportHandler = async (
     // NOT bare numbers: each is page-bounded, and the qualifier travels in the
     // same sentence so a zero can never be lifted out as an org-wide finding.
     `Risk flags raised: ${riskFlags.length.toString()} (${pageQualifier})  `,
-    `Object+FLS exposure pairs: ${objectFlsExposures.length.toString()} (${pageQualifier})  `,
+    `Object+FLS exposure pairs: ${objectFlsExposures.length.toString()} (${pageQualifier})` +
+      (droppedExposureRows > 0
+        ? `; only ${renderedExposures.length.toString()} are rendered in the table below  `
+        : '  '),
     nextPageLine,
   ].join('\n');
 
@@ -653,18 +800,32 @@ export const generateComplianceReportHandler = async (
   const objectFlsBlock: string[] = ['## Object + FLS Exposure', ''];
   if (objectFlsExposures.length === 0) {
     // Emitted only AFTER the system-perm (ModifyAllData/ViewAllData) path has
-    // been checked alongside the object-edge path — god-mode is folded in.
+    // been checked alongside the object-edge path — god-mode is folded in —
+    // and only after the pass ran over EVERY audited field on this page. It
+    // used to be printed when the pass had examined nothing at all, because a
+    // narrower private predicate dropped every ordinary PII field first.
     objectFlsBlock.push(
-      '_(no profile/perm-set holds object-level access — via an object grant or org-wide ModifyAllData/ViewAllData — AND FLS read on a regulated field in the audited set)_',
+      `_(no profile/perm-set holds object-level access — via an object grant or org-wide ModifyAllData/ViewAllData — AND FLS read on any of the ${auditEntries.length.toString()} regulated field(s) audited on this page)_`,
     );
   } else {
+    if (droppedExposureRows > 0) {
+      // A silently truncated table is the same defect as a certified zero: the
+      // reader cannot tell a short list from a complete one. Say the cap here,
+      // where the list is, as well as in the summary and the boundaries.
+      objectFlsBlock.push(
+        `Showing ${renderedExposures.length.toString()} of ${objectFlsExposures.length.toString()} exposure pair(s) found on this page ` +
+          `(highest-risk field classes first); ${droppedExposureRows.toString()} row(s) are not rendered. ` +
+          'Narrow with `objectApiName` / `objectFilter`, or use `limit` to audit fewer fields per page, to see the rest.',
+      );
+      objectFlsBlock.push('');
+    }
     objectFlsBlock.push(
       '| Field | Principal | Object access | Note |',
     );
     objectFlsBlock.push('| --- | --- | --- | --- |');
-    for (const row of objectFlsExposures) {
+    for (const row of renderedExposures) {
       objectFlsBlock.push(
-        `| \`${escapeCell(row.fieldId)}\` | ${escapeCell(row.grantorType)}:${escapeCell(row.grantorName)} | ${row.objectAccess} | Can reach parent records AND has FLS read on this field — verify encrypted/identifier exposure |`,
+        `| \`${escapeCell(row.fieldId)}\` | ${escapeCell(row.grantorType)}:${escapeCell(row.grantorName)} | ${row.objectAccess} | Can reach parent records AND has FLS read on this field — verify exposure |`,
       );
     }
   }
@@ -712,11 +873,19 @@ export const generateComplianceReportHandler = async (
     STRUCTURAL_DISCLOSURE,
     'PII classifications inherit the v2.0d recognizer heuristic — fields flagged here may not contain PII at runtime, and unflagged fields may.',
     'Dynamic Apex and runtime SOQL strings are invisible to the access-audit — the recognizer cannot trace reflective field access.',
-    'Object+FLS exposure pairs flag principals with BOTH parent-object access and field-level read on regulated fields — cross-check with `sfi.who_can_access_object` and `sfi.field_access_audit`.',
+    `Object+FLS exposure pairs flag principals with BOTH parent-object access and field-level read on regulated fields. The pass covers EVERY regulated (PII/sensitive) field audited on this page — all ${auditEntries.length.toString()} of them — not a narrower high-risk subset; cross-check with \`sfi.who_can_access_object\` and \`sfi.field_access_audit\`.`,
     'Object+FLS exposure now folds in org-wide god-mode: a Profile/PermissionSet holding `ModifyAllData` or `ViewAllData` (on `userPermissions`) reaches every record even with NO explicit object-permission row, so it is reported whenever it ALSO holds FLS read/edit on a regulated field. ViewAllData maps to read-level only.',
     'DISCLOSED GAP: god-mode granted via a Permission Set GROUP or a muting permission set is NOT resolved here — the vault models `userPermissions` on Profile/PermissionSet nodes only; PSG aggregation / muting is not folded into this exposure pass.',
   ];
 
+  // The rendered-row cap, stated as a typed disclosure a machine consumer
+  // cannot skip. Only pushed when it actually bit — an uncapped table must not
+  // carry a caveat that suggests rows are missing when none are.
+  if (droppedExposureRows > 0) {
+    boundaries.push(
+      `OBJECT+FLS TABLE CAPPED: ${objectFlsExposures.length.toString()} exposure pair(s) were FOUND on this page but only ${renderedExposures.length.toString()} rows are RENDERED (highest-risk field classes first). The count in the Executive Summary is the full total; the table is not. Narrow with \`objectApiName\` / \`objectFilter\`, or lower \`limit\` so fewer fields are audited per page, to reach the rest.`,
+    );
+  }
   // The scope, stated as a typed disclosure a machine consumer cannot skip.
   boundaries.push(
     scope !== null

@@ -170,7 +170,7 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listEdgesForNodes } from '@sf-intelligence/graph';
 import {
   findRegistryRoot,
   loadManifest,
@@ -181,6 +181,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted } from './absence-disclosure.js';
 import {
   resolveAccessParity,
   type AccessParityResult,
@@ -247,6 +248,161 @@ const isDependencyEdge = (edgeType: string, changedType: string): boolean => {
 
 /** Apex component types `tests_for_change` can map to a covering test set. */
 const APEX_TYPES: ReadonlySet<string> = new Set(['ApexClass', 'ApexTrigger']);
+
+/**
+ * REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
+ *
+ * The edge types the covering-test walk this gate composes
+ * (`tests_for_change`'s `COVERAGE_EDGE_TYPES`) actually traverses. Anything
+ * NOT in this set is a path by which a real test class can exercise a changed
+ * component WITHOUT the walk ever seeing it — most commonly a plain
+ * `new SomeClass()`, which the Apex edge builder mints as a `references` edge
+ * (`properties.mechanism === 'instantiation'`), deliberately NOT as
+ * `callsApex` (a constructor is not a method call).
+ *
+ * The consequence measured on a real production vault: for a modified Apex
+ * class the gate returned `testCoverage: 'uncovered'`, `selectedTests: []`,
+ * `summary.testsToRun: 0`, `trust.completeness.status: 'complete'` and
+ * `trust.limitations: []` — while the SAME payload listed that class's own
+ * test class in `dependents`. `uncovered` is an AFFIRMATIVE claim ("no test
+ * reaches this"); the walk had only failed to look. A host reading the
+ * structured fields tells the developer there are no tests to run.
+ *
+ * So: a zero produced while an unwalked path from a test exists is
+ * `'unknown'`, never `'uncovered'`, the tests are named in a typed field, and
+ * the gap downgrades the response's completeness. The walk itself is not
+ * widened here — that would mean changing `tests_for_change`'s traversal,
+ * which this tool composes and must not reimplement.
+ */
+const COVERAGE_WALK_EDGE_TYPES: ReadonlySet<string> = new Set([
+  'callsApex',
+  'dispatchesAsync',
+]);
+
+/** Node-id prefix for the only referrer family that can BE an Apex test. */
+const APEX_CLASS_ID_PREFIX = 'ApexClass:';
+
+/** Node-id prefix for the other Apex family the reverse search passes through. */
+const APEX_TRIGGER_ID_PREFIX = 'ApexTrigger:';
+
+/**
+ * Sentinel property proving the refresh CLASSIFIED a class's test-ness. Read
+ * through {@link familyWasExtracted} (`hasOwnProperty`) so a vault that never
+ * extracted `isTest` is `unknown`, not silently "known not to be a test" —
+ * `props['isTest'] !== true` alone collapses NEVER-SCANNED into SCANNED-AND-
+ * CLEAN, which is the same defect one layer down.
+ */
+const IS_TEST_PROPERTY = 'isTest';
+
+/**
+ * Node-expansion budget for the reverse search, shared across every row of one
+ * request. Bounds the extra graph work on a hub class. Exhausting it NEVER
+ * upgrades a zero to a proven one: any not-yet-expanded node that was reached
+ * through an unwalked edge is reported as an unchecked referrer instead.
+ */
+const UNCHECKED_REFERRER_NODE_BUDGET = 600;
+
+/**
+ * Decide whether a zero-covering-test result for `selfId` is a CHECKED zero.
+ *
+ * It is not, if any Apex test class reaches `selfId` over a reverse path that
+ * uses at least ONE edge type {@link COVERAGE_WALK_EDGE_TYPES} does not
+ * traverse. That is deliberately the whole transitive closure, not the direct
+ * referrers: the shape measured on a real vault is TWO hops — a test class
+ * `callsApex` a production class, and THAT class instantiates the changed one
+ * (`references`, mechanism `instantiation`). A depth-1 check certifies such a
+ * class `uncovered` while its eponymous test class exercises it.
+ *
+ * Reverse BFS from `selfId` over INBOUND edges whose source is an Apex node,
+ * carrying one bit of state per visit: whether the path so far used an
+ * unwalked edge. A class flagged `isTest: true` — or one carrying NO extracted
+ * `isTest` property, because never-extracted is not "known not a test" (R1) —
+ * is a SINK: recorded when reached dirty, never traversed THROUGH, matching
+ * `tests_for_change`'s own "a test class is a coverage sink" rule. An edge
+ * whose source class is not in the vault at all is treated the same way — a
+ * referrer we cannot read is not a referrer we can rule out. `selfId` is
+ * excluded outright (R3 self-match). A node reached over walked edges only is
+ * still expanded, because the unwalked edge may be further upstream, but it is
+ * never itself reported — the walk already had its chance at it.
+ *
+ * Returns the test classes that make the zero unproven. Empty ⇒ the zero is
+ * checked (within {@link UNCHECKED_REFERRER_NODE_BUDGET} and the walk's own
+ * depth-3 cap, both disclosed in `boundaries`).
+ */
+const collectUncheckedTestReferrers = async (
+  selfId: ComponentId,
+  inboundEdges: readonly Edge[],
+  loadNode: (id: ComponentId) => Promise<Result<Node | null, McpError>>,
+  loadInbound: (
+    ids: readonly ComponentId[],
+  ) => Promise<Result<ReadonlyMap<ComponentId, readonly Edge[]>, McpError>>,
+  budget: { remaining: number },
+): Promise<Result<readonly ComponentId[], McpError>> => {
+  const dirtyTests = new Set<ComponentId>();
+  const seenClean = new Set<ComponentId>([selfId]);
+  const seenDirty = new Set<ComponentId>();
+  let level: readonly { readonly dirty: boolean; readonly edges: readonly Edge[] }[] = [
+    { dirty: false, edges: inboundEdges },
+  ];
+  while (level.length > 0) {
+    const next: { id: ComponentId; dirty: boolean }[] = [];
+    for (const cur of level) {
+      for (const e of cur.edges) {
+        const from = e.fromId;
+        if (from === selfId) continue;
+        const isClass = from.startsWith(APEX_CLASS_ID_PREFIX);
+        if (!isClass && !from.startsWith(APEX_TRIGGER_ID_PREFIX)) continue;
+        const dirty = cur.dirty || !COVERAGE_WALK_EDGE_TYPES.has(e.edgeType);
+        if ((dirty ? seenDirty : seenClean).has(from)) continue;
+        (dirty ? seenDirty : seenClean).add(from);
+        if (isClass) {
+          const res = await loadNode(from);
+          if (!res.ok) return res;
+          const referrer = res.value;
+          const classified =
+            referrer !== null && familyWasExtracted(referrer.properties, IS_TEST_PROPERTY);
+          if (!classified || referrer?.properties[IS_TEST_PROPERTY] === true) {
+            // Test, or test-ness never extracted: a SINK either way.
+            if (dirty) dirtyTests.add(from);
+            continue;
+          }
+        }
+        next.push({ id: from, dirty });
+      }
+    }
+    if (next.length === 0) break;
+    if (next.length > budget.remaining) {
+      // Out of budget. Everything reached over an unwalked edge and never
+      // expanded is reported, so the zero stays unproven rather than being
+      // silently certified. What is dropped is the CLEAN frontier — nodes
+      // reachable only over `callsApex` / `dispatchesAsync`, which is exactly
+      // the territory the composed walk owns and whose depth-3 cap `boundaries`
+      // already discloses. Exhaustion can therefore only ever ADD `unknown`
+      // rows, never manufacture an `uncovered` one.
+      for (const n of next) if (n.dirty) dirtyTests.add(n.id);
+      break;
+    }
+    budget.remaining -= next.length;
+    const edgeRes = await loadInbound(next.map((n) => n.id));
+    if (!edgeRes.ok) return edgeRes;
+    level = next.map((n) => ({ dirty: n.dirty, edges: edgeRes.value.get(n.id) ?? [] }));
+  }
+  return ok(sortIds(dirtyTests));
+};
+
+/** The typed limitation a response carries when any row's coverage is unknown. */
+const unknownTestCoverageLimitation = (rows: number): string =>
+  `Test coverage could not be determined for ${rows} changed Apex component(s): an Apex test ` +
+  'class reaches them over a path that uses at least one edge the covering-test walk does not ' +
+  'traverse (a `new SomeClass()` is minted as `references`, not `callsApex`/`dispatchesAsync`), ' +
+  'either directly or through a production class in between. Those rows read ' +
+  '`testCoverage: "unknown"` and name the tests in `uncheckedTestReferrers`; ' +
+  '`summary.testsToRun` and `selectedTests` UNDER-report what must run. Run those test classes ' +
+  'too, or the full suite — an empty selection here is NOT "no tests cover this change".';
+
+/** The `missingCoverage` marker for the same gap, for a machine consumer. */
+const UNKNOWN_TEST_COVERAGE_MARKER =
+  'test-coverage mapping (the callsApex / dispatchesAsync covering-test walk)';
 
 /**
  * Frontend bundle types whose promotion risk is OUTBOUND, not inbound. A
@@ -424,7 +580,7 @@ const buildFiringBindingReason = (
 
 /** Verbatim honesty disclosure surfaced on every response. */
 export const REVIEW_CHANGE_DISCLOSURE =
-  'review_change is a pre-deploy gate over the LAST VAULT REFRESH of the target org — the vault can have DRIFTED from what is actually deployed, so a `safe` verdict is only as fresh as the last `sfi refresh`; re-refresh before trusting it. Dependents are DIRECT (single-hop) INCOMING edges, EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (a structural object→field parent) per the access≠usage rule — the full transitive blast radius is sfi.get_impact. ONE exception to the grantedBy exclusion: for a CustomPermission the inbound grantedBy granters (Profile/PermissionSet) reference it BY NAME, so they ARE counted as dependents (deleting the permission breaks those granters). A DELETED component with ANY dependent is `blocking` (removing it breaks its dependents; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate). An Active DuplicateRule / MatchingRule fires on record save regardless of inbound references (parentOf is structural; any MatchingRule link is outbound), so a delete/modify the inbound gate would call `safe` is floored at `review` (never bare `safe`) when the rule is LIVE — an inactive rule keeps its table verdict. Likewise an ACTIVE record-triggered (before/after-save) Flow, an ACTIVE ApexTrigger, or an ACTIVE ValidationRule PARTICIPATES in the save transaction of its object via a binding the inbound-dependent gate is blind to — the Flow/Trigger binds OUTBOUND (`triggersOn` → object) and the ValidationRule binds via the excluded structural `parentOf` — so the gate shows 0 dependents; deleting such a live save participant is floored at `blocking` and modifying one at `review` (never bare `safe`), while an inactive/Obsolete automation keeps its table verdict (it does not fire). A MODIFIED component with firm (declared/parsed) dependents is `risky`; with heuristic-only readers it is `review` (verify the scanner inference). ADDED components are NOT analysed for their own contents — only name-collision (id already in the vault) + tests mapping; their forward references were never extracted. A component the vault does not contain under a modified/deleted label is `review`, never fabricated. Test selection composes sfi.tests_for_change: CLASS granularity, dynamic dispatch / reflection / managed-package tests invisible, depth-3 capped — SELECTION ≠ VALIDATION (a selected test that merely runs the changed code does not prove correctness). A zero-dependent DELETE/MODIFY is "not checked", not "none", unless the vault covers every family that COULD reference the component (its usage-source families — a VisualforcePage is placed by a CustomSite, a CompactLayout is assigned by a CustomObject, a Screen Flow is embedded on a FlexiPage); a gap in any of those planes is surfaced as coverageCaveat and downgrades an otherwise-safe verdict to `review`, because absence of inbound edges is only as strong as the coverage of the families that produce them. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) carry OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them, and `selectedTests` carries the covering tests of the Apex controllers it calls (its own bundle has no Apex tests).';
+  'review_change is a pre-deploy gate over the LAST VAULT REFRESH of the target org — the vault can have DRIFTED from what is actually deployed, so a `safe` verdict is only as fresh as the last `sfi refresh`; re-refresh before trusting it. Dependents are DIRECT (single-hop) INCOMING edges, EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (a structural object→field parent) per the access≠usage rule — the full transitive blast radius is sfi.get_impact. ONE exception to the grantedBy exclusion: for a CustomPermission the inbound grantedBy granters (Profile/PermissionSet) reference it BY NAME, so they ARE counted as dependents (deleting the permission breaks those granters). A DELETED component with ANY dependent is `blocking` (removing it breaks its dependents; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate). An Active DuplicateRule / MatchingRule fires on record save regardless of inbound references (parentOf is structural; any MatchingRule link is outbound), so a delete/modify the inbound gate would call `safe` is floored at `review` (never bare `safe`) when the rule is LIVE — an inactive rule keeps its table verdict. Likewise an ACTIVE record-triggered (before/after-save) Flow, an ACTIVE ApexTrigger, or an ACTIVE ValidationRule PARTICIPATES in the save transaction of its object via a binding the inbound-dependent gate is blind to — the Flow/Trigger binds OUTBOUND (`triggersOn` → object) and the ValidationRule binds via the excluded structural `parentOf` — so the gate shows 0 dependents; deleting such a live save participant is floored at `blocking` and modifying one at `review` (never bare `safe`), while an inactive/Obsolete automation keeps its table verdict (it does not fire). A MODIFIED component with firm (declared/parsed) dependents is `risky`; with heuristic-only readers it is `review` (verify the scanner inference). ADDED components are NOT analysed for their own contents — only name-collision (id already in the vault) + tests mapping; their forward references were never extracted. A component the vault does not contain under a modified/deleted label is `review`, never fabricated. Test selection composes sfi.tests_for_change: CLASS granularity, dynamic dispatch / reflection / managed-package tests invisible, depth-3 capped — SELECTION ≠ VALIDATION (a selected test that merely runs the changed code does not prove correctness). That walk follows only `callsApex` / `dispatchesAsync`, so a test that exercises a class through a plain `new SomeClass()` (minted as `references`, mechanism `instantiation`) is INVISIBLE to it — DIRECTLY, or with a production class in between (a test calls a helper and the helper instantiates the changed class). Before reporting a zero this gate therefore reverse-searches the WHOLE inbound Apex closure of the component for a test class reachable over a path that uses at least one unwalked edge; when one exists the row reads `testCoverage: "unknown"` (NEVER `uncovered`), names those test classes in `uncheckedTestReferrers`, is counted in `summary.unknownTestCoverage` rather than `uncoveredApex`, and downgrades `trust.completeness` with a `trust.limitations` entry — an empty selected-test list is then "not checked", never "no tests cover this change". The reverse search is node-budgeted, and exhausting the budget reports the unexpanded unwalked referrers as `unknown` rather than certifying. A remaining `uncovered` is therefore a zero over the extracted Apex edges only: it is still NOT proof of no coverage where the extractor never saw the call at all (dynamic dispatch / `Type.forName` / reflection / managed-package tests) or where the covering chain exceeds the composed walk’s depth-3 cap. A zero-dependent DELETE/MODIFY is "not checked", not "none", unless the vault covers every family that COULD reference the component (its usage-source families — a VisualforcePage is placed by a CustomSite, a CompactLayout is assigned by a CustomObject, a Screen Flow is embedded on a FlexiPage); a gap in any of those planes is surfaced as coverageCaveat and downgrades an otherwise-safe verdict to `review`, because absence of inbound edges is only as strong as the coverage of the families that produce them. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) carry OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them, and `selectedTests` carries the covering tests of the Apex controllers it calls (its own bundle has no Apex tests).';
 
 /**
  * Zod schema for the `sfi.review_change` tool input.
@@ -508,8 +664,21 @@ export const reviewChangeInputSchema = z.object({
 /** Parsed input shape. */
 export type ReviewChangeInput = z.infer<typeof reviewChangeInputSchema>;
 
-/** Whether a changed Apex component is reached by a test (or is not Apex at all). */
-export type TestCoverageStatus = 'covered' | 'uncovered' | 'not-applicable';
+/**
+ * Whether a changed Apex component is reached by a test (or is not Apex at all).
+ *
+ *   - `covered` — the covering-test walk found at least one test class.
+ *   - `uncovered` — the walk found none AND no test class reaches the
+ *     component anywhere in its inbound Apex closure over a path using an
+ *     edge the walk cannot follow. A zero over the EXTRACTED edges — see
+ *     {@link ReviewChangeSummary.uncoveredApex} for what that still excludes.
+ *   - `unknown` — the walk found none, but a class that is (or may be) a test
+ *     reaches the component over such a path, directly or through production
+ *     classes in between; see `uncheckedTestReferrers`. NOT a claim that no
+ *     test covers this. REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
+ *   - `not-applicable` — the component is not Apex, so no test maps to it.
+ */
+export type TestCoverageStatus = 'covered' | 'uncovered' | 'unknown' | 'not-applicable';
 
 /** The review outcome for one component in the change set. */
 export interface ReviewedComponent {
@@ -551,6 +720,26 @@ export interface ReviewedComponent {
   readonly selectedTests: readonly ComponentId[];
   readonly testCoverage: TestCoverageStatus;
   /**
+   * Apex test classes that reach this component over a path using at least one
+   * edge type the covering-test walk (`callsApex` / `dispatchesAsync`) does
+   * not traverse — in practice a `new SomeClass()` instantiation, which the
+   * Apex edge builder mints as `references` (`mechanism: 'instantiation'`).
+   * The path may run THROUGH production classes, so a direct referrer of this
+   * component is not necessarily listed; the test class at the far end is.
+   * A class carrying no extracted `isTest` property counts as a possible test
+   * (never-extracted is not "known not a test"). When the reverse search hits
+   * its node budget, the unexpanded classes reached over an unwalked edge are
+   * listed instead of being silently dropped.
+   *
+   * RUN THESE. They are exactly what `selectedTests` could not see.
+   *
+   * Present ONLY when non-empty, and non-empty IFF `testCoverage` is
+   * `'unknown'` — the pair is the machine-readable form of "I found no
+   * covering test, and here is what I could not look at".
+   * REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
+   */
+  readonly uncheckedTestReferrers?: readonly ComponentId[];
+  /**
    * Frontend bundles only: the Apex classes this bundle `callsApex` (outbound
    * risk the inbound-dependent gate misses). Sample-capped. Absent otherwise.
    */
@@ -573,8 +762,30 @@ export interface ReviewChangeSummary {
   readonly safe: number;
   /** Union of covering tests across the whole set. */
   readonly testsToRun: number;
-  /** Changed Apex components no test reaches. */
+  /**
+   * Changed Apex components no test reaches over ANY extracted inbound Apex
+   * edge — neither the covering-test walk (`callsApex` / `dispatchesAsync`)
+   * nor an unwalked `references` path from a test class. Rows whose coverage
+   * could not be decided are counted in
+   * {@link ReviewChangeSummary.unknownTestCoverage} instead, so this number
+   * never launders a not-checked zero as a checked one.
+   *
+   * Still an UPPER BOUND on the truly unguarded surface, NOT a proof: coverage
+   * the extractor never minted an edge for (dynamic dispatch, reflection,
+   * managed-package tests) and chains longer than the composed walk's depth-3
+   * cap are invisible to every search here. It over-reports risk, which is the
+   * safe direction for a gate — it must never under-report it.
+   */
   readonly uncoveredApex: number;
+  /**
+   * Changed Apex components whose test coverage could NOT be determined: a test
+   * class reaches them only through an edge the covering-test walk does not
+   * traverse (see each row's `uncheckedTestReferrers`). Disjoint from
+   * `uncoveredApex`. Non-zero ⇒ `trust.completeness` is downgraded and
+   * `trust.limitations` names the gap.
+   * REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
+   */
+  readonly unknownTestCoverage: number;
   /** Components labelled modified/deleted but absent from the vault. */
   readonly notInVault: number;
   /** True when more components exist than the inlined `reviewed[]` rows. */
@@ -742,12 +953,39 @@ const runReviewCore = async (
   }
   const prepared: Prepared[] = [];
   const frontendCalleeApexIds = new Set<ComponentId>();
+  // One node cache for the whole core pass, shared with the unwalked-referrer
+  // detector below (a referrer named by several changed components is fetched
+  // once). Mirrors `tests_for_change`'s own `loadNode`.
+  const nodeCache = new Map<ComponentId, Node | null>();
+  const loadNode = async (nodeId: ComponentId): Promise<Result<Node | null, McpError>> => {
+    const cached = nodeCache.get(nodeId);
+    if (cached !== undefined) return ok(cached);
+    const res = await getNodeById(ctx.graph, nodeId);
+    if (!res.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${res.error.message}` });
+    }
+    nodeCache.set(nodeId, res.value);
+    return ok(res.value);
+  };
+  // Batched inbound-edge fetch for the unwalked-referrer reverse search — ONE
+  // query per BFS level, not one per node. `listEdgesForNodes` is the shared
+  // module that already reproduces N `listEdges(id, {direction:'in'})` calls.
+  const loadInbound = async (
+    ids: readonly ComponentId[],
+  ): Promise<Result<ReadonlyMap<ComponentId, readonly Edge[]>, McpError>> => {
+    const res = await listEdgesForNodes(ctx.graph, ids, { direction: 'in' });
+    if (!res.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${res.error.message}` });
+    }
+    return ok(res.value);
+  };
+  // One node budget for the WHOLE request, so a wide change set of hub classes
+  // cannot multiply the reverse search out.
+  const referrerBudget = { remaining: UNCHECKED_REFERRER_NODE_BUDGET };
   for (const change of components) {
     const id = canonicalId(change.type, change.apiName);
-    const nodeRes = await getNodeById(ctx.graph, id);
-    if (!nodeRes.ok) {
-      return { ok: false, error: { kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` } };
-    }
+    const nodeRes = await loadNode(id);
+    if (!nodeRes.ok) return nodeRes;
     const node = nodeRes.value;
     let outboundApex: readonly ComponentId[] = [];
     let outboundWires: readonly ComponentId[] = [];
@@ -792,19 +1030,23 @@ const runReviewCore = async (
   ];
   const perChangeById = new Map<ComponentId, PerChangeCoverage>();
   const selectedTestsUnion = new Set<ComponentId>();
-  let uncoveredApex = 0;
   if (apexIdsToScore.length > 0) {
     const tfc = await testsForChangeHandler(ctx, { changedComponents: apexIdsToScore });
     if (!tfc.ok) return tfc;
     for (const pc of tfc.value.data.perChange) perChangeById.set(pc.id, pc);
     for (const t of tfc.value.data.selectedTests) selectedTestsUnion.add(t.id);
-    // `uncoveredApex` counts only the changeset's OWN unguarded Apex — a callee
-    // pulled in for a frontend bundle is a dependency, not a changed component.
-    // (When there are no bundle callees this equals `summary.uncoveredCount`.)
-    for (const uid of tfc.value.data.uncoveredChanges) {
-      if (changesetApexSet.has(uid)) uncoveredApex += 1;
-    }
   }
+  // `uncoveredApex` / `unknownTestCoverage` are tallied in the review loop
+  // below, NOT from `tfc.uncoveredChanges`: a zero-covering-test result splits
+  // into a PROVEN-unguarded class and one whose coverage the walk could not
+  // decide, and only the per-component inbound edge set tells them apart
+  // (REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO). Both count the changeset's
+  // OWN Apex only — a callee pulled in for a frontend bundle is a dependency,
+  // not a changed component — and each id at most once, so a duplicated change
+  // entry cannot inflate either tally.
+  let uncoveredApex = 0;
+  let unknownTestCoverage = 0;
+  const talliedApexIds = new Set<ComponentId>();
 
   // Per-type coverage caveat cache — consulted ONLY for a zero-dependent result,
   // to distinguish a proven "none" from an absence the vault could never have
@@ -910,11 +1152,38 @@ const runReviewCore = async (
     // the truncation it exists to disclose.
     // REVIEW-CHANGE-SELECTED-TESTS-SILENT-TRUNCATION.
     const distinctSelectedTests = sortIds(new Set<ComponentId>(selectedTests));
+
+    // (b') IS THE ZERO CHECKED? A zero-covering-test result is only "no test
+    // reaches this" if no test class reaches the component through an edge the
+    // walk cannot follow. Reuses `inboundEdges` already in hand — no extra edge
+    // query. REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
+    const walkFoundTests = pc !== undefined && pc.covered;
+    let uncheckedTestReferrers: readonly ComponentId[] = [];
+    if (isApex && inVault && !walkFoundTests) {
+      const refRes = await collectUncheckedTestReferrers(
+        id,
+        inboundEdges,
+        loadNode,
+        loadInbound,
+        referrerBudget,
+      );
+      if (!refRes.ok) return refRes;
+      uncheckedTestReferrers = refRes.value;
+    }
     const testCoverage: TestCoverageStatus = !isApex
       ? 'not-applicable'
-      : pc !== undefined && pc.covered
+      : walkFoundTests
         ? 'covered'
-        : 'uncovered';
+        : uncheckedTestReferrers.length > 0
+          ? 'unknown'
+          : 'uncovered';
+    // Tally the changeset's own Apex once. A row whose coverage is UNKNOWN is
+    // never counted as proven-unguarded, and never silently dropped either.
+    if (isApex && pc !== undefined && !pc.covered && changesetApexSet.has(id) && !talliedApexIds.has(id)) {
+      talliedApexIds.add(id);
+      if (testCoverage === 'unknown') unknownTestCoverage += 1;
+      else uncoveredApex += 1;
+    }
 
     // (c) VERDICT — the classification table, then a frontend-bundle OUTBOUND
     // adjustment. A modified LWC/Aura/VF has (almost) no INCOMING dependents, so
@@ -994,6 +1263,20 @@ const runReviewCore = async (
       }
     }
 
+    // The blind spot also goes in the PROSE the row carries, because a host
+    // summarising `reviewed[]` reads `reason` aloud. No verdict floor is added:
+    // an unwalked referrer is by construction an inbound edge, so the row
+    // already has >=1 dependent and the table can never have called it `safe`.
+    if (uncheckedTestReferrers.length > 0) {
+      reason =
+        `${reason} TEST COVERAGE UNKNOWN, not zero: ${uncheckedTestReferrers.length} Apex test ` +
+        `class(es) (${uncheckedTestReferrers.slice(0, DEPENDENT_SAMPLE_CAP).join(', ')}) reach this ` +
+        'component over a path using an edge the covering-test walk does not traverse (a ' +
+        '`new SomeClass()` is minted as `references`, not `callsApex`) — directly or through a ' +
+        'production class in between — so the empty selected-test list is "not checked", NEVER ' +
+        '"no tests cover this". Run them.';
+    }
+
     reviewed.push({
       id,
       type: change.type,
@@ -1010,6 +1293,9 @@ const runReviewCore = async (
       selectedTestCount: distinctSelectedTests.length,
       selectedTests: distinctSelectedTests.slice(0, TEST_SAMPLE_CAP),
       testCoverage,
+      ...(uncheckedTestReferrers.length > 0
+        ? { uncheckedTestReferrers: uncheckedTestReferrers.slice(0, DEPENDENT_SAMPLE_CAP) }
+        : {}),
       ...(isFrontendBundle && outboundApex.length > 0
         ? { outboundApex: outboundApex.slice(0, DEPENDENT_SAMPLE_CAP) }
         : {}),
@@ -1056,15 +1342,35 @@ const runReviewCore = async (
     safe: tally.safe,
     testsToRun: selectedTestsUnion.size,
     uncoveredApex,
+    unknownTestCoverage,
     notInVault,
     truncated,
   };
 
+  // A response that could not decide the test dimension must not certify
+  // `completeness: complete` with `limitations: []` — that pair is precisely
+  // what a host reads as "the gate checked everything and found nothing to
+  // run". The gap is downgraded in the machine-readable completeness AND named
+  // verbatim in `limitations`, additively alongside any family-coverage caveat.
+  // REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
+  const testGap = unknownTestCoverage > 0;
+  const baseCompleteness =
+    coverageCaveat === undefined
+      ? { status: 'complete' as const, missingCoverage: [] as readonly string[] }
+      : { status: coverageCaveat.status, missingCoverage: coverageCaveat.missingCoverage };
+  const missingCoverage = testGap
+    ? [...baseCompleteness.missingCoverage, UNKNOWN_TEST_COVERAGE_MARKER]
+    : baseCompleteness.missingCoverage;
   const trust = offlineTrust(
     ctx,
-    coverageCaveat === undefined
+    missingCoverage.length === 0
       ? { status: 'complete' }
-      : { status: coverageCaveat.status, missingCoverage: coverageCaveat.missingCoverage },
+      : {
+          status: testGap && baseCompleteness.status === 'complete' ? 'partial' : baseCompleteness.status,
+          missingCoverage,
+        },
+    undefined,
+    testGap ? [unknownTestCoverageLimitation(unknownTestCoverage)] : undefined,
   );
 
   // Additive grant-completeness ("ships for nobody") section — computed ONLY
@@ -1294,6 +1600,8 @@ const REVIEW_CHANGE_BOUNDARIES: readonly string[] = [
   'Active save-time automation binds to its object OUTSIDE the inbound-dependent model: a record-triggered (before/after-save) Flow and an ApexTrigger bind OUTBOUND via `triggersOn`, and a ValidationRule binds via the structural `parentOf` from its object (excluded as a dependent). Such a live save participant shows 0 inbound dependents, so its delete is floored at `blocking` and its modify at `review` (never bare `safe`). An INACTIVE / Obsolete automation does not fire and keeps its table verdict.',
   'ADDED components are not analysed for their own contents — only name-collision (id already present) and test mapping. Their forward references were never extracted offline.',
   'Test selection composes `sfi.tests_for_change`: CLASS-granular, blind to dynamic dispatch / reflection / managed-package tests, depth-3 capped. SELECTION ≠ VALIDATION.',
+  'The covering-test walk traverses only `callsApex` / `dispatchesAsync`. A test class that exercises a change through a plain `new SomeClass()` reaches it via a `references` edge the walk never follows — directly, or with one or more production classes in between. Before reporting a zero this gate reverse-searches the component’s WHOLE inbound Apex closure for a test reachable over a path using at least one unwalked edge; if one exists the row reports `testCoverage: "unknown"` with those tests in `uncheckedTestReferrers`, counts in `summary.unknownTestCoverage` (not `uncoveredApex`), and downgrades `trust.completeness` with a named `trust.limitations` entry. `summary.testsToRun` is then a FLOOR — run those test classes too, or the full suite.',
+  'A remaining `uncovered` is a zero over the EXTRACTED Apex edges, not a proof of no coverage. Three boundaries survive: the composed walk is depth-3 capped, so a longer all-`callsApex` chain still reports uncovered; dynamic dispatch (`Type.forName`), reflection and managed-package tests are never extracted as edges at all, so no search here can see them; and the reverse search is node-budgeted (it fails toward `unknown`, never toward a false `uncovered`). Treat `summary.uncoveredApex` as an UPPER BOUND on the unguarded surface.',
   'Frontend bundles (LightningComponentBundle / Aura / Visualforce) are reviewed on OUTBOUND wiring too: a modified/added bundle that calls an Apex controller or references a CustomPermission / FlexiPage is floored at `review` (never bare `safe`), with `outboundApex` / `outboundWires` naming them and the controllers’ covering tests selected. Only `callsApex` and `references`→CustomPermission/FlexiPage wiring are composed; other outbound edges (e.g. a bundle’s own field reads) are not turned into verdicts.',
 ];
 
@@ -1383,6 +1691,26 @@ export const classify = (i: ClassifyInput): { verdict: ChangeVerdict; reason: st
 
 /** Compose the single-line deploy recommendation from the tallies. */
 const buildRecommendation = (
+  summary: ReviewChangeSummary,
+  reviewed: readonly ReviewedComponent[],
+): string => `${buildVerdictRecommendation(summary, reviewed)}${buildUnknownTestSuffix(summary)}`;
+
+/**
+ * The sentence appended to EVERY recommendation when the test dimension could
+ * not be decided. A host reads this line aloud, so "run the N selected test(s)"
+ * must never be the last thing it says about a change set whose selection is
+ * known to be short. REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
+ */
+const buildUnknownTestSuffix = (summary: ReviewChangeSummary): string =>
+  summary.unknownTestCoverage === 0
+    ? ''
+    : ` TEST COVERAGE COULD NOT BE DETERMINED for ${summary.unknownTestCoverage} change(s): a test ` +
+      'class reaches them over a path using an edge the covering-test walk does not traverse, so ' +
+      `the ${summary.testsToRun} selected test(s) are a FLOOR, not the set — see ` +
+      '`uncheckedTestReferrers` on those rows and run those test classes too (or the full suite).';
+
+/** The verdict-driven half of the recommendation (the pre-existing table). */
+const buildVerdictRecommendation = (
   summary: ReviewChangeSummary,
   reviewed: readonly ReviewedComponent[],
 ): string => {

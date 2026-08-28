@@ -252,6 +252,76 @@ const PHI_ACRONYM_RE = /(?<![A-Za-z])PHI(?![A-Za-z])/;
 const hasPhiAcronym = (rawText: string): boolean => PHI_ACRONYM_RE.test(rawText);
 
 /**
+ * SEPARATOR-INSENSITIVE VIEW OF AN API NAME.
+ *
+ * The vocabulary carries multi-word concepts as ONE concatenated token
+ * (`socialsecurity`, `dateofbirth`, `zipcode`, `driverslicense`), and the match
+ * was a plain substring test against the api name with its separators INTACT.
+ * So the SAME concept classified differently depending on how the admin
+ * punctuated the field: `SocialSecurity_Number__c` matched the identifier
+ * vocabulary and `Social_Security_Number__c` did not — it fell to the unmatched
+ * `public` / `unknown` default, which is indistinguishable in the emitted row
+ * from a bucket that was checked and found clean. That is the miss a compliance
+ * sweep cannot see. (The table had started to pay for this by hand: it already
+ * carries `national_origin` AND `nationalorigin`, `sexual_orientation` AND
+ * `sexualorientation`, `first_name` AND `firstname` — a per-token second copy,
+ * added one at a time, for exactly this reason. This replaces that pattern with
+ * one derivation instead of extending it.)
+ *
+ * `squashed` is the name's word segments joined with no delimiter;
+ * `segmentStarts` is the index in `squashed` at which each segment begins.
+ * A token is only accepted when it STARTS on one of those boundaries — see
+ * {@link squashedNameStartsToken} for why the boundary is load-bearing.
+ */
+interface SquashedName {
+  readonly squashed: string;
+  readonly segmentStarts: ReadonlySet<number>;
+}
+
+const toSquashedName = (rawApiName: string): SquashedName => {
+  const segmentStarts = new Set<number>();
+  let squashed = '';
+  for (const segment of toWordSegments(rawApiName)) {
+    segmentStarts.add(squashed.length);
+    squashed += segment;
+  }
+  return { squashed, segmentStarts };
+};
+
+/**
+ * True when `token` occurs in the separator-stripped name STARTING ON A WORD
+ * BOUNDARY.
+ *
+ * The boundary is not decoration. Squashing the whole name and running an
+ * unguarded `includes` over it lets a short token STRADDLE two words that
+ * merely abut: `Class_Number__c` squashes to `classnumber`, which contains
+ * `ssn`; `Address_Number__c` -> `addressnumber` likewise; `Record_Object__c` ->
+ * `recordobject` contains `dob`; `Team_RN_Count__c` -> `teamrncount` contains
+ * `mrn`. Each of those would then be published as a personal identifier. This
+ * is the same class of false positive that `WHOLE_WORD_ONLY_TOKENS` and
+ * `hasRaceSegment` already exist to prevent (`Grace`, `Seating_Capacity`,
+ * `Headphone_Model`), reintroduced through a different door.
+ *
+ * Requiring the match to BEGIN at a segment start admits the case this fix is
+ * for (a multi-word concept spelled with separators — the token starts where a
+ * word starts) and rejects every straddle above. The match may END mid-segment,
+ * which is what lets `socialsecurity` match `Social_Security_Number__c`.
+ */
+const squashedNameStartsToken = (
+  name: SquashedName,
+  token: string,
+): boolean => {
+  for (
+    let i = name.squashed.indexOf(token);
+    i >= 0;
+    i = name.squashed.indexOf(token, i + 1)
+  ) {
+    if (name.segmentStarts.has(i)) return true;
+  }
+  return false;
+};
+
+/**
  * The classification axis the recognizer emits. See the module JSDoc
  * for the semantics of each value.
  */
@@ -548,7 +618,40 @@ interface DescriptionRule {
   readonly reason: string;
 }
 
-/** Description-rule table; per-keyword case-insensitive matches. */
+/**
+ * Description-rule table; per-keyword case-insensitive matches.
+ *
+ * DISPOSITION — DELIBERATELY REGIME KEYWORDS ONLY, NOT CONCEPT VOCABULARY.
+ *
+ * This table carries no identifier vocabulary (no `date of birth`, no `social
+ * security`, no `drivers licence`), so the description layer can never rescue an
+ * identifier that the NAME layer missed. That gap was raised as a defect — a
+ * field whose description literally reads "Date of this individual's birth"
+ * classifying `public` — and the disposition is to NARROW THE CLAIM rather than
+ * widen the table. Two reasons, both concrete:
+ *
+ * 1. A description is free prose ABOUT a field, and the most common prose about
+ *    a regulated concept is a PROHIBITION or a CROSS-REFERENCE, not a
+ *    declaration: "Do not enter social security numbers in this field",
+ *    "Deprecated — use the date of birth field on the person record",
+ *    "Calculated from date of birth; do not populate". Concept vocabulary here
+ *    would classify every one of those as holding the data it warns against.
+ *    The name layer has no such failure mode: an api name is a label for what
+ *    the field HOLDS.
+ * 2. What every keyword below has in common is that it is an admin ASSERTING a
+ *    regulatory character over this field (hipaa / pci / confidential /
+ *    restricted / internal only). That is a declaration, and a declaration is
+ *    evidence. A concept mention is not, which is why the layer's absence of a
+ *    verdict must not be read as the description having been "checked".
+ *
+ * The consequence is disclosed rather than hidden: the unmatched reason names
+ * all three layers and says the description limb looks for a COMPLIANCE KEYWORD,
+ * and `sfi.pii_inventory` carries the same narrowing in its response
+ * boundaries. The name-layer miss that produced the reported example is fixed
+ * where it belongs — separator-spelled concepts now match (see
+ * {@link squashedNameStartsToken}), so `Date_of_Birth__c` classifies
+ * `pii`/`identifier` on its NAME.
+ */
 const DESCRIPTION_RULES: readonly DescriptionRule[] = [
   {
     classification: 'sensitive',
@@ -675,16 +778,21 @@ const getDescriptionLower = (node: Node): string | null => {
 /**
  * Find the first name-pattern rule that matches, in table priority order
  * (protected-class > health > financial > identifier > contact). A rule matches
- * on a plain substring token; the protected-class rule ALSO matches the
+ * on a substring token — tested against the api name as written AND against its
+ * separator-stripped form; the protected-class rule ALSO matches the
  * whole-word `race` segment and the health rule ALSO matches the standalone
  * `PHI` acronym — both checked at that rule's own priority so higher-sensitivity
  * verdicts still win. `apiNameLower` is the stripped, lowercased name;
  * `apiNameRaw` is the stripped, case-PRESERVED name (needed for the
- * case-sensitive PHI acronym). Returns null when no rule fires.
+ * case-sensitive PHI acronym); `squashedName` is the separator-stripped view
+ * that lets a concatenated token (`socialsecurity`) match the same concept
+ * spelled with separators (`Social_Security_Number__c`) — boundary-aligned, so
+ * a token cannot straddle two abutting words. Returns null when no rule fires.
  */
 const matchNamePattern = (
   apiNameLower: string,
   apiNameRaw: string,
+  squashedName: SquashedName,
 ): {
   readonly classification: PiiClassification;
   readonly category: PiiCategory;
@@ -692,9 +800,13 @@ const matchNamePattern = (
 } | null => {
   for (const rule of NAME_PATTERNS_LOWERCASED) {
     for (const token of rule.tokensLower) {
+      // A whole-word-only token is DELIBERATELY excluded from the squashed
+      // form: `city` / `phone` / `street` are common English substrings, and
+      // the squashed name is exactly where they would straddle again.
       const matched = WHOLE_WORD_ONLY_TOKENS.has(token)
         ? toWordSegments(apiNameRaw).includes(token)
-        : apiNameLower.includes(token);
+        : apiNameLower.includes(token) ||
+          squashedNameStartsToken(squashedName, token);
       if (matched) {
         return {
           classification: rule.classification,
@@ -771,11 +883,14 @@ interface HeuristicVerdict {
 const detectHeuristic = (node: Node): HeuristicVerdict => {
   const apiNameRaw = stripCustomFieldSuffix(node.apiName);
   const apiNameLower = apiNameRaw.toLowerCase();
+  // Built once per field: both the EncryptedText branch and the Layer-2 name
+  // branch match against it, and it is the same name either way.
+  const squashedName = toSquashedName(apiNameRaw);
   const dataType = getDataType(node);
 
   // Layer 1: EncryptedText override. Always `pii` — encryption IS the signal.
   if (dataType === ENCRYPTED_TEXT_DATA_TYPE) {
-    const nameMatch = matchNamePattern(apiNameLower, apiNameRaw);
+    const nameMatch = matchNamePattern(apiNameLower, apiNameRaw, squashedName);
     const category = nameMatch === null ? 'unknown' : nameMatch.category;
     return {
       classification: 'pii',
@@ -786,7 +901,7 @@ const detectHeuristic = (node: Node): HeuristicVerdict => {
   }
 
   // Layer 2: name patterns.
-  let nameMatch = matchNamePattern(apiNameLower, apiNameRaw);
+  let nameMatch = matchNamePattern(apiNameLower, apiNameRaw, squashedName);
 
   // Layer 2a: venue / org-location contact-token false positives — a field on
   // OA_Location__c or OA_Engagements__c named Location_Address__c or
@@ -825,7 +940,13 @@ const detectHeuristic = (node: Node): HeuristicVerdict => {
     ? 'API name matches a contact token, but the parent object or field name indicates an organizational venue/location (not person PII); classified public'
     : suppressedContactFlag
       ? `API name matches a contact token, but the field type (${dataType}) cannot hold a free-text contact value (email / phone / address); classified public — likely metadata or a configuration flag, not stored PII`
-      : 'no PII signal detected in API name or data type';
+      : // Names all THREE layers. The old text ("...in API name or data type")
+        // named two, so a reader could not tell whether the description had
+        // been consulted and found nothing or never consulted at all — and the
+        // advertised describe text says the recognizer reads description text.
+        // "keyword" is load-bearing: the layer matches compliance-REGIME
+        // keywords, not concept mentions (see DESCRIPTION_RULES).
+        'no PII signal: no API-name token, no self-declaring data type, no description compliance keyword';
   if (nameMatch !== null) {
     baseClassification = nameMatch.classification;
     baseCategory = nameMatch.category;

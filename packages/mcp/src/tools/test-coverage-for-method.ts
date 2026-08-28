@@ -48,7 +48,10 @@
  * **TCFM-TRIGGER-BARE-NAME**: a bare name is probed against BOTH `ApexClass:`
  * and `ApexTrigger:` (it used to be hard-prefixed `ApexClass:`, making every
  * trigger unreachable by bare name through all three selectors), and the
- * not-found text names exactly the ids that were looked up.
+ * not-found text names exactly the ids that were looked up. On a two-family
+ * miss `error.path` carries the BARE NAME the caller passed, never a
+ * synthesized `ApexClass:` id: the typed field a machine consumer reads must
+ * not re-assert the single-family search the message disclaims.
  *
  * Implementation notes:
  *   - The walk visits each id at most once. Cycles do not loop.
@@ -699,7 +702,16 @@ export const testCoverageForMethodHandler = async (
             ? disclosures.join(' ')
             : `Run \`sfi.resolve\` on the name for near-matches, or pass the canonical ` +
               `id if the component belongs to another type.`);
-    return err({ kind: 'component-not-found', message, path: probedIds[0] as ComponentId });
+    // `McpError.path` is "pointer to the offending input" and is the TYPED field
+    // a machine consumer reads INSTEAD of the prose. When TWO families were
+    // probed there is no single id that was the input — synthesizing
+    // `ApexClass:<name>` here would re-assert, in the one field a host cannot
+    // skip, the single-family search the message above just disclaimed. Point at
+    // the bare name the caller actually passed; keep the exact id when the
+    // caller named the family and only that one id was looked up.
+    const offendingInput =
+      probedIds.length === 1 ? (probedIds[0] as ComponentId) : selector.name;
+    return err({ kind: 'component-not-found', message, path: offendingInput });
   }
   if (foundIds.length > 1) {
     // A class and a trigger genuinely share this api name. Picking one would be

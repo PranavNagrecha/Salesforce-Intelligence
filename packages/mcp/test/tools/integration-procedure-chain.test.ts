@@ -188,6 +188,32 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
   ...overrides,
 });
 
+/**
+ * A ctx whose graph connection behaves exactly like the real one EXCEPT
+ * for `listNodesByType` reads of ONE node type, which it fails outright —
+ * simulating a graph query error rather than a real miss.
+ *
+ * The narrow is exact-equality on the first bound parameter, which
+ * `listNodesByType` binds to the TYPE (`queries.ts`: `params = [type]`)
+ * while `getNodeById` binds it to the full canonical id. So the handler's
+ * own IP fetch still succeeds and only the target-resolution scan fails.
+ */
+const poisonedCtxForType = (type: string): Context => {
+  const realConnection = store.connection;
+  const poisonedConnection = {
+    runAndReadAll: (
+      sql: string,
+      params: Parameters<GraphStore['connection']['runAndReadAll']>[1],
+    ) => {
+      if (Array.isArray(params) && params[0] === type) {
+        throw new Error('simulated graph query failure');
+      }
+      return realConnection.runAndReadAll(sql, params);
+    },
+  } as unknown as GraphStore['connection'];
+  return { ...ctx, graph: { connection: poisonedConnection, instance: store.instance } };
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -604,30 +630,13 @@ describe('integrationProcedureChainHandler', () => {
     const imported = await importExtractionResults(store, [poisonSeed]);
     expect(imported.ok).toBe(true);
 
-    // A connection that behaves exactly like the real one EXCEPT for
-    // the one lookup this test targets, which it fails outright —
-    // simulating a graph query error rather than a real miss.
-    const poisonedId = 'OmniDataTransform:PoisonBundle';
-    const realConnection = store.connection;
-    const poisonedConnection = {
-      runAndReadAll: (
-        sql: string,
-        params: Parameters<GraphStore['connection']['runAndReadAll']>[1],
-      ) => {
-        if (Array.isArray(params) && params[0] === poisonedId) {
-          throw new Error('simulated graph query failure');
-        }
-        return realConnection.runAndReadAll(sql, params);
-      },
-    } as unknown as GraphStore['connection'];
-    const poisonedCtx: Context = {
-      ...ctx,
-      graph: { connection: poisonedConnection, instance: store.instance },
-    };
-
-    const result = await integrationProcedureChainHandler(poisonedCtx, {
-      integrationProcedureId: 'OmniIntegrationProcedure:Poison_Procedure_1',
-    });
+    // The failure is injected at the OmniDataTransform SCAN — the read
+    // the resolution actually performs now that a target is matched on
+    // `properties.name` rather than on a templated node id.
+    const result = await integrationProcedureChainHandler(
+      poisonedCtxForType('OmniDataTransform'),
+      { integrationProcedureId: 'OmniIntegrationProcedure:Poison_Procedure_1' },
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const endpoints = result.value.data.externalEndpoints;
@@ -640,6 +649,321 @@ describe('integrationProcedureChainHandler', () => {
     // query failed" apart from "this target lives outside the vault".
     expect(ep?.targetId).toBeNull();
     expect(ep?.targetResolution).toBe('lookup-failed');
+    expect(ep?.targetCandidateIds).toEqual([]);
+  });
+
+  // ==========================================================================
+  // Real-vault id forms. The two extractors key their NODE ids off the
+  // FILENAME, while callers name their targets by a DIFFERENT field:
+  //   - OmniIntegrationProcedure node id = `OmniIntegrationProcedure:{file
+  //     stem}`, but a caller's `integrationProcedureKey` is the IP's
+  //     `omniProcessKey` (`omni-integration-procedure.ts` says so verbatim:
+  //     "the downstream target id uses the IP's `omniProcessKey` ... NOT its
+  //     file-level `uniqueName`").
+  //   - OmniDataTransform node id = `OmniDataTransform:{file stem}` (the
+  //     VERSIONED `<uniqueName>` form, e.g. `Sample_Mapper_2`), but a
+  //     caller's `bundle` is the unversioned `<name>`.
+  // String-templating the caller's name onto the id prefix therefore MISSES a
+  // target that is present in the vault. These two cases pin that the
+  // resolution reads the property the extractor points at.
+  // ==========================================================================
+
+  it('resolves a nested IP whose node id is filename-derived and whose omniProcessKey differs', async () => {
+    const callerPath = join(tempDir, 'fixtures', 'IdForm_Ip_Procedure_1.oip-meta.xml');
+    await writeFile(
+      callerPath,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<OmniIntegrationProcedure xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>true</isIntegrationProcedure>
+    <name>Id Form Caller</name>
+    <omniProcessElements>
+        <name>invokeChildByKey</name>
+        <propertySetConfig>{ &quot;integrationProcedureKey&quot; : &quot;Sample_ChildKey&quot; }</propertySetConfig>
+        <sequenceNumber>1.0</sequenceNumber>
+        <type>Integration Procedure Action</type>
+    </omniProcessElements>
+    <omniProcessKey>IdFormCaller</omniProcessKey>
+    <omniProcessType>Integration Procedure</omniProcessType>
+    <uniqueName>IdForm_Ip_Procedure_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniIntegrationProcedure>`,
+      'utf-8',
+    );
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'OmniIntegrationProcedure:IdForm_Ip_Procedure_1',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'IdForm_Ip_Procedure_1',
+            sourcePath: callerPath,
+            properties: { omniProcessKey: 'IdFormCaller', isActive: true },
+          }),
+          // The target IS in the vault. Its node id is the filename stem;
+          // its omniProcessKey — the name the caller uses — is different.
+          makeNode({
+            id: 'OmniIntegrationProcedure:Sample_Child_Procedure_1',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Sample_Child_Procedure_1',
+            sourcePath: 'unused.oip-meta.xml',
+            properties: {
+              omniProcessKey: 'Sample_ChildKey',
+              uniqueName: 'Sample_Child_Procedure_1',
+              isActive: true,
+            },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imported.ok).toBe(true);
+
+    const result = await integrationProcedureChainHandler(ctx, {
+      integrationProcedureId: 'OmniIntegrationProcedure:IdForm_Ip_Procedure_1',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const endpoints = result.value.data.externalEndpoints;
+    expect(endpoints.length).toBe(1);
+    const ep = endpoints[0];
+    // The target is PRESENT. Claiming `not-in-vault` here would be an
+    // affirmative org fact the lookup cannot support.
+    expect(ep?.targetResolution).toBe('resolved');
+    expect(ep?.targetId).toBe('OmniIntegrationProcedure:Sample_Child_Procedure_1');
+    expect(ep?.targetCandidateIds).toEqual([
+      'OmniIntegrationProcedure:Sample_Child_Procedure_1',
+    ]);
+  });
+
+  it('resolves a DataRaptor whose node id is the versioned stem while the bundle is the unversioned name', async () => {
+    const callerPath = join(tempDir, 'fixtures', 'IdForm_Dr_Procedure_1.oip-meta.xml');
+    await writeFile(
+      callerPath,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<OmniIntegrationProcedure xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>true</isIntegrationProcedure>
+    <name>Id Form Dr Caller</name>
+    <omniProcessElements>
+        <name>callMapperByName</name>
+        <propertySetConfig>{ &quot;bundle&quot; : &quot;Sample_Mapper&quot; }</propertySetConfig>
+        <sequenceNumber>1.0</sequenceNumber>
+        <type>DataRaptor Extract Action</type>
+    </omniProcessElements>
+    <omniProcessKey>IdFormDrCaller</omniProcessKey>
+    <omniProcessType>Integration Procedure</omniProcessType>
+    <uniqueName>IdForm_Dr_Procedure_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniIntegrationProcedure>`,
+      'utf-8',
+    );
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'OmniIntegrationProcedure:IdForm_Dr_Procedure_1',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'IdForm_Dr_Procedure_1',
+            sourcePath: callerPath,
+            properties: { omniProcessKey: 'IdFormDrCaller', isActive: true },
+          }),
+          makeNode({
+            id: 'OmniDataTransform:Sample_Mapper_2',
+            type: 'OmniDataTransform',
+            apiName: 'Sample_Mapper_2',
+            sourcePath: 'unused.rpt-meta.xml',
+            // `name` is the field an IP `bundle` matches; `uniqueName`
+            // is the versioned form the filename follows.
+            properties: { name: 'Sample_Mapper', uniqueName: 'Sample_Mapper_2' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imported.ok).toBe(true);
+
+    const result = await integrationProcedureChainHandler(ctx, {
+      integrationProcedureId: 'OmniIntegrationProcedure:IdForm_Dr_Procedure_1',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const endpoints = result.value.data.externalEndpoints;
+    expect(endpoints.length).toBe(1);
+    const ep = endpoints[0];
+    expect(ep?.targetResolution).toBe('resolved');
+    expect(ep?.targetId).toBe('OmniDataTransform:Sample_Mapper_2');
+  });
+
+  it('reports ambiguous rather than picking a version when two IPs answer to one omniProcessKey', async () => {
+    const callerPath = join(tempDir, 'fixtures', 'Ambiguous_Ip_Procedure_1.oip-meta.xml');
+    await writeFile(
+      callerPath,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<OmniIntegrationProcedure xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>true</isIntegrationProcedure>
+    <name>Ambiguous Caller</name>
+    <omniProcessElements>
+        <name>invokeVersionedChild</name>
+        <propertySetConfig>{ &quot;integrationProcedureKey&quot; : &quot;Sample_MultiKey&quot; }</propertySetConfig>
+        <sequenceNumber>1.0</sequenceNumber>
+        <type>Integration Procedure Action</type>
+    </omniProcessElements>
+    <omniProcessKey>AmbiguousCaller</omniProcessKey>
+    <omniProcessType>Integration Procedure</omniProcessType>
+    <uniqueName>Ambiguous_Ip_Procedure_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniIntegrationProcedure>`,
+      'utf-8',
+    );
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'OmniIntegrationProcedure:Ambiguous_Ip_Procedure_1',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Ambiguous_Ip_Procedure_1',
+            sourcePath: callerPath,
+            properties: { omniProcessKey: 'AmbiguousCaller', isActive: true },
+          }),
+          // Two versions of ONE IP. Salesforce dispatches to whichever is
+          // active at RUNTIME; the vault cannot decide that statically, so
+          // the tool must not pick one and call it resolved.
+          makeNode({
+            id: 'OmniIntegrationProcedure:Sample_Multi_Procedure_1',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Sample_Multi_Procedure_1',
+            sourcePath: 'unused.oip-meta.xml',
+            properties: { omniProcessKey: 'Sample_MultiKey', isActive: false },
+          }),
+          makeNode({
+            id: 'OmniIntegrationProcedure:Sample_Multi_Procedure_2',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Sample_Multi_Procedure_2',
+            sourcePath: 'unused.oip-meta.xml',
+            properties: { omniProcessKey: 'Sample_MultiKey', isActive: true },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imported.ok).toBe(true);
+
+    const result = await integrationProcedureChainHandler(ctx, {
+      integrationProcedureId: 'OmniIntegrationProcedure:Ambiguous_Ip_Procedure_1',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ep = result.value.data.externalEndpoints[0];
+    expect(ep?.targetResolution).toBe('ambiguous');
+    expect(ep?.targetId).toBeNull();
+    expect(ep?.targetCandidateIds).toEqual([
+      'OmniIntegrationProcedure:Sample_Multi_Procedure_1',
+      'OmniIntegrationProcedure:Sample_Multi_Procedure_2',
+    ]);
+  });
+
+  it('tells a graph query failure apart from a genuine absence when resolving an integration-procedure target', async () => {
+    // The MIRROR of the dataraptor lookup-failure case, on the OTHER
+    // branch. Both branches share one classifier, and this pins that the
+    // IP side cannot regress to `not-in-vault` on a failed read.
+    const poisonPath = join(tempDir, 'fixtures', 'PoisonIp_Procedure_1.oip-meta.xml');
+    await writeFile(
+      poisonPath,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<OmniIntegrationProcedure xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>true</isIntegrationProcedure>
+    <name>Poison Ip</name>
+    <omniProcessElements>
+        <name>callPoisonedIp</name>
+        <propertySetConfig>{ &quot;integrationProcedureKey&quot; : &quot;PoisonIpKey&quot; }</propertySetConfig>
+        <sequenceNumber>1.0</sequenceNumber>
+        <type>Integration Procedure Action</type>
+    </omniProcessElements>
+    <omniProcessKey>PoisonIp</omniProcessKey>
+    <omniProcessType>Integration Procedure</omniProcessType>
+    <uniqueName>PoisonIp_Procedure_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniIntegrationProcedure>`,
+      'utf-8',
+    );
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'OmniIntegrationProcedure:PoisonIp_Procedure_1',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'PoisonIp_Procedure_1',
+            sourcePath: poisonPath,
+            properties: { omniProcessKey: 'PoisonIp', isActive: true },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imported.ok).toBe(true);
+
+    const result = await integrationProcedureChainHandler(
+      poisonedCtxForType('OmniIntegrationProcedure'),
+      { integrationProcedureId: 'OmniIntegrationProcedure:PoisonIp_Procedure_1' },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ep = result.value.data.externalEndpoints[0];
+    expect(ep?.targetId).toBeNull();
+    expect(ep?.targetResolution).toBe('lookup-failed');
+    expect(ep?.targetCandidateIds).toEqual([]);
+  });
+
+  // ==========================================================================
+  // The residual scan cap. A miss against a walk that stopped short proves
+  // NOTHING, so it must not be published as `'not-in-vault'`.
+  // ==========================================================================
+
+  describe('residual scan ceiling', () => {
+    const saved = {
+      window: process.env['SFI_NODE_SCAN_LIMIT'],
+      ceiling: process.env['SFI_OMNI_TARGET_SCAN_MAX'],
+    };
+
+    afterEach(() => {
+      if (saved.window === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = saved.window;
+      if (saved.ceiling === undefined) delete process.env['SFI_OMNI_TARGET_SCAN_MAX'];
+      else process.env['SFI_OMNI_TARGET_SCAN_MAX'] = saved.ceiling;
+    });
+
+    it('a miss against a walk stopped at the residual ceiling is unresolved, never not-in-vault', async () => {
+      // The store holds far more than 2 OmniIntegrationProcedure nodes by
+      // this point, so a ceiling of 2 leaves real nodes behind the cap.
+      process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+      process.env['SFI_OMNI_TARGET_SCAN_MAX'] = '2';
+      const result = await integrationProcedureChainHandler(ctx, {
+        integrationProcedureId: 'OmniIntegrationProcedure:Dangling_Procedure_1',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const ip = result.value.data.externalEndpoints.find(
+        (e) => e.kind === 'integration-procedure',
+      );
+      expect(ip?.targetId).toBeNull();
+      // Absence was NOT established — nodes behind the cap were never read.
+      expect(ip?.targetResolution).toBe('unresolved');
+      expect(ip?.targetCandidateIds).toEqual([]);
+    });
+
+    it('does NOT over-disclose: a fully walked type still reports a real miss as not-in-vault', async () => {
+      const result = await integrationProcedureChainHandler(ctx, {
+        integrationProcedureId: 'OmniIntegrationProcedure:Dangling_Procedure_1',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      for (const ep of result.value.data.externalEndpoints) {
+        expect(ep.targetResolution).toBe('not-in-vault');
+      }
+    });
   });
 
   it('parses the Response Action additionalOutput into responseShape', async () => {

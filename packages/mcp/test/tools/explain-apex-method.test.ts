@@ -915,6 +915,80 @@ describe('explainApexMethodHandler', () => {
     expect(result.value.data.methodName).toBeNull();
   });
 
+  // ===========================================================================
+  // METHOD-SCOPE-NEVER-APPLIED.
+  //
+  // The two cases above are the OLD contract and they still hold — the echo is
+  // pinned by callers. What they do NOT cover is the defect measured on a real
+  // vault: the response echoed `methodName` back at the top as though it had
+  // been honoured, and every section underneath (lineCount, calls, fieldAccess,
+  // qualityIssues) still described the WHOLE class. On a ~580-line class the
+  // mirrored `qualityIssues[].location` line numbers ALL fell in other methods
+  // than the one named, and nothing anywhere in the payload said so. A host
+  // reading that reports findings against the wrong method.
+  //
+  // This tool narrates from graph NODE PROPERTIES, which carry no per-method
+  // line ranges, so it cannot narrow. The fix is therefore disclosure, not
+  // analysis: a typed scope block a machine consumer cannot skip, plus prose a
+  // host will read aloud, plus the pointer at the tool that DOES narrow.
+  // ===========================================================================
+
+  it('reports methodScope.applied false and names the narrower tool when methodName is passed', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: TEST_CLASS_ID,
+      methodName: 'testMyMethod',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { methodScope } = result.value.data;
+    expect(methodScope.requested).toBe('testMyMethod');
+    // The load-bearing bit: a machine consumer must be able to read, without
+    // parsing prose, that the narrowing it asked for did not happen.
+    expect(methodScope.applied).toBe(false);
+    expect(methodScope.scope).toBe('class');
+    expect(methodScope.reason).toMatch(/no per-method/i);
+    expect(methodScope.narrowerTool).toBe('sfi.apex_structure');
+  });
+
+  it('always reports methodScope, with requested null, when methodName is omitted', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: TEST_CLASS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { methodScope } = result.value.data;
+    expect(methodScope.requested).toBeNull();
+    expect(methodScope.applied).toBe(false);
+    expect(methodScope.scope).toBe('class');
+  });
+
+  it('disclosure says the method scope was NOT applied and that the issue line numbers are class-wide', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: TEST_CLASS_ID,
+      methodName: 'testMyMethod',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { disclosure, qualityIssues } = result.value.data;
+    // The fixture mirrors findings at lines that have nothing to do with the
+    // requested method — exactly the real-vault shape.
+    expect(qualityIssues.length).toBeGreaterThan(0);
+    expect(disclosure).toContain('METHOD SCOPE NOT APPLIED');
+    expect(disclosure).toContain("'testMyMethod'");
+    // The specific misreading that has to be headed off by name.
+    expect(disclosure).toMatch(/line numbers/i);
+    expect(disclosure).toContain('sfi.apex_structure');
+  });
+
+  it('does NOT emit the method-scope warning when no methodName was passed', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: TEST_CLASS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.disclosure).not.toContain('METHOD SCOPE NOT APPLIED');
+  });
+
   it('accepts an ApexTrigger: prefix', async () => {
     const result = await explainApexMethodHandler(ctx, {
       classApiName: TRIGGER_ID,

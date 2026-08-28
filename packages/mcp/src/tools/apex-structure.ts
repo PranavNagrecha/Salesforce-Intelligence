@@ -1410,19 +1410,49 @@ const applyInclude = (
   // `method` are honoured together, and the block has to say so.
   const prior = current.narrowing;
   const alsoMethod = prior?.applied === 'method';
+  const priorOmitted = prior?.omittedSections ?? [];
+  const omittedSections = [...new Set([...priorOmitted, ...omitted])];
+  // The recovery advice has to be a call that WORKS. It used to promise "call
+  // again without `include` for the full body" — but a class too large for one
+  // response sheds whole sections in `fitToBudget`, so for exactly the classes
+  // that need narrowing the promised call CANNOT return the full body. A
+  // printed remedy the tool cannot honour is the same defect as a silently
+  // ignored argument. So: name the `include` list that provably returns the
+  // omitted sections, and state the shed instead of promising past it.
+  //
+  // RECOVERABLE-BY-INCLUDE is NOT the same as OMITTED. Under `method`,
+  // `members` / `innerTypes` are blanked by {@link applyMethodNarrowing}
+  // BEFORE `include` is ever applied, so an `include` naming them comes back
+  // blank AND still lists them as omitted — the response would contradict its
+  // own advice inside one round trip. Only the sections `include` ITSELF
+  // omitted are reachable by another `include`; the rest are reachable only by
+  // dropping `method`.
+  const recoverable = omitted.filter((s2) => !priorOmitted.includes(s2));
+  const includeList = `include: [${recoverable
+    .map((s2) => `'${s2}'`)
+    .join(', ')}]`;
+  const shedCaveat =
+    ' Calling without `include` asks for every section at once, which a class too large for one response sheds again — that answer\'s own `narrowing` block names what it dropped.';
+  const dropMethod = `call sfi.apex_structure again without \`method\` for the whole class.${shedCaveat}`;
+  // No `recoverWith` at all when nothing was omitted: the field advertises a
+  // CALL, and prose in a call-shaped field is its own small lie.
+  const recoverWith =
+    omittedSections.length === 0
+      ? undefined
+      : alsoMethod
+        ? recoverable.length === 0
+          ? dropMethod
+          : `call sfi.apex_structure again with ${includeList} for this method's omitted section(s), or ${dropMethod}`
+        : `call sfi.apex_structure again with ${includeList} for the omitted section(s).${shedCaveat}`;
   return {
     ...current,
     narrowing: {
       applied: alsoMethod ? 'method+include' : 'include',
       ...(prior?.method === undefined ? {} : { method: prior.method }),
       include,
-      omittedSections: [
-        ...new Set([...(prior?.omittedSections ?? []), ...omitted]),
-      ],
+      omittedSections,
       truncated: omitted.length > 0 || (prior?.truncated ?? false),
-      recoverWith: alsoMethod
-        ? 'call sfi.apex_structure again without `include` for every section of this method, or without `method` for the whole class'
-        : 'call sfi.apex_structure again without `include` for the full body',
+      ...(recoverWith === undefined ? {} : { recoverWith }),
     },
   };
 };
@@ -1494,8 +1524,11 @@ const applyMethodNarrowing = (
       method,
       omittedSections: ['members', 'innerTypes'],
       truncated: true,
+      // Same honesty rule as `applyInclude`: the whole-class call is the right
+      // recovery, but it is not a guarantee of a whole class — a class too
+      // large for one response sheds sections, and that answer says so.
       recoverWith:
-        'call sfi.apex_structure again without `method` for the whole class',
+        "call sfi.apex_structure again without `method` for the whole class. A class too large for one response sheds sections there — that answer's own `narrowing` block names what it dropped.",
     },
   };
 };

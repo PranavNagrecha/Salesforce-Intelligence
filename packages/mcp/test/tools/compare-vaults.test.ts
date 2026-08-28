@@ -1183,6 +1183,85 @@ describe('compare_vaults — R2 verifier round 2 (markdown budget, disclosure ho
     }
   }, 60_000);
 
+  it('does not certify a "Complete diff" when a drift VALUE was replaced by a size marker', async () => {
+    // Round-3 hole in the round-2 fix. `boundValue` swaps any property value
+    // over DRIFT_MAX_VALUE_BYTES for `{ __omitted, bytes, preview }`, but
+    // `collectDrift` only reported `truncated` for the ROW cap
+    // (`drift.length > DRIFT_MAX_ROWS`). One component, ONE fat property:
+    // the row cap never fires, the byte pager never fires (the response is
+    // tiny), so `truncated` stayed false and the disclosure certified
+    // "...inlined in full" over a payload whose only interesting value had
+    // been thrown away. The prose for this case already existed in the
+    // capped branch; nothing could reach it.
+    const huge = (fill: string): string => fill.repeat(5_000);
+    const node = (fill: string): Node =>
+      makeNode({
+        id: 'ApexClass:Class_C',
+        type: 'ApexClass',
+        apiName: 'Class_C',
+        properties: { body: huge(fill) },
+      });
+    const seeded = await seedPair('sfi-r3-cv-omitted-', [node('a')], [node('b')]);
+    try {
+      const r = await compareVaultsHandler(seeded.ctx, { vaultA: 'r2-a', vaultB: 'r2-b' });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+
+      // Preconditions that isolate THIS defect from the R2 byte-budget one:
+      // exactly one row, no row-cap, no byte paging, comfortably in budget.
+      expect(d.summary.shapeModifiedCount).toBe(1);
+      expect(d.shapeModified.length).toBe(1);
+      expect(d.shapeModifiedPage).toBeUndefined();
+      const bytes = Buffer.byteLength(JSON.stringify(r.value), 'utf8');
+      expect(bytes).toBeLessThanOrEqual(toolLocalPayloadBudgetBytes());
+
+      // Proof the value really was thrown away and a marker shipped instead.
+      const rows = d.shapeModified[0]?.drift ?? [];
+      expect(rows.length).toBe(1);
+      const omitted = (v: unknown): boolean =>
+        typeof v === 'object' && v !== null && (v as { __omitted?: unknown }).__omitted === true;
+      expect(omitted(rows[0]?.valueA)).toBe(true);
+      expect(omitted(rows[0]?.valueB)).toBe(true);
+
+      // The defect: certifying completeness over a summarised value.
+      expect(d.truncated).toBe(true);
+      expect(d.disclosure).not.toMatch(/^Complete diff/);
+      expect(d.disclosure).not.toMatch(/inlined in full/);
+      // ...and the gap has to be NAMED in prose a host will read aloud, not
+      // merely flagged by a boolean: the disclosure must say which marker
+      // shipped and that the A->B comparison cannot be made from it.
+      expect(d.disclosure).toMatch(/__omitted/);
+      expect(d.disclosure).toMatch(/NOT inlined/);
+    } finally {
+      await seeded.dispose();
+    }
+  }, 60_000);
+
+  it('still certifies a complete diff when every drift value shipped verbatim (the marker check is not a blanket downgrade)', async () => {
+    // Control for the test above: same shape, small values. If the fix
+    // downgraded every response instead of the summarised ones, this fails.
+    const node = (fill: string): Node =>
+      makeNode({
+        id: 'ApexClass:Class_C',
+        type: 'ApexClass',
+        apiName: 'Class_C',
+        properties: { body: fill },
+      });
+    const seeded = await seedPair('sfi-r3-cv-verbatim-', [node('a')], [node('b')]);
+    try {
+      const r = await compareVaultsHandler(seeded.ctx, { vaultA: 'r2-a', vaultB: 'r2-b' });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.shapeModified[0]?.drift?.[0]?.valueA).toBe('a');
+      expect(d.truncated).toBe(false);
+      expect(d.disclosure).toMatch(/^Complete diff/);
+    } finally {
+      await seeded.dispose();
+    }
+  }, 60_000);
+
   it('drift test: the refit constants stay identical to compare-profile-across-vaults.ts (R6 — a "mirrors" comment is not a guard)', async () => {
     // The measure/refit loop is duplicated across the two cross-vault tools.
     // De-duplicating it needs an edit to a SHARED module (page-cursor.ts /

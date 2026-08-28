@@ -779,3 +779,138 @@ describe('sfi.field_access_audit — every emitted sentinel key is named on a su
     );
   });
 });
+
+// =============================================================================
+// CASE-INSENSITIVE FIELD-ID RESOLUTION.
+//
+// Salesforce api names are case-insensitive: `Contact.SSN__c`, `CONTACT.SSN__C`
+// and `contact.ssn__c` all name the SAME field in SOQL, in a formula and in a
+// Setup URL. A ticket pasted in upper case, or a host that upper-cased an id,
+// therefore names a field this vault DOES hold.
+//
+// The measured defect: the handler probed `getNodeById(exact id)` only, so an
+// upper-cased id missed the node, carried NO inbound edges under that exact
+// spelling either, and fell through to `component-not-found` — with a
+// FABRICATED cause ("standard-object field ... Metadata API retrieve does not
+// emit uncustomized standard fields"), because the phantom-node standard-field
+// guard tests the `__c` suffix case-SENSITIVELY and an upper-cased custom field
+// ends `__C`. The refusal's hedge was honest; the named cause was invented, and
+// the field's real 40-plus grantors were reachable the whole time.
+//
+// Sibling object-scoped tools (`pii_inventory`, `who_can_access_object`, …)
+// already fold case through `input-aliases` `objectIdCaseVariants`; this tool
+// did not.
+// =============================================================================
+
+describe('fieldAccessAuditHandler — case-insensitive field-id resolution', () => {
+  it('answers an UPPER-CASED field id with the real audit, not a not-found', async () => {
+    const upper = 'CustomField:CONTACT.SSN__C';
+    const result = await fieldAccessAuditHandler(ctx, { fieldId: upper });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    // The vault's EXACT id is echoed — never the caller's spelling, which is an
+    // id no vault holds.
+    expect(d.fieldId).toBe(SSN_FIELD);
+    expect(d.resolvedFrom).toBe(upper);
+    // Same answer as the exactly-cased call: 4 grants, 2 Apex routes.
+    expect(d.grants.length).toBe(4);
+    expect(d.viaApexAccess.length).toBe(2);
+    expect(d.notModeled).toBe(false);
+  });
+
+  it('answers a LOWER-CASED object segment the same way', async () => {
+    const result = await fieldAccessAuditHandler(ctx, {
+      fieldId: 'CustomField:contact.SSN__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(SSN_FIELD);
+    expect(result.value.data.grants.length).toBe(4);
+  });
+
+  it('tells the caller in the boundaryNote that the id was case-corrected', async () => {
+    const result = await fieldAccessAuditHandler(ctx, {
+      fieldId: 'CustomField:Contact.ssn__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.boundaryNote).toMatch(/case/i);
+    expect(result.value.data.boundaryNote).toContain(SSN_FIELD);
+  });
+
+  it('still refuses a genuinely unknown id, and says the case probe was RUN and found nothing', async () => {
+    const result = await fieldAccessAuditHandler(ctx, {
+      fieldId: 'CustomField:Contact.NOPE__C',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+    // A checked zero, stated as one: the parent's whole field list was walked.
+    expect(result.error.message).toMatch(/case/i);
+  });
+
+  it('REFUSES rather than silently picking when two vault fields differ only by case', async () => {
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-faa-fieldcase-'));
+    const opened = await openGraph(join(localDir, 'case.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    const objId = 'CustomObject:Obj_A__c';
+    const imp = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          makeNode({ id: objId, type: 'CustomObject', apiName: 'Obj_A__c', properties: {} }),
+          makeNode({ id: `CustomField:Obj_A__c.Dup__c`, apiName: 'Dup__c', parentId: objId }),
+          makeNode({ id: `CustomField:Obj_A__c.DUP__c`, apiName: 'DUP__c', parentId: objId }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) return;
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+    const r = await fieldAccessAuditHandler(localCtx, {
+      fieldId: 'CustomField:Obj_A__c.dup__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/case/i);
+    // BOTH candidates are named, so nothing is silently picked.
+    expect(r.error.message).toContain('CustomField:Obj_A__c.Dup__c');
+    expect(r.error.message).toContain('CustomField:Obj_A__c.DUP__c');
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
+  it('does not claim a case probe it could not run when the parent object has no node', async () => {
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-faa-noparent-'));
+    const opened = await openGraph(join(localDir, 'noparent.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    const imp = await importExtractionResults(localStore, [{ nodes: [], edges: [] }]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) return;
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+    const r = await fieldAccessAuditHandler(localCtx, {
+      fieldId: 'CustomField:Obj_B__c.Field_C__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    // The probe could NOT run — say so, rather than implying a checked zero.
+    expect(r.error.message).toMatch(/could not be walked|no CustomObject node/i);
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+});

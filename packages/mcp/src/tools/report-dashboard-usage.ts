@@ -173,7 +173,7 @@ const EVIDENCE_FLAGS_CHECKED =
 
 /** Verbatim clause: the families were never retrieved, so an absent stamp proves nothing. */
 const EVIDENCE_FLAGS_UNCHECKED =
-  'The Report and Dashboard families were NOT retrieved into this vault, so a family with no folded stamp is reported `null` (NOT CHECKED) rather than `false` — run `sfi refresh --with-reports` to check it.';
+  'The Report and Dashboard families are NOT FULLY retrieved into this vault (never requested, or a capped / staged / errored pull), so a family with no folded stamp is reported `null` (NOT CHECKED) rather than `false`. A `true` here still comes from analytics metadata that IS in this vault. Run `sfi refresh --with-reports` for the uncapped pull.';
 
 /** Verbatim clause: the boolean is stamped but the fold captured no names. */
 const EVIDENCE_NAMES_UNAVAILABLE =

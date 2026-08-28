@@ -39,6 +39,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import { closeGraph, openGraph, type GraphStore } from '@sf-intelligence/graph';
 import { captureSecurityPostureMetrics } from '@sf-intelligence/mcp';
 import {
+  backfillCoverageInMemory,
   deleteSnapshot,
   listSnapshots,
   loadManifest,
@@ -325,7 +326,16 @@ export const runSnapshotCreate = async (
     try {
       metrics = await captureSecurityPostureMetrics({
         vaultRoot,
-        manifest,
+        // COVERAGE-ASYMMETRY-CLI-VS-MCP. `server.ts` builds every serving
+        // Context as `backfillCoverageInMemory(manifestResult.value)`, so a
+        // coverage-aware analysis reached over MCP sees derived coverage rows
+        // that the same analysis reached from the CLI did not — the CLI path
+        // read a strictly weaker manifest and could grade a family as "not
+        // retrieved" that the server grades as retrieved. Only the ANALYSIS
+        // context is backfilled: the `manifest` persisted into the snapshot
+        // below stays the manifest as it was on disk, so snapshot-to-snapshot
+        // diffs keep comparing stored facts rather than derived ones.
+        manifest: backfillCoverageInMemory(manifest),
         graph: store,
       });
     } catch {

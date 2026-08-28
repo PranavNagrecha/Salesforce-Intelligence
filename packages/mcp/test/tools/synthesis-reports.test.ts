@@ -16,8 +16,10 @@ import type { Context } from '../../src/server.js';
 import {
   automationRiskReportHandler,
   fieldCleanupCandidatesHandler,
+  FINDINGS_LIMIT_MAX,
   orgRiskReportHandler,
   permissionRiskReportHandler,
+  permissionRiskReportInputSchema,
   releaseReadinessReportHandler,
 } from '../../src/tools/synthesis-reports.js';
 
@@ -1100,5 +1102,180 @@ describe('permissionRiskReportHandler — the scan is a CENSUS, not a page', () 
     }
     expect(r.error.kind).toBe('internal');
     expect(r.error.message).toContain('graph query failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REAL-ORG FINDING (MEDIUM): the default `limit: 50` silently truncated the
+// findings array. The envelope carried no `truncated`, no counts, no note and
+// `trust.limitations: []`, so a host read 50 as the whole over-privileged
+// population when the analysis had actually produced far more.
+//
+// REAL-ORG FINDING (LOW): the tool advertises that it "rolls in unassigned
+// permission sets", but with no Tooling-API assignment enrichment EVERY
+// permission set has UNKNOWN assignment status. The report emitted zero
+// unassigned-grant findings and disclosed nothing, so absence read as a
+// checked zero. Two sibling tools disclose the same fact.
+// ---------------------------------------------------------------------------
+describe('permissionRiskReportHandler — truncation + unassigned-coverage honesty', () => {
+  const truncDirs: string[] = [];
+  const truncStores: GraphStore[] = [];
+  let truncCtx: Context;
+
+  /** Number of god-mode profiles in the fixture — deliberately > the page. */
+  const GOD_PROFILES = 6;
+  /** Page size used to force truncation. */
+  const SMALL_LIMIT = 3;
+
+  const psNode = (o: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'Profile',
+    apiName: 'Anon',
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...o,
+  });
+
+  beforeAll(async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-synth-trunc-'));
+    truncDirs.push(dir);
+    const opened = await openGraph(join(dir, 'trunc.duckdb'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    truncStores.push(opened.value);
+    const nodes: Node[] = [];
+    for (let i = 0; i < GOD_PROFILES; i += 1) {
+      nodes.push(
+        psNode({
+          id: `Profile:Profile_${String(i).padStart(2, '0')}`,
+          apiName: `Profile_${String(i).padStart(2, '0')}`,
+          properties: { userPermissions: ['ModifyAllData'] },
+        }),
+      );
+    }
+    // One permission set so the unassigned sub-analysis has something to scan.
+    nodes.push(
+      psNode({
+        id: 'PermissionSet:PermSet_A',
+        type: 'PermissionSet',
+        apiName: 'PermSet_A',
+        properties: { userPermissions: ['ApiEnabled'] },
+      }),
+    );
+    const imp = await importExtractionResults(opened.value, [
+      { nodes, edges: [] },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    truncCtx = { vaultRoot: dir, manifest: MANIFEST, graph: opened.value };
+  });
+
+  afterAll(async () => {
+    for (const s of truncStores) await closeGraph(s);
+    for (const d of truncDirs) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('a limit-truncated findings page carries typed truncation state, not silence', async () => {
+    const r = await permissionRiskReportHandler(truncCtx, { limit: SMALL_LIMIT });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The analysis DID find every over-privileged grantor…
+    expect(d.privilege.overPrivilegedGrantorCount).toBe(GOD_PROFILES);
+    // …but the page shows fewer. That MUST be typed, not inferred.
+    expect(d.truncated).toBe(true);
+    expect(d.findingsPage.limit).toBe(SMALL_LIMIT);
+    expect(d.findingsPage.totalCount).toBeGreaterThanOrEqual(GOD_PROFILES);
+    expect(d.findingsPage.returnedCount).toBe(d.findings.length);
+    expect(d.findingsPage.omittedCount).toBe(
+      d.findingsPage.totalCount - d.findingsPage.returnedCount,
+    );
+    expect(d.findingsPage.omittedCount).toBeGreaterThan(0);
+    const op = d.findingsPage.byCategory.find(
+      (c) => c.category === 'over-privilege',
+    );
+    expect(op?.totalCount).toBe(GOD_PROFILES);
+    expect(op?.returnedCount).toBe(SMALL_LIMIT);
+    expect(op?.truncated).toBe(true);
+    // A machine consumer must not be able to skip it, and a host must read it.
+    expect(d.findingsPage.note).toContain('limit');
+    expect(d.trust.limitations.join(' ')).toContain('finding');
+    expect(d.disclosure).toContain('limit');
+  });
+
+  it('an untruncated page says so without inventing a gap', async () => {
+    const r = await permissionRiskReportHandler(truncCtx, { limit: 500 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.truncated).toBe(false);
+    expect(d.findingsPage.omittedCount).toBe(0);
+    expect(d.findingsPage.returnedCount).toBe(d.findings.length);
+    expect(d.findingsPage.note).toBeNull();
+    expect(d.trust.limitations.join(' ')).not.toContain('dropped by limit');
+  });
+
+  it('discloses that assignment status is UNKNOWN — zero unassigned findings is not a checked zero', async () => {
+    const r = await permissionRiskReportHandler(truncCtx, { limit: 500 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The advertised category produced nothing…
+    expect(d.findings.some((f) => f.category === 'unassigned-grant')).toBe(false);
+    // …because assignment status could not be determined for ANY permission set.
+    expect(d.unassignedCoverage.analyzed).toBe(true);
+    expect(d.unassignedCoverage.assignmentStatusKnown).toBe(false);
+    expect(d.unassignedCoverage.unknownAssignmentCount).toBeGreaterThan(0);
+    expect(d.unassignedCoverage.enrichmentStatus).toBe('structural-only');
+    expect(d.unassignedCoverage.note).toContain('UNKNOWN');
+    // The remedy the sibling tools name must be here too.
+    expect(d.unassignedCoverage.note).toContain('--classify-permissions');
+    expect(d.trust.limitations.join(' ')).toContain('Assignment status is UNKNOWN');
+    expect(d.disclosure).toContain('Assignment status is UNKNOWN');
+  });
+
+  it('a profile-scoped report says the unassigned category was NOT evaluated', async () => {
+    const r = await permissionRiskReportHandler(truncCtx, {
+      profileFilter: 'Profile_00',
+      limit: 50,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.profileFilter?.found).toBe(true);
+    expect(d.unassignedCoverage.analyzed).toBe(false);
+    expect(d.unassignedCoverage.note).toContain('not');
+    expect(d.truncated).toBe(false);
+    expect(d.findingsPage.returnedCount).toBe(d.findings.length);
+  });
+
+  it('a false-premise profileFilter still declares the unassigned category unchecked', async () => {
+    const r = await permissionRiskReportHandler(truncCtx, {
+      profileFilter: 'No_Such_Profile_Xyz',
+      limit: 50,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.profileFilter?.found).toBe(false);
+    expect(d.unassignedCoverage.analyzed).toBe(false);
+    expect(d.findingsPage.totalCount).toBe(0);
+    expect(d.truncated).toBe(false);
+  });
+});
+
+// The truncation note advises "re-run with limit: N". If that bound and the
+// validator's bound ever drift, the advice names a limit the tool would
+// REJECT — so the two are derived from one constant and pinned here.
+describe('permissionRiskReportHandler — the advised limit is the limit the schema accepts', () => {
+  it('FINDINGS_LIMIT_MAX is exactly what the validator admits at the boundary', () => {
+    expect(
+      permissionRiskReportInputSchema.safeParse({ limit: FINDINGS_LIMIT_MAX }).success,
+    ).toBe(true);
+    expect(
+      permissionRiskReportInputSchema.safeParse({ limit: FINDINGS_LIMIT_MAX + 1 }).success,
+    ).toBe(false);
   });
 });

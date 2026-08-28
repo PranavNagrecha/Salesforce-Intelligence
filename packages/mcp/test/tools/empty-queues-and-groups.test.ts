@@ -76,16 +76,35 @@ const seed: ExtractionResult = {
         objectTypes: ['Lead', 'Case'],
       },
     }),
+    // MEASURED empties: `memberChannels: []` is the sentinel the current
+    // extractor writes once it has walked EVERY `<queueMembers>` channel, so
+    // these zeros are checked zeros. Before the membership-honesty fix these
+    // fixtures carried no sentinel, which made this suite assert that an
+    // unwalked queue is a confirmed empty — the defect itself, pinned as
+    // expected behavior. The unwalked shape now has its own honest cases in
+    // the "an unmeasured zero is never a measured zero" block below.
     makeNode({
       id: Q_STALE,
       apiName: 'Stale_Q3',
-      properties: { memberCount: 0, objectTypes: ['Case'] },
+      properties: {
+        memberCount: 0,
+        memberChannels: [],
+        queueMembersDeclared: false,
+        queueMembersUnparsed: false,
+        objectTypes: ['Case'],
+      },
     }),
     makeNode({
       id: Q_LEGACY,
       apiName: 'LegacyRouting',
       lastModifiedDate: STALE_DATE,
-      properties: { memberCount: 0, objectTypes: ['Lead'] },
+      properties: {
+        memberCount: 0,
+        memberChannels: [],
+        queueMembersDeclared: false,
+        queueMembersUnparsed: false,
+        objectTypes: ['Lead'],
+      },
     }),
     makeNode({
       id: Q_UNKNOWN,
@@ -218,15 +237,28 @@ describe('emptyQueuesAndGroupsHandler', () => {
     expect(q?.memberSource).toBe('unknown');
   });
 
-  it('lists empty groups but excludes groups with members', async () => {
+  // SPLIT from "lists empty groups but excludes groups with members", which
+  // asserted that a zero-declared-member group is a CONFIRMED empty
+  // (`memberSource !== 'unknown'`). It cannot be: the retrieved Group metadata
+  // carries no membership element at all, so that zero was never measured. The
+  // two honest halves are (a) a group with declared members is never listed,
+  // and (b) a zero-declared group is listed as unknown-membership.
+  it('never lists a group that declares members', async () => {
     const r = await emptyQueuesAndGroupsHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const ids = r.value.data.groups
-      .filter((g) => g.memberSource !== 'unknown')
-      .map((g) => g.id);
-    expect(ids).toContain(G_EMPTY);
-    expect(ids).not.toContain(G_FULL);
+    expect(r.value.data.groups.map((g) => g.id)).not.toContain(G_FULL);
+  });
+
+  it('lists a zero-declared-member group as unknown-membership, not as empty', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const g = r.value.data.groups.find((x) => x.id === G_EMPTY);
+    expect(g).toBeDefined();
+    expect(g?.memberSource).toBe('unknown');
+    expect(g?.memberCountUnknownReason).toBe('group-membership-not-in-metadata');
+    expect(r.value.data.confirmedEmptyGroups).toBe(0);
   });
 
   it('flags Group with unknown member source', async () => {
@@ -238,19 +270,24 @@ describe('emptyQueuesAndGroupsHandler', () => {
     expect(g?.memberSource).toBe('unknown');
   });
 
-  // EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT: a declared-empty group is
-  // NOT cleanup-ready — vault direct-user emptiness drifts from the live roster
-  // (a declared-empty group can show 0 vault members yet a non-empty live roster). Every
-  // listed row must carry a non-delete verdict, and the boundary must point at
-  // live_group_members for confirmation.
-  it('marks a declared-empty group review-not-delete (never a bare delete)', async () => {
+  // EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT: no listed row is ever
+  // cleanup-ready. A MEASURED empty queue is `review-not-delete` (vault
+  // emptiness drifts from the live roster); a group whose membership was never
+  // measurable is `unknown-membership`. The earlier version of this case
+  // asserted `memberSource !== 'unknown'` on the group, i.e. it required the
+  // fabricated provenance; the measured-row half now rides on the queue, which
+  // really does carry a walked-every-channel zero.
+  it('marks every listed row non-delete, measured or not', async () => {
     const r = await emptyQueuesAndGroupsHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const g = r.value.data.groups.find((g) => g.id === G_EMPTY);
+    const q = r.value.data.queues.find((x) => x.id === Q_STALE);
+    expect(q?.memberCount).toBe(0);
+    expect(q?.memberSource).not.toBe('unknown');
+    expect(q?.cleanupVerdict).toBe('review-not-delete');
+    const g = r.value.data.groups.find((x) => x.id === G_EMPTY);
     expect(g?.memberCount).toBe(0);
-    expect(g?.memberSource).not.toBe('unknown');
-    expect(g?.cleanupVerdict).toBe('review-not-delete');
+    expect(g?.cleanupVerdict).toBe('unknown-membership');
     // every emitted queue/group row carries a non-delete verdict
     for (const row of [...r.value.data.queues, ...r.value.data.groups]) {
       expect(['review-not-delete', 'unknown-membership']).toContain(
@@ -258,8 +295,9 @@ describe('emptyQueuesAndGroupsHandler', () => {
       );
     }
     // unknown-membership rows get their own verdict
-    const gUnknown = r.value.data.groups.find((g) => g.id === G_UNKNOWN);
+    const gUnknown = r.value.data.groups.find((x) => x.id === G_UNKNOWN);
     expect(gUnknown?.cleanupVerdict).toBe('unknown-membership');
+    expect(gUnknown?.memberCountUnknownReason).toBe('no-member-data-extracted');
     // the drift boundary points the reader at the live confirmation tool
     expect(
       r.value.data.boundaries.some(
@@ -659,5 +697,251 @@ describe('emptyQueuesAndGroupsHandler — past the 500-node SCAN cap (R6 scan-ta
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect('scanTruncated' in r.value.data).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MEMBERSHIP HONESTY — a zero the tool never measured must not be certified.
+//
+// Two real-org shapes produced a CONFIDENT ZERO with a fabricated provenance
+// label (`memberSource: 'user-direct'`, i.e. "a direct user reference was
+// read") over membership the vault never read:
+//
+//  1. QUEUE, legacy extraction. `<queueMembers>` is a container of one WRAPPER
+//     PER MEMBER CHANNEL (`<users>`, `<roles>`, …). An older refresh read only
+//     the `<users>` channel, so a queue staffed ENTIRELY by a role extracted as
+//     `memberCount: 0` — and this tool, whose whole job is to name the EMPTY
+//     queues, then named the one queue in the org that is NOT empty. The
+//     current extractor walks every channel and stamps `memberChannels`; a node
+//     WITHOUT that property came from a refresh that only looked at `<users>`,
+//     so its zero is "we only looked in one place", never "nobody is in it".
+//     R1: decided by whether the node CARRIES the sentinel, never by the count.
+//
+//  2. GROUP. The retrieved `Group` metadata declares no membership element at
+//     all; public-group membership lives in GroupMember DATA, which a metadata
+//     retrieve never emits (which is exactly why `sfi.live_group_members`
+//     exists and queries it over the API). A zero declared count is therefore
+//     NOT-MEASURED for every public group in every org, forever — a re-refresh
+//     cannot fix it. Certifying it as empty hands a cleanup shortlist that is
+//     just the shape of the metadata format.
+//
+// Both must land in the tool's OWN unknown bucket (`memberSource: 'unknown'`,
+// `cleanupVerdict: 'unknown-membership'`, counted in `unknownMemberCount*`) and
+// stay out of the confirmed-empty counters — the handling its sibling
+// `sfi.unassigned_permission_sets` already gives the identical unknowable.
+// ---------------------------------------------------------------------------
+describe('emptyQueuesAndGroupsHandler — an unmeasured zero is never a measured zero', () => {
+  let hDir: string;
+  let hStore: GraphStore;
+  let hCtx: Context;
+
+  // Legacy (users-only) refresh: no `memberChannels` sentinel. This is the
+  // real-org shape — a role-staffed queue whose role member was dropped.
+  const Q_LEGACY_VAULT = 'Queue:Queue_A';
+  // Modern refresh, genuinely nothing declared: `memberChannels: []` proves
+  // EVERY channel was walked, so this zero IS a measurement.
+  const Q_WALKED_CLEAN = 'Queue:Queue_B';
+  // Modern refresh, role-staffed: not empty at all, must never be listed.
+  const Q_ROLE_STAFFED = 'Queue:Queue_C';
+  // Modern refresh whose `<queueMembers>` block could not be read.
+  const Q_UNREADABLE = 'Queue:Queue_D';
+  // Public group with zero declared members — unmeasurable by construction.
+  const G_ZERO_DECLARED = 'Group:Group_E';
+
+  beforeAll(async () => {
+    hDir = mkdtempSync(join(tmpdir(), 'sfi-eqg-honesty-'));
+    const o = await openGraph(join(hDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    hStore = o.value;
+    const imp = await importExtractionResults(hStore, [
+      {
+        nodes: [
+          makeNode({
+            id: Q_LEGACY_VAULT,
+            apiName: 'Queue_A',
+            // Verbatim shape of a Queue node on a real vault: no
+            // `memberChannels` sentinel, and NO `objectTypes` property — no
+            // extractor has ever written that key.
+            properties: { memberCount: 0, memberEmails: [], sobjectTypeCount: 1 },
+          }),
+          makeNode({
+            id: Q_WALKED_CLEAN,
+            apiName: 'Queue_B',
+            properties: {
+              memberCount: 0,
+              memberEmails: [],
+              memberChannels: [],
+              queueMembersDeclared: false,
+              queueMembersUnparsed: false,
+              memberSource: 'user-direct',
+              objectTypes: ['Case'],
+            },
+          }),
+          makeNode({
+            id: Q_ROLE_STAFFED,
+            apiName: 'Queue_C',
+            properties: {
+              memberCount: 1,
+              memberEmails: [],
+              memberChannels: [
+                { channel: 'roles', memberKind: 'role', memberCount: 1, topologyAsserted: true },
+              ],
+              queueMembersDeclared: true,
+              queueMembersUnparsed: false,
+              memberSource: 'role-resolved',
+              objectTypes: ['Case'],
+            },
+          }),
+          makeNode({
+            id: Q_UNREADABLE,
+            apiName: 'Queue_D',
+            properties: {
+              memberCount: 0,
+              memberEmails: [],
+              memberChannels: [],
+              queueMembersDeclared: true,
+              queueMembersUnparsed: true,
+              memberSource: 'unknown',
+              objectTypes: ['Case'],
+            },
+          }),
+          makeNode({
+            id: G_ZERO_DECLARED,
+            type: 'Group',
+            apiName: 'Group_E',
+            properties: { memberCount: 0, emails: [], doesIncludeBosses: true },
+          }),
+        ],
+        edges: [
+          // What the Queue extractor really emits per `<queueSobject>`.
+          makeEdge({
+            fromId: Q_LEGACY_VAULT,
+            toId: 'CustomObject:Obj_A__c',
+            edgeType: 'sharedWith',
+            properties: { relationship: 'queueOwner' },
+          }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    hCtx = {
+      vaultRoot: hDir,
+      manifest: { ...FIXTURE_MANIFEST, sourceTreeHash: 'sha256:fixture-honesty' },
+      graph: hStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(hStore);
+    rmSync(hDir, { recursive: true, force: true });
+  });
+
+  it('a queue from a users-only refresh is unknown-membership, not a confirmed empty', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const q = r.value.data.queues.find((x) => x.id === Q_LEGACY_VAULT);
+    expect(q).toBeDefined();
+    // The defect: 'user-direct' asserts a direct user reference WAS read.
+    expect(q?.memberSource).toBe('unknown');
+    expect(q?.cleanupVerdict).toBe('unknown-membership');
+    expect(q?.memberCountUnknownReason).toBe('queue-member-channels-not-extracted');
+    expect(r.value.data.unknownMemberCountQueues).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a queue walked across every channel keeps its measured zero', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const q = r.value.data.queues.find((x) => x.id === Q_WALKED_CLEAN);
+    expect(q?.memberSource).toBe('user-direct');
+    expect(q?.cleanupVerdict).toBe('review-not-delete');
+    expect('memberCountUnknownReason' in (q ?? {})).toBe(false);
+    // …and the confirmed counter counts THIS one and only this one.
+    expect(r.value.data.confirmedEmptyQueues).toBe(1);
+  });
+
+  // NOT IN THE BRIEF, same disease, same rows: `objectTypes` was read from a
+  // node property no extractor has ever written, so every listed queue said it
+  // owns NOTHING. On a cleanup shortlist that reads as extra permission to
+  // delete — the queue in the real org owns Cases.
+  it('reports the sObjects a queue owns from its sharedWith edges, not an unwritten property', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const q = r.value.data.queues.find((x) => x.id === Q_LEGACY_VAULT);
+    expect(q?.objectTypes).toEqual(['Obj_A__c']);
+  });
+
+  it('a queue that owns nothing reports an empty objectTypes list', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const q = r.value.data.queues.find((x) => x.id === Q_WALKED_CLEAN);
+    expect(q?.objectTypes).toEqual([]);
+  });
+
+  it('a role-staffed queue is never listed as empty', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.queues.map((q) => q.id)).not.toContain(Q_ROLE_STAFFED);
+  });
+
+  it('an unreadable member block is unknown, never a zero', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const q = r.value.data.queues.find((x) => x.id === Q_UNREADABLE);
+    expect(q?.memberSource).toBe('unknown');
+    expect(q?.memberCountUnknownReason).toBe('queue-member-block-unreadable');
+  });
+
+  it('a group with zero DECLARED members is unknown-membership, not a confirmed empty', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Group' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const g = r.value.data.groups.find((x) => x.id === G_ZERO_DECLARED);
+    expect(g).toBeDefined();
+    expect(g?.memberSource).toBe('unknown');
+    expect(g?.cleanupVerdict).toBe('unknown-membership');
+    expect(g?.memberCountUnknownReason).toBe('group-membership-not-in-metadata');
+    expect(r.value.data.unknownMemberCountGroups).toBe(1);
+    expect(r.value.data.confirmedEmptyGroups).toBe(0);
+  });
+
+  it('the boundary names the queue gap and tells the reader to re-refresh', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toMatch(/memberChannels/);
+    expect(joined).toMatch(/sfi-refresh/);
+  });
+
+  it('the boundary says a re-refresh CANNOT populate group membership', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, { type: 'Group' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toMatch(/GroupMember/);
+    expect(joined).toMatch(/live_group_members/);
+    // A re-refresh is the WRONG remedy here and the text must not imply it.
+    expect(joined).toMatch(/not populate|never emits|cannot be/i);
+  });
+
+  it('the confirmed-empty counters exclude every unknown row (the boundary made true)', async () => {
+    const r = await emptyQueuesAndGroupsHandler(hCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.confirmedEmptyQueues).toBe(
+      d.queues.filter((q) => q.memberSource !== 'unknown').length,
+    );
+    expect(d.confirmedEmptyGroups).toBe(
+      d.groups.filter((g) => g.memberSource !== 'unknown').length,
+    );
+    expect(d.confirmedEmptyQueues + d.unknownMemberCountQueues).toBe(d.totalQueues);
+    expect(d.confirmedEmptyGroups + d.unknownMemberCountGroups).toBe(d.totalGroups);
   });
 });

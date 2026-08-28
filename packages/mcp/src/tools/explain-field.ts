@@ -39,6 +39,16 @@
  *     vault) is disclosed as "referenced but not retrieved" rather than a flat
  *     "doesn't exist" (B12/B29). An id with no node and no references gets the
  *     plain "no CustomField with id" message.
+ *   - **Case-insensitive resolution**: Salesforce api names are
+ *     case-insensitive but canonical component ids are not, so a caller who
+ *     types `CustomField:account.industry` names a real field. The exactly-cased
+ *     id is tried FIRST (a correct call pays nothing); on a miss the object and
+ *     field segments are folded against the vault's own casing. Exactly one
+ *     match is answered, and the correction ships as the typed `resolvedFrom`
+ *     plus the prose `resolutionNote` so the answer is never mistaken for one
+ *     about the id the caller typed. Two matches differing only by case are
+ *     REFUSED with both ids (`invalid-query`) — resolution is never IDENTITY.
+ *     Zero matches fall through to the phantom-aware not-found above unchanged.
  *   - The `parent is __mdt` check uses the field's `parentId`
  *     (`CustomObject:{TypeApiName}`). If the type name ends with
  *     `__mdt`, the parent is a CustomMetadataDefinition and the
@@ -90,7 +100,7 @@ import {
 } from './absence-disclosure.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
-import { resolveFieldAlias } from './input-aliases.js';
+import { objectIdCaseVariants, resolveFieldAlias } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   normalizePicklistValues,
@@ -252,6 +262,22 @@ export interface ExplainFieldOutput {
   readonly recordValuesNote?: string;
   /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
+  /**
+   * The `fieldId` the CALLER passed, present ONLY when it differs from the
+   * canonical `fieldId` above because the vault spells the same api name with
+   * different CASE (Salesforce api names are case-insensitive; component ids
+   * are not). Absent for an exactly-cased call.
+   *
+   * Typed on purpose: a machine consumer that reads `fieldId` alone would
+   * otherwise never learn that the id it asked about is not the id it was
+   * answered about. Always ships together with {@link resolutionNote}.
+   */
+  readonly resolvedFrom?: string;
+  /**
+   * Prose form of {@link resolvedFrom} for a host to read aloud — present and
+   * absent on exactly the same calls. Never emitted without `resolvedFrom`.
+   */
+  readonly resolutionNote?: string;
 }
 
 /**
@@ -607,6 +633,136 @@ const NO_PARENT_RECORD_VALUES_NOTE =
   'checked. This is a structural absence (the vault recorded this field without a parent), ' +
   'NEVER a verified "no record sets this field". Re-run `/sfi-refresh`.';
 
+/** Canonical id prefix for the CustomObject node type (a field id's parent). */
+const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
+
+/** What {@link resolveFieldIdCase} decided about the caller's casing. */
+interface FieldIdCaseResolution {
+  /** The vault's EXACT id when one was found; the caller's id otherwise. */
+  readonly fieldId: ComponentId;
+  /** The resolved node, or `null` when nothing in the vault matches. */
+  readonly node: Node | null;
+  /** The caller's id when it was case-corrected; `null` when it was exact. */
+  readonly resolvedFrom: string | null;
+}
+
+/**
+ * WRONG-CASE-FIELD-ID-WAS-A-CONFIDENT-MISS.
+ *
+ * Salesforce api names are CASE-INSENSITIVE; canonical component ids are not.
+ * `sfi.resolve` grades a fully-lower-cased `<Object>.<Field>` string
+ * `disposition: "exact"` and `sfi.object_360` states the case-insensitivity
+ * rule out loud in its own `resolutionNote` — while this tool answered
+ * `component-not-found` for a field the vault holds in full. "no CustomField
+ * with id X" reads to a user as evidence about their ORG (go re-refresh their
+ * vault), not about the resolver, which makes a wrong turn expensive on a
+ * freshness-sensitive product.
+ *
+ * The probe runs ONLY after the exactly-cased id has already missed, so a
+ * correctly-cased call pays nothing, and it is bounded by one object's field
+ * list rather than a whole-graph scan.
+ *
+ * Case-insensitive RESOLUTION is never case-insensitive IDENTITY: when two
+ * vault fields fold to the same name nothing here can pick between them, so the
+ * caller is REFUSED with both ids — the same rule `canonicalizeObjectScope`
+ * applies to objects. A name matching NOTHING is returned unchanged so the
+ * existing phantom-aware `component-not-found` path still owns that wording.
+ */
+const resolveFieldIdCase = async (
+  ctx: Context,
+  fieldId: ComponentId,
+): Promise<Result<FieldIdCaseResolution, McpError>> => {
+  const exact = await getNodeById(ctx.graph, fieldId);
+  if (!exact.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${exact.error.message}`,
+    });
+  }
+  if (exact.value !== null) {
+    return ok({ fieldId, node: exact.value, resolvedFrom: null });
+  }
+
+  const rest = fieldId.slice(CUSTOM_FIELD_PREFIX.length);
+  const dot = rest.indexOf('.');
+  if (dot < 1 || dot === rest.length - 1) {
+    return ok({ fieldId, node: null, resolvedFrom: null });
+  }
+  const objectApi = rest.slice(0, dot);
+  const fieldApi = rest.slice(dot + 1);
+
+  // The parent object is resolved case-insensitively too — a caller who
+  // lower-cased the field name almost always lower-cased the object with it,
+  // and the lower-cased OBJECT segment was the half that suppressed every
+  // recovery path.
+  const parentIds: string[] = [];
+  const exactParentId = `${CUSTOM_OBJECT_PREFIX}${objectApi}` as ComponentId;
+  const exactParent = await getNodeById(ctx.graph, exactParentId);
+  if (!exactParent.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${exactParent.error.message}`,
+    });
+  }
+  if (exactParent.value !== null) {
+    parentIds.push(exactParentId);
+  } else {
+    const variants = await objectIdCaseVariants(ctx.graph, objectApi);
+    if (!variants.ok) return err(variants.error);
+    parentIds.push(...variants.value);
+  }
+
+  const folded = fieldApi.toLowerCase();
+  const matches: Node[] = [];
+  for (const parentId of parentIds) {
+    const children = await listChildren(ctx.graph, parentId as ComponentId);
+    if (!children.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${children.error.message}`,
+      });
+    }
+    for (const child of children.value) {
+      if (child.type !== 'CustomField') continue;
+      if (child.id === fieldId) continue;
+      if (child.apiName.toLowerCase() !== folded) continue;
+      matches.push(child);
+    }
+  }
+
+  if (matches.length === 0) {
+    return ok({ fieldId, node: null, resolvedFrom: null });
+  }
+  if (matches.length > 1) {
+    const ids = matches.map((m) => m.id).sort();
+    return err({
+      kind: 'invalid-query',
+      message:
+        `\`${fieldId}\` matches ${ids.length} fields in this vault that differ only by CASE ` +
+        `(${ids.join(', ')}). Salesforce api names are case-insensitive, so nothing here can ` +
+        'pick between them — pass the exact `fieldId` you mean. No explanation was rendered.',
+      path: 'fieldId',
+    });
+  }
+
+  const only = matches[0] as Node;
+  return ok({
+    fieldId: only.id as ComponentId,
+    node: only,
+    resolvedFrom: fieldId,
+  });
+};
+
+/**
+ * Verbatim disclosure for a case-corrected `fieldId`. Shipped as the typed
+ * `resolutionNote` on EVERY success rendered from a corrected id, so a reader
+ * can never mistake the explanation for one about the id they typed.
+ */
+const caseCorrectionNote = (resolvedFrom: string, fieldId: string): string =>
+  `\`${resolvedFrom}\` is not a component id in this vault; it was case-corrected to ` +
+  `\`${fieldId}\` (Salesforce api names are case-insensitive, component ids are not). ` +
+  'Everything below describes the corrected id — confirm it is the field you meant.';
+
 /**
  * The `sfi.explain_field` MCP tool. Returns one field's label,
  * description, type, and required flag, and (when the parent is a
@@ -646,14 +802,25 @@ export const explainFieldHandler = async (
     });
   }
 
-  const nodeResult = await getNodeById(ctx.graph, input.fieldId);
-  if (!nodeResult.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${nodeResult.error.message}`,
-    });
-  }
-  const node = nodeResult.value;
+  // WRONG-CASE-FIELD-ID-WAS-A-CONFIDENT-MISS — resolve the caller's casing
+  // against the vault's own BEFORE any not-found path runs. See
+  // `resolveFieldIdCase`. This also stops a custom field whose `__c` suffix was
+  // typed `__C` from reaching the phantom message, which classified it as a
+  // standard field on a case-SENSITIVE suffix test and volunteered a specific,
+  // technical, FALSE causal explanation about a field this vault holds in full.
+  const caseResolved = await resolveFieldIdCase(ctx, input.fieldId as ComponentId);
+  if (!caseResolved.ok) return err(caseResolved.error);
+  const resolvedFieldId = caseResolved.value.fieldId;
+  const caseResolvedFrom = caseResolved.value.resolvedFrom;
+  const caseDisclosure =
+    caseResolvedFrom !== null
+      ? {
+          resolvedFrom: caseResolvedFrom,
+          resolutionNote: caseCorrectionNote(caseResolvedFrom, resolvedFieldId),
+        }
+      : {};
+
+  const node = caseResolved.value.node;
   if (node === null) {
     // B12/B29: a standard or managed-package field that is referenced by other
     // components but has no definition of its own in the vault is a PHANTOM,
@@ -662,12 +829,8 @@ export const explainFieldHandler = async (
     return err(
       await fieldNotFoundError(
         ctx,
-        input.fieldId as ComponentId,
-        await phantomAwareNotFoundMessage(
-          ctx,
-          input.fieldId as ComponentId,
-          'CustomField',
-        ),
+        resolvedFieldId,
+        await phantomAwareNotFoundMessage(ctx, resolvedFieldId, 'CustomField'),
       ),
     );
   }
@@ -679,8 +842,8 @@ export const explainFieldHandler = async (
   if (node.type !== 'CustomField') {
     return err({
       kind: 'component-not-found',
-      message: `node ${input.fieldId} is not a CustomField (type=${node.type})`,
-      path: input.fieldId,
+      message: `node ${resolvedFieldId} is not a CustomField (type=${node.type})`,
+      path: resolvedFieldId,
     });
   }
 
@@ -720,6 +883,9 @@ export const explainFieldHandler = async (
       ? { picklistValuesNote: NON_INLINE_VALUE_SET_NOTE }
       : {}),
     ...(annotations !== undefined ? { annotations } : {}),
+    // Typed + prose, populated together, on EVERY branch below (they all spread
+    // `base`) so no success path can render a corrected id silently.
+    ...caseDisclosure,
   };
 
   const parentType = parentTypeApiName(node);

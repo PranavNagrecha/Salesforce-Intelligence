@@ -573,6 +573,34 @@ const OOE_PAGING_NOTE =
   "limit/offset apply PER EVENT: a page of N means N steps for EACH of insert/update/delete/undelete, never N across the four. Each event's `summary.totalSteps` stays the WHOLE composition count, so reconcile a page against `paging.byEvent[event].totalCount`, not against the four-event sum.";
 
 /**
+ * Appended to {@link OOE_PAGING_NOTE} on a page the byte budget shortened AND
+ * for which one shared resume offset was nameable.
+ *
+ * Every per-event `nextCursor` is dropped in that case (see the FIX 16 block at
+ * the end of the handler), including the pointers of events the trim never
+ * touched, so a host reading `hasMore: true` beside `nextCursor: null` is told
+ * IN PROSE where the one usable pointer is instead of concluding the event is
+ * exhausted.
+ */
+const OOE_PAGING_TRIMMED_NOTE =
+  'A byte trim shortened a page here, so every per-event `nextCursor` is dropped and `paging.nextCursor` is the ONE safe resume pointer: an event showing `hasMore: true` beside `nextCursor: null` is NOT exhausted.';
+
+/**
+ * Appended INSTEAD of {@link OOE_PAGING_TRIMMED_NOTE} when the trim left no
+ * offset that is safe for every event still paging, so the page carries no
+ * resume pointer at all.
+ *
+ * A pointer-less page that still reports `hasMore` is a dead end unless the
+ * envelope names the way out, so it names the one that works: narrowing the
+ * call to a single event (`event` / `events`) — or to one `phase` — removes
+ * the cross-event constraint entirely and pages that slice on its own. Do not
+ * shorten this to "no pointer": a host has no other way to learn the recovery
+ * exists.
+ */
+const OOE_PAGING_NO_SAFE_OFFSET_NOTE =
+  'A byte trim shortened a page here and no single offset is safe for every event still paging, so this page carries NO resume pointer: re-request the remainder narrowed to one event at a time with `event`/`events` (or to a single `phase`), which pages that slice on its own without the cross-event constraint.';
+
+/**
  * Zod schema for the `sfi.order_of_execution` tool input.
  *
  *   - object identity (required): name the object ANY way the router / a
@@ -1891,11 +1919,14 @@ export const orderOfExecutionHandler = async (
   // above which names the shortfall but does not touch this pointer. Reconcile
   // every paged event's counters against what `byEvent[event].soe` actually
   // holds now, and re-mint ONE shared resume cursor at the SMALLEST corrected
-  // offset across paged events — the shared `limit`/`offset` apply to every
-  // event identically (see `OOE_PAGING_NOTE`), so any other offset would still
-  // skip whichever event was cut hardest. When no paged event kept even one
-  // more step than before, forward progress cannot be guaranteed and the
-  // pointer is dropped rather than left wrong (mirrors
+  // offset across the paged events THAT STILL HAVE MORE TO GIVE — the shared
+  // `limit`/`offset` apply to every event identically (see `OOE_PAGING_NOTE`),
+  // so any other offset would still skip whichever LIVE event was cut hardest,
+  // while an event this page EXHAUSTED has nothing left to skip and must not
+  // drag the minimum down (see the `corrected.hasMore` guard below). When no
+  // live event kept even one more step than before, forward progress cannot be
+  // guaranteed and the pointer is dropped rather than left wrong — `note` then
+  // names the narrowing recovery instead of dead-ending the reader (mirrors
   // `reconcileHandlerPageAfterGlobalTrim`'s page-cursor.ts contract: correct
   // when a safe resume point is nameable, otherwise remove — never leave a
   // pointer that reads as trustworthy but is not).
@@ -1909,22 +1940,48 @@ export const orderOfExecutionHandler = async (
       const perEvent = byEvent[event];
       if (entry === undefined || perEvent === undefined) continue;
       const actual = perEvent.soe.length;
-      if (actual < entry.returnedCount) {
-        anyCorrected = true;
-        correctedByEvent[event] = {
-          totalCount: entry.totalCount,
-          returnedCount: actual,
-          hasMore: true,
-          // The per-event pointer cannot be resolved in isolation — the ONE
-          // resume offset below is shared across every event on this page —
-          // so it carries no cursor of its own; `paging.nextCursor` is the
-          // single source of truth for resuming.
-          nextCursor: null,
-        };
-      } else {
-        correctedByEvent[event] = entry;
-      }
-      keptCounts.push(actual);
+      const wasShortened = actual < entry.returnedCount;
+      if (wasShortened) anyCorrected = true;
+      // EVERY per-event pointer is dropped, not only the shortened ones. Pass
+      // 4 sheds from the LARGEST container only, so a page where one event is
+      // byte-heavy and its sibling is not ends with the heavy event cut and
+      // the sibling's slice whole — and the sibling's own pointer, untouched
+      // because its `returnedCount` still matched, still encodes
+      // `offset + <the shared page size>`. Following it (which `PageInfo`
+      // explicitly tells callers to do: "echo it back verbatim as the `cursor`
+      // input") resumes PAST the point the trimmed event actually reached and
+      // skips its middle steps — the same silent loss the correction closes,
+      // through a pointer that reads as trustworthy. Observed on a real org:
+      // one event delivered 21 of a 22-step page while its sibling's surviving
+      // pointer pointed at offset 22, and resuming on it jumped the trimmed
+      // event from step 20 to 22. So the ONE re-minted `paging.nextCursor`
+      // below is the only resume point on a trimmed page, and `note` says so
+      // in prose, because `nextCursor: null` beside `hasMore: true` must not
+      // be read as "this event is exhausted".
+      const corrected: PageInfo = wasShortened
+        ? {
+            totalCount: entry.totalCount,
+            returnedCount: actual,
+            hasMore: true,
+            nextCursor: null,
+          }
+        : { ...entry, nextCursor: null };
+      correctedByEvent[event] = corrected;
+      // Only events that STILL HAVE MORE TO GIVE constrain the shared offset.
+      // An event this page exhausted (`hasMore: false` — typically a short
+      // chain whose `totalCount` the offset has already run past, so it
+      // returns 0) has nothing left to skip, so folding its count into the
+      // minimum is not conservative, it is destructive: one exhausted event
+      // pins `Math.min` at 0, `safeOffset` collapses back onto `pageOffset`,
+      // no cursor is minted, and the page becomes a DEAD END that reports
+      // `hasMore: true` for the events that really do have more. Measured on a
+      // real org before this guard: page 2 of a 54-insert / 60-update
+      // composition carried two exhausted short chains at 0, and 12 insert +
+      // 17 update steps became unreachable through any pointer the tool
+      // exposes. Excluding them yields the min over the LIVE events, which
+      // still cannot skip a step for any of them — the worst it does is
+      // re-deliver a few steps for the event that reached furthest.
+      if (corrected.hasMore) keptCounts.push(actual);
     }
     if (anyCorrected) {
       const safeOffset =
@@ -1946,7 +2003,11 @@ export const orderOfExecutionHandler = async (
         limit: paging.limit,
         offset: paging.offset,
         byEvent: correctedByEvent,
-        note: paging.note,
+        note: `${paging.note} ${
+          nextCursor !== undefined
+            ? OOE_PAGING_TRIMMED_NOTE
+            : OOE_PAGING_NO_SAFE_OFFSET_NOTE
+        }`,
         ...(nextCursor !== undefined ? { nextCursor } : {}),
       };
     }

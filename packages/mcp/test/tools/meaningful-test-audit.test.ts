@@ -319,6 +319,9 @@ describe('meaningfulTestAuditHandler — production-target / covering-tests mode
   const UNRELATED_TEST = 'ApexClass:UnrelatedTest';
   const NON_TEST_CALLER = 'ApexClass:HelperCaller';
   const LONELY_PROD = 'ApexClass:LonelyProdClass';
+  // A TEST class the apex scanner recorded as calling ITSELF. Real orgs carry
+  // such self edges (a helper test class referencing its own static members).
+  const SELF_REF_TEST = 'ApexClass:SelfRefTest';
 
   const targetSeed: ExtractionResult = {
     nodes: [
@@ -342,6 +345,11 @@ describe('meaningfulTestAuditHandler — production-target / covering-tests mode
       // A NON-test class that also references the target — must NOT count as a
       // covering test.
       makeNode({ id: NON_TEST_CALLER, apiName: 'HelperCaller', properties: { isTest: false } }),
+      makeNode({
+        id: SELF_REF_TEST,
+        apiName: 'SelfRefTest',
+        properties: { isTest: true, assertionCount: 4, sourceBytes: 1000, qualityIssues: [] },
+      }),
     ],
     edges: [
       {
@@ -355,6 +363,25 @@ describe('meaningfulTestAuditHandler — production-target / covering-tests mode
       {
         fromId: NON_TEST_CALLER,
         toId: PROD,
+        edgeType: 'callsApex',
+        confidence: 'heuristic',
+        source: 'apex-scanner',
+        properties: {},
+      },
+      // The SELF edge: the class is recorded as calling itself.
+      {
+        fromId: SELF_REF_TEST,
+        toId: SELF_REF_TEST,
+        edgeType: 'callsApex',
+        confidence: 'heuristic',
+        source: 'apex-scanner',
+        properties: {},
+      },
+      // A genuine, DIFFERENT covering test for the same target, so excluding
+      // the self edge cannot be mistaken for excluding everything.
+      {
+        fromId: COVERING_TEST,
+        toId: SELF_REF_TEST,
         edgeType: 'callsApex',
         confidence: 'heuristic',
         source: 'apex-scanner',
@@ -447,6 +474,28 @@ describe('meaningfulTestAuditHandler — production-target / covering-tests mode
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
     expect(r.error.path).toBe('targetClass');
+  });
+
+  it('never counts the target as its OWN covering test (self callsApex edge)', async () => {
+    // MEANINGFUL-TEST-AUDIT-TARGET-COVERS-ITSELF: the inbound `callsApex` walk
+    // deduped by fromId but never excluded `fromId === targetId`, so a class
+    // the scanner recorded as calling itself was reported as one of its own
+    // covering tests — and `coveringTestCount` CERTIFIED that number. A class
+    // cannot cover itself; the self edge must be dropped, leaving only the
+    // genuine coverer.
+    const r = await withStore((localCtx) =>
+      meaningfulTestAuditHandler(localCtx, { targetClass: SELF_REF_TEST }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.tests.map((t) => t.testClassId);
+    expect(ids).not.toContain(SELF_REF_TEST);
+    expect(ids).toEqual([COVERING_TEST]);
+    expect(r.value.data.totalTestClassCount).toBe(1);
+    const scope = r.value.data.appliedScope;
+    expect(scope.mode).toBe('covering-tests');
+    if (scope.mode !== 'covering-tests') return;
+    expect(scope.coveringTestCount).toBe(1);
   });
 
   it('refuses targetClass + classFilter together (ambiguous scope)', async () => {
@@ -616,6 +665,17 @@ describe('meaningfulTestAuditHandler — R6 full-scan residual-cap disclosure (s
     expect(r.value.data.totalTestClassCount).toBeLessThan(5);
     expect(r.value.data.disclosure).toMatch(/Full scan capped at 3 nodes per type/);
     expect(r.value.data.disclosure).toMatch(/scanTruncated/);
+    // TYPED, not just prose: a machine consumer reading `totalTestClassCount`
+    // must be able to see that the number is a floor without parsing English.
+    expect(r.value.data.scanTruncated).toBe(true);
+  });
+
+  it('carries the incomplete scan in a TYPED field, not only in the prose disclosure', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, { nameContains: 'test' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // A name-filtered answer over a capped walk can be a FALSE ZERO / undercount.
+    expect(r.value.data.scanTruncated).toBe(true);
   });
 
   it('resolves a classFilter id that sorts PAST the residual scan ceiling', async () => {
@@ -661,6 +721,7 @@ describe('meaningfulTestAuditHandler — R6 full-scan residual-cap disclosure (s
     if (!r.ok) return;
     expect(r.value.data.totalTestClassCount).toBe(2);
     expect(r.value.data.disclosure).not.toMatch(/Full scan capped/);
+    expect('scanTruncated' in r.value.data).toBe(false);
   });
 
   it('stays silent about capping when the ceiling comfortably exceeds the corpus', async () => {
@@ -670,6 +731,9 @@ describe('meaningfulTestAuditHandler — R6 full-scan residual-cap disclosure (s
     if (!r.ok) return;
     expect(r.value.data.totalTestClassCount).toBe(5);
     expect(r.value.data.disclosure).not.toMatch(/Full scan capped/);
+    // Control: no over-disclosure. The key is absent, not `false`, so an org
+    // under the ceiling keeps the byte-identical pre-knob shape.
+    expect('scanTruncated' in r.value.data).toBe(false);
   });
 });
 

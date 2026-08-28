@@ -9,6 +9,7 @@ import { openGraph, closeGraph, type GraphStore } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
 import {
+  SEARCH_APEX_SOURCE_SCAN_CAP,
   searchApexSourceHandler,
   searchApexSourceInputSchema,
 } from '../../src/tools/search-apex-source.js';
@@ -602,5 +603,253 @@ describe('searchApexSourceInputSchema', () => {
       regex: true,
     });
     expect(parsed.success).toBe(true);
+  });
+});
+
+// =============================================================================
+// SEARCH-APEX-PAGE-UNCOUNTABLE-AND-UNREACHABLE.
+//
+// The pre-fix payload for an over-limit search was exactly two keys —
+// `matches` and `truncated: true`. That is not a lie about what it FOUND, but
+// it is a certification about what it SHOWED: there was no total anywhere in
+// the payload, so a caller could not learn that a remainder existed OR how
+// large it was, and there was no `offset` / `cursor` in the input schema, so
+// the remainder could not be fetched at any price. `limit` maxes at 200.
+//
+// Worse, `offset` was ACCEPTED and IGNORED. The Zod object is non-strict, so a
+// caller who reasonably assumed the product's own house paging convention
+// applied here (`find_code_usages`, `test_coverage_gaps` and a dozen others
+// take `offset`/`cursor`) got page ONE back, byte-identical, with no error and
+// no echo — a false paging illusion that reads as "I paged to exhaustion and
+// the last page repeated", i.e. a manufactured duplicate.
+//
+// Both halves are fixed here: the scan now walks the WHOLE corpus and publishes
+// `totalCount`, and `offset` / `cursor` actually advance. Where the scan cap
+// bites, `scanCap` says so in a typed field rather than letting `totalCount`
+// pass as exact.
+// =============================================================================
+describe('searchApexSourceHandler — the remainder is countable and reachable', () => {
+  it('an over-limit page publishes a total, a nextOffset and a resume cursor', async () => {
+    // The bulk fixture holds 100 `LIMITSCAN` matches (20 files x 5 lines).
+    const result = await searchApexSourceHandler(ctx, {
+      query: 'LIMITSCAN',
+      limit: 10,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.matches).toHaveLength(10);
+    expect(d.truncated).toBe(true);
+    // THE COUNT. Pre-fix the payload carried no total at all, so 90 hidden
+    // matches were indistinguishable from none.
+    expect(d.totalCount).toBe(100);
+    expect(d.hasMore).toBe(true);
+    expect(d.offset).toBe(0);
+    expect(d.limit).toBe(10);
+    expect(d.nextOffset).toBe(10);
+    // THE RESUME POINTER. R2: a truncated answer carries BOTH the flags and a
+    // way to continue.
+    expect(typeof d.nextCursor).toBe('string');
+    expect(d.pageInfo?.totalCount).toBe(100);
+    expect(d.pageInfo?.hasMore).toBe(true);
+    expect(d.pageInfo?.nextCursor).toBe(d.nextCursor);
+    // And prose a host will read aloud rather than narrate as an inventory.
+    expect(d.note).toMatch(/INCOMPLETE/);
+  });
+
+  it('offset ADVANCES the page instead of silently re-serving page one', async () => {
+    // The sharpest half of the finding, reproduced exactly as the persona hit
+    // it: pass the offset the first page's own size implies and compare.
+    const first = await searchApexSourceHandler(ctx, {
+      query: 'LIMITSCAN',
+      limit: 10,
+    });
+    const second = await searchApexSourceHandler(ctx, {
+      query: 'LIMITSCAN',
+      limit: 10,
+      offset: 10,
+    });
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    // Pre-fix these two arrays were byte-identical.
+    expect(second.value.data.matches).not.toEqual(first.value.data.matches);
+    expect(second.value.data.offset).toBe(10);
+    expect(second.value.data.matches).toHaveLength(10);
+    const overlap = second.value.data.matches.filter((m) =>
+      first.value.data.matches.some((f) => f.path === m.path && f.line === m.line),
+    );
+    expect(overlap).toEqual([]);
+  });
+
+  it('paging to exhaustion by offset yields every match exactly once', async () => {
+    const seen = new Set<string>();
+    let offset = 0;
+    let guard = 0;
+    let total = -1;
+    for (;;) {
+      guard += 1;
+      if (guard > 50) throw new Error('offset paging did not terminate');
+      const page = await searchApexSourceHandler(ctx, {
+        query: 'LIMITSCAN',
+        limit: 10,
+        offset,
+      });
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      total = page.value.data.totalCount;
+      for (const m of page.value.data.matches) {
+        const key = `${m.path}#${String(m.line)}`;
+        // No duplicate row may ever be served — that was the manufactured
+        // duplication the ignored `offset` produced.
+        expect(seen.has(key)).toBe(false);
+        seen.add(key);
+      }
+      if (!page.value.data.hasMore) break;
+      offset = page.value.data.nextOffset ?? 0;
+    }
+    expect(seen.size).toBe(100);
+    expect(total).toBe(100);
+  });
+
+  it('the emitted cursor resumes the same query and a foreign cursor is refused', async () => {
+    const first = await searchApexSourceHandler(ctx, {
+      query: 'LIMITSCAN',
+      limit: 10,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    const resumed = await searchApexSourceHandler(ctx, {
+      query: 'LIMITSCAN',
+      limit: 10,
+      cursor: cursor as string,
+    });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.value.data.offset).toBe(10);
+    expect(resumed.value.data.matches).not.toEqual(first.value.data.matches);
+
+    // A cursor minted for a DIFFERENT query must not be honoured — replaying it
+    // would page one list with another list's offsets.
+    const foreign = await searchApexSourceHandler(ctx, {
+      query: 'Account',
+      limit: 10,
+      cursor: cursor as string,
+    });
+    expect(foreign.ok).toBe(false);
+    if (foreign.ok) return;
+    expect(foreign.error.kind).toBe('invalid-query');
+  });
+
+  it('an exhausted page past the end is NOT reported as a proven absence', async () => {
+    // The regression the offset fix could easily have introduced: an empty page
+    // at offset >= total is an EXHAUSTED page, not "the corpus was read and
+    // this query matches nothing". Certifying `proven-none` there would be a
+    // fresh instance of the very disease.
+    const result = await searchApexSourceHandler(ctx, {
+      query: 'LIMITSCAN',
+      limit: 10,
+      offset: 100,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.matches).toEqual([]);
+    expect(result.value.data.totalCount).toBe(100);
+    expect(result.value.data.hasMore).toBe(false);
+    const d = result.value.data as unknown as Record<string, unknown>;
+    expect('absence' in d).toBe(false);
+    expect('boundaryNote' in d).toBe(false);
+  });
+
+  it('a genuinely empty result still carries its typed absence, with a zero total', async () => {
+    const result = await searchApexSourceHandler(ctx, { query: 'ZZZZZ' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.totalCount).toBe(0);
+    expect(result.value.data.hasMore).toBe(false);
+    expect(result.value.data.absence?.kind).toBe('checked-empty');
+  });
+
+  it('accepts offset and cursor in the input schema instead of stripping them', () => {
+    const parsed = searchApexSourceInputSchema.safeParse({
+      query: 'Account',
+      offset: 20,
+      cursor: 'abc',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    // Pre-fix the non-strict object STRIPPED both keys, which is how the
+    // handler could accept `offset` and ignore it without any error.
+    expect(parsed.data.offset).toBe(20);
+    expect(parsed.data.cursor).toBe('abc');
+  });
+
+  it('rejects a negative offset', () => {
+    const parsed = searchApexSourceInputSchema.safeParse({
+      query: 'Account',
+      offset: -1,
+    });
+    expect(parsed.success).toBe(false);
+  });
+});
+
+describe('searchApexSourceHandler — the scan cap is disclosed, not absorbed', () => {
+  it('a corpus past the scan cap reports totalCount as a LOWER BOUND', async () => {
+    // The one place `totalCount` cannot be a total: the corpus walk is bounded
+    // so a single-character query cannot materialise one object per source
+    // line. A floor presented as a total would be the same certification this
+    // whole fix removes, so it is published as a typed field.
+    const vault = mkdtempSync(join(tmpdir(), 'sfi-mcp-apex-scan-cap-'));
+    try {
+      const perFile = 600;
+      const fileCount = Math.ceil((SEARCH_APEX_SOURCE_SCAN_CAP + 500) / perFile);
+      for (let i = 0; i < fileCount; i += 1) {
+        const body = Array.from(
+          { length: perFile },
+          (_, j) => `String v${String(j)} = 'CAPMARK';`,
+        ).join('\n');
+        writeSource(
+          vault,
+          'classes',
+          `Cap${String(i).padStart(3, '0')}.cls`,
+          `${body}\n`,
+        );
+      }
+      const capCtx: Context = {
+        vaultRoot: vault,
+        manifest: FIXTURE_MANIFEST,
+        graph: store,
+      };
+      const result = await searchApexSourceHandler(capCtx, {
+        query: 'CAPMARK',
+        limit: 5,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const d = result.value.data;
+      expect(d.totalCount).toBe(SEARCH_APEX_SOURCE_SCAN_CAP);
+      // The load-bearing assertion: a machine consumer is TOLD the number is a
+      // floor, in a typed field it cannot skip.
+      expect(d.scanCap).toBeDefined();
+      expect(d.scanCap?.totalIsLowerBound).toBe(true);
+      expect(d.scanCap?.cap).toBe(SEARCH_APEX_SOURCE_SCAN_CAP);
+      expect(d.scanCap?.note).toMatch(/LOWER BOUND/);
+      // ...and the prose a host reads aloud hedges the count too.
+      expect(d.note).toMatch(/at least/);
+    } finally {
+      rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  it('an under-cap corpus carries NO scanCap, so the caveat stays meaningful', async () => {
+    const result = await searchApexSourceHandler(ctx, {
+      query: 'LIMITSCAN',
+      limit: 10,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanCap).toBeUndefined();
+    expect(result.value.data.note).not.toMatch(/at least/);
   });
 });

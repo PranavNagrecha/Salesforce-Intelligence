@@ -37,9 +37,22 @@
  * discipline means dynamic SOQL strings, reflective field access
  * (`obj.get('FieldName')`), and managed-package code are INVISIBLE to
  * the graph edges this tool walks. The `boundaries` array surfaces the
- * verbatim "dynamic SOQL invisible" disclosure unconditionally when
- * any results are returned, mirroring `SemanticSearchSemantics.md`'s
- * per-tool disclosure catalog for `sfi.find_anywhere`.
+ * method + invisibility disclosures on EVERY successful response,
+ * including (especially) a zero — see GRAPH_EDGE_WALK_DISCLOSURE and
+ * ZERO_IS_A_GRAPH_ZERO for what those two sentences used to get wrong.
+ * NOTE THAT THIS TOOL READS NO FILE: it does not pattern-match Apex,
+ * Flow XML or metadata XML at call time, and the boundary text no
+ * longer claims it does.
+ *
+ * **Unresolved-id axis:** the edge walk is keyed on the CANONICAL field
+ * id, so every edge an extractor minted against a different spelling of
+ * the same field (the dotted prefix of a ReportType column's `<field>`
+ * element, a case-variant object name, an object the refresh never retrieved) is
+ * invisible to it and the answer reads as a checked zero. Those edges
+ * are recovered into the always-present typed
+ * `unresolvedApiNameMatches` section via the graph's own dangling-target
+ * anti-join, and are deliberately NEVER folded into `totalCount` — an
+ * api-name match is a lead, not a proven usage.
  *
  * Implementation notes:
  *   - The CustomField id is `targetId` OR its alias `fieldId` (parity with
@@ -83,7 +96,11 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  danglingTargetIdsMatching,
+  getNodeById,
+  listEdges,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -103,9 +120,20 @@ import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
   reportDashboardUsage,
 } from './report-dashboard-usage.js';
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 
-/** Per-response byte budget for the designated section's page. */
-const FIND_FIELD_ANYWHERE_BYTE_BUDGET = 38_000;
+/**
+ * Floor for the designated section's page budget.
+ *
+ * The page budget itself is DERIVED from `toolLocalPayloadBudgetBytes()` at
+ * call time (see the call site) rather than declared as a hard-coded sibling of
+ * it. It used to be a literal `38_000`, which is a hand-maintained neighbour of
+ * the global budget's effective ceiling — the exact drift
+ * `response-budget.ts` was written to end. This floor only bites when
+ * `SFI_MAX_RESPONSE_BYTES` is set so low that the derived budget would leave no
+ * room for a page at all.
+ */
+const DESIGNATED_SECTION_FLOOR_BYTES = 2_000;
 
 /** Canonical CustomField prefix. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -113,12 +141,76 @@ const CUSTOM_FIELD_PREFIX = 'CustomField:';
 const FIND_FIELD_ANYWHERE_MAX_LIMIT = 500;
 /** Default `limit`. */
 const FIND_FIELD_ANYWHERE_DEFAULT_LIMIT = 200;
+/**
+ * How many of the matching unresolved ids are WALKED to ENUMERATE referrers.
+ *
+ * This caps the ENUMERATION ONLY. It does not cap `referenceCount` or
+ * `byComponentType`: those come from {@link aggregateUnresolvedReferrers}, one
+ * SQL aggregate over EVERY matching id, so they are exact at any number of ids.
+ *
+ * WHAT THIS DOC USED TO CLAIM, AND WHY IT WAS FALSE. It said "the COUNT
+ * reported is the true pre-cap total ... so the cap can never read as a smaller
+ * blind spot than the vault actually has". `referenceCount` was `referrers
+ * .length` — a tally over the WALKED subset — so the sentence was false for
+ * every api name carried by more than {@link UNRESOLVED_ID_SCAN_CAP} unresolved
+ * ids. Measured on a real vault: the commonest such api name is carried by 226
+ * unresolved ids holding 568 referring edges, and the tool published
+ * `referenceCount: 97` under prose certifying it as the true total — a 5.9x
+ * understatement, in a sentence a host reads aloud. Five api names on that
+ * vault exceed the cap, covering 133 real CustomField nodes.
+ *
+ * Why the walk stays capped even though the count no longer is: the walk costs
+ * one `listEdges` plus one `getNodeById` PER EDGE. Measured on that vault, the
+ * uncapped walk for those 226 ids took 4 234 ms; the aggregate that now
+ * produces the same 568 took 62 ms. The expensive pass buys only ROWS, and rows
+ * are what the byte budget makes us give back first anyway.
+ */
+const UNRESOLVED_ID_SCAN_CAP = 50;
+/** How many resolved referrers the unresolved section emits (counts stay true). */
+const UNRESOLVED_REFERRER_CAP = 50;
+/**
+ * Max ids bound into one `IN (...)` of the count aggregate. The aggregate is
+ * chunked and SUMMED, so the exactness of the total does not depend on how many
+ * ids match — no chunk boundary is a silent cap.
+ */
+const UNRESOLVED_ID_AGGREGATE_CHUNK = 500;
+/**
+ * Hard byte ceiling for the serialised unresolved section. Without it an
+ * always-present new section could push the widest field's response past the
+ * ceiling the global guard enforces and turn a working answer into a truncated
+ * or oversize one. The section shrinks its referrer list (then its id list)
+ * until it fits, flips `truncated`, and NEVER lowers `referenceCount` /
+ * `idsTotal` / `byComponentType` — the shrink changes what is ENUMERATED, never
+ * what is CLAIMED.
+ */
+const UNRESOLVED_SECTION_BYTE_CAP = 9_000;
 
-/** Verbatim honesty disclosures echoed in the response's `boundaries`. */
-const STATIC_GRAPH_DISCLOSURE =
-  "the search uses pattern-matching over Apex source, Flow XML, and metadata XML. Dynamic SOQL (`Database.query('SELECT...')`) is stripped before the pattern pass and is invisible. Reflective field access (`obj.get('FieldName')`) is invisible. Custom utility methods that wrap the operation you're searching for are invisible — the search finds calls to `Messaging.sendEmail` but not calls to `MyEmailHelper.send(...)` unless you also search for that helper.";
+/**
+ * Verbatim honesty disclosures echoed in the response's `boundaries`.
+ *
+ * WHAT THE FIRST SENTENCE USED TO SAY, AND WHY IT WAS THE DEFECT. Until this
+ * change it read "the search uses pattern-matching over Apex source, Flow XML,
+ * and metadata XML". This handler runs NO text pass of any kind — it is one
+ * `listEdges(direction: 'in')` call plus node lookups. A host that read the old
+ * sentence aloud told the admin that the metadata XML HAD been searched, which
+ * is how a `totalCount` covering only permission grants got reported as a
+ * verified "used by nothing else" for a field whose references sit in metadata
+ * XML in the very vault being read. The sentence now names the method the
+ * handler actually uses and points at the tools that DO read files.
+ */
+const GRAPH_EDGE_WALK_DISCLOSURE =
+  "this answer is an EDGE WALK over the already-extracted graph. No file is opened and no text pass runs at call time — a referrer appears here only if an extractor already resolved it to this EXACT field id, so this list is a statement about the GRAPH, not a verified statement about the org. Dynamic SOQL (`Database.query('SELECT...')`) built from strings, reflective field access (`obj.get('FieldName')`), and custom utility methods that wrap the operation are never resolved to an edge and are invisible here. To search the vaulted FILES themselves use `sfi.search_apex_source` / `sfi.search_flow_metadata`, or grep `{vaultRoot}/source/` directly.";
 const MANAGED_PACKAGE_DISCLOSURE =
-  'results from managed packages are limited to metadata XML; Apex source within managed packages is not indexed. If the operation lives inside a managed-package class, this search will not find it.';
+  'managed-package Apex source is not indexed, so no edge is ever minted from it. If the operation lives inside a managed-package class, nothing in this list will show it.';
+/**
+ * Pushed when the edge walk resolved NOTHING. The zero is the answer that most
+ * needs the caveats and it used to be the answer that carried the FEWEST: the
+ * two disclosures above were gated on `collected.length > 0`, so a field with no
+ * resolved referrer returned a bare zero with only the report/dashboard caveat
+ * attached. That is the certified zero this tool exists not to produce.
+ */
+const ZERO_IS_A_GRAPH_ZERO =
+  '`totalCount: 0` means NO EXTRACTED EDGE LANDS ON THIS EXACT ID. It is NOT a verified "this field is used nowhere". An extractor that minted its reference against a DIFFERENT id — a relationship alias in place of the object api name, a case-variant spelling, an object this refresh never retrieved — produces exactly this zero while the reference is real and sitting in the vault XML. Read `unresolvedApiNameMatches` below before acting on it, and confirm with a text search over `{vaultRoot}/source/` before deleting anything.';
 /**
  * PHANTOM target: the id is referenced by real edges but no node carries it, so
  * the field's own definition was never retrieved. The reference list is still
@@ -185,6 +277,105 @@ export interface ReferenceGroup {
   readonly count: number;
 }
 
+/**
+ * References the graph HOLDS that name a field with THIS field's api name under
+ * an object id that resolves to NO node in this vault.
+ *
+ * ## The measured defect this exists for
+ *
+ * An extractor does not always know the object api name that owns a field it
+ * saw. `enterprise-metadata.ts`'s column sweep mints `CustomField:{token}` for
+ * any `<field>` value CONTAINING a dot, so a ReportType column written as a
+ * relationship path becomes `CustomField:{RelationshipPath}.{Field}` rather
+ * than `CustomField:{Object}.{Field}`. The edge is real, its referrer is real,
+ * and its target id resolves to nothing — so an edge walk keyed on the
+ * CANONICAL id sees none of it and returns a `totalCount` covering only the
+ * permission grants. On the vault this was measured against, 91.6% of that
+ * family's edges had a target no node carries, and the tool the honest sibling
+ * tools REDIRECT to for those surfaces answered zero.
+ *
+ * IT IS THE `<field>` PREFIX, NOT THE SECTION'S `<table>`. Ground truth on that
+ * vault: of 1 793 dotted `<field>` values across the ReportType corpus, 1 793
+ * have a prefix that DIFFERS from the sibling `<table>` element — zero match it.
+ * A reader sent to `<table>` opens the wrong element.
+ *
+ * ## WHAT THIS SECTION CANNOT RECOVER, AND WHY
+ *
+ * The far bigger half of the same gap is upstream and OUT OF THIS FILE'S REACH.
+ * `extractReportType` passes no parent object and a ReportType XML has no
+ * `<reportType>` element, so `inferReportObjectApiName` returns null and a BARE
+ * `<field>Some_Field__c</field>` mints NO EDGE AT ALL — there is nothing
+ * dangling for this anti-join to find. Ground truth on that vault: 33 203 bare
+ * `<field>` values versus 1 793 dotted ones. The finding that prompted this
+ * section named 48 report types using the BARE form; this section recovers
+ * none of them, and cannot. See `needsOrchestrator` — the fix is
+ * `parentFromXmlElement: 'baseObject'` (or per-section `<table>` scoping) in
+ * `packages/extractors/src/enterprise-metadata.ts`.
+ *
+ * ## Why it is a SEPARATE typed section and never folded into `totalCount`
+ *
+ * The match is on api name only. `CustomField:Other_Obj__c.Status__c` may be
+ * this field reached through a relationship alias, or a genuinely different
+ * field that happens to share a name. THE VAULT CANNOT TELL THEM APART, so
+ * counting them as usages would trade a false zero for a false positive. They
+ * are published as leads to check, with the ambiguity stated in `note`.
+ *
+ * ## Absence here is a CHECKED absence
+ *
+ * The section is emitted on EVERY successful response. `referenceCount: 0` with
+ * `scanned: true` means the anti-join ran and found none; it is never the
+ * silence of a section that was skipped.
+ */
+export interface UnresolvedApiNameMatches {
+  /** The field api name the scan matched on (the id's text after its first dot). */
+  readonly fieldApiName: string;
+  /** True on every successful response — the scan is unconditional. */
+  readonly scanned: boolean;
+  /**
+   * Distinct unresolved `CustomField:` ids carrying this api name, across the
+   * WHOLE vault. Never capped.
+   */
+  readonly idsTotal: number;
+  /**
+   * How many of those ids were walked to ENUMERATE `referrers`
+   * ({@link UNRESOLVED_ID_SCAN_CAP}). `idsScanned < idsTotal` means the ROW
+   * LIST is a sample — it does NOT mean the counts below are partial.
+   */
+  readonly idsScanned: number;
+  /**
+   * EXACT count of referring edges across ALL {@link idsTotal} ids, from one
+   * SQL aggregate — not a tally of the walked subset, and not a floor. Honours
+   * the `componentTypes` filter and excludes `parentOf`, exactly as
+   * {@link referrers} does.
+   */
+  readonly referenceCount: number;
+  /**
+   * The unresolved ids, ASC — the walked slice, further shrunk to fit the byte
+   * budget. A SAMPLE whenever `idsScanned < idsTotal` or `truncated` is true.
+   */
+  readonly unresolvedTargetIds: readonly ComponentId[];
+  /**
+   * Referrer rows from the walked ids, capped at
+   * {@link UNRESOLVED_REFERRER_CAP} and shrunk further under byte pressure. A
+   * SAMPLE of {@link referenceCount}, never a claim to be all of it.
+   */
+  readonly referrers: readonly FieldReference[];
+  /**
+   * EXACT referrer-ComponentType tally across ALL {@link idsTotal} ids, from
+   * the same aggregate as {@link referenceCount}. Its values sum to
+   * `referenceCount`; it is never a tally of the enumerated slice.
+   */
+  readonly byComponentType: Readonly<Record<string, number>>;
+  /**
+   * True when the ENUMERATED lists are a sample of what the counts describe —
+   * because the id walk was capped, the referrer list was capped, or the byte
+   * budget shrank either. Counts are unaffected.
+   */
+  readonly truncated: boolean;
+  /** Prose a host will read aloud, stating what this is and what it is not. */
+  readonly note: string;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface FindFieldAnywhereOutput {
   readonly targetId: ComponentId;
@@ -206,6 +397,17 @@ export interface FindFieldAnywhereOutput {
   readonly designatedList?: string;
   /** The non-paged ComponentType sections, with their full reference counts; truncation only. */
   readonly otherSections?: readonly SectionDisclosure[];
+  /**
+   * Always present. Edges the graph holds against a DIFFERENT, unresolvable id
+   * carrying this field's api name — the blind spot that made this tool's
+   * zero look verified. Never folded into `groups` / `totalCount` / `byEdgeType`.
+   */
+  readonly unresolvedApiNameMatches: UnresolvedApiNameMatches;
+  /**
+   * The method that produced `groups`. A literal, so a machine consumer can
+   * assert the answer is an edge walk rather than infer a text pass from prose.
+   */
+  readonly searchMethod: 'graph-edge-walk';
 }
 
 const isCustomField = (id: string): boolean =>
@@ -254,6 +456,292 @@ const compareRefs = (a: FieldReference, b: FieldReference): number => {
   if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
   if (a.source !== b.source) return a.source < b.source ? -1 : 1;
   return 0;
+};
+
+/**
+ * The field portion of a `CustomField:` id: everything after the FIRST dot that
+ * follows the prefix. `CustomField:Contact.Owner.Name` -> `Owner.Name`, which is
+ * the same split the graph's own ids use for a relationship-traversed column.
+ * Returns `null` for an id with no dot (not a field id shape).
+ */
+const fieldApiNameOf = (id: string): string | null => {
+  const body = id.slice(CUSTOM_FIELD_PREFIX.length);
+  const dot = body.indexOf('.');
+  return dot === -1 || dot === body.length - 1 ? null : body.slice(dot + 1);
+};
+
+/**
+ * EXACT referrer tally across EVERY matching unresolved id, in one aggregate
+ * per chunk of {@link UNRESOLVED_ID_AGGREGATE_CHUNK} ids.
+ *
+ * This exists because the referrer WALK is capped and a count taken from the
+ * walked subset is a lie the size of the tail. Measured on a real vault: the
+ * commonest dangling field api name is carried by 226 unresolved ids holding
+ * 568 referring edges; the 50-id walk saw 97. The aggregate returns 568 in
+ * 62 ms — the walk needed 4 234 ms to reach the same number.
+ *
+ * Predicate parity with the walk is load-bearing, and is asserted by a test
+ * that compares the two on the same fixture: `parentOf` is excluded (a field's
+ * own parent object is not a referrer), the referrer node must EXIST (the walk
+ * drops an unresolvable referrer via `resolveReference` returning `null`; the
+ * `JOIN nodes` does the same), and `typeFilter` is applied. Any divergence
+ * would put a count next to rows that disagree with it.
+ */
+const aggregateUnresolvedReferrers = async (
+  ctx: Context,
+  ids: readonly ComponentId[],
+  typeFilter: ReadonlySet<string> | null,
+): Promise<Result<Record<string, number>, string>> => {
+  const tally: Record<string, number> = {};
+  const types = typeFilter === null ? [] : [...typeFilter];
+  if (typeFilter !== null && types.length === 0) return ok(tally);
+  for (let i = 0; i < ids.length; i += UNRESOLVED_ID_AGGREGATE_CHUNK) {
+    const chunk = ids.slice(i, i + UNRESOLVED_ID_AGGREGATE_CHUNK);
+    const idPlaceholders = chunk.map(() => '?').join(',');
+    const typeClause =
+      types.length === 0 ? '' : ` AND n.type IN (${types.map(() => '?').join(',')})`;
+    const sql = `SELECT n.type AS component_type, COUNT(*) AS c
+         FROM edges e
+         JOIN nodes n ON e.from_id = n.id
+        WHERE e.to_id IN (${idPlaceholders})
+          AND e.edge_type <> 'parentOf'${typeClause}
+        GROUP BY n.type`;
+    try {
+      const reader = await ctx.graph.connection.runAndReadAll(sql, [
+        ...chunk,
+        ...types,
+      ]);
+      for (const row of reader.getRowObjectsJS()) {
+        const t = String(row['component_type'] ?? '');
+        tally[t] = (tally[t] ?? 0) + Number(row['c'] ?? 0);
+      }
+    } catch (e) {
+      return err((e as Error).message);
+    }
+  }
+  return ok(tally);
+};
+
+/**
+ * Scan the graph for edges whose target is an UNRESOLVED `CustomField:` id
+ * carrying the same field api name as `targetId`, and resolve their referrers.
+ *
+ * Adopts the graph's own anti-join (`danglingTargetIdsMatching`) rather than a
+ * fourth local copy of "LEFT JOIN nodes ... IS NULL"; the substring pre-filter
+ * is deliberately loose, so the EXACT api-name equality is re-applied here
+ * (case-insensitively — Salesforce api names are case-insensitive and the vault
+ * carries case-variant spellings).
+ */
+const scanUnresolvedApiNameMatches = async (
+  ctx: Context,
+  targetId: ComponentId,
+  typeFilter: ReadonlySet<string> | null,
+): Promise<Result<UnresolvedApiNameMatches, McpError>> => {
+  const fieldApiName = fieldApiNameOf(targetId);
+  const empty = (name: string, note: string): UnresolvedApiNameMatches => ({
+    fieldApiName: name,
+    scanned: true,
+    idsTotal: 0,
+    idsScanned: 0,
+    referenceCount: 0,
+    unresolvedTargetIds: [],
+    referrers: [],
+    byComponentType: {},
+    truncated: false,
+    note,
+  });
+  if (fieldApiName === null) {
+    return ok(
+      empty(
+        '',
+        'No field api name could be split out of this id, so the unresolved-id scan could not run. Treat a zero above as UNCHECKED for references minted against a different id.',
+      ),
+    );
+  }
+
+  const danglingResult = await danglingTargetIdsMatching(
+    ctx.graph,
+    `.${fieldApiName}`,
+  );
+  if (!danglingResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${danglingResult.error.message}`,
+    });
+  }
+  const wanted = fieldApiName.toLowerCase();
+  const matching = danglingResult.value
+    .filter(
+      (id) =>
+        id.startsWith(CUSTOM_FIELD_PREFIX) &&
+        id !== targetId &&
+        (fieldApiNameOf(id) ?? '').toLowerCase() === wanted,
+    )
+    .slice()
+    .sort((a2, b2) => (a2 < b2 ? -1 : a2 > b2 ? 1 : 0));
+
+  if (matching.length === 0) {
+    return ok(
+      empty(
+        fieldApiName,
+        `Checked: no edge in this vault names an UNRESOLVABLE \`CustomField:*.${fieldApiName}\` id, so no reference to this field is hiding behind a relationship alias or a case-variant object spelling. This is a scanned zero, not a skipped section.`,
+      ),
+    );
+  }
+
+  // COUNTS come from ONE aggregate over EVERY matching id — never from the
+  // walked slice below. The walked slice buys ROWS, and rows are the first
+  // thing the byte budget takes back; a count taken from them understated a
+  // real vault's blind spot 5.9x while calling itself a true total.
+  const aggregated = await aggregateUnresolvedReferrers(ctx, matching, typeFilter);
+  if (!aggregated.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${aggregated.error}` });
+  }
+  const byComponentType = aggregated.value;
+  const referenceCount = Object.values(byComponentType).reduce((a2, b2) => a2 + b2, 0);
+
+  const walked = matching.slice(0, UNRESOLVED_ID_SCAN_CAP);
+  const referrers: FieldReference[] = [];
+  for (const id of walked) {
+    const edges = await listEdges(ctx.graph, id, { direction: 'in' });
+    if (!edges.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${edges.error.message}`,
+      });
+    }
+    for (const edge of edges.value) {
+      if (edge.edgeType === 'parentOf') continue;
+      const resolved = await resolveReference(ctx, edge);
+      if (!resolved.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${resolved.error}` });
+      }
+      if (resolved.value === null) continue;
+      if (typeFilter !== null && !typeFilter.has(resolved.value.componentType)) {
+        continue;
+      }
+      referrers.push(resolved.value);
+    }
+  }
+  referrers.sort(compareRefs);
+  // Fit the section to UNRESOLVED_SECTION_BYTE_CAP: drop enumerated referrers
+  // first, then enumerated ids. Counts are computed above and never touched.
+  let shownRefs = referrers.slice(0, UNRESOLVED_REFERRER_CAP);
+  let shownIds: readonly ComponentId[] = walked;
+  const sectionBytes = (): number =>
+    Buffer.byteLength(JSON.stringify({ shownRefs, shownIds }), 'utf8');
+  while (sectionBytes() > UNRESOLVED_SECTION_BYTE_CAP && shownRefs.length > 0) {
+    shownRefs = shownRefs.slice(0, Math.max(0, Math.floor(shownRefs.length / 2)));
+  }
+  while (sectionBytes() > UNRESOLVED_SECTION_BYTE_CAP && shownIds.length > 1) {
+    shownIds = shownIds.slice(0, Math.max(1, Math.floor(shownIds.length / 2)));
+  }
+  const truncated =
+    matching.length > shownIds.length || referenceCount > shownRefs.length;
+  const kinds = Object.entries(byComponentType)
+    .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
+    .map(([t, n]) => `${n} ${t}`)
+    .join(', ');
+  return ok({
+    fieldApiName,
+    scanned: true,
+    idsTotal: matching.length,
+    idsScanned: walked.length,
+    referenceCount,
+    unresolvedTargetIds: shownIds,
+    referrers: shownRefs,
+    byComponentType,
+    truncated,
+    note:
+      `${referenceCount} reference(s) (${kinds || 'none after the componentTypes filter'}) name a field called ` +
+      `\`${fieldApiName}\` under ${matching.length} object id(s) that resolve to NO node in this vault. They are NOT counted in ` +
+      '`totalCount` and they are NOT proven to be this field: an extractor that only knew an ALIAS for the object ' +
+      "mints exactly this shape — the dotted prefix of a ReportType column's `<field>` element (a relationship path, " +
+      'not the object api name), a case-variant object spelling, or an object this refresh never retrieved — and so ' +
+      'does a genuinely different field that happens to share the name. For a COMMON api name most of these rows will ' +
+      "be OTHER objects' same-named fields, not this one. THE VAULT CANNOT TELL THEM APART — open the referrers listed " +
+      'here, or grep the api name under `{vaultRoot}/source/`, before treating the resolved count above as the whole ' +
+      'footprint.' +
+      ` The count and the componentType tally are EXACT over all ${matching.length} id(s).` +
+      (truncated
+        ? ` The ENUMERATED lists are a sample: ${shownIds.length} of ${matching.length} id(s) listed, referrer rows drawn from the first ${walked.length} of ${matching.length} id(s) and ${shownRefs.length} of ${referenceCount} row(s) shown.`
+        : ''),
+  });
+};
+
+/**
+ * Shrink the unresolved section's ENUMERATED lists until the whole payload fits
+ * the shared response budget.
+ *
+ * A new always-present section is not free. The widest field on a real vault
+ * already serialises past the global budget on the whole-fits path (a
+ * pre-existing gap: `limit` is a PER-SECTION page size, so a field whose every
+ * bucket is under `limit` never pages no matter how many buckets it has), and a
+ * borderline field must not be pushed over by a disclosure. The COUNTS and the
+ * `note` are never dropped — they are the honest part, and they are ~1 KB — only
+ * the enumeration shrinks, and `truncated` stays true whenever it did.
+ *
+ * WHICH CEILING, AND WHY IT WAS THE WRONG ONE. This fitted to
+ * `responseBudgetBytes()` (40 000). Nothing is ever measured against that
+ * number: `tool-dispatch` reduces against `responseBudgetBytes()` MINUS
+ * `RESPONSE_ENVELOPE_RESERVE_BYTES` (38 976), and the body it measures also
+ * carries `vaultState` / `contentPolicy` / `orgDrift`, which this handler never
+ * sees. Fitting to 40 000 therefore certified "fits" for payloads landing in
+ * the 38 976–40 000 window — measured: 3 of the 300 widest fields on a real
+ * vault newly crossed 38 976 and fell into the global array-truncation pass on
+ * answers that had returned whole. `toolLocalPayloadBudgetBytes()` is the
+ * shared module's own answer to exactly this question (reduction cap minus a
+ * measured margin for the fields added after the handler returns); adopting it
+ * means this tool cannot drift from the guard again.
+ */
+const fitUnresolvedSection = (
+  section: UnresolvedApiNameMatches,
+  overheadBytes: number,
+): UnresolvedApiNameMatches => {
+  const budget = toolLocalPayloadBudgetBytes();
+  // The shrink DISCLOSES itself in `note`, and that sentence is ~200 bytes the
+  // fit must pay for. Measuring the pre-disclosure section and then appending
+  // the sentence left the payload over the cap it had just certified — a fit
+  // that does not weigh its own disclosure is the same class of error as a
+  // budget measured against the wrong ceiling. `candidate` builds the FINAL
+  // object, disclosure included, at every step of the search.
+  const candidate = (
+    refs: readonly FieldReference[],
+    ids: readonly ComponentId[],
+  ): UnresolvedApiNameMatches =>
+    refs.length === section.referrers.length &&
+    ids.length === section.unresolvedTargetIds.length
+      ? section
+      : {
+          ...section,
+          referrers: refs,
+          unresolvedTargetIds: ids,
+          truncated: true,
+          note:
+            `${section.note} The enumerated lists were shrunk further to fit the response ` +
+            `budget (${refs.length} of ${section.referenceCount} referrer row(s), ${ids.length} of ` +
+            `${section.idsTotal} id(s) listed); the COUNTS are unaffected. ` +
+            'Re-run with a `componentTypes` filter to see the rows.',
+        };
+  const total = (
+    refs: readonly FieldReference[],
+    ids: readonly ComponentId[],
+  ): number =>
+    overheadBytes + Buffer.byteLength(JSON.stringify(candidate(refs, ids)), 'utf8');
+  let refs = section.referrers;
+  let ids = section.unresolvedTargetIds;
+  while (total(refs, ids) > budget && refs.length > 0) {
+    refs = refs.slice(0, Math.floor(refs.length / 2));
+  }
+  while (total(refs, ids) > budget && ids.length > 0) {
+    ids = ids.slice(0, Math.floor(ids.length / 2));
+  }
+  // At a budget below what the COUNTS and the `note` alone cost, both lists are
+  // now empty and the residue is disclosure prose. That prose is not dropped:
+  // an answer that fits by deleting its own caveat is the defect this whole
+  // change exists to remove. The global reducer trims arrays, and there are
+  // none left for it to take.
+  return candidate(refs, ids);
 };
 
 /**
@@ -386,6 +874,28 @@ export const findFieldAnywhereHandler = async (
   // section overflows, the DESIGNATED section is paged and the others are emitted
   // with empty `references` (their `count` preserved) + disclosed via
   // otherSections, so each is walkable section-by-section.
+  // The scan for references the graph holds against a DIFFERENT, unresolvable id
+  // carrying this field's api name. Unconditional: a CHECKED zero here is the
+  // whole point, and a section that only appears when it has something to say is
+  // indistinguishable from one that was never run.
+  const unresolvedResult = await scanUnresolvedApiNameMatches(
+    ctx,
+    targetId,
+    typeFilter,
+  );
+  if (!unresolvedResult.ok) return err(unresolvedResult.error);
+  const unresolvedApiNameMatches = unresolvedResult.value;
+
+  // The new section is BUDGETED, not free: the paged section must give back
+  // exactly what the unresolved section takes, or the widest field turns from a
+  // working answer into a truncated one. Both sides are measured against
+  // `toolLocalPayloadBudgetBytes()` — the ONE number the global guard's
+  // reduction cap is derived from — so they cannot drift apart.
+  const unresolvedSectionBytes = Buffer.byteLength(
+    JSON.stringify(unresolvedApiNameMatches),
+    'utf8',
+  );
+
   const TOOL = 'sfi.find_field_anywhere';
   const fingerprint = argsFingerprint({
     targetId,
@@ -434,7 +944,12 @@ export const findFieldAnywhereHandler = async (
     const pagedResult = paginateSection(sections, designatedListId, {
       offset,
       limit,
-      byteBudget: FIND_FIELD_ANYWHERE_BYTE_BUDGET,
+      // DERIVED from the shared budget, not a hand-maintained literal beside
+      // it, and net of what the always-present unresolved section costs.
+      byteBudget: Math.max(
+        DESIGNATED_SECTION_FLOOR_BYTES,
+        toolLocalPayloadBudgetBytes() - unresolvedSectionBytes,
+      ),
       keyOf: (r) => `${r.componentId}|${r.edgeType}|${r.source}`,
       binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
     });
@@ -493,10 +1008,27 @@ export const findFieldAnywhereHandler = async (
     byEdgeType[ref.edgeType] = (byEdgeType[ref.edgeType] ?? 0) + 1;
   }
 
+  // UNCONDITIONAL (was gated on `collected.length > 0`). The disclosures describe
+  // the METHOD, and the method is the same whether the walk found six referrers
+  // or none — gating them handed the emptiest, most dangerous answer the least
+  // disclosure. See ZERO_IS_A_GRAPH_ZERO.
   const boundaries: string[] = [];
-  if (collected.length > 0) {
-    boundaries.push(STATIC_GRAPH_DISCLOSURE);
-    boundaries.push(MANAGED_PACKAGE_DISCLOSURE);
+  boundaries.push(GRAPH_EDGE_WALK_DISCLOSURE);
+  boundaries.push(MANAGED_PACKAGE_DISCLOSURE);
+  if (collected.length === 0) boundaries.push(ZERO_IS_A_GRAPH_ZERO);
+  if (unresolvedApiNameMatches.referenceCount > 0) {
+    // A POINTER, not a second copy of `note`. The full explanation lives in the
+    // typed section; duplicating ~900 bytes of it here pushed a real field's
+    // payload past the global hard ceiling, and a disclosure that makes the
+    // response un-returnable discloses nothing.
+    boundaries.push(
+      `${unresolvedApiNameMatches.referenceCount} reference(s) in this vault name a field called ` +
+        `\`${unresolvedApiNameMatches.fieldApiName}\` under ${unresolvedApiNameMatches.idsTotal} object id(s) that ` +
+        'resolve to NO node here (an object ALIAS — the dotted prefix of a ReportType column\'s `<field>` element, ' +
+        'a case-variant spelling, or an object this refresh never retrieved). They are NOT counted in `totalCount` ' +
+        "and NOT proven to be this field; for a common api name most will be OTHER objects' same-named fields. Read " +
+        'the typed `unresolvedApiNameMatches` section before treating the count above as the whole footprint.',
+    );
   }
 
   // Report / Dashboard field usage is folded onto the field as a PROPERTY by
@@ -529,6 +1061,24 @@ export const findFieldAnywhereHandler = async (
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);
   }
 
+  // Fit the new section to the budget LAST, against the real assembled payload.
+  const fitted = fitUnresolvedSection(
+    unresolvedApiNameMatches,
+    Buffer.byteLength(
+      JSON.stringify({
+        targetId,
+        groups,
+        totalCount: collected.length,
+        byEdgeType,
+        boundaries,
+        truncated,
+        searchMethod: 'graph-edge-walk',
+        ...(cursorBlock ?? {}),
+      }),
+      'utf8',
+    ),
+  );
+
   return ok({
     data: {
       targetId,
@@ -537,6 +1087,8 @@ export const findFieldAnywhereHandler = async (
       byEdgeType,
       boundaries,
       truncated,
+      searchMethod: 'graph-edge-walk',
+      unresolvedApiNameMatches: fitted,
       ...(cursorBlock !== undefined
         ? {
             nextCursor: cursorBlock.nextCursor,

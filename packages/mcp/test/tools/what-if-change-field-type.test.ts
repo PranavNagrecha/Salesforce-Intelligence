@@ -25,10 +25,30 @@ import {
   whatIfChangeFieldTypeInputSchema,
 } from '../../src/tools/what-if-change-field-type.js';
 
-// Mirrors the tool's own (unexported) `FIELD_CHANGE_REQUIRED_COVERAGE` — the
-// same list `FIXTURE_MANIFEST.coverage` below is built from, kept as one
-// named list here so the drift test can build the expected caveat directly
-// off the shared module rather than guessing at the tool's private constant.
+// Mirrors the tool's own (unexported) `FIELD_CHANGE_REQUIRED_COVERAGE`.
+// `FIXTURE_MANIFEST.coverage` below is derived from this copy, so the fixture
+// asserts "every required family was retrieved" by construction.
+//
+// What this mirror catches, and in which DIRECTION, measured one edit at a time
+// against this suite rather than assumed (an earlier version of this comment
+// asserted a symmetry that does not hold):
+//
+//   ADDED entry  -> already caught WITHOUT the `status: 'unknown'` case below.
+//     A family added to the tool's constant is, by construction, absent from
+//     this file's fixture coverage, so it lands in `missingCoverage`, changes
+//     the rendered sentence and flips safe -> review. Appending one entry runs
+//     3 failed | 23 passed, and two of the three are the pre-existing cases
+//     'excludes FLS / permission grants' and 'emits the shared
+//     buildCoverageCaveat wording'.
+//
+//   REMOVED entry -> caught ONLY by the `status: 'unknown'` case below, which
+//     pins the whole list. Dropping one entry runs 1 failed | 25 passed, and
+//     the single failure is that case. This is the direction that case exists
+//     for; the partial-coverage case above cannot see it, because a family the
+//     tool stopped requiring is simply never asked about.
+//
+//   RENAMED entry -> both halves fire (3 failed | 23 passed); the rename's
+//     removal half is only visible through the `status: 'unknown'` case.
 const FIELD_CHANGE_REQUIRED_COVERAGE = [
   'CustomField',
   'ValidationRule',
@@ -65,24 +85,7 @@ const FIXTURE_MANIFEST: VaultManifest = {
   edges: { parentOf: 1, references: 1 },
   sourceTreeHash: 'sha256:fixture',
   coverageComputedAt: '2026-05-29T12:00:00.000Z',
-  coverage: completeCoverage([
-    'CustomField',
-    'ValidationRule',
-    'Flow',
-    'ApexClass',
-    'ApexTrigger',
-    'Layout',
-    'LightningComponentBundle',
-    'AuraDefinitionBundle',
-    'VisualforcePage',
-    'VisualforceComponent',
-    'WorkflowRule',
-    'Report',
-    'Dashboard',
-    'ListView',
-    'ReportType',
-    'FlexiPage',
-  ]),
+  coverage: completeCoverage(FIELD_CHANGE_REQUIRED_COVERAGE),
 };
 
 const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
@@ -645,10 +648,24 @@ describe('whatIfChangeFieldTypeHandler', () => {
   // R6 drift test: the coverage caveat this tool emits must be the SAME
   // sentence `buildCoverageCaveat` (coverage-trust.ts) renders for every other
   // what-if tool, not a hand-rolled second copy that can drift from it. A
-  // partial-coverage manifest (ApexClass errored) on an otherwise
+  // partial-coverage manifest (one family errored) on an otherwise
   // forward-compatible transition (which would be `safe` with full coverage)
-  // proves both halves of R6 at once: the caveat message text, and the
-  // safe -> review downgrade.
+  // exercises both the caveat message text and the safe -> review downgrade.
+  //
+  // Which assertion BITES, stated honestly: only the MESSAGE one. Reverting the
+  // adoption fails this test on the message text alone. The `verdict` assertion
+  // is a BEHAVIOUR LOCK, not bite-proof of the fix — the hand-rolled inline
+  // ternary that `applyCoverageToVerdict` replaced produced 'review' here too,
+  // so that half passes with the fix reverted. It is kept because the downgrade
+  // is the product behaviour a reader depends on, not because it proves the
+  // refactor.
+  //
+  // Wording note, since adopting the shared sentence changed the tail: this tool
+  // used to end '... means "not checked", not "safe"' and now ends '... as "not
+  // checked", not "none"'. The dropped "not safe" half is not lost, it moved
+  // from prose into structure — `applyCoverageToVerdict` downgrades this
+  // otherwise-safe transition to 'review', which is the assertion directly
+  // above and is machine-readable rather than a sentence a host has to parse.
   it('emits the shared buildCoverageCaveat wording and downgrades safe to review when coverage is partial', async () => {
     const partialManifest: VaultManifest = {
       ...FIXTURE_MANIFEST,
@@ -676,6 +693,48 @@ describe('whatIfChangeFieldTypeHandler', () => {
     );
     expect(expected).toBeDefined();
     expect(result.value.data.coverageCaveat?.message).toBe(expected?.message);
+  });
+
+  // Extends the FIELD_CHANGE_REQUIRED_COVERAGE mirror above to the REMOVAL and
+  // RENAME directions. Additions were already guarded (see the header comment:
+  // an added family is uncovered in the fixture by construction, so it shows up
+  // in `missingCoverage` and fails the partial-coverage case above). A family
+  // DROPPED from the tool's constant is invisible there — the tool simply stops
+  // asking about it — so it needs this case: when the manifest carries coverage
+  // rows but NONE for any required family, `summarizeCoverage` filters to
+  // nothing and returns `status: 'unknown'` with `missingCoverage` set to the
+  // requested list itself, so `buildCoverageCaveat` renders the tool's private
+  // constant VERBATIM, in the tool's own order. Measured: dropping one entry
+  // runs 1 failed | 25 passed and this is the only failure.
+  it('renders the full required-coverage list, so the mirrored constant catches drift', async () => {
+    const unrelatedCoverageManifest: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      // A family no field-type transition depends on: coverage IS known
+      // (rows exist), it just says nothing about any required family.
+      coverage: completeCoverage(['CustomObject']),
+    };
+    const unknownCtx: Context = { ...ctx, manifest: unrelatedCoverageManifest };
+
+    const result = await whatIfChangeFieldTypeHandler(unknownCtx, {
+      fieldId: PICK_FIELD,
+      newType: 'Picklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const caveat = result.value.data.coverageCaveat;
+    expect(caveat).toBeDefined();
+    expect(caveat?.status).toBe('unknown');
+    // Order-sensitive on purpose: the constant is rendered as a join.
+    expect(caveat?.missingCoverage).toEqual([...FIELD_CHANGE_REQUIRED_COVERAGE]);
+    expect(caveat?.message).toContain(FIELD_CHANGE_REQUIRED_COVERAGE.join(', '));
+    // Still the shared sentence, not a hand-rolled one.
+    const expected = buildCoverageCaveat(
+      unknownCtx,
+      FIELD_CHANGE_REQUIRED_COVERAGE,
+      'Field-type change impact',
+    );
+    expect(expected).toBeDefined();
+    expect(caveat?.message).toBe(expected?.message);
   });
 });
 

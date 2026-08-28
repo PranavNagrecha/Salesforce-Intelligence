@@ -21,7 +21,15 @@ import type { Context } from '../../src/server.js';
 import { jsonResult, runTool } from '../../src/tools/index.js';
 import { SOE_UNGROUNDED_REFS_NOTE } from '../../src/tools/order-of-execution.js';
 import {
+  responseReductionCap,
+  toolLocalPayloadBudgetBytes,
+} from '../../src/tools/response-budget.js';
+import { AUTOMATION_PHASES } from '../../src/tools/soe-payload-bounds.js';
+import {
+  buildPhaseEnumeration,
   computePhasesOmitted,
+  RECOVERY_PATH_BYTE_CEILING,
+  RECOVERY_PHASE_ROUTES,
   tallyPhaseCounts,
   whatHappensOnSaveHandler,
   whatHappensOnSaveInputSchema,
@@ -1306,6 +1314,55 @@ const f4HeavySeed: ExtractionResult = {
   edges: [...f4ActiveVrs.flatMap((v) => v.edges)],
 };
 
+// =============================================================================
+// `NearCapObj` — the fixture that catches a disclosure block PAYING FOR ITSELF
+// IN STEPS.
+//
+// The global reducer in `tool-dispatch.ts` only runs when the whole envelope
+// passes `responseBudgetBytes()`, and when it runs it HALVES the list it trims
+// (`keep = max(10, floor(len/2))`). So there is a band — between this tool's own
+// cap (`toolLocalPayloadBudgetBytes()`) and the reducer's
+// (`responseReductionCap()`) — where a payload is over the tool's guard and yet
+// arrives COMPLETE. A disclosure block emitted on that band pushes the envelope
+// past the trigger and costs fifty percent of the answer to warn about a cut
+// that was not going to happen. Measured on a real org before this fixture
+// existed: 60 delivered steps became 30, and 54 became 27.
+//
+// 93 rules lands `data` at ~38.4 KB, inside that band. The rules carry NO
+// conditional context and no action fan-out, so `enforceSoeByteBudget` has
+// nothing to trim and the payload is the same size whatever reserve that pass
+// is given — the fixture measures the disclosure blocks and nothing else.
+// `sits in the band` asserts the placement, so a byte drift retunes the count
+// instead of silently voiding every test below it.
+// =============================================================================
+
+const NEAR_CAP_OBJ = 'CustomObject:NearCapObj';
+const NEAR_CAP_RULE_COUNT = 93;
+
+const nearCapSeed: ExtractionResult = (() => {
+  const nodes: Node[] = [makeNode({ id: NEAR_CAP_OBJ, apiName: 'NearCapObj' })];
+  const edges: Edge[] = [];
+  for (let i = 0; i < NEAR_CAP_RULE_COUNT; i += 1) {
+    const suffix = String(i).padStart(3, '0');
+    const id = `ValidationRule:NearCapObj.Guard_${suffix}`;
+    nodes.push(
+      makeNode({
+        id,
+        type: 'ValidationRule',
+        apiName: `NearCapObj.Guard_${suffix}`,
+        parentId: NEAR_CAP_OBJ,
+        properties: {
+          active: true,
+          errorMessage: `Guard_${suffix} rejected this record: the routing owner, the qualification stage and the territory assignment disagree for this combination.`,
+          errorDisplayField: null,
+        },
+      }),
+    );
+    edges.push(makeEdge({ fromId: NEAR_CAP_OBJ, toId: id, edgeType: 'parentOf' }));
+  }
+  return { nodes, edges };
+})();
+
 const budgetAllocationSeed: ExtractionResult = {
   nodes: [
     makeNode({ id: BUDGET_OBJ, apiName: 'WidgetOrder__c', properties: { sharingModel: 'Private' } }),
@@ -1403,6 +1460,7 @@ beforeAll(async () => {
     receiverGuardSeed,
     budgetAllocationSeed,
     f4HeavySeed,
+    nearCapSeed,
     groundingSeed,
   ]);
   if (!imported.ok) {
@@ -3202,5 +3260,475 @@ describe('whatHappensOnSaveHandler — FIX 15 (3): grounded vs ungrounded condit
     // Grounding issues NO edge query at all, so the edge slope is entirely the
     // composer's pre-existing per-firer pair and is not the discriminator here.
     expect(many.edgeQueries).toBeGreaterThan(few.edgeQueries);
+  });
+});
+
+// =============================================================================
+// RECOVERY-PATH-NAMES-KNOBS-THIS-TOOL-DOES-NOT-HAVE + CONCEPT-REASONING-ABSENCE-
+// IS-UNTYPED.
+//
+// Both were found by a persona driving the REAL MCP server against a real
+// production org, on its two busiest objects. Reproduced here on `WidgetLead__c`
+// (`f4HeavySeed`, 110 active validation rules) and `SaveHeavyObj`
+// (`saveHeavySeed`, 160 rules + duplicate rules + after-triggers + flows +
+// async), which are the same shape: ONE phase big enough to blow the byte budget
+// on its own.
+//
+// Defect 1. The payload goes to the dispatcher over budget, the global reducer
+// tail-truncates `soe`, and every sentence offering a way out was false FOR THIS
+// TOOL: the envelope's shared "re-query with a smaller limit", the shared
+// filtered-phase note's "narrow further with limit/offset", and the concept
+// note's "re-query one `phase` at a time" — which is false precisely when it is
+// needed, because a single-phase query on such an object is over budget too.
+// This tool is `.strict()` and accepts no limit/offset/cursor, so following any
+// of them returns `invalid-query: Unknown argument`. Those three sentences are
+// shared prose owned elsewhere (two in `soe-payload-bounds.ts`, used by
+// `order_of_execution`, which DOES accept limit/offset/cursor and for which they
+// are TRUE; one in the dispatcher's envelope). This module cannot rewrite them,
+// so it states the truth for itself in a typed `recoveryPath` a machine consumer
+// cannot skip plus prose a host reads aloud — and hands back an EXECUTABLE,
+// resumable enumeration that does reach the full roster.
+//
+// Defect 2. `conceptReasoning` is documented DEFAULT ON, and it is absent on
+// exactly the objects whose answers are least complete. The reason was in the
+// prose and nowhere in the data, so a host reading `data` could only see a
+// missing key — and read it as "the reasoning engine found nothing", the one
+// reading the block's own `completeness` contract exists to prevent. Absence is
+// now carried by a property (R1), never inferred from a missing key.
+// =============================================================================
+
+/**
+ * Steps that survive the FULL pipeline — the handler's own budget pass AND the
+ * global reducer inside `jsonResult` — measured TWICE: as shipped, and with
+ * this batch's two disclosure blocks stripped back out of the very same
+ * handler result.
+ *
+ * The handler-level assertions below cannot see this. `allowStepDrop: false`
+ * means the handler NEVER drops a step, so every step it composed is still
+ * there when it returns; the loss happens downstream, in a reducer that halves.
+ * A disclosure block is only honest if the answer it describes is the answer
+ * that arrives, so the fix-vs-no-fix comparison is the assertion that matters.
+ */
+const deliveredStepsWithAndWithout = async (
+  args: Record<string, unknown>,
+): Promise<{
+  readonly asShipped: number;
+  readonly withoutTheBlocks: number;
+  readonly composedBytes: number;
+}> => {
+  const r = await whatHappensOnSaveHandler(ctx, args as never);
+  if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
+  const stepsOf = (value: unknown): number => {
+    const text = (
+      jsonResult(value as never, { args, knobs: ['limit', 'offset', 'phase'] })
+        .content[0] as { readonly text: string }
+    ).text;
+    const parsed = JSON.parse(text) as {
+      readonly data?: { readonly soe?: readonly unknown[] };
+    };
+    return parsed.data?.soe?.length ?? 0;
+  };
+  const stripped = structuredClone(r.value) as unknown as {
+    data: Record<string, unknown>;
+  };
+  delete stripped.data['recoveryPath'];
+  delete stripped.data['conceptReasoningOmitted'];
+  // The prose half. It is appended LAST by the handler, so cutting from its
+  // opening words removes exactly the sentence this batch added and nothing
+  // that was already there.
+  const disclosure = String(stripped.data['disclosure'] ?? '');
+  const at = disclosure.indexOf('RECOVERY PATH.');
+  if (at >= 0) stripped.data['disclosure'] = disclosure.slice(0, at).trimEnd();
+  return {
+    asShipped: stepsOf(r.value),
+    withoutTheBlocks: stepsOf(stripped),
+    composedBytes: Buffer.byteLength(JSON.stringify(r.value.data), 'utf8'),
+  };
+};
+
+describe('whatHappensOnSaveHandler — the disclosure never pays for itself in steps', () => {
+  it('sits in the band: NearCapObj is over this tool’s cap and under the reducer’s', async () => {
+    // The precondition every test in this describe rests on. Without it they
+    // would all pass vacuously on a payload that was never near the cliff.
+    const { composedBytes } = await deliveredStepsWithAndWithout({
+      objectApiName: 'NearCapObj',
+      event: 'insert',
+    });
+    expect(composedBytes).toBeGreaterThan(toolLocalPayloadBudgetBytes());
+    expect(composedBytes).toBeLessThanOrEqual(responseReductionCap());
+  });
+
+  it('an answer inside the band arrives COMPLETE — the blocks cost it nothing', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'NearCapObj',
+      event: 'insert',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const composed = r.value.data.soe.length;
+    const { asShipped, withoutTheBlocks } = await deliveredStepsWithAndWithout({
+      objectApiName: 'NearCapObj',
+      event: 'insert',
+    });
+    // Identical with and without: the blocks are not what decides how much of
+    // this answer the caller receives.
+    expect(asShipped).toBe(withoutTheBlocks);
+    // ...and both deliver everything the handler composed. A gate on this
+    // tool's own cap rather than the reducer's fired here and halved it.
+    expect(asShipped).toBe(composed);
+    expect(asShipped).toBeGreaterThan(TRUNCATE_KEEP_MIN_MIRROR);
+  });
+
+  it('an OVER-budget answer keeps every step it would have kept without the blocks', async () => {
+    // The other side of the cliff: here the reducer really does cut, and the
+    // question is whether the disclosure makes the cut deeper. It must not.
+    for (const args of [
+      { objectApiName: 'WidgetLead__c', event: 'update' },
+      { objectApiName: 'WidgetLead__c', event: 'update', phase: 'pre-save-validation' },
+      { objectApiName: 'SaveHeavyObj', event: 'insert' },
+    ]) {
+      const { asShipped, withoutTheBlocks } = await deliveredStepsWithAndWithout(args);
+      expect({ ...args, asShipped }).toEqual({ ...args, asShipped: withoutTheBlocks });
+      expect(asShipped).toBeGreaterThan(0);
+    }
+  });
+
+  it('the recovery block stays inside its byte ceiling — the reducer halves, so bytes are steps', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const path = r.value.data.recoveryPath;
+    expect(path).toBeDefined();
+    if (path === undefined) return;
+    // Field plus the prose it generates — the whole cost, not the half of it
+    // that is easy to measure. The first shape of this block ran 1.6-2.8 KB and
+    // bought itself half an answer.
+    const cost =
+      Buffer.byteLength(JSON.stringify({ recoveryPath: path }), 'utf8') +
+      Buffer.byteLength(
+        r.value.data.disclosure.slice(r.value.data.disclosure.indexOf('RECOVERY PATH.')),
+        'utf8',
+      );
+    expect(cost).toBeLessThanOrEqual(RECOVERY_PATH_BYTE_CEILING);
+  });
+});
+
+/** Mirrors `tool-dispatch.ts`'s floor only to keep the assertion above non-vacuous. */
+const TRUNCATE_KEEP_MIN_MIRROR = 10;
+
+describe('whatHappensOnSaveHandler — a truncated answer names a recovery path this tool really has', () => {
+  it('a phase-filtered query on a phase that is ITSELF over budget emits a typed, non-resumable recoveryPath', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    // Precondition: this is the real shape — the caller already narrowed to ONE
+    // phase (the narrowest scope the tool offers) and the payload is STILL over
+    // the budget the tool fits `soe` to, so the global reducer will cut steps
+    // the caller has no argument to page past.
+    expect(d.appliedPhaseFilter).toBe('pre-save-validation');
+    const path = d.recoveryPath;
+    expect(path).toBeDefined();
+    if (path === undefined) return;
+    // The numbers are named for what they ARE. `composedPayloadBytes` is the
+    // payload this handler BUILT, not the one the caller received — the reducer
+    // shrinks it afterwards — and the JSDoc and the prose both say so.
+    expect(path.composedPayloadBytes).toBeGreaterThan(path.reducerCapBytes);
+    expect(path.reducerCapBytes).toBe(responseReductionCap());
+    // BEFORE the block, so strictly smaller than the payload that carries it —
+    // the number is honest about which measurement it is, and the prose says
+    // "the composed payload was", never "this response is".
+    expect(path.composedPayloadBytes).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(d), 'utf8'),
+    );
+    expect(d.disclosure).toContain(
+      `The composed payload was ${path.composedPayloadBytes} byte(s)`,
+    );
+
+    // The typed contract, in a field: not resumable, and the narrowest scope has
+    // already been spent.
+    expect(path.resumable).toBe(false);
+    expect(path.narrowestScope).toBe('phase');
+    expect(path.narrowestScopeApplied).toBe(true);
+
+    // The accepted-argument list is the SCHEMA's, not a hand-written copy — and
+    // it proves the boilerplate wrong by its contents.
+    expect(path.acceptedArguments).toContain('phase');
+    expect(path.acceptedArguments).not.toContain('limit');
+    expect(path.acceptedArguments).not.toContain('offset');
+    expect(path.acceptedArguments).not.toContain('cursor');
+
+    // The recovery is EXECUTABLE and reaches the phase that was cut.
+    expect(path.enumerateWith).toEqual([
+      {
+        tool: 'sfi.list_components',
+        arguments: {
+          type: 'ValidationRule',
+          parentId: 'CustomObject:WidgetLead__c',
+          limit: 100,
+        },
+        superset: true,
+      },
+    ]);
+    // A populated enumeration and an excuse are mutually exclusive: an emitted
+    // reason beside a working call would be an invented one.
+    expect(path.unenumerableReason).toBeUndefined();
+
+    // And the host-facing prose contradicts the boilerplate BY NAME, in ADVANCE
+    // — the shared filtered-phase tail is appended by the dispatcher AFTER this
+    // sentence, so a host reads the false advice last. Naming all three forms of
+    // it up front is what survives that ordering.
+    expect(d.disclosure).toContain('DOES NOT APPLY');
+    expect(d.disclosure).toContain('accepts NO `limit`, `offset` or `cursor`');
+    expect(d.disclosure).toContain('narrow further with limit/offset');
+    expect(d.disclosure).toContain('re-query with a smaller limit');
+    expect(d.disclosure).toContain('pass includeConceptReasoning: false');
+    // Every key the prose sends the reader to is populated. A sentence naming a
+    // key the handler never emits is the defect this release has already had to
+    // fix twice.
+    expect(d.disclosure).toContain('`recoveryPath.enumerateWith`');
+    expect(path.enumerateWith.length).toBeGreaterThan(0);
+    expect(d.disclosure).not.toContain('recoveryPath.unenumerableReason');
+  });
+
+  it('the accepted-argument list tracks the input schema — a knob added to one cannot go missing from the other', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const path = r.value.data.recoveryPath;
+    expect(path).toBeDefined();
+    if (path === undefined) return;
+    // The tuple behind `acceptedArguments` also drives the `.strict()` refusal,
+    // so those two can never disagree — but it is hand-maintained and NOTHING
+    // derives it from the Zod object. This is the guard that makes the claim
+    // true rather than aspirational: add `limit` to the schema without touching
+    // the tuple and both the refusal message and this field go stale, here.
+    expect([...path.acceptedArguments].sort()).toEqual(
+      Object.keys(whatHappensOnSaveInputSchema.innerType().shape).sort(),
+    );
+  });
+
+  it('the arguments the recoveryPath hands back are ones this tool would ACCEPT — and limit is not one of them', () => {
+    const path = whatHappensOnSaveInputSchema.safeParse({
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+      phase: 'pre-save-validation',
+    });
+    expect(path.success).toBe(true);
+    // The refusal the persona hit when following the boilerplate. This is what
+    // makes "re-query with a smaller limit" a dead end rather than bad advice.
+    const withLimit = whatHappensOnSaveInputSchema.safeParse({
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+      limit: 10,
+    });
+    expect(withLimit.success).toBe(false);
+    if (withLimit.success) return;
+    expect(JSON.stringify(withLimit.error.issues)).toContain("Unknown argument 'limit'");
+  });
+
+  it('an UNFILTERED over-budget answer gets NO block — its own advice still names a knob this tool HAS', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'SaveHeavyObj',
+      event: 'insert',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    // Precondition: this answer really is over the reducer's cap, so it is the
+    // over-budget case and not a light object dodging the block by accident.
+    expect(Buffer.byteLength(JSON.stringify(d), 'utf8')).toBeGreaterThan(
+      responseReductionCap(),
+    );
+    expect(d.appliedPhaseFilter).toBeUndefined();
+
+    // No block. The exit this answer already offers — `crossPhaseShortfallNote`'s
+    // "re-query with the `phase` filter to see the full roster" — names a knob
+    // this tool really accepts and really narrows with, so there is no false
+    // advice here to correct. Spending bytes to repeat it is not free: the
+    // reducer halves, and on a real org this same block cost an unfiltered
+    // answer 27 of its 54 delivered steps.
+    expect(d.recoveryPath).toBeUndefined();
+    expect(d.disclosure).not.toContain('RECOVERY PATH');
+    expect(whatHappensOnSaveInputSchema.safeParse({
+      objectApiName: 'SaveHeavyObj',
+      event: 'insert',
+      phase: 'pre-save-validation',
+    }).success).toBe(true);
+  });
+
+  it('every phase route resolves to the call that actually reaches it — and an unreachable phase gets a reason, never a fabricated call', () => {
+    const objectId = 'CustomObject:SaveHeavyObj';
+    // parentOf-scoped phases enumerate with list_components under the object...
+    for (const phase of RECOVERY_PHASE_ROUTES.parentScoped) {
+      const { calls, reason } = buildPhaseEnumeration(objectId, phase as never);
+      expect(calls.length).toBeGreaterThan(0);
+      expect(reason).toBeUndefined();
+      for (const call of calls) {
+        expect(call.tool).toBe('sfi.list_components');
+        expect(call.arguments['parentId']).toBe(objectId);
+        expect(call.superset).toBe(true);
+      }
+    }
+    // ...triggersOn-scoped phases with the incoming-edge walk the collectors use...
+    for (const phase of RECOVERY_PHASE_ROUTES.triggersOn) {
+      const { calls, reason } = buildPhaseEnumeration(objectId, phase as never);
+      expect(reason).toBeUndefined();
+      expect(calls).toEqual([
+        {
+          tool: 'sfi.get_edges',
+          arguments: {
+            nodeId: objectId,
+            direction: 'in',
+            edgeType: 'triggersOn',
+            limit: 100,
+          },
+          superset: true,
+        },
+      ]);
+    }
+    // ...and the phases no single call reaches get a stated reason instead of a
+    // call that would answer a different question. That is the honesty half: a
+    // fabricated recovery is the defect, not the fix.
+    for (const phase of RECOVERY_PHASE_ROUTES.unenumerable) {
+      const { calls, reason } = buildPhaseEnumeration(objectId, phase as never);
+      expect(calls).toEqual([]);
+      expect(reason).toBeDefined();
+      expect(String(reason).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('an answer that FITS carries no recoveryPath — the block is a truncation disclosure, not boilerplate', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // A light object loses nothing, so there is nothing to recover. Emitting the
+    // block here would cost bytes to warn about a cut that is not happening —
+    // and on an object near the cap it is those bytes that CAUSE one.
+    expect(r.value.data.recoveryPath).toBeUndefined();
+    expect(r.value.data.disclosure).not.toContain('RECOVERY PATH');
+  });
+});
+
+describe('whatHappensOnSaveHandler — an absent conceptReasoning block says so in a FIELD', () => {
+  it('a heavy object drops the block for want of headroom and carries a typed, unskippable absence', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'WidgetLead__c',
+      event: 'update',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    // Precondition: this is the case the persona hit — the block is GONE on the
+    // answer that is least complete.
+    expect(d.conceptReasoning).toBeUndefined();
+
+    // R1: absence is carried by a property, not inferred from a missing key.
+    const omitted = d.conceptReasoningOmitted;
+    expect(omitted).toBeDefined();
+    if (omitted === undefined) return;
+    expect(omitted.checked).toBe(false);
+    expect(omitted.reason).toBe('no-budget-headroom');
+    // This path DID measure a headroom, so it reports one — and the floor it
+    // was measured against, because neither number is readable alone.
+    expect(omitted.headroomBytes).toBeGreaterThanOrEqual(0);
+    expect(omitted.minimumHeadroomBytes).toBeGreaterThan(0);
+    // The sentence lives in `disclosure` and nowhere else. It used to be
+    // duplicated into a `note` field on this block, which cost ~380 bytes to
+    // say the same thing twice on the one payload where bytes are steps.
+    expect(d.disclosure).toContain('Concept reasoning was NOT attached');
+    expect(d.disclosure).toContain('that is "not checked", not "nothing found"');
+    expect(omitted).not.toHaveProperty('note');
+  });
+
+  it('the caller opting out and the phase-filter default are kept APART — one field, two reasons', async () => {
+    const explicit = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+      includeConceptReasoning: false,
+    });
+    expect(explicit.ok).toBe(true);
+    if (!explicit.ok) return;
+    expect(explicit.value.data.conceptReasoning).toBeUndefined();
+    expect(explicit.value.data.conceptReasoningOmitted?.checked).toBe(false);
+    expect(explicit.value.data.conceptReasoningOmitted?.reason).toBe('caller-opted-out');
+
+    const byDefault = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+      phase: 'pre-save-validation',
+    });
+    expect(byDefault.ok).toBe(true);
+    if (!byDefault.ok) return;
+    expect(byDefault.value.data.conceptReasoningOmitted?.reason).toBe('phase-filter-default');
+  });
+
+  it('a path that never MEASURED a headroom reports none — a fabricated 0 is the shape this field exists to prevent', async () => {
+    for (const args of [
+      { objectApiName: 'FullObj', event: 'insert', includeConceptReasoning: false },
+      { objectApiName: 'FullObj', event: 'insert', phase: 'pre-save-validation' },
+    ]) {
+      const r = await whatHappensOnSaveHandler(ctx, args as never);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const omitted = r.value.data.conceptReasoningOmitted;
+      expect(omitted).toBeDefined();
+      if (omitted === undefined) return;
+      // The block was never attempted on either path, so there is no headroom
+      // to report. Emitting `headroomBytes: 0` beside `minimumHeadroomBytes:
+      // 2500` reads as a MEASUREMENT saying "no room was left" — a different,
+      // and false, claim from "no one looked". `reason` carries the whole truth.
+      expect(omitted).not.toHaveProperty('headroomBytes');
+      expect(omitted).not.toHaveProperty('minimumHeadroomBytes');
+      expect(omitted.checked).toBe(false);
+    }
+  });
+
+  it('the two keys are MUTUALLY EXCLUSIVE — a present block is never accompanied by an absence marker', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The positive case: the block IS attached on a light object, and nothing
+    // contradicts it. If both keys could appear a host would have to decide
+    // which one to believe.
+    expect(r.value.data.conceptReasoning).toBeDefined();
+    expect(r.value.data.conceptReasoningOmitted).toBeUndefined();
+  });
+});
+
+describe('recovery-path phase coverage', () => {
+  it('the three routes PARTITION every automation phase — no phase can inherit another phase\'s excuse', () => {
+    const { parentScoped, triggersOn, unenumerable } = RECOVERY_PHASE_ROUTES;
+    const all = [...parentScoped, ...triggersOn, ...unenumerable];
+    // Exhaustive: every phase the composition can populate is routed.
+    expect([...all].sort()).toEqual([...AUTOMATION_PHASES].sort());
+    // Disjoint: no phase is routed twice, so the first-match order in
+    // `buildPhaseEnumeration` is not load-bearing and cannot be reordered into
+    // a different answer.
+    expect(new Set(all).size).toBe(all.length);
+    // Non-vacuous: an empty roster would satisfy "no duplicates" over nothing.
+    expect(all.length).toBe(AUTOMATION_PHASES.length);
+    expect(all.length).toBeGreaterThan(0);
   });
 });

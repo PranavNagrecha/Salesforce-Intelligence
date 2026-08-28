@@ -52,17 +52,22 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { guestProfileNameForSite } from '@sf-intelligence/extractors';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
-import { isRegulatedPiiClassification } from '@sf-intelligence/patterns';
+import {
+  isRegulatedPiiClassification,
+  type QualityIssue,
+} from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted } from './absence-disclosure.js';
 import { coercePrefix } from './coerce-id.js';
 import { offlineTrust } from './coverage-trust.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { collectPiiInventoryFields, type PiiField } from './pii-inventory.js';
+import { QUALITY_ISSUES_PROPERTY } from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 
@@ -73,9 +78,63 @@ const OBJECT_PREFIX = 'CustomObject:';
 const FIELD_PREFIX = 'CustomField:';
 const APEX_PREFIX = 'ApexClass:';
 const SHARING_RULE_PREFIX = 'SharingRule:';
+const VISUALFORCE_PAGE_PREFIX = 'VisualforcePage:';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/**
+ * Apex sharing keywords that ENFORCE record sharing on a guest-invoked entry
+ * point. Anything else — `without sharing`, or no keyword at all — means a
+ * guest-reachable method can read rows the guest user has no share on, which is
+ * the canonical Salesforce guest data-leak shape. Named rather than inlined so
+ * the escalation below stays one readable expression.
+ */
+const SHARING_ENFORCED_MODELS: ReadonlySet<string> = new Set([
+  'with sharing',
+  'inherited sharing',
+]);
+
+/** Quality-issue severities, worst first — the ladder {@link worstIssueSeverity} walks. */
+const ISSUE_SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'] as const;
+type IssueSeverity = (typeof ISSUE_SEVERITY_ORDER)[number];
+
+/**
+ * The recognizer rules that describe a GUEST-CONTEXT data-exposure hazard
+ * specifically, as opposed to general code hygiene. Named on the finding so a
+ * reader sees WHICH hazard fired rather than only a severity count.
+ */
+const GUEST_SECURITY_RULES: ReadonlySet<string> = new Set([
+  'missing-fls-check',
+  'missing-crud-check',
+  'soql-injection',
+  'without-sharing-no-comment',
+  'dynamic-apex',
+]);
+
+/**
+ * The `<pageAccesses>` blind spot, in the one place both channels read from.
+ *
+ * GUEST-EXPOSURE-CERTIFIES-A-ZERO-IT-NEVER-CHECKED. Measured on a real org: an
+ * ACTIVE public Visualforce site whose guest profile granted NO object CRUD and
+ * NO Apex returned `findings: []`, `summary.totalFindings: 0`,
+ * `trust.completeness.status: 'complete'` — while a prose disclosure in the very
+ * same envelope said a guest-exposed Visualforce page "will not appear as a
+ * finding". The site's only guest surface was ten `<pageAccesses>` entries with
+ * `<enabled>true</enabled>`, and a Visualforce page RUNS its controller Apex.
+ * A consumer reading the structured trust block got the opposite of the truth.
+ *
+ * The old wording was also misleading about the CAUSE: it said the access is
+ * "NOT in the offline metadata model", which sends a reader away from a file the
+ * vault actually ships. The `<pageAccesses>` blocks ARE in the retrieved
+ * `.profile-meta.xml`, and the pages themselves ARE modeled as
+ * `VisualforcePage` nodes — it is the profile extractor that emits no
+ * `Profile -> VisualforcePage` grant edge (it emits object, field, class, flow
+ * and custom-permission grants and stops there). That is a gap a future
+ * extraction closes, and until then a reader can open the profile file by hand.
+ */
+const VISUALFORCE_GAP_LIMITATION =
+  'Visualforce-page guest access is NOT enumerated by this report. The guest profile\'s `<pageAccesses>` entries ARE present in the retrieved `.profile-meta.xml` this vault ships (see each community\'s `guestProfileSourcePath`), and the pages themselves ARE modeled as `VisualforcePage` nodes, but the profile extractor emits no `Profile -> VisualforcePage` grant edge — so no guest-exposed page can ever become a finding here. A Visualforce page RUNS its controller Apex, so this is a real guest-reachable code surface. An empty `findings` list is therefore NEVER proof that a site exposes nothing: read the `<pageAccesses>` blocks in the profile XML yourself before treating a zero as a clearance. See `uncheckedGuestSurfaces`.';
 
 /**
  * The classifier caveat, emitted on EVERY response (in `disclosures` and in
@@ -246,6 +305,98 @@ export interface ExposureFinding {
   readonly piiCategory?: string;
   readonly fieldReadable?: boolean;
   readonly fieldEditable?: boolean;
+  /**
+   * apex-enabled: the facts THIS VAULT ALREADY HOLDS about the granted class,
+   * and which of them could not be read. See {@link GuestApexAnalysis}.
+   */
+  readonly apex?: GuestApexAnalysis;
+}
+
+/**
+ * What the vault knows about one guest-invocable Apex class — the join this
+ * report used to skip.
+ *
+ * GUEST-EXPOSURE-RANKS-EVERY-GUEST-CLASS-FLAT. Measured on a real org: a live
+ * self-registration community produced 19 `apex-enabled` findings, EVERY one
+ * severity `low`, EVERY one carrying the identical sentence "review it enforces
+ * CRUD/FLS (guest context runs without a user)". That sentence is an open
+ * QUESTION, and the vault had already answered it — on the very node each
+ * finding cites. Two of the 19 were `without sharing` `@AuraEnabled`
+ * controllers whose own `qualityIssues[]` carried `missing-fls-check` at
+ * severity HIGH with line numbers; a third declared no sharing keyword at all
+ * and carried twelve `high` plus one `critical`. All three ranked identically
+ * to the stock login and change-password boilerplate beside them, on a report
+ * whose entire value is ranking. A host reading 19 uniform `low` rows with
+ * identical text says "standard Communities boilerplate" and drops the axis.
+ *
+ * The fix is a JOIN, not a new subsystem: every field below is already on the
+ * `ApexClass` node. The honesty half is that both ways of not knowing are
+ * TYPED rather than collapsed into the rating:
+ *   - `nodeResolved: false` — the granted class is not in this vault at all, so
+ *     nothing about it was read and the finding stays UNRATED at `low`;
+ *   - `qualityScanned: false` — the class IS modeled but carries no
+ *     `qualityIssues` PROPERTY, so the code-quality recognizers never ran over
+ *     its source. Decided with the shared `familyWasExtracted` predicate on the
+ *     property's PRESENCE, never on an empty array: NOT SCANNED is not CLEAN.
+ */
+export interface GuestApexAnalysis {
+  /** Whether the granted `ApexClass` node exists in this vault at all. */
+  readonly nodeResolved: boolean;
+  /**
+   * Whether the code-quality recognizers ever RAN over this class's source —
+   * decided by whether the node carries the `qualityIssues` property, never by
+   * whether that array is empty.
+   */
+  readonly qualityScanned: boolean;
+  /** The declared sharing keyword, `null` when the class declares none. */
+  readonly sharingModel: string | null;
+  /**
+   * Whether a guest-invoked entry point on this class runs OUTSIDE record
+   * sharing (`without sharing`, or no keyword at all). `null` when the vault
+   * never recorded a sharing model for this class, so it was not ranked on.
+   */
+  readonly sharingBypass: boolean | null;
+  /**
+   * Whether the class exposes a remotely-invocable entry point
+   * (`@AuraEnabled` / `@RestResource` / `@InvocableMethod`). `null` when none
+   * of those markers was extracted onto this node.
+   */
+  readonly remotelyInvocable: boolean | null;
+  /** `true` for an `@isTest` class — not invocable at runtime, so capped at `low`. */
+  readonly isTest: boolean | null;
+  readonly status: string | null;
+  /**
+   * Per-severity counts from the class's own `qualityIssues[]`. ABSENT exactly
+   * when `qualityScanned` is false — the absence is guarded by a typed boolean,
+   * never left for a consumer to infer from a zero.
+   */
+  readonly qualityIssueCounts?: Readonly<Record<IssueSeverity, number>>;
+  /** Guest-relevant recognizer rules that fired, deduped and sorted. */
+  readonly securityRules?: readonly string[];
+}
+
+/**
+ * A guest-reachable surface this report did NOT enumerate, with the evidence
+ * that says whether it exists — the TYPED half of the honesty channel, so a
+ * machine consumer reading `findings: []` cannot skip the gap the way it could
+ * skip a sentence in `disclosures`.
+ *
+ * `kind` splits the two cases the way the rest of the product splits them:
+ *   - `extractor-blind` — the family IS in the vault but no grant edge is
+ *     emitted for it, so this report can never see a grant. `modeledNodeCount`
+ *     is the evidence that the family is there to be read by hand.
+ *   - `not-enumerated` — grant edges to that family DO exist on the scoped
+ *     guest profiles, and this build does not rank them.
+ */
+export interface UncheckedGuestSurface {
+  /** The component family, e.g. `VisualforcePage`. */
+  readonly surface: string;
+  readonly kind: 'extractor-blind' | 'not-enumerated';
+  /** Nodes of that family this vault holds (`0` = the family was not retrieved). */
+  readonly modeledNodeCount: number;
+  /** `grantedBy` edges to that family seen on the scoped guest profiles. */
+  readonly guestGrantEdgeCount: number;
+  readonly detail: string;
 }
 
 /** Per-community metadata + roll-up counts (COMPLETE list; findings paginate separately). */
@@ -268,6 +419,13 @@ export interface CommunitySummary {
   readonly guestProfileConfidence: 'heuristic';
   /** Whether that guest profile node exists in the vault (fail-closed when false). */
   readonly guestProfileResolved: boolean;
+  /**
+   * The retrieved `.profile-meta.xml` this vault ships for that guest profile,
+   * or `null` when the profile did not resolve. Named because the
+   * `<pageAccesses>` grants this report cannot enumerate live in that file —
+   * a disclosure that says "go and look" has to say WHERE.
+   */
+  readonly guestProfileSourcePath: string | null;
   /** Count of this community's findings (across all severities). */
   readonly findingCount: number;
   readonly criticalCount: number;
@@ -330,6 +488,15 @@ export interface GuestExposureReportOutput {
   readonly truncated: boolean;
   /** True when a Profile/SharingRule scan hit the per-type node cap. */
   readonly scanTruncated: boolean;
+  /**
+   * Guest-reachable surfaces this report did NOT enumerate — see
+   * {@link UncheckedGuestSurface}. ALWAYS present and never empty: the
+   * Visualforce-page grant plane is unmodeled on every vault, so every response
+   * this tool produces has at least one. Read it before reading `findings: []`
+   * as "nothing is exposed"; `trust.completeness.status` is downgraded off
+   * `complete` for the same reason.
+   */
+  readonly uncheckedGuestSurfaces: readonly UncheckedGuestSurface[];
   /**
    * Guest sharing rules that attach to NO modeled community — see
    * {@link OrphanGuestRule}. Present ONLY when at least one rule was
@@ -515,6 +682,194 @@ const orphanListingSentence = (page: OrphanRulePage): string => {
   }.`;
 };
 
+/**
+ * The class's own quality findings, narrowed for TYPE only. Whether the scan
+ * RAN is decided separately by `familyWasExtracted` on the property's presence
+ * — this function is never the absence decision, so an empty return here always
+ * means "scanned and clean".
+ */
+const qualityIssuesOf = (
+  props: Readonly<Record<string, unknown>>,
+): readonly QualityIssue[] => {
+  const raw = props[QUALITY_ISSUES_PROPERTY];
+  return Array.isArray(raw) ? (raw as readonly QualityIssue[]) : [];
+};
+
+/** The worst severity present in a quality-issue list, or `null` when empty. */
+const worstIssueSeverity = (
+  issues: readonly QualityIssue[],
+): IssueSeverity | null => {
+  for (const level of ISSUE_SEVERITY_ORDER) {
+    if (issues.some((i) => i.severity === level)) return level;
+  }
+  return null;
+};
+
+/**
+ * OR of the remote-invocation markers, `null` when the vault recorded NONE of
+ * them on this node — an old vault's silence must not read as "no remote entry
+ * point", which is exactly the collapse this release is fixing.
+ */
+const remoteInvocabilityOf = (
+  props: Readonly<Record<string, unknown>>,
+): boolean | null => {
+  const markers = ['hasAuraEnabledMethod', 'isRestResource', 'hasInvocableMethod'].map(
+    (k) => boolProp(props, k),
+  );
+  if (markers.every((m) => m === null)) return null;
+  return markers.some((m) => m === true);
+};
+
+/** Per-severity census of a class's quality issues (zeros included). */
+const countIssueSeverities = (
+  issues: readonly QualityIssue[],
+): Record<IssueSeverity, number> => {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const issue of issues) {
+    if (issue.severity in counts) counts[issue.severity as IssueSeverity] += 1;
+  }
+  return counts;
+};
+
+/** Human phrase for a count census, e.g. `1 critical, 3 high`. */
+const describeIssueCounts = (counts: Record<IssueSeverity, number>): string => {
+  const parts = ISSUE_SEVERITY_ORDER.filter((k) => counts[k] > 0).map(
+    (k) => `${counts[k]} ${k}`,
+  );
+  return parts.length === 0 ? 'no quality issues' : parts.join(', ');
+};
+
+/**
+ * Rank ONE guest-invocable Apex class on the facts the vault already holds, and
+ * say plainly which of those facts could not be read. See
+ * {@link GuestApexAnalysis} for the defect this closes.
+ *
+ * The ladder, in one expression: an `@isTest` class is capped at `low` because
+ * it cannot be invoked at runtime; otherwise the class's own worst recognizer
+ * severity leads, a sharing bypass on a remotely-invocable class is `high` on
+ * its own (the canonical guest leak shape), and a bare sharing bypass or a
+ * `medium` recognizer hit is `medium`. A class that was never read is UNRATED
+ * at `low` with the reason in the detail — never rated safe.
+ */
+const analyseGuestApex = (
+  apexId: string,
+  apexName: string,
+  cls: Node | null,
+): { readonly analysis: GuestApexAnalysis; readonly severity: ExposureSeverity; readonly detail: string } => {
+  const lead = `guest profile has class access to Apex ${apexName} (${apexId})`;
+  if (cls === null) {
+    return {
+      analysis: {
+        nodeResolved: false,
+        qualityScanned: false,
+        sharingModel: null,
+        sharingBypass: null,
+        remotelyInvocable: null,
+        isTest: null,
+        status: null,
+      },
+      severity: 'low',
+      detail: `${lead} — that ApexClass is NOT IN THIS VAULT, so its sharing model and code-quality scan were never read. This finding is UNRATED (held at \`low\`): it means "not checked", NOT "reviewed and safe". Include ApexClass in the next \`/sfi-refresh\` and re-run.`,
+    };
+  }
+  const props = cls.properties;
+  const qualityScanned = familyWasExtracted(props, QUALITY_ISSUES_PROPERTY);
+  const issues = qualityIssuesOf(props);
+  const counts = countIssueSeverities(issues);
+  const worst = qualityScanned ? worstIssueSeverity(issues) : null;
+  const sharingKnown = familyWasExtracted(props, 'sharingModel');
+  const sharingModel = stringProp(props, 'sharingModel');
+  const sharingBypass = sharingKnown
+    ? sharingModel === null || !SHARING_ENFORCED_MODELS.has(sharingModel)
+    : null;
+  const remotelyInvocable = remoteInvocabilityOf(props);
+  const isTest = boolProp(props, 'isTest');
+  const securityRules = [
+    ...new Set(issues.filter((i) => GUEST_SECURITY_RULES.has(i.rule)).map((i) => i.rule)),
+  ].sort();
+  const severity: ExposureSeverity =
+    isTest === true
+      ? 'low'
+      : worst === 'critical'
+        ? 'critical'
+        : worst === 'high'
+          ? 'high'
+          : sharingBypass === true && remotelyInvocable === true
+            ? 'high'
+            : sharingBypass === true || worst === 'medium'
+              ? 'medium'
+              : 'low';
+  const sharingPhrase =
+    sharingBypass === null
+      ? 'its sharing model was never extracted onto this node, so sharing was NOT ranked on'
+      : sharingModel === null
+        ? 'it declares NO sharing keyword, so a guest entry point runs outside record sharing'
+        : `it is declared \`${sharingModel}\``;
+  const invocablePhrase =
+    remotelyInvocable === null
+      ? 'no remote-entry-point markers were extracted onto this node'
+      : remotelyInvocable
+        ? 'it exposes a remotely-invocable entry point (@AuraEnabled / @RestResource / @InvocableMethod)'
+        : 'no remotely-invocable entry point is declared on it';
+  const scanPhrase = qualityScanned
+    ? `the vault's own code-quality scan of this class carries ${describeIssueCounts(counts)}${
+        securityRules.length > 0 ? ` (${securityRules.join(', ')})` : ''
+      }`
+    : 'this class carries NO `qualityIssues` property, so the code-quality recognizers NEVER RAN over its source — NOT SCANNED, which is not the same as clean';
+  const testPhrase =
+    isTest === true
+      ? ' It declares @isTest, so it is not invocable at runtime by a guest — capped at `low` regardless of what the scan found.'
+      : '';
+  return {
+    analysis: {
+      nodeResolved: true,
+      qualityScanned,
+      sharingModel,
+      sharingBypass,
+      remotelyInvocable,
+      isTest,
+      status: stringProp(props, 'status'),
+      ...(qualityScanned ? { qualityIssueCounts: counts, securityRules } : {}),
+    },
+    severity,
+    detail: `${lead} — ${sharingPhrase}, ${invocablePhrase}; ${scanPhrase}.${testPhrase}`,
+  };
+};
+
+/**
+ * The `uncheckedGuestSurfaces` rows for one response. The Visualforce row is
+ * UNCONDITIONAL — the grant plane is unmodeled on every vault — so this list is
+ * never empty and `trust.completeness` can never be `complete`.
+ *
+ * `guestGrantEdgeCount` is measured, not assumed: if a future extraction starts
+ * emitting `Profile -> VisualforcePage` grants, the row flips to
+ * `not-enumerated` and says the grants exist while this build does not rank
+ * them, rather than continuing to claim the plane is invisible.
+ */
+const buildUncheckedGuestSurfaces = (opts: {
+  readonly modeledPageCount: number;
+  readonly pageCountIsFloor: boolean;
+  readonly guestPageGrantEdges: number;
+}): readonly UncheckedGuestSurface[] => {
+  const countPhrase = `${opts.pageCountIsFloor ? 'At least ' : ''}${opts.modeledPageCount}`;
+  const evidence =
+    opts.modeledPageCount === 0
+      ? 'This vault holds NO `VisualforcePage` node either, so the pages themselves were not retrieved.'
+      : `${countPhrase} \`VisualforcePage\` node(s) ARE modeled in this vault, so the pages exist — only the grant edge is missing.`;
+  return [
+    {
+      surface: 'VisualforcePage',
+      kind: opts.guestPageGrantEdges > 0 ? 'not-enumerated' : 'extractor-blind',
+      modeledNodeCount: opts.modeledPageCount,
+      guestGrantEdgeCount: opts.guestPageGrantEdges,
+      detail:
+        opts.guestPageGrantEdges > 0
+          ? `${opts.guestPageGrantEdges} \`Profile -> VisualforcePage\` grant edge(s) were seen on the scoped guest profile(s) and this build does NOT rank them as findings. ${evidence} Read them directly, or from the \`<pageAccesses>\` blocks in the profile XML at \`guestProfileSourcePath\`.`
+          : `The profile extractor emits no \`Profile -> VisualforcePage\` grant edge (it emits object, field, Apex-class, flow and custom-permission grants and stops there), so a guest-exposed Visualforce page can NEVER become a finding here. ${evidence} The \`<pageAccesses>\` blocks ARE present in the retrieved profile XML at \`guestProfileSourcePath\` — open it to see which pages a guest can load. A Visualforce page RUNS its controller Apex, so this is a real guest-reachable code surface.`,
+    },
+  ];
+};
+
 /** The guest profile id a CustomSite implies via the naming convention. */
 const guestProfileIdForSite = (site: Node): string => {
   const declared = stringProp(site.properties, 'guestProfileName');
@@ -674,6 +1029,22 @@ export const guestExposureReportHandler = async (
   const allSites = scanResult.value.nodes.filter((n) => n.type === 'CustomSite');
   const allNetworks = scanResult.value.nodes.filter((n) => n.type === 'Network');
 
+  // The Visualforce-page corpus, scanned SEPARATELY from the three corpora
+  // above so a cap on it can never be mistaken for a cap on the SharingRule
+  // walk — the two feed different disclosures and collapsing them would make
+  // "some guest sharing-rule findings may be missing" fire for a reason that
+  // has nothing to do with sharing rules. Counted, not enumerated: the count is
+  // the evidence that the pages EXIST while the grant edge does not, which is
+  // what turns `uncheckedGuestSurfaces` from an assertion into a measurement.
+  const pageScan = await scanAllNodesOfTypes(ctx.graph, ['VisualforcePage']);
+  if (!pageScan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${pageScan.error.message}` });
+  }
+  const modeledPageCount = pageScan.value.nodes.length;
+  const pageCountIsFloor = pageScan.value.scanIncomplete;
+  /** `Profile -> VisualforcePage` grant edges seen on the scoped guest profiles. */
+  let guestPageGrantEdges = 0;
+
   const vaultState = {
     sourceTreeHash: ctx.manifest.sourceTreeHash,
     refreshedAt: ctx.manifest.refreshedAt,
@@ -756,8 +1127,14 @@ export const guestExposureReportHandler = async (
       orphanRowsFor(allGuestRules),
       input.orphanOffset ?? 0,
     );
+    const failClosedSurfaces = buildUncheckedGuestSurfaces({
+      modeledPageCount,
+      pageCountIsFloor,
+      guestPageGrantEdges: 0,
+    });
     const failClosedDisclosures = [
       'No Experience Cloud surface in the vault — no Network or CustomSite node is modeled. The org may have no communities/sites, OR the vault predates the Experience Cloud extraction (R6-17). Re-run `/sfi-refresh` to pull Network / CustomSite / ExperienceBundle before treating this as "no guest exposure".',
+      VISUALFORCE_GAP_LIMITATION,
     ];
     if (orphanRulePage.totalCount > 0) {
       failClosedDisclosures.push(
@@ -788,6 +1165,7 @@ export const guestExposureReportHandler = async (
         hasMore: false,
         truncated: false,
         scanTruncated,
+        uncheckedGuestSurfaces: failClosedSurfaces,
         ...(orphanRulePage.totalCount > 0
           ? {
               orphanGuestRules: orphanRulePage.rows,
@@ -798,10 +1176,15 @@ export const guestExposureReportHandler = async (
         disclosures: failClosedDisclosures,
         boundaryNote:
           'Fail-closed: absence of a modeled Experience Cloud surface is reported as "not checked", never as "no exposure".',
-        trust: offlineTrust(ctx, {
-          status: coverage.status === 'complete' ? 'unknown' : coverage.status,
-          missingCoverage: ['Network', 'CustomSite', 'ExperienceBundle'],
-        }),
+        trust: offlineTrust(
+          ctx,
+          {
+            status: coverage.status === 'complete' ? 'unknown' : coverage.status,
+            missingCoverage: ['Network', 'CustomSite', 'ExperienceBundle'],
+          },
+          undefined,
+          [VISUALFORCE_GAP_LIMITATION],
+        ),
       },
       vaultState,
     });
@@ -900,7 +1283,8 @@ export const guestExposureReportHandler = async (
     if (!profileResult.ok) {
       return err({ kind: 'internal', message: `graph query failed: ${profileResult.error.message}` });
     }
-    const guestProfileResolved = profileResult.value !== null;
+    const guestProfileNode = profileResult.value;
+    const guestProfileResolved = guestProfileNode !== null;
     if (guestProfileResolved) guestProfilesResolved += 1;
 
     const experienceBundleId =
@@ -950,6 +1334,11 @@ export const guestExposureReportHandler = async (
           }
         } else if (edge.toId.startsWith(APEX_PREFIX)) {
           apexGrants.push(edge.toId.slice(APEX_PREFIX.length));
+        } else if (edge.toId.startsWith(VISUALFORCE_PAGE_PREFIX)) {
+          // Counted, never dropped: the plane this build does not rank is
+          // MEASURED here so `uncheckedGuestSurfaces` reports what it saw
+          // rather than asserting a permanent blindness it never re-checked.
+          guestPageGrantEdges += 1;
         }
       }
 
@@ -1031,18 +1420,31 @@ export const guestExposureReportHandler = async (
         });
       }
 
-      // Apex classes the guest profile can invoke.
+      // Apex classes the guest profile can invoke, RANKED on the facts the
+      // vault already holds about each one (sharing model, remote entry point,
+      // the class's own `qualityIssues[]`) instead of a flat `low` and an open
+      // question. See `GuestApexAnalysis` for the real-org defect this closes.
       for (const apex of apexGrants) {
+        const apexId = `${APEX_PREFIX}${apex}`;
+        const apexNodeResult = await getNodeById(ctx.graph, apexId as ComponentId);
+        if (!apexNodeResult.ok) {
+          return err({
+            kind: 'internal',
+            message: `graph query failed: ${apexNodeResult.error.message}`,
+          });
+        }
+        const ranked = analyseGuestApex(apexId, apex, apexNodeResult.value);
         communityFindings.push({
           communityId: site.id,
           guestProfileId,
           kind: 'apex-enabled',
-          severity: 'low',
-          nodeId: `${APEX_PREFIX}${apex}`,
+          severity: ranked.severity,
+          nodeId: apexId,
           label: apex,
-          detail: `guest profile has class access to Apex ${apex} — a guest-invocable class; review it enforces CRUD/FLS (guest context runs without a user)`,
+          detail: ranked.detail,
           grantConfidence: 'declared',
           guestLinkageConfidence: 'heuristic',
+          apex: ranked.analysis,
         });
       }
     }
@@ -1093,6 +1495,7 @@ export const guestExposureReportHandler = async (
       guestProfileId,
       guestProfileConfidence: 'heuristic',
       guestProfileResolved,
+      guestProfileSourcePath: guestProfileNode?.sourcePath ?? null,
       findingCount: scopedFindings.length,
       criticalCount,
     });
@@ -1191,7 +1594,7 @@ export const guestExposureReportHandler = async (
   const disclosures: string[] = [
     'The guest-profile identity is HEURISTIC: it is inferred from Salesforce\'s "{Site Label} Profile" naming convention, not a declared metadata pointer. Every finding\'s underlying CRUD/FLS/apex grant is `declared`, but that the profile IS the site guest user is heuristic — so the report confidence is `heuristic`. Confirm the guest profile in Setup.',
     'Object CRUD + FLS are the DECLARED static grant. Actual record visibility to a guest also depends on OWD + guest/criteria sharing rules (record level) — guest sharing rules are surfaced as their own findings, but whether a specific record matches is not modeled here.',
-    'Visualforce-page guest access (`<pageAccesses>`) is NOT in the offline metadata model — only Apex-class access is enumerated. A guest-exposed VF page will not appear as a finding.',
+    VISUALFORCE_GAP_LIMITATION,
     PII_RECOGNIZER_LIMITATION,
   ];
   if (objectScope !== null) {
@@ -1240,6 +1643,24 @@ export const guestExposureReportHandler = async (
     'SharingRule',
   ]);
 
+  const uncheckedGuestSurfaces = buildUncheckedGuestSurfaces({
+    modeledPageCount,
+    pageCountIsFloor,
+    guestPageGrantEdges,
+  });
+  /**
+   * NEVER `complete`. This report enumerates four guest planes and the
+   * Visualforce-page grant plane is not one of them, on any vault — so the
+   * strongest honest completeness is `partial`, whatever the retrieve coverage
+   * says. A real org's ACTIVE public site returned `findings: []` beside
+   * `completeness: 'complete'` while its ONLY guest surface was ten enabled
+   * `<pageAccesses>` entries; the machine-readable channel certified the
+   * opposite of the prose channel in the same envelope.
+   */
+  const completenessStatus: 'partial' | 'unknown' =
+    coverage.status === 'unknown' ? 'unknown' : 'partial';
+  const uncheckedSurfaceNames = uncheckedGuestSurfaces.map((u) => u.surface).join(', ');
+
   return ok({
     data: {
       communities,
@@ -1259,6 +1680,7 @@ export const guestExposureReportHandler = async (
       hasMore: paged.hasMore,
       truncated,
       scanTruncated,
+      uncheckedGuestSurfaces,
       ...(orphanRulePage.totalCount > 0
         ? {
             orphanGuestRules: orphanRulePage.rows,
@@ -1267,7 +1689,7 @@ export const guestExposureReportHandler = async (
         : {}),
       confidence: 'heuristic',
       disclosures,
-      boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s)${objectScope !== null ? `, scoped to object '${objectScope}'` : ''}; ${bySeverity.critical} critical (public write on a PII object), ${bySeverity.high} high. Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. \`appliedScope\` echoes the scope actually applied. Confidence is heuristic — the guest-profile linkage is a naming convention.`,
+      boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s)${objectScope !== null ? `, scoped to object '${objectScope}'` : ''}; ${bySeverity.critical} critical, ${bySeverity.high} high. NOT A COMPLETE PICTURE OF GUEST REACH: this report enumerates object CRUD, PII field FLS, Apex-class access and guest sharing rules, and does NOT enumerate ${uncheckedSurfaceNames} guest access — a Visualforce page runs its controller Apex, and its \`<pageAccesses>\` grants live in the profile XML at each community's \`guestProfileSourcePath\`, unreachable from this graph. So \`findings: []\` here is never a clearance; see \`uncheckedGuestSurfaces\` and \`trust.limitations\`. Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. \`appliedScope\` echoes the scope actually applied. Confidence is heuristic — the guest-profile linkage is a naming convention.`,
       // The recognizer caveat rides on EVERY response, findings or none — it
       // describes what the classifier cannot see, which does not become untrue
       // when a scope happens to surface nothing. An empty `limitations` next to
@@ -1275,13 +1697,13 @@ export const guestExposureReportHandler = async (
       trust: offlineTrust(
         ctx,
         {
-          status: coverage.status,
+          status: completenessStatus,
           ...(coverage.missingCoverage.length > 0
             ? { missingCoverage: coverage.missingCoverage }
             : {}),
         },
         undefined,
-        [PII_RECOGNIZER_LIMITATION],
+        [VISUALFORCE_GAP_LIMITATION, PII_RECOGNIZER_LIMITATION],
       ),
       ...(paged.nextCursor !== null
         ? { nextCursor: paged.nextCursor, pageInfo: paged.pageInfo }

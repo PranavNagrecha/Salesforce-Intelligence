@@ -221,6 +221,25 @@ ${Array.from(
 }
 `;
 
+/**
+ * A class whose UNNARROWED answer cannot fit one response and whose fattest
+ * section is a SHEDDABLE one (`dataAccess`), so the budget drops whole sections
+ * rather than only trimming the method list. This is the shape a real large
+ * class has, and the shape that makes the include-narrowing recovery advice
+ * checkable.
+ */
+const SHED_SERVICE_SRC = `public class ShedService {
+${Array.from(
+  { length: 200 },
+  (_, i) =>
+    `    public static void loadTheRecordsForBatchNumber${String(i)}(String argumentOne${String(i)}) {
+        List<Widget__c> rowsForBatchNumber${String(i)} = [SELECT Id, Name FROM Widget__c WHERE Name = :argumentOne${String(i)}];
+        insert rowsForBatchNumber${String(i)};
+    }`,
+).join('\n')}
+}
+`;
+
 const seed: ExtractionResult = {
   nodes: [
     makeNode({
@@ -283,6 +302,12 @@ const seed: ExtractionResult = {
       id: 'ApexClass:HugeService',
       apiName: 'HugeService',
       sourcePath: 'source/classes/HugeService.cls',
+      properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
+    }),
+    makeNode({
+      id: 'ApexClass:ShedService',
+      apiName: 'ShedService',
+      sourcePath: 'source/classes/ShedService.cls',
       properties: { ...CLASSIFIERS, status: 'Active', isTest: false },
     }),
     // Unparseable + externally annotated, and the node carries NO modifiers /
@@ -499,6 +524,7 @@ beforeAll(async () => {
   write('source/classes/ReceiverService.cls', RECEIVER_SERVICE_SRC);
   write('source/triggers/BrokenTrigger.trigger', BROKEN_TRIGGER_SRC);
   write('source/classes/HugeService.cls', HUGE_SERVICE_SRC);
+  write('source/classes/ShedService.cls', SHED_SERVICE_SRC);
   write('source/triggers/WidgetTrigger.trigger', WIDGET_TRIGGER_SRC);
   write('source/triggers/CleanTrigger.trigger', CLEAN_TRIGGER_SRC);
 
@@ -793,6 +819,118 @@ describe('apexStructureHandler — the honesty spine', () => {
     expect(d.structure!.methods.truncated).toBe(true);
     expect(d.narrowing?.truncated).toBe(true);
     expect(d.narrowing?.recoverWith).toContain('method:');
+  });
+
+  it('does not promise a "full body" the unnarrowed call demonstrably cannot deliver', async () => {
+    // A class whose UNNARROWED response does not fit one budget: the tool sheds
+    // whole sections and says so.
+    const unnarrowed = await run({ classRef: 'ShedService' });
+    const shed = unnarrowed.narrowing?.omittedSections ?? [];
+    expect(shed.length).toBeGreaterThan(0);
+
+    // Narrowing with `include` fits, so the include block's own `recoverWith`
+    // survives (fitToBudget only overwrites it when the budget also sheds).
+    const narrowed = await run({ classRef: 'ShedService', include: ['review'] });
+    expect(narrowed.narrowing?.applied).toBe('include');
+    const advice = narrowed.narrowing?.recoverWith ?? '';
+
+    // FAIL-BEFORE: the advice was the unconditional
+    // "call ... again without `include` for the full body". Following it
+    // returns a body that STILL omits `shed` — a printed remedy that cannot be
+    // followed. The remedy must name a call that WORKS (an `include` list for
+    // the omitted sections) and must disclose that the unnarrowed call sheds.
+    for (const section of narrowed.narrowing?.omittedSections ?? []) {
+      expect(advice).toContain(`'${section}'`);
+    }
+    expect(advice).toContain('include: [');
+    expect(advice).toMatch(/sheds/);
+  });
+
+  // DERIVED from the handler's own input type, never re-typed by hand.
+  type Section = NonNullable<
+    Parameters<typeof apexStructureHandler>[1]['include']
+  >[number];
+
+  it('under `method`, never names a section `include` cannot bring back', async () => {
+    // FAIL-BEFORE (self-inflicted by the first pass of this very fix): the
+    // `method+include` branch built its printed include list from EVERY omitted
+    // section, including `members` / `innerTypes` — which `applyMethodNarrowing`
+    // blanks BEFORE `include` is ever applied. Following the advice verbatim
+    // returned them blank and STILL listed them as omitted: the response
+    // contradicted its own advice inside one round trip, and the next advice
+    // pointed back at the call you had just made. A ping-pong.
+    const first = await run({
+      classRef: 'WidgetService',
+      method: 'lookup',
+      include: ['methods'],
+    });
+    expect(first.narrowing?.applied).toBe('method+include');
+    const advice = first.narrowing?.recoverWith ?? '';
+
+    // Read the advice the way a host LLM would: whatever it puts in the
+    // include list is what we call next. Nothing is hard-coded.
+    const named = [...(/include: \[([^\]]*)\]/.exec(advice)?.[1] ?? '').matchAll(/'([^']+)'/g)].map(
+      (m) => m[1] as Section,
+    );
+    expect(named.length).toBeGreaterThan(0);
+
+    // FOLLOW IT VERBATIM.
+    const followUp = await run({
+      classRef: 'WidgetService',
+      method: 'lookup',
+      include: named,
+    });
+    // The control: what `method` alone returns for each section. "Recovered"
+    // means IDENTICAL to that, not merely present-and-empty.
+    const control = await run({ classRef: 'WidgetService', method: 'lookup' });
+    const sectionOf = (
+      d: ApexStructureOutput,
+      section: Section,
+    ): unknown =>
+      ({
+        methods: d.structure?.methods,
+        members: d.structure?.members,
+        innerTypes: d.structure?.innerTypes,
+        dataAccess: d.structure?.dataAccess,
+        entryPoints: d.entryPoints,
+        touches: d.touches,
+        review: d.review.findings,
+        tests: d.tests.coveringTestClasses,
+      })[section];
+
+    for (const section of named) {
+      // (a) the follow-up must not still call it omitted...
+      expect(followUp.narrowing?.omittedSections ?? []).not.toContain(section);
+      // (b) ...and it must actually carry the content.
+      expect(sectionOf(followUp, section)).toEqual(sectionOf(control, section));
+    }
+    // The sections `method` itself dropped are reachable only by dropping
+    // `method`, and the advice says exactly that instead of promising an
+    // `include` for them.
+    for (const blanked of control.narrowing?.omittedSections ?? []) {
+      expect(named).not.toContain(blanked);
+    }
+    expect(advice).toContain('without `method` for the whole class');
+  });
+
+  it('omits `recoverWith` entirely when the `include` omitted nothing', async () => {
+    // `recoverWith` advertises a CALL. When there is nothing to recover there
+    // is no call to name, and prose in a call-shaped field is its own lie.
+    const d = await run({
+      classRef: 'WidgetService',
+      include: [
+        'methods',
+        'members',
+        'innerTypes',
+        'dataAccess',
+        'entryPoints',
+        'touches',
+        'review',
+        'tests',
+      ],
+    });
+    expect(d.narrowing?.omittedSections).toEqual([]);
+    expect(d.narrowing?.recoverWith).toBeUndefined();
   });
 
   it('holds at SFI_MAX_RESPONSE_BYTES=20000 — the budget is DERIVED, not a hard-coded constant', async () => {

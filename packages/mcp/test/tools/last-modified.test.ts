@@ -90,6 +90,18 @@ const seed: ExtractionResult = {
       apiName: 'Unenriched',
     }),
     makeNode({
+      // The shape a REAL un-enriched vault produces for every component
+      // whose own metadata file ships an `<apiVersion>` element: the
+      // version is known, the two Tooling-API-only axes are not. This
+      // was the certified-unchecked-zero case — `enriched: true` plus
+      // "Freshness fields populated" over two nulls nothing had asked
+      // about.
+      id: 'ApexClass:Class_C',
+      type: 'ApexClass',
+      apiName: 'Class_C',
+      apiVersion: 63.0,
+    }),
+    makeNode({
       id: 'Flow:PartiallyEnriched',
       type: 'Flow',
       apiName: 'PartiallyEnriched',
@@ -329,5 +341,184 @@ describe('lastModifiedHandler — disclosure invariants', () => {
     expect(enriched.value.data.disclosure).not.toBe(
       unenriched.value.data.disclosure,
     );
+  });
+});
+
+
+describe('R6 adoption — the TOOL reads its freshness through the shared module', () => {
+  // The previous revision of this file asserted only on freshness-fields.ts
+  // in isolation, so every case stayed green with last-modified.ts's private
+  // copies restored. A test that passes with the fix reverted measures
+  // nothing. These sentinels are observable ONLY through the handler: they
+  // are values no fixture node carries and no private copy could invent.
+  const SENTINEL_DATE = '1999-12-31T23:59:59.000Z';
+  const SENTINEL_BY = { id: 'SENTINEL', name: 'reached-only-via-shared-module' };
+  const SENTINEL_API_VERSION = 1.1;
+
+  afterEach(() => {
+    vi.doUnmock('../../src/tools/freshness-fields.js');
+    vi.resetModules();
+  });
+
+  it('routes every freshness axis through freshness-fields.ts, so re-privatising the extractors is observable', async () => {
+    vi.resetModules();
+    vi.doMock('../../src/tools/freshness-fields.js', () => ({
+      extractLastModifiedDate: () => SENTINEL_DATE,
+      extractLastModifiedBy: () => SENTINEL_BY,
+      extractApiVersion: () => SENTINEL_API_VERSION,
+    }));
+    const { lastModifiedHandler: handlerUnderTest } = await import(
+      '../../src/tools/last-modified.js'
+    );
+    // The UNENRICHED node: a handler carrying its own private copy of the
+    // precedence logic resolves every axis to null here, whatever the
+    // shared module says. Only a handler that CALLS the shared module can
+    // return the sentinels.
+    const result = await handlerUnderTest(ctx, {
+      componentId: 'ApexClass:Unenriched',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.lastModifiedDate).toBe(SENTINEL_DATE);
+    expect(result.value.data.lastModifiedBy).toEqual(SENTINEL_BY);
+    expect(result.value.data.apiVersion).toBe(SENTINEL_API_VERSION);
+    // And the derived honesty fields follow the shared module too.
+    expect(result.value.data.enrichmentState).toBe('complete');
+    expect(result.value.data.missingAxes).toEqual([]);
+  });
+
+  it('passes the node\'s legacy field AND its properties bag to the shared module (both precedence inputs)', async () => {
+    vi.resetModules();
+    const dateCalls: unknown[][] = [];
+    vi.doMock('../../src/tools/freshness-fields.js', () => ({
+      extractLastModifiedDate: (...args: unknown[]) => {
+        dateCalls.push(args);
+        return null;
+      },
+      extractLastModifiedBy: () => null,
+      extractApiVersion: () => null,
+    }));
+    const { lastModifiedHandler: handlerUnderTest } = await import(
+      '../../src/tools/last-modified.js'
+    );
+    const result = await handlerUnderTest(ctx, {
+      componentId: 'CustomField:Account.Hybrid',
+    });
+    expect(result.ok).toBe(true);
+    expect(dateCalls).toHaveLength(1);
+    // Legacy top-level value first, properties overlay second — a handler
+    // that only forwarded one of the two could not resolve the precedence.
+    expect(dateCalls[0]?.[0]).toBe('2026-01-01T00:00:00.000Z');
+    expect(dateCalls[0]?.[1]).toMatchObject({
+      lastModifiedDate: '2026-05-12T00:00:00.000Z',
+    });
+  });
+});
+
+describe('lastModifiedHandler — a partial answer is not certified as populated', () => {
+  // Real-vault reproduction: on a vault where the Tooling API enricher has
+  // never run, every component whose metadata file ships an `<apiVersion>`
+  // resolved to `enriched: true` + the ENRICHED disclosure ("Freshness
+  // fields populated. lastModifiedDate / lastModifiedBy reflect the Tooling
+  // API at enrichment time") while both of those axes were null and nothing
+  // had asked the Tooling API. A certified unchecked zero.
+  it('an apiVersion-only node reports enrichmentState: partial and NAMES the unchecked axes', async () => {
+    const result = await lastModifiedHandler(ctx, {
+      componentId: 'ApexClass:Class_C',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { data } = result.value;
+    expect(data.apiVersion).toBe(63.0);
+    expect(data.lastModifiedDate).toBeNull();
+    expect(data.lastModifiedBy).toBeNull();
+    // The typed field a machine consumer cannot skip.
+    expect(data.enrichmentState).toBe('partial');
+    expect(data.missingAxes).toEqual(['lastModifiedDate', 'lastModifiedBy']);
+    // The prose a host reads aloud must NOT be the populated-certification.
+    expect(data.disclosure).not.toBe(LAST_MODIFIED_ENRICHED_DISCLOSURE);
+    expect(data.disclosure).toContain('PARTIAL');
+    expect(data.disclosure).toContain('UNCHECKED');
+    expect(data.disclosure).toContain('lastModifiedDate');
+    expect(data.disclosure).toContain('lastModifiedBy');
+    expect(data.disclosure).toContain('sfi refresh --with-tooling-api');
+  });
+
+  it('the partial disclosure is DERIVED from missingAxes, so prose and typed field cannot drift', async () => {
+    const result = await lastModifiedHandler(ctx, {
+      componentId: 'Flow:PartiallyEnriched',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { data } = result.value;
+    expect(data.enrichmentState).toBe('partial');
+    expect(data.missingAxes).toEqual(['lastModifiedBy', 'apiVersion']);
+    // Imported dynamically so reverting the source fix fails THIS case on
+    // its own assertion rather than breaking the whole file's module link.
+    const { lastModifiedPartialDisclosure } = await import(
+      '../../src/tools/last-modified.js'
+    );
+    expect(data.disclosure).toBe(
+      lastModifiedPartialDisclosure(['lastModifiedBy', 'apiVersion']),
+    );
+    // The axis that IS known must not be named as unchecked.
+    expect(data.disclosure).not.toContain('lastModifiedDate,');
+  });
+
+  it('a fully-populated node keeps enrichmentState: complete with an EMPTY missingAxes', async () => {
+    const result = await lastModifiedHandler(ctx, {
+      componentId: 'ApexClass:FullyEnriched',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.enrichmentState).toBe('complete');
+    expect(result.value.data.missingAxes).toEqual([]);
+    expect(result.value.data.disclosure).toBe(LAST_MODIFIED_ENRICHED_DISCLOSURE);
+  });
+
+  it('a node with nothing reports none and names ALL THREE axes — empty missingAxes never stands in for "we did not look"', async () => {
+    const result = await lastModifiedHandler(ctx, {
+      componentId: 'ApexClass:Unenriched',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { data } = result.value;
+    expect(data.enrichmentState).toBe('none');
+    expect(data.missingAxes).toEqual([
+      'lastModifiedDate',
+      'lastModifiedBy',
+      'apiVersion',
+    ]);
+    expect(data.disclosure).toBe(LAST_MODIFIED_UNENRICHED_DISCLOSURE);
+  });
+
+  it('missingAxes is empty for EVERY fixture node if and only if enrichmentState is complete', async () => {
+    const ids = [
+      'ApexClass:FullyEnriched',
+      'ApexClass:LegacyOnly',
+      'ApexClass:Unenriched',
+      'ApexClass:Class_C',
+      'Flow:PartiallyEnriched',
+      'CustomField:Account.Hybrid',
+    ];
+    for (const componentId of ids) {
+      const result = await lastModifiedHandler(ctx, { componentId });
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      const { data } = result.value;
+      expect(data.missingAxes.length === 0).toBe(
+        data.enrichmentState === 'complete',
+      );
+      // And the enumerated axes must agree with the reported values.
+      expect(data.missingAxes.includes('lastModifiedDate')).toBe(
+        data.lastModifiedDate === null,
+      );
+      expect(data.missingAxes.includes('lastModifiedBy')).toBe(
+        data.lastModifiedBy === null,
+      );
+      expect(data.missingAxes.includes('apiVersion')).toBe(
+        data.apiVersion === null,
+      );
+    }
   });
 });

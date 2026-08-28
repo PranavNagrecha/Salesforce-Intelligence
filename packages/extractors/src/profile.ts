@@ -203,6 +203,44 @@ const buildClassEdges = (
 };
 
 /**
+ * Emit one `grantedBy` edge per `<pageAccesses>` entry with `<enabled>` true —
+ * the Visualforce pages this profile may LOAD.
+ *
+ * GUEST-PAGE-ACCESS: this was the one access element the profile walk skipped,
+ * and its absence was load-bearing. `sfi.guest_exposure_report` composes guest
+ * reach out of this profile's `grantedBy` edges, so with no
+ * `Profile -> VisualforcePage` edge in the graph a page a GUEST profile enables
+ * could never become a finding — that tool shipped a permanent
+ * "the profile extractor emits no such edge" disclosure in place of an answer,
+ * while the `<pageAccesses>` blocks sat in the retrieved XML the whole time.
+ * A Visualforce page RUNS its controller Apex, so an enabled page on an
+ * internet-facing site's guest profile is a real guest-reachable CODE surface,
+ * not a cosmetic grant.
+ *
+ * Shape and guards are identical to {@link buildClassEdges}: element
+ * `<pageAccesses><apexPage>X</apexPage><enabled>true|false</enabled>`
+ * (VERIFIED against retrieved profile source), the `<enabled>` gate is
+ * mandatory (`enabled=false` grants nothing), and an empty `<apexPage>` is
+ * dropped rather than minting a `VisualforcePage:` id with no name. The target
+ * id is the flat `VisualforcePage:{apexPage}` the VisualforcePage extractor
+ * mints; a page name with no retrieved definition becomes a `targetMissing`
+ * edge the consumer discloses, never a fabricated node.
+ */
+const buildPageEdges = (
+  rootObj: Record<string, unknown>,
+  fromId: string,
+): Edge[] => {
+  const edges: Edge[] = [];
+  for (const entry of iterEntries(rootObj, 'pageAccesses')) {
+    if (!coerceBoolean(unwrapSingle(entry['enabled']))) continue;
+    const apexPage = String(unwrapSingle(entry['apexPage']) ?? '');
+    if (apexPage.length === 0) continue;
+    edges.push(grantedByEdge(fromId, `VisualforcePage:${apexPage}`, { enabled: true }));
+  }
+  return edges;
+};
+
+/**
  * Emit one `grantedBy` edge per `<flowAccesses>` entry with `<enabled>` true —
  * the flows (autolaunched / screen) this profile/permission set may RUN. The
  * `flowAccess: true` marker on the edge distinguishes a run grant from a code
@@ -468,6 +506,7 @@ interface GrantCounts {
   readonly objectGrantCount: number;
   readonly fieldGrantCount: number;
   readonly classGrantCount: number;
+  readonly pageGrantCount: number;
   readonly userPermissions: readonly string[];
   readonly layoutAssignments: readonly LayoutAssignmentEntry[];
   readonly recordTypeVisibilities: readonly RecordTypeVisibilityEntry[];
@@ -584,6 +623,7 @@ export const extractProfile = async (
   if (!fieldEdgesResult.ok) return fieldEdgesResult;
   const fieldEdges = fieldEdgesResult.value;
   const classEdges = buildClassEdges(rootObj, nodeId);
+  const pageEdges = buildPageEdges(rootObj, nodeId);
   const flowEdges = buildFlowEdges(rootObj, nodeId);
   const customPermissionEdges = buildCustomPermissionEdges(rootObj, nodeId);
   const userPermissions = collectEnabledUserPermissions(rootObj);
@@ -593,7 +633,14 @@ export const extractProfile = async (
   const tabVisibilities = collectTabVisibilities(rootObj);
   const { loginIpRanges, loginHoursDefined, loginHours } = collectLoginRestrictions(rootObj);
 
-  const edges: Edge[] = [...objectEdges, ...fieldEdges, ...classEdges, ...flowEdges, ...customPermissionEdges].sort(
+  const edges: Edge[] = [
+    ...objectEdges,
+    ...fieldEdges,
+    ...classEdges,
+    ...pageEdges,
+    ...flowEdges,
+    ...customPermissionEdges,
+  ].sort(
     (a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0),
   );
 
@@ -611,6 +658,7 @@ export const extractProfile = async (
       objectGrantCount: objectEdges.length,
       fieldGrantCount: fieldEdges.length,
       classGrantCount: classEdges.length,
+      pageGrantCount: pageEdges.length,
       userPermissions,
       layoutAssignments,
       recordTypeVisibilities,

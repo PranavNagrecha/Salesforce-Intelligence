@@ -153,7 +153,7 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { compareVersions, err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listChildren, listEdges } from '@sf-intelligence/graph';
 import {
   detectPiiClassification,
   isRegulatedPiiClassification,
@@ -179,7 +179,7 @@ import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { scanFlowConditionFieldReaders } from './flow-condition-field-readers-scan.js';
 import { scanSupplementalFlowFieldWriters } from './flow-field-writers-scan.js';
 import { hybridTrust } from './hybrid-trust.js';
-import { resolveFieldAlias } from './input-aliases.js';
+import { objectIdCaseVariants, resolveFieldAlias } from './input-aliases.js';
 import {
   computeLivePopulation,
   LIVE_POPULATION_NOT_CHECKED_DISCLOSURE,
@@ -810,6 +810,15 @@ const buildPiiCompliance = (node: Node): PiiCompliance | undefined => {
  *   });
  *   if (r.ok) console.log(r.value.data.verdict);
  */
+/**
+ * The clause every case-correction disclosure carries. ONE constant, used both
+ * to BUILD the `trust.limitations` entry and to FIND it again when rendering the
+ * checklist — the checklist renders no `trust` block, so without a way to pull
+ * the disclosure back out, a reader who typed the wrong case would see a
+ * heading naming a field id they never typed and no explanation of why.
+ */
+const CASE_CORRECTION_CLAUSE = 'it was case-corrected to';
+
 /** Severity order for the delete checklist — resolve the most severe first. */
 const VERDICT_ORDER: Record<Verdict, number> = {
   blocking: 0,
@@ -847,6 +856,15 @@ export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
   // stale-vault `review` would print with no stated cause.
   if (out.builderVersionCaveat !== undefined) {
     lines.push(`> ⚠️ **Stale vault:** ${out.builderVersionCaveat}`, '');
+  }
+  // The heading above names the CORRECTED id. A reader who typed another casing
+  // must be told that in the prose, not only in the typed `trust` block the
+  // checklist format does not render.
+  const caseCorrected = out.trust.limitations.find((l) =>
+    l.includes(CASE_CORRECTION_CLAUSE),
+  );
+  if (caseCorrected !== undefined) {
+    lines.push(`> ⚠️ **Field id case-corrected:** ${caseCorrected}`, '');
   }
   lines.push(`**Verdict: ${out.verdict.toUpperCase()}**`, '');
   const ordered = [...out.reasoning].sort(
@@ -930,6 +948,145 @@ export const buildSafeToDeleteFieldProposal = (
   });
 };
 
+/** Canonical id prefix for the CustomObject node type. */
+const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
+
+/** A field id resolved against the vault's OWN casing. */
+interface FieldIdCaseResolution {
+  /** The id to answer about — the vault's exact casing when one was found. */
+  readonly fieldId: ComponentId;
+  /** The node for {@link fieldId}, or `null` when no casing of it is modeled. */
+  readonly node: Node | null;
+  /**
+   * The id the CALLER passed, when the vault spells the same field
+   * differently; `null` when nothing was corrected. Non-null means the
+   * response MUST disclose the correction — otherwise it answers about an id
+   * the caller never named.
+   */
+  readonly resolvedFrom: string | null;
+}
+
+/**
+ * WRONG-CASE-FIELD-ID-WAS-A-CONFIDENT-MISS. Salesforce api names are
+ * case-insensitive — `obj_a__c.field_b__c`, `Obj_A__c.Field_B__c` and
+ * `OBJ_A__C.FIELD_B__C` name ONE field in SOQL, in a formula and in the Setup
+ * UI — but component ids are byte-compared, so a casing slip made a
+ * modeled, BLOCKING field answer `component-not-found` from the one tool whose
+ * entire job is to say "do not delete this". Worse, a `__C` suffix additionally
+ * missed the custom-field suffix test in the shared not-found messenger, so the
+ * refusal came back explaining that the field is an unmodelled STANDARD field —
+ * a specific, authoritative claim about a component the vault holds in full.
+ * Silence would have been bad; the explanation invited the reader to stop
+ * asking.
+ *
+ * The probe runs ONLY after the exactly-cased id has already missed, so a
+ * correctly-cased call pays nothing, and it is bounded by one object's field
+ * list rather than a whole-graph scan.
+ *
+ * Case-insensitive RESOLUTION is never case-insensitive IDENTITY: when two
+ * vault fields fold to the same name nothing here can pick between them, so the
+ * caller is REFUSED with both ids (the same rule `canonicalizeObjectScope`
+ * applies to objects). A name matching NOTHING is returned unchanged so the
+ * existing phantom-aware `component-not-found` path still owns that wording.
+ */
+const resolveFieldIdCase = async (
+  ctx: Context,
+  fieldId: ComponentId,
+): Promise<Result<FieldIdCaseResolution, McpError>> => {
+  const exact = await getNodeById(ctx.graph, fieldId);
+  if (!exact.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${exact.error.message}`,
+    });
+  }
+  if (exact.value !== null) {
+    return ok({ fieldId, node: exact.value, resolvedFrom: null });
+  }
+
+  const rest = fieldId.slice(CUSTOM_FIELD_PREFIX.length);
+  const dot = rest.indexOf('.');
+  if (dot < 1 || dot === rest.length - 1) {
+    return ok({ fieldId, node: null, resolvedFrom: null });
+  }
+  const objectApi = rest.slice(0, dot);
+  const fieldApi = rest.slice(dot + 1);
+
+  // The parent object is resolved case-insensitively too — a caller who
+  // lower-cases the field name almost always lower-cased the object with it.
+  const parentIds: string[] = [];
+  const exactParentId = `${CUSTOM_OBJECT_PREFIX}${objectApi}` as ComponentId;
+  const exactParent = await getNodeById(ctx.graph, exactParentId);
+  if (!exactParent.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${exactParent.error.message}`,
+    });
+  }
+  if (exactParent.value !== null) {
+    parentIds.push(exactParentId);
+  } else {
+    const variants = await objectIdCaseVariants(ctx.graph, objectApi);
+    if (!variants.ok) return err(variants.error);
+    parentIds.push(...variants.value);
+  }
+
+  const folded = fieldApi.toLowerCase();
+  const matches: Node[] = [];
+  for (const parentId of parentIds) {
+    const children = await listChildren(ctx.graph, parentId as ComponentId);
+    if (!children.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${children.error.message}`,
+      });
+    }
+    for (const child of children.value) {
+      if (child.type !== 'CustomField') continue;
+      if (child.id === fieldId) continue;
+      if (child.apiName.toLowerCase() !== folded) continue;
+      matches.push(child);
+    }
+  }
+
+  if (matches.length === 0) {
+    return ok({ fieldId, node: null, resolvedFrom: null });
+  }
+  if (matches.length > 1) {
+    const ids = matches.map((m) => m.id).sort();
+    return err({
+      kind: 'invalid-query',
+      message:
+        `\`${fieldId}\` matches ${ids.length} fields in this vault that differ only by CASE ` +
+        `(${ids.join(', ')}). Salesforce api names are case-insensitive, so nothing here can ` +
+        'pick between them — pass the exact `fieldId` you mean. No verdict was rendered.',
+      path: 'fieldId',
+    });
+  }
+
+  const only = matches[0] as Node;
+  return ok({
+    fieldId: only.id as ComponentId,
+    node: only,
+    resolvedFrom: fieldId,
+  });
+};
+
+/**
+ * Verbatim disclosure for a case-corrected `fieldId`. Emitted into
+ * `trust.limitations` (typed, un-skippable) on EVERY branch that renders a
+ * verdict from a corrected id, so a reader can never mistake the answer for one
+ * about the id they typed.
+ */
+const caseCorrectionDisclosure = (resolvedFrom: string, fieldId: string): string =>
+  // `resolvedFrom` is the string the CALLER TYPED, not the normalized id. On the
+  // short-form input path (`Obj__c.Field__c`) those differ, and quoting the
+  // normalized id back at a caller who never typed it reads as if the tool had
+  // been given something it was not.
+  `\`${resolvedFrom}\` is not a component id in this vault; ${CASE_CORRECTION_CLAUSE} ` +
+  `\`${fieldId}\` (Salesforce api names are case-insensitive, component ids are not). ` +
+  'Every finding below is about the corrected id — confirm it is the field you meant.';
+
 const coreSafeToDeleteFieldHandler = async (
   ctx: Context,
   rawInput: SafeToDeleteFieldInput,
@@ -964,16 +1121,23 @@ const coreSafeToDeleteFieldHandler = async (
     });
   }
 
-  const fieldId = normalizedFieldId;
+  // WRONG-CASE-FIELD-ID-WAS-A-CONFIDENT-MISS — resolve the caller's casing
+  // against the vault's own BEFORE any not-found path runs. See
+  // `resolveFieldIdCase`.
+  const caseResolved = await resolveFieldIdCase(ctx, normalizedFieldId);
+  if (!caseResolved.ok) return err(caseResolved.error);
+  const fieldId = caseResolved.value.fieldId;
+  const caseResolvedFrom = caseResolved.value.resolvedFrom;
+  const caseDisclosure =
+    caseResolvedFrom !== null
+      ? // Quote the caller's LITERAL input, not the prefix-normalized form of
+        // it — `resolveFieldIdCase` only ever sees the normalized id, so it
+        // cannot know whether the caller typed the short form.
+        [caseCorrectionDisclosure(input.fieldId, fieldId)]
+      : [];
 
-  const nodeResult = await getNodeById(ctx.graph, fieldId);
-  if (!nodeResult.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${nodeResult.error.message}`,
-    });
-  }
-  if (nodeResult.value === null) {
+  const resolvedNode = caseResolved.value.node;
+  if (resolvedNode === null) {
     // B12: a standard field (Contact.Email) or managed-package field is often
     // not modeled as its own node. If it is referenced (dependency / permission
     // edges exist), don't return a silent component-not-found — return a
@@ -1035,7 +1199,7 @@ const coreSafeToDeleteFieldHandler = async (
     });
   }
 
-  const node = nodeResult.value;
+  const node = resolvedNode;
   const objectApi =
     node.parentId?.startsWith('CustomObject:')
       ? node.parentId.slice('CustomObject:'.length)
@@ -1118,6 +1282,7 @@ const coreSafeToDeleteFieldHandler = async (
               : {}),
           },
           limitations: [
+            ...caseDisclosure,
             isStandardField
               ? 'Standard-field deletion is platform-blocked; the referrer count is informational only and the BLOCKING verdict does not depend on dependency-edge coverage.'
               : 'System fields are platform-guaranteed; the referrer count is informational only and the BLOCKING verdict does not depend on dependency-edge coverage.',
@@ -1371,7 +1536,7 @@ const coreSafeToDeleteFieldHandler = async (
   // edge-derived referrers are subtracted from it and only the genuinely
   // additional remainder is added. Examples are unioned by id — both sides
   // mint the same `Report:{Folder}/{Name}` identity.
-  const rdUsage = reportDashboardUsageDetail(nodeResult.value);
+  const rdUsage = reportDashboardUsageDetail(node);
   // Whether an ABSENT folded stamp is a checked `false` or an unchecked `null`.
   const analyticsRetrieved = analyticsFamiliesRetrieved(ctx.manifest);
   let analyticsCountIsFloor = false;
@@ -1433,7 +1598,7 @@ const coreSafeToDeleteFieldHandler = async (
   const reasoning = buildReasoning(buckets);
   const coverageCaveat = buildCoverageCaveat(ctx);
   // GROUP-A PII-safety: a non-verdict-lowering compliance escalation.
-  const piiCompliance = buildPiiCompliance(nodeResult.value);
+  const piiCompliance = buildPiiCompliance(node);
   // UPGRADE PATH: a vault older than the running build is missing whole edge
   // FAMILIES this tool cites, which the coverage caveat cannot see (the
   // families were retrieved; the extractor that reads them did not exist).
@@ -1467,6 +1632,7 @@ const coreSafeToDeleteFieldHandler = async (
       : {}),
   };
   const baseLimitations: string[] = [
+    ...caseDisclosure,
     'Dependency evidence comes from the last offline vault refresh. String-built dynamic SOQL, reflective Apex, and runtime metadata access remain invisible to static analysis; inline static SOQL and constant-string Database.query field references ARE resolved (parsed-confidence Apex AST edges). A dot-access read/write to a shared Activity custom field through a Task or Event receiver (someTask.Field__c) is NOT a direct parsed edge on the Activity field — it is attached by a name-based polymorphic import alias (see next limitation).',
     'Polymorphic Activity attribution: a shared Activity custom field can appear as up to three nodes (CustomField:Activity/Task/Event.<field>) that are ONE physical field. A read/write keyed on one representation is attached to the others at import by a name-based alias — re-pointed onto the Activity base when it exists, otherwise mirrored across the Task/Event describe-snapshot siblings (Task and Event share the custom fields defined on Activity). This is a heuristic name match applied at import, not a declared parent relationship — an admin should still confirm the referrer before deleting.',
     // Unconditional when it fires — a `blocking` verdict on a stale vault is
@@ -1583,10 +1749,7 @@ const coreSafeToDeleteFieldHandler = async (
       ...(livePopulation !== undefined ? { livePopulation } : {}),
       ...(rdUsage.usedInReport || rdUsage.usedInDashboard
         ? {
-            reportUsage: reportDashboardEvidence(
-              nodeResult.value,
-              analyticsRetrieved,
-            ),
+            reportUsage: reportDashboardEvidence(node, analyticsRetrieved),
           }
         : {}),
       trust,

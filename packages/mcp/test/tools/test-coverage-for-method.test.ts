@@ -909,6 +909,34 @@ describe('testCoverageForMethodHandler — bare ApexTrigger name (TCFM-TRIGGER-B
     expect(r.value.data.appliedScope.component).toBe('ApexTrigger:Dual_D');
   });
 
+  // The prose above was made honest; `error.path` was not. `McpError.path` is
+  // documented as "pointer to the offending input", and it is the TYPED field a
+  // machine consumer reads INSTEAD of the prose. Echoing a synthesized
+  // `ApexClass:<name>` there re-asserts, in the one field a host cannot skip,
+  // exactly the single-family search the message just disclaimed — and it names
+  // a family the caller never mentioned.
+  it('does not echo a synthesized single-family id as the offending input for a bare-name miss', async () => {
+    const r = await testCoverageForMethodHandler(ctxB, { classApiName: 'Nope_X' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.message).toMatch(/ApexTrigger:Nope_X/);
+    expect(r.error.path).not.toBe('ApexClass:Nope_X');
+    expect(r.error.path).toBe('Nope_X');
+  });
+
+  it('still points at the one id looked up when the caller named the family', async () => {
+    for (const input of [
+      { componentId: 'ApexTrigger:Nope_X' },
+      { classApiName: 'ApexClass:Nope_X' },
+    ]) {
+      const r = await testCoverageForMethodHandler(ctxB, input);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.path).toBe(Object.values(input)[0]);
+    }
+  });
+
   it('two selectors naming DIFFERENT components are still invalid-query', async () => {
     const r = await testCoverageForMethodHandler(ctxB, {
       classApiName: 'ApexClass:Dual_D',

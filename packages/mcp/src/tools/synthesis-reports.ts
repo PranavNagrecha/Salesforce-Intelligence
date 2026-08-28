@@ -58,8 +58,17 @@ import {
   type UnusedFieldsDeepOutput,
 } from './unused-fields-deep.js';
 
+/**
+ * The hard ceiling `limit` accepts. Declared ONCE and referenced by both the
+ * validator below and the truncation note `buildFindingsPage` writes, so the
+ * "re-run with limit: N" advice can never name a bound the schema would
+ * reject — a second literal under a "mirrors the schema" comment is exactly the
+ * drift this release keeps paying for.
+ */
+export const FINDINGS_LIMIT_MAX = 500;
+
 const synthesisInputSchema = z.object({
-  limit: z.number().int().min(1).max(500).optional(),
+  limit: z.number().int().min(1).max(FINDINGS_LIMIT_MAX).optional(),
 });
 
 export type SynthesisInput = z.infer<typeof synthesisInputSchema>;
@@ -181,13 +190,22 @@ const sortFindings = (
     )
     .map((finding, index) => ({ ...finding, rank: index + 1 }));
 
-const coverageTrust = (ctx: Context): TrustSummary => {
+/**
+ * Trust block for a synthesis report. `limitations` is the TYPED channel a
+ * machine consumer cannot skip: an omitted-by-limit page or an unchecked
+ * sub-analysis belongs here, not only in prose. Omitting the argument yields
+ * the historical `limitations: []` byte-for-byte.
+ */
+const coverageTrust = (
+  ctx: Context,
+  limitations?: readonly string[],
+): TrustSummary => {
   const summary = summarizeCoverage(ctx.manifest);
   const completeness: TrustSummary['completeness'] =
     summary.missingCoverage.length > 0
       ? { status: summary.status, missingCoverage: summary.missingCoverage }
       : { status: summary.status };
-  return offlineTrust(ctx, completeness);
+  return offlineTrust(ctx, completeness, undefined, limitations);
 };
 
 // ---------------------------------------------------------------------------
@@ -1553,10 +1571,28 @@ const scopedProfileReport = async (
   ];
   const dataShape = await readActiveHoldersFor(ctx, godModeIds);
 
+  const paged = sortFindings(findings).slice(0, limit);
+  // One grantor produces at most one finding, so `limit` cannot realistically
+  // bite here — but the block is computed, never assumed, so a future scoped
+  // analysis that DOES overflow discloses it instead of silently truncating.
+  const findingsPage = buildFindingsPage(limit, [
+    {
+      category: 'over-privilege',
+      total: findings.length,
+      returned: paged.length,
+    },
+  ]);
+  const limitations: string[] = [];
+  if (findingsPage.note !== null) limitations.push(findingsPage.note);
+  limitations.push(UNASSIGNED_NOT_EVALUATED.note);
+
   return ok({
     data: {
-      findings: sortFindings(findings).slice(0, limit),
+      findings: paged,
       auditTotals: null,
+      truncated: findingsPage.truncated,
+      findingsPage,
+      unassignedCoverage: UNASSIGNED_NOT_EVALUATED,
       privilege: {
         modifyAllDataGrantors: [...modifyAllDataGrantors].sort(),
         viewAllDataGrantors: [...viewAllDataGrantors].sort(),
@@ -1574,8 +1610,10 @@ const scopedProfileReport = async (
         caveat: `Report scoped to ${node.id}.`,
       },
       ...(dataShape !== undefined ? { dataShape } : {}),
-      trust: coverageTrust(ctx),
-      disclosure: SYNTHESIS_DISCLOSURE,
+      trust: coverageTrust(ctx, limitations),
+      disclosure:
+        `${findingsPage.note !== null ? `${findingsPage.note} ` : ''}` +
+        `${UNASSIGNED_NOT_EVALUATED.note} ${SYNTHESIS_DISCLOSURE}`,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -1588,11 +1626,96 @@ const scopedProfileReport = async (
 // sfi.permission_risk_report
 // ---------------------------------------------------------------------------
 
+/**
+ * TRUNCATION-HONESTY: per-category page accounting for the ranked findings.
+ * `totalCount` is what the analysis PRODUCED; `returnedCount` is what this
+ * response carries. They differ whenever `limit` capped a category.
+ */
+export interface FindingsCategoryPage {
+  /** The `RankedFinding.category` this row accounts for. */
+  readonly category: string;
+  /** Findings this category produced before `limit` was applied. */
+  readonly totalCount: number;
+  /** Findings from this category present in `findings`. */
+  readonly returnedCount: number;
+  /** True when `limit` dropped at least one finding from this category. */
+  readonly truncated: boolean;
+}
+
+/**
+ * TRUNCATION-HONESTY: the findings array is a capped PAGE, not the population.
+ * Before this block the default `limit: 50` dropped findings with NOTHING in
+ * the envelope saying so — no flag, no count, no note, `trust.limitations: []`
+ * — so a host presented 50 as the complete over-privileged population of an org
+ * that had far more. ALWAYS present: a missing block would let a capped page
+ * read as a complete one, which is the exact defect this field exists to
+ * prevent.
+ */
+export interface FindingsPageSummary {
+  /** The effective `limit` applied to each sub-analysis. */
+  readonly limit: number;
+  /** Findings the analysis produced, across every category, before `limit`. */
+  readonly totalCount: number;
+  /** Findings present in `findings` (always equals `findings.length`). */
+  readonly returnedCount: number;
+  /** `totalCount - returnedCount` — findings this response does NOT carry. */
+  readonly omittedCount: number;
+  /** True when `omittedCount > 0`. */
+  readonly truncated: boolean;
+  /** Per-category breakdown, so a caller sees WHICH analysis was capped. */
+  readonly byCategory: readonly FindingsCategoryPage[];
+  /**
+   * Plain-English resume instruction naming the `limit` that returns the whole
+   * population; null when nothing was omitted (never a stale note).
+   */
+  readonly note: string | null;
+}
+
+/**
+ * UNASSIGNED-COVERAGE HONESTY: this report advertises that it rolls in
+ * unassigned permission sets, but that sub-analysis can only CONFIRM an
+ * assignment status when the Tooling-API enrichment pass has run. Without it
+ * every permission set is UNKNOWN, so an empty `unassigned-grant` category is
+ * an UNCHECKED category, not a proven zero — the distinction two sibling tools
+ * already make and this one used to hide. ALWAYS present.
+ */
+export interface UnassignedCoverageSummary {
+  /** True when the unassigned sub-analysis actually ran for this response. */
+  readonly analyzed: boolean;
+  /** Permission sets CONFIRMED unassigned; null when the analysis did not run. */
+  readonly unassignedCount: number | null;
+  /** Permission sets whose assignment status could not be determined. */
+  readonly unknownAssignmentCount: number | null;
+  /** Permission sets the sub-analysis scanned (post-filter). */
+  readonly permissionSetsScanned: number | null;
+  /** The sub-analysis enrichment tier (`structural-only`, `tooling-api-*`, …). */
+  readonly enrichmentStatus: string | null;
+  /**
+   * True ONLY when the analysis ran AND resolved assignment status for every
+   * scanned permission set — i.e. an empty `unassigned-grant` category is a
+   * CHECKED zero. False whenever any status is unknown or the analysis did not
+   * run.
+   */
+  readonly assignmentStatusKnown: boolean;
+  /** Human-readable statement of what was and was not determined. */
+  readonly note: string;
+}
+
 export interface PermissionRiskReportOutput extends SynthesisBase {
   readonly auditTotals: Pick<
     CrudFlsAuditOutput,
     'totalFindingCount' | 'totalClassCount'
   > | null;
+  /**
+   * True when `limit` dropped at least one finding from `findings`. Mirrors
+   * `findingsPage.truncated`, surfaced at the top level under the same name the
+   * sibling audit tools use so a machine consumer scanning for it finds it.
+   */
+  readonly truncated: boolean;
+  /** Page accounting for `findings` — produced vs returned, per category. */
+  readonly findingsPage: FindingsPageSummary;
+  /** Whether the advertised unassigned-permission-set category was CHECKED. */
+  readonly unassignedCoverage: UnassignedCoverageSummary;
   /** Over-privilege rosters: god-mode system perms + object-level escalation. */
   readonly privilege: PrivilegeSummary;
   /**
@@ -1738,6 +1861,119 @@ const closestProfileName = (
   return best ? best.name : null;
 };
 
+/**
+ * The refresh flag that runs the Tooling-API permission-set assignment
+ * enrichment. Named once so this report's caveat cannot drift from the remedy
+ * `sfi.unassigned_permission_sets` and `sfi.org_risk_report` already name.
+ */
+const ASSIGNMENT_ENRICHMENT_REMEDY = 'sfi refresh --classify-permissions';
+
+/** Build the page block from per-category (total, returned) pairs. */
+const buildFindingsPage = (
+  limit: number,
+  rows: readonly { category: string; total: number; returned: number }[],
+): FindingsPageSummary => {
+  const byCategory: FindingsCategoryPage[] = rows.map((r) => ({
+    category: r.category,
+    totalCount: r.total,
+    returnedCount: r.returned,
+    truncated: r.returned < r.total,
+  }));
+  const totalCount = rows.reduce((n, r) => n + r.total, 0);
+  const returnedCount = rows.reduce((n, r) => n + r.returned, 0);
+  const omittedCount = totalCount - returnedCount;
+  const truncated = omittedCount > 0;
+  const capped = Math.min(totalCount, FINDINGS_LIMIT_MAX);
+  const dropped = byCategory
+    .filter((c) => c.truncated)
+    .map((c) => `${c.category} (${c.returnedCount} of ${c.totalCount})`)
+    .join(', ');
+  const note = truncated
+    ? `Showing ${returnedCount} of ${totalCount} finding(s): ${omittedCount} ` +
+      `were dropped by limit=${limit} — ${dropped}. This is a PAGE, not the ` +
+      `population. Re-run with limit: ${capped} for the full list` +
+      (totalCount > FINDINGS_LIMIT_MAX
+        ? ` (${FINDINGS_LIMIT_MAX} is the maximum this tool accepts, so ` +
+          `${totalCount - FINDINGS_LIMIT_MAX} finding(s) stay unreachable in a ` +
+          `single call — narrow with profileFilter, or use ` +
+          `sfi.unassigned_permission_sets / sfi.crud_fls_audit for their ` +
+          `own paged views).`
+        : '.')
+    : null;
+  return {
+    limit,
+    totalCount,
+    returnedCount,
+    omittedCount,
+    truncated,
+    byCategory,
+    note,
+  };
+};
+
+/**
+ * The unassigned sub-analysis is ORG-WIDE and is not run on the profile-scoped
+ * or false-premise paths. Saying so is the whole point: silence there reads as
+ * a checked zero for an advertised category.
+ */
+const UNASSIGNED_NOT_EVALUATED: UnassignedCoverageSummary = Object.freeze({
+  analyzed: false,
+  unassignedCount: null,
+  unknownAssignmentCount: null,
+  permissionSetsScanned: null,
+  enrichmentStatus: null,
+  assignmentStatusKnown: false,
+  note:
+    'The unassigned-permission-set sub-analysis is org-wide and was NOT run ' +
+    'for this profile-scoped request, so this report carries no ' +
+    'unassigned-grant finding — that category is UNCHECKED here, not zero. ' +
+    'Run sfi.unassigned_permission_sets for it.',
+});
+
+/** Translate the unassigned sub-analysis result into the coverage block. */
+const buildUnassignedCoverage = (
+  data: {
+    readonly unassignedCount: number;
+    readonly unknownAssignmentCount: number;
+    readonly totalScanned: number;
+    readonly enrichmentStatus: string;
+  } | null,
+): UnassignedCoverageSummary => {
+  if (data === null) {
+    return {
+      analyzed: false,
+      unassignedCount: null,
+      unknownAssignmentCount: null,
+      permissionSetsScanned: null,
+      enrichmentStatus: null,
+      assignmentStatusKnown: false,
+      note:
+        'The unassigned-permission-set sub-analysis FAILED to run, so this ' +
+        'report carries no unassigned-grant finding — that category is ' +
+        'UNCHECKED, not zero. Run sfi.unassigned_permission_sets directly.',
+    };
+  }
+  const known = data.unknownAssignmentCount === 0;
+  return {
+    analyzed: true,
+    unassignedCount: data.unassignedCount,
+    unknownAssignmentCount: data.unknownAssignmentCount,
+    permissionSetsScanned: data.totalScanned,
+    enrichmentStatus: data.enrichmentStatus,
+    assignmentStatusKnown: known,
+    note: known
+      ? `Assignment status was resolved for all ${data.totalScanned} scanned ` +
+        `permission set(s) (enrichment: ${data.enrichmentStatus}); ` +
+        `${data.unassignedCount} confirmed unassigned.`
+      : `Assignment status is UNKNOWN for ${data.unknownAssignmentCount} of ` +
+        `${data.totalScanned} scanned permission set(s) (enrichment: ` +
+        `${data.enrichmentStatus}), so the ${data.unassignedCount} ` +
+        `unassigned-grant finding(s) here are a FLOOR, not a checked zero. ` +
+        `Run \`${ASSIGNMENT_ENRICHMENT_REMEDY}\` to resolve them, or see ` +
+        `sfi.unassigned_permission_sets for the per-set breakdown.`,
+  };
+};
+
 export const permissionRiskReportHandler = async (
   ctx: Context,
   input: PermissionRiskReportInput,
@@ -1762,10 +1998,14 @@ export const permissionRiskReportHandler = async (
         '. The requested profile-scoped analysis cannot be performed — the ' +
         'premise is false. Verify the profile name or run /sfi-refresh if the ' +
         'vault may be stale.';
+      const emptyPage = buildFindingsPage(limit, []);
       return ok({
         data: {
           findings: [],
           auditTotals: null,
+          truncated: false,
+          findingsPage: emptyPage,
+          unassignedCoverage: UNASSIGNED_NOT_EVALUATED,
           privilege: {
             modifyAllDataGrantors: [],
             viewAllDataGrantors: [],
@@ -1783,8 +2023,10 @@ export const permissionRiskReportHandler = async (
             closestMatch: closest,
             caveat,
           },
-          trust: coverageTrust(ctx),
-          disclosure: `${caveat} ${SYNTHESIS_DISCLOSURE}`,
+          trust: coverageTrust(ctx, [UNASSIGNED_NOT_EVALUATED.note]),
+          disclosure:
+            `${caveat} ${UNASSIGNED_NOT_EVALUATED.note} ` +
+            `${SYNTHESIS_DISCLOSURE}`,
         },
         vaultState: {
           sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -1803,9 +2045,20 @@ export const permissionRiskReportHandler = async (
   const overPriv = overPrivResult.value;
   findings.push(...overPriv.findings);
 
+  // UNASSIGNED-COVERAGE HONESTY: this category can only report a CHECKED zero
+  // when the Tooling-API assignment enrichment has run. Capture the
+  // sub-analysis's own coverage numbers so an empty category is disclosed as
+  // UNKNOWN rather than presented as "no stale grants".
   const unassigned = await unassignedPermissionSetsHandler(ctx, { limit });
+  let unassignedTotal = 0;
+  let unassignedReturned = 0;
+  let unassignedCoverage: UnassignedCoverageSummary;
   if (unassigned.ok) {
-    for (const row of unassigned.value.data.unassigned.slice(0, limit)) {
+    const u = unassigned.value.data;
+    const rows = u.unassigned.slice(0, limit);
+    unassignedTotal = u.unassignedCount;
+    unassignedReturned = rows.length;
+    for (const row of rows) {
       findings.push({
         rank: 0,
         severity: 'medium',
@@ -1815,9 +2068,18 @@ export const permissionRiskReportHandler = async (
         confidence: 'declared',
       });
     }
+    unassignedCoverage = buildUnassignedCoverage({
+      unassignedCount: u.unassignedCount,
+      unknownAssignmentCount: u.unknownAssignmentCount,
+      totalScanned: u.totalScanned,
+      enrichmentStatus: u.enrichmentStatus,
+    });
+  } else {
+    unassignedCoverage = buildUnassignedCoverage(null);
   }
 
   const audit = await crudFlsAuditHandler(ctx, { limit });
+  let crudFlsRollups = 0;
   let auditTotals: PermissionRiskReportOutput['auditTotals'] = null;
   if (audit.ok) {
     auditTotals = {
@@ -1825,6 +2087,8 @@ export const permissionRiskReportHandler = async (
       totalClassCount: audit.value.data.totalClassCount,
     };
     if (audit.value.data.totalFindingCount > 0) {
+      // One ROLLUP finding, never paged — its own totals live in `auditTotals`.
+      crudFlsRollups = 1;
       findings.push({
         rank: 0,
         severity: 'high',
@@ -1844,19 +2108,59 @@ export const permissionRiskReportHandler = async (
   ].slice(0, 50);
   const dataShape = await readActiveHoldersFor(ctx, godModeIds);
 
+  // TRUNCATION HONESTY: each sub-analysis was asked for at most `limit` rows,
+  // so `findings` is a PAGE. `overPrivilegedGrantorCount` / `unassignedCount`
+  // are the pre-cap populations — the disagreement between them and what is
+  // returned is exactly what used to go unsaid.
+  const findingsPage = buildFindingsPage(limit, [
+    {
+      category: 'over-privilege',
+      total: overPriv.privilege.overPrivilegedGrantorCount,
+      returned: overPriv.findings.length,
+    },
+    {
+      category: 'unassigned-grant',
+      total: unassignedTotal,
+      returned: unassignedReturned,
+    },
+    {
+      category: 'crud-fls',
+      total: crudFlsRollups,
+      returned: crudFlsRollups,
+    },
+  ]);
+
+  // The TYPED channel a machine consumer cannot skip. Prose alone is not it.
+  const limitations: string[] = [];
+  if (findingsPage.note !== null) limitations.push(findingsPage.note);
+  if (!unassignedCoverage.assignmentStatusKnown) {
+    limitations.push(unassignedCoverage.note);
+  }
+  if (overPriv.privilege.scanBoundaryNote !== null) {
+    limitations.push(overPriv.privilege.scanBoundaryNote);
+  }
+
   return ok({
     data: {
       findings: sortFindings(findings),
       auditTotals,
+      truncated: findingsPage.truncated,
+      findingsPage,
+      unassignedCoverage,
       privilege: overPriv.privilege,
       ...(dataShape !== undefined ? { dataShape } : {}),
-      trust: coverageTrust(ctx),
+      trust: coverageTrust(ctx, limitations),
       // A capped census must SAY it was capped — the roster is otherwise read
-      // as a complete answer to "who has god mode".
-      disclosure:
-        overPriv.privilege.scanBoundaryNote !== null
-          ? `${overPriv.privilege.scanBoundaryNote} ${SYNTHESIS_DISCLOSURE}`
-          : SYNTHESIS_DISCLOSURE,
+      // as a complete answer to "who has god mode". Same for a capped findings
+      // PAGE and for an unassigned category nothing could confirm.
+      disclosure: [
+        overPriv.privilege.scanBoundaryNote,
+        findingsPage.note,
+        unassignedCoverage.assignmentStatusKnown ? null : unassignedCoverage.note,
+        SYNTHESIS_DISCLOSURE,
+      ]
+        .filter((part): part is string => part !== null)
+        .join(' '),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

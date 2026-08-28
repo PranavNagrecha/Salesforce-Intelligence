@@ -21,6 +21,18 @@
  * The roster/dispatch references are imported LAZILY at call time to avoid a
  * module cycle with tools/index.ts (which imports the two plain handlers
  * here).
+ *
+ * CATEGORY-FILTER-FAILED-OPEN (R4). `list_analyses` filtered on `category`
+ * without ever verifying the value named a category. A typo, a
+ * plausible-but-wrong word, or a REAL category in the WRONG CASE all returned
+ * `{ analyses: [], total: 0 }` — no error, no marker — which reads as "this
+ * server has no analyses of that kind". `describe_analysis` in this same file
+ * already refused an unknown NAME with `invalid-query`, so the name filter
+ * failed closed while the category filter failed open. The category now routes
+ * through `resolveExistingCategory` against the vocabulary the roster itself
+ * derives: unknown is refused by name (with the real vocabulary in the
+ * message), wrong case is folded, and a filtered page echoes the canonical
+ * `appliedCategory` so it can never be read as the whole roster.
  */
 
 import type { McpError, McpResponse, PageInfo } from '@sf-intelligence/contracts';
@@ -88,7 +100,48 @@ export interface ListAnalysesOutput {
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
   readonly pageInfo?: PageInfo;
+  /**
+   * R4 verified scope echo: the category filter that was ACTUALLY applied,
+   * canonicalized to this roster's own vocabulary (a wrong-case request is
+   * folded, e.g. `What-If` -> `what-if`). Present ONLY on a filtered call, so a
+   * narrowed page can never be read as the whole roster; absent on an
+   * unfiltered call, keeping that response byte-identical to its prior shape.
+   */
+  readonly appliedCategory?: string;
 }
+
+/**
+ * R4 (verified scope): resolve a caller-supplied `category` against the
+ * vocabulary this roster ACTUALLY derives, BEFORE it is used as a filter.
+ *
+ * CATEGORY-FILTER-FAILED-OPEN — the defect this replaces: the category was
+ * string-compared straight against `analysisCategory()` output, so a value that
+ * names no category (a typo, a plausible-but-wrong word, or a REAL category in
+ * the WRONG CASE) produced `{ analyses: [], total: 0 }` with no error and no
+ * marker. A host reads that as "this server has no analyses of that kind" —
+ * a confident zero over a filter that never matched anything. The sibling
+ * `describe_analysis` in this same file already refuses an unknown NAME with
+ * `invalid-query`; the two now fail closed the same way.
+ *
+ * Wrong CASE is resolved rather than refused: the vocabulary is a closed,
+ * lowercase, name-derived set, so a case fold is unambiguous. The canonical
+ * value is echoed back as `appliedCategory` and is what binds the cursor.
+ */
+export const resolveExistingCategory = (
+  requested: string,
+  vocabulary: readonly string[],
+): Result<string, McpError> => {
+  const exact = vocabulary.find((c) => c === requested);
+  if (exact !== undefined) return ok(exact);
+  const folded = requested.trim().toLowerCase();
+  const insensitive = vocabulary.find((c) => c.toLowerCase() === folded);
+  if (insensitive !== undefined) return ok(insensitive);
+  return err({
+    kind: 'invalid-query',
+    message: `Unknown category '${requested}'. This roster derives exactly: ${vocabulary.join(', ')}. Omit \`category\` to list every analysis.`,
+    path: 'category',
+  });
+};
 
 /** Lazy roster access (cycle-safe): tools/index.ts owns `V01_TOOLS`. */
 const loadRoster = async (): Promise<
@@ -119,8 +172,17 @@ export const listAnalysesHandler = async (
       category: analysisCategory(t.name),
     }));
   const categories = [...new Set(all.map((a) => a.category))].sort((a, b) => a.localeCompare(b));
+  // R4: VERIFY the requested category exists in the derived vocabulary before
+  // filtering on it. An unknown category is refused by name; a wrong-case one
+  // is folded to its canonical form and echoed.
+  let appliedCategory: string | undefined;
+  if (input.category !== undefined) {
+    const resolved = resolveExistingCategory(input.category, categories);
+    if (!resolved.ok) return err(resolved.error);
+    appliedCategory = resolved.value;
+  }
   const filtered =
-    input.category === undefined ? all : all.filter((a) => a.category === input.category);
+    appliedCategory === undefined ? all : all.filter((a) => a.category === appliedCategory);
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed `category`, different tool, or refreshed
@@ -128,8 +190,10 @@ export const listAnalysesHandler = async (
   // array (`V01_TOOLS`) with unique tool names, so the slice order is already a
   // total order keyed by array position (unique `name` tiebreak) and offset
   // resume neither dups nor skips.
+  // Bind the cursor to the CANONICAL category so a case-variant resume
+  // (`core` page 1, `CORE` page 2) is the same filter, not a forged one.
   const fingerprint = argsFingerprint({
-    ...(input.category !== undefined ? { category: input.category } : {}),
+    ...(appliedCategory !== undefined ? { category: appliedCategory } : {}),
   });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
@@ -166,6 +230,7 @@ export const listAnalysesHandler = async (
       total: filtered.length,
       offset,
       categories,
+      ...(appliedCategory !== undefined ? { appliedCategory } : {}),
       next: 'Call sfi.describe_analysis { name } for one tool’s full input schema, then sfi.run_analysis { name, args } to execute it — identical output to calling the tool directly.',
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
     },

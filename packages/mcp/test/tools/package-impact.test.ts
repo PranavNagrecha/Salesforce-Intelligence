@@ -255,7 +255,7 @@ describe('packageImpactHandler — impact mode', () => {
   });
 
   // VLOC HAS a visible member (VLOC__Thing__c) but no inbound edges — the
-  // SparkTable-shaped "members present with empty inbound" case. The verdict is
+  // Pkg_Gamma-shaped "members present with empty inbound" case. The verdict is
   // NOT the soft `no-detected-dependencies`: a member in the vault IS a package
   // touchpoint (PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-BLIND).
   it('returns members-present-no-static-inbound for a package with members but no inbound', async () => {
@@ -469,7 +469,7 @@ describe('packageImpactInputSchema', () => {
 
   it('accepts a namespacePrefix selector', () => {
     expect(
-      packageImpactInputSchema.safeParse({ namespacePrefix: 'hed' }).success,
+      packageImpactInputSchema.safeParse({ namespacePrefix: 'Pkg_Beta' }).success,
     ).toBe(true);
   });
   it('accepts a namespace + limit', () => {
@@ -775,7 +775,7 @@ describe('packageImpactHandler — W6.2 verdict policy (members-present not bare
 
 // =============================================================================
 // PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-BLIND (W6 residual) — verdict enum ⇔
-// caveat AGREEMENT. The QA-witnessed bug: a SparkTable-shaped two-segment member
+// caveat AGREEMENT. The QA-witnessed bug: a Pkg_Gamma-shaped two-segment member
 // yields `packageComponentCount: 1` yet the verdict was still the soft
 // `no-detected-dependencies` (only a coverageCaveat was attached). A caveat alone
 // is insufficient — the verdict is what a host acts on. These lock the truthful
@@ -799,7 +799,7 @@ describe('packageVerdictFor — pure verdict policy (enum ⇔ caveat agreement)'
     ).toBe('incomplete-scan');
   });
 
-  it('visible members but no inbound → members-present-no-static-inbound (the SparkTable trap)', () => {
+  it('visible members but no inbound → members-present-no-static-inbound (the Pkg_Gamma trap)', () => {
     expect(
       packageVerdictFor({ hasInbound: false, scanIncomplete: false, membersPresent: true, hasCaveat: true }),
     ).toBe('members-present-no-static-inbound');
@@ -844,20 +844,20 @@ describe('packageVerdictFor — pure verdict policy (enum ⇔ caveat agreement)'
   });
 });
 
-describe('packageImpactHandler — SparkTable-shaped two-segment member (verdict ⇔ caveat)', () => {
+describe('packageImpactHandler — Pkg_Gamma-shaped two-segment member (verdict ⇔ caveat)', () => {
   let dir: string;
   let local: GraphStore;
   let localCtx: Context;
 
   beforeAll(async () => {
-    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-sparktable-'));
-    const opened = await openGraph(join(dir, 'sparktable.db'));
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-pkg-gamma-'));
+    const opened = await openGraph(join(dir, 'pkg-gamma.db'));
     if (!opened.ok) throw new Error(opened.error.message);
     local = opened.value;
     // Zzz managed package (synthetic namespace — NEVER a real vault namespace):
     // an InstalledPackage marker + a two-segment managed FieldSet member that WAS
     // retrieved (packageComponentCount 1) but has NO inbound reference. This is
-    // the exact SparkTable shape the QA cited: a member is present yet the tool
+    // the exact Pkg_Gamma shape the QA cited: a member is present yet the tool
     // used to answer the soft `no-detected-dependencies`.
     const imp = await importExtractionResults(local, [
       {
@@ -968,7 +968,7 @@ describe('packageImpactHandler — grant-only targetMissing two-segment touchpoi
 // VAULT SCALE. The synthetic W6.1 fixtures above have <50 dangling targets, so a
 // capped per-group sample happened to include the grant. On a busy org there are
 // far MORE than 50 dangling `(ApexClass, grantedBy, declared)` targets across the
-// installed packages, and a namespace whose members sort late (`SparkTable__*`)
+// installed packages, and a namespace whose members sort late (`Acme__*`)
 // falls OUTSIDE the smallest-50 sample — its grant touchpoint was DROPPED and
 // `yourDependencyTotal` under-counted the footprint (soft-verdict was already
 // correct; only the COUNT was low). This fixture floods the dangling grant group
@@ -1145,134 +1145,50 @@ const TOOL_IDENTITY_SCAN_MIRROR = readNumericLiteral(
 // an uninstall decision on): "we cannot find that package" and "that package is
 // installed and nothing touches it" must not render identically.
 //
-// The refusal is gated on FOUR conditions, and each gate has its own case here
+// The refusal is gated on FIVE conjuncts, and each one has its own case here
 // because each one, if it fired wrongly, would manufacture a NEW confident-wrong
 // answer — a flat denial that a package the org genuinely has is installed:
-//   1. InstalledPackage coverage COMPLETE (adopted predicate) + roster non-empty
-//   2. no visible members
-//   3. no inbound touchpoint, INCLUDING phantom-target ones
-//   4. the scan ran to completion
+//   1a. the roster is non-empty (`known.size > 0`)
+//   1b. InstalledPackage coverage is AFFIRMATIVELY `complete` (adopted predicate)
+//   2.  no visible members — the PACKAGING-org shape, where the graph holds the
+//       namespace's components but no InstalledPackage record exists for it
+//   3.  no inbound touchpoint, INCLUDING phantom-target ones
+//   4.  the scan ran to completion
+//   5.  the namespace really is absent from the roster (an installed-but-unused
+//       package must keep its soft verdict)
+// Every one is mutation-proved: deleting that conjunct alone turns the matching
+// case below red. `!membersPresent` was the conjunct that had NO biting case.
 // =============================================================================
 describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
   const KNOWN_PKG_SEED: ExtractionResult = {
     nodes: [
       makeNode({
-        id: 'InstalledPackage:APXTConga4',
+        id: 'InstalledPackage:Pkg_Alpha4',
         type: 'InstalledPackage',
-        apiName: 'APXTConga4',
+        apiName: 'Pkg_Alpha4',
       }),
       // A real component under the REAL namespace — proves the positive-match
       // (regression) path keeps working after the fix.
       makeNode({
-        id: 'CustomObject:APXTConga4__Thing__c',
+        id: 'CustomObject:Pkg_Alpha4__Thing__c',
         type: 'CustomObject',
-        apiName: 'APXTConga4__Thing__c',
+        apiName: 'Pkg_Alpha4__Thing__c',
       }),
     ],
     edges: [],
   };
 
-  let dir: string;
-  let localStore: GraphStore;
-  let localCtx: Context;
-
-  beforeAll(async () => {
-    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-'));
-    const opened = await openGraph(join(dir, 'known.db'));
-    if (!opened.ok) throw new Error(opened.error.message);
-    localStore = opened.value;
-    const imp = await importExtractionResults(localStore, [KNOWN_PKG_SEED]);
-    if (!imp.ok) throw new Error(imp.error.message);
-    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
-  });
-
-  afterAll(async () => {
-    await closeGraph(localStore);
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it('refuses a near-miss typo of a real installed package with invalid-query, naming the real one', async () => {
-    const r = await packageImpactHandler(localCtx, { namespace: 'APXTConga' });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.error.kind).toBe('invalid-query');
-    expect(r.error.path).toBe('namespace');
-    expect(r.error.message).toContain('APXTConga4');
-  });
-
-  it('is case-insensitive: the REAL namespace in a different case is never refused', async () => {
-    const r = await packageImpactHandler(localCtx, { namespace: 'apxtconga4' });
-    expect(r.ok).toBe(true);
-    if (!r.ok || r.value.data.mode !== 'impact') return;
-    expect(r.value.data.packageComponentCount).toBe(1);
-  });
-
-  it('still answers normally for the REAL namespace (no over-refusal)', async () => {
-    const r = await packageImpactHandler(localCtx, { namespace: 'APXTConga4' });
-    expect(r.ok).toBe(true);
-    if (!r.ok || r.value.data.mode !== 'impact') return;
-    expect(r.value.data.packageComponentCount).toBe(1);
-    expect(r.value.data.verdict).not.toBe('no-detected-dependencies');
-  });
-
-  it('an installed-but-unused package (0 members, 0 extensions, 0 deps) is NOT refused — it IS known', async () => {
-    // A second known package with literally nothing else touching it: `known`
-    // recognizes it, so the bare/soft verdict path (not the refusal) applies.
-    const dir2 = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-unused-'));
-    const opened = await openGraph(join(dir2, 'unused.db'));
-    expect(opened.ok).toBe(true);
-    if (!opened.ok) return;
-    const store2 = opened.value;
-    const imp = await importExtractionResults(store2, [
-      {
-        nodes: [
-          makeNode({
-            id: 'InstalledPackage:UnusedPkg',
-            type: 'InstalledPackage',
-            apiName: 'UnusedPkg',
-          }),
-        ],
-        edges: [],
-      },
-    ]);
-    expect(imp.ok).toBe(true);
-    const ctx2: Context = { vaultRoot: dir2, manifest: FIXTURE_MANIFEST, graph: store2 };
-    const r = await packageImpactHandler(ctx2, { namespace: 'UnusedPkg' });
-    await closeGraph(store2);
-    rmSync(dir2, { recursive: true, force: true });
-    expect(r.ok).toBe(true);
-    if (!r.ok || r.value.data.mode !== 'impact') return;
-    expect(r.value.data.packageComponentCount).toBe(0);
-    expect(r.value.data.verdict).toBe('no-detected-dependencies');
-  });
-
-  it('never refuses on a vault with NO InstalledPackage metadata at all (the pre-existing prefix-heuristic mode)', async () => {
-    // The top-level `ctx` fixture carries zero InstalledPackage nodes, so
-    // known.size === 0 there — the new gate is OFF and the pre-existing soft
-    // verdict for a genuinely-untracked vault must survive unchanged.
-    const r = await packageImpactHandler(ctx, { namespace: 'TOTALLYUNKNOWNNS' });
-    expect(r.ok).toBe(true);
-    if (!r.ok || r.value.data.mode !== 'impact') return;
-    expect(r.value.data.verdict).toBe('no-detected-dependencies');
-  });
-
   // ---------------------------------------------------------------------------
-  // GATE 1 — InstalledPackage coverage must be COMPLETE, not merely non-empty.
+  // Manifests. EVERY case below covers DEFAULT_USAGE_SOURCE_FAMILIES completely,
+  // so the usage-source caveat is silent and the ONLY variable across the cases
+  // is the `InstalledPackage` coverage row itself.
   //
-  // The rejected first cut hand-rolled `known.size > 0` as its proxy for
-  // "InstalledPackage retrieval is AUTHORITATIVE here". It is not: a manifest row
-  // that is `errored` / `capped` / `pending` / not-requested (a scoped `--types`
-  // refresh) leaves STALE-or-PARTIAL InstalledPackage nodes in the graph, so
-  // `known.size > 0` is TRUE while `known` is INCOMPLETE. Refusing there invents
-  // a brand-new confident-wrong answer — a flat `invalid-query` denying a package
-  // the org actually HAS installed, printed alongside an incomplete roster.
-  // The fix adopts `buildEnumerationCoverageCaveat(ctx, 'InstalledPackage')`
-  // (coverage-trust.ts), the same predicate the sibling
-  // `sfi.installed_package_catalog` already uses for this exact family.
-  //
-  // Every manifest below covers DEFAULT_USAGE_SOURCE_FAMILIES completely, so the
-  // usage-source caveat is silent and the ONLY variable across these cases is the
-  // InstalledPackage coverage row itself.
+  // These are declared at the TOP of the block on purpose: the refusal is armed
+  // ONLY on a manifest whose InstalledPackage coverage status is `complete`, so
+  // every "does NOT refuse" case must be run on an ARMED manifest. Run on
+  // `FIXTURE_MANIFEST` (which carries no coverage rows at all) those cases would
+  // pass because the gate is switched OFF entirely — proving nothing about the
+  // condition each one names.
   // ---------------------------------------------------------------------------
   const coveredUsageFamilies = DEFAULT_USAGE_SOURCE_FAMILIES.map((type) => ({
     type,
@@ -1285,6 +1201,7 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
     row: Partial<{
       requested: boolean;
       retrieved: number;
+      retrieveConfirmed: boolean;
       errored: boolean;
       neverModeled: boolean;
       pending: boolean;
@@ -1305,20 +1222,140 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
     ],
     coverageComputedAt: '2026-05-29T12:00:00.000Z',
   });
+  /** The one manifest that ARMS the refusal: InstalledPackage status `complete`. */
+  const ARMED_MANIFEST = manifestWithInstalledPackageRow({});
 
-  it('CONTROL: on a vault whose InstalledPackage coverage is COMPLETE, the typo is still refused', async () => {
+  let dir: string;
+  let localStore: GraphStore;
+  /** Coverage UNKNOWN (`FIXTURE_MANIFEST` carries no coverage rows) — gate OFF. */
+  let localCtx: Context;
+  /** Same graph, coverage `complete` — gate ARMED. Every gate case uses this. */
+  let armedCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-'));
+    const opened = await openGraph(join(dir, 'known.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    localStore = opened.value;
+    const imp = await importExtractionResults(localStore, [KNOWN_PKG_SEED]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
+    armedCtx = { ...localCtx, manifest: ARMED_MANIFEST };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a near-miss typo of a real installed package with invalid-query, naming the real one', async () => {
+    const r = await packageImpactHandler(armedCtx, { namespace: 'Pkg_Alpha' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('namespace');
+    expect(r.error.message).toContain('Pkg_Alpha4');
+  });
+
+  it('is case-insensitive: the REAL namespace in a different case is never refused', async () => {
+    const r = await packageImpactHandler(armedCtx, { namespace: 'pkg_alpha4' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.packageComponentCount).toBe(1);
+  });
+
+  it('still answers normally for the REAL namespace (no over-refusal)', async () => {
+    const r = await packageImpactHandler(armedCtx, { namespace: 'Pkg_Alpha4' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.packageComponentCount).toBe(1);
+    expect(r.value.data.verdict).not.toBe('no-detected-dependencies');
+  });
+
+  it('an installed-but-unused package (0 members, 0 extensions, 0 deps) is NOT refused — it IS known', async () => {
+    // A second known package with literally nothing else touching it: `known`
+    // recognizes it, so the bare/soft verdict path (not the refusal) applies.
+    // Run on the ARMED manifest — on an unarmed one this would pass for the
+    // wrong reason.
+    const dir2 = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-unused-'));
+    const opened = await openGraph(join(dir2, 'unused.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const store2 = opened.value;
+    const imp = await importExtractionResults(store2, [
+      {
+        nodes: [
+          makeNode({
+            id: 'InstalledPackage:UnusedPkg',
+            type: 'InstalledPackage',
+            apiName: 'UnusedPkg',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    const ctx2: Context = { vaultRoot: dir2, manifest: ARMED_MANIFEST, graph: store2 };
+    const r = await packageImpactHandler(ctx2, { namespace: 'UnusedPkg' });
+    await closeGraph(store2);
+    rmSync(dir2, { recursive: true, force: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.packageComponentCount).toBe(0);
+    expect(r.value.data.verdict).toBe('no-detected-dependencies');
+  });
+
+  // ---------------------------------------------------------------------------
+  // GATE 1a — `known.size > 0`. An org whose InstalledPackage retrieve came back
+  // CONFIRMED-CLEAN (status `complete`, zero rows) has an EMPTY roster, and an
+  // empty roster proves nothing about a namespace: the prefix heuristic is all
+  // there is, so the pre-existing soft verdict must survive.
+  // ---------------------------------------------------------------------------
+  it('never refuses when the roster is EMPTY even though coverage is complete (confirmed-clean retrieve)', async () => {
+    // The top-level `ctx` fixture carries zero InstalledPackage nodes.
+    const confirmedEmptyRoster = manifestWithInstalledPackageRow({
+      retrieved: 0,
+      retrieveConfirmed: true,
+    });
     const r = await packageImpactHandler(
-      { ...localCtx, manifest: manifestWithInstalledPackageRow({}) },
-      { namespace: 'APXTConga' },
+      { ...ctx, manifest: confirmedEmptyRoster },
+      { namespace: 'TOTALLYUNKNOWNNS' },
     );
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.verdict).toBe('no-detected-dependencies');
+  });
+
+  // ---------------------------------------------------------------------------
+  // GATE 1b — InstalledPackage coverage must be AFFIRMATIVELY COMPLETE.
+  //
+  // Two spellings of this gate have now been wrong, and both failed the same
+  // way — by treating a coverage state the vault never established as proof:
+  //
+  //   1. `known.size > 0` alone. TRUE on an `errored` / `capped` / `pending` /
+  //      not-requested refresh whose InstalledPackage rows are stale or
+  //      half-retrieved.
+  //   2. `buildEnumerationCoverageCaveat(ctx, 'InstalledPackage') === undefined`.
+  //      That helper answers "should I NAG about this inventory?" and abstains
+  //      on a manifest carrying NO coverage rows at all, so legacy vaults are
+  //      not false-flagged. Read as "coverage is authoritative" it promotes
+  //      UNKNOWN to COMPLETE — and a legacy vault gets a flat `invalid-query`
+  //      denying a package off a roster nobody ever verified.
+  //
+  // The predicate is `summarizeCoverage(ctx.manifest, ['InstalledPackage'])
+  // .status === 'complete'`, which keeps `complete` / `partial` / `unknown` as
+  // three states. Only `complete` may deny. Every row below is a vault where
+  // InstalledPackage nodes EXIST (`known.size > 0`) but the retrieval behind
+  // them is NOT authoritative; a refusal on any of them would deny a package the
+  // org genuinely has.
+  // ---------------------------------------------------------------------------
+  it('CONTROL: on a vault whose InstalledPackage coverage is COMPLETE, the typo is still refused', async () => {
+    const r = await packageImpactHandler(armedCtx, { namespace: 'Pkg_Alpha' });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
   });
 
-  // Each of these is a vault where InstalledPackage nodes EXIST (known.size > 0)
-  // but the retrieval behind them is NOT authoritative. A refusal here would deny
-  // a genuinely-installed package.
   const nonAuthoritativeCoverage: readonly (readonly [string, VaultManifest])[] = [
     ['errored', manifestWithInstalledPackageRow({ errored: true })],
     ['capped', manifestWithInstalledPackageRow({ capped: true })],
@@ -1327,7 +1364,8 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
     // not-requested, while stale InstalledPackage nodes persist in the graph.
     ['not-requested (scoped --types refresh)', manifestWithInstalledPackageRow({ requested: false })],
     // Scoped refresh that never wrote an InstalledPackage row at all: coverage
-    // rows EXIST (so the vault is not "legacy"), but say nothing about this family.
+    // rows EXIST (so the vault is not "legacy"), but say nothing about this
+    // family — summarizeCoverage reports `partial`.
     [
       'no InstalledPackage row at all on a coverage-carrying manifest',
       {
@@ -1336,11 +1374,17 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
         coverageComputedAt: '2026-05-29T12:00:00.000Z',
       } as VaultManifest,
     ],
+    // The legacy / pre-coverage vault: NO coverage rows anywhere, so
+    // summarizeCoverage reports `unknown`. Nothing here says the
+    // InstalledPackage family was ever retrieved, let alone retrieved WHOLE, so
+    // the roster is not evidence and the refusal must stay off. This is the case
+    // `buildEnumerationCoverageCaveat === undefined` silently certified.
+    ['UNKNOWN — a manifest with no coverage rows at all (legacy vault)', FIXTURE_MANIFEST],
   ];
 
   for (const [label, manifest] of nonAuthoritativeCoverage) {
     it(`does NOT refuse an unknown namespace when InstalledPackage coverage is ${label}`, async () => {
-      const r = await packageImpactHandler({ ...localCtx, manifest }, { namespace: 'APXTConga' });
+      const r = await packageImpactHandler({ ...localCtx, manifest }, { namespace: 'Pkg_Alpha' });
       // The roster cannot prove absence, so the honest soft/`review` verdict
       // stands — NEVER a confident `invalid-query` denial.
       expect(r.ok).toBe(true);
@@ -1351,23 +1395,89 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
   }
 
   // ---------------------------------------------------------------------------
+  // GATE 2 — `!membersPresent`. The org's own components may carry a namespace
+  // prefix that has NO `InstalledPackage` record behind it: a PACKAGING org (the
+  // 2GP/1GP developer org that BUILDS the package) holds `Ns__Obj__c` components
+  // under its own registered prefix, and that prefix is never an installed
+  // package there. The roster is complete and genuinely does not list it — yet
+  // the graph is literally holding the namespace's components, so a flat
+  // "namespace does not match any InstalledPackage ... and no component ...
+  // carries it either" would be false on its own second clause.
+  //
+  // Everything else about this fixture is refusal-shaped on purpose: coverage is
+  // COMPLETE, the roster is non-empty (a DIFFERENT package), there is no inbound
+  // dependency and no extension, and the scan runs to completion. `packageNodes`
+  // is the ONLY thing standing between this vault and an `invalid-query`.
+  // ---------------------------------------------------------------------------
+  it('does NOT refuse a roster-absent namespace whose components ARE in the graph (packaging org)', async () => {
+    const dir4 = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-members-'));
+    const opened = await openGraph(join(dir4, 'members.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const store4 = opened.value;
+    const imp = await importExtractionResults(store4, [
+      {
+        nodes: [
+          // The roster is non-empty but names a DIFFERENT package, so
+          // `known.size > 0` holds and `known.has('pkg_delta')` is false.
+          makeNode({
+            id: 'InstalledPackage:Pkg_Alpha4',
+            type: 'InstalledPackage',
+            apiName: 'Pkg_Alpha4',
+          }),
+          // Components carrying the queried namespace, with NO InstalledPackage
+          // record for it — the packaging-org shape.
+          makeNode({
+            id: 'CustomObject:Pkg_Delta__Widget__c',
+            type: 'CustomObject',
+            apiName: 'Pkg_Delta__Widget__c',
+          }),
+          makeNode({
+            id: 'CustomField:Pkg_Delta__Widget__c.Pkg_Delta__Size__c',
+            type: 'CustomField',
+            apiName: 'Pkg_Delta__Widget__c.Pkg_Delta__Size__c',
+            parentId: 'CustomObject:Pkg_Delta__Widget__c',
+          }),
+        ],
+        // No inbound dependency, no extension: `hasInbound` is false.
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    const ctx4: Context = { vaultRoot: dir4, manifest: ARMED_MANIFEST, graph: store4 };
+    const r = await packageImpactHandler(ctx4, { namespace: 'Pkg_Delta' });
+    await closeGraph(store4);
+    rmSync(dir4, { recursive: true, force: true });
+
+    // NOT refused — the tool is holding this namespace's components.
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.scanTruncated).toBe(false);
+    expect(r.value.data.packageComponentCount).toBeGreaterThan(0);
+    // And the verdict is the honest non-soft one: members are present with no
+    // static inbound reference, which is never "safe to uninstall".
+    expect(r.value.data.verdict).not.toBe('no-detected-dependencies');
+    expect(['members-present-no-static-inbound', 'review']).toContain(r.value.data.verdict);
+  });
+
+  // ---------------------------------------------------------------------------
   // GATE 4 — `!scanIncomplete`. A namespace with ZERO visible members can never
   // trip `edgeScanTruncated` (that is `packageNodes.length > EDGE_SCAN_CAP`), so
   // the only reachable truncation is the whole-vault identity scan hitting the
   // graph's IDENTITY_SCAN_MAX. Drive that by intercepting `listNodeIdentities`'
   // own SQL on the real store — the roster row is kept in the padded result so
-  // `known` stays non-empty and GATE 1 is NOT what is being measured here.
-  // A truncated scan may simply not have REACHED the namespace's members, so it
-  // must yield `incomplete-scan`, never the refusal.
+  // `known` stays non-empty, and the manifest is the ARMED one, so GATE 1 is NOT
+  // what is being measured here. A truncated scan may simply not have REACHED
+  // the namespace's members, so it must yield `incomplete-scan`, never a refusal.
   // ---------------------------------------------------------------------------
   it('does NOT refuse on a TRUNCATED whole-vault scan — it yields incomplete-scan', async () => {
     expect(GRAPH_IDENTITY_SCAN_MAX).not.toBeNull();
     const cap = GRAPH_IDENTITY_SCAN_MAX as number;
     const paddedRows: readonly Record<string, unknown>[] = [
       {
-        id: 'InstalledPackage:APXTConga4',
+        id: 'InstalledPackage:Pkg_Alpha4',
         type: 'InstalledPackage',
-        api_name: 'APXTConga4',
+        api_name: 'Pkg_Alpha4',
         parent_id: null,
       },
       ...Array.from({ length: cap - 1 }, (_unused, i) => ({
@@ -1389,11 +1499,11 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
       },
     } as unknown as GraphStore['connection'];
     const truncatedCtx: Context = {
-      ...localCtx,
+      ...armedCtx,
       graph: { ...localStore, connection: truncatingConnection } as GraphStore,
     };
 
-    const r = await packageImpactHandler(truncatedCtx, { namespace: 'APXTConga' });
+    const r = await packageImpactHandler(truncatedCtx, { namespace: 'Pkg_Alpha' });
     expect(r.ok).toBe(true);
     if (!r.ok || r.value.data.mode !== 'impact') return;
     expect(r.value.data.scanTruncated).toBe(true);
@@ -1405,7 +1515,8 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
   // components are usually never retrieved, so a reference from YOUR metadata to
   // one of them is a DANGLING (`targetMissing`) edge: the namespace has zero
   // NODES yet is demonstrably real. That dependency is positive evidence, so the
-  // namespace must NOT be refused even though it is absent from the roster.
+  // namespace must NOT be refused even though it is absent from the roster —
+  // and the manifest here is the ARMED one, so the refusal really is live.
   // ---------------------------------------------------------------------------
   it('does NOT refuse a roster-absent namespace whose ONLY evidence is a phantom-target dependency', async () => {
     const dir3 = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-phantom-'));
@@ -1419,9 +1530,9 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
           // A DIFFERENT package is the only one in the roster, so the namespace
           // under test is roster-absent — exactly the refusal precondition.
           makeNode({
-            id: 'InstalledPackage:APXTConga4',
+            id: 'InstalledPackage:Pkg_Alpha4',
             type: 'InstalledPackage',
-            apiName: 'APXTConga4',
+            apiName: 'Pkg_Alpha4',
           }),
           makeNode({ id: 'ApexClass:My_Caller', type: 'ApexClass', apiName: 'My_Caller' }),
         ],
@@ -1438,7 +1549,7 @@ describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
       },
     ]);
     expect(imp.ok).toBe(true);
-    const ctx3: Context = { vaultRoot: dir3, manifest: FIXTURE_MANIFEST, graph: store3 };
+    const ctx3: Context = { vaultRoot: dir3, manifest: ARMED_MANIFEST, graph: store3 };
     const r = await packageImpactHandler(ctx3, { namespace: 'Ghostpkg' });
     await closeGraph(store3);
     rmSync(dir3, { recursive: true, force: true });

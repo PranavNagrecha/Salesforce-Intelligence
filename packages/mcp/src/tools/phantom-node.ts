@@ -47,7 +47,16 @@ const isKnownStandardFieldId = (id: string): boolean => {
   const objectApi = rest.slice(0, dot);
   const fieldApi = rest.slice(dot + 1);
   if (!STANDARD_OBJECT_API_NAMES.has(objectApi)) return false;
-  return !fieldApi.endsWith('__c') && !fieldApi.endsWith('__mdt');
+  // Salesforce api names are case-INSENSITIVE, and this suffix test is the
+  // only thing standing between a caller-typed id and an authoritative claim
+  // about a component the vault never looked up. Compared case-sensitively,
+  // `Foo__C` (the casing metadata exports use) falls through to the
+  // standard-field disclosure and FABRICATES a property of a real custom
+  // field — or of a name that exists in no org at all. Fold the SUFFIX only:
+  // folding the objectApi test above would route MORE ids into the
+  // disclosure branch, which is the wrong direction for this defect.
+  const foldedFieldApi = fieldApi.toLowerCase();
+  return !foldedFieldApi.endsWith('__c') && !foldedFieldApi.endsWith('__mdt');
 };
 
 /**

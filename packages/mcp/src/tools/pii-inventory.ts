@@ -50,8 +50,12 @@
  *   - A field name with a PII token (e.g. `Notes_SSN__c`) classifies
  *     as PII even if the field is empty at runtime.
  *
- *   - The `EncryptedText` data type ALWAYS classifies as `pii`.
- *     The encryption type IS the declaration.
+ *   - The `EncryptedText` data type ALWAYS classifies as `pii` — NOT
+ *     `sensitive`. The encryption type IS the declaration. A
+ *     `classification: 'sensitive'` sweep therefore returns none of the
+ *     org's encrypted fields; that is stated in `boundaries` on every
+ *     response so the natural "find every encrypted field" query cannot
+ *     quietly come back short.
  *
  *   - Description-keyword matching is sub-string-based; a field whose
  *     description merely mentions "PII" in a context unrelated to its
@@ -80,6 +84,7 @@ import type {
   McpResponse,
   Node,
   PageInfo,
+  TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdgesForNodes, listNodesByType } from '@sf-intelligence/graph';
@@ -244,6 +249,20 @@ export interface PiiInventoryOutput {
    */
   readonly csv?: string;
   readonly summary: PiiInventorySummary;
+  /**
+   * Verbatim method boundaries, present on EVERY response (json and csv) —
+   * what the classifier could not see, which stays true when it saw nothing.
+   * The csv header is derived from this array, so the two encodings cannot
+   * disagree. See {@link PII_INVENTORY_BOUNDARIES}.
+   */
+  readonly boundaries: readonly string[];
+  /**
+   * One-sentence prose caveat for a host that surfaces a single string.
+   * Always present. See {@link PII_INVENTORY_DISCLOSURE}.
+   */
+  readonly disclosure: string;
+  /** Provenance / confidence / completeness. Never certifies `complete`. */
+  readonly trust: TrustSummary;
   /** Page size applied to this response (echoes the request; default 200). */
   readonly limit: number;
   /** Zero-based offset of the first returned field in the sorted set. */
@@ -281,6 +300,196 @@ export interface PiiInventoryOutput {
  * sort-ordered prefix that fits and flags `truncated` with a `nextOffset`.
  */
 const PII_PAYLOAD_BUDGET_BYTES = 38_000;
+
+/**
+ * PII-INVENTORY-PUBLISHES-A-HEURISTIC-VERDICT-AS-A-CHECKED-ONE.
+ *
+ * The recognizer behind this tool reads a field's API NAME, DECLARED DATA TYPE
+ * and DESCRIPTION. Nothing else. A field it cannot place classifies `public` /
+ * `category: 'unknown'` — an UNMATCHED DEFAULT that is indistinguishable, in
+ * the emitted row, from a bucket that was checked and found clean.
+ *
+ * The default (`format: 'json'`) response used to disclose none of that. Its
+ * keys were `[fields, summary, limit, offset, truncated, nextOffset,
+ * nextCursor, pageInfo, note]` — no trust block, no boundaries, no method
+ * caveat anywhere in the envelope — while the ONE sentence the product owns
+ * about its own method rode only on the NON-DEFAULT `format: 'csv'` header. So
+ * the encoding a host LLM actually calls was the encoding with no caveat, and
+ * `summary.byCategory` published lines like `health: 0` over thousands of
+ * fields. A zero produced by "no name token matched" is not a finding.
+ * Certifying it as one is how a compliance reader drops an entire regulated
+ * category from a migration plan.
+ *
+ * These sentences are therefore emitted on EVERY response, json and csv, gap
+ * or no gap: they describe what the classifier could not see, which does not
+ * become untrue when it happens to see nothing. The csv header is DERIVED from
+ * this same array rather than kept as a second hand-maintained copy — that
+ * second copy is what let the header assert `EncryptedText always classifies
+ * sensitive` while the recognizer had always classified it `pii`.
+ */
+const BOUNDARY_RECOGNIZER_IS_HEURISTIC =
+  'Classification is a HEURISTIC over metadata only: the recognizer reads a field\'s API name, declared data type, and description text. It never reads record values, so it cannot confirm what a field actually stores — treat every row as the starting point of a compliance review, not its conclusion.';
+
+const BOUNDARY_PUBLIC_IS_THE_UNMATCHED_DEFAULT =
+  '`public` / `category: "unknown"` is the UNMATCHED DEFAULT, not a checked negative: it means no name token, data-type rule, or description keyword fired — never that the field was verified to hold no personal data. Do not read the `public` bucket as a cleared bucket.';
+
+/**
+ * REPLACED the separator-sensitivity boundary rather than keeping it.
+ *
+ * That sentence described a real defect: the name match was a substring test
+ * over the API name with its separators INTACT, so `Birthdate__c` matched the
+ * identifier vocabulary and `Birth_Date__c` — the same concept, same object —
+ * did not. It has since been FIXED in the recognizer
+ * (`@sf-intelligence/patterns` `pii-detection.ts`: the token is now also tested
+ * against the name's word segments joined, boundary-aligned). Leaving the
+ * sentence in would have shipped a boundary describing a limitation that no
+ * longer exists — the same stale-prose drift this tool's csv header already had
+ * to be fixed for. What survives the fix is the limitation UNDERNEATH it: the
+ * vocabulary is a finite list, and a name outside it matches nothing.
+ */
+/**
+ * Carries TWO narrowings in one sentence, deliberately — they are the same
+ * limitation seen from two sides and a second array entry costs rows off every
+ * page (see the reserve note in the handler).
+ *
+ * (1) It REPLACED a separator-sensitivity boundary. That sentence described a
+ * real defect — the name match was a substring test over the API name with its
+ * separators INTACT, so `Birthdate__c` matched the identifier vocabulary and
+ * `Birth_Date__c` (same concept, same object) did not — which has since been
+ * FIXED in the recognizer (`@sf-intelligence/patterns` `pii-detection.ts`: the
+ * token is now also tested against the name's word segments joined,
+ * boundary-aligned). Keeping it would have shipped a boundary describing a
+ * limitation that no longer exists, which is the same stale-prose drift this
+ * tool's csv header already had to be fixed for. What survives the fix is the
+ * limitation underneath: the vocabulary is finite.
+ *
+ * (2) The describe text says the recognizer inspects "API name, declared data
+ * type, AND description text", which reads as three chances to catch a field.
+ * It is not: the description layer matches compliance-REGIME keywords and
+ * carries no concept vocabulary, deliberately — a description is prose ABOUT a
+ * field, and the commonest prose about a regulated concept is a prohibition
+ * ("do not enter social security numbers here"), which concept vocabulary would
+ * classify as holding the very data it forbids. The disposition is recorded on
+ * `DESCRIPTION_RULES` in `@sf-intelligence/patterns`; this sentence carries it
+ * to the caller.
+ */
+const BOUNDARY_VOCABULARY_IS_A_FIXED_LIST =
+  'Name matching runs a FIXED vocabulary of concept tokens (social security number / date of birth / drivers licence / bank account / credit card / email / phone / postal address / ethnicity / disability / citizenship / veteran status and similar), tested against the API name as written AND with its word separators stripped. A field naming a regulated concept in wording the list does not carry — a local term, an in-house abbreviation, a non-English word, an opaque code — matches nothing and lands in `public` / `unknown`. The description text is NOT a second chance at it: that layer matches compliance-REGIME keywords only (HIPAA / PCI / confidential / restricted / sensitive / internal only / PII), so a description that merely describes the data raises no signal. Widening the sweep past this vocabulary is manual work, not something a different argument to this tool can do.';
+
+const BOUNDARY_ENCRYPTED_TEXT_IS_PII =
+  'An `EncryptedText`-typed field classifies `pii` (its category comes from the name, or `unknown` when no name token fires) — it does NOT classify `sensitive`. A `classification: "sensitive"` sweep therefore returns NONE of the org\'s encrypted fields; use `classification: "pii"` or an unfiltered call to enumerate them.';
+
+/**
+ * Emitted on every response regardless of what the scan found. Order is the
+ * reading order a host should hedge in: method, then what the default bucket
+ * means, then the two ways the vocabulary produces a surprising verdict (a
+ * concept it does not carry; an encrypted field that is `pii`, not `sensitive`).
+ */
+const PII_INVENTORY_BOUNDARIES: readonly string[] = Object.freeze([
+  BOUNDARY_RECOGNIZER_IS_HEURISTIC,
+  BOUNDARY_PUBLIC_IS_THE_UNMATCHED_DEFAULT,
+  BOUNDARY_VOCABULARY_IS_A_FIXED_LIST,
+  BOUNDARY_ENCRYPTED_TEXT_IS_PII,
+]);
+
+/**
+ * The one-sentence prose line a host reads aloud. Mirrors the `disclosure`
+ * key the `what_if_*` envelope already established, so a caller that only ever
+ * surfaces one string still surfaces the caveat.
+ */
+const PII_INVENTORY_DISCLOSURE =
+  'This is a heuristic classification of field METADATA, not a verified list of where regulated data lives: a field classifies `public`/`unknown` whenever no name token, data-type rule, or description keyword fires, so a zero in ANY bucket is an unmatched-token zero rather than a checked zero. Read `boundaries` before quoting a count.';
+
+/**
+ * Name the zero-count buckets EXPLICITLY. A `health: 0` line in a compliance
+ * summary is the sharpest edge this tool has: it is produced by "nothing
+ * matched the health vocabulary", and read as "this org holds no health data".
+ * Naming the buckets in a typed array puts the distinction where a machine
+ * consumer cannot skip past it.
+ */
+const WHY_A_BUCKET_READS_ZERO =
+  'A bucket reads 0 when no field\'s name, data type, or description matched that ' +
+  'bucket\'s vocabulary. A field holding that kind of data under a name the ' +
+  'vocabulary does not carry is counted in a DIFFERENT bucket (commonly `unknown`), ' +
+  'not here. This zero is not evidence the org holds no such data.';
+
+const zeroBucketBoundary = (
+  byClassification: Readonly<Record<PiiClassification, number>>,
+  byCategory: Readonly<Record<PiiCategory, number>>,
+  total: number,
+  classificationFilter: (typeof CLASSIFICATION_FILTER_VALUES)[number],
+  categoryFilter: (typeof CATEGORY_FILTER_VALUES)[number],
+): string | null => {
+  // An EMPTY filtered result is the sharpest case — every bucket is trivially
+  // zero, so enumerating them says nothing. Name the filter instead.
+  if (total === 0) {
+    const applied = [
+      ...(classificationFilter === 'all'
+        ? []
+        : [`classification "${classificationFilter}"`]),
+      ...(categoryFilter === 'all' ? [] : [`category "${categoryFilter}"`]),
+    ];
+    return (
+      `UNMATCHED-TOKEN ZERO — this ${applied.length === 0 ? 'inventory' : applied.join(' + ')} ` +
+      `sweep matched 0 fields. ${WHY_A_BUCKET_READS_ZERO}`
+    );
+  }
+  // Only buckets the filter LET THROUGH carry information: under
+  // `category: "financial"` every other category is zero by construction.
+  // `classification: "unknown"` is excluded outright — the recognizer reserves
+  // that value and never emits it, so its zero is structural, not a blind spot.
+  const zeroClassifications = Object.entries(byClassification)
+    .filter(([k, n]) =>
+      n === 0 &&
+      k !== 'unknown' &&
+      (classificationFilter === 'all' || k === classificationFilter),
+    )
+    .map(([k]) => `classification "${k}"`);
+  const zeroCategories = Object.entries(byCategory)
+    .filter(([k, n]) => n === 0 && (categoryFilter === 'all' || k === categoryFilter))
+    .map(([k]) => `category "${k}"`);
+  const zeros = [...zeroClassifications, ...zeroCategories];
+  if (zeros.length === 0) return null;
+  return (
+    `UNMATCHED-TOKEN ZERO — this summary reports 0 for: ${zeros.join(', ')}. ` +
+    WHY_A_BUCKET_READS_ZERO
+  );
+};
+
+/** Emitted when a filter narrowed the set, so `summary` is not the org-wide picture. */
+const FILTERED_SUMMARY_BOUNDARY =
+  'A `classification` / `category` filter was applied, so `summary` counts the FILTERED set only — it is NOT the org-wide inventory. Re-run without filters for org-wide totals.';
+
+/**
+ * Build the response trust block.
+ *
+ * `completeness` is NEVER `complete`. The field ENUMERATION is exhaustive over
+ * the vault's CustomField family, but the CLAIM this tool makes — "here is
+ * where regulated data lives" — rests on a name/type/description heuristic that
+ * cannot be confirmed from metadata, so a `complete` here would certify exactly
+ * the thing that was never checked. `confidence` is `heuristic` for the same
+ * reason (the sibling `history_tracking_gaps`, which reuses this recognizer,
+ * already reasons this way: "the classification that SELECTS which fields
+ * matter is heuristic — the weaker signal governs"). `limitations` is DERIVED
+ * from the boundaries this response actually carries, so the two cannot drift.
+ */
+const buildPiiTrust = (
+  ctx: Context,
+  boundaries: readonly string[],
+  pageLimitation: string | null,
+): TrustSummary => ({
+  provenance: 'offline_snapshot',
+  confidence: 'heuristic',
+  freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+  completeness: {
+    status: 'partial',
+    missingCoverage: [
+      'record-level field values — the recognizer classifies declared metadata and never reads stored data, so a field holding regulated data under an unremarkable name is not detectable here',
+      ...(pageLimitation === null ? [] : [pageLimitation]),
+    ],
+  },
+  limitations: [...(pageLimitation === null ? [] : [pageLimitation]), ...boundaries],
+});
 
 /**
  * Build an empty per-classification counter; the handler increments
@@ -606,6 +815,56 @@ export const piiInventoryHandler = async (
   if (!classified.ok) return classified;
   const { sorted, byClassification, byCategory, scope } = classified.value;
 
+  // The disclosure block is built BEFORE paging because its byte cost has to
+  // come OUT of the row budget: `PII_PAYLOAD_BUDGET_BYTES` sits below the
+  // global ~45 KB dispatch guard with headroom for the envelope, and adding
+  // ~2 KB of boundaries on top of a full page would eat that headroom instead
+  // of one row. Every input to these sentences (`sorted`, the two count maps,
+  // the filters) is known here; only the page-truncation sentence needs the
+  // paging result, and it is added to `trust` afterwards.
+  const zeroBoundary = zeroBucketBoundary(
+    byClassification,
+    byCategory,
+    sorted.length,
+    classificationFilter,
+    categoryFilter,
+  );
+  const filtered = classificationFilter !== 'all' || categoryFilter !== 'all';
+  const boundaries: readonly string[] = [
+    ...PII_INVENTORY_BOUNDARIES,
+    ...(zeroBoundary === null ? [] : [zeroBoundary]),
+    ...(filtered ? [FILTERED_SUMMARY_BOUNDARY] : []),
+  ];
+  // Reserve = the disclosure keys' own serialized cost plus headroom for the
+  // page-truncation sentence, which is written twice (missingCoverage +
+  // limitations) and is not known until after `paginateLegacy` runs.
+  //
+  // MEASURED PAGE-SIZE COST — the next reader should not have to rediscover it.
+  // The disclosure block is charged to the ROW budget, not added on top of it,
+  // so the default `{}` page over a ~4,300-field vault carries FEWER rows than
+  // before: 135 rows / 41.5 KB previously, 113 rows / 38.7 KB now (max 38.7 KB
+  // across json, csv and every filtered shape — still inside the ~45 KB dispatch
+  // guard, which is the point of charging it here). ~5.5 KB of that is the
+  // boundary text itself, serialized twice in a json response (`boundaries` and
+  // `trust.limitations`) and three times in a csv one (plus the `#` header).
+  // The duplication is DERIVED from one array rather than hand-copied — a
+  // hand-copied csv header is exactly what let this tool publish "EncryptedText
+  // always classifies sensitive" while the recognizer classified it `pii` — so
+  // the cost buys drift-freedom, and a new boundary is a real per-page charge.
+  // Consequences are bounded: an org-wide walk needs ~19% more pages (correct,
+  // and disclosed through `truncated` / `nextOffset` / the PARTIAL PAGE
+  // limitation), and the composing tools are unaffected because
+  // `collectPiiInventoryFields` bypasses paging entirely.
+  const disclosureReserveBytes =
+    Buffer.byteLength(
+      JSON.stringify({
+        boundaries,
+        disclosure: PII_INVENTORY_DISCLOSURE,
+        trust: buildPiiTrust(ctx, boundaries, null),
+      }),
+      'utf8',
+    ) + 800;
+
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed objectId/classification/category, different
   // tool, or refreshed vault) is rejected with invalid-query.
@@ -632,7 +891,7 @@ export const piiInventoryHandler = async (
   const paged = paginateLegacy(sorted, {
     offset,
     limit,
-    byteBudget: PII_PAYLOAD_BUDGET_BYTES,
+    byteBudget: Math.max(1_000, PII_PAYLOAD_BUDGET_BYTES - disclosureReserveBytes),
     binding: {
       tool: 'sfi.pii_inventory',
       vaultHash: ctx.manifest.sourceTreeHash,
@@ -660,6 +919,15 @@ export const piiInventoryHandler = async (
       byClassification,
       byCategory,
     },
+    boundaries,
+    disclosure: PII_INVENTORY_DISCLOSURE,
+    trust: buildPiiTrust(
+      ctx,
+      boundaries,
+      truncated
+        ? `PARTIAL PAGE: this response carries ${kept.length} of ${sorted.length} matched field(s) (offset ${offset}). The rows past this page were NOT returned — resume with \`nextOffset\` / \`nextCursor\` before treating this list as the org's full inventory.`
+        : null,
+    ),
     limit,
     offset,
     truncated,
@@ -686,10 +954,16 @@ export const piiInventoryHandler = async (
   // csv text, but JSON.stringify-ing it into the envelope escapes every `\n`
   // (inflating past the raw byte count) — measure the ACTUAL envelope and
   // shrink until it fits, mirroring `generate_data_dictionary`'s csv path.
+  // DERIVED, not a second copy. The line this replaced was hand-written and
+  // asserted the OPPOSITE of the recognizer ("EncryptedText always classifies
+  // sensitive"; the recognizer classifies it `pii`), which is precisely what a
+  // duplicated disclosure buys you. Deriving it means a boundary added above is
+  // in the csv by construction and cannot contradict the json.
   const csvDisclosures = [
     `generatedAt: ${ctx.manifest.refreshedAt}`,
     `sourceTreeHash: ${ctx.manifest.sourceTreeHash}`,
-    'The pii-detection recognizer is heuristic: a field with no name-token or description signal classifies public even if it stores PII at runtime; EncryptedText always classifies sensitive.',
+    ...boundaries,
+    PII_INVENTORY_DISCLOSURE,
     `total matched: ${sorted.length}; this page: ${kept.length} (offset ${offset})`,
     ...(truncated ? [`truncated: more matching fields remain past offset ${offset + kept.length}`] : []),
   ];

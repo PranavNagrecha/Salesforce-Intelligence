@@ -17,6 +17,13 @@
  *     referenced by permission/Apex edges is still audited from those edges
  *     with `notModeled: true` (B12); an id with no node AND no inbound
  *     references is `component-not-found`.
+ *
+ *     The id is resolved CASE-INSENSITIVELY (Salesforce api names are), by
+ *     walking the parent object's complete field list — see
+ *     {@link probeFieldIdCase}. The output `fieldId` is always the vault's
+ *     exact casing and `resolvedFrom` echoes the caller's spelling when the
+ *     two differ; two vault fields differing only by case are an
+ *     `invalid-query`, never a silent pick.
  *   - `permissionType` (optional `'read' | 'edit' | 'all'`, default
  *     `'all'`): narrow to grants whose level matches. `'all'` reports
  *     every grant; `'edit'` filters to grants where `properties.edit`
@@ -58,6 +65,13 @@
  *     level is reported as `'unknown'` — a non-fabricated honest
  *     signal.
  *
+ *   - A `component-not-found` states what the CASE probe covered, because the
+ *     probe has three outcomes and only one is a checked zero: the parent's
+ *     whole field list was walked (checked), the parent object has no node so
+ *     no list could be walked, or the walk stopped at the scan cap. Only NODES
+ *     are case-folded — an unmodeled field is matched to its permission/Apex
+ *     edges by EXACT spelling, and the note says so.
+ *
  *   - Apex via-access is heuristic. The Apex scanner emits
  *     `readsFrom`/`writesTo` edges from ApexClass nodes to fields;
  *     those edges flag the source file, not the runtime user. The
@@ -92,11 +106,13 @@ import {
   RECORD_EDIT_DEPENDENCY,
 } from './field-update-access.js';
 import {
+  objectIdCaseVariants,
   parseFieldParentObjectApiName,
   resolveFieldAlias,
   toCustomObjectId,
 } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -267,6 +283,16 @@ export interface FieldUpdateAccess {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface FieldAccessAuditOutput {
   readonly fieldId: ComponentId;
+  /**
+   * The id the CALLER passed, when it named this field in a DIFFERENT CASE from
+   * the vault's spelling; `null` on an exactly-cased call.
+   *
+   * `fieldId` above is always the vault's exact casing, because echoing the
+   * caller's spelling would assert a component id no vault holds. This key is
+   * how a caller sees that the correction happened — without it, an audit
+   * silently answers about an id the caller never typed.
+   */
+  readonly resolvedFrom: string | null;
   readonly fieldLabel: string;
   /**
    * True when the field's OWN definition was not in the vault (a standard or
@@ -403,9 +429,18 @@ const BOUNDARY_NOTE_BASE =
 const buildBoundaryNote = (
   summary: FieldAccessAuditSummary,
   update: FieldUpdateAccess,
+  caseCorrection: { readonly fieldId: ComponentId; readonly resolvedFrom: string } | null,
 ): string => {
   const unknownGrants = summary.profilesWithUnknown + summary.permSetsWithUnknown;
   const parts = [BOUNDARY_NOTE_BASE];
+  if (caseCorrection !== null) {
+    parts.push(
+      `ON THIS FIELD: the id you passed (\`${caseCorrection.resolvedFrom}\`) differs only in ` +
+        `CASE from the vault's spelling; Salesforce api names are case-insensitive, so this ` +
+        `audit is for \`${caseCorrection.fieldId}\` (echoed as fieldId, with your spelling in ` +
+        `resolvedFrom).`,
+    );
+  }
   if (unknownGrants > 0) {
     parts.push(
       `ON THIS FIELD: ${unknownGrants} grant(s) carry an unpopulated read/edit level ` +
@@ -421,6 +456,135 @@ const buildBoundaryNote = (
     );
   }
   return parts.join(' ');
+};
+
+/**
+ * FIELD-ID-CASE — Salesforce api names are case-insensitive.
+ *
+ * `Obj_A__c.Field_B__c`, `OBJ_A__C.FIELD_B__C` and `obj_a__c.field_b__c` name
+ * the SAME field in SOQL, in a formula and in a Setup URL, so an id pasted from
+ * an upper-cased ticket is not a different field — it is THIS field, spelled
+ * differently. The handler used to probe `getNodeById(exact id)` alone, so such
+ * an id missed the node, carried no inbound edges under that exact spelling
+ * either, and fell out as `component-not-found` on a field whose grantors were
+ * reachable the whole time. Object-scoped siblings already fold case through
+ * `input-aliases` {@link objectIdCaseVariants}; this is the field-level twin.
+ *
+ * The walk is EXHAUSTIVE, not a bounded search: the parent object is resolved
+ * case-insensitively, then {@link scanAllNodesOfTypes} pages every `CustomField`
+ * under that parent. So "no case variant exists" is a CHECKED zero — except on
+ * the two paths that say otherwise in {@link FieldCaseProbe.note}.
+ *
+ * Case-insensitive RESOLUTION is never case-insensitive IDENTITY: two vault ids
+ * that fold to the same name are two components, and picking one silently is how
+ * a reader ends up holding an answer about the other. That is an `invalid-query`.
+ */
+interface FieldCaseProbe {
+  /** The vault's exactly-cased node when exactly one case variant exists. */
+  readonly node: Node | null;
+  /**
+   * True when the parent's COMPLETE field list was walked, so a `node: null`
+   * is a checked zero. False when the probe could not run (no parent object
+   * node) or stopped at the scan's residual cap.
+   */
+  readonly walkComplete: boolean;
+  /**
+   * What the probe covered, for the `component-not-found` message. Empty when
+   * the probe resolved a node (nothing to disclose).
+   */
+  readonly note: string;
+}
+
+/** A probe that ran and found the id genuinely absent under every casing. */
+const fieldCaseProbeNoVariant = (
+  parentId: string,
+  scanned: number,
+): FieldCaseProbe => ({
+  node: null,
+  walkComplete: true,
+  note:
+    `Case was also checked: all ${scanned} CustomField node(s) under \`${parentId}\` were ` +
+    `walked and NONE folds to this id, so this is not a casing mismatch. (Only NODES were ` +
+    `case-folded — an id with no node of its own is matched to permission/Apex edges by ` +
+    `EXACT spelling, so a wrongly-cased unmodeled field can still miss here.)`,
+});
+
+/**
+ * Resolve `fieldId` to the vault's exact casing. Returns the node when exactly
+ * one case variant exists, `null` (with a note that says what was checked) when
+ * none does, and `invalid-query` when two variants differ only by case.
+ */
+const probeFieldIdCase = async (
+  ctx: Context,
+  fieldId: ComponentId,
+): Promise<Result<FieldCaseProbe, McpError>> => {
+  const objectApi = parseFieldParentObjectApiName(fieldId);
+  if (objectApi === null) {
+    return ok({
+      node: null,
+      walkComplete: false,
+      note:
+        'Case was NOT checked: the id carries no `Object.Field` split, so no parent ' +
+        'object field list could be walked for a case variant.',
+    });
+  }
+  const variants = await objectIdCaseVariants(ctx.graph, objectApi);
+  if (!variants.ok) return err(variants.error);
+  if (variants.value.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `\`${objectApi}\` matches ${variants.value.length} objects in this vault that differ ` +
+        `only by CASE (${variants.value.join(', ')}). Salesforce api names are ` +
+        'case-insensitive, so nothing here can pick between them — pass the exact ' +
+        '`fieldId` you mean. No audit was run.',
+      path: 'fieldId',
+    });
+  }
+  const parentId = variants.value[0];
+  if (parentId === undefined) {
+    return ok({
+      node: null,
+      walkComplete: false,
+      note:
+        `Case was NOT checked: no CustomObject node in this vault folds to \`${objectApi}\`, ` +
+        'so the parent\u2019s field list could not be walked for a case variant. A wrongly-cased ' +
+        'or unretrieved parent object looks exactly like an absent field here.',
+    });
+  }
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomField'], {
+    parentId: parentId as ComponentId,
+  });
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  }
+  const folded = fieldId.toLowerCase();
+  const matches = scan.value.nodes
+    .filter((n) => n.id.toLowerCase() === folded)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  if (matches.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `\`${fieldId}\` matches ${matches.length} fields in this vault that differ only by ` +
+        `CASE (${matches.map((n) => n.id).join(', ')}). Salesforce api names are ` +
+        'case-insensitive, so nothing here can pick between them — pass the exact ' +
+        '`fieldId` you mean. No audit was run.',
+      path: 'fieldId',
+    });
+  }
+  const only = matches[0];
+  if (only !== undefined) return ok({ node: only, walkComplete: true, note: '' });
+  if (scan.value.scanIncomplete) {
+    return ok({
+      node: null,
+      walkComplete: false,
+      note:
+        `Case was checked only PARTLY: the walk of \`${parentId}\`\u2019s fields stopped at the ` +
+        'scan cap with more behind it, so a case variant may exist past the cap.',
+    });
+  }
+  return ok(fieldCaseProbeNoVariant(parentId, scan.value.nodes.length));
 };
 
 /**
@@ -453,17 +617,26 @@ export const fieldAccessAuditHandler = async (
     });
   }
 
-  const fieldId = resolvedFieldId as ComponentId;
   const permissionFilter = input.permissionType ?? 'all';
 
-  const fieldResult = await getNodeById(ctx.graph, fieldId);
-  if (!fieldResult.ok) {
+  const exactResult = await getNodeById(ctx.graph, resolvedFieldId as ComponentId);
+  if (!exactResult.ok) {
     return err({
       kind: 'internal',
-      message: `graph query failed: ${fieldResult.error.message}`,
+      message: `graph query failed: ${exactResult.error.message}`,
     });
   }
-  const fieldNode = fieldResult.value;
+  // FIELD-ID-CASE: an exactly-cased id never pays for the probe. A miss is NOT
+  // yet an absence — Salesforce api names are case-insensitive, so walk the
+  // parent object's complete field list for a variant before refusing.
+  const caseProbe =
+    exactResult.value !== null ? null : await probeFieldIdCase(ctx, resolvedFieldId as ComponentId);
+  if (caseProbe !== null && !caseProbe.ok) return err(caseProbe.error);
+  const canonicalNode =
+    caseProbe !== null && caseProbe.ok ? caseProbe.value.node : null;
+  const fieldId = (canonicalNode?.id ?? resolvedFieldId) as ComponentId;
+  const resolvedFrom = canonicalNode === null ? null : resolvedFieldId;
+  const fieldNode = exactResult.value ?? canonicalNode;
 
   // Walk incoming `grantedBy` edges — these are the Profile /
   // PermissionSet grants. Walk incoming `readsFrom` / `writesTo`
@@ -495,9 +668,14 @@ export const fieldAccessAuditHandler = async (
   // component-not-found. Only a field with NO node AND NO inbound references is
   // genuinely unknown (a typo / wrong id).
   if (fieldNode === null && allIncomingResult.value.length === 0) {
+    const phantomMessage = await phantomAwareNotFoundMessage(ctx, fieldId, 'CustomField');
+    // Say what the case probe covered. A `component-not-found` that stayed
+    // silent about it reads as "checked everything"; the probe has three
+    // outcomes and only one of them is a checked zero.
+    const caseNote = caseProbe !== null && caseProbe.ok ? caseProbe.value.note : '';
     return err({
       kind: 'component-not-found',
-      message: await phantomAwareNotFoundMessage(ctx, fieldId, 'CustomField'),
+      message: caseNote === '' ? phantomMessage : `${phantomMessage} ${caseNote}`,
       path: fieldId,
     });
   }
@@ -688,6 +866,7 @@ export const fieldAccessAuditHandler = async (
   return ok({
     data: {
       fieldId,
+      resolvedFrom,
       fieldLabel: effectiveField.label ?? effectiveField.apiName,
       notModeled,
       ...(notModeled
@@ -724,6 +903,7 @@ export const fieldAccessAuditHandler = async (
           permSetsWithUnknown,
         },
         update,
+        resolvedFrom === null ? null : { fieldId, resolvedFrom },
       ),
     },
     vaultState: {

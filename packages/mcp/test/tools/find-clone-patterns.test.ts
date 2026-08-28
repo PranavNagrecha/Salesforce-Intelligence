@@ -508,7 +508,72 @@ describe('findClonePatternsHandler: cluster mode (P4-clone-patterns)', () => {
     // TwinA/TwinB are identical (score 1.0) so they still cluster at 0.999.
     expect((r.value.data.clusters ?? []).length).toBe(1);
   });
+
+  // ===========================================================================
+  // A RESULT-SIZE FIELD THAT CONTRADICTS THE RESPONSE IT IS IN (real-org, LOW).
+  //
+  // Cluster mode used to hardcode `totalCount: 0` and `matches: []` while
+  // returning a fully populated `clusters` array. `totalCount` is THIS
+  // product's conventional result-size field — the PII, field-cleanup,
+  // flow-fault, dead-code, CRUD/FLS and guest-exposure surfaces all use it as
+  // the honest total — so a caller that has learned the envelope grammar and
+  // short-circuits on `totalCount === 0` (or on `matches.length === 0`) reads a
+  // CERTIFIED ZERO off a response carrying real results. Nothing in
+  // `boundaries` and nothing in the tool description flagged that the field
+  // does not describe a cluster-mode payload.
+  //
+  // Two things are asserted below, and both are required: the count must
+  // describe the payload (a), and the empty `matches` must be DISCLOSED as
+  // empty-by-construction rather than as a searched-and-clean zero (b).
+  // ===========================================================================
+
+  it('cluster mode: totalCount describes the clusters returned, never a hardcoded 0', async () => {
+    const r = await findClonePatternsHandler(ctx2, { type: 'ApexClass' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.mode).toBe('clusters');
+    // The fixture yields exactly one cluster; the guard is that the two
+    // result-size fields AGREE, so this can never be satisfied by a constant.
+    expect(d.clusterCount).toBe(1);
+    expect(d.totalCount).toBe(d.clusterCount);
+    expect(d.totalCount).toBeGreaterThan(0);
+  });
+
+  it('cluster mode: discloses that matches[] is empty BY CONSTRUCTION, not searched-and-clean', async () => {
+    const r = await findClonePatternsHandler(ctx2, { type: 'ApexClass' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.matches).toEqual([]);
+    const joined = r.value.data.boundaries.join(' ');
+    // A host reads boundaries aloud; a machine consumer keys off totalCount.
+    // Both must be told which array carries the answer here.
+    expect(joined).toContain('`matches` is EMPTY BY CONSTRUCTION');
+    expect(joined).toContain('`totalCount` counts those clusters');
+    // `limit` is a seed-mode cap the cluster branch never applies — saying so
+    // is cheaper and more honest than pretending it was honoured.
+    expect(joined).toContain('IGNORED in cluster mode');
+  });
+
+  it('cluster mode: a genuinely clone-free scan still reads a CHECKED zero', async () => {
+    // Overcorrection guard. minScore 1.0001 is unreachable, so no pair unions
+    // and the honest answer is zero clusters — totalCount must be 0 THERE.
+    const r = await findClonePatternsHandler(ctx2, { type: 'ApexClass', minScore: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // TwinA/TwinB are identical (1.0) so they DO union at minScore 1; use a
+    // type with no members at all for the true empty case instead.
+    expect(d.totalCount).toBe(d.clusterCount);
+    const empty = await findClonePatternsHandler(ctx2, { type: 'ApexTrigger' });
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) return;
+    expect(empty.value.data.clusterCount).toBe(0);
+    expect(empty.value.data.totalCount).toBe(0);
+    expect(empty.value.data.scannedCount).toBe(0);
+  });
 });
+
 
 // =============================================================================
 // R6 (0.3.3 honesty census, line 342): SEED mode's per-type walk had a

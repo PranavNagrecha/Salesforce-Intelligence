@@ -261,8 +261,8 @@ export const buildResolveIndex = async (
         push(bySortedChars, sig, idx);
       }
       for (const bg of charBigrams(t)) {
-        if (!seenBigrams.has(`${bg} ${idx}`)) {
-          seenBigrams.add(`${bg} ${idx}`);
+        if (!seenBigrams.has(`${bg}\u0000${idx}`)) {
+          seenBigrams.add(`${bg}\u0000${idx}`);
           push(byBigram, bg, idx);
         }
       }

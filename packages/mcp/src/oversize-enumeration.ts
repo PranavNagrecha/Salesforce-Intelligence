@@ -90,7 +90,7 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.automation_collisions': { bound: 'handler-capped', note: 'limit + byte-budget truncator on both findings lists; narrow the object or raise limit, no cursor (R6-15)' },
   'sfi.review_change': { bound: 'handler-capped', note: 'limit + most-dangerous-first ordering; narrow the changeset or raise limit, no cursor (R6-16)' },
   'sfi.ai_exposure_report': { bound: 'handler-capped', note: 'limit + byte-budget truncator on surfaces + piiExposures; narrow by objectApiName or raise limit, no cursor (R6-13)' },
-  'sfi.search_apex_source': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.search_apex_source': { bound: 'paginated', note: 'offset + CR-22 cursor over the grep hits (adopted paginateLegacy/decodeCursor in 0.3.3; it was a bare top-N truncator with no resume before that). NOTE the residual: `totalCount` is grepped over the whole corpus up to a scan ceiling, so once that ceiling bites it is a LOWER BOUND, disclosed in a typed field rather than presented as a total' },
   'sfi.search_flow_metadata': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   // Was `handler-capped`, "no cursor". Both halves went stale in the commit
   // that gave this tool `offset` plus `totalCount` / `hasMore` / `nextOffset`.

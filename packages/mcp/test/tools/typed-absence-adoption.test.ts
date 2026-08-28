@@ -191,7 +191,11 @@ describe('typed-absence adoption (roster-universal drift gate)', () => {
   // RE-TIGHTENED AGAIN, 88 -> 85, as the MEDIUM/LOW wave landed. Same rule as the
   // 93 -> 88 step: the number only moves here, once, deliberately, and never by an
   // agent passing through on other work.
-  const BASELINE = 85;
+  // RE-TIGHTENED, 85 -> 82. Third time. The number only ever moves here, once,
+  // deliberately, and never by an agent passing through on other work — which is
+  // the whole reason it is a shared file that fails loudly rather than a comment
+  // asking to be respected.
+  const BASELINE = 82;
 
   it('the hand-rolled-predicate count may only shrink (ratchet)', () => {
     const violations: string[] = [];

@@ -9,10 +9,9 @@
  * across refreshes (scores cannot be recomputed from hash-only snapshot nodes).
  */
 
-import { summarizeCoverage } from '@sf-intelligence/vault';
-
 import type { Context } from '../server.js';
 
+import { buildEnumerationCoverageCaveatFor } from './coverage-trust.js';
 import { permissionRiskReportHandler } from './synthesis-reports.js';
 
 /**
@@ -71,6 +70,12 @@ export const securityPostureMetricsFromFindingCount = (
  * proven zero: it was not checked, so it has no count (the same
  * `findingCount: null` law `ComposedAnalysis` encodes for composed
  * reports). Snapshot create must still succeed without metrics.
+ *
+ * The converse matters just as much: a vault whose manifest carries no
+ * coverage rows at all (pre-v4) has no KNOWN gap, only unknown coverage, and
+ * is still graded — withholding there would blank the trend chart forever on
+ * every legacy vault and disclose nothing. `buildEnumerationCoverageCaveatFor`
+ * draws that line; see the call site.
  */
 export const captureSecurityPostureMetrics = async (
   ctx: Context,
@@ -82,22 +87,48 @@ export const captureSecurityPostureMetrics = async (
     // Coverage gate scoped to what this report reads (Profile / PermissionSet
     // / PermissionSetGroup / ApexClass / ApexTrigger — never the whole
     // manifest): none of these five is ever a permanently not-modeled family
-    // for this product, so `missingCoverage` here means "not requested" or
-    // "requested but errored / not confirmed retrieved" — either way, the
-    // over-privilege / CRUD-FLS headline this metric grades was computed over
-    // data that was not actually retrieved. Scoping to this list (rather than
-    // reading the report's own whole-vault `trust.completeness`) is what
-    // keeps this metric from being withheld forever by an UNRELATED
-    // permanently-unmodeled family elsewhere in the vault (e.g. ListView).
-    const coverage = summarizeCoverage(ctx.manifest, [
-      ...SECURITY_POSTURE_REQUIRED_COVERAGE,
-    ]);
-    if (coverage.missingCoverage.length > 0) return undefined;
+    // for this product, so a caveat here means "not requested" or "requested
+    // but errored / not confirmed retrieved" — either way, the over-privilege
+    // / CRUD-FLS headline this metric grades was computed over data that was
+    // not actually retrieved. Scoping to this list (rather than reading the
+    // report's own whole-vault `trust.completeness`) is what keeps this metric
+    // from being withheld forever by an UNRELATED permanently-unmodeled family
+    // elsewhere in the vault (e.g. ListView).
+    //
+    // R6 ADOPTION: this is `buildEnumerationCoverageCaveatFor`, the shared
+    // multi-family coverage predicate, NOT a local re-derivation of it. A
+    // hand-rolled `summarizeCoverage(...).missingCoverage.length > 0` looks
+    // equivalent and is not: it is missing the helper's `coverageKnown` guard,
+    // and on a manifest that persisted NO coverage rows at all (a pre-v4
+    // vault) `summarizeCoverage` reports every requested family as missing —
+    // so the hand-rolled gate withholds this metric on every snapshot,
+    // forever, with nothing saying why. `undefined` caveat == coverage is
+    // either unknowable (legacy vault — never false-flag it) or complete;
+    // either way the finding count is as gradeable as it will ever be. We use
+    // only the caveat's PRESENCE: `SnapshotMeta.metrics` is
+    // `Record<string, number>` and cannot carry the caveat's prose, so the
+    // typed absence (`undefined`, surfaced by `sfi.trend` as `value: null`) is
+    // this metric's whole disclosure channel.
+    const coverageCaveat = buildEnumerationCoverageCaveatFor(
+      ctx,
+      SECURITY_POSTURE_REQUIRED_COVERAGE,
+      'The graded security posture of this vault',
+    );
+    if (coverageCaveat !== undefined) return undefined;
 
     // `auditTotals` is null iff the CRUD/FLS sub-analysis errored (its
     // findings never made it into `findings.length` at all) — the same
     // signal `permissionRiskReportHandler` already exposes for this failure
     // mode, unread until now.
+    //
+    // This reading depends on calling with NO `profileFilter`: the
+    // scoped-profile paths in `synthesis-reports.ts` also return
+    // `auditTotals: null`, but they return it BY DESIGN (they never run the
+    // CRUD/FLS sub-analysis) rather than as an error signal. The call above
+    // passes `{ limit: 50 }` only, so null here is unambiguously "the
+    // sub-analysis failed". If a `profileFilter` is ever plumbed through this
+    // capture, this branch must be re-derived — the owned test pins the
+    // no-filter call shape so that change cannot land silently.
     if (perm.value.data.auditTotals === null) return undefined;
 
     return securityPostureMetricsFromFindingCount(

@@ -1250,3 +1250,343 @@ describe('listComponentsHandler retrievalHint — pending vs never-pulled', () =
     expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Report');
   });
 });
+
+/**
+ * LIST-COMPONENTS-SILENTLY-DROPS-OBJECT-SCOPE.
+ *
+ * Found against a real production org. `sfi.list_components
+ * { type: 'ValidationRule', objectApiName: '<Obj_L>' }` returned the ORG-WIDE
+ * total (332) with a first row belonging to an unrelated managed package —
+ * byte-identical to the same call with no filter at all, and byte-identical to
+ * the same call with a nonsense key. `objectApiName` is the canonical scope key
+ * across the rest of the product, so it is precisely the argument a host LLM
+ * reaches for; it was not in this tool's schema, so Zod stripped it and the
+ * handler certified an org-wide answer as the scoped one.
+ *
+ * `sfi.what_happens_on_save` already refuses an unknown argument by name for
+ * exactly this reason. This block holds this tool to the same doctrine on both
+ * halves: HONOR the object scope, and REFUSE what it cannot honor.
+ *
+ * The second half is the same disease one level down: a `parentId` narrow that
+ * matched nothing was certified `"none in the org"`. The product's OWN router
+ * suggests `{ type: 'ApexTrigger', parentId: 'CustomObject:<X>' }`, and
+ * ApexTrigger nodes are top-level (no object parent) in a real vault — so that
+ * certification read "this org has no triggers" on an org that has 22.
+ */
+describe('listComponentsHandler — object scope (LIST-COMPONENTS-SILENTLY-DROPS-OBJECT-SCOPE)', () => {
+  let scopeDir: string;
+  let scopeStore: GraphStore;
+  let scopeCtx: Context;
+
+  beforeAll(async () => {
+    scopeDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-listcomp-scope-'));
+    const opened = await openGraph(join(scopeDir, 'scope.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    scopeStore = opened.value;
+    const vr = (parent: string, name: string): Node =>
+      makeNode({
+        id: `ValidationRule:${parent}.${name}`,
+        type: 'ValidationRule',
+        apiName: name,
+        label: name,
+        parentId: `CustomObject:${parent}`,
+        sourcePath: `objects/${parent}/validationRules/${name}.validationRule-meta.xml`,
+      });
+    const imported = await importExtractionResults(scopeStore, [
+      {
+        nodes: [
+          makeNode({ id: 'CustomObject:Obj_A__c', apiName: 'Obj_A__c', label: 'Obj A' }),
+          makeNode({ id: 'CustomObject:Obj_B__c', apiName: 'Obj_B__c', label: 'Obj B' }),
+          vr('Obj_A__c', 'Rule_One'),
+          vr('Obj_A__c', 'Rule_Two'),
+          vr('Obj_B__c', 'Rule_Three'),
+          // Top-level: no object parent, so no `CustomObject:` narrow can ever
+          // match one. This is the shape ApexTrigger / Flow / ApexClass have.
+          makeNode({
+            id: 'Flow:Flow_B',
+            type: 'Flow',
+            apiName: 'Flow_B',
+            label: 'Flow B',
+            // Record-triggered so the `recordTriggered` short-circuit term can
+            // be exercised as a SEPARATE case from `status`.
+            properties: { status: 'Active', triggerType: 'RecordAfterSave' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    scopeCtx = { vaultRoot: scopeDir, manifest: FIXTURE_MANIFEST, graph: scopeStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(scopeStore);
+    rmSync(scopeDir, { recursive: true, force: true });
+  });
+
+  it('honors objectApiName instead of returning the org-wide list', async () => {
+    // FAIL-BEFORE: `objectApiName` was not a schema key, so the handler saw
+    // `{type}` alone and answered totalCount 3 — every rule in the vault.
+    const parsed = listComponentsInputSchema.safeParse({
+      type: 'ValidationRule',
+      objectApiName: 'Obj_A__c',
+    });
+    expect(parsed.success).toBe(true);
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'ValidationRule',
+      objectApiName: 'Obj_A__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(2);
+    expect(r.value.data.components.map((n) => n.id)).toEqual([
+      'ValidationRule:Obj_A__c.Rule_One',
+      'ValidationRule:Obj_A__c.Rule_Two',
+    ]);
+    // The applied narrow must be echoed, or a caller cannot tell a scoped
+    // answer from an org-wide one.
+    expect(r.value.data.appliedScope).toEqual({
+      object: 'Obj_A__c',
+      componentId: 'CustomObject:Obj_A__c',
+      narrowedBy: 'parentId',
+    });
+  });
+
+  it('honors the `object` and `objectId` aliases identically', async () => {
+    for (const key of ['object', 'objectId'] as const) {
+      const r = await listComponentsHandler(scopeCtx, {
+        type: 'ValidationRule',
+        [key]: 'Obj_B__c',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalCount).toBe(1);
+      expect(r.value.data.appliedScope?.componentId).toBe('CustomObject:Obj_B__c');
+    }
+  });
+
+  it('resolves a WRONG-CASE object name to the vault casing rather than answering org-wide', async () => {
+    // Salesforce api names are case-insensitive. On the real org the lower-case
+    // form produced a confident "no PII on <Obj>" where the truth was nine.
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'ValidationRule',
+      objectApiName: 'obj_a__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(2);
+    expect(r.value.data.appliedScope?.componentId).toBe('CustomObject:Obj_A__c');
+    expect(r.value.data.appliedScope?.resolvedFrom).toBe('CustomObject:obj_a__c');
+  });
+
+  it('REFUSES an object that does not exist in the vault instead of widening to org-wide', async () => {
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'ValidationRule',
+      objectApiName: 'Obj_Z__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Obj_Z__c');
+  });
+
+  it('REFUSES an objectApiName that disagrees with an explicit parentId', async () => {
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'ValidationRule',
+      objectApiName: 'Obj_A__c',
+      parentId: 'CustomObject:Obj_B__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('CustomObject:Obj_A__c');
+    expect(r.error.message).toContain('CustomObject:Obj_B__c');
+  });
+
+  it('REFUSES an unknown argument by name rather than silently dropping it', () => {
+    // The doctrine `sfi.what_happens_on_save` already states verbatim. Before
+    // the fix this parsed clean and the answer was byte-identical to the
+    // unfiltered call.
+    const parsed = listComponentsInputSchema.safeParse({
+      type: 'ValidationRule',
+      zzzNonsense: 'xyz',
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    const message = parsed.error.issues.map((i) => i.message).join(' ');
+    expect(message).toContain('zzzNonsense');
+    expect(message).toContain(
+      'Refusing rather than ignoring it — a silently-dropped argument returns a confident answer to a question you did not ask.',
+    );
+    // The refusal must name what the tool DOES accept, including the scope keys.
+    expect(message).toContain('objectApiName');
+    expect(message).toContain('parentId');
+  });
+
+  it('does NOT certify "none in the org" when an object narrow matched nothing', async () => {
+    // FAIL-BEFORE: the empty page fell through to
+    // `"…retrieved `Flow` and found none — this is \"none in the org\"…"`,
+    // which is false on a vault holding a Flow: the narrow is PARENT-based and
+    // a top-level type can never match it.
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'Flow',
+      objectApiName: 'Obj_A__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(0);
+    expect(r.value.data.retrievalHint).toBeDefined();
+    // The CERTIFICATION is what has to go: the old sentence asserted the zero
+    // as an org-wide fact. The replacement may quote the phrase to negate it.
+    expect(r.value.data.retrievalHint).not.toContain('this is "none in the org"');
+    expect(r.value.data.retrievalHint).toContain('PARENT-scoped zero');
+    // TYPED, so a machine consumer cannot skip past the prose.
+    expect(r.value.data.scopeCaveat).toEqual({
+      parentId: 'CustomObject:Obj_A__c',
+      narrowedBy: 'parentId',
+      countWithoutParentNarrow: 1,
+      parentScopedOnly: true,
+    });
+  });
+
+  it('gives the same honest hint for a bare parentId narrow (the router suggests these)', async () => {
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'Flow',
+      parentId: 'CustomObject:Obj_B__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.retrievalHint).not.toContain('this is "none in the org"');
+    expect(r.value.data.retrievalHint).toContain('PARENT-scoped zero');
+    expect(r.value.data.scopeCaveat?.countWithoutParentNarrow).toBe(1);
+  });
+
+  it('still discloses the scoped zero when a PROPERTY filter is also active', async () => {
+    // The coverage prose is deliberately suppressed under a property filter (an
+    // empty result there is the filter's doing, not a coverage gap). The SCOPE
+    // disclosure is a different fact and must survive that suppression, or a
+    // filtered scoped zero is certified silently. `countWithoutParentNarrow`
+    // keeps every other filter intact and drops ONLY the parent narrow.
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'Flow',
+      objectApiName: 'Obj_A__c',
+      status: 'Active',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(0);
+    expect(r.value.data.scopeCaveat?.countWithoutParentNarrow).toBe(1);
+    expect(r.value.data.appliedScope?.componentId).toBe('CustomObject:Obj_A__c');
+    // A TYPED field alone is half a disclosure: a prose-only host renders
+    // `retrievalHint` and never looks at `scopeCaveat`, so it read this back as
+    // a bare zero. The scope sentence must survive the coverage-guard
+    // short-circuit that the property filter triggers.
+    expect(r.value.data.retrievalHint).toBeDefined();
+    expect(r.value.data.retrievalHint).toContain('PARENT-scoped zero');
+    expect(r.value.data.retrievalHint).not.toContain('this is "none in the org"');
+  });
+
+  it('carries the scope prose for a recordTriggered-filtered scoped zero too', async () => {
+    // recordTriggered is a separate short-circuit term in the same guard, so it
+    // is checked separately rather than assumed to follow from `status`.
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'Flow',
+      objectApiName: 'Obj_A__c',
+      recordTriggered: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(0);
+    expect(r.value.data.retrievalHint).toContain('PARENT-scoped zero');
+  });
+
+  it('REFUSES a whitespace-only object scope instead of silently widening to the org', async () => {
+    // The exact defect this lane exists to kill, surviving on a degenerate
+    // input: `z.string().min(1)` measures the RAW string, so '   ' cleared the
+    // check, then trimmed away downstream and resolved to NO scope — the
+    // ORG-WIDE list returned under a scoped question, with no `appliedScope` to
+    // give the reader a clue. Every alias is checked: they share one resolver
+    // but they are three separate schema entries.
+    // Asserted through the HANDLER first, so the failure output names the
+    // actual harm (the org-wide 3 with no `appliedScope`) rather than a schema
+    // technicality, and so the test still bites if the refusal ever moves out
+    // of Zod and into the handler.
+    const parsed = listComponentsInputSchema.safeParse({
+      type: 'ValidationRule',
+      objectApiName: '   ',
+    });
+    if (parsed.success) {
+      const r = await listComponentsHandler(scopeCtx, parsed.data);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(
+        { totalCount: r.value.data.totalCount, appliedScope: r.value.data.appliedScope },
+        'a blank scope must never return the org-wide count with no appliedScope',
+      ).not.toEqual({ totalCount: 3, appliedScope: undefined });
+    }
+    // Every alias: they share one resolver but are three separate schema entries.
+    for (const key of ['objectApiName', 'object', 'objectId'] as const) {
+      for (const blank of ['   ', '\t', '\n ']) {
+        expect(
+          listComponentsInputSchema.safeParse({ type: 'ValidationRule', [key]: blank })
+            .success,
+          `${key}=${JSON.stringify(blank)} must be refused, not widened`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('still accepts a scope with incidental surrounding whitespace', async () => {
+    // Trim REFUSES an empty scope; it must not refuse a real one a host padded.
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'ValidationRule',
+      objectApiName: listComponentsInputSchema.parse({
+        type: 'ValidationRule',
+        objectApiName: '  Obj_A__c  ',
+      }).objectApiName,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(2);
+    expect(r.value.data.appliedScope?.componentId).toBe('CustomObject:Obj_A__c');
+  });
+
+  it('does NOT invent a caveat when the parent narrow is the only thing that could have matched', async () => {
+    // Same query, a filter nothing satisfies: dropping the parent narrow still
+    // returns zero, so there is no second zero to distinguish and no caveat.
+    const r = await listComponentsHandler(scopeCtx, {
+      type: 'Flow',
+      objectApiName: 'Obj_A__c',
+      status: 'Obsolete',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.scopeCaveat).toBeUndefined();
+  });
+
+  it('leaves the unscoped shape untouched — no appliedScope, no scopeCaveat', async () => {
+    const r = await listComponentsHandler(scopeCtx, { type: 'ValidationRule' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(3);
+    expect(r.value.data.appliedScope).toBeUndefined();
+    expect(r.value.data.scopeCaveat).toBeUndefined();
+  });
+
+  it('an honestly-empty narrow on a parented type still says "none under this parent", not "none in the org"', async () => {
+    // Obj_B__c HAS validation rules, but none named by this parent+type pair
+    // once we narrow to a parent that has none of them.
+    const empty = await listComponentsHandler(scopeCtx, {
+      type: 'RecordType',
+      objectApiName: 'Obj_A__c',
+    });
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) return;
+    expect(empty.value.data.totalCount).toBe(0);
+    // RecordType was never retrieved into this fixture vault, so coverage — not
+    // the scope — owns the sentence. It must still not claim "none in the org".
+    expect(empty.value.data.retrievalHint).not.toContain(
+      'this is "none in the org"',
+    );
+  });
+});

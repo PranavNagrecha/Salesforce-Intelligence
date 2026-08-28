@@ -121,3 +121,55 @@ describe('phantomAwareNotFoundMessage — R1 query-failure honesty', () => {
     rmSync(failDir, { recursive: true, force: true });
   });
 });
+
+describe('phantomAwareNotFoundMessage — custom-suffix test must be case-INSENSITIVE', () => {
+  // The custom-vs-standard decision is a pure SUFFIX test with no vault
+  // lookup behind it. Written case-sensitively (`endsWith('__c')`) it calls
+  // any `__C` / `__MDT` id on a standard parent object a "standard-object
+  // field", which FABRICATES an authoritative-sounding property of a
+  // component the vault never looked up — including for names that exist in
+  // no org at all. Salesforce api names are case-insensitive, so the suffix
+  // must be compared case-folded.
+  const FABRICATION = 'is a standard-object field';
+
+  it('does NOT claim an invented `__C` name on a standard parent is a standard field', async () => {
+    const msg = await phantomAwareNotFoundMessage(
+      ctx,
+      'CustomField:Task.Zzz_Nope__C' as ComponentId,
+      'CustomField',
+    );
+    expect(msg).not.toContain(FABRICATION);
+    expect(msg).toBe('no CustomField with id CustomField:Task.Zzz_Nope__C');
+  });
+
+  it('folds every casing of the custom suffixes (__C / __c / __MDT / __mdt)', async () => {
+    for (const suffix of ['__C', '__c', '__mDt', '__MDT', '__mdt']) {
+      const id = `CustomField:Account.Zzz_Nope${suffix}` as ComponentId;
+      const msg = await phantomAwareNotFoundMessage(ctx, id, 'CustomField');
+      expect(msg, `suffix ${suffix}`).not.toContain(FABRICATION);
+      expect(msg, `suffix ${suffix}`).toBe(`no CustomField with id ${id}`);
+    }
+  });
+
+  it('CONTROL: the standard-field disclosure still fires for a real standard field (fold did not disable the branch)', async () => {
+    const msg = await phantomAwareNotFoundMessage(
+      ctx,
+      'CustomField:Account.Industry' as ComponentId,
+      'CustomField',
+    );
+    expect(msg).toContain(FABRICATION);
+  });
+
+  it('CONTROL: a wrong-CASE parent object stays a bare not-found (the object-name test must NOT be folded)', async () => {
+    // Folding STANDARD_OBJECT_API_NAMES.has(objectApi) would route MORE ids
+    // into the disclosure branch, which is the wrong direction for a
+    // fabrication defect. Lock the current behaviour so a later "symmetry"
+    // edit has to argue with a test.
+    const msg = await phantomAwareNotFoundMessage(
+      ctx,
+      'CustomField:account.Industry' as ComponentId,
+      'CustomField',
+    );
+    expect(msg).toBe('no CustomField with id CustomField:account.Industry');
+  });
+});

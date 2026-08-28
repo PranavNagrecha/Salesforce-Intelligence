@@ -31,13 +31,31 @@
 // OPPOSITE — that neither file imports yet — which would have turned the suite
 // red at the exact moment the defect was actually fixed. Do not reintroduce
 // an assertion whose passing condition is that the bug still exists.
+//
+// The source-text layer below is only half the guard. It stops reading anything
+// once a file adopts the import, and it never proves the list is APPLIED. The
+// BEHAVIOURAL layer at the bottom of this file closes both gaps by driving the
+// two tools over a real graph. If you only have budget to keep one, keep that
+// one.
 // =============================================================================
 
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { Edge, ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../../src/server.js';
 import { NOT_USAGE_EDGE_TYPES } from '../../src/tools/apex-reachability.js';
+import { findComponentUsagesHandler } from '../../src/tools/find-component-usages.js';
+import { object360Handler } from '../../src/tools/object-360.js';
 
 const toolsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'tools');
 
@@ -158,5 +176,113 @@ describe('R6 — object-360.ts and find-component-usages.ts NON_USAGE_EDGE_TYPES
 
   it('find-component-usages.ts either imports the canonical NOT_USAGE_EDGE_TYPES or matches it exactly', () => {
     assertDenyListNotDrifted('find-component-usages.ts', readToolSource('find-component-usages.ts'));
+  });
+});
+
+// =============================================================================
+// R6, at the TOOL's answer rather than at its source text.
+//
+// Everything above compares SOURCE TEXT. That guard bites today, but it has two
+// holes a reader should not have to discover the hard way:
+//
+//   1. it goes VACUOUS the moment either file adopts the import — the adopted
+//      shape carries no literal, so from then on nothing checks that the tool
+//      still HONOURS the list; and
+//   2. it never executed either tool. A deny-list that is correct and simply
+//      not APPLIED at one of the three call sites (object-360.ts:816 field
+//      tier, object-360.ts:1009 object tier, find-component-usages.ts:586)
+//      reads as perfectly in-agreement to a regex.
+//
+// So this block drives both handlers over a real in-memory graph and DERIVES
+// the fixture from `NOT_USAGE_EDGE_TYPES`: one referrer per canonical
+// non-usage member, plus exactly one genuine usage edge per tier. The
+// assertion is always "one usage edge", whatever the canonical list contains.
+// Add a member to the canonical list and forget to mirror it into either
+// hand-copy and the tool COUNTS it — the answer changes, and this fails.
+//
+// This is not a second copy of the exclusion assertions those two tools already
+// carry in their own suites: theirs name `grantedBy` / `parentOf` by hand, which
+// is the very hand-copying R6 is about. This one names nothing.
+// =============================================================================
+
+const OBJ = 'CustomObject:Obj_A__c';
+const FLD = 'CustomField:Obj_A__c.Field_B__c';
+const USER = 'ApexClass:Class_C';
+
+const mkNode = (o: Partial<Node> & Pick<Node, 'id' | 'type' | 'apiName'>): Node => ({
+  label: null, parentId: null, sourcePath: 'x.xml', lastModifiedDate: null,
+  lastModifiedBy: null, apiVersion: null, properties: {}, ...o,
+});
+const mkEdge = (o: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>): Edge => ({
+  confidence: 'declared', source: 'unit-test', properties: {}, ...o,
+});
+
+/** One referrer per canonical non-usage member — DERIVED, never named here. */
+const NON_USAGE_REFERRERS = NOT_USAGE_EDGE_TYPES.map((edgeType, i) => ({
+  id: `Profile:NonUsage_${i}`,
+  edgeType,
+}));
+
+const behaviourSeed: ExtractionResult = {
+  nodes: [
+    mkNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' }),
+    mkNode({ id: FLD, type: 'CustomField', apiName: 'Field_B__c', parentId: OBJ }),
+    mkNode({ id: USER, type: 'ApexClass', apiName: 'Class_C' }),
+    ...NON_USAGE_REFERRERS.map((r) => mkNode({ id: r.id, type: 'Profile', apiName: r.id.slice('Profile:'.length) })),
+  ],
+  edges: [
+    // Exactly ONE genuine usage edge per tier.
+    mkEdge({ fromId: USER, toId: FLD, edgeType: 'readsFrom' }),
+    mkEdge({ fromId: USER, toId: OBJ, edgeType: 'references' }),
+    // One edge of EVERY canonical non-usage type, into BOTH tiers.
+    ...NON_USAGE_REFERRERS.map((r) => mkEdge({ fromId: r.id, toId: FLD, edgeType: r.edgeType })),
+    ...NON_USAGE_REFERRERS.map((r) => mkEdge({ fromId: r.id, toId: OBJ, edgeType: r.edgeType })),
+  ],
+};
+
+const BEHAVIOUR_MANIFEST: VaultManifest = {
+  version: '0.1.0', refreshedAt: '2026-06-09T00:00:00Z', sourceOrg: 'me@example.com',
+  components: {}, edges: {}, sourceTreeHash: 'sha256:fixture',
+};
+
+describe('R6 — both hand-copies must BEHAVE like the canonical deny-list', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-apex-reach-'));
+    const opened = await openGraph(join(dir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    const imported = await importExtractionResults(store, [behaviourSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx = { vaultRoot: dir, manifest: BEHAVIOUR_MANIFEST, graph: store };
+  });
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('find_component_usages counts ONE usage referrer, whatever the canonical list holds', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: FLD, includeGrep: false });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.graphReferrerCount).toBe(1);
+    expect([...d.summary.referrerTypes]).toEqual(['ApexClass']);
+    const seen = d.graphReferrers.flatMap((g) => g.sample.map((s) => s.referrerId));
+    for (const r2 of NON_USAGE_REFERRERS) expect(seen).not.toContain(r2.id);
+  });
+
+  it('object_360 counts ONE usage edge per tier, whatever the canonical list holds', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'Obj_A__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const summary = (r.value.data as { summary: Record<string, unknown> }).summary;
+    // :1009 object tier and :816 field tier are SEPARATE applications of the
+    // same list — a drift that reaches only one of them is still caught.
+    expect(summary.objectLevelUsageEdges).toBe(1);
+    expect(summary.fieldLevelUsageEdges).toBe(1);
   });
 });

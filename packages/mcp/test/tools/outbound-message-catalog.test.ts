@@ -638,3 +638,233 @@ describe('outboundMessageCatalogHandler — objectFilter is a VERIFIED scope', (
     expect(d.disclosure).toContain('NOT VALIDATED');
   });
 });
+
+// =============================================================================
+// OUTBOUND-MESSAGE-CATALOG-CERTIFIES-AN-UNCHECKED-WORKFLOW-CORPUS (R1 / MEDIUM)
+//
+// The zero-entry disclosure upgraded "no OutboundMessage nodes" into an ORG
+// FACT — "the org defines none … do not suggest a refresh" — on the strength of
+// ONE manifest row: `summarizeCoverage(manifest, ['WorkflowRule']).status`.
+//
+// That row is a PER-TYPE retrieve tally. It does not certify that every
+// object's `.workflow-meta.xml` reached the vault, and classic SOAP
+// `<outboundMessages>` live inside those FILES. On a real vault the row read
+// `complete` while retrieved approval processes referenced workflow actions on
+// an object for which this vault holds NO modeled workflow component at all —
+// so the file that would have carried that object's outbound messages was never
+// scanned, and the answer certified it anyway AND told the reader to stop
+// looking.
+//
+// Note on the evidence shape: `WorkflowFieldUpdate:` / `WorkflowTask:`
+// references dangle BY DESIGN (no extractor mints those node types), so an
+// unresolved reference alone is NOT a gap. The gap is an object that is
+// REFERENCED by a workflow-action id while this vault holds NO node of a type
+// the workflow extractor actually mints (WorkflowRule / WorkflowAlert /
+// OutboundMessage) for it.
+// =============================================================================
+
+const MODELED_OBJECT = 'CustomObject:Obj_A__c';
+const MODELED_ALERT = 'WorkflowAlert:Obj_A__c.Notify_Owner';
+const UNMODELED_OBJECT = 'CustomObject:Pkg_Obj_B__c';
+
+/**
+ * A manifest whose WorkflowRule row is `requested + retrieveConfirmed` with a
+ * zero tally — EXACTLY the row shape the real vault carries, and the one
+ * `summarizeCoverage` reports as `complete`.
+ */
+const CONFIRMED_WORKFLOW_ROW_MANIFEST = {
+  version: '0.1.0',
+  refreshedAt: '2026-05-27T14:33:08Z',
+  sourceOrg: 'me@example.com',
+  components: { CustomObject: 2 },
+  edges: {},
+  sourceTreeHash: 'sha256:outbound-workflow-blindspot',
+  coverage: [
+    {
+      type: 'WorkflowRule',
+      requested: true,
+      retrieved: 0,
+      errored: false,
+      neverModeled: false,
+      retrieveConfirmed: true,
+    },
+  ],
+} as unknown as VaultManifest;
+
+describe('outboundMessageCatalogHandler — a zero is never certified over an unscanned workflow corpus', () => {
+  let gapDir: string;
+  let gapStore: GraphStore;
+  let gapCtx: Context;
+
+  beforeAll(async () => {
+    gapDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-outbound-gap-'));
+    const opened = await openGraph(join(gapDir, 'gap.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    gapStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: MODELED_OBJECT, type: 'CustomObject', apiName: 'Obj_A__c' }),
+        // Obj_A__c's workflow metadata IS modeled here (an alert node came out
+        // of its `.workflow-meta.xml`), so its dangling field-update reference
+        // below is dangling-BY-DESIGN and must NOT be reported as a gap.
+        makeNode({
+          id: MODELED_ALERT,
+          type: 'WorkflowAlert',
+          apiName: 'Obj_A__c.Notify_Owner',
+          parentId: MODELED_OBJECT,
+          properties: { name: 'Notify_Owner' },
+        }),
+        makeNode({
+          id: UNMODELED_OBJECT,
+          type: 'CustomObject',
+          apiName: 'Pkg_Obj_B__c',
+        }),
+        makeNode({
+          id: 'ApprovalProcess:Obj_A__c.Approve_A',
+          type: 'ApprovalProcess',
+          apiName: 'Obj_A__c.Approve_A',
+        }),
+        makeNode({
+          id: 'ApprovalProcess:Pkg_Obj_B__c.Approve_B',
+          type: 'ApprovalProcess',
+          apiName: 'Pkg_Obj_B__c.Approve_B',
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'ApprovalProcess:Obj_A__c.Approve_A',
+          toId: 'WorkflowFieldUpdate:Obj_A__c.Set_Status',
+          edgeType: 'references',
+        }),
+        makeEdge({
+          fromId: 'ApprovalProcess:Pkg_Obj_B__c.Approve_B',
+          toId: 'WorkflowFieldUpdate:Pkg_Obj_B__c.Set_Approved',
+          edgeType: 'references',
+        }),
+        makeEdge({
+          fromId: 'ApprovalProcess:Pkg_Obj_B__c.Approve_B',
+          toId: 'WorkflowFieldUpdate:Pkg_Obj_B__c.Set_Rejected',
+          edgeType: 'references',
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(gapStore, [seed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    gapCtx = {
+      vaultRoot: gapDir,
+      manifest: CONFIRMED_WORKFLOW_ROW_MANIFEST,
+      graph: gapStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(gapStore);
+    rmSync(gapDir, { recursive: true, force: true });
+  });
+
+  it('does not report coverageStatus=complete when an object’s workflow metadata is not modeled in this vault', async () => {
+    const result = await outboundMessageCatalogHandler(gapCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.totalEntries).toBe(0);
+    expect(result.value.data.coverageStatus).not.toBe('complete');
+  });
+
+  it('names the unscanned objects in a TYPED coverageGap a machine consumer cannot skip', async () => {
+    const result = await outboundMessageCatalogHandler(gapCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const gap = result.value.data.coverageGap;
+    expect(gap).not.toBeNull();
+    // ONLY the object with no modeled workflow component. Obj_A__c also has an
+    // unresolved `WorkflowFieldUpdate:` reference, but that family is never
+    // minted as nodes, so flagging it would be crying wolf on every vault.
+    expect(gap?.objectsWithoutModeledWorkflowMetadata).toEqual(['Pkg_Obj_B__c']);
+    expect(gap?.unresolvedWorkflowReferenceCount).toBe(2);
+  });
+
+  it('does not tell the reader to stop looking, and says which object was not scanned', async () => {
+    const result = await outboundMessageCatalogHandler(gapCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disclosure = result.value.data.disclosure;
+    expect(disclosure).not.toContain('do not suggest a refresh');
+    expect(disclosure).not.toContain(
+      'No outbound message definitions exist in this org',
+    );
+    expect(disclosure).toContain('Pkg_Obj_B__c');
+  });
+
+  it('a call SCOPED to the unscanned object says the zero is not a checked zero for it', async () => {
+    const result = await outboundMessageCatalogHandler(gapCtx, {
+      objectFilter: 'Pkg_Obj_B__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.summary.totalEntries).toBe(0);
+    expect(d.disclosure).toContain('NOT a checked zero for Pkg_Obj_B__c');
+    expect(d.disclosure).not.toContain('determinate negative');
+  });
+
+  it('does NOT hedge a scoped answer for an object the gap is not about', async () => {
+    const result = await outboundMessageCatalogHandler(gapCtx, {
+      objectFilter: 'Obj_A__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    // Obj_A__c's own workflow metadata IS modeled, so its zero is a checked
+    // zero — the org-wide downgrade must not be laundered into a warning about
+    // Obj_A__c that the reader cannot act on...
+    expect(d.disclosure).toContain('determinate negative FOR Obj_A__c');
+    expect(d.disclosure).not.toContain('NOT a checked zero');
+    // ...but the org-wide downgrade is still stated, and still typed.
+    expect(d.coverageStatus).toBe('partial');
+    expect(d.disclosure).toContain('Org-wide note');
+    expect(d.coverageGap?.objectsWithoutModeledWorkflowMetadata).toEqual([
+      'Pkg_Obj_B__c',
+    ]);
+  });
+
+  it('leaves coverageGap null on a vault with no unscanned workflow object (control)', async () => {
+    const cleanDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-outbound-clean-'));
+    const opened = await openGraph(join(cleanDir, 'clean.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const cleanStore = opened.value;
+    const imported = await importExtractionResults(cleanStore, [
+      {
+        nodes: [
+          makeNode({ id: MODELED_OBJECT, type: 'CustomObject', apiName: 'Obj_A__c' }),
+          makeNode({
+            id: MODELED_ALERT,
+            type: 'WorkflowAlert',
+            apiName: 'Obj_A__c.Notify_Owner',
+            parentId: MODELED_OBJECT,
+            properties: { name: 'Notify_Owner' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imported.ok).toBe(true);
+    const result = await outboundMessageCatalogHandler(
+      {
+        vaultRoot: cleanDir,
+        manifest: CONFIRMED_WORKFLOW_ROW_MANIFEST,
+        graph: cleanStore,
+      },
+      {},
+    );
+    await closeGraph(cleanStore);
+    rmSync(cleanDir, { recursive: true, force: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.coverageGap).toBeNull();
+    expect(result.value.data.coverageStatus).toBe('complete');
+    expect(result.value.data.disclosure).toContain('determinate negative');
+  });
+});

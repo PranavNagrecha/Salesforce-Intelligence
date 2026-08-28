@@ -2458,9 +2458,14 @@ describe('safeToDeleteFieldHandler — cross-tool parity with field_360', () => 
     expect(ru?.usedInDashboard).toBeNull();
     expect(ru?.dashboardNames).toBeNull();
     expect(ru?.reportNames).toBeNull();
-    expect(ru?.evidenceNote).toContain('NOT retrieved into this vault');
+    expect(ru?.evidenceNote).toContain('NOT FULLY retrieved into this vault');
     expect(ru?.evidenceNote).toContain('NOT CHECKED');
     expect(ru?.evidenceNote).toContain('sfi refresh --with-reports');
+    // The note used to flatly assert 'were NOT retrieved' while `usedInReport`
+    // above is TRUE off a NAMED report from this very vault — a sentence that
+    // contradicts the field it annotates. The `true` must stay explainable.
+    expect(ru?.evidenceNote).not.toContain('were NOT retrieved into this vault');
+    expect(ru?.evidenceNote).toContain('still comes from analytics metadata that IS in this vault');
   });
 
   it('when the fold DID capture names, they are produced as evidence', async () => {
@@ -2498,5 +2503,184 @@ describe('safeToDeleteFieldHandler — cross-tool parity with field_360', () => 
     expect(wrongType.ok).toBe(false);
     if (wrongType.ok) return;
     expect(wrongType.error.kind).toBe('invalid-query');
+  });
+});
+
+// =============================================================================
+// WRONG-CASE FIELD ID — a real, modeled, BLOCKING field typed in the wrong case
+// came back as `component-not-found`, and (when the caller's suffix was `__C`)
+// with a fabricated "this is a standard-object field" explanation attached.
+// Salesforce api names are case-insensitive; component ids are not. A
+// delete-safety tool that turns a loud "do not delete this" into silence for a
+// casing slip is the worst place in the product for that to happen.
+// =============================================================================
+
+describe('safeToDeleteFieldHandler — wrong-CASE field id', () => {
+  it('resolves an all-lowercase real field id to the vault casing and still says blocking', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: 'CustomField:account.usedbyflow__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(FLOW_FIELD);
+    expect(result.value.data.verdict).toBe('blocking');
+  });
+
+  it('does NOT call an uppercase-suffix custom field a standard field', async () => {
+    // `__C` instead of `__c`: the id names a modeled CUSTOM field. The answer
+    // must be that field's verdict, never an authoritative-sounding claim that
+    // the vault does not model it.
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: 'CustomField:Account.UsedByFlow__C',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(FLOW_FIELD);
+    expect(result.value.data.verdict).toBe('blocking');
+  });
+
+  it('DISCLOSES the case correction in a typed limitation naming both ids', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: 'CustomField:account.usedbyflow__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disclosure = result.value.data.trust.limitations.find((l) =>
+      l.includes('CustomField:account.usedbyflow__c'),
+    );
+    expect(disclosure).toBeDefined();
+    expect(disclosure).toContain(FLOW_FIELD);
+  });
+
+  it('discloses the case correction on the undeletable standard-field short-circuit too', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-case-std-'));
+    const opened = await openGraph(join(dir, 'case-std.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const imp = await importExtractionResults(s, [
+        {
+          nodes: [
+            makeNode({ id: 'CustomObject:Lead', type: 'CustomObject', apiName: 'Lead' }),
+            makeNode({
+              id: 'CustomField:Lead.Industry',
+              apiName: 'Industry',
+              parentId: 'CustomObject:Lead',
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      expect(imp.ok).toBe(true);
+      const localCtx: Context = {
+        vaultRoot: dir,
+        manifest: FIXTURE_MANIFEST,
+        graph: s,
+        liveCapability: mintLiveCapability('opt-in'),
+      };
+      const r = await safeToDeleteFieldHandler(localCtx, {
+        fieldId: 'CustomField:lead.industry',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.fieldId).toBe('CustomField:Lead.Industry');
+      expect(r.value.data.verdict).toBe('blocking');
+      expect(
+        r.value.data.trust.limitations.some((l) =>
+          l.includes('CustomField:lead.industry'),
+        ),
+      ).toBe(true);
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('REFUSES rather than picks when two vault fields differ only by case', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-case-ambig-'));
+    const opened = await openGraph(join(dir, 'ambig.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const imp = await importExtractionResults(s, [
+        {
+          nodes: [
+            makeNode({ id: 'CustomObject:Obj_A__c', type: 'CustomObject', apiName: 'Obj_A__c' }),
+            makeNode({
+              id: 'CustomField:Obj_A__c.Dup__c',
+              apiName: 'Dup__c',
+              parentId: 'CustomObject:Obj_A__c',
+            }),
+            makeNode({
+              id: 'CustomField:Obj_A__c.DUP__c',
+              apiName: 'DUP__c',
+              parentId: 'CustomObject:Obj_A__c',
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      expect(imp.ok).toBe(true);
+      const localCtx: Context = {
+        vaultRoot: dir,
+        manifest: FIXTURE_MANIFEST,
+        graph: s,
+        liveCapability: mintLiveCapability('opt-in'),
+      };
+      const r = await safeToDeleteFieldHandler(localCtx, {
+        fieldId: 'CustomField:Obj_A__c.dup__c',
+      });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+      expect(r.error.message).toContain('CASE');
+      expect(r.error.message).toContain('CustomField:Obj_A__c.Dup__c');
+      expect(r.error.message).toContain('CustomField:Obj_A__c.DUP__c');
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says the id was case-corrected in the CHECKLIST prose, above the verdict', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: 'CustomField:account.usedbyflow__c',
+      format: 'checklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const checklist = result.value.data.checklist ?? '';
+    expect(checklist).toContain('case-corrected');
+    expect(checklist).toContain('CustomField:account.usedbyflow__c');
+    expect(checklist.indexOf('case-corrected')).toBeLessThan(
+      checklist.indexOf('**Verdict:'),
+    );
+  });
+
+  it('quotes the id the caller LITERALLY typed on the short-form path, not the normalized one', async () => {
+    // Short form + wrong case. The disclosure must name the string the caller
+    // actually typed; quoting back a `CustomField:`-prefixed id they never
+    // wrote reads as if the tool had been handed something else.
+    const typed = 'account.usedbyflow__c';
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: typed });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(FLOW_FIELD);
+    const disclosure = result.value.data.trust.limitations.find((l) =>
+      l.includes('case-corrected'),
+    );
+    expect(disclosure).toBeDefined();
+    expect(disclosure).toContain(`\`${typed}\``);
+    expect(disclosure).toContain(FLOW_FIELD);
+    expect(disclosure).not.toContain('`CustomField:account.usedbyflow__c`');
+  });
+
+  it('still returns an honest component-not-found for a field that exists in NO casing', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: 'CustomField:Account.Not_A_Field_Here__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
   });
 });

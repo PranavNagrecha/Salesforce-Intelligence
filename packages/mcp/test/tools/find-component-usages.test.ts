@@ -548,3 +548,508 @@ describe('findComponentUsagesHandler — edge count vs distinct referrer count',
     }
   });
 });
+
+// FCU-WRONG-CASE-ID-READS-AS-ABSENT. The universal usage dispatcher receives
+// whatever string a host LLM was handed — including a name read off a
+// spreadsheet in the wrong case. Measured on a real vault: the exactly-cased id
+// returned a full answer, the SAME id lower-cased returned
+// `component-not-found` with a message and payload byte-identical to the one a
+// FABRICATED one-character typo produced. A caller could not tell "you
+// mis-typed the case of something real" from "this does not exist", and the
+// natural host recovery is to report an ACTIVE component absent from the org.
+// `sfi.resolve` resolves the same lower-cased string to `exact` on the same
+// vault, so the product already held the resolver.
+describe('findComponentUsagesHandler — wrong-CASE component id', () => {
+  beforeAll(async () => {
+    await importExtractionResults(store, [{
+      nodes: [
+        // Two nodes differing ONLY by case: case-insensitive RESOLUTION must
+        // never become case-insensitive IDENTITY.
+        node({ id: 'Flow:Dup_Case_Flow', type: 'Flow', apiName: 'Dup_Case_Flow' }),
+        node({ id: 'Flow:dup_case_flow', type: 'Flow', apiName: 'dup_case_flow' }),
+        // Same api name, DIFFERENT type — case folding must not cross types.
+        node({ id: 'ApexClass:LeadConvert', type: 'ApexClass', apiName: 'LeadConvert' }),
+      ],
+      edges: [],
+    }]);
+  });
+
+  it('answers a real component named in the wrong CASE instead of refusing it as absent', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'Flow:leadconvert', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.target.componentId).toBe('Flow:LeadConvert');
+    expect(d.target.apiName).toBe('LeadConvert');
+    // The correction is DISCLOSED — the answer is about a different id than
+    // the caller passed, and a host must be able to say so.
+    expect(d.target.resolvedFrom).toBe('Flow:leadconvert');
+    expect(d.boundaries.join(' ')).toMatch(/case/i);
+  });
+
+  it('resolves a mis-cased TYPE PREFIX too (a SQL type filter is case-sensitive)', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'flow:LeadConvert', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.target.componentId).toBe('Flow:LeadConvert');
+    // The type-driven behaviour below must key off the RESOLVED prefix.
+    expect(r.value.data.target.type).toBe('Flow');
+    expect(r.value.data.target.resolvedFrom).toBe('flow:LeadConvert');
+  });
+
+  it('does NOT fold across types — a same-named node of another type is not the answer', async () => {
+    // `ApexClass:LeadConvert` exists; asking for `CustomObject:leadconvert`
+    // must still refuse rather than answer about the class.
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomObject:leadconvert', includeGrep: false });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  // The graph stores a CHILD-scoped node's `api_name` as the BARE leaf
+  // (`CustomField:Object.Field__c` has `api_name` = `Field__c`; the object
+  // lives in the id). A probe that searched the QUALIFIED name matched nothing
+  // on a real vault, leaving every field / record type / validation rule / list
+  // view immune to this repair while the flat families looked fixed.
+  it('resolves a mis-cased CHILD-scoped id (CustomField), whose api_name is the bare leaf', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'customfield:account.industry__c', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.target.componentId).toBe(FIELD);
+    expect(r.value.data.target.resolvedFrom).toBe('customfield:account.industry__c');
+    // …and the corrected id gets the REAL answer, not an empty one.
+    expect(r.value.data.summary.graphReferrerCount).toBe(2);
+  });
+
+  it('keeps refusing a fabricated typo, and the refusal SAYS case variants were checked', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'Flow:LeadConverx', includeGrep: false });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    // Distinguishable from the wrong-case case, which now answers.
+    expect(r.error.message).toMatch(/case/i);
+  });
+
+  it('REFUSES rather than guesses when two vault ids differ only by case', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'Flow:DUP_CASE_FLOW', includeGrep: false });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/differ only by CASE/i);
+    expect(r.error.message).toContain('Flow:Dup_Case_Flow');
+    expect(r.error.message).toContain('Flow:dup_case_flow');
+  });
+
+  it('calls a SATURATED probe inconclusive rather than reporting a checked absence', async () => {
+    // The probe reads a bounded window of name matches. Seed enough same-leaf
+    // components to fill it, with the real (differently-cased) target sorting
+    // PAST the window — the refusal must say the probe could not rule a case
+    // variant out, never that there is none.
+    const satDir = mkdtempSync(join(tmpdir(), 'sfi-fcu-sat-'));
+    try {
+      const o = await openGraph(join(satDir, 'g.db'));
+      expect(o.ok).toBe(true); if (!o.ok) return;
+      const satStore = o.value;
+      const decoys = Array.from({ length: 100 }, (_, i) => {
+        const obj = `Obj_${String(i).padStart(3, '0')}__c`;
+        return node({ id: `CustomField:${obj}.Shared_Leaf__c`, type: 'CustomField', apiName: 'Shared_Leaf__c' });
+      });
+      const i = await importExtractionResults(satStore, [{
+        nodes: [
+          ...decoys,
+          // Sorts after every decoy by id, so it falls outside the window.
+          node({ id: 'CustomField:Zzz_Obj__c.Shared_Leaf__c', type: 'CustomField', apiName: 'Shared_Leaf__c' }),
+        ],
+        edges: [],
+      }]);
+      expect(i.ok).toBe(true);
+      const satCtx: Context = { vaultRoot: satDir, manifest: MANIFEST, graph: satStore };
+      const r = await findComponentUsagesHandler(satCtx, {
+        componentId: 'CustomField:zzz_obj__c.shared_leaf__c', includeGrep: false,
+      });
+      expect(r.ok).toBe(false); if (r.ok) return;
+      expect(r.error.kind).toBe('component-not-found');
+      expect(r.error.message).toMatch(/INCONCLUSIVE/);
+      expect(r.error.message).not.toMatch(/is NOT a casing mismatch/);
+      await closeGraph(satStore);
+    } finally {
+      rmSync(satDir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves an exactly-cased id untouched (no correction disclosed)', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: FIELD, includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.target.resolvedFrom).toBeNull();
+  });
+});
+
+// FCU-FLOW-FIELD-WRITERS-UNCONSULTED. A CustomField written by an ACTIVE Flow
+// through an SObject-variable `assignToReference` (or a
+// `recordCreates`/`recordUpdates` `<inputAssignments>` block) mints NO
+// `writesTo` edge, so the graph tier is empty; the grep tier searches for the
+// QUALIFIED `Object.Field` string, which Flow XML never writes. Measured on a
+// real vault the dispatcher answered `graphReferrers: []`,
+// `hasStaticEvidence: false`, `grepMatchCount: 0` and a `coverageCaveat` naming
+// Dashboard + Report as THE reason the empty could be false — while
+// `safe_to_delete_field` on the identical id returned `blocking` on an Active
+// Flow, from a family the vault retrieved COMPLETELY. The caveat pointed the
+// reader at the one place the answer was not hiding.
+describe('findComponentUsagesHandler — supplemental Flow field-writer plane', () => {
+  const OBJ = 'Obj_A__c';
+  let fdir: string; let fstore: GraphStore; let fctx: Context;
+
+  beforeAll(async () => {
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    fdir = mkdtempSync(join(tmpdir(), 'sfi-fcu-flowwriters-'));
+    const flowsDir = join(fdir, 'source', 'main', 'default', 'flows');
+    mkdirSync(flowsDir, { recursive: true });
+    // A record-triggered Flow that writes the field through an SObject
+    // VARIABLE, never through `$Record` — the shape that mints no edge.
+    writeFileSync(
+      join(flowsDir, 'Flow_B.flow-meta.xml'),
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+        '  <status>Active</status>',
+        '  <variables>',
+        '    <name>RecToUpdate</name>',
+        '    <dataType>SObject</dataType>',
+        `    <objectType>${OBJ}</objectType>`,
+        '  </variables>',
+        '  <assignments>',
+        '    <assignmentItems>',
+        '      <assignToReference>RecToUpdate.Field_A__c</assignToReference>',
+        '    </assignmentItems>',
+        '  </assignments>',
+        // ONE Flow writing the SAME field from TWO branches — two ROWS, one
+        // component. Quoting the row count as "2 flows write this" is the
+        // over-count `graphReferrers.distinctReferrers` already exists to stop.
+        '  <assignments>',
+        '    <assignmentItems>',
+        '      <assignToReference>RecToUpdate.Field_D__c</assignToReference>',
+        '    </assignmentItems>',
+        '    <assignmentItems>',
+        '      <assignToReference>RecToUpdate.Field_D__c</assignToReference>',
+        '    </assignmentItems>',
+        '  </assignments>',
+        '</Flow>',
+        '',
+      ].join('\n'),
+    );
+    const o = await openGraph(join(fdir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    fstore = o.value;
+    const i = await importExtractionResults(fstore, [{
+      nodes: [
+        node({ id: `CustomField:${OBJ}.Field_A__c`, type: 'CustomField', apiName: `${OBJ}.Field_A__c` }),
+        node({ id: `CustomField:${OBJ}.Field_C__c`, type: 'CustomField', apiName: `${OBJ}.Field_C__c` }),
+        node({ id: `CustomField:${OBJ}.Field_D__c`, type: 'CustomField', apiName: `${OBJ}.Field_D__c` }),
+        node({
+          id: 'Flow:Flow_B', type: 'Flow', apiName: 'Flow_B',
+          sourcePath: 'source/main/default/flows/Flow_B.flow-meta.xml',
+        }),
+      ],
+      edges: [],
+    }]);
+    if (!i.ok) throw new Error(i.error.message);
+    fctx = { vaultRoot: fdir, manifest: MANIFEST, graph: fstore };
+  });
+  afterAll(async () => { await closeGraph(fstore); rmSync(fdir, { recursive: true, force: true }); });
+
+  it('finds the Active-Flow writer the graph never stamped, instead of a confident empty', async () => {
+    const r = await findComponentUsagesHandler(fctx, {
+      componentId: `CustomField:${OBJ}.Field_A__c`, includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.graphReferrers).toEqual([]);
+    expect(d.supplementalFlowWriters?.count).toBe(1);
+    expect(d.supplementalFlowWriters?.distinctWriters).toBe(1);
+    expect(d.supplementalFlowWriters?.writers.map((w) => w.flowId)).toEqual(['Flow:Flow_B']);
+    expect(d.supplementalFlowWriters?.writers[0]?.mechanism).toBe('assignToReference');
+    expect(d.summary.supplementalFlowWriterCount).toBe(1);
+    // The evidence is real, so the answer is no longer an empty result — and
+    // the empty-result caveat that pointed at the wrong families is gone.
+    expect(d.summary.hasStaticEvidence).toBe(true);
+    expect('coverageCaveat' in d).toBe(false);
+    expect(d.boundaries.join(' ')).toMatch(/flow-field-writers-scan/);
+  });
+
+  it('separates write-site ROWS from distinct writing FLOWS', async () => {
+    const r = await findComponentUsagesHandler(fctx, {
+      componentId: `CustomField:${OBJ}.Field_D__c`, includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.supplementalFlowWriters?.count).toBe(2);
+    expect(d.supplementalFlowWriters?.distinctWriters).toBe(1);
+    // The human-facing summary number is the COMPONENT count, not the rows.
+    expect(d.summary.supplementalFlowWriterCount).toBe(1);
+    expect(d.boundaries.join(' ')).toContain('1 Flow(s) write this field');
+    expect(d.boundaries.join(' ')).toContain('2 write site(s)');
+  });
+
+  it('reports a CHECKED zero (not an unchecked one) when the scan runs clean', async () => {
+    const r = await findComponentUsagesHandler(fctx, {
+      componentId: `CustomField:${OBJ}.Field_C__c`, includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.hasStaticEvidence).toBe(false);
+    expect(d.summary.supplementalFlowWriterCount).toBe(0);
+    expect(d.supplementalFlowWriters?.truncated).toBe(false);
+    expect(d.supplementalFlowWriters?.scannedFlows).toBe(1);
+    expect(d.supplementalFlowWriters?.totalFlows).toBe(1);
+  });
+
+  it('marks the plane NOT CHECKED when a Flow source could not be read', async () => {
+    // The shared fixture vault holds a Flow whose `sourcePath` points at
+    // nothing on disk — the writer set is UNPROVEN, never a clean zero.
+    const r = await findComponentUsagesHandler(ctx, {
+      componentId: 'CustomField:Account.Orphan__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.supplementalFlowWriters?.truncated).toBe(true);
+    expect(d.supplementalFlowWriters?.truncationCause).toBe('unreadable-sources');
+    expect(d.summary.supplementalFlowWriterCount).toBeNull();
+    expect(d.boundaries.join(' ')).toMatch(/could not be opened/i);
+  });
+
+  it('says WHICH string the grep tier searched, so a field zero is not read as corroboration', async () => {
+    const r = await findComponentUsagesHandler(fctx, {
+      componentId: `CustomField:${OBJ}.Field_C__c`,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.grepSupplement.matchCount).toBe(0);
+    expect(d.boundaries.join(' ')).toContain(`QUALIFIED string \`${OBJ}.Field_C__c\``);
+    expect(d.boundaries.join(' ')).toMatch(/WEAK evidence of absence/);
+    // The Apex spelling it names is the BARE leaf, not the qualified string again.
+    expect(d.boundaries.join(' ')).toContain('`record.Field_C__c`');
+  });
+
+  it('does NOT claim the plane for a non-CustomField target', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'Flow:LeadConvert', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect('supplementalFlowWriters' in r.value.data).toBe(false);
+    expect(r.value.data.summary.supplementalFlowWriterCount).toBeNull();
+  });
+});
+
+// FCU-INPUTASSIGNMENTS-IS-OBJECT-BLIND — the repair to the repair.
+//
+// The supplemental tier above adopted `flow-field-writers-scan`, whose
+// `inputAssignments` mechanism matches a bare `<field>NAME</field>` inside ANY
+// `<recordCreates>`/`<recordUpdates>` WITHOUT checking that DML's own object.
+// In `sfi.safe_to_delete_field` that over-match is conservative (a phantom
+// writer only makes the verdict `blocking`). HERE it points the other way: it
+// would flip `hasStaticEvidence` false→true and DELETE the empty-result
+// coverage caveat, turning a name collision into a named referrer. Measured on
+// a real production vault, `CustomField:Contract.Name` collected TEN such
+// "writers", the first of which never mentions Contract at all, and
+// `CustomField:Case.IsVisibleInSelfService` collected a Flow that writes that
+// field on a Task.
+describe('findComponentUsagesHandler — inputAssignments object scoping', () => {
+  const flowXml = (body: readonly string[]): string =>
+    ['<?xml version="1.0" encoding="UTF-8"?>',
+      '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+      '  <status>Active</status>', ...body, '</Flow>', ''].join('\n');
+  const dml = (tag: string, scope: string, field: string): string[] => [
+    `  <${tag}>`, `    <name>Dml_${field}</name>`, ...scope.split('\n').map((l) => `    ${l}`),
+    '    <inputAssignments>', `      <field>${field}</field>`,
+    '      <value><elementReference>x</elementReference></value>',
+    '    </inputAssignments>', `  </${tag}>`,
+  ];
+
+  let sdir: string; let sstore: GraphStore; let sctx: Context;
+
+  beforeAll(async () => {
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    sdir = mkdtempSync(join(tmpdir(), 'sfi-fcu-objscope-'));
+    const flowsDir = join(sdir, 'source', 'main', 'default', 'flows');
+    mkdirSync(flowsDir, { recursive: true });
+    const flows: Record<string, string> = {
+      // (1) writes `Name` on a DIFFERENT object — the real-vault false positive.
+      Wrong_Object: flowXml(dml('recordCreates', '<object>Other__c</object>', 'Name')),
+      // (2) writes `Name` on THIS object, declared inline.
+      Right_Object: flowXml(dml('recordUpdates', '<object>Obj_B__c</object>', 'Name')),
+      // (3) `$Record` — resolved through the record-triggered `<start>` object.
+      Via_Record: flowXml([
+        '  <start>', '    <object>Obj_B__c</object>', '  </start>',
+        ...dml('recordUpdates', '<inputReference>$Record</inputReference>', 'Status__c'),
+      ]),
+      // (4) `$Record` on a start element for ANOTHER object — dropped.
+      Via_Record_Other: flowXml([
+        '  <start>', '    <object>Other__c</object>', '  </start>',
+        ...dml('recordUpdates', '<inputReference>$Record</inputReference>', 'Status__c'),
+      ]),
+      // (5) an SObject `<variables>` entry — resolved through its objectType.
+      Via_Variable: flowXml([
+        '  <variables>', '    <name>Rec</name>', '    <dataType>SObject</dataType>',
+        '    <objectType>Obj_B__c</objectType>', '  </variables>',
+        ...dml('recordCreates', '<inputReference>Rec</inputReference>', 'Note__c'),
+      ]),
+      // (6) an `<inputReference>` naming NOTHING resolvable (a loop variable):
+      //     UNKNOWN object, so a LEAD — never confirmed, never silently dropped.
+      Via_Unknown: flowXml(
+        dml('recordUpdates', '<inputReference>LoopVar</inputReference>', 'Note__c'),
+      ),
+      // (7) polymorphic Activity: a Task DML writes Activity's custom field.
+      Task_Writer: flowXml(dml('recordUpdates', '<object>Task</object>', 'Poly__c')),
+      // (8) the ONLY match for `Lead_Only__c` is unresolvable — the whole
+      //     answer then rests on a lead, which must not read as evidence.
+      Lead_Only: flowXml(
+        dml('recordUpdates', '<inputReference>LoopVar</inputReference>', 'Lead_Only__c'),
+      ),
+    };
+    // (9) MORE confirmed writers than the 25-row sample cap, so the section's
+    //     row lists are cut and the payload-level `truncated` must say so.
+    for (let i = 0; i < 26; i += 1) {
+      flows[`Bulk_${String(i).padStart(2, '0')}`] = flowXml(
+        dml('recordUpdates', '<object>Obj_B__c</object>', 'Bulk__c'),
+      );
+    }
+    for (const [name, xml] of Object.entries(flows)) {
+      writeFileSync(join(flowsDir, `${name}.flow-meta.xml`), xml);
+    }
+    const o = await openGraph(join(sdir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    sstore = o.value;
+    const i = await importExtractionResults(sstore, [{
+      nodes: [
+        node({ id: 'CustomField:Obj_B__c.Name', type: 'CustomField', apiName: 'Obj_B__c.Name' }),
+        node({ id: 'CustomField:Obj_B__c.Status__c', type: 'CustomField', apiName: 'Obj_B__c.Status__c' }),
+        node({ id: 'CustomField:Obj_B__c.Note__c', type: 'CustomField', apiName: 'Obj_B__c.Note__c' }),
+        node({ id: 'CustomField:Activity.Poly__c', type: 'CustomField', apiName: 'Activity.Poly__c' }),
+        node({ id: 'CustomField:Obj_B__c.Lead_Only__c', type: 'CustomField', apiName: 'Obj_B__c.Lead_Only__c' }),
+        node({ id: 'CustomField:Obj_B__c.Bulk__c', type: 'CustomField', apiName: 'Obj_B__c.Bulk__c' }),
+        node({ id: 'CustomField:Obj_B__c.Untouched__c', type: 'CustomField', apiName: 'Obj_B__c.Untouched__c' }),
+        ...Object.keys(flows).map((n) => node({
+          id: `Flow:${n}`, type: 'Flow', apiName: n,
+          sourcePath: `source/main/default/flows/${n}.flow-meta.xml`,
+        })),
+      ],
+      edges: [],
+    }]);
+    if (!i.ok) throw new Error(i.error.message);
+    sctx = { vaultRoot: sdir, manifest: MANIFEST, graph: sstore };
+  });
+  afterAll(async () => { await closeGraph(sstore); rmSync(sdir, { recursive: true, force: true }); });
+
+  it('does NOT certify a same-named field written on a DIFFERENT object', async () => {
+    const r = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Obj_B__c.Name', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    // `Right_Object` is a genuine writer; `Wrong_Object` is a name collision.
+    expect(d.supplementalFlowWriters?.writers.map((w) => w.flowId)).toEqual(['Flow:Right_Object']);
+    expect(d.supplementalFlowWriters?.otherObjectMatchesDropped).toBe(1);
+    expect(d.supplementalFlowWriters?.objectUnverified.count).toBe(0);
+    expect(d.summary.supplementalFlowWriterCount).toBe(1);
+  });
+
+  it('keeps hasStaticEvidence FALSE and the coverage caveat when every match is another object', async () => {
+    const r = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Obj_B__c.Status__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    // `Via_Record` writes Status__c on Obj_B__c → confirmed;
+    // `Via_Record_Other` writes it on Other__c → dropped.
+    expect(d.supplementalFlowWriters?.writers.map((w) => w.flowId)).toEqual(['Flow:Via_Record']);
+    expect(d.supplementalFlowWriters?.otherObjectMatchesDropped).toBe(1);
+    expect(d.summary.hasStaticEvidence).toBe(true);
+    expect(d.boundaries.join(' ')).toContain('resolves to a DIFFERENT object');
+  });
+
+  it('resolves the DML object through an SObject <variables> inputReference', async () => {
+    const r = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Obj_B__c.Note__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.supplementalFlowWriters?.writers.map((w) => w.flowId)).toEqual(['Flow:Via_Variable']);
+    expect(d.summary.supplementalFlowWriterCount).toBe(1);
+  });
+
+  it('routes an UNRESOLVABLE DML object to a LEADS bucket that never certifies', async () => {
+    const r = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Obj_B__c.Note__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    const u = d.supplementalFlowWriters?.objectUnverified;
+    expect(u?.writers.map((w) => w.flowId)).toEqual(['Flow:Via_Unknown']);
+    expect(u?.count).toBe(1);
+    expect(d.summary.supplementalFlowWriterUnverifiedCount).toBe(1);
+    // The prose must name the mechanism's actual weakness, in the tool's own words.
+    expect(d.boundaries.join(' ')).toContain('FIELD NAME ALONE');
+    expect(d.boundaries.join(' ')).toContain("WITHOUT checking the enclosing DML's object");
+  });
+
+  it('a LEAD alone is NOT static evidence and does NOT suppress the coverage caveat', async () => {
+    const r = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Obj_B__c.Lead_Only__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.supplementalFlowWriters?.count).toBe(0);
+    expect(d.supplementalFlowWriters?.objectUnverified.count).toBe(1);
+    // THE assertion this whole repair exists for: an unscoped name match must
+    // never flip the evidence flag nor delete the empty-result hedge.
+    expect(d.summary.hasStaticEvidence).toBe(false);
+    expect(d.summary.supplementalFlowWriterCount).toBe(0);
+    expect(d.summary.supplementalFlowWriterUnverifiedCount).toBe(1);
+    expect(d.boundaries.join(' ')).toContain('NOT proof that nothing uses it');
+    // The empty-result hedge is in EXACTLY the state it would be in with no
+    // match at all — a lead never suppresses it.
+    const control = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Obj_B__c.Untouched__c', includeGrep: false,
+    });
+    expect(control.ok).toBe(true); if (!control.ok) return;
+    expect('coverageCaveat' in d).toBe('coverageCaveat' in control.value.data);
+    expect(control.value.data.summary.hasStaticEvidence).toBe(false);
+  });
+
+  it('folds the writer sample cap into the payload-level truncated flag', async () => {
+    const r = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Obj_B__c.Bulk__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.supplementalFlowWriters?.count).toBe(26);
+    expect(d.supplementalFlowWriters?.writers.length).toBe(25);
+    expect(d.supplementalFlowWriters?.sampleTruncated).toBe(true);
+    // The scan itself was complete — WITHOUT the sample-cap term this payload
+    // flag stayed FALSE while the list under it was 25 of 26.
+    expect(d.supplementalFlowWriters?.truncated).toBe(false);
+    expect(d.truncated).toBe(true);
+    expect(d.boundaries.join(' ')).toContain('SAMPLES capped at 25 rows');
+  });
+
+  it('folds the SCAN truncation into the payload-level truncated flag too', async () => {
+    // The shared fixture's Flow source is unreadable, so the writer scan is
+    // admittedly incomplete while `graphTruncated` and `grepTruncated` are BOTH
+    // false — before this change the payload said `truncated: false` on top of
+    // an unproven scan, which is exactly the unchecked-zero shape this file is
+    // being repaired for.
+    const r = await findComponentUsagesHandler(ctx, {
+      componentId: 'CustomField:Account.Orphan__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.supplementalFlowWriters?.truncated).toBe(true);
+    expect(d.supplementalFlowWriters?.sampleTruncated).toBe(false);
+    expect(d.truncated).toBe(true);
+  });
+
+  it('honours the Activity/Task/Event polymorphic alias instead of dropping it', async () => {
+    const r = await findComponentUsagesHandler(sctx, {
+      componentId: 'CustomField:Activity.Poly__c', includeGrep: false,
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    // Task and Event share Activity's custom fields — a literal object match
+    // would have dropped this REAL writer, re-introducing the false empty.
+    expect(d.supplementalFlowWriters?.writers.map((w) => w.flowId)).toEqual(['Flow:Task_Writer']);
+    expect(d.supplementalFlowWriters?.otherObjectMatchesDropped).toBe(0);
+    expect(d.summary.hasStaticEvidence).toBe(true);
+  });
+});

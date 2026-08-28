@@ -438,14 +438,24 @@ const PAGE_REFIT_ATTEMPTS = 6;
  * `DRIFT_MAX_VALUE_BYTES` with an honest size marker, so a fat node's
  * inline value can't blow up the response. Small values pass through
  * verbatim (the common case — tests and real small drifts are unchanged).
+ *
+ * Returns the `summarised` flag ALONGSIDE the value. It used to return the
+ * marker and nothing else, so the one caller could not tell a verbatim value
+ * from a discarded one — and the handler went on to certify `truncated:
+ * false` / "inlined in full" over a row whose only interesting content had
+ * been thrown away. The caller MUST propagate this flag; a marker in the
+ * payload is a truncation even when no row cap fired.
  */
-const boundValue = (value: unknown): unknown => {
+const boundValue = (value: unknown): { readonly value: unknown; readonly summarised: boolean } => {
   const json = canonicalJson(value);
-  if (json.length <= DRIFT_MAX_VALUE_BYTES) return value;
+  if (json.length <= DRIFT_MAX_VALUE_BYTES) return { value, summarised: false };
   return {
-    __omitted: true,
-    bytes: json.length,
-    preview: `${json.slice(0, 200)}…`,
+    value: {
+      __omitted: true,
+      bytes: json.length,
+      preview: `${json.slice(0, 200)}…`,
+    },
+    summarised: true,
   };
 };
 
@@ -453,22 +463,36 @@ const collectDrift = (
   a: Readonly<Record<string, unknown>>,
   b: Readonly<Record<string, unknown>>,
   includeVolatile: boolean,
-): { readonly rows: PropertyDrift[]; readonly truncated: boolean } => {
+): {
+  readonly rows: PropertyDrift[];
+  readonly truncated: boolean;
+  readonly valuesSummarised: boolean;
+} => {
   const keys = new Set<string>([...Object.keys(a), ...Object.keys(b)]);
   const drift: PropertyDrift[] = [];
+  let valuesSummarised = false;
   for (const key of keys) {
     if (!includeVolatile && VOLATILE_PROPERTY_PATHS.has(key)) continue;
     const va = a[key];
     const vb = b[key];
     if (canonicalJson(va) !== canonicalJson(vb)) {
-      drift.push({ propertyPath: key, valueA: boundValue(va), valueB: boundValue(vb) });
+      const boundA = boundValue(va);
+      const boundB = boundValue(vb);
+      if (boundA.summarised || boundB.summarised) valuesSummarised = true;
+      drift.push({ propertyPath: key, valueA: boundA.value, valueB: boundB.value });
     }
   }
   drift.sort((x, y) =>
     x.propertyPath < y.propertyPath ? -1 : x.propertyPath > y.propertyPath ? 1 : 0,
   );
   const truncated = drift.length > DRIFT_MAX_ROWS;
-  return { rows: truncated ? drift.slice(0, DRIFT_MAX_ROWS) : drift, truncated };
+  return {
+    rows: truncated ? drift.slice(0, DRIFT_MAX_ROWS) : drift,
+    truncated,
+    // Reported SEPARATELY from `truncated`: the row cap and the per-value
+    // size cap are independent, and only one of them was ever surfaced.
+    valuesSummarised,
+  };
 };
 
 const VOLATILE_FILTER_DISCLOSURE =
@@ -639,6 +663,7 @@ export const compareVaultsHandler = async (
     const commonNodes = new Map<ComponentId, CompactNode>();
     let unchangedCount = 0;
     let anyDriftTruncated = false;
+    let anyValueSummarised = false;
 
     for (const [id, nodeB] of mapB) {
       const nodeA = mapA.get(id);
@@ -654,12 +679,13 @@ export const compareVaultsHandler = async (
         const hashA = hashProperties(nodeA.properties, includeVolatile);
         const hashB = hashProperties(nodeB.properties, includeVolatile);
         if (hashA !== hashB) {
-          const { rows: drift, truncated: driftTruncated } = collectDrift(
-            nodeA.properties,
-            nodeB.properties,
-            includeVolatile,
-          );
+          const {
+            rows: drift,
+            truncated: driftTruncated,
+            valuesSummarised,
+          } = collectDrift(nodeA.properties, nodeB.properties, includeVolatile);
           if (driftTruncated) anyDriftTruncated = true;
+          if (valuesSummarised) anyValueSummarised = true;
           shapeModified.push({
             id,
             type: nodeB.type,
@@ -728,7 +754,11 @@ export const compareVaultsHandler = async (
       responseOverBudget: boolean,
     ): string => {
       const anyTruncation =
-        bucketsClipped || anyDriftTruncated || shapeModifiedPartial || responseOverBudget;
+        bucketsClipped ||
+        anyDriftTruncated ||
+        anyValueSummarised ||
+        shapeModifiedPartial ||
+        responseOverBudget;
       if (!anyTruncation) {
         // DERIVED from what actually shipped, never a blanket cap claim.
         // Since R2 the `shapeModified` bucket is BYTE-bound, not row-bound —
@@ -745,9 +775,22 @@ export const compareVaultsHandler = async (
           `\`added\`/\`removed\` clipped to ${COMPARE_MAX_PER_BUCKET} components (lowest ids first)`,
         );
       }
+      // Two INDEPENDENT caps, two independent notes. They used to share one
+      // sentence reachable only from the row cap, so a response that shipped
+      // `{ __omitted, bytes, preview }` in place of a value — and nothing
+      // else — said "inlined in full" instead.
       if (anyDriftTruncated) {
+        notes.push(`a component's \`drift\` capped at ${DRIFT_MAX_ROWS} rows`);
+      }
+      // Computed over the WHOLE drift pass, not per shipped page: when the
+      // R2 pager ships a page whose own rows happen to carry no marker, this
+      // note still fires. That direction is deliberate — it can only
+      // OVER-disclose (warn about a marker the reader will not see), never
+      // under-disclose (ship a marker with no warning), and a paged response
+      // is already flagged partial by `shapeModifiedPartial`.
+      if (anyValueSummarised) {
         notes.push(
-          `a component's \`drift\` capped at ${DRIFT_MAX_ROWS} rows, with property values over ${DRIFT_MAX_VALUE_BYTES} bytes summarised`,
+          `at least one drift property value over ${DRIFT_MAX_VALUE_BYTES} bytes was NOT inlined — it ships as \`{ __omitted: true, bytes, preview }\`, so the A→B comparison for that property cannot be made from this response; re-read the component's source (\`sfi.explain_*\` / the retrieved XML) to see the full value`,
         );
       }
       if (shapeModifiedPartial) {
@@ -795,7 +838,11 @@ export const compareVaultsHandler = async (
           unchangedCount,
         },
         truncated:
-          bucketsClipped || anyDriftTruncated || shapeModifiedPartial || responseOverBudget,
+          bucketsClipped ||
+          anyDriftTruncated ||
+          anyValueSummarised ||
+          shapeModifiedPartial ||
+          responseOverBudget,
         disclosure: disclosureFor(
           shapeModifiedPartial,
           shapeModifiedRows.length,

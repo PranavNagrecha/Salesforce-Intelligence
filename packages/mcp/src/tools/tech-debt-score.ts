@@ -100,6 +100,19 @@ const scanMaxNodesOverride = (): number | undefined => {
 };
 
 /**
+ * The residual per-type ceiling actually APPLIED to this invocation's scans.
+ *
+ * Read from ONE place by both the walk (`loadAllNodes`) and the disclosure
+ * that reports it (`fullScanTruncationNote`'s `fullScanCap` argument). Read
+ * twice, they drift: the note's default is the module constant, so a run under
+ * the override used to announce "Full scan capped at 20000 nodes per type"
+ * while the cap that actually bit was the override's value — a disclosure tool
+ * stating the wrong number for its own limit.
+ */
+const residualScanCap = (): number =>
+  scanMaxNodesOverride() ?? FULL_SCAN_MAX_NODES;
+
+/**
  * Load EVERY node of a single ComponentType, not just the first page. The
  * tech-debt composite SCORE inspects per-node properties (apiVersion,
  * qualityIssues, lastModifiedDate) and must be computed over the COMPLETE set —
@@ -126,8 +139,7 @@ const loadAllNodes = async (
   type: ComponentType,
   incompleteAcc?: Set<string>,
 ): Promise<Result<readonly Node[], string>> => {
-  const maxNodes = scanMaxNodesOverride() ?? FULL_SCAN_MAX_NODES;
-  const r = await scanAllNodesOfTypes(ctx.graph, [type], maxNodes);
+  const r = await scanAllNodesOfTypes(ctx.graph, [type], residualScanCap());
   if (!r.ok) return err(r.error.message);
   if (incompleteAcc !== undefined) {
     for (const t of r.value.incompleteTypes) incompleteAcc.add(t);
@@ -859,9 +871,18 @@ export const techDebtScoreHandler = async (
     ups.enrichmentStatus === 'tooling-api-stale';
   const unassignedGrantsExtractorRan =
     unassignedPsAuthoritative || ups.unknownAssignmentCount === 0;
+  // UNMEASURED-CONTAINERS-SCORED-AS-DEAD-WEIGHT. `totalQueues` / `totalGroups`
+  // are ROW COUNTS and include the `unknown-membership` rows — containers whose
+  // emptiness was never MEASURED. Adding them here charged the org debt score
+  // for containers nobody had looked at, which is exactly the "absence of
+  // evidence read as evidence" this axis exists to avoid; on a real vault that
+  // was 42 unmeasured containers scored as confirmed dead weight. Score only
+  // what was measured: `confirmedEmptyQueues + unknownMemberCountQueues ===
+  // totalQueues` by construction, so the unknown rows are not lost, they move
+  // to the honest-signal keys in `details` below.
   const unassignedGrantsRaw = unassignedPsAuthoritative
-    ? ups.unassignedCount + eq.totalQueues + eq.totalGroups
-    : eq.totalQueues + eq.totalGroups;
+    ? ups.unassignedCount + eq.confirmedEmptyQueues + eq.confirmedEmptyGroups
+    : eq.confirmedEmptyQueues + eq.confirmedEmptyGroups;
 
   // Build excluded categories list.
   const excluded: ExcludedCategory[] = [];
@@ -917,6 +938,13 @@ export const techDebtScoreHandler = async (
   // 500-node scan cap — emitting it here would be a dead-end remedy stated as
   // fact by a disclosure tool. The note below carries the remedy that DOES
   // work (page the sub-tool's cursor directly).
+  //
+  // The exclusion is ALSO announced in `boundaries` further down
+  // (`legacyScanCapBoundary`). `excludedCategories` is the typed field a
+  // machine consumer cannot skip; `boundaries` is the prose a host reads
+  // aloud. Populating only the first is how a dropped 0.20-weight axis went
+  // unmentioned in every sentence the caller actually sees.
+  let legacyScanCapBoundary: string | undefined;
   if (lc.scanTruncated === true && !excludedByUser.has('legacyAutomation')) {
     const trueCounts = lc.trueTypeCounts ?? {};
     const cappedRows: readonly (readonly [string, number | undefined])[] = [
@@ -934,6 +962,27 @@ export const techDebtScoreHandler = async (
       note:
         `sfi.process_builder_migration_candidates capped its internal scan at 500 nodes per type (${capped}), so activeWorkflowRulesCount/activeProcessBuildersCount would be counted from an alphabetically-first subset, not the complete org. This axis's raw count would be a sum with an UNCHECKED term, so it is EXCLUDED from the score rather than scored on a capped subset. Call \`sfi.process_builder_migration_candidates\` directly and page its cursor for the complete inventory.`,
     });
+    // Deliberately worded WITHOUT the word "refresh": a re-retrieve re-reads
+    // the same 500-node window, so naming it here would be the dead-end
+    // remedy this exclusion exists to avoid stating (that is why the reason is
+    // `'insufficient-data'` and not `'extractor-not-run'`).
+    //
+    // Two numbers in this sentence are read from the values that ACTUALLY
+    // applied, never from the module defaults: the weight comes from
+    // `weightsApplied` (a caller who passed `weights` re-weighted this axis,
+    // and quoting DEFAULT_WEIGHTS would announce a share the run never used),
+    // and the score arithmetic is described as `weightedScore` performs it.
+    // That function SKIPS an excluded axis in both the numerator and the
+    // denominator — it re-normalises over the surviving weights rather than
+    // folding a zero in — so "contributes 0" would read as "this axis dragged
+    // the score DOWN", i.e. understating debt, which is the opposite of what
+    // happens. The typed `categories.legacyAutomation.contribution` field does
+    // read 0; the prose has to say what that 0 means.
+    legacyScanCapBoundary =
+      `UNCHECKED, NOT ZERO — legacyAutomation (weight ${weightsApplied.legacyAutomation}) is EXCLUDED from this score: ` +
+      `\`sfi.process_builder_migration_candidates\` capped its internal scan at 500 nodes per type (${capped}), so the axis would have been counted from an alphabetically-first subset rather than the complete org. ` +
+      `An excluded axis is REMOVED from the weighted mean — dropped from both the numerator and the divisor, so the remaining axes are re-normalised over their own weights and absorb its share; it is not folded in as a zero. Its \`contribution\` field reads 0 because the axis was not scored, NOT because the org scored clean there. This composite is therefore NOT comparable to one from an org under the cap. ` +
+      `Call \`sfi.process_builder_migration_candidates\` directly and page its cursor for the complete automation inventory.`;
   }
 
   // TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. Gate every axis on the COVERAGE
@@ -1147,8 +1196,15 @@ export const techDebtScoreHandler = async (
         // Always surface unknown-assignment count — it is the honest signal when
         // tooling API enrichment did not run (Bug 20).
         unknownAssignmentPermissionSetsCount: ups.unknownAssignmentCount,
-        emptyQueuesCount: unassignedGrantsExcluded ? null : eq.totalQueues,
-        emptyGroupsCount: unassignedGrantsExcluded ? null : eq.totalGroups,
+        // CONFIRMED-empty only — a key named `emptyQueuesCount` must not be a
+        // row count that includes containers whose membership was never read.
+        emptyQueuesCount: unassignedGrantsExcluded ? null : eq.confirmedEmptyQueues,
+        emptyGroupsCount: unassignedGrantsExcluded ? null : eq.confirmedEmptyGroups,
+        // Always surfaced, like unknownAssignmentPermissionSetsCount above: the
+        // containers NOT scored, so a reader can see what the number excludes
+        // rather than inferring a clean zero.
+        unknownMembershipQueuesCount: eq.unknownMemberCountQueues,
+        unknownMembershipGroupsCount: eq.unknownMemberCountGroups,
       },
     },
   };
@@ -1202,6 +1258,12 @@ export const techDebtScoreHandler = async (
   if (excluded.some((e) => e.reason === 'extractor-not-run')) {
     boundaries.push(Q115_DISCLOSURE);
   }
+  // The scan-cap exclusion's own prose. Q115 above deliberately does NOT cover
+  // it (its remedy is a refresh, which cannot lift a page cap), so without
+  // this line the axis vanished from `boundaries` entirely.
+  if (legacyScanCapBoundary !== undefined) {
+    boundaries.push(legacyScanCapBoundary);
+  }
   // Cite the heuristic tier whenever the codeQuality axis actually contributes
   // (its input is the heuristic Apex scanner). When the axis is excluded it is
   // not part of the score, so the disclosure would be misleading.
@@ -1226,7 +1288,14 @@ export const techDebtScoreHandler = async (
   // axes' counts are a floor, not the complete org, until the vault is
   // narrower or the cap is raised.
   if (scanIncompleteTypes.size > 0) {
-    boundaries.push(fullScanTruncationNote([...scanIncompleteTypes].sort()));
+    boundaries.push(
+      fullScanTruncationNote(
+        [...scanIncompleteTypes].sort(),
+        // The cap that ACTUALLY bit, not the module default — see
+        // {@link residualScanCap}.
+        residualScanCap(),
+      ),
+    );
   }
   // TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. The composite used to print the
   // Q115 "missing axes are EXCLUDED, not assumed zero" boundary while scoring
