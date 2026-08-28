@@ -58,8 +58,8 @@ import {
 } from '../../packages/mcp/src/index.js';
 import { vaultPaths } from '../../packages/vault/src/index.js';
 
-import { assertNotStubEnvelope as assertNotStubShared } from './envelope-honesty.js';
 import { deriveArgs, sampleFromNodes } from './derived-tool-args.js';
+import { assertNotStubEnvelope as assertNotStubShared } from './envelope-honesty.js';
 import { FIXTURE_ROOT, FIXTURE_SOURCE } from './fixture-paths.js';
 
 /**
