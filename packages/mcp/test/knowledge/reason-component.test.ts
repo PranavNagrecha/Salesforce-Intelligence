@@ -42,6 +42,7 @@ import { CONCEPT_RULES } from '../../src/knowledge/loader.js';
 import {
   classifyRuleCoverage,
   reasonAboutComponent,
+  UNEVALUABLE_REASONS,
 } from '../../src/knowledge/reason-component.js';
 import type { Context } from '../../src/server.js';
 import {
@@ -844,10 +845,23 @@ describe('toCompletenessDigest — bounded lists, exact counts', () => {
     expect(digest.sampled?.conceptsNotEvaluable?.total).toBe(
       r.value.coverageReport.conceptsNotEvaluable.length,
     );
-    // The two unevaluable reasons stay split — they imply different user actions.
+    // The unevaluable reasons stay split — they imply different user actions —
+    // and the split ACCOUNTS FOR EVERY unevaluable rule. Summed over
+    // `UNEVALUABLE_REASONS` rather than over a hand-written pair: the pair
+    // stopped adding up the moment a third reason (`slice-truncated`) was
+    // added, and a sum that quietly drops a bucket is how a starved rule
+    // disappears from the honesty accounting.
+    //
+    // The `?? 0` is a KNOWN GAP, not defensive noise: `countByReason` in
+    // `concept-reasoning.ts` seeds its record from a hand-written two-key
+    // literal, so a reason with no rows is `undefined` there rather than 0.
+    // That literal must be replaced with `zeroUnevaluableCounts()`; until it
+    // is, the count is right whenever it is non-zero and absent when it is not.
     expect(
-      digest.rulesNotEvaluableByReason['vault-coverage-missing'] +
-        digest.rulesNotEvaluableByReason['shape-not-provable'],
+      UNEVALUABLE_REASONS.reduce(
+        (n, reason) => n + (digest.rulesNotEvaluableByReason[reason] ?? 0),
+        0,
+      ),
     ).toBe(digest.rulesNotEvaluable);
   });
 });

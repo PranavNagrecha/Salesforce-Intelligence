@@ -144,6 +144,7 @@ const unresolvedEffectsNote = (count: number): string =>
   unresolvedTargetsDisclosure({
     count,
     targetKind: 'effect-edge',
+    targetNoun: 'edge',
     surface: '`unresolvedEffects`',
   }) +
   ' They are EXCLUDED from `effects` and from every `summary` counter, so treat the counts as a LOWER BOUND.';

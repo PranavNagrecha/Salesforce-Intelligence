@@ -336,3 +336,119 @@ describe('aiExposureReportHandler — unresolvable object scope', () => {
     expect(d.summary.bots).toBe(1);
   });
 });
+
+// =============================================================================
+// AI-EXPOSURE-REPORTS-ZERO-PII-ON-AN-EDGE-SCAN-THAT-FAILED (0.3.3).
+//
+// Six edge reads swallowed a failed graph query into an EMPTY field reach:
+// `promptTemplateReach` returned the empty Map, `codeFieldReach` `continue`d,
+// the per-function loop skipped its `if (edgesR.ok)` block, `memberIds`
+// returned `[]`, and the Bot loop's two reads were both wrapped in
+// `if (….ok)`. The surface was then emitted as REAL with
+// `exposedFields: []`, `exposedFieldCount: 0`, `piiFieldCount: 0`, and was
+// excluded from `summary.surfacesWithFieldExposure` — an UNREAD reach
+// byte-indistinguishable from a surface that genuinely grounds on nothing, in
+// the org's flagship "what data can my AI see?" audit. The same handler
+// already PROPAGATES a failed node scan as `internal`, so the file was
+// inconsistent with itself.
+// =============================================================================
+describe('aiExposureReportHandler — a failed edge scan is never a clean reach', () => {
+  /**
+   * Wrap a real store so any edge query whose bound parameters name `nodeId`
+   * throws. `listEdges` catches and returns `err(query-failed)` — exactly the
+   * shape a corrupt/locked graph produces in the field.
+   */
+  const withEdgeScanFailure = (real: GraphStore, nodeId: string): GraphStore => {
+    const connection = new Proxy(real.connection, {
+      get(target, prop) {
+        if (prop === 'runAndReadAll') {
+          return async (sql: string, params: readonly unknown[] = []) => {
+            if (sql.includes('FROM edges') && params.includes(nodeId)) {
+              throw new Error('injected edge-scan failure');
+            }
+            return await (target as never as {
+              runAndReadAll: (s: string, p: readonly unknown[]) => Promise<unknown>;
+            }).runAndReadAll(sql, params);
+          };
+        }
+        const v = Reflect.get(target, prop, target) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    return { connection, instance: real.instance } as GraphStore;
+  };
+
+  const ctxWithFailure = (nodeId: string): Context =>
+    ({ ...ctx, graph: withEdgeScanFailure(store, nodeId) }) as Context;
+
+  it.each([
+    ['prompt template grounding scan', 'GenAiPromptTemplate:Draft_Loyalty_Followup'],
+    ['apex readsFrom/writesTo scan', 'ApexClass:OrderService'],
+    ['GenAiFunction reference scan', 'GenAiFunction:Get_Order_Status'],
+    ['GenAiPlugin member scan', 'GenAiPlugin:Order_Management'],
+    ['GenAiPlannerBundle member scan', 'GenAiPlannerBundle:Order_Support_Agent'],
+    ['Bot context-variable / BotVersion scan', 'Bot:Order_Support_Bot'],
+    ['BotVersion planner scan', 'BotVersion:Order_Support_Bot.v1'],
+  ])('propagates a failed %s instead of reporting an empty reach', async (_label, nodeId) => {
+    const r = await aiExposureReportHandler(ctxWithFailure(nodeId), {});
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('internal');
+    expect(r.error.message).toContain('graph query failed');
+  });
+
+  it('never emits a surface whose reach came back from a failed scan', async () => {
+    // The single most dangerous shape: the prompt template that DOES ground on
+    // PII is reported as a live AI surface exposing nothing at all.
+    const r = await aiExposureReportHandler(
+      ctxWithFailure('GenAiPromptTemplate:Draft_Loyalty_Followup'),
+      {},
+    );
+    if (r.ok) {
+      const s = r.value.data.surfaces.find(
+        (x) => x.id === 'GenAiPromptTemplate:Draft_Loyalty_Followup',
+      );
+      throw new Error(
+        `expected a refusal; got disposition=${r.value.data.disposition} ` +
+          `promptSurface.exposedFieldCount=${String(s?.exposedFieldCount)} ` +
+          `piiFieldCount=${String(s?.piiFieldCount)} ` +
+          `summary.piiFieldsExposed=${String(r.value.data.summary.piiFieldsExposed)}`,
+      );
+    }
+    expect(r.error.kind).toBe('internal');
+  });
+
+  it('propagates a failed field-classification node read, never "field not modeled"', async () => {
+    const connection = new Proxy(store.connection, {
+      get(target, prop) {
+        if (prop === 'runAndReadAll') {
+          return async (sql: string, params: readonly unknown[] = []) => {
+            if (sql.includes('FROM nodes') && params.includes('CustomField:Contact.SSN__c')) {
+              throw new Error('injected node-read failure');
+            }
+            return await (target as never as {
+              runAndReadAll: (s: string, p: readonly unknown[]) => Promise<unknown>;
+            }).runAndReadAll(sql, params);
+          };
+        }
+        const v = Reflect.get(target, prop, target) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const r = await aiExposureReportHandler(
+      { ...ctx, graph: { connection, instance: store.instance } } as Context,
+      {},
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('internal');
+  });
+
+  it('REGRESSION: the unfaulted org-wide call still reports both PII fields', async () => {
+    const r = await aiExposureReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.piiFieldsExposed).toBe(2);
+    expect(r.value.data.summary.surfacesWithFieldExposure).toBeGreaterThan(0);
+  });
+});

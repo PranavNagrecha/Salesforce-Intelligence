@@ -140,6 +140,82 @@ export const SLICE_EDGE_CAP = 1_000;
 export const JOIN_FANOUT_CAP = 1_000;
 
 /**
+ * Every place the slice assembly can CLIP its own evidence, NAMED.
+ *
+ * The caps themselves are fine — a hub with 40k incident edges must not be
+ * pulled whole. What was NOT fine is that hitting one was invisible past a bare
+ * boolean: six copies of `if (sliceEdges.length >= edges.length +
+ * JOIN_FANOUT_CAP) { sliceTruncated = true; break; }`, each recording only THAT
+ * something was dropped, never WHERE. A caller could not tell a clipped 1-hop
+ * (the root's own evidence is short) from a clipped cascade expansion (a
+ * second-hop enrichment is short) — two very different answers.
+ */
+export type SliceExpansion =
+  /** The root's own incident bound-type edges, clipped at {@link SLICE_EDGE_CAP}. */
+  | 'root-incident-edges'
+  /** JOIN — shared keys read off an intermediary's key array. */
+  | 'join-shared-keys'
+  /** JOIN — second-ground (`writesTo`-shaped) edges into those keys. */
+  | 'join-second-ground-edges'
+  /** AGGREGATE `root-children-outgoing` — the child fields' counted edges. */
+  | 'aggregate-child-field-edges'
+  /** EC-8 anti-join, C15 arm2 — grants into the field's parent object. */
+  | 'anti-join-root-object-grants'
+  /** EC-8 anti-join, C15 arm1 — each present grantor's outgoing object grants. */
+  | 'anti-join-present-object-grants'
+  /** EC-11 crossObjectCascade — firers incident to the written-to objects. */
+  | 'cascade-target-firers';
+
+/**
+ * THE ONE PLACE THE FAN-OUT CAP IS APPLIED, and the ledger of where it bit.
+ *
+ * Every expansion asks this object whether it may admit one more item instead
+ * of re-deciding `>= JOIN_FANOUT_CAP` for itself. That matters beyond tidiness:
+ * the decision and the DISCLOSURE of the decision are now the same statement,
+ * so a new expansion cannot be added that clips silently — there is no way to
+ * clip except through a call that records the site.
+ */
+export interface SliceBudget {
+  /**
+   * May this expansion push one more EDGE? `sliceEdgeCount` is the CURRENT
+   * `sliceEdges.length`; the budget subtracts the 1-hop base itself, so no
+   * caller re-derives `edges.length + CAP`.
+   */
+  admitEdge(expansion: SliceExpansion, sliceEdgeCount: number): boolean;
+  /** May this expansion admit one more non-edge item (a shared key)? */
+  admitItem(expansion: SliceExpansion, itemCount: number): boolean;
+  /** Record a clip decided elsewhere (the 1-hop cap, which is a different constant). */
+  clip(expansion: SliceExpansion): void;
+  /** TRUE once ANY expansion clipped. The old `sliceTruncated` boolean, derived. */
+  readonly truncated: boolean;
+  /** WHICH expansions clipped. Sorted, deduped. Empty exactly when not truncated. */
+  readonly expansions: readonly SliceExpansion[];
+}
+
+/** Build a budget over a slice whose 1-hop base already holds `baseEdgeCount` edges. */
+export const createSliceBudget = (baseEdgeCount: number): SliceBudget => {
+  const clipped = new Set<SliceExpansion>();
+  const admit = (expansion: SliceExpansion, used: number): boolean => {
+    if (used < JOIN_FANOUT_CAP) return true;
+    clipped.add(expansion);
+    return false;
+  };
+  return {
+    admitEdge: (expansion, sliceEdgeCount) => admit(expansion, sliceEdgeCount - baseEdgeCount),
+    admitItem: (expansion, itemCount) => admit(expansion, itemCount),
+    clip: (expansion) => {
+      clipped.add(expansion);
+    },
+    get truncated(): boolean {
+      return clipped.size > 0;
+    },
+    get expansions(): readonly SliceExpansion[] {
+      return [...clipped].sort();
+    },
+  };
+};
+
+/**
  * One candidate a natural identifier resolved to. Mirrors the shared resolver's
  * shape so a caller can render a clarification without re-querying.
  */
@@ -192,17 +268,46 @@ export interface ReasonAboutComponentOptions {
   readonly resolveIdentifier?: boolean;
 }
 
-/** Why a rule could not be evaluated. Both are "unknown", never "skipped". */
-export type UnevaluableReason =
-  /** The vault never retrieved a metadata family this rule reads. */
-  | 'vault-coverage-missing'
-  /**
-   * The classifier could not PROVE the rule inapplicable to this root — an
-   * edge / multi-edge shape whose bound types are absent from the assembled
-   * slice, or a bind shape the classifier does not understand at all. Reported
-   * as undetermined rather than skipped, deliberately.
-   */
-  | 'shape-not-provable';
+/**
+ * Why a rule could not be evaluated. ALL of these are "unknown", never
+ * "skipped", and they name DIFFERENT remedies:
+ *
+ *   - `vault-coverage-missing` — the vault never retrieved a metadata family
+ *     this rule reads. Remedy: refresh the vault.
+ *   - `shape-not-provable` — the classifier could not PROVE the rule
+ *     inapplicable to this root: an edge / multi-edge shape whose bound types
+ *     are absent from the assembled slice, or a bind shape the classifier does
+ *     not understand at all. Remedy: none — it is a limit of the classifier.
+ *   - `slice-truncated` — the rule's shape WAS present and the vault DID carry
+ *     its families; the assembled evidence was clipped at a cap before it ran.
+ *     Remedy: ask about a narrower anchor. Distinct from both of the above on
+ *     purpose: telling a user to refresh a vault that is complete, or that the
+ *     model has no rule shape for their component, is the wrong instruction.
+ *
+ * DERIVED from {@link UNEVALUABLE_REASONS} rather than written twice, so a
+ * consumer that must enumerate the reasons cannot drift from this list — see
+ * {@link zeroUnevaluableCounts}.
+ */
+export const UNEVALUABLE_REASONS = [
+  'vault-coverage-missing',
+  'shape-not-provable',
+  'slice-truncated',
+] as const;
+
+export type UnevaluableReason = (typeof UNEVALUABLE_REASONS)[number];
+
+/**
+ * A zeroed count-by-reason record, covering EVERY reason by construction.
+ *
+ * Exists so no consumer has to hand-write the key set (the hand-written copy in
+ * `concept-reasoning.ts` is exactly the kind of second copy that goes stale the
+ * moment a reason is added).
+ */
+export const zeroUnevaluableCounts = (): Record<UnevaluableReason, number> =>
+  Object.fromEntries(UNEVALUABLE_REASONS.map((r) => [r, 0])) as Record<
+    UnevaluableReason,
+    number
+  >;
 
 /** One rule that could NOT be evaluated. Distinct from "evaluated, found nothing". */
 export interface UnevaluableRule {
@@ -210,8 +315,9 @@ export interface UnevaluableRule {
   readonly concept: string;
   /**
    * The metadata families this rule depends on that are absent from the vault.
-   * EMPTY when `reason` is `shape-not-provable` — nothing was missing from the
-   * vault; the classifier simply could not prove the rule inapplicable.
+   * EMPTY for `shape-not-provable` and `slice-truncated` — nothing was missing
+   * from the VAULT in either case, and an empty list must never be read as a
+   * retrieval gap (whose remedy is the opposite advice).
    */
   readonly missingCoverage: readonly string[];
   readonly reason: UnevaluableReason;
@@ -290,7 +396,15 @@ export interface ReasonAboutComponentResult {
   readonly selectedRules: readonly ConceptRule[];
   /** Distinct rule ids that fired. */
   readonly rulesFired: number;
+  /** TRUE when ANY expansion clipped. Derived from {@link truncatedExpansions}. */
   readonly sliceTruncated: boolean;
+  /**
+   * WHICH expansions clipped. REQUIRED, never optional, and empty exactly when
+   * `sliceTruncated` is false — a consumer that wants to know whether the
+   * shortfall is in the root's own evidence or in a second-hop enrichment reads
+   * this rather than guessing from a boolean.
+   */
+  readonly truncatedExpansions: readonly SliceExpansion[];
   readonly slice: GroundedSlice;
   /** Union of the selected rules' `dependsOnCoverage`, deduped. */
   readonly unionCoverageTypes: readonly ComponentType[];
@@ -414,6 +528,26 @@ const PROVABLE_CATEGORIES: ReadonlySet<BindCategory | 'unknown'> = new Set<
 >(['node', 'node-present']);
 
 /**
+ * The categories whose evaluation READS THE SLICE EDGES, and which a clipped
+ * slice can therefore STARVE — they matched nothing because the evidence was
+ * cut short, not because there was nothing to match.
+ *
+ * `node` is deliberately ABSENT, and that omission is the precision half of the
+ * fix. `runBind`'s node branch scopes the match to THE ROOT NODE ONLY (see
+ * `reason.ts`: with a `rootId` it evaluates `[nodesById.get(rootId)]`), and the
+ * root node is in every assembled slice unconditionally. No edge cap can starve
+ * it, so demoting it on truncation would manufacture a false "unknown" — the
+ * opposite dishonesty, and just as wrong as the one being fixed here.
+ *
+ * `node-present` IS listed: its PRESENT side is the root node, but the anti-join
+ * still reads incident edges of the absent type out of the 1-hop slice, and a
+ * clip can remove them.
+ */
+const EDGE_READING_CATEGORIES: ReadonlySet<BindCategory | 'unknown'> = new Set<
+  BindCategory | 'unknown'
+>(['edge', 'multi-edge', 'node-present']);
+
+/**
  * Does this bind carry at least one criterion the NODE branch of `runBind`
  * actually reads? Mirrors that function's own `hasNodeCriterion` guard: with
  * none of these present the node branch returns empty and the rule can never
@@ -534,6 +668,11 @@ export const classifyRuleCoverage = (args: {
    * names — see the gate below; the two cases need opposite advice.
    */
   readonly coverageKnown: boolean;
+  /**
+   * The assembled slice hit a cap. NOT merely cosmetic here: a rule that reads
+   * slice edges and matched nothing over a CLIPPED slice has not been evaluated
+   * — it has been starved — and may not be counted `checkedClean`.
+   */
   readonly sliceTruncated: boolean;
 }): ConceptCoverageReport => {
   const firedRuleIds = new Set(args.interpretations.map((i) => i.ruleId));
@@ -561,6 +700,7 @@ export const classifyRuleCoverage = (args: {
   let applicableRules = 0;
 
   for (const rule of args.selectedRules) {
+    const category = bindCategory(rule);
     const verdict = decideApplicability(
       rule,
       args.rootType,
@@ -609,7 +749,29 @@ export const classifyRuleCoverage = (args: {
       continue;
     }
 
-    // 5. Applicable, evaluated against real data, matched nothing.
+    // 5. STARVED BY THE CLIP. The rule's shape was present, the vault carried
+    //    its families, and it still matched nothing — but the slice it ran
+    //    against was CUT SHORT at a cap, so "matched nothing" is an artifact of
+    //    the clip and not a finding. This is the whole point of the bucket
+    //    split: `checkedClean` is a POSITIVE assertion ("really evaluated
+    //    against a slice carrying the shape it binds on, and matched nothing")
+    //    and a clipped slice cannot support it.
+    //
+    //    A machine consumer reads these COUNTS and never reads the prose
+    //    caveat; that is exactly how a truncated access-control slice produced
+    //    a confident wrong answer. So the disclosure is the bucket itself plus
+    //    a typed `reason`, not a sentence appended to a summary.
+    if (args.sliceTruncated && EDGE_READING_CATEGORIES.has(category)) {
+      notEvaluable.push({
+        ruleId: rule.id,
+        concept: rule.concept,
+        missingCoverage: [],
+        reason: 'slice-truncated',
+      });
+      continue;
+    }
+
+    // 6. Applicable, evaluated against real data, matched nothing.
     rulesCheckedClean += 1;
     conceptsCheckedClean.add(rule.concept);
   }
@@ -626,7 +788,11 @@ export const classifyRuleCoverage = (args: {
   const coverageMissingCount = notEvaluable.filter(
     (r) => r.reason === 'vault-coverage-missing',
   ).length;
-  const notProvableCount = notEvaluable.length - coverageMissingCount;
+  const truncationStarvedCount = notEvaluable.filter(
+    (r) => r.reason === 'slice-truncated',
+  ).length;
+  const notProvableCount =
+    notEvaluable.length - coverageMissingCount - truncationStarvedCount;
 
   // D5 — when the vault itself is the blocker, the disclosure must name the
   // REMEDY, not just the wall of "unknown". A vault refreshed before coverage
@@ -686,7 +852,9 @@ export const classifyRuleCoverage = (args: {
       `because their bind shape could not be proven inapplicable here (reported as unknown, ` +
       `never as skipped)` +
       (args.sliceTruncated
-        ? '. The graph slice hit its cap, so any absence conclusion is partial at best.'
+        ? `; ${truncationStarvedCount} could not be evaluated because the graph slice was ` +
+          'truncated at its cap — CUT SHORT before their evidence was complete. They are reported as ' +
+          'unknown, NOT as clean. Any absence conclusion here is partial at best.'
         : '.') +
       vaultRemedy;
 
@@ -865,7 +1033,7 @@ export const reasonAboutComponent = async (
   // node is absent from `slice.nodes`).
   const edgeTypes = boundEdgeTypes(selectedRules);
   let edges: readonly Edge[] = [];
-  let sliceTruncated = false;
+  let rootIncidentClipped = false;
   if (edgeTypes.length > 0) {
     const edgeRes = await listEdgesForNodes(ctx.graph, [anchorId], {
       direction: 'both',
@@ -879,12 +1047,18 @@ export const reasonAboutComponent = async (
     }
     const incident = edgeRes.value.get(anchorId) ?? [];
     if (incident.length > SLICE_EDGE_CAP) {
-      sliceTruncated = true;
+      rootIncidentClipped = true;
       edges = incident.slice(0, SLICE_EDGE_CAP);
     } else {
       edges = incident;
     }
   }
+
+  // THE ONE BOUNDARY. Every expansion below asks this for permission instead of
+  // re-deciding the cap for itself, so there is exactly one place that can clip
+  // and exactly one place that records having clipped.
+  const budget = createSliceBudget(edges.length);
+  if (rootIncidentClipped) budget.clip('root-incident-edges');
 
   const endpointIds = new Set<ComponentId>();
   for (const edge of edges) {
@@ -969,11 +1143,11 @@ export const reasonAboutComponent = async (
         const arr = through.properties[prop];
         if (!Array.isArray(arr)) continue;
         for (const raw of arr) {
-          if (typeof raw === 'string' && keyIds.size < JOIN_FANOUT_CAP) {
-            keyIds.add(raw as ComponentId);
-          } else if (typeof raw === 'string') {
-            sliceTruncated = true; // key fan-out capped
-          }
+          if (typeof raw !== 'string') continue;
+          // `continue`, not `break` — the original kept scanning the array and
+          // merely recorded the clip; preserved verbatim.
+          if (!budget.admitItem('join-shared-keys', keyIds.size)) continue;
+          keyIds.add(raw as ComponentId);
         }
       }
     }
@@ -993,10 +1167,7 @@ export const reasonAboutComponent = async (
       const writerIds = new Set<ComponentId>();
       for (const keyId of keyIds) {
         for (const writeEdge of writeRes.value.get(keyId) ?? []) {
-          if (sliceEdges.length >= edges.length + JOIN_FANOUT_CAP) {
-            sliceTruncated = true; // second-ground edge fan-out capped
-            break;
-          }
+          if (!budget.admitEdge('join-second-ground-edges', sliceEdges.length)) break;
           sliceEdges.push(writeEdge);
           writerIds.add(writeEdge.fromId);
         }
@@ -1099,10 +1270,7 @@ export const reasonAboutComponent = async (
       const needIds = new Set<ComponentId>();
       for (const fieldId of childFieldIds) {
         for (const fieldEdge of fieldEdgeRes.value.get(fieldId) ?? []) {
-          if (sliceEdges.length >= edges.length + JOIN_FANOUT_CAP) {
-            sliceTruncated = true; // child-field edge fan-out capped
-            break;
-          }
+          if (!budget.admitEdge('aggregate-child-field-edges', sliceEdges.length)) break;
           sliceEdges.push(fieldEdge);
           needIds.add(fieldEdge.fromId);
           needIds.add(fieldEdge.toId);
@@ -1163,10 +1331,7 @@ export const reasonAboutComponent = async (
         }
         const grantorIds = new Set<ComponentId>();
         for (const gEdge of objGrantRes.value.get(parentObjId) ?? []) {
-          if (sliceEdges.length >= edges.length + JOIN_FANOUT_CAP) {
-            sliceTruncated = true;
-            break;
-          }
+          if (!budget.admitEdge('anti-join-root-object-grants', sliceEdges.length)) break;
           sliceEdges.push(gEdge);
           grantorIds.add(gEdge.fromId);
         }
@@ -1209,10 +1374,7 @@ export const reasonAboutComponent = async (
         const objIds = new Set<ComponentId>();
         for (const grantorId of grantorIds) {
           for (const gEdge of outRes.value.get(grantorId) ?? []) {
-            if (sliceEdges.length >= edges.length + JOIN_FANOUT_CAP) {
-              sliceTruncated = true;
-              break;
-            }
+            if (!budget.admitEdge('anti-join-present-object-grants', sliceEdges.length)) break;
             sliceEdges.push(gEdge);
             objIds.add(gEdge.toId);
           }
@@ -1310,10 +1472,7 @@ export const reasonAboutComponent = async (
       for (const objId of targetObjIds) {
         for (const inEdge of inRes.value.get(objId) ?? []) {
           if (inEdge.fromId === anchorId) continue;
-          if (sliceEdges.length >= edges.length + JOIN_FANOUT_CAP) {
-            sliceTruncated = true;
-            break;
-          }
+          if (!budget.admitEdge('cascade-target-firers', sliceEdges.length)) break;
           sliceEdges.push(inEdge);
           firerIds.add(inEdge.fromId);
         }
@@ -1333,6 +1492,10 @@ export const reasonAboutComponent = async (
   }
 
   const slice: GroundedSlice = { nodes: sliceNodes, edges: sliceEdges };
+  // DERIVED from the ledger, never assigned: the boolean and the list of clip
+  // sites can no longer disagree.
+  const sliceTruncated = budget.truncated;
+  const truncatedExpansions = budget.expansions;
 
   // (d)+(e) per-rule coverage → interpret → flatten (claims VERBATIM).
   const interpretations: Interpretation[] = [];
@@ -1422,6 +1585,7 @@ export const reasonAboutComponent = async (
     selectedRules,
     rulesFired,
     sliceTruncated,
+    truncatedExpansions,
     slice,
     unionCoverageTypes,
     aggSummary,

@@ -11,13 +11,32 @@
  *   - `test/tools/automation-collisions.test.ts` runs the TOOL over a graph; it
  *     never touches the concept model.
  * Nothing ran BOTH over ONE vault, so their answers were free to diverge and
- * every gate stayed green. On a real vault they DO diverge (measured: the rule
- * flags fields on objects where the tool reports zero collisions). This file is
- * the missing gate: it runs both engines over the SAME graph and pins the
+ * every gate stayed green. On a real vault they DO diverge. This file is the
+ * missing gate: it runs both engines over the SAME graph and pins the
  * relationship between them.
  *
- * WHAT WAS ACTUALLY WRONG. Neither engine. They answer DIFFERENT questions and
- * both answer their own correctly:
+ * WHAT THE DISAGREEMENT ACTUALLY IS — MEASURED, not assumed. Both engines were
+ * run field-by-field over one real vault (4,296 CustomField nodes, 144
+ * CustomObject nodes, every object answered, none refused):
+ *
+ *     rule fires on ....................... 107 fields
+ *     tool reports a collision on .......... 56 fields
+ *     both agree on ........................ 39 fields
+ *     rule-only ............................ 68 fields
+ *     tool-only ............................ 17 fields
+ *
+ * That 68/17 split is the bug report. The finding is that NEITHER ENGINE IS
+ * WRONG. Over that same vault:
+ *
+ *     INVARIANT A (below): 34 comparisons, 0 violations, 1 edge-only field
+ *     INVARIANT B (below): 34 comparisons, 0 violations
+ *     rule-side false-positive hunt: 0 duplicate citations, 0 fields cited with
+ *       fewer than 2 DISTINCT flows, 0 non-Active flows cited, 0 citations
+ *       without a backing `writesTo` edge
+ *     every one of the 85 disagreements classified into one of the SIX causes
+ *       pinned in the DIVERGENCE table below — none unexplained
+ *
+ * They answer DIFFERENT questions and both answer their own correctly:
  *
  *   RULE  — counts DISTINCT Flow nodes with `status === 'Active'` that carry a
  *           `writesTo` edge to the field, however the flow is invoked, whatever
@@ -26,34 +45,43 @@
  *   TOOL  — counts automation reached from the object's own incoming
  *           `triggersOn` edges (Flow + ApexTrigger + WorkflowRule), buckets them
  *           by execution PATH (save vs delete), and lists INACTIVE writers too
- *           (severity `info`: "a dormant writer would collide if reactivated").
- *           Keys on the field ID, so it also reports on ids that exist only as
- *           an edge target.
+ *           ("a dormant writer would collide if reactivated"). Keys on the field
+ *           ID, so it also reports on ids that exist only as an edge target.
  *
  * So the honest gate is not `ruleFields === toolFields` — that assertion is
  * FALSE by design and would have to be weakened until it asserted nothing.
- * The gate is two IMPLICATIONS over the shared scope plus a pinned table of
- * every reason they are allowed to differ:
+ * The gate is two IMPLICATIONS over the shared scope plus a CLOSED-ENUM
+ * classification of every reason they are allowed to differ:
  *
- *   INVARIANT A (tool ⇒ rule) — a save-path collision whose writer set holds
+ *   INVARIANT A (tool => rule) — a save-path collision whose writer set holds
  *     >= 2 distinct ACTIVE Flow components, on a field that EXISTS as a node,
  *     MUST make the rule fire, and the rule must CITE every one of those flows.
  *     The rule's predicate is strictly weaker, so a miss is a rule defect.
- *   INVARIANT B (rule ⇒ tool) — when >= 2 of the flows the rule cites are
+ *   INVARIANT B (rule => tool) — when >= 2 of the flows the rule cites are
  *     ACTIVE and `triggersOn` the field's own object on the SAVE path, the tool
- *     MUST report a save-path collision on that field naming them. A miss is a
- *     tool defect.
+ *     MUST report a save-path collision on that field. A miss is a tool defect.
  *
- * NON-VACUITY. Both invariants are satisfied by an empty vault, so they are
- * counted, not just checked — `comparisonsA` / `comparisonsB` are asserted
- * non-zero and pinned at their fixture values, the way `HonestyAudit.checks`
- * counts evaluations rather than passes. The DIVERGENCE table below is asserted
- * exhaustively for the same reason: an engine change that silently collapses a
- * divergence cause fails here.
+ * NON-VACUITY — four independent guards, because every one of these assertions
+ * is satisfied by an empty vault:
+ *   1. `comparisonsA` / `comparisonsB` are COUNTED and asserted non-zero (and
+ *      pinned at their fixture values), the way `HonestyAudit.checks` counts
+ *      evaluations rather than passes.
+ *   2. the disagreement set is asserted NON-EMPTY — the fixture must actually
+ *      reproduce the divergence it exists to explain.
+ *   3. every cause in {@link DIVERGENCE_CAUSES} is asserted EXERCISED at least
+ *      once, so the table cannot rot into a list of dead reasons that explain
+ *      nothing.
+ *   4. `summary.collisionsTruncated` is asserted false on every tool call.
+ *      A byte-trimmed collision list makes INVARIANT A compare fewer rows and
+ *      makes INVARIANT B report a FALSE violation, so a differential that reads
+ *      a trimmed page as a complete one is blind to exactly the response
+ *      trimmer it exists to catch.
  *
- * The shipped demo vault CANNOT settle this — it holds 2 flows whose write
- * targets are disjoint, so it produces ZERO comparisons in either direction.
- * That gap is asserted explicitly at the bottom rather than left silent.
+ * The shipped demo vault CANNOT settle this — measured: 63 fields, 13 objects,
+ * ZERO rule hits and ZERO tool collisions, so it produces zero comparisons in
+ * either direction. That gap is asserted explicitly at the bottom rather than
+ * left silent, and `SFI_DIFFERENTIAL_VAULT` re-runs the whole differential
+ * against a real vault to reproduce the census above.
  *
  * Synthetic placeholder components only — no real org names.
  */
@@ -82,6 +110,33 @@ import {
 import { scanAllNodesOfTypes } from '../../src/tools/scan-all-nodes.js';
 
 const RULE_ID = 'rule:automation/flow-field-writer-collision';
+
+/**
+ * The CLOSED set of reasons the two surfaces are allowed to disagree.
+ *
+ * Closed on purpose. `classifyDivergence` returns a subset of these and the
+ * gate fails when a disagreement maps to NONE of them — that is how a genuinely
+ * new divergence (i.e. a real defect on one side) surfaces as a failure instead
+ * of being absorbed into a hand-maintained allow-list of field ids. The
+ * previous shape of this test pinned six literal field ids, which explains only
+ * the fixture it was written against and would pass unchanged on a vault where
+ * both engines had started lying.
+ */
+const DIVERGENCE_CAUSES = [
+  /** Tool reports on a field id that exists only as an edge target — the rule roots on NODES. */
+  'edge-only-field',
+  /** Tool's writer set holds fewer than 2 FLOW writers (e.g. one Flow + one ApexTrigger). */
+  'non-flow-writer-family',
+  /** Tool's Flow writer set holds fewer than 2 ACTIVE flows (a dormant writer is listed, not run). */
+  'inactive-writer',
+  /** A flow the rule cites carries NO `triggersOn` edge at all (screen / scheduled / autolaunched). */
+  'not-record-triggered',
+  /** A flow the rule cites is record-triggered on a DIFFERENT object than the field's parent. */
+  'cross-object-writer',
+  /** A flow the rule cites fires on the DELETE path, which can never race a save-path writer. */
+  'disjoint-execution-path',
+] as const;
+type DivergenceCause = (typeof DIVERGENCE_CAUSES)[number];
 
 /**
  * `examples/demo-vault` — the only fully-built vault committed to this repo.
@@ -142,7 +197,7 @@ const edge = (o: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>): Ed
 const ALPHA = 'CustomObject:Alpha__c';
 const BETA = 'CustomObject:Beta__c';
 
-/** Fields that EXIST as nodes. `Ghost__c` deliberately does NOT — see DIVERGENCE 5. */
+/** Fields that EXIST as nodes. `Ghost__c` deliberately does NOT — see `edge-only-field`. */
 const F_AGREE = 'CustomField:Alpha__c.Agree__c';
 const F_DORMANT = 'CustomField:Alpha__c.Dormant__c';
 const F_SCREEN = 'CustomField:Alpha__c.ScreenOnly__c';
@@ -272,13 +327,31 @@ afterAll(async () => {
 // inputs rather than over two hand-written expectations that can drift apart.
 // ---------------------------------------------------------------------------
 
-/** Every save-path collision the tool reports for one object. */
+/**
+ * Every collision the tool reports for one object.
+ *
+ * THROWS on `collisionsTruncated`. A byte-trimmed list is not a smaller answer,
+ * it is a DIFFERENT answer: INVARIANT A would compare only the rows that
+ * survived the trim (quietly shrinking the gate) and INVARIANT B would read a
+ * trimmed-away row as "the tool reports no save collision" and raise a FALSE
+ * violation against the tool. The response trimmer is the thing this file
+ * exists to be able to see, so it may never be silently absorbed.
+ */
 const toolCollisions = async (
   context: Context,
   objectApiName: string,
 ): Promise<readonly FieldCollision[]> => {
   const res = await automationCollisionsHandler(context, { object: objectApiName, limit: 200 });
   if (!res.ok) throw new Error(`tool refused ${objectApiName}: ${JSON.stringify(res.error)}`);
+  if (res.value.data.summary.collisionsTruncated) {
+    throw new Error(
+      `tool truncated its collision list for ${objectApiName} ` +
+        `(${String(res.value.data.collisions.length)} of ` +
+        `${String(res.value.data.summary.fieldsWithMultipleWriters)} fields shipped). ` +
+        `The differential cannot compare a trimmed page against a complete one — ` +
+        `narrow the scope rather than letting the trim read as agreement.`,
+    );
+  }
   return res.value.data.collisions;
 };
 
@@ -294,110 +367,212 @@ const ruleFlowsFor = async (
   return fired.flatMap((i) => i.groundedIn.filter((g) => g.startsWith('Flow:')));
 };
 
-/** Which of `flowIds` are ACTIVE and `triggersOn` `objectApiName` on the SAVE path. */
-const saveWiredActiveFlows = async (
+/** How one cited flow relates to the object that owns the field it writes. */
+type FlowWiring = 'save-wired' | 'not-record-triggered' | 'cross-object' | 'other-path';
+
+/** Classify one cited flow's `triggersOn` wiring relative to `objectApiName`. */
+const wiringOf = async (
+  context: Context,
+  flowId: string,
+  objectApiName: string,
+): Promise<FlowWiring> => {
+  const trig = await listEdges(context.graph, flowId as ComponentId, {
+    direction: 'out',
+    edgeType: 'triggersOn',
+  });
+  const edges = trig.ok ? trig.value : [];
+  if (edges.length === 0) return 'not-record-triggered';
+  const own = edges.filter((e) => e.toId === `CustomObject:${objectApiName}`);
+  if (own.length === 0) return 'cross-object';
+  const onSavePath = own.some(
+    (e) =>
+      e.properties['triggerType'] === 'RecordAfterSave' ||
+      e.properties['triggerType'] === 'RecordBeforeSave',
+  );
+  return onSavePath ? 'save-wired' : 'other-path';
+};
+
+/** Which of `flowIds` are `triggersOn` `objectApiName` on the SAVE path. */
+const saveWiredFlows = async (
   context: Context,
   flowIds: readonly string[],
   objectApiName: string,
 ): Promise<readonly string[]> => {
   const out: string[] = [];
-  for (const flowId of flowIds) {
-    const trig = await listEdges(context.graph, flowId as ComponentId, {
-      direction: 'out',
-      edgeType: 'triggersOn',
-    });
-    if (!trig.ok) continue;
-    const wired = trig.value.some(
-      (e) =>
-        e.toId === `CustomObject:${objectApiName}` &&
-        (e.properties['triggerType'] === 'RecordAfterSave' ||
-          e.properties['triggerType'] === 'RecordBeforeSave'),
-    );
-    if (wired) out.push(flowId);
+  for (const flowId of new Set(flowIds)) {
+    if ((await wiringOf(context, flowId, objectApiName)) === 'save-wired') out.push(flowId);
   }
   return out;
 };
 
+const objectOfField = (fieldId: string): string =>
+  fieldId.slice('CustomField:'.length).split('.')[0] ?? '';
+
 /**
- * Run BOTH invariants over one vault. Returns the comparison COUNTS as well as
- * the violations, because "no violations" over zero comparisons asserts nothing.
+ * Why this one field is reported by one surface and not the other, as a subset
+ * of {@link DIVERGENCE_CAUSES}. An EMPTY result is the failure signal: the
+ * surfaces disagree for a reason the model does not know about, which means one
+ * of them is wrong.
  */
-const runDifferential = async (
+const classifyDivergence = async (
   context: Context,
-): Promise<{
-  comparisonsA: number;
-  comparisonsB: number;
-  violationsA: string[];
-  violationsB: string[];
-  edgeOnlyFieldIds: string[];
-}> => {
+  fieldId: string,
+  toolRows: readonly FieldCollision[] | undefined,
+  citedFlows: readonly string[] | null,
+  fieldNodeIds: ReadonlySet<string>,
+): Promise<readonly DivergenceCause[]> => {
+  const causes = new Set<DivergenceCause>();
+
+  // --- tool reports, rule silent -----------------------------------------
+  if (toolRows !== undefined && citedFlows === null) {
+    if (!fieldNodeIds.has(fieldId)) causes.add('edge-only-field');
+    else
+      for (const row of toolRows) {
+        const flowWriters = row.writers.filter((w) => w.componentType === 'Flow');
+        if (flowWriters.length < 2) causes.add('non-flow-writer-family');
+        else if (flowWriters.filter((w) => w.active).length < 2) causes.add('inactive-writer');
+      }
+  }
+
+  // --- rule fires, tool silent on the SAVE path ---------------------------
+  if (citedFlows !== null) {
+    const objectApiName = objectOfField(fieldId);
+    for (const flowId of new Set(citedFlows)) {
+      switch (await wiringOf(context, flowId, objectApiName)) {
+        case 'not-record-triggered':
+          causes.add('not-record-triggered');
+          break;
+        case 'cross-object':
+          causes.add('cross-object-writer');
+          break;
+        case 'other-path':
+          causes.add('disjoint-execution-path');
+          break;
+        case 'save-wired':
+          break;
+      }
+    }
+  }
+
+  return [...causes];
+};
+
+interface DifferentialResult {
+  readonly comparisonsA: number;
+  readonly comparisonsB: number;
+  readonly violationsA: readonly string[];
+  readonly violationsB: readonly string[];
+  readonly disagreements: readonly string[];
+  readonly unexplained: readonly string[];
+  readonly causesExercised: readonly DivergenceCause[];
+}
+
+/**
+ * Run BOTH invariants and the divergence classification over one vault.
+ *
+ * Returns the comparison COUNTS as well as the violations, because "no
+ * violations" over zero comparisons asserts nothing.
+ */
+const runDifferential = async (context: Context): Promise<DifferentialResult> => {
   const objectScan = await scanAllNodesOfTypes(context.graph, ['CustomObject']);
   if (!objectScan.ok) throw new Error(objectScan.error.message);
   const fieldScan = await scanAllNodesOfTypes(context.graph, ['CustomField']);
   if (!fieldScan.ok) throw new Error(fieldScan.error.message);
   const fieldNodeIds = new Set(fieldScan.value.nodes.map((n) => n.id));
 
+  // One pass over the tool, indexed two ways, so both invariants and the
+  // classifier read the SAME answers rather than re-querying and drifting.
+  const toolRowsByField = new Map<string, FieldCollision[]>();
+  const saveCollisionFieldsByObject = new Map<string, Set<string>>();
+  for (const objectNode of objectScan.value.nodes) {
+    const objectApiName = objectNode.id.slice('CustomObject:'.length);
+    const saveFields = new Set<string>();
+    for (const collision of await toolCollisions(context, objectApiName)) {
+      toolRowsByField.set(collision.fieldId, [
+        ...(toolRowsByField.get(collision.fieldId) ?? []),
+        collision,
+      ]);
+      if (collision.collisionPath === 'save') saveFields.add(collision.fieldId);
+    }
+    saveCollisionFieldsByObject.set(objectApiName, saveFields);
+  }
+
+  // One pass over the rule, over every field NODE.
+  const ruleFlowsByField = new Map<string, readonly string[]>();
+  for (const field of fieldScan.value.nodes) {
+    const cited = await ruleFlowsFor(context, field.id);
+    if (cited !== null) ruleFlowsByField.set(field.id, cited);
+  }
+
   let comparisonsA = 0;
   let comparisonsB = 0;
   const violationsA: string[] = [];
   const violationsB: string[] = [];
-  const edgeOnlyFieldIds: string[] = [];
 
-  // --- INVARIANT A: tool ⇒ rule -------------------------------------------
-  for (const objectNode of objectScan.value.nodes) {
-    const objectApiName = objectNode.id.slice('CustomObject:'.length);
-    for (const collision of await toolCollisions(context, objectApiName)) {
+  // --- INVARIANT A: tool => rule -------------------------------------------
+  for (const [fieldId, rows] of toolRowsByField) {
+    for (const collision of rows) {
       if (collision.collisionPath !== 'save') continue;
       const activeFlowWriters = collision.writers
         .filter((w) => w.componentType === 'Flow' && w.active)
         .map((w) => w.componentId);
       if (activeFlowWriters.length < 2) continue;
-      if (!fieldNodeIds.has(collision.fieldId)) {
-        // The rule roots on NODES and cannot reach an id that exists only as an
-        // edge target. Recorded, never silently skipped (DIVERGENCE 5).
-        edgeOnlyFieldIds.push(collision.fieldId);
-        continue;
-      }
+      // The rule roots on NODES and cannot reach an id that exists only as an
+      // edge target. Not a violation, and not silently skipped either — it
+      // falls through to the classifier as `edge-only-field`.
+      if (!fieldNodeIds.has(fieldId)) continue;
       comparisonsA += 1;
-      const cited = await ruleFlowsFor(context, collision.fieldId);
-      if (cited === null) {
+      const cited = ruleFlowsByField.get(fieldId);
+      if (cited === undefined) {
         violationsA.push(
-          `${collision.fieldId}: tool names ${String(activeFlowWriters.length)} active Flow writers, rule silent`,
+          `${fieldId}: tool names ${String(activeFlowWriters.length)} active Flow writers, rule silent`,
         );
         continue;
       }
       const missing = activeFlowWriters.filter((w) => !cited.includes(w));
       if (missing.length > 0) {
-        violationsA.push(`${collision.fieldId}: rule did not cite ${missing.join(',')}`);
+        violationsA.push(`${fieldId}: rule did not cite ${missing.join(',')}`);
       }
     }
   }
 
-  // --- INVARIANT B: rule ⇒ tool -------------------------------------------
-  const saveCollisionFieldsByObject = new Map<string, Set<string>>();
-  for (const objectNode of objectScan.value.nodes) {
-    const objectApiName = objectNode.id.slice('CustomObject:'.length);
-    const set = new Set<string>();
-    for (const collision of await toolCollisions(context, objectApiName)) {
-      if (collision.collisionPath === 'save') set.add(collision.fieldId);
-    }
-    saveCollisionFieldsByObject.set(objectApiName, set);
-  }
-  for (const field of fieldScan.value.nodes) {
-    const cited = await ruleFlowsFor(context, field.id);
-    if (cited === null) continue;
-    const objectApiName = field.id.slice('CustomField:'.length).split('.')[0] ?? '';
-    const wired = await saveWiredActiveFlows(context, cited, objectApiName);
+  // --- INVARIANT B: rule => tool -------------------------------------------
+  for (const [fieldId, cited] of ruleFlowsByField) {
+    const objectApiName = objectOfField(fieldId);
+    const wired = await saveWiredFlows(context, cited, objectApiName);
     if (wired.length < 2) continue;
     comparisonsB += 1;
-    if (!(saveCollisionFieldsByObject.get(objectApiName)?.has(field.id) ?? false)) {
+    if (!(saveCollisionFieldsByObject.get(objectApiName)?.has(fieldId) ?? false)) {
       violationsB.push(
-        `${field.id}: rule cites ${String(wired.length)} active save-wired flows, tool reports no save collision`,
+        `${fieldId}: rule cites ${String(wired.length)} save-wired flows, tool reports no save collision`,
       );
     }
   }
 
-  return { comparisonsA, comparisonsB, violationsA, violationsB, edgeOnlyFieldIds };
+  // --- every disagreement must map to a KNOWN cause ------------------------
+  const disagreements: string[] = [];
+  const unexplained: string[] = [];
+  const causesExercised = new Set<DivergenceCause>();
+  const allFields = new Set([...toolRowsByField.keys(), ...ruleFlowsByField.keys()]);
+  for (const fieldId of allFields) {
+    const rows = toolRowsByField.get(fieldId);
+    const cited = ruleFlowsByField.get(fieldId) ?? null;
+    if (rows !== undefined && cited !== null) continue; // both fired — no disagreement
+    disagreements.push(fieldId);
+    const causes = await classifyDivergence(context, fieldId, rows, cited, fieldNodeIds);
+    if (causes.length === 0) unexplained.push(fieldId);
+    for (const c of causes) causesExercised.add(c);
+  }
+
+  return {
+    comparisonsA,
+    comparisonsB,
+    violationsA,
+    violationsB,
+    disagreements,
+    unexplained,
+    causesExercised: [...causesExercised],
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -405,7 +580,7 @@ const runDifferential = async (
 // ---------------------------------------------------------------------------
 
 describe('DIFFERENTIAL — concept rule vs sfi.automation_collisions over ONE vault', () => {
-  it('INVARIANT A (tool ⇒ rule) and B (rule ⇒ tool) hold, and the comparison COUNT is non-zero', async () => {
+  it('INVARIANT A (tool => rule) and B (rule => tool) hold, over a NON-ZERO comparison count', async () => {
     const result = await runDifferential(ctx);
 
     // Non-vacuity FIRST. An empty vault satisfies both implications; this suite
@@ -418,12 +593,34 @@ describe('DIFFERENTIAL — concept rule vs sfi.automation_collisions over ONE va
     // reporting the wrong cause.
     expect.soft(result.comparisonsA).toBe(1); // F_AGREE
     expect.soft(result.comparisonsB).toBe(1); // F_AGREE
-    expect.soft(result.comparisonsA).toBeGreaterThan(0);
-    expect.soft(result.comparisonsB).toBeGreaterThan(0);
 
     expect.soft(result.violationsA).toEqual([]);
     expect.soft(result.violationsB).toEqual([]);
     expect(result.violationsA.length + result.violationsB.length).toBe(0);
+  });
+
+  it('every disagreement maps to a KNOWN cause, and every known cause is EXERCISED', async () => {
+    const result = await runDifferential(ctx);
+
+    // Non-vacuity: the fixture must really reproduce the divergence.
+    expect(result.disagreements.length).toBeGreaterThan(0);
+
+    // The SEMANTIC guards go first, deliberately. A regression that makes the
+    // two engines disagree for a NEW reason also perturbs the literal id set
+    // below, and if the id pin were asserted first the reported failure would
+    // name the fixture rather than the defect.
+    //
+    // Catches a NEW divergence — i.e. a real defect on one side.
+    expect(result.unexplained).toEqual([]);
+
+    // Stops the table rotting into dead reasons: a cause nothing exercises
+    // explains nothing, and would let a regression hide behind it.
+    expect([...result.causesExercised].sort()).toEqual([...DIVERGENCE_CAUSES].sort());
+
+    // Fixture tripwire, asserted LAST.
+    expect([...result.disagreements].sort()).toEqual(
+      [F_DORMANT, F_SCREEN, F_CROSS, F_PATH, F_MIXED, F_GHOST].sort(),
+    );
   });
 
   it('both engines fire on the shared-scope field and name the SAME two flows', async () => {
@@ -436,7 +633,7 @@ describe('DIFFERENTIAL — concept rule vs sfi.automation_collisions over ONE va
       .sort();
     expect(toolFlows).toEqual(['Flow:Alpha_After_A', 'Flow:Alpha_After_B']);
 
-    const ruleFlows = [...(await ruleFlowsFor(ctx, F_AGREE) ?? [])].sort();
+    const ruleFlows = [...((await ruleFlowsFor(ctx, F_AGREE)) ?? [])].sort();
     expect(ruleFlows).toEqual(toolFlows);
   });
 
@@ -448,14 +645,13 @@ describe('DIFFERENTIAL — concept rule vs sfi.automation_collisions over ONE va
 });
 
 // ---------------------------------------------------------------------------
-// The DIVERGENCE table. Every case below is a place the two surfaces are ALLOWED
-// to disagree, with the reason pinned. This is the other half of the gate: an
-// unexplained disagreement fails INVARIANT A/B above, and an explained one that
-// silently changes shape fails here.
+// The DIVERGENCE table. One case per member of `DIVERGENCE_CAUSES`, with the
+// mechanism pinned. The test above proves the set is CLOSED and fully
+// exercised; these prove each member behaves the way the model says it does.
 // ---------------------------------------------------------------------------
 
 describe('DIVERGENCE table — the reasons the two surfaces may differ, each pinned', () => {
-  it('1 — ACTIVITY FILTER: an obsolete flow is a tool writer (severity info) but never a rule writer', async () => {
+  it('inactive-writer: an obsolete flow is a tool writer but never a rule writer', async () => {
     const collisions = await toolCollisions(ctx, 'Alpha__c');
     const dormant = collisions.find((c) => c.fieldId === F_DORMANT);
     expect(dormant).toBeDefined();
@@ -477,8 +673,8 @@ describe('DIVERGENCE table — the reasons the two surfaces may differ, each pin
     expect(await ruleFlowsFor(ctx, F_DORMANT)).toBeNull();
   });
 
-  it('2 — INVOCATION SCOPE: two active screen flows are a rule finding and invisible to the tool', async () => {
-    const ruleFlows = [...(await ruleFlowsFor(ctx, F_SCREEN) ?? [])].sort();
+  it('not-record-triggered: two active screen flows are a rule finding and invisible to the tool', async () => {
+    const ruleFlows = [...((await ruleFlowsFor(ctx, F_SCREEN)) ?? [])].sort();
     expect(ruleFlows).toEqual(['Flow:Alpha_Screen_A', 'Flow:Alpha_Screen_B']);
     // The tool walks the object's incoming `triggersOn` edges; a flow with none
     // is not reachable from the object, so it reports nothing.
@@ -486,8 +682,8 @@ describe('DIVERGENCE table — the reasons the two surfaces may differ, each pin
     expect(collisions.some((c) => c.fieldId === F_SCREEN)).toBe(false);
   });
 
-  it('3 — CROSS-OBJECT WRITER: a flow wired to another object counts for the rule, not the tool', async () => {
-    const ruleFlows = [...(await ruleFlowsFor(ctx, F_CROSS) ?? [])].sort();
+  it('cross-object-writer: a flow wired to another object counts for the rule, not the tool', async () => {
+    const ruleFlows = [...((await ruleFlowsFor(ctx, F_CROSS)) ?? [])].sort();
     expect(ruleFlows).toEqual(['Flow:Alpha_After_A', 'Flow:Beta_After']);
     // Querying Alpha__c: Beta_After is not one of Alpha's firers.
     expect((await toolCollisions(ctx, 'Alpha__c')).some((c) => c.fieldId === F_CROSS)).toBe(false);
@@ -495,8 +691,8 @@ describe('DIVERGENCE table — the reasons the two surfaces may differ, each pin
     expect((await toolCollisions(ctx, 'Beta__c')).some((c) => c.fieldId === F_CROSS)).toBe(false);
   });
 
-  it('4 — EXECUTION PATH: the tool splits save from delete; the rule has no path model', async () => {
-    const ruleFlows = [...(await ruleFlowsFor(ctx, F_PATH) ?? [])].sort();
+  it('disjoint-execution-path: the tool splits save from delete; the rule has no path model', async () => {
+    const ruleFlows = [...((await ruleFlowsFor(ctx, F_PATH)) ?? [])].sort();
     expect(ruleFlows).toEqual(['Flow:Alpha_After_A', 'Flow:Alpha_BeforeDelete']);
     // The tool buckets them on DISJOINT paths, so neither bucket reaches 2.
     expect((await toolCollisions(ctx, 'Alpha__c')).some((c) => c.fieldId === F_PATH)).toBe(false);
@@ -509,7 +705,7 @@ describe('DIVERGENCE table — the reasons the two surfaces may differ, each pin
     expect(claim.toLowerCase()).toContain('does not assert the flows actually collide');
   });
 
-  it('5 — ROOTABILITY: the tool reports on an edge-only field id the rule can never root on', async () => {
+  it('edge-only-field: the tool reports on a field id the rule can never root on', async () => {
     const collisions = await toolCollisions(ctx, 'Alpha__c');
     const ghost = collisions.find((c) => c.fieldId === F_GHOST);
     expect(ghost).toBeDefined();
@@ -521,7 +717,7 @@ describe('DIVERGENCE table — the reasons the two surfaces may differ, each pin
     expect(res.error.kind).toBe('component-not-found');
   });
 
-  it('6 — WRITER FAMILY: a Flow + ApexTrigger pair is a tool collision and not a rule finding', async () => {
+  it('non-flow-writer-family: a Flow + ApexTrigger pair is a tool collision and not a rule finding', async () => {
     const collisions = await toolCollisions(ctx, 'Alpha__c');
     const mixed = collisions.find((c) => c.fieldId === F_MIXED);
     expect(mixed).toBeDefined();
@@ -529,36 +725,10 @@ describe('DIVERGENCE table — the reasons the two surfaces may differ, each pin
     // The rule binds `componentTypes: [Flow]`, so one Flow writer is not a race.
     expect(await ruleFlowsFor(ctx, F_MIXED)).toBeNull();
   });
-
-  it('the table is EXHAUSTIVE for this fixture — every tool/rule disagreement has a pinned cause', async () => {
-    const explained = new Set([F_DORMANT, F_SCREEN, F_CROSS, F_PATH, F_GHOST, F_MIXED]);
-    const fieldScan = await scanAllNodesOfTypes(ctx.graph, ['CustomField']);
-    if (!fieldScan.ok) throw new Error(fieldScan.error.message);
-
-    const toolFields = new Set<string>();
-    for (const objectApiName of ['Alpha__c', 'Beta__c']) {
-      for (const c of await toolCollisions(ctx, objectApiName)) toolFields.add(c.fieldId);
-    }
-    const ruleFields = new Set<string>();
-    for (const f of fieldScan.value.nodes) {
-      if ((await ruleFlowsFor(ctx, f.id)) !== null) ruleFields.add(f.id);
-    }
-
-    // The raw sets DO differ — that is the measured bug report, reproduced.
-    expect([...ruleFields].sort()).not.toEqual([...toolFields].sort());
-
-    const disagreements = [
-      ...[...ruleFields].filter((f) => !toolFields.has(f)),
-      ...[...toolFields].filter((f) => !ruleFields.has(f)),
-    ];
-    // Non-vacuity: the fixture really does reproduce a disagreement.
-    expect(disagreements.length).toBe(explained.size);
-    expect(disagreements.filter((f) => !explained.has(f))).toEqual([]);
-  });
 });
 
 // ---------------------------------------------------------------------------
-// The shipped demo vault, asserted honestly.
+// Real vaults, asserted honestly.
 // ---------------------------------------------------------------------------
 
 describe('FIXTURE GAP — the shipped demo vault cannot settle this differential', () => {
@@ -578,9 +748,46 @@ describe('FIXTURE GAP — the shipped demo vault cannot settle this differential
       // fixture above.
       expect(result.comparisonsA).toBe(0);
       expect(result.comparisonsB).toBe(0);
-      expect(result.edgeOnlyFieldIds).toEqual([]);
+      expect(result.disagreements).toEqual([]);
     } finally {
       await shutdown(built.value);
     }
   }, 120_000);
+});
+
+/**
+ * The reproduction leg. `SFI_DIFFERENTIAL_VAULT=/path/to/vault` re-runs the
+ * whole differential against a real vault and reproduces the census in the
+ * header. It is opt-in because no real vault is committed — but it is NOT a
+ * silent skip: with the variable unset the test still runs and asserts the
+ * thing that is true, namely that the committed fixtures cannot settle this and
+ * the numbers in the header came from somewhere else.
+ */
+describe('REPRODUCTION — the same differential over a real vault', () => {
+  const vaultUnderTest = process.env['SFI_DIFFERENTIAL_VAULT'] ?? '';
+
+  it('holds both invariants over a NON-ZERO comparison count, with no unexplained divergence', async () => {
+    if (vaultUnderTest === '') {
+      // Recorded, not skipped. The committed fixtures are a synthetic slice and
+      // an empty demo vault; neither is evidence about a real org.
+      expect(existsSync(join(demoVaultRoot(), 'graph', 'graph.duckdb'))).toBe(true);
+      return;
+    }
+    const { buildContext, shutdown } = await import('../../src/index.js');
+    const built = await buildContext(resolve(vaultUnderTest));
+    if (!built.ok) throw new Error(JSON.stringify(built.error));
+    try {
+      const result = await runDifferential(built.value);
+      expect.soft(result.violationsA).toEqual([]);
+      expect.soft(result.violationsB).toEqual([]);
+      expect.soft(result.unexplained).toEqual([]);
+      // Non-vacuity: a real vault that compared nothing has not reproduced
+      // anything, and must not read as a green differential.
+      expect(result.comparisonsA).toBeGreaterThan(0);
+      expect(result.comparisonsB).toBeGreaterThan(0);
+      expect(result.disagreements.length).toBeGreaterThan(0);
+    } finally {
+      await shutdown(built.value);
+    }
+  }, 900_000);
 });

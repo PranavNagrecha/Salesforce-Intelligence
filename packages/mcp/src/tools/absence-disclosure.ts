@@ -156,10 +156,29 @@ export interface UnresolvedTargetsOptions {
    * currently supplies this value correctly, but it is read by no code.
    */
   readonly surface: string;
+  /**
+   * Singular noun for the RELATIONSHIP being disclosed. Defaults to `'grant'`,
+   * which is where this module was extracted from.
+   *
+   * It exists because the sentence used to hardcode that noun, and the module
+   * then spread beyond permissions: `downstream-effects.ts` renders
+   * "effect-edge grant(s)", and `what-if-deactivate-flow.ts` would have rendered
+   * "impact-edge grant(s)" — a permissions word applied to an impact edge, in
+   * copy whose whole job is to be precise about what is and is not known. The
+   * caller that hit it correctly refused to reword locally, because a fourth
+   * spelling of a shared sentence is the drift this module exists to prevent.
+   * Parameterising the noun is the fix; every existing call site renders
+   * byte-identically.
+   */
+  readonly targetNoun?: string;
 }
 
 /**
- * Build the "this individual grant target is not in the vault" sentence.
+ * Build the "this individual target is not in the vault" sentence.
+ *
+ * The relationship noun defaults to `'grant'` (this module's birthplace) and is
+ * overridable via {@link UnresolvedTargetsOptions.targetNoun} — see that field
+ * for why.
  *
  * Callers PUSH this (they do not unshift it): it is a follow-the-id caveat,
  * not an over- or under-statement of access, so it must not displace a muting
@@ -168,7 +187,7 @@ export interface UnresolvedTargetsOptions {
 export const unresolvedTargetsDisclosure = (
   options: UnresolvedTargetsOptions,
 ): string =>
-  `${options.count} ${options.targetKind} grant(s) above name a component that is NOT in this ` +
+  `${options.count} ${options.targetKind} ${options.targetNoun ?? 'grant'}(s) above name a component that is NOT in this ` +
   'vault (`targetMissing`) — a managed-package component, or one this refresh did not retrieve. ' +
   'The GRANT is declared and real; the TARGET is not resolvable here, so `resolve` / ' +
   '`get_component` on that id returns component-not-found. Each affected row carries ' +

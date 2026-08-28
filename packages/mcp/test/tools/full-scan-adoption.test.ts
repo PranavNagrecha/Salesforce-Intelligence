@@ -21,13 +21,26 @@ import { fileURLToPath } from 'node:url';
 
 const TOOLS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../src/tools');
 
-/** The five tool files this guard owns. */
+/**
+ * The tool files this guard owns.
+ *
+ * `generate-onboarding-doc.ts` was added in 0.3.3 when it migrated off the
+ * single-page scan, and the reason it was MISSING is the more interesting half:
+ * `generate-admin-handbook.ts` was already guarded here and was being COMPOSED
+ * by `generate-onboarding-doc.ts`, which was not. So the guard's own coverage
+ * gap was reachable from inside a guarded tool — the composed document inherited
+ * an alphabetical first page that the guard would never have seen. A guard whose
+ * membership is hand-maintained has exactly this failure mode; the mitigation
+ * for now is that adding a file here is cheap and forgetting one is what this
+ * comment exists to make expensive.
+ */
 const FULL_SCAN_TOOLS = [
   'test-coverage-gaps.ts',
   'integration-map.ts',
   'org-overview.ts',
   'endpoint-catalog.ts',
   'generate-admin-handbook.ts',
+  'generate-onboarding-doc.ts',
 ] as const;
 
 describe('full-scan adoption (G2 drift guard)', () => {

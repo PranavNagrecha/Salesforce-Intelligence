@@ -67,6 +67,7 @@ import {
   type UnevaluableReason,
   type UnevaluableRule,
   weakest,
+  zeroUnevaluableCounts,
 } from '../knowledge/index.js';
 
 import { assertEvidenceEnvelopeV2 } from './evidence-envelope.js';
@@ -214,14 +215,21 @@ const sampleOf = <T>(
     ? { rows }
     : { rows: rows.slice(0, cap), note: { returned: cap, total: rows.length } };
 
-/** Split the unevaluable rows by reason. Both counts are exact. */
+/**
+ * Split the unevaluable rows by reason. Every count is exact.
+ *
+ * The zero record is DERIVED from `UNEVALUABLE_REASONS` rather than written out
+ * here. It used to be a hand-written two-key literal, and adding a third reason
+ * (`'slice-truncated'`, so a rule starved by the join fan-out cap stops reading
+ * as clean) broke this file — which is the good outcome, because the compiler
+ * caught it. The bad outcome was available too: had this been typed loosely,
+ * the new bucket would simply have gone missing from every digest and nothing
+ * would have said so.
+ */
 const countByReason = (
   rows: readonly UnevaluableRule[],
 ): Record<UnevaluableReason, number> => {
-  const byReason: Record<UnevaluableReason, number> = {
-    'vault-coverage-missing': 0,
-    'shape-not-provable': 0,
-  };
+  const byReason = zeroUnevaluableCounts();
   for (const row of rows) byReason[row.reason] = (byReason[row.reason] ?? 0) + 1;
   return byReason;
 };

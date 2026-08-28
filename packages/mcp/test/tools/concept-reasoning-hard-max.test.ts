@@ -97,6 +97,7 @@ const buildSyntheticReasonResult = (): ReasonAboutComponentResult => {
     selectedRules: [],
     rulesFired: 1,
     sliceTruncated: false,
+    truncatedExpansions: [],
     slice: { nodes: [], edges: [] },
     unionCoverageTypes: [],
     aggSummary: {

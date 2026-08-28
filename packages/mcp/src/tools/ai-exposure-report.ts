@@ -47,6 +47,7 @@
 
 import type {
   ComponentId,
+  Edge,
   McpError,
   McpResponse,
   Node,
@@ -348,12 +349,26 @@ export const aiExposureReportHandler = async (
 
   // --- Field classification cache (the pii_inventory recognizer). ---
   const verdictCache = new Map<ComponentId, FieldVerdict>();
-  const classifyField = async (fieldId: ComponentId): Promise<FieldVerdict> => {
+  const classifyField = async (
+    fieldId: ComponentId,
+  ): Promise<Result<FieldVerdict, McpError>> => {
     const cached = verdictCache.get(fieldId);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) return ok(cached);
     let verdict: FieldVerdict;
     const nodeR = await getNodeById(ctx.graph, fieldId);
-    if (nodeR.ok && nodeR.value !== null && nodeR.value.type === 'CustomField') {
+    // A FAILED node read is NOT "the vault does not model this field". The
+    // `modeled: false` / `unknown` verdict below is the honest answer for a row
+    // the vault genuinely does not hold; a query that ERRORED knows nothing
+    // about the field at all, and folding it into the same bucket would let a
+    // read failure read as a completed classification. Propagate it, exactly as
+    // the surface-family node scan above already does.
+    if (!nodeR.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: reading ${fieldId} for PII classification: ${nodeR.error.message}`,
+      });
+    }
+    if (nodeR.value !== null && nodeR.value.type === 'CustomField') {
       const det = detectPiiClassificationWithReason(nodeR.value);
       verdict = {
         classification: det.piiClassification,
@@ -371,7 +386,7 @@ export const aiExposureReportHandler = async (
       };
     }
     verdictCache.set(fieldId, verdict);
-    return verdict;
+    return ok(verdict);
   };
 
   /** Accumulate field ids → the mechanisms that reach them for one surface. */
@@ -389,11 +404,43 @@ export const aiExposureReportHandler = async (
     into.set(fieldId, bucket);
   };
 
+  // AI-EXPOSURE-REPORTS-ZERO-PII-ON-AN-EDGE-SCAN-THAT-FAILED: every edge read
+  // in this handler goes through this ONE helper, which PROPAGATES a failed
+  // graph query as `internal` — the same treatment the surface-family node scan
+  // above already gives a failed `listNodesByType`.
+  //
+  // What each of the seven call sites used to do, and why it mattered: a failed
+  // `listEdges` was swallowed into an EMPTY field reach (`return reach`,
+  // `continue`, `if (edgesR.ok) { … }`, `return []`). The surface was then
+  // emitted as a REAL AI surface with `exposedFields: []`,
+  // `exposedFieldCount: 0`, `piiFieldCount: 0`, and was excluded from
+  // `summary.surfacesWithFieldExposure` — byte-indistinguishable from a surface
+  // that genuinely grounds on nothing. In the org's flagship "what data can my
+  // AI see?" audit that reads as "this agent touches no PII" when the truth is
+  // "we could not read what it touches". An UNREAD reach must never wear a
+  // READ-AND-CLEAN reach's clothes; the file was also inconsistent with itself,
+  // aborting on a failed node scan while silently zeroing a failed edge scan.
+  const readOutEdges = async (
+    nodeId: ComponentId,
+    edgeType: Edge['edgeType'],
+  ): Promise<Result<readonly Edge[], McpError>> => {
+    const edgesR = await listEdges(ctx.graph, nodeId, { direction: 'out', edgeType });
+    if (!edgesR.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: reading ${edgeType} edges of ${nodeId}: ${edgesR.error.message}`,
+      });
+    }
+    return ok(edgesR.value);
+  };
+
   /** The CustomField ids a prompt template grounds on, from its declared references edges. */
-  const promptTemplateReach = async (templateId: ComponentId): Promise<FieldReach> => {
+  const promptTemplateReach = async (
+    templateId: ComponentId,
+  ): Promise<Result<FieldReach, McpError>> => {
     const reach: FieldReach = new Map();
-    const edgesR = await listEdges(ctx.graph, templateId, { direction: 'out', edgeType: 'references' });
-    if (!edgesR.ok) return reach;
+    const edgesR = await readOutEdges(templateId, 'references');
+    if (!edgesR.ok) return err(edgesR.error);
     for (const edge of edgesR.value) {
       if (!edge.toId.startsWith('CustomField:')) continue;
       const kind = edge.properties['referenceKind'];
@@ -401,51 +448,56 @@ export const aiExposureReportHandler = async (
         kind === 'promptTemplateRelatedField' ? 'prompt-related-field' : 'prompt-grounding-field';
       addReach(reach, edge.toId, via);
     }
-    return reach;
+    return ok(reach);
   };
 
   /** The CustomField ids one Apex/Flow node reads or writes (an action's code-level field access). */
   const codeFieldReach = async (
     codeId: ComponentId,
     viaPrefix: string,
-  ): Promise<FieldReach> => {
+  ): Promise<Result<FieldReach, McpError>> => {
     const reach: FieldReach = new Map();
     for (const [edgeType, suffix] of [
       ['readsFrom', 'read'],
       ['writesTo', 'write'],
     ] as const) {
-      const edgesR = await listEdges(ctx.graph, codeId, { direction: 'out', edgeType });
-      if (!edgesR.ok) continue;
+      const edgesR = await readOutEdges(codeId, edgeType);
+      if (!edgesR.ok) return err(edgesR.error);
       for (const edge of edgesR.value) {
         if (!edge.toId.startsWith('CustomField:')) continue;
         addReach(reach, edge.toId, `${viaPrefix}-${suffix}`);
       }
     }
-    return reach;
+    return ok(reach);
   };
 
   // --- Per-function field reach (memoised — plugins/planners reuse it). ---
   const functionReach = new Map<ComponentId, FieldReach>();
   for (const fn of functions) {
     const reach: FieldReach = new Map();
-    const edgesR = await listEdges(ctx.graph, fn.id, { direction: 'out', edgeType: 'references' });
-    if (edgesR.ok) {
-      for (const edge of edgesR.value) {
-        const kind = edge.properties['referenceKind'];
-        if (kind === 'genAiFunctionApexTarget') {
-          mergeReach(reach, await codeFieldReach(edge.toId, 'apex-action'));
-        } else if (kind === 'genAiFunctionFlowTarget') {
-          mergeReach(reach, await codeFieldReach(edge.toId, 'flow-action'));
-        }
-      }
+    const edgesR = await readOutEdges(fn.id, 'references');
+    if (!edgesR.ok) return err(edgesR.error);
+    for (const edge of edgesR.value) {
+      const kind = edge.properties['referenceKind'];
+      const viaPrefix =
+        kind === 'genAiFunctionApexTarget'
+          ? 'apex-action'
+          : kind === 'genAiFunctionFlowTarget'
+            ? 'flow-action'
+            : null;
+      if (viaPrefix === null) continue;
+      const codeR = await codeFieldReach(edge.toId, viaPrefix);
+      if (!codeR.ok) return err(codeR.error);
+      mergeReach(reach, codeR.value);
     }
     // An action can INVOKE a prompt template — inherit its grounding fields.
     const target = fn.properties['invocationTarget'];
     if (typeof target === 'string') {
       const tmpl = promptTemplateById.get(`GenAiPromptTemplate:${target}`);
       if (tmpl !== undefined) {
-        const tmplReach = await promptTemplateReach(tmpl.id);
-        for (const [fieldId] of tmplReach) addReach(reach, fieldId, 'prompt-template-action');
+        const tmplReachR = await promptTemplateReach(tmpl.id);
+        if (!tmplReachR.ok) return err(tmplReachR.error);
+        for (const [fieldId] of tmplReachR.value) addReach(reach, fieldId, 'prompt-template-action');
       }
     }
     functionReach.set(fn.id, reach);
@@ -455,19 +507,23 @@ export const aiExposureReportHandler = async (
   const memberIds = async (
     surfaceId: ComponentId,
     referenceKinds: readonly string[],
-  ): Promise<readonly ComponentId[]> => {
-    const edgesR = await listEdges(ctx.graph, surfaceId, { direction: 'out', edgeType: 'references' });
-    if (!edgesR.ok) return [];
-    return edgesR.value
-      .filter((e) => referenceKinds.includes(String(e.properties['referenceKind'])))
-      .map((e) => e.toId);
+  ): Promise<Result<readonly ComponentId[], McpError>> => {
+    const edgesR = await readOutEdges(surfaceId, 'references');
+    if (!edgesR.ok) return err(edgesR.error);
+    return ok(
+      edgesR.value
+        .filter((e) => referenceKinds.includes(String(e.properties['referenceKind'])))
+        .map((e) => e.toId),
+    );
   };
 
   // --- Per-plugin field reach = union of its member functions. ---
   const pluginReach = new Map<ComponentId, FieldReach>();
   for (const plugin of plugins) {
     const reach: FieldReach = new Map();
-    for (const fnId of await memberIds(plugin.id, ['genAiPluginFunction'])) {
+    const fnIdsR = await memberIds(plugin.id, ['genAiPluginFunction']);
+    if (!fnIdsR.ok) return err(fnIdsR.error);
+    for (const fnId of fnIdsR.value) {
       const fnr = functionReach.get(fnId);
       if (fnr !== undefined) mergeReach(reach, fnr);
     }
@@ -478,11 +534,15 @@ export const aiExposureReportHandler = async (
   const plannerReach = new Map<ComponentId, FieldReach>();
   for (const n of plannerBundles) {
     const reach: FieldReach = new Map();
-    for (const pluginId of await memberIds(n.id, ['plannerBundlePlugin'])) {
+    const pluginIdsR = await memberIds(n.id, ['plannerBundlePlugin']);
+    if (!pluginIdsR.ok) return err(pluginIdsR.error);
+    for (const pluginId of pluginIdsR.value) {
       const pr = pluginReach.get(pluginId);
       if (pr !== undefined) mergeReach(reach, pr);
     }
-    for (const fnId of await memberIds(n.id, ['plannerBundleFunction'])) {
+    const fnIdsR = await memberIds(n.id, ['plannerBundleFunction']);
+    if (!fnIdsR.ok) return err(fnIdsR.error);
+    for (const fnId of fnIdsR.value) {
       const fnr = functionReach.get(fnId);
       if (fnr !== undefined) mergeReach(reach, fnr);
     }
@@ -496,7 +556,9 @@ export const aiExposureReportHandler = async (
     reach: FieldReach;
   }[] = [];
   for (const n of promptTemplates) {
-    rawSurfaces.push({ node: n, surfaceType: 'GenAiPromptTemplate', reach: await promptTemplateReach(n.id) });
+    const reachR = await promptTemplateReach(n.id);
+    if (!reachR.ok) return err(reachR.error);
+    rawSurfaces.push({ node: n, surfaceType: 'GenAiPromptTemplate', reach: reachR.value });
   }
   for (const n of functions) {
     rawSurfaces.push({ node: n, surfaceType: 'GenAiFunction', reach: functionReach.get(n.id) ?? new Map() });
@@ -515,36 +577,30 @@ export const aiExposureReportHandler = async (
   // Bot = context-variable fields + union of every BotVersion's planner reach.
   for (const bot of bots) {
     const reach: FieldReach = new Map();
-    const ctxEdgesR = await listEdges(ctx.graph, bot.id, {
-      direction: 'out',
-      edgeType: 'references',
-    });
-    if (ctxEdgesR.ok) {
-      for (const edge of ctxEdgesR.value) {
-        if (edge.properties['referenceKind'] !== 'botContextVariableField') continue;
-        if (!edge.toId.startsWith('CustomField:')) continue;
-        addReach(reach, edge.toId, 'bot-context-variable');
-        if (edge.properties['includeInPrompt'] === true) {
-          addReach(reach, edge.toId, 'bot-context-in-prompt');
-        }
+    const ctxEdgesR = await readOutEdges(bot.id, 'references');
+    if (!ctxEdgesR.ok) return err(ctxEdgesR.error);
+    for (const edge of ctxEdgesR.value) {
+      if (edge.properties['referenceKind'] !== 'botContextVariableField') continue;
+      if (!edge.toId.startsWith('CustomField:')) continue;
+      addReach(reach, edge.toId, 'bot-context-variable');
+      if (edge.properties['includeInPrompt'] === true) {
+        addReach(reach, edge.toId, 'bot-context-in-prompt');
       }
     }
-    const versionEdgesR = await listEdges(ctx.graph, bot.id, {
-      direction: 'out',
-      edgeType: 'parentOf',
-    });
-    if (versionEdgesR.ok) {
-      for (const versionEdge of versionEdgesR.value) {
-        if (!versionEdge.toId.startsWith('BotVersion:')) continue;
-        for (const plannerId of await memberIds(versionEdge.toId, ['botVersionPlanner'])) {
-          const pr = plannerReach.get(plannerId);
-          if (pr === undefined) continue;
-          for (const [fieldId, vias] of pr) {
-            const bucket = reach.get(fieldId) ?? new Set<string>();
-            for (const v of vias) bucket.add(v);
-            bucket.add('bot-version-planner');
-            reach.set(fieldId, bucket);
-          }
+    const versionEdgesR = await readOutEdges(bot.id, 'parentOf');
+    if (!versionEdgesR.ok) return err(versionEdgesR.error);
+    for (const versionEdge of versionEdgesR.value) {
+      if (!versionEdge.toId.startsWith('BotVersion:')) continue;
+      const plannerIdsR = await memberIds(versionEdge.toId, ['botVersionPlanner']);
+      if (!plannerIdsR.ok) return err(plannerIdsR.error);
+      for (const plannerId of plannerIdsR.value) {
+        const pr = plannerReach.get(plannerId);
+        if (pr === undefined) continue;
+        for (const [fieldId, vias] of pr) {
+          const bucket = reach.get(fieldId) ?? new Set<string>();
+          for (const v of vias) bucket.add(v);
+          bucket.add('bot-version-planner');
+          reach.set(fieldId, bucket);
         }
       }
     }
@@ -562,7 +618,9 @@ export const aiExposureReportHandler = async (
       const parts = splitFieldId(fieldId);
       if (parts === null) continue;
       if (objectFilter !== undefined && parts.object !== objectFilter) continue;
-      const verdict = await classifyField(fieldId);
+      const verdictR = await classifyField(fieldId);
+      if (!verdictR.ok) return err(verdictR.error);
+      const verdict = verdictR.value;
       fields.push({
         fieldId,
         objectApiName: parts.object,

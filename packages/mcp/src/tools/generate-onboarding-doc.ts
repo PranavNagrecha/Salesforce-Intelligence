@@ -23,7 +23,15 @@
  * Honesty axis: the glossary is HEURISTIC — a label that appears on
  * one CustomObject MAY be org-specific terminology OR may simply be
  * an underused standard label. Key Contacts depends on v1.7
- * enrichment and surfaces a disclosure when absent.
+ * enrichment and surfaces a disclosure when absent — but ONLY when the
+ * scan actually succeeded and found nothing; a graph failure is
+ * propagated as an `internal` error rather than rendered as a missing
+ * enrichment with a remedy that would change nothing.
+ *
+ * Both corpus reads go through the shared `scanAllNodesOfTypes`, which
+ * windows the SQL `OFFSET` forward. A single capped page ranked the top
+ * modifiers of an ALPHABETICAL first 500 rows and presented them to a new
+ * hire as the org's key people, with no truncation note.
  */
 
 import type {
@@ -34,7 +42,6 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -51,9 +58,8 @@ import {
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
 import { orgOverviewHandler } from './org-overview.js';
-
-/** Per-scan cap matching the graph layer's `LIST_MAX_LIMIT`. */
-const TYPE_SCAN_CAP = 500;
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * Cap on the number of CustomObjects a label may appear on before it
@@ -240,44 +246,41 @@ export const generateOnboardingDocHandler = async (
   const overview = overviewResult.value.data;
   const topObjects = overview.topObjects.slice(0, 3);
 
-  // Step 4: build the glossary from CustomField labels. Page through the
-  // ENTIRE field population: buildGlossary tallies each label's distinct
-  // parent-object count, so a single capped page (TYPE_SCAN_CAP=500) would
-  // undercount those tallies on larger orgs (acme has 1034 fields) —
-  // wrongly including common labels whose count is truncated below the
-  // threshold and omitting org-specific terms whose fields sort past page 1.
-  const fields: Node[] = [];
-  for (let offset = 0; ; offset += TYPE_SCAN_CAP) {
-    const fieldsResult = await listNodesByType(ctx.graph, 'CustomField', {
-      limit: TYPE_SCAN_CAP,
-      offset,
+  // Step 4: build the glossary from the ENTIRE CustomField population.
+  // buildGlossary tallies each label's distinct parent-object count, so a
+  // single capped page would undercount those tallies — wrongly including
+  // common labels whose count is truncated below the threshold and omitting
+  // org-specific terms whose fields sort past page 1. The shared scan windows
+  // the SQL OFFSET forward at `clampedNodeScanLimit()` (derived, not a local
+  // literal asserting parity with the graph layer in a comment).
+  const fieldScan = await scanAllNodesOfTypes(ctx.graph, ['CustomField']);
+  if (!fieldScan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${fieldScan.error.message}`,
     });
-    if (!fieldsResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${fieldsResult.error.message}`,
-      });
-    }
-    fields.push(...fieldsResult.value);
-    if (fieldsResult.value.length < TYPE_SCAN_CAP) break;
   }
+  const fields: readonly Node[] = fieldScan.value.nodes;
   const glossary = buildGlossary(fields);
 
-  // Step 5: build Key Contacts from the lastModifiedBy axis. Empty
-  // unless v1.7 enrichment ran.
-  const codeNodes: Node[] = [];
-  const apexResult = await listNodesByType(ctx.graph, 'ApexClass', {
-    limit: TYPE_SCAN_CAP,
-  });
-  if (apexResult.ok) codeNodes.push(...apexResult.value);
-  const triggerResult = await listNodesByType(ctx.graph, 'ApexTrigger', {
-    limit: TYPE_SCAN_CAP,
-  });
-  if (triggerResult.ok) codeNodes.push(...triggerResult.value);
-  const flowResult = await listNodesByType(ctx.graph, 'Flow', {
-    limit: TYPE_SCAN_CAP,
-  });
-  if (flowResult.ok) codeNodes.push(...flowResult.value);
+  // Step 5: build Key Contacts from the lastModifiedBy axis over the FULL code
+  // corpus. A single capped page named the top modifiers of an ALPHABETICAL
+  // first page as the org's key people. A graph FAILURE is propagated, never
+  // folded into an empty tally: an empty tally renders the v1.7 enrichment
+  // remedy, and prescribing `sfi refresh --with-tooling-api` for a query error
+  // would change nothing.
+  const codeScan = await scanAllNodesOfTypes(ctx.graph, [
+    'ApexClass',
+    'ApexTrigger',
+    'Flow',
+  ]);
+  if (!codeScan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${codeScan.error.message}`,
+    });
+  }
+  const codeNodes: readonly Node[] = codeScan.value.nodes;
 
   const modifierTally = new Map<string, number>();
   for (const node of codeNodes) {
@@ -392,6 +395,22 @@ export const generateOnboardingDocHandler = async (
     'Glossary entries are heuristic — a label on fewer than the threshold objects MAY be org-specific terminology or may simply be an underused standard label.',
     'Key Contacts depends on v1.7 enrichment; without it the section surfaces an enrichment disclosure rather than a fabricated list.',
   ];
+
+  // Residual-cap honesty: the full scans stop at FULL_SCAN_MAX_NODES only for a
+  // pathological type. When that happens the glossary tallies and the Key
+  // Contacts ranking are drawn from a PREFIX of the type, so say so rather than
+  // present a partial scan as the whole org. The wording is the shared
+  // `fullScanTruncationNote` (not a local copy), so it quotes the ceiling that
+  // actually bit and does not prescribe the dead-end SFI_NODE_SCAN_LIMIT knob.
+  const incompleteTypes = [
+    ...new Set([
+      ...fieldScan.value.incompleteTypes,
+      ...codeScan.value.incompleteTypes,
+    ]),
+  ];
+  if (incompleteTypes.length > 0) {
+    boundaries.push(fullScanTruncationNote(incompleteTypes));
+  }
 
   // Compose the chained component ids — handbook + architecture +
   // top objects + glossary source fields. Deduplicated (first-seen order):

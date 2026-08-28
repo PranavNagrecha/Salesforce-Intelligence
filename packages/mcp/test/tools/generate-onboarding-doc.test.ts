@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type {
   ExtractionResult,
@@ -17,9 +18,44 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import {
-  generateOnboardingDocHandler,
-} from '../../src/tools/generate-onboarding-doc.js';
+import { generateOnboardingDocHandler } from '../../src/tools/generate-onboarding-doc.js';
+
+// A graph query that FAILS must not be reported as an absent v1.7 enrichment.
+// There is no way to make a real DuckDB query fail for one type, so
+// `listNodesByType` is wrapped: ApexClass reads are counted, and the read whose
+// 1-based index is >= `scanState.failFrom` returns a typed query-failed Result.
+// `failFrom` is +Infinity by default, so every other case in this file runs
+// against the real, unmocked query.
+const { scanState } = vi.hoisted(() => ({
+  scanState: { apexCalls: 0, failFrom: Number.POSITIVE_INFINITY },
+}));
+
+vi.mock('@sf-intelligence/graph', async () => {
+  const actual = await vi.importActual<typeof import('@sf-intelligence/graph')>(
+    '@sf-intelligence/graph',
+  );
+  return {
+    ...actual,
+    listNodesByType: async (
+      store: Parameters<typeof actual.listNodesByType>[0],
+      type: Parameters<typeof actual.listNodesByType>[1],
+      options?: Parameters<typeof actual.listNodesByType>[2],
+    ) => {
+      if (type !== 'ApexClass') return actual.listNodesByType(store, type, options);
+      scanState.apexCalls += 1;
+      if (scanState.apexCalls >= scanState.failFrom) {
+        return {
+          ok: false as const,
+          error: {
+            kind: 'query-failed' as const,
+            message: 'listNodesByType: simulated store failure',
+          },
+        };
+      }
+      return actual.listNodesByType(store, type, options);
+    },
+  };
+});
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -336,5 +372,141 @@ describe('generateOnboardingDocHandler — full CustomField corpus glossary', ()
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.document.body).toContain('AAA Onboarding Term');
+  });
+});
+
+describe('generateOnboardingDocHandler — Key Contacts over the FULL code corpus', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('big-key-contacts.db');
+    store = built.store;
+    ctx = built.ctx;
+    // 505 ApexClasses. The first 500 by id ASC were all last modified by one
+    // person; the 5 that sort LAST were modified by someone else. A single
+    // capped `listNodesByType` page (limit 500, OFFSET 0) sees only the
+    // alphabetically-first 500, so the late modifier is invisible and the
+    // 'Key Contacts' table silently presents ONE person as the org's key
+    // people — with no truncation note anywhere in the document.
+    const nodes: Node[] = [];
+    for (let i = 0; i < 500; i++) {
+      const n = String(i).padStart(3, '0');
+      nodes.push(
+        makeNode({
+          id: `ApexClass:aaa_early_${n}`,
+          type: 'ApexClass',
+          apiName: `aaa_early_${n}`,
+          lastModifiedBy: 'Early Modifier',
+        }),
+      );
+    }
+    for (let i = 0; i < 5; i++) {
+      nodes.push(
+        makeNode({
+          id: `ApexClass:zzz_late_${String(i)}`,
+          type: 'ApexClass',
+          apiName: `zzz_late_${String(i)}`,
+          lastModifiedBy: 'Late Modifier',
+        }),
+      );
+    }
+    const imported = await importExtractionResults(store, [
+      { nodes, edges: [] },
+    ]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('names a modifier whose ApexClasses sort beyond the first 500-row page', async () => {
+    const result = await generateOnboardingDocHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('Early Modifier');
+    // Only reachable when the scan windows the SQL OFFSET forward.
+    expect(body).toContain('Late Modifier');
+  });
+});
+
+describe('generateOnboardingDocHandler — a failed code scan is NOT an enrichment gap', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('scan-failure.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    scanState.failFrom = Number.POSITIVE_INFINITY;
+    scanState.apexCalls = 0;
+  });
+
+  it('propagates a graph failure instead of printing the v1.7 enrichment remedy', async () => {
+    // Calibrate: how many ApexClass list queries does one full run issue?
+    // The LAST one is the Key Contacts scan (step 5) — everything before it
+    // belongs to the chained handbook / architecture / org-overview calls,
+    // which propagate their own errors already.
+    scanState.failFrom = Number.POSITIVE_INFINITY;
+    scanState.apexCalls = 0;
+    const calibration = await generateOnboardingDocHandler(ctx, {});
+    expect(calibration.ok).toBe(true);
+    const totalApexCalls = scanState.apexCalls;
+    expect(totalApexCalls).toBeGreaterThan(0);
+
+    // Arm: fail ONLY that final Key Contacts scan.
+    scanState.apexCalls = 0;
+    scanState.failFrom = totalApexCalls;
+    const result = await generateOnboardingDocHandler(ctx, {});
+
+    // A graph error must surface as an error. Reporting a query failure as
+    // "run `sfi refresh --with-tooling-api`" prescribes a remedy that would
+    // change nothing.
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      expect(result.value.data.document.body).not.toContain(
+        'Key Contacts data depends on v1.7 enrichment',
+      );
+      return;
+    }
+    expect(result.error.kind).toBe('internal');
+    expect(result.error.message).toContain('graph query failed');
+  });
+});
+
+describe('generate-onboarding-doc full-scan adoption (drift guard)', () => {
+  const SOURCE = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../src/tools/generate-onboarding-doc.ts',
+    ),
+    'utf8',
+  );
+
+  it('issues no single-page listNodesByType scan', () => {
+    expect(/listNodesByType\(/.test(SOURCE)).toBe(false);
+  });
+
+  it('calls the shared scanAllNodesOfTypes helper', () => {
+    expect(SOURCE).toContain('scanAllNodesOfTypes');
+  });
+
+  it('derives its page size from the shared cap rather than a local literal', () => {
+    // R6: `const TYPE_SCAN_CAP = 500` asserted parity with the graph layer's
+    // LIST_MAX_LIMIT in a COMMENT instead of deriving it. The shared helper
+    // reads clampedNodeScanLimit() itself.
+    expect(SOURCE).not.toMatch(/TYPE_SCAN_CAP\s*=\s*\d+/);
   });
 });

@@ -474,6 +474,117 @@ const verdictSpreadSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Suite 7 (R1 honesty — unresolved edge targets): a Flow whose every impact
+// edge names a component that is NOT a node in this vault (a managed-package
+// Apex action, an EmailTemplate the refresh never retrieved, a packaged
+// subflow). The edges are DECLARED and real; only the targets are unnameable
+// here. Dropping those edges produced `impacts: []`, which `aggregateVerdict`
+// turns into a literal `safe` — a destructive verdict produced by not looking.
+// =============================================================================
+
+const FLOW_EXTERNAL_ID = 'Flow:Vendor_Sync_Flow';
+const MISSING_TRIGGER_OBJ = 'CustomObject:Vendor_Record__c';
+const MISSING_APEX = 'ApexClass:VendorGatewayService';
+const MISSING_FIELD = 'CustomField:Vendor_Record__c.Status__c';
+const MISSING_EMAIL = 'EmailTemplate:VendorDigest';
+const MISSING_SUBFLOW = 'Flow:Vendor_Post_Steps';
+
+const externalTargetsSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: FLOW_EXTERNAL_ID,
+      type: 'Flow',
+      apiName: 'Vendor_Sync_Flow',
+      properties: { status: 'Active', triggerType: 'RecordAfterSave' },
+    }),
+    // Deliberately NO node for any of the five targets below.
+  ],
+  edges: [
+    makeEdge({
+      fromId: FLOW_EXTERNAL_ID,
+      toId: MISSING_TRIGGER_OBJ,
+      edgeType: 'triggersOn',
+      confidence: 'declared',
+    }),
+    makeEdge({
+      fromId: FLOW_EXTERNAL_ID,
+      toId: MISSING_APEX,
+      edgeType: 'callsApex',
+    }),
+    makeEdge({
+      fromId: FLOW_EXTERNAL_ID,
+      toId: MISSING_FIELD,
+      edgeType: 'writesTo',
+      properties: { operation: 'recordUpdate' },
+    }),
+    makeEdge({
+      fromId: FLOW_EXTERNAL_ID,
+      toId: MISSING_EMAIL,
+      edgeType: 'sendsEmail',
+      confidence: 'declared',
+    }),
+    makeEdge({
+      fromId: FLOW_EXTERNAL_ID,
+      toId: MISSING_SUBFLOW,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'subflow', subflowElementName: 'Call_Pkg' },
+    }),
+  ],
+};
+
+// The INCOMING mirror: a subflow whose only parent caller is not a node in
+// this vault, and a publisher whose only event subscriber is not a node.
+const FLOW_ORPHAN_CALLED_ID = 'Flow:Orphan_Called_Subflow';
+const MISSING_PARENT_ID = 'Flow:Vendor_Parent_Caller';
+const FLOW_BEACON_PUB_ID = 'Flow:Beacon_Publisher';
+const BEACON_EVENT_OBJ = 'CustomObject:Beacon_Event__e';
+const MISSING_SUBSCRIBER_ID = 'Flow:Beacon_Listener';
+
+const incomingMissingSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: FLOW_ORPHAN_CALLED_ID,
+      type: 'Flow',
+      apiName: 'Orphan_Called_Subflow',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLOW_BEACON_PUB_ID,
+      type: 'Flow',
+      apiName: 'Beacon_Publisher',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: BEACON_EVENT_OBJ,
+      type: 'CustomObject',
+      apiName: 'Beacon_Event__e',
+    }),
+    // NO node for MISSING_PARENT_ID or MISSING_SUBSCRIBER_ID.
+  ],
+  edges: [
+    makeEdge({
+      fromId: MISSING_PARENT_ID,
+      toId: FLOW_ORPHAN_CALLED_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'subflow', subflowElementName: 'Call_Ext' },
+    }),
+    makeEdge({
+      fromId: FLOW_BEACON_PUB_ID,
+      toId: BEACON_EVENT_OBJ,
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: MISSING_SUBSCRIBER_ID,
+      toId: BEACON_EVENT_OBJ,
+      edgeType: 'listensTo',
+      confidence: 'declared',
+    }),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -494,6 +605,8 @@ beforeAll(async () => {
     subflowActiveParentsSeed,
     subflowObsoleteParentSeed,
     verdictSpreadSeed,
+    externalTargetsSeed,
+    incomingMissingSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -551,6 +664,9 @@ describe('whatIfDeactivateFlowHandler', () => {
         kind: 'triggersOn',
         componentId: ACCOUNT_OBJ,
         note: 'the object this Flow starts on; deactivating removes the record-trigger here',
+        // ALWAYS written — a resolved entry point is `false`, never absent, so
+        // "resolved" and "never resolvable" cannot render the same.
+        targetMissing: false,
       },
     ]);
   });
@@ -840,6 +956,9 @@ describe('whatIfDeactivateFlowHandler — FIX 5 verdict information content', ()
         kind: 'triggersOn',
         componentId: OBJ_WIDGET,
         note: 'the object this Flow starts on; deactivating removes the record-trigger here',
+        // ALWAYS written — a resolved entry point is `false`, never absent, so
+        // "resolved" and "never resolvable" cannot render the same.
+        targetMissing: false,
       },
     ]);
   });
@@ -1070,5 +1189,103 @@ describe('whatIfDeactivateFlowHandler — flowId / componentId / flowApiName / a
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
+// =============================================================================
+// GUARD (WHAT-IF-DEACTIVATE-FLOW-UNRESOLVED-TARGETS, R1): an impact edge whose
+// target is not a node in this vault used to be dropped silently at three
+// sites (the outgoing walk, the broken-caller walk, the platform-event second
+// hop). A Flow whose impact edges ALL point out of the vault therefore
+// produced `impacts: []`, and `aggregateVerdict([])` returns the literal word
+// `safe` — a destructive verdict manufactured by not looking, with nothing in
+// the response counting or naming what was dropped. The edges are DECLARED and
+// real; only the TARGET is unnameable here, so each is now surfaced with
+// `targetMissing: true` and bears on the verdict exactly as its resolvable
+// twin would (the `sfi.user_ability` doctrine: emit the row, never drop it).
+// =============================================================================
+describe('whatIfDeactivateFlowHandler — unresolved edge targets (guard)', () => {
+  it('does NOT return `safe` for a Flow whose every impact edge leaves the vault', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, { flowId: FLOW_EXTERNAL_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // writesTo / sendsEmail / subflow are metadata-blockers → blocking. The
+    // pre-fix code dropped all four edges and answered the literal word `safe`.
+    expect(d.structuralVerdict).toBe('blocking');
+    expect(d.verdict).toBe('blocking');
+    // The four non-entry-point edges (callsApex / writesTo / sendsEmail /
+    // subflow references) are real declared effects that stop on deactivation.
+    expect(d.unresolvedImpacts.map((i) => i.componentId).sort()).toEqual(
+      [MISSING_APEX, MISSING_EMAIL, MISSING_FIELD, MISSING_SUBFLOW].sort(),
+    );
+    for (const row of d.unresolvedImpacts) expect(row.targetMissing).toBe(true);
+    // "No downstream effect is visible in this vault" would be a lie here.
+    expect(d.notProvenHarmless).toBeUndefined();
+    // The count is stated, not merely implied by an array the caller may skip.
+    expect(d.unresolvedTargetsNote).toContain('4');
+    expect(d.unresolvedTargetsNote).toContain('targetMissing');
+  });
+
+  it('keeps the unresolved ENTRY POINT in the response instead of dropping it', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, { flowId: FLOW_EXTERNAL_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.entryPoints).toEqual([
+      {
+        kind: 'triggersOn',
+        componentId: MISSING_TRIGGER_OBJ,
+        note: expect.any(String) as unknown as string,
+        targetMissing: true,
+      },
+    ]);
+  });
+
+  it('a resolvable Flow is unaffected: every impact still resolves and nothing is marked missing', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, { flowId: FLOW_RICH_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.unresolvedImpacts).toEqual([]);
+    expect(r.value.data.unresolvedTargetsNote).toBeUndefined();
+    for (const e of r.value.data.entryPoints) expect(e.targetMissing).toBe(false);
+  });
+
+  it('a subflow whose only parent caller is out of vault does not read `safe`', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: FLOW_ORPHAN_CALLED_ID,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Pre-fix: the parent edge was dropped at the `parentNode === undefined`
+    // guard, leaving zero impacts and the literal word `safe`.
+    expect(d.structuralVerdict).not.toBe('safe');
+    expect(d.verdict).not.toBe('safe');
+    expect(d.notProvenHarmless).toBeUndefined();
+    expect(d.unresolvedImpacts).toEqual([
+      {
+        category: 'broken-caller',
+        componentId: MISSING_PARENT_ID,
+        edgeType: 'references',
+        confidence: 'declared',
+        targetMissing: true,
+        explanation: expect.any(String) as unknown as string,
+      },
+    ]);
+  });
+
+  it('a platform-event subscriber that is not a node is surfaced, not dropped', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: FLOW_BEACON_PUB_ID,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The publisher's only downstream consumer is the out-of-vault subscriber;
+    // pre-fix it was dropped and the publisher read `safe`.
+    expect(d.verdict).toBe('blocking');
+    expect(
+      d.unresolvedImpacts.some((i) => i.componentId === MISSING_SUBSCRIBER_ID),
+    ).toBe(true);
   });
 });

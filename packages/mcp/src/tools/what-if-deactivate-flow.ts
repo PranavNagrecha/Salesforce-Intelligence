@@ -63,9 +63,11 @@
  *   - `structuralVerdict` is what the dependency structure says, over
  *     the VERDICT-BEARING impacts only (`input-only` excluded). Cascade,
  *     mirroring R2a's `WhatIfChangeFieldType`:
- *       * `safe` when there is no verdict-bearing impact at all — and
- *         then `notProvenHarmless` states what that `safe` does and does
- *         not prove, because `safe` alone over-claims.
+ *       * `safe` when there is no verdict-bearing impact at all — counting
+ *         `unresolvedImpacts` as well, so an unresolvable dependent can never
+ *         be answered with `safe` — and then `notProvenHarmless` states what
+ *         that `safe` does and does not prove, because `safe` alone
+ *         over-claims.
  *       * `blocking` if ANY `metadata-blocker` impact appears (record
  *         writes / email sends / subflow invocations would silently
  *         stop), OR any `broken-caller` is an ACTIVE parent Flow (R6-02:
@@ -106,10 +108,16 @@
  *   - Unknown ids resolve to `component-not-found`. The graph cannot
  *     distinguish "Flow never existed" from "Flow was deleted between
  *     vault refresh and tool invocation".
- *   - For each outgoing edge, `getNodeById(edge.toId)` resolves the
- *     downstream node's identity (`type`, `apiName`). Sparse-graph
- *     misses (an edge whose target was dropped) are silently skipped —
- *     matches the tolerance every other composition tool uses.
+ *   - For each outgoing edge, the batched node fetch resolves the downstream
+ *     node's identity (`type`, `apiName`). An edge whose target is NOT a node
+ *     in this vault (the importer's `targetMissing` marker, read via the
+ *     shared `edgeTargetMissing`) is NEVER dropped: it is diverted to
+ *     `unresolvedImpacts` (or, for an entry point, kept in `entryPoints` with
+ *     `targetMissing: true`) and it is graded into the verdict alongside the
+ *     resolvable rows. Dropping it — the old behaviour, justified only by a
+ *     comment claiming parity with unnamed peers — made a Flow whose impact
+ *     edges all left the vault report `impacts: []`, which `aggregateVerdict`
+ *     turns into the literal word `safe`.
  *   - The `firingConditions` array is sourced from the Flow's outgoing
  *     `firesWhen` edges (the v2.0a ConditionalContext primitive). Each
  *     entry carries the synthetic conditionContextId and the parsed
@@ -125,6 +133,7 @@ import type {
   ComponentType,
   ConfidenceLevel,
   Edge,
+  EdgeType,
   McpError,
   McpResponse,
   Node,
@@ -142,6 +151,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  edgeTargetMissing,
+  unresolvedTargetsDisclosure,
+} from './absence-disclosure.js';
 import { coercePrefix } from './coerce-id.js';
 import {
   attachCoverageToWhatIf,
@@ -219,12 +232,53 @@ export interface WhatIfDeactivateFlowFiringCondition {
  * `listensTo` (a Platform Event subscription) used to be reported as
  * `impacts`, which pinned the verdict: an entry point is not a dependent.
  * They are recategorised here rather than dropped, so the identity a caller
- * used to read out of `impacts` is still in the response.
+ * used to read out of `impacts` is still in the response. A row whose target
+ * is not a node in this vault is kept too, flagged `targetMissing`.
  */
 export interface WhatIfEntryPoint {
   readonly kind: 'triggersOn' | 'listensTo';
   readonly componentId: ComponentId;
   readonly note: string;
+  /**
+   * True when the entry-point target is not a node in this vault — a standard
+   * object outside the retrieve scope, or a managed-package Platform Event.
+   * ALWAYS written: a row without the key would make "resolved" and "never
+   * resolvable" render the same. The row is emitted either way, because a
+   * record-triggered Flow whose trigger object is out of vault previously
+   * reported `entryPoints: []` — indistinguishable from an autolaunched Flow
+   * that genuinely has no entry point.
+   */
+  readonly targetMissing: boolean;
+}
+
+/**
+ * One impact whose target component is NOT a node in this vault: a
+ * managed-package Apex action, an EmailTemplate the refresh never retrieved, a
+ * packaged subflow, or a caller/subscriber outside the retrieve scope.
+ *
+ * The EDGE is declared and real — deactivating the Flow stops that effect
+ * whether or not the target can be named here — so these rows are NEVER
+ * dropped and they bear on the verdict exactly as their resolvable twins do.
+ * They are kept OUT of `impacts` because `componentType` / `apiName` are
+ * genuinely unknown, and a fabricated identity would send the caller to
+ * `resolve` / `get_component` on an id that dead-ends.
+ *
+ * Before this shape existed, all three walks (`out`, broken-caller, the
+ * platform-event second hop) dropped the edge at a `node === undefined` guard,
+ * so a Flow whose every impact edge left the vault produced `impacts: []` and
+ * the aggregate verdict `safe` — a destructive answer manufactured by not
+ * looking. `sfi.user_ability` and `sfi.downstream_effects` already solve the
+ * identical case by marking the row; this mirrors them.
+ */
+export interface WhatIfUnresolvedImpact {
+  readonly category: Category;
+  /** The edge endpoint id, verbatim. `resolve` on it returns not-found. */
+  readonly componentId: ComponentId;
+  readonly edgeType: EdgeType;
+  readonly confidence: ConfidenceLevel;
+  /** Always `true` on this array — see {@link edgeTargetMissing}. */
+  readonly targetMissing: true;
+  readonly explanation: string;
 }
 
 /**
@@ -274,6 +328,17 @@ export interface WhatIfDeactivateFlowOutput {
   /** Where the runtime enters this Flow. NOT impacts — see {@link WhatIfEntryPoint}. */
   readonly entryPoints: readonly WhatIfEntryPoint[];
   readonly impacts: readonly WhatIfImpactItem[];
+  /**
+   * Impacts whose target is not a node in this vault. ALWAYS present (empty
+   * when every target resolved) so an absent key can never be read as "none".
+   * These rows DO move the verdict — see {@link WhatIfUnresolvedImpact}.
+   */
+  readonly unresolvedImpacts: readonly WhatIfUnresolvedImpact[];
+  /**
+   * The shared unresolved-target sentence, present exactly when at least one
+   * `unresolvedImpacts` row or one `targetMissing` entry point exists.
+   */
+  readonly unresolvedTargetsNote?: string;
   /** Does it run today? Its own axis; see {@link WhatIfRuntimeState}. */
   readonly runtimeState: WhatIfRuntimeState;
   /** HEADLINE. `already-inactive` when the Flow does not run today. */
@@ -455,6 +520,19 @@ const classifyOutgoingEdge = (
 };
 
 /**
+ * The verb for an outgoing edge type, shared by the resolvable and the
+ * unresolvable explanation builders so the two sentences cannot drift.
+ */
+const outgoingVerb = (edgeType: EdgeType): string =>
+  edgeType === 'writesTo'
+    ? 'writes to'
+    : edgeType === 'callsApex'
+      ? 'calls'
+      : edgeType === 'sendsEmail'
+        ? 'sends email via'
+        : 'references';
+
+/**
  * Synthesise the per-finding `explanation` string. The phrasing
  * mirrors R2a's `what-if-change-field-type.ts` `buildExplanation` so
  * the renderer can rely on a uniform "the Flow does X to component Y"
@@ -479,23 +557,86 @@ const buildExplanation = (
   if (edge.edgeType === 'readsFrom') {
     return `Flow '${flowApiName}' reads ${toNode.type} '${toNode.apiName}'. Deactivating the Flow removes that read; '${toNode.apiName}' itself is unchanged and nothing downstream of it is affected. Listed because it is a dependency of this Flow, not a dependent on it.`;
   }
-  const verb =
-    edge.edgeType === 'writesTo'
-      ? 'writes to'
-      : edge.edgeType === 'callsApex'
-        ? 'calls'
-        : edge.edgeType === 'sendsEmail'
-          ? 'sends email via'
-          : 'references';
-  return `Flow '${flowApiName}' ${verb} ${toNode.type} '${toNode.apiName}'; deactivating the Flow stops this action.`;
+  return `Flow '${flowApiName}' ${outgoingVerb(edge.edgeType)} ${toNode.type} '${toNode.apiName}'; deactivating the Flow stops this action.`;
+};
+
+/**
+ * The `explanation` for an OUTGOING edge whose target is not a node here. It
+ * names the id verbatim (never a fabricated apiName), says why the lookup
+ * dead-ends, and states that the effect stops anyway — the edge is declared.
+ */
+const buildUnresolvedOutgoingExplanation = (
+  edge: Edge,
+  flowApiName: string,
+): string => {
+  const subflow =
+    edge.edgeType === 'references' &&
+    edge.properties['referenceKind'] === 'subflow';
+  const action = subflow
+    ? `invokes subflow '${edge.toId}'`
+    : `${outgoingVerb(edge.edgeType)} '${edge.toId}'`;
+  const consequence =
+    edge.edgeType === 'readsFrom'
+      ? 'Deactivating the Flow removes that read; nothing downstream of it is affected (listed as a dependency of this Flow, not a dependent on it).'
+      : 'Deactivating the Flow stops this action.';
+  return (
+    `Flow '${flowApiName}' ${action}, which is NOT a node in this vault ` +
+    '(`targetMissing`) — a managed-package component, or one this refresh did ' +
+    `not retrieve. The edge is DECLARED and real. ${consequence} The target's ` +
+    'type and api name cannot be reported here, so this row is in ' +
+    '`unresolvedImpacts` rather than `impacts`.'
+  );
+};
+
+/**
+ * Build the response's `unresolvedTargetsNote`, or `undefined` when every
+ * target resolved. The impact half is the shared
+ * {@link unresolvedTargetsDisclosure} contract sentence so this tool cannot
+ * drift from `user_ability` / `downstream_effects`; the entry-point half is
+ * appended only when it applies, because a "0 …" sentence is itself a false
+ * statement.
+ */
+const buildUnresolvedTargetsNote = (
+  unresolvedImpactCount: number,
+  unresolvedEntryPointCount: number,
+): string | undefined => {
+  const parts: string[] = [];
+  if (unresolvedImpactCount > 0) {
+    parts.push(
+      unresolvedTargetsDisclosure({
+        count: unresolvedImpactCount,
+        targetKind: 'impact-edge',
+        targetNoun: 'edge',
+        surface: '`unresolvedImpacts`',
+      }) +
+        ' They are carried in `unresolvedImpacts`, EXCLUDED from `impacts` ' +
+        '(their type / api name are unknown), and they DO bear on the verdict ' +
+        '— the declared effect stops on deactivation whether or not the ' +
+        'target can be named here.',
+    );
+  }
+  if (unresolvedEntryPointCount > 0) {
+    parts.push(
+      `${unresolvedEntryPointCount} entryPoints row(s) name a component that is ` +
+        'NOT in this vault (`targetMissing`) — typically a standard object or ' +
+        'Platform Event outside the retrieve scope. The row is kept so an ' +
+        'out-of-vault trigger cannot read as "this Flow has no entry point".',
+    );
+  }
+  return parts.length > 0 ? parts.join(' ') : undefined;
 };
 
 /**
  * TRUE when an impact is a DEPENDENT of this Flow — something downstream that
  * stops. `input-only` entries are dependencies the Flow CONSUMES and are
  * excluded: they are reported, but they never move the verdict.
+ *
+ * Takes the CATEGORY-bearing shape rather than `WhatIfImpactItem` so the
+ * resolvable rows and the `targetMissing` rows are graded by ONE predicate. An
+ * unresolvable target is still a real declared effect; grading it separately
+ * is how `impacts: []` became the word `safe`.
  */
-const isVerdictBearing = (impact: WhatIfImpactItem): boolean =>
+const isVerdictBearing = (impact: { readonly category: Category }): boolean =>
   impact.category !== 'input-only';
 
 /**
@@ -515,7 +656,9 @@ const isVerdictBearing = (impact: WhatIfImpactItem): boolean =>
  * this category-only cascade does not carry. A subflow whose only callers are
  * inactive (Draft / Obsolete) is surfaced but stays `risky`, not `safe`.
  */
-const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
+const aggregateVerdict = (
+  impacts: readonly { readonly category: Category }[],
+): Verdict => {
   const dependents = impacts.filter(isVerdictBearing);
   if (dependents.length === 0) return 'safe';
   for (const impact of dependents) {
@@ -588,7 +731,12 @@ const escalateForActiveCallers = (
  * `category` ASC then by `componentId` ASC so related blockers stay
  * grouped in the rendered output.
  */
-const compareImpacts = (a: WhatIfImpactItem, b: WhatIfImpactItem): number => {
+interface SortableImpact {
+  readonly category: Category;
+  readonly componentId: ComponentId;
+}
+
+const compareImpacts = (a: SortableImpact, b: SortableImpact): number => {
   if (a.category !== b.category) return a.category < b.category ? -1 : 1;
   if (a.componentId !== b.componentId) {
     return a.componentId < b.componentId ? -1 : 1;
@@ -637,6 +785,13 @@ const collectFiringConditions = async (
 /** Result of the incoming broken-caller walk. */
 interface BrokenCallerScan {
   readonly impacts: readonly WhatIfImpactItem[];
+  /**
+   * Callers whose SOURCE node is not in this vault. The subflow-call edge is
+   * declared, so the caller exists and breaks; only its identity and its
+   * `status` are unknown here. Never dropped — a subflow whose only parent is
+   * out of vault used to read `safe`.
+   */
+  readonly unresolved: readonly WhatIfUnresolvedImpact[];
   /** True when at least one broken caller has `status === 'Active'`. */
   readonly hasActiveBrokenCaller: boolean;
 }
@@ -696,10 +851,34 @@ const collectBrokenCallers = async (
   if (!parentNodesResult.ok) return err(parentNodesResult.error.message);
   const parentById = new Map(parentNodesResult.value.map((n) => [n.id, n]));
   const impacts: WhatIfImpactItem[] = [];
+  const unresolved: WhatIfUnresolvedImpact[] = [];
   let hasActiveBrokenCaller = false;
   for (const edge of subflowEdges) {
     const parentNode = parentById.get(edge.fromId);
-    if (parentNode === undefined) continue; // sparse-graph miss
+    if (parentNode === undefined) {
+      // The caller's node is not in this vault (a packaged parent Flow, or one
+      // outside the retrieve scope). The `<subflows>` call is DECLARED, so the
+      // caller is real and it breaks on deactivation — dropping it is how a
+      // called subflow reported zero dependents and the word `safe`. Its
+      // `status` is unreadable, so it never escalates to `blocking`; the
+      // explanation says so rather than implying the parent is inactive.
+      unresolved.push({
+        category: 'broken-caller',
+        componentId: edge.fromId,
+        edgeType: edge.edgeType,
+        confidence: edge.confidence,
+        targetMissing: true,
+        explanation:
+          `'${edge.fromId}' invokes '${flowApiName}' as a subflow, but that ` +
+          'caller is NOT a node in this vault (`targetMissing`) — a ' +
+          'managed-package Flow, or one this refresh did not retrieve. The ' +
+          'subflow call is DECLARED, so deactivating ' +
+          `'${flowApiName}' makes it fail; the caller's activation status is ` +
+          'UNKNOWN here, so this does not escalate the verdict to blocking on ' +
+          'its own. Confirm the caller in the org.',
+      });
+      continue;
+    }
     if (parentNode.type !== 'Flow') continue; // defensive: subflow callers are Flows
     const status = readCallerStatus(parentNode);
     if (status === 'Active') hasActiveBrokenCaller = true;
@@ -718,7 +897,7 @@ const collectBrokenCallers = async (
         `deactivating '${flowApiName}' makes that subflow call fail — ${activeNote}.`,
     });
   }
-  return ok({ impacts, hasActiveBrokenCaller });
+  return ok({ impacts, unresolved, hasActiveBrokenCaller });
 };
 
 /**
@@ -762,6 +941,7 @@ const whatIfDeactivateFlowFromNode = async (
   const outTargetById = new Map(outTargetsResult.value.map((n) => [n.id, n]));
 
   const impacts: WhatIfImpactItem[] = [];
+  const unresolvedImpacts: WhatIfUnresolvedImpact[] = [];
   const entryPoints: WhatIfEntryPoint[] = [];
   for (const edge of edgesResult.value) {
     // Structural edges: `parentOf` is the Flow's container relationship,
@@ -769,21 +949,45 @@ const whatIfDeactivateFlowFromNode = async (
     // in `firingConditions`. Neither is a downstream impact.
     if (edge.edgeType === 'parentOf' || edge.edgeType === 'firesWhen') continue;
     const toNode = outTargetById.get(edge.toId);
-    if (toNode === undefined) {
-      // Sparse-graph case: the edge points at an id the graph has no
-      // node row for. Drop silently — matches the tolerance every
-      // other composition tool uses.
+    // The edge names a component this vault holds no node for: a
+    // managed-package action, an EmailTemplate the refresh never retrieved, a
+    // packaged subflow. The importer stamps `targetMissing` on such an edge
+    // (`edgeTargetMissing` is the shared authority); the Map miss additionally
+    // covers a vault built before the marker existed. The EDGE is declared and
+    // real, so the row is DIVERTED, never dropped — dropping it is what turned
+    // a Flow whose impacts all left the vault into the word `safe`.
+    const targetMissing = toNode === undefined || edgeTargetMissing(edge);
+    const entryNote = entryPointNoteFor(edge.edgeType);
+    if (targetMissing) {
+      if (entryNote !== undefined) {
+        // An entry point is not a dependent and never moves the verdict, but
+        // it is still surfaced: an out-of-vault trigger object must not render
+        // as "this Flow has no entry point".
+        entryPoints.push({
+          kind: edge.edgeType as WhatIfEntryPoint['kind'],
+          componentId: edge.toId,
+          note: entryNote,
+          targetMissing: true,
+        });
+        continue;
+      }
+      unresolvedImpacts.push({
+        category: classifyOutgoingEdge(edge).category,
+        componentId: edge.toId,
+        edgeType: edge.edgeType,
+        confidence: edge.confidence,
+        targetMissing: true,
+        explanation: buildUnresolvedOutgoingExplanation(edge, flowNode.apiName),
+      });
       continue;
     }
-    // The Flow's OWN entry points are recategorised here, not dropped: the
-    // node is resolved first, so an `entryPoints` row can never name an id the
-    // graph has no node for.
-    const entryNote = entryPointNoteFor(edge.edgeType);
+    // The Flow's OWN entry points are recategorised here, not dropped.
     if (entryNote !== undefined) {
       entryPoints.push({
         kind: edge.edgeType as WhatIfEntryPoint['kind'],
         componentId: toNode.id,
         note: entryNote,
+        targetMissing: false,
       });
       continue;
     }
@@ -808,6 +1012,7 @@ const whatIfDeactivateFlowFromNode = async (
   // when `triggersOn` / `listensTo` targets still sat in `impacts`.
   const seenSubscribers = new Set<string>([
     ...impacts.map((i) => i.componentId),
+    ...unresolvedImpacts.map((i) => i.componentId),
     ...entryPoints.map((e) => e.componentId),
   ]);
   // Batched second hop. Collect the published-event objects in outer-edge order,
@@ -853,7 +1058,26 @@ const whatIfDeactivateFlowFromNode = async (
   const subNodeById = new Map(subNodesResult.value.map((n) => [n.id, n]));
   for (const { fromId, eventApiName } of pendingSubscribers) {
     const subNode = subNodeById.get(fromId);
-    if (subNode === undefined) continue;
+    if (subNode === undefined) {
+      // A subscriber outside this vault (managed-package Flow or trigger on
+      // the event). The `listensTo` subscription is declared, so it does lose
+      // its trigger — surfaced, never dropped, so `impacts` cannot report a
+      // confident zero for a published event that only external code consumes.
+      unresolvedImpacts.push({
+        category: 'metadata-blocker',
+        componentId: fromId,
+        edgeType: 'listensTo',
+        confidence: 'heuristic',
+        targetMissing: true,
+        explanation:
+          `'${fromId}' subscribes to the platform event ${eventApiName}, ` +
+          'which this flow publishes, but that subscriber is NOT a node in ' +
+          'this vault (`targetMissing`) — a managed-package component, or one ' +
+          'this refresh did not retrieve. Deactivating this flow stops the ' +
+          'event, so the subscriber will no longer be triggered by it.',
+      });
+      continue;
+    }
     impacts.push({
       category: 'metadata-blocker',
       componentId: subNode.id,
@@ -879,8 +1103,10 @@ const whatIfDeactivateFlowFromNode = async (
     return err({ kind: 'internal', message: brokenCallersResult.error });
   }
   impacts.push(...brokenCallersResult.value.impacts);
+  unresolvedImpacts.push(...brokenCallersResult.value.unresolved);
 
   const sortedImpacts = [...impacts].sort(compareImpacts);
+  const sortedUnresolvedImpacts = [...unresolvedImpacts].sort(compareImpacts);
   const sortedEntryPoints = [...entryPoints].sort((a, b) =>
     a.kind !== b.kind
       ? a.kind < b.kind
@@ -901,8 +1127,12 @@ const whatIfDeactivateFlowFromNode = async (
   // The STRUCTURAL axis is what gets coverage-downgraded: "nothing depends on
   // this" is a coverage-dependent claim. "It is already switched off" is not,
   // so the headline `already-inactive` is never downgraded.
+  // The unresolvable rows are graded alongside the resolvable ones: the edge
+  // is declared, so the effect stops whether or not the target can be named.
+  // Grading only `sortedImpacts` is precisely how "we could not resolve any of
+  // them" was answered with the word `safe`.
   const rawVerdict = escalateForActiveCallers(
-    aggregateVerdict(sortedImpacts),
+    aggregateVerdict([...sortedImpacts, ...sortedUnresolvedImpacts]),
     brokenCallersResult.value.hasActiveBrokenCaller,
   );
   const coverage = attachCoverageToWhatIf(
@@ -914,7 +1144,19 @@ const whatIfDeactivateFlowFromNode = async (
   const structuralVerdict = coverage.verdict as Verdict;
 
   const status = readFlowStatus(flowNode);
-  const dependentCount = sortedImpacts.filter(isVerdictBearing).length;
+  // Counts BOTH halves: `notProvenHarmless` claims "no downstream effect is
+  // visible in this vault", which is false the moment one unresolvable
+  // dependent exists.
+  const dependentCount =
+    sortedImpacts.filter(isVerdictBearing).length +
+    sortedUnresolvedImpacts.filter(isVerdictBearing).length;
+  const unresolvedEntryPointCount = sortedEntryPoints.filter(
+    (e) => e.targetMissing,
+  ).length;
+  const unresolvedTargetsNote = buildUnresolvedTargetsNote(
+    sortedUnresolvedImpacts.length,
+    unresolvedEntryPointCount,
+  );
   const runtimeState = resolveRuntimeState(status, dependentCount);
   // `currentlyRunning === null` (status unknown) deliberately does NOT take
   // this branch: an unrecorded status is not evidence the Flow is off.
@@ -940,6 +1182,8 @@ const whatIfDeactivateFlowFromNode = async (
       firingConditions: firingConditionsResult.value,
       entryPoints: sortedEntryPoints,
       impacts: sortedImpacts,
+      unresolvedImpacts: sortedUnresolvedImpacts,
+      ...(unresolvedTargetsNote !== undefined ? { unresolvedTargetsNote } : {}),
       runtimeState,
       verdict,
       structuralVerdict,
