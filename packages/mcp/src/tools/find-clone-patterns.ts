@@ -75,20 +75,17 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  getNodeById,
-  listEdges,
-  listNodesByType,
-} from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES, fullScanTruncationNote } from './scan-cap.js';
+
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 10;
 const DEFAULT_MIN_SCORE = 0.3;
-const PAGE_SIZE = 500;
-const MAX_PAGES = 20;
 
 const APEX_PREFIX = 'ApexClass:';
 const TRIGGER_PREFIX = 'ApexTrigger:';
@@ -98,8 +95,63 @@ const APEX_FINGERPRINT_DISCLOSURE =
   "the fingerprint approximates structural shape — method count, line count, and the set of called Apex / read fields / written fields. Two classes with identical fingerprints may have radically different behavior. Treat this as a 'have you considered' list, not a 'these are duplicates' assertion.";
 const SMALL_CLASS_DISCLOSURE =
   'structural similarity is less meaningful for small classes; a single-method utility class will match many other single-method utility classes by trivial fingerprint overlap. Inspect the source to verify they actually do the same thing.';
+/**
+ * R1 (0.3.3 honesty census): a seed whose fingerprint carries NO outgoing
+ * callsApex / readsFrom / writesTo edges at all makes `jaccard`'s empty-set
+ * guard return 0 on every dimension against every candidate. This is a
+ * distinct boundary from {@link SMALL_CLASS_DISCLOSURE}, which warns about the
+ * OPPOSITE failure mode (trivial fingerprint OVER-matching on a real
+ * single-method class) and must never be the only disclosure attached to a
+ * comparison that could not be made at all.
+ *
+ * The claim is deliberately about the SCORE, not about the payload: `score <
+ * minScore` is a STRICT compare, so `minScore: 0` admits every 0.00-scoring
+ * candidate and the match list is NOT empty. An earlier draft of this text
+ * asserted `matches: []` / `totalCount: 0` and therefore contradicted the rows
+ * printed beside it. Wording is per-kind because "never parsed by the Apex
+ * scanner" is nonsense on a Flow.
+ */
+const APEX_EMPTY_FINGERPRINT_DISCLOSURE =
+  "this seed's fingerprint is completely empty — no callsApex, readsFrom, or writesTo edges at all — so there was nothing to compare against any candidate: the empty-set Jaccard rule makes a score of exactly 0.00 against EVERY component in the org a mathematical guarantee, whatever those components actually contain. An empty match list here is NOT evidence this class is structurally unique, and any row that does appear (reachable only at minScore 0) is a scoreless placeholder, not a detected clone. This can mean the class was never parsed by the Apex scanner, is a managed-package / phantom stub with no modeled body, or the vault predates the field-reference extraction that would have populated readsFrom/writesTo. Inspect the source directly, and re-run `/sfi-refresh` if the vault may be stale.";
+/**
+ * The Flow twin of {@link APEX_EMPTY_FINGERPRINT_DISCLOSURE}, for a flow with
+ * no callsApex / readsFrom / writesTo edges AND no `triggersOn` target — the
+ * only shape where a Flow comparison really is impossible on all four
+ * dimensions. Carries no Apex-scanner wording and no "class" noun.
+ */
+const FLOW_EMPTY_FINGERPRINT_DISCLOSURE =
+  "this seed flow's fingerprint is completely empty — no callsApex, readsFrom, or writesTo edges and no triggersOn target — so there was nothing to compare against any candidate: a score of exactly 0.00 against EVERY flow in the org is a mathematical guarantee, whatever those flows actually contain. An empty match list here is NOT evidence this flow is structurally unique, and any row that does appear (reachable only at minScore 0) is a scoreless placeholder, not a detected clone. This can mean the flow was never parsed into element-level edges, is a managed-package / phantom definition, or the vault predates the field-reference extraction that would have populated readsFrom/writesTo. Inspect the flow definition directly, and re-run `/sfi-refresh` if the vault may be stale.";
+/**
+ * The THIRD case the 0.3.3 verification found: a record-triggered flow with no
+ * callsApex / readsFrom / writesTo edges but a real `triggersOn` target. That
+ * target is NOT part of `seedEdgeTotal`, yet {@link scorePair}'s Flow branch
+ * scores it at weight 0.20 — so the comparison is neither impossible (a match
+ * CAN be returned, at minScore <= 0.2) nor meaningful (nothing above 0.20 is
+ * reachable, so the default 0.3 threshold guarantees an empty list). Emitting
+ * {@link FLOW_EMPTY_FINGERPRINT_DISCLOSURE} here produced a response that
+ * declared the comparison impossible directly above a non-empty `matches`
+ * array.
+ */
+const FLOW_TRIGGER_ONLY_DISCLOSURE =
+  "this seed flow carries NO callsApex, readsFrom, or writesTo edges — its record-triggered object is the only dimension left that can score anything. That dimension is weighted 0.20, so NO candidate can score above 0.20 however similar the two flows really are, and at the default minScore of 0.30 an empty match list is a mathematical guarantee rather than evidence of uniqueness. Any row listed here means only 'also triggered on the same object', not 'structurally similar' — lower minScore to see them, and inspect the flow definitions directly.";
 const HEURISTIC_DISCLOSURE =
   'clone detection by structural fingerprint is heuristic; AST-level clone detection is deferred to a future milestone. Verify any high-similarity result by inspecting the source.';
+
+/**
+ * R6 (0.3.3 honesty census): residual ceiling on the per-type full scan in
+ * SEED mode. Defaults to the shared {@link FULL_SCAN_MAX_NODES} (20,000 —
+ * already well above the old private, undisclosed 500 x 20 = 10,000
+ * hand-rolled window cap this replaces), and is now DISCLOSED via {@link
+ * fullScanTruncationNote} when hit instead of silently dropping candidates
+ * past the cap. `SFI_CLONE_PATTERNS_SCAN_MAX` overrides it so a test can
+ * exercise the boundary without seeding tens of thousands of fixture nodes —
+ * mirrors `SFI_FLOW_FAULT_SCAN_MAX` on the `flow_fault_audit` sibling
+ * migration. Read at call time.
+ */
+const cloneScanCeiling = (): number => {
+  const v = Number(process.env['SFI_CLONE_PATTERNS_SCAN_MAX']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
+};
 
 /** Upper bound on nodes scanned in seedless cluster mode (O(n²) pairwise). */
 const MAX_CLUSTER_NODES = 800;
@@ -325,10 +377,24 @@ const scorePair = (
   };
 };
 
+/** Outcome of a seed-mode candidate walk, including scan-completeness. */
+interface CandidateScan {
+  readonly matches: CloneMatch[];
+  readonly scanIncomplete: boolean;
+  readonly incompleteTypes: readonly string[];
+}
+
 /**
- * Walk every node of the seed's type, compute its fingerprint, score
- * against the seed, and emit matches above `minScore`. Excludes the
- * seed itself.
+ * Walk every node of the seed's type via the shared {@link
+ * scanAllNodesOfTypes} full-window walk, compute each candidate's
+ * fingerprint, score against the seed, and emit matches above `minScore`.
+ * Excludes the seed itself.
+ *
+ * R6 (0.3.3 honesty census): this used to be a hand-rolled `listNodesByType`
+ * page loop with a private, undisclosed 500 x 20 = 10,000 node ceiling — a
+ * type past that count was silently truncated with no `truncated` flag and
+ * no boundary entry. The shared walk carries the same disclosed-truncation
+ * contract every other full-scan tool in this tree already adopted.
  */
 const findCandidates = async (
   ctx: Context,
@@ -337,33 +403,30 @@ const findCandidates = async (
   seedKind: 'apex' | 'flow',
   seedFp: Fingerprint,
   minScore: number,
-): Promise<Result<CloneMatch[], string>> => {
+): Promise<Result<CandidateScan, string>> => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, [seedType], cloneScanCeiling());
+  if (!scan.ok) return err(scan.error.message);
   const matches: CloneMatch[] = [];
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const r = await listNodesByType(ctx.graph, seedType, {
-      limit: PAGE_SIZE,
-      offset: page * PAGE_SIZE,
+  for (const node of scan.value.nodes) {
+    if (node.id === seedId) continue;
+    const fpResult = await computeFingerprint(ctx, node.id, seedKind);
+    if (!fpResult.ok) return err(fpResult.error);
+    const { score, ...breakdown } = scorePair(seedFp, fpResult.value);
+    if (score < minScore) continue;
+    matches.push({
+      componentId: node.id,
+      apiName: node.apiName,
+      type: node.type,
+      score,
+      similarityBreakdown: breakdown,
+      confidence: 'heuristic',
     });
-    if (!r.ok) return err(r.error.message);
-    if (r.value.length === 0) break;
-    for (const node of r.value) {
-      if (node.id === seedId) continue;
-      const fpResult = await computeFingerprint(ctx, node.id, seedKind);
-      if (!fpResult.ok) return err(fpResult.error);
-      const { score, ...breakdown } = scorePair(seedFp, fpResult.value);
-      if (score < minScore) continue;
-      matches.push({
-        componentId: node.id,
-        apiName: node.apiName,
-        type: node.type,
-        score,
-        similarityBreakdown: breakdown,
-        confidence: 'heuristic',
-      });
-    }
-    if (r.value.length < PAGE_SIZE) break;
   }
-  return ok(matches);
+  return ok({
+    matches,
+    scanIncomplete: scan.value.scanIncomplete,
+    incompleteTypes: scan.value.incompleteTypes,
+  });
 };
 
 /**
@@ -378,26 +441,34 @@ const buildClusters = async (
   kind: 'apex' | 'flow',
   minScore: number,
 ): Promise<Result<{ clusters: CloneCluster[]; scanned: number; capped: boolean }, string>> => {
-  // 1. Load up to MAX_CLUSTER_NODES nodes + their fingerprints.
+  // 1. Load up to MAX_CLUSTER_NODES nodes + their fingerprints, via the same
+  // shared full-window walk seed mode uses (R6, 0.3.3 honesty census) — the
+  // O(n²) pairwise pass below is what actually bounds cluster mode, so
+  // MAX_CLUSTER_NODES (not the org-wide FULL_SCAN_MAX_NODES) is passed as
+  // THIS call's ceiling AND re-applied to the returned list (see below): the
+  // shared walk treats `maxNodes` as a stop-check made AFTER a whole window is
+  // appended, which is a fine residual cap for a 20 000-node ceiling but not
+  // for a bound the tool prints verbatim.
+  const scan = await scanAllNodesOfTypes(ctx.graph, [type], MAX_CLUSTER_NODES);
+  if (!scan.ok) return err(scan.error.message);
+  // `scanAllNodesOfTypes` appends a WHOLE window BEFORE it tests
+  // `scannedThisType >= maxNodes`, so a ceiling of 800 with the 500-node window
+  // returns up to 1000 nodes. The O(n²) pass below is what MAX_CLUSTER_NODES
+  // actually bounds and the `capped` boundary quotes that number verbatim, so
+  // the overshoot is truncated HERE: without this the tool scanned 900 nodes
+  // while printing no cap boundary at all, and 1000 nodes while printing
+  // "capped at the first 800" next to `scannedCount: 1000`.
+  const scannedNodes = scan.value.nodes.slice(0, MAX_CLUSTER_NODES);
+  // Capped when the walk itself hit its residual ceiling OR when the overshoot
+  // above was trimmed. A type holding EXACTLY MAX_CLUSTER_NODES nodes is
+  // neither, preserving the CR-P3 off-by-one fix (the old hand-rolled loop set
+  // `capped` the instant the 800th node was appended).
+  const capped = scan.value.scanIncomplete || scan.value.nodes.length > MAX_CLUSTER_NODES;
   const nodes: { id: ComponentId; apiName: string; fp: Fingerprint }[] = [];
-  let capped = false;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const r = await listNodesByType(ctx.graph, type, {
-      limit: PAGE_SIZE,
-      offset: page * PAGE_SIZE,
-    });
-    if (!r.ok) return err(r.error.message);
-    if (r.value.length === 0) break;
-    for (const node of r.value) {
-      if (nodes.length >= MAX_CLUSTER_NODES) {
-        capped = true;
-        break;
-      }
-      const fpResult = await computeFingerprint(ctx, node.id, kind);
-      if (!fpResult.ok) return err(fpResult.error);
-      nodes.push({ id: node.id, apiName: node.apiName, fp: fpResult.value });
-    }
-    if (capped || r.value.length < PAGE_SIZE) break;
+  for (const node of scannedNodes) {
+    const fpResult = await computeFingerprint(ctx, node.id, kind);
+    if (!fpResult.ok) return err(fpResult.error);
+    nodes.push({ id: node.id, apiName: node.apiName, fp: fpResult.value });
   }
 
   // 2. Score all unordered pairs; union those >= minScore. Track the tightest
@@ -565,7 +636,7 @@ export const findClonePatternsHandler = async (
       message: `graph query failed: ${candidatesResult.error}`,
     });
   }
-  const matches = candidatesResult.value;
+  const { matches, scanIncomplete, incompleteTypes } = candidatesResult.value;
 
   // Rank: score DESC, then componentId ASC for determinism.
   matches.sort((a, b) => {
@@ -578,8 +649,40 @@ export const findClonePatternsHandler = async (
     APEX_FINGERPRINT_DISCLOSURE,
     HEURISTIC_DISCLOSURE,
   ];
-  if (seedFp.callsApex.size + seedFp.readsFrom.size + seedFp.writesTo.size <= 1) {
+  // R1 (0.3.3 honesty census + its adversarial verification): the old `<= 1`
+  // test collapsed THREE different situations into one piece of wording that
+  // warned about over-matching. They are separated here:
+  //   0 edges, no triggersOn  → nothing was comparable; every candidate scores
+  //                             exactly 0.00 by the empty-set Jaccard guard.
+  //   0 edges, a triggersOn   → Flow only: the 0.20-weighted triggeredObject
+  //                             dimension DOES score, so matches can come back
+  //                             (at minScore <= 0.2) and nothing above 0.20 is
+  //                             reachable.
+  //   exactly 1 edge          → comparable, but trivially over-match-prone —
+  //                             the original SMALL_CLASS warning, preserved.
+  const seedEdgeTotal =
+    seedFp.callsApex.size + seedFp.readsFrom.size + seedFp.writesTo.size;
+  // A Flow's `triggersOn` target is NOT in `seedEdgeTotal` but IS scored (0.20)
+  // by `scorePair`, so a trigger-only flow is edge-total-0 and STILL
+  // comparable. Testing emptiness on `seedEdgeTotal` alone made the tool
+  // declare the comparison impossible while returning a 0.2-scoring match.
+  const seedTriggeredObject =
+    seedFp.kind === 'flow' ? seedFp.triggeredObject : null;
+  if (seedEdgeTotal === 0) {
+    if (seedTriggeredObject !== null) {
+      boundaries.push(FLOW_TRIGGER_ONLY_DISCLOSURE);
+    } else {
+      boundaries.push(
+        seedFp.kind === 'flow'
+          ? FLOW_EMPTY_FINGERPRINT_DISCLOSURE
+          : APEX_EMPTY_FINGERPRINT_DISCLOSURE,
+      );
+    }
+  } else if (seedEdgeTotal === 1) {
     boundaries.push(SMALL_CLASS_DISCLOSURE);
+  }
+  if (scanIncomplete) {
+    boundaries.push(fullScanTruncationNote(incompleteTypes));
   }
 
   return ok({

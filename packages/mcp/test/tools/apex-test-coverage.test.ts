@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { Edge, ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
 import {
@@ -520,5 +521,87 @@ describe('apexTestCoverageHandler — class-selector aliases (guard)', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
+// =============================================================================
+// R1 (BRIEF 064): single-class mode used to hardcode `summary.testClasses: 0`
+// / `summary.nonTestClasses: 0` even though the org-wide roster is
+// deliberately never loaded in single-class mode (see the mode split above) —
+// a not-computed value rendering as a computed zero. A host summarising
+// `sfi.apex_test_coverage({ classApiName: 'CaseService' })` would report "this
+// org has 0 test classes and 0 non-test classes", indistinguishable from a
+// real checked zero, in the tool that gates the Salesforce 75% deploy
+// threshold. The fix: `number | null`, `null` in single-class mode, plus a
+// boundary sentence — mirroring `profile-security.ts`'s
+// `sessionSecuritySettings: null`.
+// =============================================================================
+describe('apexTestCoverageHandler — R1: single-class roster counters are typed absence, not a fake zero', () => {
+  it('summary.testClasses and summary.nonTestClasses are null (not 0) for a class WITH a covering test', async () => {
+    const r = await apexTestCoverageHandler(ctx, { classApiName: 'SvcA' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.mode).toBe('single-class');
+    // The bug rendered these as the literal 0, which is indistinguishable
+    // from "this org genuinely has zero test/non-test classes" — a false
+    // certainty. They must be null: NOT-COMPUTED in single-class mode.
+    expect(r.value.data.summary.testClasses).toBeNull();
+    expect(r.value.data.summary.nonTestClasses).toBeNull();
+  });
+
+  it('summary.testClasses and summary.nonTestClasses are null (not 0) for an untested class too', async () => {
+    const r = await apexTestCoverageHandler(ctx, { classApiName: 'SvcC' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.testClasses).toBeNull();
+    expect(r.value.data.summary.nonTestClasses).toBeNull();
+  });
+
+  it('boundaries disclose that the two roster counters were not computed in single-class mode', async () => {
+    const r = await apexTestCoverageHandler(ctx, { classApiName: 'SvcA' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const hit = r.value.data.boundaries.some(
+      (b) => b.includes('testClasses') && b.includes('nonTestClasses') && b.includes('null'),
+    );
+    expect(hit).toBe(true);
+  });
+
+  it('org-wide mode is UNCHANGED: the roster counters remain real computed numbers, never null', async () => {
+    const r = await apexTestCoverageHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.mode).toBe('org-wide');
+    expect(r.value.data.summary.testClasses).toBe(2);
+    expect(r.value.data.summary.nonTestClasses).toBe(3);
+  });
+});
+
+// =============================================================================
+// R6 (BRIEF 064): `loadAllApexClasses` was a hand-rolled second copy of the
+// OFFSET-windowed corpus walk that `scan-all-nodes.ts`'s `scanAllNodesOfTypes`
+// exists to own — correct today, but with no `FULL_SCAN_MAX_NODES` residual
+// cap and no `scanIncomplete` disclosure channel, and nothing in this file's
+// own test suite stopped it from silently diverging from the shared helper.
+// `full-scan-adoption.test.ts` is a shared, off-limits file (its FULL_SCAN_TOOLS
+// deny-list addition is reported under needsOrchestrator); this is the same
+// source-shape assertion scoped to just this one file, owned locally.
+// =============================================================================
+describe('apexTestCoverageHandler — R6: org-wide roster walk adopts the shared scanAllNodesOfTypes helper', () => {
+  const SRC_PATH = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../src/tools/apex-test-coverage.ts',
+  );
+  const stripComments = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  it('issues no hand-rolled listNodesByType offset scan', () => {
+    const src = stripComments(readFileSync(SRC_PATH, 'utf8'));
+    expect(/listNodesByType\(/.test(src)).toBe(false);
+  });
+
+  it('calls the shared scanAllNodesOfTypes helper', () => {
+    const src = readFileSync(SRC_PATH, 'utf8');
+    expect(src).toContain('scanAllNodesOfTypes');
   });
 });

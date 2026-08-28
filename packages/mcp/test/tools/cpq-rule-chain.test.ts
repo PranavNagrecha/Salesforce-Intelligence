@@ -226,3 +226,102 @@ describe('cpqRuleChainHandler', () => {
     expect(result.error.kind).toBe('component-not-found');
   });
 });
+
+// =============================================================================
+// R1/BRIEF-081: a rule object with MORE THAN 500 siblings under the same
+// parent. The old handler fetched exactly one `listNodesByType` page capped
+// at 500 with no OFFSET, so any sibling whose id sorted past the cap was
+// dropped from the chain with no truncation disclosure — and when the
+// CALLER's own rule was one of the dropped rows, `targetPosition` fell back
+// to a bare `0`, a position no rule can occupy, indistinguishable from a
+// real answer.
+// =============================================================================
+
+describe('cpqRuleChainHandler — sibling count beyond the legacy 500-row page', () => {
+  const BIG_PARENT_ID = 'CustomObject:SBQQ__PriceRule__c';
+  const SIBLING_COUNT = 501;
+  // Zero-padded so lexical (id ASC) order matches numeric order — the last
+  // one, index 500, sorts strictly after the first 500 (index 0..499).
+  const idFor = (i: number) =>
+    `CpqPriceRule:SBQQ__PriceRule__c.Rule${String(i).padStart(4, '0')}`;
+  // The rule that sorted PAST the old 500-row cap: the 501st id, index 500.
+  const LAST_RULE_ID = idFor(SIBLING_COUNT - 1);
+
+  let bigTempDir: string;
+  let bigStore: GraphStore;
+  let bigCtx: Context;
+
+  beforeAll(async () => {
+    bigTempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-cpq-rule-chain-big-'));
+    const dbPath = join(bigTempDir, 'cpq-rule-chain-big.db');
+    const opened = await openGraph(dbPath);
+    if (!opened.ok) {
+      throw new Error(`openGraph failed: ${opened.error.message}`);
+    }
+    bigStore = opened.value;
+    const nodes: Node[] = [
+      makeNode({
+        id: BIG_PARENT_ID,
+        type: 'CustomObject',
+        apiName: 'SBQQ__PriceRule__c',
+      }),
+    ];
+    for (let i = 0; i < SIBLING_COUNT; i += 1) {
+      nodes.push(
+        makeNode({
+          id: idFor(i),
+          type: 'CpqPriceRule',
+          apiName: `SBQQ__PriceRule__c.Rule${String(i).padStart(4, '0')}`,
+          parentId: BIG_PARENT_ID,
+          properties: {
+            active: true,
+            evaluationOrder: 1,
+            recognitionConfidence: 'heuristic',
+          },
+        }),
+      );
+    }
+    const imported = await importExtractionResults(bigStore, [{ nodes, edges: [] }]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    bigCtx = {
+      vaultRoot: bigTempDir,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        components: { CustomObject: 1, CpqPriceRule: SIBLING_COUNT },
+      },
+      graph: bigStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(bigStore);
+    rmSync(bigTempDir, { recursive: true, force: true });
+  });
+
+  it('includes every sibling in the chain, not just the first 500', async () => {
+    const result = await cpqRuleChainHandler(bigCtx, { ruleId: LAST_RULE_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // All 501 same-active/same-evaluationOrder rules tie-break on id ASC, so
+    // the full chain is exactly SIBLING_COUNT long when nothing was dropped.
+    expect(result.value.data.chain.length).toBe(SIBLING_COUNT);
+  });
+
+  it('reports the true position of a rule that sorts past the old 500-row cap, never a bare 0', async () => {
+    const result = await cpqRuleChainHandler(bigCtx, { ruleId: LAST_RULE_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // idFor(500) is the 501st id in ASC order → position 501, one-based.
+    expect(result.value.data.targetPosition).toBe(SIBLING_COUNT);
+    expect(result.value.data.targetPosition).not.toBe(0);
+  });
+
+  it('does not report the walk as truncated when every sibling was scanned', async () => {
+    const result = await cpqRuleChainHandler(bigCtx, { ruleId: LAST_RULE_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanTruncated).toBe(false);
+  });
+});

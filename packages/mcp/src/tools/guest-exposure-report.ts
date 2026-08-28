@@ -52,6 +52,7 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { guestProfileNameForSite } from '@sf-intelligence/extractors';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { isRegulatedPiiClassification } from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -75,6 +76,20 @@ const SHARING_RULE_PREFIX = 'SharingRule:';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/**
+ * The classifier caveat, emitted on EVERY response (in `disclosures` and in
+ * `trust.limitations`) rather than only when something was found.
+ *
+ * Which fields count as regulated here is decided by the shared heuristic
+ * recognizer, so both directions of its error are load-bearing on a guest-
+ * exposure answer: a field storing regulated data whose API name / label /
+ * description carries no signal classifies `public` and never becomes a
+ * finding at all. That blind spot does not become untrue when the scoped
+ * answer happens to be short, so the sentence does not ride on a condition.
+ */
+const PII_RECOGNIZER_LIMITATION =
+  'Which exposed fields are REGULATED is decided by the shared pii_inventory heuristic recognizer over the field\'s declared API name, label, data type and description — it covers the pii, sensitive and protected (protected-class) tiers, but a field that stores regulated data while carrying no name/description signal classifies public and is NOT reported here. Absence of a field from `findings` is therefore never proof the guest cannot see regulated data on it.';
 /** Per-response byte budget for the paged `findings` list; below the ~45 KB guard. */
 const FINDINGS_BYTE_BUDGET = 36_000;
 /**
@@ -844,13 +859,31 @@ export const guestExposureReportHandler = async (
     }
   }
 
-  // PII field ids (pii + sensitive), reusing the SAME classifier pii_inventory
-  // uses — composed, not duplicated. Map id -> classified field for detail.
+  // Regulated field ids, reusing the SAME classifier `pii_inventory` uses —
+  // composed, not duplicated. Map id -> classified field for detail.
+  //
+  // GUEST-EXPOSURE-DROPS-THE-PROTECTED-BUCKET: this used to loop over a
+  // hand-written `['pii', 'sensitive']` tuple. The shared recognizer mints a
+  // THIRD regulated tier — `protected` (protected-class attributes: race,
+  // ethnicity, religion, disability, citizenship / national origin, veteran /
+  // military status, gender identity) — and that tuple silently dropped it,
+  // while the envelope still certified `trust.completeness: complete` with an
+  // EMPTY `trust.limitations`. On a real community the report then listed 31
+  // exposed `pii`/`sensitive` fields and NONE of the eight protected-class
+  // fields the same guest profile held READ+EDIT FLS on, which reads to a host
+  // as "nothing in a special category is reachable".
+  //
+  // The fix is adoption, not a fourth copy: `isRegulatedPiiClassification` is
+  // the shared predicate in `@sf-intelligence/patterns` whose own doc says
+  // callers must use it "rather than an ad-hoc `=== 'pii' || === 'sensitive'`
+  // check, so `protected` is never missed". One unfiltered classification pass
+  // now feeds it — which also collapses the previous per-classification full
+  // org scans into a single one.
   const piiById = new Map<string, PiiField>();
-  for (const cls of ['pii', 'sensitive'] as const) {
-    const collected = await collectPiiInventoryFields(ctx, { classification: cls });
-    if (!collected.ok) return collected;
-    for (const f of collected.value.fields) piiById.set(f.id, f);
+  const collected = await collectPiiInventoryFields(ctx, {});
+  if (!collected.ok) return collected;
+  for (const f of collected.value.fields) {
+    if (isRegulatedPiiClassification(f.classification)) piiById.set(f.id, f);
   }
 
   const communities: CommunitySummary[] = [];
@@ -1159,6 +1192,7 @@ export const guestExposureReportHandler = async (
     'The guest-profile identity is HEURISTIC: it is inferred from Salesforce\'s "{Site Label} Profile" naming convention, not a declared metadata pointer. Every finding\'s underlying CRUD/FLS/apex grant is `declared`, but that the profile IS the site guest user is heuristic — so the report confidence is `heuristic`. Confirm the guest profile in Setup.',
     'Object CRUD + FLS are the DECLARED static grant. Actual record visibility to a guest also depends on OWD + guest/criteria sharing rules (record level) — guest sharing rules are surfaced as their own findings, but whether a specific record matches is not modeled here.',
     'Visualforce-page guest access (`<pageAccesses>`) is NOT in the offline metadata model — only Apex-class access is enumerated. A guest-exposed VF page will not appear as a finding.',
+    PII_RECOGNIZER_LIMITATION,
   ];
   if (objectScope !== null) {
     disclosures.push(
@@ -1234,10 +1268,21 @@ export const guestExposureReportHandler = async (
       confidence: 'heuristic',
       disclosures,
       boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s)${objectScope !== null ? `, scoped to object '${objectScope}'` : ''}; ${bySeverity.critical} critical (public write on a PII object), ${bySeverity.high} high. Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. \`appliedScope\` echoes the scope actually applied. Confidence is heuristic — the guest-profile linkage is a naming convention.`,
-      trust: offlineTrust(ctx, {
-        status: coverage.status,
-        ...(coverage.missingCoverage.length > 0 ? { missingCoverage: coverage.missingCoverage } : {}),
-      }),
+      // The recognizer caveat rides on EVERY response, findings or none — it
+      // describes what the classifier cannot see, which does not become untrue
+      // when a scope happens to surface nothing. An empty `limitations` next to
+      // `completeness: complete` is the certification this tool has no right to.
+      trust: offlineTrust(
+        ctx,
+        {
+          status: coverage.status,
+          ...(coverage.missingCoverage.length > 0
+            ? { missingCoverage: coverage.missingCoverage }
+            : {}),
+        },
+        undefined,
+        [PII_RECOGNIZER_LIMITATION],
+      ),
       ...(paged.nextCursor !== null
         ? { nextCursor: paged.nextCursor, pageInfo: paged.pageInfo }
         : {}),

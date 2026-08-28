@@ -5,10 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
+import { err } from '@sf-intelligence/core';
 import {
   closeGraph,
   importExtractionResults,
   openGraph,
+  resolveComponents,
   type GraphStore,
 } from '@sf-intelligence/graph';
 import { appendAnnotationEvent } from '@sf-intelligence/vault';
@@ -26,6 +28,17 @@ import {
   routeQuestionHandler,
 } from '../../src/tools/route-question.js';
 import { isDirectlyInvokable } from '../../src/tools/tool-profile.js';
+
+// R1 (line ~2914 pre-route existence probe): only `resolveComponents` is
+// wrapped, and it forwards to the REAL implementation by default — every
+// other test in this file exercises the real graph-backed resolver
+// unchanged. A single test below uses `mockImplementationOnce` to force the
+// ONE probe call it targets to fail, proving the probe's error path is
+// disclosed rather than silently treated as a clean pass.
+vi.mock('@sf-intelligence/graph', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@sf-intelligence/graph')>();
+  return { ...actual, resolveComponents: vi.fn(actual.resolveComponents) };
+});
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -1605,6 +1618,34 @@ describe('routeQuestionHandler — pre-route existence gate (R3 §5b)', () => {
     const { route } = r.value.data;
     expect(route.intent).not.toBe('funnel-advisory');
     expect(route.reason).toContain('PREMISE CHECK');
+  });
+
+  it('R1: a resolveComponents error at the existence probe is disclosed, not silently treated as a clean pass', async () => {
+    // Same question shape as the "no-resolve intent (record-count)" case
+    // above — record-count never runs entity resolution earlier in the
+    // handler, so the pre-route probe at line ~2914 is the ONLY
+    // resolveComponents call this question reaches. Force just that one
+    // call to fail (graph query error) the way a locked/corrupt DB would.
+    const spy = vi.mocked(resolveComponents);
+    spy.mockImplementationOnce(() =>
+      Promise.resolve(err({ kind: 'query-failed', message: 'simulated graph failure' })),
+    );
+    const r = await routeQuestionHandler(ctx, {
+      question: 'count records in the Ghost_Award__c object by year',
+      logGap: false,
+    });
+    expect(spy).toHaveBeenCalled();
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route, entityEvidence } = r.value.data;
+    // The bug: a failed probe was byte-identical to a probe that ran and
+    // found the component clean — no disclosure at all.
+    expect(route.reason).not.toContain('no component named'); // never claim confirmed absence
+    // A checked-and-failed premise ships confidence 'low' with a
+    // 'PREMISE CHECK:' warning; an UNCHECKED premise must be distinguishable
+    // from BOTH that and a silent full-confidence pass.
+    expect(route.reason).toMatch(/premise[^.]*(not|could not|failed to|inconclusive)/i);
+    expect(entityEvidence).toBeUndefined(); // not a confirmed-absent disposition
   });
 });
 

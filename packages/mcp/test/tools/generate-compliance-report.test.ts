@@ -20,6 +20,7 @@ import {
 import type { Context } from '../../src/server.js';
 import {
   generateComplianceReportHandler,
+  generateComplianceReportInputSchema,
 } from '../../src/tools/generate-compliance-report.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
@@ -679,5 +680,276 @@ describe('generateComplianceReportHandler — exposure pass must not fail open (
     expect(body).toContain('Edge Reader');
     expect(body).not.toContain('God Reader');
     expect(body).toContain('Object+FLS exposure pairs: 1');
+  });
+});
+
+// =============================================================================
+// REAL-ORG (HIGH + MEDIUM): the report answered a question it never scoped, and
+// then printed a remedy it could not honour.
+//
+// (1) SCOPE SWALLOWED. `generateComplianceReportInputSchema` was `z.object({})`
+//     — non-strict — so zod STRIPPED every narrowing key a caller passed and
+//     the handler signature took `_input`. Asking for one object's compliance
+//     posture returned the ORG-WIDE document, unlabelled, with no
+//     `appliedScope`, and a name that exists in no vault returned that same
+//     confident org-wide answer instead of refusing.
+//
+// (2) UNREACHABLE REMEDY. With every regulated field rendered into one
+//     document, a real org blew the per-document byte budget and the shared
+//     fitter dropped EVERY readable section — PII Inventory, Field Access
+//     Audit, Sharing Model Exposure, Risk Flags, Object + FLS Exposure — i.e.
+//     every section that could carry a finding. What survived was a six-line
+//     summary plus a generic note telling the reader to "re-run with a narrower
+//     scope (`objectFilter` / `objectApiName`) or pagination" — four knobs the
+//     tool did not have. The tool was structurally incapable of emitting a
+//     single compliance finding.
+//
+// The fix makes the analysis actually cover what it claims (a verified object
+// scope via the shared `resolveExistingObjectScope`, and a paged inventory via
+// the shared `paginate`, so the document always fits and the tail is
+// REACHABLE), and makes the remaining certification true (page window named in
+// the Executive Summary, a resume pointer in `pageInfo`, boundaries that name
+// only knobs that exist).
+// =============================================================================
+
+const OBJ_A = 'CustomObject:Obj_A__c';
+const OBJ_B = 'CustomObject:Obj_B__c';
+const FIELD_A = 'CustomField:Obj_A__c.Secret_A__c';
+const FIELD_B = 'CustomField:Obj_B__c.Secret_B__c';
+
+const twoObjectSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: OBJ_A, type: 'CustomObject', apiName: 'Obj_A__c', label: 'Obj A', properties: { sharingModel: 'Private' } }),
+    makeNode({ id: OBJ_B, type: 'CustomObject', apiName: 'Obj_B__c', label: 'Obj B', properties: { sharingModel: 'ReadWrite' } }),
+    makeNode({
+      id: FIELD_A,
+      type: 'CustomField',
+      apiName: 'Secret_A__c',
+      label: 'Secret A',
+      parentId: OBJ_A,
+      properties: { label: 'Secret A', dataType: 'EncryptedText' },
+    }),
+    makeNode({
+      id: FIELD_B,
+      type: 'CustomField',
+      apiName: 'Secret_B__c',
+      label: 'Secret B',
+      parentId: OBJ_B,
+      properties: { label: 'Secret B', dataType: 'EncryptedText' },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: OBJ_A, toId: FIELD_A, edgeType: 'parentOf' }),
+    makeEdge({ fromId: OBJ_B, toId: FIELD_B, edgeType: 'parentOf' }),
+  ],
+};
+
+describe('generateComplianceReportHandler — object scope is honoured, not swallowed', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('scope.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [twoObjectSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('narrows the document to the named object and echoes appliedScope', async () => {
+    const r = await generateComplianceReportHandler(ctx, { objectApiName: 'Obj_B__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    expect(body).toContain('Secret_B__c');
+    // FAIL-BEFORE: the org-wide document was returned, so the OTHER object's
+    // regulated field was in the answer to a question about this one.
+    expect(body).not.toContain('Secret_A__c');
+    expect(r.value.data.appliedScope?.object).toBe(OBJ_B);
+  });
+
+  it('a REAL object typed in the wrong case still scopes (not a confident org-wide answer)', async () => {
+    const r = await generateComplianceReportHandler(ctx, { objectApiName: 'obj_b__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope?.object).toBe(OBJ_B);
+    expect(r.value.data.document.body).not.toContain('Secret_A__c');
+  });
+
+  it('honours the `objectFilter` alias the truncation remedy names', async () => {
+    const r = await generateComplianceReportHandler(ctx, { objectFilter: 'Obj_A__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope?.object).toBe(OBJ_A);
+    expect(r.value.data.document.body).not.toContain('Secret_B__c');
+  });
+
+  it('REFUSES an object that is not in the vault instead of answering org-wide', async () => {
+    const r = await generateComplianceReportHandler(ctx, {
+      objectApiName: 'Zz_Not_In_This_Vault__c',
+    });
+    // FAIL-BEFORE: ok(true) with the full org-wide report, labelled as the
+    // answer for an object that does not exist.
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a bare call stays org-wide and omits appliedScope', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toBeUndefined();
+    expect(r.value.data.document.body).toContain('Secret_A__c');
+    expect(r.value.data.document.body).toContain('Secret_B__c');
+  });
+});
+
+describe('generateComplianceReportInputSchema — the advertised argument channel', () => {
+  it('accepts the object-scope keys a caller is told to pass', () => {
+    for (const key of ['objectApiName', 'object', 'objectId', 'objectFilter', 'componentId']) {
+      const parsed = generateComplianceReportInputSchema.safeParse({ [key]: 'Obj_A__c' });
+      expect(parsed.success).toBe(true);
+      // FAIL-BEFORE: `z.object({})` is non-strict, so zod STRIPPED the key and
+      // the handler never saw it — the scope vanished with no error.
+      if (parsed.success) {
+        expect((parsed.data as Record<string, unknown>)[key]).toBe('Obj_A__c');
+      }
+    }
+  });
+
+  it('accepts the paging knobs that make the dropped tail reachable', () => {
+    const parsed = generateComplianceReportInputSchema.safeParse({ limit: 10, offset: 5 });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect((parsed.data as Record<string, unknown>)['limit']).toBe(10);
+      expect((parsed.data as Record<string, unknown>)['offset']).toBe(5);
+    }
+  });
+
+  it('REFUSES an unknown key rather than silently swallowing it', () => {
+    // A silently ignored argument is worse than a refusal: the caller has no
+    // signal that the narrowing they asked for did not apply.
+    for (const bad of [{ personaFocus: 'compliance' }, { format: 'html' }]) {
+      expect(generateComplianceReportInputSchema.safeParse(bad).success).toBe(false);
+    }
+  });
+});
+
+// A vault whose regulated-field population is large enough that rendering all
+// of it into one document blows the per-document byte budget — the real-org
+// shape, where the fitter dropped every readable section.
+const BIG_OBJ = 'CustomObject:Obj_Big__c';
+const BIG_FIELD_COUNT = 320;
+const bigSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: BIG_OBJ,
+      type: 'CustomObject',
+      apiName: 'Obj_Big__c',
+      label: 'Obj Big',
+      properties: { sharingModel: 'Private' },
+    }),
+    ...Array.from({ length: BIG_FIELD_COUNT }, (_unused, i) => {
+      const n = String(i).padStart(3, '0');
+      return makeNode({
+        id: `CustomField:Obj_Big__c.Placeholder_Email_Address_${n}__c`,
+        type: 'CustomField',
+        apiName: `Placeholder_Email_Address_${n}__c`,
+        label: `Placeholder Email Address ${n}`,
+        parentId: BIG_OBJ,
+        properties: {
+          label: `Placeholder Email Address ${n}`,
+          dataType: 'Email',
+          description: `Placeholder contact-email field number ${n}, sized to match a production org's regulated-field population.`,
+        },
+      });
+    }),
+  ],
+  edges: Array.from({ length: BIG_FIELD_COUNT }, (_unused, i) =>
+    makeEdge({
+      fromId: BIG_OBJ,
+      toId: `CustomField:Obj_Big__c.Placeholder_Email_Address_${String(i).padStart(3, '0')}__c`,
+      edgeType: 'parentOf',
+    }),
+  ),
+};
+
+describe('generateComplianceReportHandler — the report must be able to emit a finding', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('big.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [bigSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('renders its readable sections instead of dropping every one of them', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    // FAIL-BEFORE: the whole readable body was a six-line summary plus a
+    // generic Truncation Note; every section that could carry a finding was
+    // dropped tail-first by the shared fitter.
+    expect(body).not.toContain('## Truncation Note');
+    expect(body).toContain('## PII Inventory by Category');
+    expect(body).toContain('## Field Access Audit');
+    expect(body).toContain('## Object + FLS Exposure');
+  });
+
+  it('carries a resume pointer, so the tail the note points at is REACHABLE', async () => {
+    const first = await generateComplianceReportHandler(ctx, {});
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const pageInfo = first.value.data.pageInfo;
+    expect(pageInfo?.totalCount).toBe(BIG_FIELD_COUNT);
+    expect(pageInfo?.hasMore).toBe(true);
+    expect(typeof pageInfo?.nextCursor).toBe('string');
+
+    const second = await generateComplianceReportHandler(ctx, {
+      cursor: pageInfo?.nextCursor ?? '',
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    // The second page is a DIFFERENT slice — no dup, no empty page.
+    expect(second.value.data.document.body).not.toBe(first.value.data.document.body);
+    const firstIds = first.value.data.document.frontmatter.componentIds;
+    const secondIds = second.value.data.document.frontmatter.componentIds;
+    expect(secondIds.length).toBeGreaterThan(0);
+    expect(secondIds.some((id) => firstIds.includes(id))).toBe(false);
+  });
+
+  it('does not certify a page-bounded zero as an org-wide checked zero', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    // FAIL-BEFORE: "Object+FLS exposure pairs: 0" and "Risk flags raised: N"
+    // were computed over the first 25 of 305 regulated fields and printed bare,
+    // reading as an org-wide finding.
+    expect(body).toMatch(/Object\+FLS exposure pairs: 0 \(/);
+    expect(body).toMatch(/Risk flags raised: 0 \(/);
+    expect(body).toContain(`of ${String(BIG_FIELD_COUNT)} regulated`);
+  });
+
+  it('boundaries name the resume knob that exists, and the regenerate hint is constructible', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.document.boundaries.join('\n');
+    expect(joined).toContain('cursor');
+    expect(r.value.data.document.body).toContain('objectApiName');
   });
 });

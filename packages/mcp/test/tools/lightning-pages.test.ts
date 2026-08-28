@@ -266,3 +266,120 @@ describe('lightningPagesHandler — CR-22 continuation cursor (object mode)', ()
     expect(replay.error.kind).toBe('invalid-query');
   });
 });
+
+// R6 — census brief 069, line 171: `resolveObjectAlias` (sync) does not
+// canonicalize casing against the vault, so `objectApiName: 'account'` built
+// `CustomObject:account` (no such node) instead of resolving to the real
+// `CustomObject:Account` the vault holds under the correct case.
+describe('lightningPagesHandler — R6 wrong-case object alias (vault canonicalization)', () => {
+  it('a lower-cased objectApiName resolves to the correctly-cased object, not component-not-found', async () => {
+    const r = await lightningPagesHandler(ctx, { objectApiName: 'account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.mode).toBe('object');
+    expect(r.value.data.object).toBe('Account');
+    expect(r.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:Account',
+      object: 'Account',
+    });
+    expect(r.value.data.summary.pages).toBe(3);
+  });
+
+  it('an all-caps objectId resolves the same way', async () => {
+    const r = await lightningPagesHandler(ctx, { objectId: 'CustomObject:ACCOUNT' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.object).toBe('Account');
+    expect(r.value.data.summary.pages).toBe(3);
+  });
+});
+
+// R1 — census brief 069, line 43: object mode answers ENTIRELY from the
+// FlexiPage -> CustomObject `references` (flexiPageObject) edge, which only
+// exists on a vault whose refresh ran the extractor version that captures
+// `sobjectType`. A vault whose refresh predates it holds bare FlexiPage nodes
+// with NO `sobjectType` property at all, so `pages: []` for every object is
+// indistinguishable from a genuinely checked-empty object.
+describe('lightningPagesHandler — R1 typed absence (FlexiPage extraction vintage)', () => {
+  let vintageTempDir: string;
+  let vintageStore: GraphStore;
+  let vintageCtx: Context;
+
+  beforeAll(async () => {
+    vintageTempDir = await mkdtemp(join(tmpdir(), 'sfi-lightning-pages-vintage-'));
+    const o = await openGraph(join(vintageTempDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    vintageStore = o.value;
+    const vintageSeed: ExtractionResult = {
+      nodes: [
+        node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+        // A pre-extraction-era FlexiPage: a bare node with NO `sobjectType` /
+        // `pageType` / `masterLabel` property at all — exactly what a refresh
+        // that predates the extractor upgrade leaves behind. No `references`
+        // edge is ever minted for a node like this (the extractor only emits
+        // the edge `if (sobjectType !== null)`), so it is invisible to every
+        // object query no matter which object it actually targets.
+        node({ id: 'FlexiPage:Legacy_Page', type: 'FlexiPage', apiName: 'Legacy_Page', properties: {} }),
+      ],
+      edges: [],
+    };
+    const i = await importExtractionResults(vintageStore, [vintageSeed]);
+    if (!i.ok) throw new Error(i.error.message);
+    vintageCtx = { vaultRoot: vintageTempDir, manifest: MANIFEST, graph: vintageStore };
+  });
+  afterAll(async () => {
+    await closeGraph(vintageStore);
+    await rm(vintageTempDir, { recursive: true, force: true });
+  });
+
+  it('a zero-page answer on a never-extracted vault is a typed absence (null), not a verified zero', async () => {
+    const r = await lightningPagesHandler(vintageCtx, { componentId: 'CustomObject:Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The bug: this asserted `toBe(0)` pre-fix — a confident "no Lightning
+    // pages exist for Account" on a vault that never extracted the family.
+    expect(r.value.data.summary.pages).toBeNull();
+  });
+
+  it('the activation/extraction disclosure names the unextracted FlexiPage and does not claim completeness', async () => {
+    const r = await lightningPagesHandler(vintageCtx, { componentId: 'CustomObject:Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.activationDisclosure).toContain('FlexiPage:Legacy_Page');
+    expect(r.value.data.activationDisclosure).toMatch(/NOT/);
+    // The activation-gap sentence must still be present (it covers a
+    // different, still-true boundary).
+    expect(r.value.data.activationDisclosure).toContain('NOT in the retrieved FlexiPage metadata');
+  });
+
+  it('a genuinely-checked object (extraction DID run, some FlexiPage carries the sentinel) still reports a real number, not null', async () => {
+    // Add a properly-extracted FlexiPage on a second object into the SAME
+    // vintage graph, proving the null-vs-number split is per-query, not a
+    // global switch flipped by the presence of any legacy node.
+    const mixedSeed: ExtractionResult = {
+      nodes: [
+        node({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
+        node({
+          id: 'FlexiPage:Contact_Record_Page',
+          type: 'FlexiPage',
+          apiName: 'Contact_Record_Page',
+          properties: { sobjectType: 'Contact', pageType: 'RecordPage', masterLabel: 'Contact Record Page' },
+        }),
+      ],
+      edges: [
+        edge({
+          fromId: 'FlexiPage:Contact_Record_Page',
+          toId: 'CustomObject:Contact',
+          edgeType: 'references',
+          properties: { referenceKind: 'flexiPageObject' },
+        }),
+      ],
+    };
+    const i = await importExtractionResults(vintageStore, [mixedSeed]);
+    if (!i.ok) throw new Error(i.error.message);
+    const r = await lightningPagesHandler(vintageCtx, { componentId: 'CustomObject:Contact' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.pages).toBe(1);
+  });
+});

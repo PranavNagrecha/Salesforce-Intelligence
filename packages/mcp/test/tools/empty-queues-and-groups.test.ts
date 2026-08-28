@@ -589,3 +589,75 @@ describe('coverage-aware-zero — Queue/Group not retrieved', () => {
     expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('Group');
   });
 });
+
+// R6 (BRIEF 084 / scan-tail-unreachable) — a single un-offset `listNodesByType`
+// page caps the SCAN axis (not just the OUTPUT axis) at 500 nodes per type. A
+// Queue/Group sorted past row 500 in id-ASC order is never fetched at all, so
+// no cursor can ever reach it — distinct from CR-22 output pagination, which
+// only pages a list that was already built from the capped window. 500 filler
+// Queues (non-empty, so they'd never surface as "empty" even if scanned) sort
+// FIRST; one target Queue sorts LAST (row 501) and is genuinely empty.
+describe('emptyQueuesAndGroupsHandler — past the 500-node SCAN cap (R6 scan-tail-unreachable)', () => {
+  let dir: string;
+  let st: GraphStore;
+  let bigCtx: Context;
+
+  const FILLER = 500;
+  const bigNodes: Node[] = [];
+  for (let i = 0; i < FILLER; i += 1) {
+    bigNodes.push(
+      makeNode({
+        id: `Queue:Cls${String(i).padStart(3, '0')}`,
+        apiName: `Cls${String(i).padStart(3, '0')}`,
+        // Non-empty: must NEVER surface even once reachable — isolates the
+        // scan-reachability bug from the emptiness filter.
+        properties: { memberCount: 5 },
+      }),
+    );
+  }
+  bigNodes.push(
+    makeNode({
+      id: 'Queue:Zqueue',
+      apiName: 'Zqueue',
+      properties: { memberCount: 0 },
+    }),
+  );
+  const bigSeed: ExtractionResult = { nodes: bigNodes, edges: [] };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-eq-scancap-'));
+    const opened = await openGraph(join(dir, 'eq.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    st = opened.value;
+    const imp = await importExtractionResults(st, [bigSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    bigCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: st };
+  });
+
+  afterAll(async () => {
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('finds the empty Queue sorted past row 500 (fail-before on the un-offset single page)', async () => {
+    const r = await emptyQueuesAndGroupsHandler(bigCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix: the un-offset `listNodesByType` page holds only Cls000..Cls499
+    // (all non-empty), so `queues` is empty and `totalQueues` is 0 — a
+    // permanently incomplete cleanup shortlist that no cursor can recover,
+    // even though the tool's own `scanTruncated` disclosure below is honest
+    // about there being 501 Queue nodes.
+    expect(r.value.data.totalQueues).toBe(1);
+    expect(r.value.data.queues.map((q) => q.id)).toContain('Queue:Zqueue');
+  });
+
+  it('does not falsely disclose scanTruncated once the full 501-node type is walked', async () => {
+    // 501 < FULL_SCAN_MAX_NODES (20,000), so the multi-window walk completes
+    // and there is nothing left to disclose as truncated.
+    const r = await emptyQueuesAndGroupsHandler(bigCtx, { type: 'Queue' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('scanTruncated' in r.value.data).toBe(false);
+  });
+});

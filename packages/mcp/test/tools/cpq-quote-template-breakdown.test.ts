@@ -99,6 +99,12 @@ const templateSeed: ExtractionResult = {
             valueType: 'string',
             isMasked: false,
           },
+          {
+            field: 'SBQQ__Section__c__Masked',
+            value: 'ShouldNeverSurface',
+            valueType: 'string',
+            isMasked: true,
+          },
         ],
       },
     }),
@@ -152,10 +158,10 @@ describe('cpqQuoteTemplateBreakdownHandler', () => {
     );
     expect(data.documentFormat).toBe('PDF');
     expect(data.landscape).toBe(false);
-    // Two SBQQ__Section__c-prefixed values surface as sections; the
-    // SomeOtherField__c entry is excluded. Sort is alphabetical by
-    // fieldName for deterministic emission.
-    expect(data.sections.length).toBe(2);
+    // Three SBQQ__Section__c-prefixed values surface as sections (one
+    // masked); the SomeOtherField__c entry is excluded. Sort is
+    // alphabetical by fieldName for deterministic emission.
+    expect(data.sections.length).toBe(3);
     expect(data.sections[0]?.fieldName).toBe(
       'SBQQ__Section__c__Cover',
     );
@@ -163,6 +169,28 @@ describe('cpqQuoteTemplateBreakdownHandler', () => {
     expect(data.sections[1]?.fieldName).toBe(
       'SBQQ__Section__c__LineItems',
     );
+  });
+
+  it('marks a masked section value with isMasked so it is not conflated with a genuinely blank reference', async () => {
+    const result = await cpqQuoteTemplateBreakdownHandler(ctx, {
+      templateId: TEMPLATE_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const masked = result.value.data.sections.find(
+      (s) => s.fieldName === 'SBQQ__Section__c__Masked',
+    );
+    expect(masked).toBeDefined();
+    // The recognition layer must never fabricate the masked value —
+    // the reference stays empty either way — but the row must carry
+    // an explicit marker distinguishing "withheld" from "blank".
+    expect(masked?.reference).toBe('');
+    expect(masked?.isMasked).toBe(true);
+
+    const unmasked = result.value.data.sections.find(
+      (s) => s.fieldName === 'SBQQ__Section__c__Cover',
+    );
+    expect(unmasked?.isMasked).toBe(false);
   });
 
   it('surfaces the verbatim sub-record-limitation disclosure on every response', async () => {

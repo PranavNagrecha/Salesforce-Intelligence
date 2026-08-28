@@ -39,7 +39,10 @@ const SAMPLE_MANIFEST: VaultManifest = {
  * nodes and one parentOf edge between them. The snapshot CLI then
  * has a real graph to capture without spawning an extractor walk.
  */
-const seedVault = async (cwd: string): Promise<{ readonly vaultRoot: string }> => {
+const seedVault = async (
+  cwd: string,
+  manifest: VaultManifest = SAMPLE_MANIFEST,
+): Promise<{ readonly vaultRoot: string }> => {
   const vaultRoot = join(cwd, 'org-kb');
   const paths = vaultPaths(vaultRoot);
   for (const dir of [paths.meta, paths.graph, paths.source, paths.components]) {
@@ -50,7 +53,7 @@ const seedVault = async (cwd: string): Promise<{ readonly vaultRoot: string }> =
     JSON.stringify({ targetOrg: 'test', vaultRoot, version: '0.1.0', createdAt: '2026-05-27T00:00:00.000Z' }),
     'utf8',
   );
-  const saved = await saveManifest(vaultRoot, SAMPLE_MANIFEST);
+  const saved = await saveManifest(vaultRoot, manifest);
   if (!saved.ok) throw new Error(saved.error.message);
 
   // Seed the graph with two nodes + one edge so the captured
@@ -122,10 +125,60 @@ describe('runSnapshotCreate', () => {
       expect(meta.componentCount).toBe(2);
       expect(meta.edgeCount).toBe(1);
       expect(meta.sourceTreeHash).toBe('sha256:fixture');
-      // R8-SECURITY-TREND: capture-time metrics bag (empty fixture → A / 100).
+      // R8-SECURITY-TREND. This assertion USED TO READ:
+      //     expect(meta.metrics?.['securityScore']).toBe(100)   // "empty fixture → A / 100"
+      // which encoded the defect rather than the contract. This fixture's
+      // manifest carries NO coverage at all, so Profile / PermissionSet /
+      // PermissionSetGroup / ApexClass / ApexTrigger were never confirmed
+      // retrieved — and the metric grades an over-privilege headline computed
+      // from exactly those five families. Scoring a perfect 100 over a vault
+      // that holds none of them is a graded A for an unchecked corpus, which is
+      // the one thing this product must never do. The metric is now WITHHELD
+      // there, and its absence is the correct answer, not a gap.
+      //
+      // WHAT THIS ASSERTION IS AND IS NOT: it documents the CONSUMER-visible
+      // effect. It cannot BITE on the change that produced it — packages/cli
+      // resolves `@sf-intelligence/mcp` through its built `dist`, so reverting
+      // the mcp source leaves this test green. Measured, not assumed: with
+      // security-posture-metric.ts reverted this file still passes 13/13.
+      // The biting guard lives where it can bite —
+      // packages/mcp/test/tools/security-posture-metric.test.ts
+      // ("withholds the metric (typed absence) when Profile retrieval ERRORED"),
+      // which goes red the moment the coverage gate is removed.
+      expect(meta.metrics).toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('captures the security metric once the families it grades are confirmed retrieved', async () => {
+    // The positive half of the pair above. Without this, "metrics is undefined"
+    // would pass just as well if the capture had been deleted outright.
+    const cwd = await makeTempCwd();
+    try {
+      const covered: VaultManifest = {
+        ...SAMPLE_MANIFEST,
+        coverage: ['Profile', 'PermissionSet', 'PermissionSetGroup', 'ApexClass', 'ApexTrigger'].map(
+          (type) => ({
+            type,
+            requested: true,
+            retrieved: 1,
+            errored: false,
+            neverModeled: false,
+            retrieveConfirmed: true,
+          }),
+        ),
+      };
+      const { vaultRoot } = await seedVault(cwd, covered);
+      const created = await runSnapshotCreate({ cwd, label: 'snap-covered' });
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const meta = JSON.parse(
+        await readFile(join(snapshotPath(vaultRoot, 'snap-covered'), 'meta.json'), 'utf8'),
+      ) as SnapshotMeta;
       expect(meta.metrics).toBeDefined();
-      expect(meta.metrics?.['securityScore']).toBe(100);
-      expect(meta.metrics?.['securityGrade']).toBe(4);
+      expect(typeof meta.metrics?.['securityScore']).toBe('number');
+      expect(typeof meta.metrics?.['securityGrade']).toBe('number');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

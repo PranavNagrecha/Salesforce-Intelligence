@@ -13,9 +13,11 @@ import type {
   McpError,
   ResolveSuggestion,
 } from '@sf-intelligence/contracts';
-import { resolveComponents } from '@sf-intelligence/graph';
+import { getNodeById, resolveComponents } from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
+
+import { objectIdCaseVariants } from './input-aliases.js';
 
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
@@ -45,14 +47,46 @@ export const fieldIdToResolveQuery = (fieldId: string): string => {
   return fieldApi;
 };
 
-/** Infer parent object id for scoping resolve to one object's fields. */
-const parentObjectIdFromFieldId = (fieldId: string): ComponentId | undefined => {
+/** The object api name carried by a `CustomField:<Object>.<Field>` id. */
+const parentObjectApiNameFromFieldId = (fieldId: string): string | undefined => {
   const raw = fieldId.startsWith(CUSTOM_FIELD_PREFIX)
     ? fieldId.slice(CUSTOM_FIELD_PREFIX.length)
     : fieldId;
   const dot = raw.indexOf('.');
   if (dot < 1) return undefined;
-  return `${CUSTOM_OBJECT_PREFIX}${raw.slice(0, dot)}` as ComponentId;
+  return raw.slice(0, dot);
+};
+
+/**
+ * The parent-object filter to scope the suggestion resolve with — VERIFIED to
+ * exist in the vault before it is used (R4), and `undefined` when no such
+ * object is there.
+ *
+ * `resolveComponents` compares `node.parentId` byte-for-byte, so a
+ * string-templated `CustomObject:{whatever the caller typed}` filter is a
+ * guaranteed-empty answer for exactly the two inputs that need suggestions
+ * MOST: a wrong-CASE object prefix (`account.Industry__c` — Salesforce api
+ * names are case-insensitive, component ids are not) and a mistyped object
+ * name. Both used to yield zero suggestions from every tool that calls
+ * {@link fieldNotFoundError}.
+ *
+ * Case-insensitive RESOLUTION is not case-insensitive IDENTITY: when two vault
+ * objects differ only by case nothing here can pick between them, so the
+ * filter is dropped rather than guessed — the caller gets wider suggestions,
+ * never a confidently wrong single-object one.
+ */
+const parentObjectFilter = async (
+  ctx: Context,
+  fieldId: string,
+): Promise<ComponentId | undefined> => {
+  const apiName = parentObjectApiNameFromFieldId(fieldId);
+  if (apiName === undefined) return undefined;
+  const asTyped = `${CUSTOM_OBJECT_PREFIX}${apiName}` as ComponentId;
+  const exact = await getNodeById(ctx.graph, asTyped);
+  if (exact.ok && exact.value !== null) return asTyped;
+  const variants = await objectIdCaseVariants(ctx.graph, apiName);
+  if (!variants.ok || variants.value.length !== 1) return undefined;
+  return variants.value[0] as ComponentId;
 };
 
 /**
@@ -66,7 +100,7 @@ export const buildFieldResolveSuggestions = async (
   const query = fieldIdToResolveQuery(fieldId);
   if (query.length === 0) return [];
 
-  const parentId = parentObjectIdFromFieldId(fieldId);
+  const parentId = await parentObjectFilter(ctx, fieldId);
   const resolved = await resolveComponents(ctx.graph, query, {
     types: ['CustomField' as ComponentType],
     limit: SUGGESTION_LIMIT,

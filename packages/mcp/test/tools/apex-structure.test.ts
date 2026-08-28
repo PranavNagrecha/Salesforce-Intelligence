@@ -45,6 +45,7 @@ import {
   apexStructureInputSchema,
   type ApexStructureOutput,
 } from '../../src/tools/apex-structure.js';
+import { toolLocalPayloadBudgetBytes } from '../../src/tools/response-budget.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.2.0',
@@ -792,6 +793,28 @@ describe('apexStructureHandler — the honesty spine', () => {
     expect(d.structure!.methods.truncated).toBe(true);
     expect(d.narrowing?.truncated).toBe(true);
     expect(d.narrowing?.recoverWith).toContain('method:');
+  });
+
+  it('holds at SFI_MAX_RESPONSE_BYTES=20000 — the budget is DERIVED, not a hard-coded constant', async () => {
+    const prior = process.env['SFI_MAX_RESPONSE_BYTES'];
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '20000';
+    try {
+      const tight = toolLocalPayloadBudgetBytes();
+      // The tool-local budget at this env is well under the 36 000 that used
+      // to be hard-coded here — proves the fixture actually exercises the drift.
+      expect(tight).toBeLessThan(36_000);
+      const d = await run({ classRef: 'HugeService' });
+      const bytes = Buffer.byteLength(JSON.stringify(d), 'utf8');
+      // FAIL-BEFORE: a hard-coded 36 000 body budget fits comfortably OVER
+      // `tight`, so the global reducer — not this tool's careful
+      // section-shedding disclosure — is what actually trims the payload.
+      expect(bytes).toBeLessThanOrEqual(tight);
+      expect(d.structure!.methods.total).toBe(300);
+      expect(d.narrowing?.truncated).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = prior;
+    }
   });
 });
 

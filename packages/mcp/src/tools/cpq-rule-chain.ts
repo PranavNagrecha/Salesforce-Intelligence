@@ -27,12 +27,14 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * The two CPQ rule ComponentTypes the tool accepts as input. CPQ Quote
@@ -94,7 +96,21 @@ export interface CpqRuleChainOutput {
   readonly type: ComponentType;
   readonly parentId: ComponentId | null;
   readonly chain: readonly CpqRuleChainEntry[];
-  readonly targetPosition: number;
+  /**
+   * The input rule's 1-based position in `chain`. `null` — never a bare `0`,
+   * which no rule can occupy — when the walk hit the residual scan cap
+   * (`scanTruncated: true`) before reaching the target's id, so the caller
+   * cannot confuse "position unknown because the scan stopped short" with
+   * "found at position zero".
+   */
+  readonly targetPosition: number | null;
+  /**
+   * True when the sibling walk stopped at `FULL_SCAN_MAX_NODES` with
+   * strictly more same-type, same-parent rules behind it — an honest
+   * residual cap for a pathological org (`scanAllNodesOfTypes`), never
+   * inferred from "the single legacy page came back full".
+   */
+  readonly scanTruncated: boolean;
   readonly disclosure: string;
 }
 
@@ -222,6 +238,7 @@ export const cpqRuleChainHandler = async (
           },
         ],
         targetPosition: 1,
+        scanTruncated: false,
         disclosure: RULE_CHAIN_DISCLOSURE,
       },
       vaultState: {
@@ -231,17 +248,22 @@ export const cpqRuleChainHandler = async (
     });
   }
 
-  const siblingsResult = await listNodesByType(ctx.graph, ruleType, {
-    parentId,
-    limit: 500,
-  });
-  if (!siblingsResult.ok) {
+  // R1/R6: walk every sibling with the shared multi-window scan instead of one
+  // `listNodesByType` page capped at the graph's hard 500-row ceiling with no
+  // OFFSET. An org whose rule object carries more than 500 rules of this type
+  // used to have every rule past the cap silently dropped from the chain —
+  // the answer to "in what order do these rules fire?" was truncated with no
+  // disclosure, and when the CALLER's own rule sorted past the cap its
+  // position collapsed to a bare `0` indistinguishable from a real position.
+  const scanResult = await scanAllNodesOfTypes(ctx.graph, [ruleType], { parentId });
+  if (!scanResult.ok) {
     return err({
       kind: 'internal',
-      message: `graph query failed: ${siblingsResult.error.message}`,
+      message: `graph query failed: ${scanResult.error.message}`,
     });
   }
-  const sortedSiblings = sortChain(siblingsResult.value);
+  const scanTruncated = scanResult.value.scanIncomplete;
+  const sortedSiblings = sortChain(scanResult.value.nodes);
   const chain: CpqRuleChainEntry[] = sortedSiblings.map((node, index) => ({
     id: node.id,
     apiName: node.apiName,
@@ -251,6 +273,14 @@ export const cpqRuleChainHandler = async (
     position: index + 1,
   }));
   const targetEntry = chain.find((entry) => entry.id === target.id);
+  // `targetEntry` can only be missing when the residual scan cap left the
+  // target's own sibling group unwalked (`scanTruncated: true` on a
+  // pathological org past FULL_SCAN_MAX_NODES rules) — `null`, never a `0`
+  // that a real chain position could also be mistaken for.
+  const targetPosition = targetEntry?.position ?? null;
+  const disclosure = scanTruncated
+    ? `${RULE_CHAIN_DISCLOSURE} ${fullScanTruncationNote([ruleType])}`
+    : RULE_CHAIN_DISCLOSURE;
 
   return ok({
     data: {
@@ -258,8 +288,9 @@ export const cpqRuleChainHandler = async (
       type: target.type,
       parentId,
       chain,
-      targetPosition: targetEntry?.position ?? 0,
-      disclosure: RULE_CHAIN_DISCLOSURE,
+      targetPosition,
+      scanTruncated,
+      disclosure,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

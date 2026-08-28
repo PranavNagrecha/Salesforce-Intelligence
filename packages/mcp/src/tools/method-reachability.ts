@@ -113,6 +113,59 @@ const ALL_ENTRY_POINTS_UNPROVEN_DISCLOSURE =
   'Every entry point found here is an UNPROVEN dynamic registration. ' +
   UNPROVEN_REGISTRATION_DISCLOSURE;
 
+/**
+ * Cap on the PUBLISHED `depthCapBoundaryIds` list. The DETECTION is uncapped —
+ * `depthCapBoundaryCount` always carries the true size of the residual
+ * frontier — but the list itself must not be, or an honesty field would eat
+ * the answer it exists to qualify: measured on a 300-wide frontier, an
+ * unbounded id list plus its unbounded prose echo put `data` at ~33.8 KB
+ * against the 45 000-byte hard ceiling `response-budget.ts` publishes as
+ * `MAX_RESPONSE_BYTES`, where the global reducer is free to drop the
+ * `verdict` and `entryPoints` this tool exists to report. Same truncated-list-plus-true-total shape as `sfi.synthesize_answer`
+ * (`citations` / `citationsTotal` / `citationsTruncated`), and the same reason
+ * `sfi.downstream_effects` publishes `unexploredClassCount` rather than the
+ * ids.
+ */
+const MAX_DEPTH_CAP_BOUNDARY_IDS = 20;
+
+/** How many boundary ids the PROSE disclosure names inline. */
+const DEPTH_CAP_PROSE_EXAMPLES = 3;
+
+/**
+ * R1 (depth axis) — attached whenever the BFS hit `REACHABILITY_BFS_DEPTH`
+ * with its frontier still non-empty. `walkUpstreamUsage` exits its loop on
+ * `depth < opts.maxDepth`, so a node discovered exactly AT the cap is left
+ * with its own upstream callers never queried — the walk cannot tell whether
+ * an entry point sits one hop past it. This is the depth-axis twin of
+ * `walkedEdgeTypes` (line ~248): that field lets an empty `entryPoints` read
+ * as "checked these edge types and found none" instead of an unbounded
+ * absence claim; `depthTruncated` / `depthCapBoundaryCount` do the same for
+ * the DEPTH the walk actually reached, so a walk that exhausted the graph and
+ * a walk that was cut off mid-frontier are no longer byte-identical.
+ *
+ * The prose leads with the COUNT and names at most
+ * {@link DEPTH_CAP_PROSE_EXAMPLES} ids: a boundary is unbounded in width, and
+ * a disclosure that grows with it is a payload bug wearing an honesty label.
+ */
+const depthCapDisclosure = (
+  boundaryCount: number,
+  publishedIds: readonly ComponentId[],
+): string => {
+  const examples = publishedIds.slice(0, DEPTH_CAP_PROSE_EXAMPLES);
+  const listNote =
+    boundaryCount > publishedIds.length
+      ? `\`depthCapBoundaryIds\` lists the first ${publishedIds.length} in id order; ` +
+        '`depthCapBoundaryCount` is the true total'
+      : '`depthCapBoundaryIds` lists all of them';
+  return (
+    `This walk hit the depth-${REACHABILITY_BFS_DEPTH} cap while its frontier was still ` +
+    `non-empty: ${boundaryCount} node(s) were discovered at the boundary and their own ` +
+    `upstream callers were never queried (e.g. ${examples.join(', ')}; ${listNote}). An entry ` +
+    `point or test class beyond depth ${REACHABILITY_BFS_DEPTH} would not appear in this ` +
+    'response. This is DIFFERENT from a walk whose frontier ran out on its own before the cap.'
+  );
+};
+
 const LIKELY_DEAD_CODE_CROSS_REFERENCE =
   'likely-dead-code here means NO usage in-edge and NO entry-point classifier within depth 3. ' +
   'It is NOT the org\'s dead-code verdict: sfi.find_dead_code runs an additional whole-word ' +
@@ -252,6 +305,32 @@ export interface MethodReachabilityOutput {
    */
   readonly walkedEdgeTypes: readonly EdgeType[];
   /**
+   * R1 (depth axis): true when the BFS hit `REACHABILITY_BFS_DEPTH` with one
+   * or more nodes discovered exactly at the cap whose own upstream callers
+   * were never queried. False when the walk's frontier emptied on its own
+   * before reaching the cap — nothing was left unexplored. Emitted on EVERY
+   * response, the same way `walkedEdgeTypes` is, so a `likely-dead-code`
+   * verdict from a walk that ran out of graph is distinguishable from one
+   * that was cut off mid-frontier.
+   *
+   * Named for `sfi.downstream_effects`'s `depthTruncated`, which is this same
+   * rule on the outgoing axis — one name for one rule, not a third spelling.
+   */
+  readonly depthTruncated: boolean;
+  /**
+   * How many nodes sat at the cap unexpanded — the TRUE size of the residual
+   * frontier, never a length of the list below. 0 when `depthTruncated` is
+   * false. The `unexploredClassCount` of this tool.
+   */
+  readonly depthCapBoundaryCount: number;
+  /**
+   * A capped prefix (id order) of the boundary ids, at most
+   * {@link MAX_DEPTH_CAP_BOUNDARY_IDS}. Empty when `depthTruncated` is false.
+   * Read the COUNT for the size of the frontier: a short list here is a
+   * publishing cap, NOT evidence that the frontier was small.
+   */
+  readonly depthCapBoundaryIds: readonly ComponentId[];
+  /**
    * Static-analysis blind spots. `complete: false` when a class on a reach path
    * uses dynamic Apex, or when the walk covered less than the full usage set.
    */
@@ -388,6 +467,24 @@ export const methodReachabilityHandler = async (
   entryPoints.sort(compareEntryHits);
   reachingTests.sort(compareReachingTests);
 
+  // R1 (depth axis): `walkUpstreamUsage`'s loop runs `depth < maxDepth` and
+  // discovers each frontier's successors at `depth + 1` before checking the
+  // loop bound again, so a node discovered exactly at `REACHABILITY_BFS_DEPTH`
+  // is the walk's UNPROCESSED final frontier — its own incoming edges were
+  // never queried. A non-empty set here means the walk was cut off mid-graph,
+  // never that the graph itself ended there. No extra query: the depths are
+  // already on every hit the walk returned.
+  const boundaryIds: ComponentId[] = [...walkRes.value.values()]
+    .filter((hit) => hit.depth === REACHABILITY_BFS_DEPTH)
+    .map((hit) => hit.id)
+    .sort();
+  // The COUNT is the honest quantity and is never capped; the published LIST
+  // is (see {@link MAX_DEPTH_CAP_BOUNDARY_IDS}) so a wide boundary cannot
+  // crowd `verdict` / `entryPoints` out of the response budget.
+  const depthCapBoundaryCount = boundaryIds.length;
+  const depthTruncated = depthCapBoundaryCount > 0;
+  const depthCapBoundaryIds = boundaryIds.slice(0, MAX_DEPTH_CAP_BOUNDARY_IDS);
+
   // Verdict cascade: entry point first, then test-only, then dead.
   // The root's own entry-point classifiers count — they were
   // emitted in the loop above at depth 0.
@@ -416,12 +513,18 @@ export const methodReachabilityHandler = async (
   // certainty the walk does not have.
   const allEntryPointsUnproven =
     entryPoints.length > 0 && entryPoints.every((e) => isUnprovenRegistrationKind(e.kind));
-  const disclosure =
+  const baseDisclosure =
     verdict === 'likely-dead-code'
       ? `${REACHABILITY_DISCLOSURE} ${LIKELY_DEAD_CODE_CROSS_REFERENCE}`
       : allEntryPointsUnproven
         ? `${REACHABILITY_DISCLOSURE} ${ALL_ENTRY_POINTS_UNPROVEN_DISCLOSURE}`
         : REACHABILITY_DISCLOSURE;
+  // R1 (depth axis): appended independent of verdict — the residual-frontier
+  // fact is orthogonal to which verdict cascade fired, exactly like
+  // `walkedEdgeTypes` is emitted regardless of verdict.
+  const disclosure = depthTruncated
+    ? `${baseDisclosure} ${depthCapDisclosure(depthCapBoundaryCount, depthCapBoundaryIds)}`
+    : baseDisclosure;
 
   return ok({
     data: {
@@ -431,6 +534,9 @@ export const methodReachabilityHandler = async (
       entryPoints,
       reachingTestClasses: reachingTests,
       walkedEdgeTypes: USAGE_EDGE_TYPES,
+      depthTruncated,
+      depthCapBoundaryCount,
+      depthCapBoundaryIds,
       soundness,
       disclosure,
     },

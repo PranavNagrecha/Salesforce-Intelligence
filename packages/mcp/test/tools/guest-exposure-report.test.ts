@@ -1217,3 +1217,168 @@ describe('guestExposureReportHandler — the SharingRule scan reaches past the f
     expect(d.disclosures.some((s) => s.includes('SFI_NODE_SCAN_LIMIT'))).toBe(false);
   });
 });
+
+// =============================================================================
+// PROTECTED-CLASS BUCKET — the fourth classification the shared recognizer mints.
+//
+// Real-org symptom this pins: scoped to one live community + one standard
+// person-shaped object the report returned 32 findings whose classifications
+// were exactly {pii: 30, sensitive: 1} — zero protected — while the guest
+// profile held READ+EDIT FLS on eight protected-class fields (military status /
+// branch / discharge date / pay grade / postal code / spouse, a derived
+// military-status field and citizenship country) on that same object, with
+// object-level read+create. The envelope certified
+// `trust.completeness.status: 'complete'` with `trust.limitations: []` and no
+// disclosure naming the excluded bucket. The shared
+// `isRegulatedPiiClassification` predicate in @sf-intelligence/patterns exists
+// precisely so `protected` is never missed by an ad-hoc pii/sensitive check.
+// =============================================================================
+
+const PROTECTED_SITE = 'CustomSite:Portal_P';
+const PROTECTED_PROFILE = 'Profile:Portal_P Profile';
+const PROTECTED_FIELD = 'CustomField:Obj_Q__c.Veteran_Status__c';
+const PII_CONTROL_FIELD = 'CustomField:Obj_Q__c.Personal_Email__c';
+
+const protectedSeed: ExtractionResult = {
+  nodes: [
+    node({
+      id: PROTECTED_SITE,
+      type: 'CustomSite',
+      apiName: 'Portal_P',
+      label: 'Portal_P',
+      properties: {
+        active: true,
+        siteType: 'ChatterNetwork',
+        masterLabel: 'Portal_P',
+        guestProfileName: 'Portal_P Profile',
+      },
+    }),
+    node({
+      id: PROTECTED_PROFILE,
+      type: 'Profile',
+      apiName: 'Portal_P Profile',
+      properties: { userPermissions: [] },
+    }),
+    node({
+      id: 'CustomObject:Obj_Q__c',
+      type: 'CustomObject',
+      apiName: 'Obj_Q__c',
+      label: 'Obj Q',
+      properties: { sharingModel: 'Private' },
+    }),
+    node({
+      id: PROTECTED_FIELD,
+      type: 'CustomField',
+      apiName: 'Veteran_Status__c',
+      parentId: 'CustomObject:Obj_Q__c',
+      properties: { dataType: 'Picklist' },
+    }),
+    node({
+      id: PII_CONTROL_FIELD,
+      type: 'CustomField',
+      apiName: 'Personal_Email__c',
+      parentId: 'CustomObject:Obj_Q__c',
+      properties: { dataType: 'Email' },
+    }),
+  ],
+  edges: [
+    edge({
+      fromId: PROTECTED_PROFILE,
+      toId: 'CustomObject:Obj_Q__c',
+      edgeType: 'grantedBy',
+      properties: { allowRead: true, allowCreate: true },
+    }),
+    // READ + EDIT FLS on a protected-class attribute, reachable by an
+    // unauthenticated guest because the object itself is readable.
+    edge({
+      fromId: PROTECTED_PROFILE,
+      toId: PROTECTED_FIELD,
+      edgeType: 'grantedBy',
+      properties: { readable: true, editable: true },
+    }),
+    edge({
+      fromId: PROTECTED_PROFILE,
+      toId: PII_CONTROL_FIELD,
+      edgeType: 'grantedBy',
+      properties: { readable: true },
+    }),
+  ],
+};
+
+describe('guestExposureReportHandler — protected-class bucket', () => {
+  let protDir: string;
+  let protStore: GraphStore;
+  let protCtx: Context;
+
+  beforeAll(async () => {
+    protDir = mkdtempSync(join(tmpdir(), 'sfi-guest-exposure-protected-'));
+    const opened = await openGraph(join(protDir, 'gp.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    protStore = opened.value;
+    const imported = await importExtractionResults(protStore, [protectedSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    protCtx = { vaultRoot: protDir, manifest: MANIFEST, graph: protStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(protStore);
+    rmSync(protDir, { recursive: true, force: true });
+  });
+
+  it('reports guest FLS on a protected-class field, not only pii/sensitive', async () => {
+    const r = await guestExposureReportHandler(protCtx, {
+      communityId: PROTECTED_SITE,
+      objectApiName: 'Obj_Q__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const fls = r.value.data.findings.filter((f) => f.kind === 'pii-field-fls');
+    const ids = fls.map((f) => f.nodeId);
+    expect(ids).toContain(PII_CONTROL_FIELD);
+    expect(ids).toContain(PROTECTED_FIELD);
+    const prot = fls.find((f) => f.nodeId === PROTECTED_FIELD);
+    expect(prot?.piiClassification).toBe('protected');
+    expect(prot?.piiCategory).toBe('protected-class');
+    // READ+EDIT for an unauthenticated guest on a protected attribute.
+    expect(prot?.fieldEditable).toBe(true);
+    expect(prot?.severity).toBe('high');
+  });
+
+  it('never certifies complete with an EMPTY trust.limitations — the recognizer caveat rides on every response', async () => {
+    const r = await guestExposureReportHandler(protCtx, {
+      communityId: PROTECTED_SITE,
+      objectApiName: 'Obj_Q__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.trust.limitations.length).toBeGreaterThan(0);
+    expect(d.trust.limitations.join(' ')).toMatch(/heuristic recognizer/i);
+    expect(d.trust.limitations.join(' ')).toMatch(/protected/i);
+    expect(d.disclosures.join(' ')).toMatch(/classifies public and is NOT reported here/i);
+  });
+
+  it('carries the recognizer caveat even on a scope that finds NOTHING (a zero is not a clearance)', async () => {
+    const r = await guestExposureReportHandler(protCtx, {
+      communityId: PROTECTED_SITE,
+      objectApiName: 'Obj_Q__c',
+      // Page past the end: an empty findings page must still disclose the blind spot.
+      offset: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.findings).toEqual([]);
+    expect(r.value.data.trust.limitations.join(' ')).toMatch(/heuristic recognizer/i);
+  });
+
+  it('counts a guest-readable protected-class field toward the object-crud escalation', async () => {
+    const r = await guestExposureReportHandler(protCtx, {
+      communityId: PROTECTED_SITE,
+      objectApiName: 'Obj_Q__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const objFinding = r.value.data.findings.find((f) => f.kind === 'object-crud');
+    expect(objFinding?.guestReadablePiiFieldCount).toBe(2);
+  });
+});

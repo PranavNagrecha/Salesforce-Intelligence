@@ -732,3 +732,87 @@ describe('generateDataDictionaryHandler — R6-19 ERD cap behavior', () => {
     expect(erdSection).toMatch(/capped at 40 of 50/);
   });
 });
+
+// R1: a bare "_(no validation rules)_" / "_(no apex triggers)_" etc. is a
+// FALSE "none" when the vault's refresh never (successfully) retrieved that
+// family — it must read "not checked" instead. Mirrors org-card.ts's identical
+// use of `buildEnumerationCoverageCaveatFor` for its own automation counts.
+describe('generateDataDictionaryHandler — coverage-aware absence (R1)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const opened = await openGraph(join(tempDir, 'coverage-caveat.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    // The seeded object DOES have a ValidationRule, a Layout ref, a
+    // trigger, and a flow (see `seed` above) — this is deliberately NOT an
+    // object that has none of these, so a caveat proves the absence-claim
+    // check is coverage-driven, not "there happen to be zero rows".
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('discloses a coverage caveat when ValidationRule/Layout/ApexTrigger/Flow were never retrieved', async () => {
+    const incompleteCoverageManifest: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'CustomField', requested: true, retrieved: 5, errored: false, neverModeled: false, retrieveConfirmed: true },
+        // Never retrieved — no row at all for ValidationRule/Layout/ApexTrigger/Flow
+        // is the realistic "refresh errored/skipped this family" shape.
+      ],
+    } as never;
+    const result = await generateDataDictionaryHandler(
+      { ...ctx, manifest: incompleteCoverageManifest },
+      { objectId: ACCOUNT_ID },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Mirrors the R6-19 ERD-disclosure test above: `boundaries[]` (the
+    // frontmatter disclosure array) is the honesty surface these caveats are
+    // asserted against — the `## Boundaries` H2 in `body` is a fixed
+    // Q125/inherited-confidence/structural footer, unrelated to this caveat.
+    const { boundaries } = result.value.data.document;
+    expect(boundaries.some((b) => /not checked/i.test(b) && /ValidationRule|Layout|ApexTrigger|Flow/.test(b))).toBe(
+      true,
+    );
+  });
+
+  it('does not disclose a coverage caveat when the families are confirmed fully retrieved', async () => {
+    const completeCoverageManifest: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'CustomField', requested: true, retrieved: 5, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'ValidationRule', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Layout', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'ApexTrigger', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Flow', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+      ],
+    } as never;
+    const result = await generateDataDictionaryHandler(
+      { ...ctx, manifest: completeCoverageManifest },
+      { objectId: ACCOUNT_ID },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { boundaries } = result.value.data.document;
+    expect(boundaries.some((b) => /not checked/i.test(b))).toBe(false);
+  });
+
+  it('does not disclose a coverage caveat on a legacy pre-v4 vault with no coverage array', async () => {
+    // FIXTURE_MANIFEST carries no `coverage` field at all — must not
+    // false-flag a legacy vault that predates the coverage feature.
+    const result = await generateDataDictionaryHandler(ctx, { objectId: ACCOUNT_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { boundaries } = result.value.data.document;
+    expect(boundaries.some((b) => /not checked/i.test(b))).toBe(false);
+  });
+});

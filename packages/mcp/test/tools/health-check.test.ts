@@ -851,6 +851,49 @@ describe('healthCheckHandler: partially-rendered vault (graph/vault desync)', ()
 });
 
 // ---------------------------------------------------------------------------
+// R1 tri-state gap: probeRenderComplete has no not-checked state. A probe
+// that THREW (or returned !ok) is silently treated as "no desync" and the
+// walk ends at `complete: true, issue: null` — the exact false-positive class
+// `probeSourceHash` already guards against with `match: boolean | null`.
+// ---------------------------------------------------------------------------
+
+describe('healthCheckHandler: renderComplete tri-state on probe failure', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-render-err-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, baseManifest(realHash));
+    ctx = built.ctx;
+    store = built.store;
+    // Close the graph store BEFORE the handler runs its probes, so the
+    // render-desync query throws/errors instead of succeeding. The graph
+    // probe (probeGraph) also observes the closed store and correctly
+    // reports graphReadable:false with an issue — proving the store really
+    // is unreadable, not merely empty.
+    await closeGraph(store);
+  });
+
+  afterAll(async () => {
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('does NOT report renderComplete:true when the render probe could not run', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The graph is provably unreadable — the sibling probe says so.
+    expect(result.value.data.checks.graphReadable).toBe(false);
+    // A render-completeness verdict of `true` here would be exactly the
+    // false "no desync" this finding describes: the probe never actually
+    // executed a query that succeeded, so it has no basis to say complete.
+    expect(result.value.data.checks.renderComplete).not.toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ENGINE-ARC §6 — the informational assignmentData block: runtime assignment
 // data is live-first BY DESIGN, so it never degrades status.
 // ---------------------------------------------------------------------------

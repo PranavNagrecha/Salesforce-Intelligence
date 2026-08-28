@@ -17,6 +17,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveExistingObjectScope } from './input-aliases.js';
+
 /**
  * Zod schema for the `sfi.get_naming_convention_report` tool input.
  * `scope` is an optional non-empty string. The recognizer parses the value
@@ -96,13 +98,39 @@ export const namingConventionReportHandler = async (
   ctx: Context,
   input: NamingConventionReportInput,
 ): Promise<Result<McpResponse<NamingConventionReportOutput>, McpError>> => {
+  // R4: a scope naming one object is STRING-SHAPE only at this point
+  // (`parseScope` in the patterns package only checks the regex). The
+  // recognizer then does an exact `parentApiName` match, so an unverified
+  // name — a typo, an object the refresh never retrieved, or a real object
+  // in the WRONG CASE — would fall through to `filtered = []` and this
+  // handler would confidently narrate "0 custom fields" about it via
+  // `emptyScopeNote`, rather than refusing. `resolveExistingObjectScope`
+  // both verifies the object exists in the vault (refusing with
+  // `invalid-query` when it does not) and corrects the caller's casing to
+  // the vault's exact spelling, so the corrected name is what actually gets
+  // analyzed and narrated.
+  let effectiveScope = input.scope;
+  const rawObjectApiName = scopedObjectApiName(input.scope);
+  if (rawObjectApiName !== null) {
+    const scopeResult = await resolveExistingObjectScope(ctx.graph, {
+      objectApiName: rawObjectApiName,
+    });
+    if (!scopeResult.ok) return err(scopeResult.error);
+    // `objectApiName` above is always non-empty when `rawObjectApiName` is
+    // non-null, so this always resolves — the `null` branch only fires for a
+    // bare (unscoped) call, which cannot happen here.
+    if (scopeResult.value !== null) {
+      effectiveScope = `CustomField:${scopeResult.value.object}.*`;
+    }
+  }
+
   // `recognizeNamingConventions` accepts an `{ scope? }` options object and
   // returns `Result<readonly PatternObservation[], PatternError>`. We
   // forward the optional `scope` directly under `exactOptionalPropertyTypes`
   // to avoid pinning `scope: undefined` into the options.
   const result = await analyzeNamingConventions(
     ctx.graph,
-    input.scope !== undefined ? { scope: input.scope } : {},
+    effectiveScope !== undefined ? { scope: effectiveScope } : {},
   );
 
   if (!result.ok) {
@@ -122,7 +150,10 @@ export const namingConventionReportHandler = async (
   }
 
   const { observations, analyzed } = result.value;
-  const objectApiName = scopedObjectApiName(input.scope);
+  // Re-derive from `effectiveScope`, not `input.scope`: after a wrong-case
+  // correction the note (and the fact it names) must describe the vault's
+  // object, not the caller's spelling.
+  const objectApiName = scopedObjectApiName(effectiveScope);
   const note =
     objectApiName !== null && observations.length === 0
       ? emptyScopeNote(

@@ -34,6 +34,13 @@
  * surfaced by `sfi.unused_components` instead. The skill's routing
  * discipline (per PLAN-v2.4 §5) enforces the distinction.
  *
+ * A Process Builder's liveness is its Flow `status` string
+ * (`FLOW_LIFECYCLE_PROPERTY`), NOT a boolean `active` — see that constant for
+ * the false-zero this filter used to certify. `activeOnly` drops only a
+ * component PROVEN inactive: a node carrying no lifecycle property at all is
+ * kept, typed `isActive: null`, and named in `lifecycleUnknown`, because
+ * "never checked" must never be filtered away as "inactive".
+ *
  * **Honesty axis** — the migration tool itself (Setup → Workflow Rules
  * → Migrate to Flow) does not run here. v2.4 produces the inventory
  * plus per-rule guidance; the user runs the migration tool themselves
@@ -56,6 +63,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  familyWasExtracted,
+  notExtractedFamilyDisclosure,
+} from './absence-disclosure.js';
+import {
   buildEnumerationCoverageCaveatFor,
   type CoverageCaveat,
 } from './coverage-trust.js';
@@ -77,6 +88,34 @@ const PROCESS_BUILDER_MAX_LIMIT = 500;
 const PROCESS_BUILDER_DEFAULT_LIMIT = 100;
 /** Internal page-size cap. */
 const LIST_PAGE_SIZE = 500;
+
+/**
+ * FLOW-LIFECYCLE-IS-STATUS-NOT-ACTIVE — the property name a Flow node's
+ * lifecycle ACTUALLY lives under.
+ *
+ * The Flow extractor (`packages/extractors/src/flow.ts`) declares
+ * `['label', 'processType', 'status']` as its REQUIRED_ELEMENTS and writes the
+ * `<status>` string through verbatim; its ALLOWED_STATUS enum is
+ * `Active | Draft | Obsolete | InvalidDraft`. It has never written a boolean
+ * `active` onto a Flow node. Reading `active` therefore evaluated `undefined`
+ * for EVERY Flow in EVERY vault this extractor built, so the `activeOnly: true`
+ * default dropped every Process Builder unconditionally and the tool certified
+ * `totalProcessBuilders: 0` with `truncated: false` on an org that had one.
+ * Process Builders reach this tool as Flows, so this constant — not a boolean
+ * property — is the lifecycle source of truth for the `processBuilders` list.
+ */
+const FLOW_LIFECYCLE_PROPERTY = 'status';
+/** The one `status` value that means the Flow is live in the org. */
+const FLOW_ACTIVE_STATUS = 'Active';
+/**
+ * The lifecycle property WorkflowRule and ApprovalProcess DO carry. Both
+ * extractors declare `<active>` a REQUIRED element and coerce it to a boolean,
+ * so this name is correct for those two families — verified against
+ * `packages/extractors/src/workflow-rule.ts` and
+ * `packages/extractors/src/approval-process.ts` before reuse rather than
+ * assumed from the Flow bug.
+ */
+const ACTIVE_FLAG_PROPERTY = 'active';
 
 /**
  * Salesforce's published deadline message for Process Builder
@@ -137,7 +176,20 @@ export interface ProcessBuilderCandidate {
   readonly id: ComponentId;
   readonly apiName: string;
   readonly parentObjectId: ComponentId | null;
-  readonly isActive: boolean;
+  /**
+   * TRISTATE. `true` / `false` are decided by the Flow's `status`;
+   * `null` means the node carries NO `status` property, so liveness was never
+   * checked — read it as "unknown", never as "inactive". Every `null` is also
+   * listed in `lifecycleUnknown.processBuilders`.
+   */
+  readonly isActive: boolean | null;
+  /**
+   * The raw Flow lifecycle string (`Active` / `Draft` / `Obsolete` /
+   * `InvalidDraft`), or `null` when the node carries none. Surfaced so a host
+   * can distinguish a retired Process Builder from a never-activated draft from
+   * an unchecked one, which a bare boolean flattens.
+   */
+  readonly status: string | null;
   readonly processType: 'Workflow';
   readonly complexity: Complexity;
   readonly edgeSummary: {
@@ -155,7 +207,8 @@ export interface WorkflowRuleCandidate {
   readonly id: ComponentId;
   readonly apiName: string;
   readonly parentObjectId: ComponentId | null;
-  readonly isActive: boolean;
+  /** TRISTATE — see {@link ProcessBuilderCandidate.isActive}. `null` = unchecked. */
+  readonly isActive: boolean | null;
   readonly triggerType: string;
   readonly complexity: Complexity;
   readonly criteriaItemCount: number;
@@ -175,7 +228,8 @@ export interface ApprovalProcessCandidate {
   readonly id: ComponentId;
   readonly apiName: string;
   readonly parentObjectId: ComponentId | null;
-  readonly isActive: boolean;
+  /** TRISTATE — see {@link ProcessBuilderCandidate.isActive}. `null` = unchecked. */
+  readonly isActive: boolean | null;
   readonly complexity: Complexity;
   readonly stepCount: number;
   readonly sendsEmailCount: number;
@@ -207,6 +261,22 @@ export interface ProcessBuilderMigrationCandidatesOutput {
     readonly workflowRuleRetirementDeadlineNote: string;
   };
   readonly boundaries: readonly string[];
+  /**
+   * R1 typed absence. Present ONLY when at least one candidate node carries no
+   * lifecycle property, i.e. the vault's refresh predates lifecycle extraction
+   * for that family. Those candidates are LISTED (never dropped) with
+   * `isActive: null`, and every id appears here so a machine consumer cannot
+   * skip the gap the way it can skip a prose sentence. `disclosure` is the same
+   * gap in the sentence a host reads aloud, and it is also unshifted into
+   * `boundaries`. Absent when every candidate's lifecycle is known, so a
+   * healthy vault's response is byte-identical.
+   */
+  readonly lifecycleUnknown?: {
+    readonly processBuilders: readonly ComponentId[];
+    readonly workflowRules: readonly ComponentId[];
+    readonly approvalProcesses: readonly ComponentId[];
+    readonly disclosure: string;
+  };
   readonly truncated: boolean;
   /**
    * coverage-aware-zero (CR): present when the manifest reports any included
@@ -266,6 +336,95 @@ const propertyBoolean = (node: Node, key: string): boolean =>
 const propertyString = (node: Node, key: string): string => {
   const v = node.properties[key];
   return typeof v === 'string' ? v : '';
+};
+
+/**
+ * A node's lifecycle, as a TRISTATE (R1 typed absence).
+ *
+ * `null` is NOT `false`. `null` means the node carries no lifecycle property at
+ * all — the vault's refresh predates that family's lifecycle extraction — so
+ * whether it is live was NEVER CHECKED. Collapsing that into `false` and then
+ * dropping it under `activeOnly` is exactly the certified-zero this tool shipped
+ * for Flows: an unchecked component silently vanishes from a migration
+ * inventory that reports `truncated: false`. Unknown is therefore KEPT and
+ * disclosed (see `lifecycleUnknown`), never filtered out.
+ */
+const flowIsActive = (flow: Node): boolean | null => {
+  if (!familyWasExtracted(flow.properties, FLOW_LIFECYCLE_PROPERTY)) return null;
+  return propertyString(flow, FLOW_LIFECYCLE_PROPERTY) === FLOW_ACTIVE_STATUS;
+};
+
+/** The `status` string a Flow node carries, or `null` when it carries none. */
+const flowStatus = (flow: Node): string | null =>
+  familyWasExtracted(flow.properties, FLOW_LIFECYCLE_PROPERTY)
+    ? propertyString(flow, FLOW_LIFECYCLE_PROPERTY)
+    : null;
+
+/** Tristate read of the boolean `active` flag on WorkflowRule / ApprovalProcess. */
+const activeFlagOf = (node: Node): boolean | null =>
+  familyWasExtracted(node.properties, ACTIVE_FLAG_PROPERTY)
+    ? propertyBoolean(node, ACTIVE_FLAG_PROPERTY)
+    : null;
+
+/**
+ * The `activeOnly` predicate. Drops ONLY a component PROVEN inactive; an
+ * unknown (`null`) lifecycle survives the filter and is disclosed instead.
+ */
+const droppedByActiveOnly = (activeOnly: boolean, isActive: boolean | null): boolean =>
+  activeOnly && isActive === false;
+
+/**
+ * The R1 disclosure sentence for candidates whose lifecycle property is absent.
+ *
+ * Built out of the shared `notExtractedFamilyDisclosure` template rather than a
+ * fourth hand-rolled sentence, so the wording (and the "NEVER a verified …"
+ * clause) stays identical to every other never-extracted disclosure in the
+ * server. One clause per family, because Flow and WorkflowRule /
+ * ApprovalProcess key their lifecycle off DIFFERENT properties.
+ */
+const lifecycleUnknownDisclosure = (unknown: {
+  readonly processBuilders: readonly ComponentId[];
+  readonly workflowRules: readonly ComponentId[];
+  readonly approvalProcesses: readonly ComponentId[];
+}): string => {
+  const parts: string[] = [];
+  if (unknown.processBuilders.length > 0) {
+    parts.push(
+      notExtractedFamilyDisclosure({
+        subject: 'Process Builder lifecycle',
+        verb: 'checked',
+        sentinelProperty: FLOW_LIFECYCLE_PROPERTY,
+        containers: [...unknown.processBuilders].sort(),
+        surface: '`processBuilders[].isActive` / `processBuilders[].status`',
+        zeroReading: '"inactive" or a safe-to-ignore Process Builder',
+      }),
+    );
+  }
+  if (unknown.workflowRules.length > 0) {
+    parts.push(
+      notExtractedFamilyDisclosure({
+        subject: 'WorkflowRule lifecycle',
+        verb: 'checked',
+        sentinelProperty: ACTIVE_FLAG_PROPERTY,
+        containers: [...unknown.workflowRules].sort(),
+        surface: '`workflowRules[].isActive`',
+        zeroReading: '"inactive" or a safe-to-ignore rule',
+      }),
+    );
+  }
+  if (unknown.approvalProcesses.length > 0) {
+    parts.push(
+      notExtractedFamilyDisclosure({
+        subject: 'ApprovalProcess lifecycle',
+        verb: 'checked',
+        sentinelProperty: ACTIVE_FLAG_PROPERTY,
+        containers: [...unknown.approvalProcesses].sort(),
+        surface: '`approvalProcesses[].isActive`',
+        zeroReading: '"inactive" or a safe-to-ignore approval process',
+      }),
+    );
+  }
+  return parts.join(' ');
 };
 
 /** Count outgoing edges of a node by edgeType. */
@@ -471,8 +630,10 @@ export const processBuilderMigrationCandidatesHandler = async (
   for (const flow of flowsRes.value) {
     const processType = propertyString(flow, 'processType');
     if (processType !== 'Workflow') continue;
-    const isActive = propertyBoolean(flow, 'active');
-    if (activeOnly && !isActive) continue;
+    // FLOW-LIFECYCLE-IS-STATUS-NOT-ACTIVE: a Flow's liveness is its `status`,
+    // not a boolean `active` the extractor never writes.
+    const isActive = flowIsActive(flow);
+    if (droppedByActiveOnly(activeOnly, isActive)) continue;
     const decisionCount = propertyNumber(flow, 'decisionCount');
     const actionCount = propertyNumber(flow, 'actionCount');
     const timeTriggerCount = propertyNumber(flow, 'timeTriggerCount');
@@ -508,6 +669,7 @@ export const processBuilderMigrationCandidatesHandler = async (
       apiName: flow.apiName,
       parentObjectId: flow.parentId,
       isActive,
+      status: flowStatus(flow),
       processType: 'Workflow',
       complexity,
       edgeSummary: {
@@ -533,8 +695,8 @@ export const processBuilderMigrationCandidatesHandler = async (
       });
     }
     for (const wr of wrRes.value) {
-      const isActive = propertyBoolean(wr, 'active');
-      if (activeOnly && !isActive) continue;
+      const isActive = activeFlagOf(wr);
+      if (droppedByActiveOnly(activeOnly, isActive)) continue;
       const triggerType = propertyString(wr, 'triggerType');
       const criteriaItemCount = propertyNumber(wr, 'criteriaItemCount');
       const timeTriggerCount = propertyNumber(wr, 'timeTriggerCount');
@@ -596,8 +758,8 @@ export const processBuilderMigrationCandidatesHandler = async (
       });
     }
     for (const ap of apRes.value) {
-      const isActive = propertyBoolean(ap, 'active');
-      if (activeOnly && !isActive) continue;
+      const isActive = activeFlagOf(ap);
+      if (droppedByActiveOnly(activeOnly, isActive)) continue;
       const stepCount = propertyNumber(ap, 'stepCount');
       const emailRes = await countOutgoingEdges(ctx, ap.id, 'sendsEmail');
       if (!emailRes.ok) {
@@ -629,6 +791,38 @@ export const processBuilderMigrationCandidatesHandler = async (
   const sortedPbs = sortFor(onScope(processBuilders), sortBy);
   const sortedWrs = sortFor(onScope(workflowRules), sortBy);
   const sortedAps = sortFor(onScope(approvalProcesses), sortBy);
+
+  // R1 typed absence, derived from the SAME lists the response emits (so it is
+  // scope- and filter-consistent by construction, not a parallel count that can
+  // drift). An id here is a candidate whose lifecycle property is absent: it was
+  // kept rather than dropped, and `isActive` is `null` rather than `false`.
+  const unknownIdsIn = (
+    arr: readonly { id: ComponentId; isActive: boolean | null }[],
+  ): ComponentId[] => arr.filter((c) => c.isActive === null).map((c) => c.id);
+  const unknownPbIds = unknownIdsIn(sortedPbs);
+  const unknownWrIds = unknownIdsIn(sortedWrs);
+  const unknownApIds = unknownIdsIn(sortedAps);
+  const unknownTotal =
+    unknownPbIds.length + unknownWrIds.length + unknownApIds.length;
+  const lifecycleUnknown =
+    unknownTotal === 0
+      ? undefined
+      : {
+          processBuilders: unknownPbIds,
+          workflowRules: unknownWrIds,
+          approvalProcesses: unknownApIds,
+          disclosure: lifecycleUnknownDisclosure({
+            processBuilders: unknownPbIds,
+            workflowRules: unknownWrIds,
+            approvalProcesses: unknownApIds,
+          }),
+        };
+  // The same gap in the array a host reads aloud. BOUNDARIES stays frozen and
+  // byte-identical when nothing is unknown.
+  const boundaries: readonly string[] =
+    lifecycleUnknown === undefined
+      ? BOUNDARIES
+      : [lifecycleUnknown.disclosure, ...BOUNDARIES];
 
   // KEEP pre-CR-22 `truncated` semantics byte-for-byte (any list over limit);
   // the cursor block is layered on top, emitted only when the designated list
@@ -760,7 +954,8 @@ export const processBuilderMigrationCandidatesHandler = async (
         processBuilderRetirementDeadlineNote: PROCESS_BUILDER_RETIREMENT_NOTE,
         workflowRuleRetirementDeadlineNote: WORKFLOW_RULE_RETIREMENT_NOTE,
       },
-      boundaries: BOUNDARIES,
+      boundaries,
+      ...(lifecycleUnknown !== undefined ? { lifecycleUnknown } : {}),
       truncated,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(scanTruncated ? { scanTruncated: true, trueTypeCounts } : {}),

@@ -1063,3 +1063,184 @@ describe('unusedComponentsHandler — type + object scope (guard)', () => {
     expect(r.value.data.appliedScope.object).toBeNull();
   });
 });
+
+// =============================================================================
+// UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH.
+//
+// Measured on a real production vault. `unused_components { type: 'Email-
+// Template' }` returned `byType: { EmailTemplate: 0 }` with
+// `uncheckedTypes: [{ reason: 'confirmed-empty', note: "… the retrieve is
+// confirmed clean and returned zero members, so the 0 IS a checked zero …" }]`.
+// The vault's OWN graph disproved that sentence in the same breath: zero
+// EmailTemplate NODES, but 79 `declared` edges from approval processes and
+// workflow alerts pointing at 30 distinct `EmailTemplate:` ids that do not
+// exist. `retrieve_blindspot_report` on the same vault, same run, said
+// `coverageStatus: 'partial', referenceEdges: 79`.
+//
+// The upstream fact the certification trusts is the manifest coverage row
+// `{ requested: true, retrieved: 0, retrieveConfirmed: true }`. For a
+// FOLDER-SCOPED metadata type that row is structurally guaranteed: a bare
+// wildcard retrieve of such a type returns nothing whether or not the org holds
+// any, so "retrieve completed, zero members" can never be evidence of absence.
+// The graph's dangling references are the arbiter and they must win.
+//
+// Downstream, the same absence silently certifies the family the missing one
+// REFERS to: a component whose only referrer family is wholly absent reads
+// "unused" on a corpus that was never retrieved.
+// =============================================================================
+describe('unusedComponentsHandler — a certified zero its own graph contradicts', () => {
+  const REFERENCED_ABSENT_A = 'EmailTemplate:Folder_A/Template_B';
+  const REFERENCED_ABSENT_B = 'EmailTemplate:Folder_A/Template_C';
+  const ALERT_A = 'WorkflowAlert:Obj_A__c.Alert_D';
+  const APPROVAL_A = 'ApprovalProcess:Obj_A__c.Approval_E';
+  const LETTERHEAD_A = 'Letterhead:Letterhead_F';
+  const PHANTOM_TARGET = 'GlobalValueSet:Phantom_G';
+  const PHANTOM_SOURCE = 'ApexClass:Scanner_H';
+
+  /** A manifest whose EmailTemplate/Letterhead/GlobalValueSet rows all read
+   *  "requested, confirmed clean, zero (or n) members" — the exact upstream
+   *  fact the certified zero is built on. */
+  const confirmedCleanManifest = (): VaultManifest => ({
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      {
+        type: 'EmailTemplate',
+        requested: true,
+        retrieved: 0,
+        retrieveConfirmed: true,
+        errored: false,
+        neverModeled: false,
+      },
+      {
+        type: 'GlobalValueSet',
+        requested: true,
+        retrieved: 0,
+        retrieveConfirmed: true,
+        errored: false,
+        neverModeled: false,
+      },
+      {
+        type: 'Letterhead',
+        requested: true,
+        retrieved: 1,
+        retrieveConfirmed: true,
+        errored: false,
+        neverModeled: false,
+      },
+    ],
+  });
+
+  let danglingDir: string;
+  let danglingStore: GraphStore;
+  let danglingCtx: Context;
+
+  beforeAll(async () => {
+    danglingDir = mkdtempSync(join(tmpdir(), 'sfi-unused-dangling-'));
+    const opened = await openGraph(join(danglingDir, 'dangling.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    danglingStore = opened.value;
+    const imported = await importExtractionResults(danglingStore, [
+      {
+        nodes: [
+          // NO EmailTemplate node exists. These are the referrers that name
+          // templates the refresh never brought back.
+          makeNode({ id: ALERT_A, type: 'WorkflowAlert', apiName: 'Obj_A__c.Alert_D' }),
+          makeNode({ id: APPROVAL_A, type: 'ApprovalProcess', apiName: 'Obj_A__c.Approval_E' }),
+          // A letterhead nothing in the RETRIEVED corpus references — its only
+          // possible referrer family is the one that is wholly absent.
+          makeNode({ id: LETTERHEAD_A, type: 'Letterhead', apiName: 'Letterhead_F' }),
+          makeNode({ id: PHANTOM_SOURCE, type: 'ApexClass', apiName: 'Scanner_H' }),
+        ],
+        edges: [
+          makeEdge({ fromId: ALERT_A, toId: REFERENCED_ABSENT_A, edgeType: 'references' }),
+          makeEdge({ fromId: APPROVAL_A, toId: REFERENCED_ABSENT_A, edgeType: 'sendsEmail' }),
+          makeEdge({ fromId: APPROVAL_A, toId: REFERENCED_ABSENT_B, edgeType: 'references' }),
+          // A HEURISTIC scanner phantom at a wholly-absent family. This is the
+          // documented-noise tier (`retrieve_blindspot_report` rolls it up
+          // separately) and must NOT be strong enough to unseat a checked zero.
+          makeEdge({
+            fromId: PHANTOM_SOURCE,
+            toId: PHANTOM_TARGET,
+            edgeType: 'references',
+            confidence: 'heuristic',
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) throw new Error('importExtractionResults failed');
+    danglingCtx = {
+      vaultRoot: danglingDir,
+      manifest: confirmedCleanManifest(),
+      graph: danglingStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(danglingStore);
+    rmSync(danglingDir, { recursive: true, force: true });
+  });
+
+  it('the fixture reproduces the real shape: zero nodes of the family, declared edges naming its members', async () => {
+    const r = await unusedComponentsHandler(danglingCtx, { type: 'EmailTemplate' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.byType['EmailTemplate']).toBe(0);
+    expect(r.value.data.components).toEqual([]);
+  });
+
+  it('does NOT certify a checked zero for a family its own edges name members of', async () => {
+    const r = await unusedComponentsHandler(danglingCtx, { type: 'EmailTemplate' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const entry = r.value.data.uncheckedTypes?.find(
+      (u) => u.type === 'EmailTemplate',
+    );
+    expect(entry).toBeDefined();
+    // The two sentences a host reads aloud. Neither may survive.
+    expect(entry?.note).not.toContain('IS a checked zero');
+    expect(entry?.note).not.toContain('holds no');
+    // The typed field a machine consumer cannot skip.
+    expect(entry?.reason).toBe('referenced-but-absent');
+    expect(entry?.note).toContain('NOT CHECKED');
+    // The contradiction is quantified, and the sibling tool that agrees with
+    // it is named so the reader can cross-check.
+    expect(entry?.note).toContain('3 declared/parsed reference edge(s)');
+    expect(entry?.note).toContain('retrieve_blindspot_report');
+  });
+
+  it('keeps the answer non-complete when a scanned family is referenced-but-absent', async () => {
+    const r = await unusedComponentsHandler(danglingCtx, { type: 'EmailTemplate' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.trust.completeness.status).not.toBe('complete');
+  });
+
+  it('names the wholly-absent REFERRER family behind an unused verdict on what it refers to', async () => {
+    const r = await unusedComponentsHandler(danglingCtx, { type: 'Letterhead' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    // The verdict itself is unchanged — the letterhead really has no retrieved
+    // referrer. What changes is that the answer now says WHY that is not proof.
+    expect(data.components.map((c) => c.id)).toContain(LETTERHEAD_A);
+    expect(data.coverageCaveat?.missingCoverage).toContain('EmailTemplate');
+    expect(data.trust.completeness.missingCoverage).toContain('EmailTemplate');
+    expect(
+      data.coverageCaveat?.blindSpots?.some(
+        (b) => b.plane === 'EmailTemplate' && b.kind === 'not-retrieved',
+      ),
+    ).toBe(true);
+    expect(data.coverageCaveat?.message).toContain('EmailTemplate');
+  });
+
+  it('a heuristic-only dangling reference does NOT unseat a confirmed-empty zero', async () => {
+    const r = await unusedComponentsHandler(danglingCtx, { type: 'GlobalValueSet' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const entry = r.value.data.uncheckedTypes?.find(
+      (u) => u.type === 'GlobalValueSet',
+    );
+    expect(entry?.reason).toBe('confirmed-empty');
+    expect(entry?.note).toContain('checked zero');
+  });
+});

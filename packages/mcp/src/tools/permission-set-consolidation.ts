@@ -82,6 +82,7 @@ import {
 } from './coverage-trust.js';
 import { packToByteBudget } from './limit-headroom-report.js';
 import { expandAllPermissionSetGroups } from './permission-set-group.js';
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 
@@ -593,8 +594,6 @@ const MAX_LIMIT = 100;
  * disclosed via `scanTruncated` so the enumeration is never implied complete.
  */
 const PAIRWISE_CAP = 1000;
-/** Self-fit target for the whole serialized body (below the 40 KB response budget). */
-const RESPONSE_TARGET_BYTES = 36_000;
 /** Note surfaced when the candidate page was byte-trimmed below the requested `limit`. */
 const PAGE_NOTE =
   'This candidate page was trimmed below the requested `limit` to fit the response byte budget. No ranked candidate was dropped: `nextOffset` equals `offset + candidates.length`, so resume from it to walk the rest.';
@@ -791,7 +790,7 @@ export const permissionSetConsolidationHandler = async (
     vaultState,
   };
   const fixedBytes = Buffer.byteLength(JSON.stringify(fixedBody), 'utf8');
-  const candidatesBudget = Math.max(0, RESPONSE_TARGET_BYTES - fixedBytes);
+  const candidatesBudget = Math.max(0, toolLocalPayloadBudgetBytes() - fixedBytes);
   const packed = packToByteBudget(
     candidates,
     offset,

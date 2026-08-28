@@ -71,6 +71,7 @@
       "sfi.find_dead_code",
       "sfi.flow_bulkification_audit",
       "sfi.flow_fault_audit",
+      "sfi.generate_compliance_report",
       "sfi.generate_data_dictionary",
       "sfi.guest_exposure_report",
       "sfi.history_tracking_gaps",
@@ -108,8 +109,20 @@
       "sfi.what_if_assign_permset",
       "sfi.what_if_revoke_permset"
     ],
+    "sharedToId": [
+      "sfi.list_view_sharing"
+    ],
+    "groupId": [
+      "sfi.list_view_sharing"
+    ],
     "eventId": [
       "sfi.event_subscribers"
+    ],
+    "classId": [
+      "sfi.apex_test_coverage"
+    ],
+    "apexClassId": [
+      "sfi.apex_test_coverage"
     ],
     "seedComponentId": [
       "sfi.domain_clusters"
@@ -150,18 +163,6 @@
     ],
     "omniUiCardId": [
       "sfi.omniuicard_widget_breakdown"
-    ],
-    "sharedToId": [
-      "sfi.list_view_sharing"
-    ],
-    "groupId": [
-      "sfi.list_view_sharing"
-    ],
-    "classId": [
-      "sfi.apex_test_coverage"
-    ],
-    "apexClassId": [
-      "sfi.apex_test_coverage"
     ]
   }
 }

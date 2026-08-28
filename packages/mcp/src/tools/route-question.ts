@@ -2912,7 +2912,27 @@ export const routeQuestionHandler = async (
     const probeToken = extractExistenceProbeToken(input.question);
     if (probeToken !== null) {
       const probe = await resolveComponents(ctx.graph, probeToken, { limit: 5 });
-      if (probe.ok) {
+      if (!probe.ok) {
+        // Typed 'premise NOT checked' state (mirrors the third branch
+        // field-360.ts:1626-1633 added for concept reasoning): a graph-query
+        // error here must not collapse into the same shape as a probe that
+        // ran and found the name clean — that conflation is exactly what let
+        // a route ship at full, undisclosed confidence when the existence
+        // check silently never ran. This does NOT claim the component is
+        // absent (we genuinely do not know), so unlike a confirmed-absent
+        // premise it does not set `premiseFlagged`, does not downgrade
+        // confidence, and does not block stage 6.5 / stage 7 — it only makes
+        // the unchecked case distinguishable in `route.reason` from both a
+        // confirmed failure and a silent pass.
+        const probeErrorNote =
+          `PREMISE CHECK INCONCLUSIVE: the existence check for '${probeToken}' could not run ` +
+          `(${probe.error.message}) — this route's premise was NOT verified either way; ` +
+          `treat it as unconfirmed rather than as a pass.`;
+        route = {
+          ...route,
+          reason: `${route.reason} ${probeErrorNote}`,
+        };
+      } else {
         const lowered = probeToken.toLowerCase();
         const loose = normLiteral(probeToken);
         const literalHit = probe.value.candidates.some(

@@ -158,6 +158,44 @@ const ticketSeed: ExtractionResult = {
 
 
 // =============================================================================
+// LIFECYCLE-PROCESS-RECORDTYPE-SCAN-CAP (R1).
+//
+// RecordType nodes are per (object x record type), org-wide. A single
+// `listNodesByType(ctx.graph, 'RecordType', { limit: 500 })` page (id ASC,
+// OFFSET 0) is a scan over the WHOLE type, shared by every object in the
+// vault — so an object whose RecordType ids sort late enough to fall past the
+// 500th row reads as having ZERO record types, indistinguishable from an
+// object that legitimately has none. `AaaFiller__c` seeds exactly 500
+// RecordType nodes whose ids sort BEFORE `RecordType:Ticket__c.*`
+// (`'A' < 'T'`), so Ticket__c's own three RecordType nodes (seeded above) land
+// at rows 501-503 of the unscoped org-wide scan and are dropped by a
+// single-page cap. Every name here is invented.
+// =============================================================================
+const FILLER = 'CustomObject:AaaFiller__c';
+const FILLER_RT_COUNT = 500;
+const fillerRecordTypes = Array.from({ length: FILLER_RT_COUNT }, (_, i) => {
+  const n = String(i).padStart(4, '0');
+  const id = `RecordType:AaaFiller__c.RT_${n}`;
+  return {
+    node: node({
+      id,
+      type: 'RecordType',
+      apiName: `AaaFiller__c.RT_${n}`,
+      parentId: FILLER,
+      properties: { developerName: `RT_${n}` },
+    }),
+    edge: edge({ fromId: FILLER, toId: id, edgeType: 'parentOf' }),
+  };
+});
+const fillerSeed: ExtractionResult = {
+  nodes: [
+    node({ id: FILLER, type: 'CustomObject', apiName: 'AaaFiller__c', properties: { sharingModel: 'Private' } }),
+    ...fillerRecordTypes.map((f) => f.node),
+  ],
+  edges: fillerRecordTypes.map((f) => f.edge),
+};
+
+// =============================================================================
 // LIFECYCLE-PROCESS-LAUNDERS-UPSTREAM-TRUNCATION (FIX 1).
 //
 // LedgerEntry__c carries 60 ACTIVE update-save validation rules, each with a
@@ -238,7 +276,7 @@ beforeAll(async () => {
   const opened = await openGraph(join(tempDir, 'g.db'));
   if (!opened.ok) throw new Error(opened.error.message);
   store = opened.value;
-  const imported = await importExtractionResults(store, [seed, ticketSeed, ledgerSeed]);
+  const imported = await importExtractionResults(store, [seed, ticketSeed, fillerSeed, ledgerSeed]);
   if (!imported.ok) throw new Error(imported.error.message);
   ctx = { vaultRoot: tempDir, manifest: MANIFEST, graph: store };
 });
@@ -430,6 +468,27 @@ describe('lifecycleProcessHandler — RecordType/BusinessProcess scope', () => {
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
     expect(r.error.message).toMatch(/Standard_Ticket/);
+  });
+
+  it('R1: a real RecordType on an object whose id sorts past 500 org-wide RecordType rows is still found (LIFECYCLE-PROCESS-RECORDTYPE-SCAN-CAP)', async () => {
+    // 500 filler RecordType nodes (AaaFiller__c) sort ASC before every
+    // RecordType:Ticket__c.* id. A single-page 500-row scan of the whole
+    // RecordType type returns ONLY the filler rows; Ticket__c's own record
+    // types are never fetched, so `Standard_Ticket` reads as unknown.
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      event: 'update',
+      recordType: 'Standard_Ticket',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const s = r.value.data.appliedScope;
+    expect(s?.kind).toBe('recordType');
+    expect(s?.resolvedRecordTypes).toEqual(['Standard_Ticket']);
+    // Full-scan cap is 20,000 nodes/type — 503 total RecordType nodes across
+    // both objects never gets close, so this scan is NOT incomplete.
+    expect(s?.scanIncomplete).toBe(false);
+    expect(r.value.data.process.map((x) => x.componentId)).not.toContain(VR_VIP_ONLY);
   });
 
   it('an unknown business process is rejected with invalid-query', async () => {

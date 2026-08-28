@@ -18,13 +18,31 @@
  * against a RESTRICTED picklist still IS flagged.
  */
 
-import type { ComponentId, Edge, Node } from '@sf-intelligence/contracts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+import type {
+  ComponentId,
+  Edge,
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../src/server.js';
 import {
   classifyPicklistLiterals,
   closestDefinedValue,
   extractCriteriaValues,
   extractQuotedFieldLiterals,
+  picklistIntegrityScanHandler,
   referencesFromEdgeSource,
   type PicklistLiteralReference,
 } from '../src/tools/picklist-integrity-scan.js';
@@ -376,5 +394,151 @@ describe('extractQuotedFieldLiterals (VR / formula mirror)', () => {
   it('does not attribute a bare literal that is not adjacent to the field', () => {
     // `'Somewhere'` is not compared against Status__c — it must not be captured.
     expect(extractQuotedFieldLiterals("String x = 'Somewhere';", 'Status__c')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R6 — handler-level paging. Adopts `paginateLegacy` (page-cursor.ts) instead
+// of open-coding slice + truncated + nextOffset, so a truncated page also
+// carries a `nextCursor` bound to this tool + the vault's `sourceTreeHash` —
+// closing the gap the census flagged: a raw `offset` carried forward has
+// nothing checking it belongs to THIS vault snapshot.
+// ---------------------------------------------------------------------------
+describe('picklistIntegrityScanHandler — R6 paging (paginateLegacy adoption)', () => {
+  const FIXTURE_MANIFEST: VaultManifest = {
+    version: '0.1.0',
+    refreshedAt: '2026-06-29T00:00:00Z',
+    sourceOrg: 'me@example.com',
+    components: {},
+    edges: {},
+    sourceTreeHash: 'sha256:fixture-pis-v1',
+  };
+
+  const makePicklistField = (
+    apiName: string,
+    // A bare-token default that matches NEITHER defined value — every field
+    // yields exactly one `orphaned`/`default` finding, no edges required.
+    defaultLiteral: string,
+  ): Node => ({
+    id: `CustomField:Account.${apiName}` as ComponentId,
+    type: 'CustomField',
+    apiName,
+    label: null,
+    parentId: 'CustomObject:Account' as ComponentId,
+    sourcePath: 'unused.field-meta.xml',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {
+      dataType: 'Picklist',
+      picklistValues: [
+        { value: 'Draft', isActive: true },
+        { value: 'Active', isActive: true },
+      ],
+      defaultValue: defaultLiteral,
+    },
+  });
+
+  // Three picklist fields, api names ascending so fieldId sort is predictable
+  // (A < B < C), each with one orphaned-default finding.
+  const seed: ExtractionResult = {
+    nodes: [
+      makePicklistField('AStatus__c', 'Missing'),
+      makePicklistField('BStatus__c', 'Missing'),
+      makePicklistField('CStatus__c', 'Missing'),
+    ],
+    edges: [],
+  };
+
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pis-'));
+    const opened = await openGraph(join(tempDir, 'pis.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('sanity: three seeded fields each yield exactly one orphaned-default finding', async () => {
+    const r = await picklistIntegrityScanHandler(ctx, { limit: 500 });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.totalFieldCount).toBe(3);
+    expect(r.value.data.totalFindingCount).toBe(3);
+    expect(r.value.data.truncated).toBe(false);
+    // Pre-fix and post-fix both: a whole-fits page emits no cursor.
+    expect(r.value.data.nextCursor).toBeUndefined();
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a truncated page carries a nextCursor bound to this vault', async () => {
+    const r = await picklistIntegrityScanHandler(ctx, { limit: 1 });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.truncated).toBe(true);
+    expect(r.value.data.nextOffset).toBe(1);
+    // BEFORE the fix (open-coded slice/truncated/nextOffset): `nextCursor` is
+    // never set on the output type nor emitted at runtime — this assertion is
+    // exactly what fails against the pre-fix code.
+    expect(typeof r.value.data.nextCursor).toBe('string');
+    expect(r.value.data.pageInfo?.hasMore).toBe(true);
+  });
+
+  it('ROUND TRIP: paging with the returned cursor reaches every field with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i += 1) {
+      const r = await picklistIntegrityScanHandler(
+        ctx,
+        cursor === undefined ? { limit: 1 } : { limit: 1, cursor },
+      );
+      if (!r.ok) throw new Error(r.error.message);
+      for (const f of r.value.data.fields) seen.push(f.apiName);
+      if (!r.value.data.truncated) break;
+      const next = r.value.data.nextCursor;
+      if (next === undefined) throw new Error('truncated page emitted no cursor');
+      cursor = next;
+    }
+    expect(seen).toEqual(['AStatus__c', 'BStatus__c', 'CStatus__c']);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a cursor minted against a DIFFERENT vault snapshot is rejected, not silently replayed', async () => {
+    const first = await picklistIntegrityScanHandler(ctx, { limit: 1 });
+    if (!first.ok) throw new Error(first.error.message);
+    const cursor = first.value.data.nextCursor;
+    if (cursor === undefined) throw new Error('expected a cursor on a truncated page');
+
+    // Simulate a refresh: same graph contents, but a DIFFERENT
+    // `sourceTreeHash` — the identity `decodeCursor` binds against. BEFORE the
+    // fix there is no cursor at all, so this class of bug (an `offset` carried
+    // forward across a refresh, unchecked) cannot even be expressed — the
+    // handler just accepts whatever offset it is given.
+    const refreshedCtx: Context = {
+      ...ctx,
+      manifest: { ...FIXTURE_MANIFEST, sourceTreeHash: 'sha256:fixture-pis-v2-refreshed' },
+    };
+    const replayed = await picklistIntegrityScanHandler(refreshedCtx, {
+      limit: 1,
+      cursor,
+    });
+    expect(replayed.ok).toBe(false);
+    if (replayed.ok) throw new Error('expected rejection');
+    expect(replayed.error.kind).toBe('invalid-query');
+  });
+
+  it('an offset beyond the end still returns cleanly with no cursor (whole-fits final page)', async () => {
+    const r = await picklistIntegrityScanHandler(ctx, { limit: 500, offset: 2 });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.fields).toHaveLength(1);
+    expect(r.value.data.fields[0]?.apiName).toBe('CStatus__c');
+    expect(r.value.data.truncated).toBe(false);
+    expect(r.value.data.nextCursor).toBeUndefined();
   });
 });

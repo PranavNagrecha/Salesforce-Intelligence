@@ -114,8 +114,18 @@ export interface ApexBuildAdvisorOutput {
   } | null;
   readonly testExpectations: {
     readonly deployGate: string;
-    readonly testClasses: number;
-    readonly untestedClasses: number;
+    /**
+     * Org-wide roster counts, or `null` when they were NOT COMPUTED.
+     *
+     * `apex_test_coverage` deliberately never loads the org roster in
+     * single-class mode — it answers off the target's own inbound edges — so it
+     * returns `null` there rather than a hardcoded `0` that reads as "this org
+     * has no test classes". Carrying the `null` through is the whole point: a
+     * consumer that coerced it to a number would re-introduce the exact false
+     * zero the sibling stopped emitting.
+     */
+    readonly testClasses: number | null;
+    readonly untestedClasses: number | null;
     readonly note: string;
   } | null;
   readonly flsCrudNorms: {
@@ -341,7 +351,9 @@ export const apexBuildAdvisorHandler = async (
               ? `has ${target.coveringTests.length.toString()} static test reference(s)`
               : 'has NO static test reference'
           } today.`
-        : `${s.classesWithoutTestReferences}/${s.nonTestClasses} classes have no static test reference today.`,
+        : s.nonTestClasses === null
+          ? 'Org-wide test-roster counts were NOT COMPUTED for this call — read them from `sfi.apex_test_coverage` without a class scope. This is not a count of zero.'
+          : `${s.classesWithoutTestReferences}/${s.nonTestClasses} classes have no static test reference today.`,
     };
     recommendations.push(
       scopedCov

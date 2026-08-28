@@ -90,3 +90,38 @@ describe('declarative value-literal coupling', () => {
     expect(a.summary).toContain('Won');
   });
 });
+
+// R6 — findValueCouplings's ConditionalContext scan was a second hand-rolled
+// `listNodesByType` offset loop (see value-change-shadow-join.test.ts for the
+// CustomField sibling and the full R6 rationale).
+describe('ConditionalContext full-scan adoption (R6) — residual scan-cap disclosure', () => {
+  const saved = {
+    window: process.env['SFI_NODE_SCAN_LIMIT'],
+    ceiling: process.env['SFI_VALUE_CHANGE_SCAN_MAX'],
+  };
+  afterEach(() => {
+    if (saved.window === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+    else process.env['SFI_NODE_SCAN_LIMIT'] = saved.window;
+    if (saved.ceiling === undefined) delete process.env['SFI_VALUE_CHANGE_SCAN_MAX'];
+    else process.env['SFI_VALUE_CHANGE_SCAN_MAX'] = saved.ceiling;
+  });
+
+  it('discloses an incomplete ConditionalContext scan instead of a silent confident verdict', async () => {
+    // 2 ConditionalContext nodes are seeded; a window/ceiling of 1 leaves 1 behind it.
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    process.env['SFI_VALUE_CHANGE_SCAN_MAX'] = '1';
+    const n = await getNodeById(ctx.graph, TYPE as Node['id']);
+    if (!n.ok || n.value === null) throw new Error('missing node');
+    const r = await assessValueChange(ctx, n.value);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.disclosures.some((d) => /full scan capped/i.test(d))).toBe(true);
+  });
+
+  it('does NOT over-disclose when the ConditionalContext scan completes', async () => {
+    const n = await getNodeById(ctx.graph, TYPE as Node['id']);
+    if (!n.ok || n.value === null) throw new Error('missing node');
+    const r = await assessValueChange(ctx, n.value);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.disclosures.some((d) => /full scan capped/i.test(d))).toBe(false);
+  });
+});

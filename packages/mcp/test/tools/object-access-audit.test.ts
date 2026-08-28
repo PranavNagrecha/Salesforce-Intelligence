@@ -465,3 +465,92 @@ describe('objectAccessAuditHandler — system permissions this tool cannot see',
     expect(withEdge.value.data.systemPermissions?.modifyAllDataGranters).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R6 (BRIEF-100): `censusSystemPermissions` used a single `listNodesByType`
+// page with no OFFSET, capped at `clampedNodeScanLimit()`. On a vault with
+// more granters than the per-window cap, every holder past the cap is
+// invisible and NEVER reachable by any later call — this is the single-page
+// corpus scan `scanAllNodesOfTypes` (CR-22 B3 / commit 8e547076) exists to
+// close. Force the cap down to 1 window-slot via `SFI_NODE_SCAN_LIMIT` so 3
+// seeded Profiles prove the scan reaches node 2 and node 3, not just node 1.
+// ---------------------------------------------------------------------------
+describe('objectAccessAuditHandler — system-permission census full multi-window scan (R6)', () => {
+  const OBJ_ID = 'CustomObject:NoGrants__c';
+
+  const buildCtx = async (
+    nodes: readonly Node[],
+  ): Promise<{ ctx: Context; close: () => Promise<void> }> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-oaa-fullscan-'));
+    const opened = await openGraph(join(dir, 'oaa.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const imported = await importExtractionResults(opened.value, [
+      { nodes: [...nodes], edges: [] },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    return {
+      ctx: { vaultRoot: dir, manifest: MANIFEST, graph: opened.value },
+      close: async () => {
+        await closeGraph(opened.value);
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  };
+
+  it('FAIL-BEFORE/PASS-AFTER: a per-window cap of 1 still reaches all 3 ModifyAllData holders', async () => {
+    const { ctx, close } = await buildCtx([
+      node({ id: OBJ_ID, type: 'CustomObject', apiName: 'NoGrants__c' }),
+      node({
+        id: 'Profile:Elevated1',
+        type: 'Profile',
+        apiName: 'Elevated1',
+        properties: { userPermissions: ['ModifyAllData'] },
+      }),
+      node({
+        id: 'Profile:Elevated2',
+        type: 'Profile',
+        apiName: 'Elevated2',
+        properties: { userPermissions: ['ModifyAllData'] },
+      }),
+      node({
+        id: 'Profile:Elevated3',
+        type: 'Profile',
+        apiName: 'Elevated3',
+        properties: { userPermissions: ['ModifyAllData'] },
+      }),
+    ]);
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    try {
+      const r = await objectAccessAuditHandler(ctx, { objectApiName: 'NoGrants__c' });
+      await close();
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // Before the fix: a single `listNodesByType(..., { limit: 1 })` page
+      // with no OFFSET returns only the alphabetically-first Profile, so this
+      // was 1 (a confident undercount) instead of the true 3.
+      expect(r.value.data.systemPermissions?.modifyAllDataGranters).toBe(3);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+
+  it('does NOT report scanTruncated under the default cap (byte-identical happy path)', async () => {
+    const { ctx, close } = await buildCtx([
+      node({ id: OBJ_ID, type: 'CustomObject', apiName: 'NoGrants__c' }),
+      node({
+        id: 'Profile:Elevated1',
+        type: 'Profile',
+        apiName: 'Elevated1',
+        properties: { userPermissions: ['ModifyAllData'] },
+      }),
+    ]);
+    const r = await objectAccessAuditHandler(ctx, { objectApiName: 'NoGrants__c' });
+    await close();
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.systemPermissions?.scanTruncated).toBe(false);
+    expect(r.value.data.systemPermissions?.note).not.toMatch(/FLOOR|capped/i);
+  });
+});

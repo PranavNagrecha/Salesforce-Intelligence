@@ -19,10 +19,13 @@
  *        - `DataRaptor Extract/Transform/Load Action` →
  *          kind `'dataraptor'`; target = the `bundle` field; `targetId`
  *          resolves to the OmniDataTransform node when present.
+ *          `targetResolution` tells "not in this vault" apart from
+ *          "the graph lookup itself failed" — see `ExternalEndpoint`.
  *        - `Integration Procedure Action` →
  *          kind `'integration-procedure'`; target = the
  *          `integrationProcedureKey`; `targetId` resolves to the IP
- *          node whose `properties.omniProcessKey` matches.
+ *          node whose `properties.omniProcessKey` matches; same
+ *          `targetResolution` disclosure as `dataraptor`.
  *        - `Remote Action` → kind `'remote-action'`; target =
  *          `{remoteClass}.{remoteMethod}`. No `targetId` resolution —
  *          Apex→OmniProcess edges are the v3.3
@@ -52,7 +55,11 @@
  *     resolved against the graph: a present node lets the response
  *     carry a canonical `targetId`; a missing one surfaces as
  *     `targetId: null` (a dangling reference — common for managed-
- *     package or cross-namespace targets).
+ *     package or cross-namespace targets). A graph QUERY FAILURE also
+ *     nulls `targetId` but is NOT an org fact about the target; the
+ *     two are told apart via `targetResolution` (`'not-in-vault'` vs
+ *     `'lookup-failed'`) so a failed read is never published as a
+ *     claim that the target lives outside the vault.
  *   - Per the task's honesty boundaries, REST endpoint URLs are
  *     documented as `parsed` confidence (not verified). The
  *     `endpointConfidence` field on each `externalEndpoint` carries
@@ -210,6 +217,26 @@ export interface ExternalEndpoint {
   readonly kind: 'rest' | 'dataraptor' | 'remote-action' | 'integration-procedure';
   readonly target: string;
   readonly targetId: ComponentId | null;
+  /**
+   * Tells apart the two reasons `targetId` can be `null`, plus the
+   * two kinds (`rest`, `remote-action`) that never attempt a lookup:
+   *   - `'resolved'` — the graph lookup found the target; `targetId`
+   *     is populated.
+   *   - `'not-in-vault'` — the lookup ran and came back empty: a
+   *     genuine dangling reference (managed package, cross-namespace,
+   *     or a target the refresh never retrieved).
+   *   - `'lookup-failed'` — the graph query itself errored. This is
+   *     NOT an org fact; it must never be read as "not in this
+   *     vault". See `notExtractedFamilyDisclosure`'s reasoning in
+   *     `absence-disclosure.ts` for why the two are kept apart.
+   *   - `'not-applicable'` — `rest` / `remote-action` kinds, which
+   *     never attempt a `targetId` lookup at all.
+   */
+  readonly targetResolution:
+    | 'resolved'
+    | 'not-in-vault'
+    | 'lookup-failed'
+    | 'not-applicable';
   readonly namedCredential: string | null;
   readonly endpointConfidence: 'parsed';
 }
@@ -672,7 +699,10 @@ const walkActions = (
  * A missing target surfaces `targetId: null` (a dangling reference —
  * common when the named target lives in a managed package or another
  * vault). The endpoint's `target` (the verbatim name) is always
- * present so the renderer can flag the dangling reference.
+ * present so the renderer can flag the dangling reference. Per-seed
+ * `targetResolution` tells that genuine absence apart from a graph
+ * query FAILURE, which also nulls `targetId` but is never an org
+ * fact — see the field's JSDoc on `ExternalEndpoint`.
  */
 const resolveExternalEndpoints = async (
   ctx: Context,
@@ -682,6 +712,7 @@ const resolveExternalEndpoints = async (
 
   for (const seed of seeds) {
     let targetId: ComponentId | null = null;
+    let targetResolution: ExternalEndpoint['targetResolution'] = 'not-applicable';
 
     if (seed.kind === 'dataraptor') {
       // The extractor keys edges by `OmniDataTransform:{bundle}`
@@ -690,8 +721,13 @@ const resolveExternalEndpoints = async (
       // OmniDataTransform node id is `OmniDataTransform:{apiName}`).
       const candidateId = `${DATA_TRANSFORM_PREFIX}${seed.target}` as ComponentId;
       const lookup = await getNodeById(ctx.graph, candidateId);
-      if (lookup.ok && lookup.value !== null) {
+      if (!lookup.ok) {
+        targetResolution = 'lookup-failed';
+      } else if (lookup.value !== null) {
         targetId = lookup.value.id;
+        targetResolution = 'resolved';
+      } else {
+        targetResolution = 'not-in-vault';
       }
     } else if (seed.kind === 'integration-procedure') {
       // IP edges resolve by `omniProcessKey` (the callable lookup key
@@ -701,23 +737,31 @@ const resolveExternalEndpoints = async (
       // direct `getNodeById` against the conventional id form first.
       const candidateId = `${IP_PREFIX}${seed.target}` as ComponentId;
       const lookup = await getNodeById(ctx.graph, candidateId);
-      if (lookup.ok && lookup.value !== null) {
+      if (!lookup.ok) {
+        targetResolution = 'lookup-failed';
+      } else if (lookup.value !== null) {
         targetId = lookup.value.id;
+        targetResolution = 'resolved';
+      } else {
+        targetResolution = 'not-in-vault';
       }
       // Note: `OmniIntegrationProcedure:{omniProcessKey}` is the id
       // form used by the extractor when emitting `dispatchesOmniAction`
       // edges (see omni-integration-procedure.ts JSDoc). Tools that
       // index IPs by their file-level `apiName` instead surface a
       // dangling reference here; that surfaces correctly as
-      // `targetId: null` because the lookup misses.
+      // `targetId: null` / `targetResolution: 'not-in-vault'` because
+      // the lookup misses cleanly rather than erroring.
     }
-    // `rest` and `remote-action` kinds never resolve a `targetId`.
+    // `rest` and `remote-action` kinds never resolve a `targetId`;
+    // `targetResolution` stays `'not-applicable'`.
 
     resolved.push({
       stepName: seed.stepName,
       kind: seed.kind,
       target: seed.target,
       targetId,
+      targetResolution,
       namedCredential: seed.namedCredential,
       endpointConfidence: 'parsed',
     });

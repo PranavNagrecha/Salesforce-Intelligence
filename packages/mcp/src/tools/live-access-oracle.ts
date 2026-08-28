@@ -157,7 +157,15 @@ export const liveAccessOracleInputSchema = z.object({
   permissionSetIds: z.array(z.string().min(1)).optional(),
   orgAlias: z.string().min(1).optional(),
   liveEnabled: z.boolean().optional(),
-});
+})
+  // roster.ts advertises `additionalProperties: false` for this tool — a
+  // security-parity check whose whole argument is REFUSE over silent
+  // degrade (see module header). Without `.strict()`, zod strips an
+  // unrecognized key (a typo'd `permissionSetId` singular, a mis-cased
+  // `profileID`) instead of rejecting it, so a container-override typo is
+  // silently dropped and the tool falls through to the derived bundle
+  // rather than the one the caller asked to adjudicate against.
+  .strict();
 
 export type LiveAccessOracleInput = z.infer<typeof liveAccessOracleInputSchema>;
 

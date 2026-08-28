@@ -22,6 +22,7 @@ import {
   fieldAccessAuditHandler,
   fieldAccessAuditInputSchema,
 } from '../../src/tools/field-access-audit.js';
+import { V01_TOOLS } from '../../src/tools/roster.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -665,5 +666,116 @@ describe('fieldAccessAuditHandler — componentId ↔ fieldId alias', () => {
     const r = await fieldAccessAuditHandler(ctx, parsed.data);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
+// BRIEF 086 / R1 — SENTINEL-KEY DISCOVERABILITY.
+//
+// This tool emits four keys whose ONLY job is to stop a zero being read as a
+// verified negative: `summary.profilesWithUnknown` / `summary.permSetsWithUnknown`
+// (an all-zero read/edit split is not "no access" when a grant's level is merely
+// unpopulated) and `update.flsEditWithoutObjectRow` / `update.objectRowNote` (an
+// empty `canUpdate` is not a proven denial when object-edit went unchecked).
+//
+// A sentinel nobody is told to look for does not do its job. Before this brief
+// the ONLY place the tool described its own output was the roster description a
+// host reads at tools/list time, and that description named FOUR of the six
+// summary keys — omitting exactly the two sentinels — and neither update key;
+// the response payload carried no honesty field of any kind. So the rule these
+// tests enforce is: every key the handler emits on the summary, plus the two
+// update honesty keys, must be NAMED on a surface the caller actually reads —
+// the tools/list description, or the response's own `boundaryNote`, which is
+// the stronger of the two because it arrives WITH the numbers it qualifies.
+//
+// The key list is read off the RUNTIME object the handler returns, never
+// hand-copied, so the assertion tracks the code rather than a second list that
+// can drift. Each test first asserts the fixture genuinely fires the sentinel it
+// is about, so a fixture that stopped producing one fails loudly instead of
+// asserting over nothing.
+describe('sfi.field_access_audit — every emitted sentinel key is named on a surface the caller reads', () => {
+  const tool = V01_TOOLS.find((t) => t.name === 'sfi.field_access_audit');
+  const rosterDescription = String(tool?.description ?? '');
+
+  /** The two honesty surfaces a caller can actually reach, concatenated. */
+  const honestySurfaces = (boundaryNote: string): string =>
+    `${rosterDescription}\n${boundaryNote}`;
+
+  it('the tool is registered in the roster (an unregistered tool would pass every check below over an empty string)', () => {
+    expect(tool).toBeDefined();
+    expect(rosterDescription.length).toBeGreaterThan(200);
+  });
+
+  it('names every FieldAccessAuditSummary key the handler emits', async () => {
+    // UNKNOWN_FIELD's grant carries no read/edit flags, so this exercises the
+    // exact case the sentinel exists for: one REAL grant, all-zero read/edit.
+    const result = await fieldAccessAuditHandler(ctx, { fieldId: UNKNOWN_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const summaryKeys = Object.keys(result.value.data.summary);
+    // Vacuity guard: the fixture must actually produce the sentinel keys.
+    expect(summaryKeys).toContain('profilesWithUnknown');
+    expect(summaryKeys).toContain('permSetsWithUnknown');
+    expect(
+      result.value.data.summary.profilesWithUnknown +
+        result.value.data.summary.permSetsWithUnknown,
+    ).toBeGreaterThan(0);
+
+    const surfaces = honestySurfaces(result.value.data.boundaryNote);
+    const unnamed = summaryKeys.filter((k) => !surfaces.includes(k));
+    expect(
+      unnamed,
+      `the handler emits these summary key(s) that NEITHER the roster description NOR the ` +
+        `response boundaryNote names, so a caller is never told to look for them: ${unnamed.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('names the update-block not-checked-vs-denied sentinel keys', async () => {
+    // STATUS_FIELD's FIELD_ONLY profile holds FLS-edit with NO object grantedBy
+    // edge at all — the exact case flsEditWithoutObjectRow exists to flag.
+    const result = await fieldAccessAuditHandler(ctx, { fieldId: STATUS_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Vacuity guard: the fixture must actually fire this sentinel.
+    expect(result.value.data.update.flsEditWithoutObjectRow).toBeGreaterThan(0);
+    expect(result.value.data.update.objectRowNote).toBeDefined();
+
+    const surfaces = honestySurfaces(result.value.data.boundaryNote);
+    const unnamed = ['flsEditWithoutObjectRow', 'objectRowNote'].filter(
+      (k) => !surfaces.includes(k),
+    );
+    expect(
+      unnamed,
+      `neither the roster description nor the response boundaryNote names these 'update' ` +
+        `honesty key(s) — the not-checked-vs-proven-denial hedge on canUpdate: ${unnamed.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('states the three honesty axes the module header claims, in the payload', async () => {
+    const result = await fieldAccessAuditHandler(ctx, { fieldId: UNKNOWN_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const note = result.value.data.boundaryNote;
+    // Axis 1: sharing rules are not walked (grant level only).
+    expect(note).toMatch(/sharing rules/i);
+    expect(note).toContain('why_cant_user_see_record');
+    // Axis 2: an unpopulated permission level is not an absence of access.
+    expect(note).toMatch(/not a verified "no access"/i);
+    // Axis 3: the Apex route is heuristic, flagging the file and not the user.
+    expect(note).toMatch(/viaApexAccess/);
+    expect(note).toMatch(/heuristic/i);
+  });
+
+  it('quantifies each sentinel that actually fired, so the caller gets the number and not only the key name', async () => {
+    const unknownResult = await fieldAccessAuditHandler(ctx, { fieldId: UNKNOWN_FIELD });
+    expect(unknownResult.ok).toBe(true);
+    if (!unknownResult.ok) return;
+    expect(unknownResult.value.data.boundaryNote).toContain('ON THIS FIELD');
+
+    const updateResult = await fieldAccessAuditHandler(ctx, { fieldId: STATUS_FIELD });
+    expect(updateResult.ok).toBe(true);
+    if (!updateResult.ok) return;
+    expect(updateResult.value.data.boundaryNote).toContain(
+      `object edit was NOT CHECKED for ${updateResult.value.data.update.flsEditWithoutObjectRow}`,
+    );
   });
 });

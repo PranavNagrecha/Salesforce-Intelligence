@@ -52,6 +52,12 @@ const seed: ExtractionResult = {
         { tab: 'Widgets__c', visibility: 'DefaultOff' },
       ],
     } }),
+    // R1: the property IS present (hasOwnProperty true — the family WAS
+    // extracted) but its value is not an array. This must read as CHECKED,
+    // ZERO — never "not extracted" (`Array.isArray` false-positives here).
+    node({ id: 'Profile:Malformed', type: 'Profile', apiName: 'Malformed', properties: {
+      tabVisibilities: null,
+    } }),
   ],
   edges: [],
 };
@@ -83,11 +89,38 @@ describe('tabAvailabilityHandler', () => {
     const on = d.tabs.find((t) => t.tab === 'Account');
     expect(on?.available).toBe(true);
   });
-  it('discloses "not modeled" when tabVisibilities was not extracted', async () => {
+  it('discloses "not modeled" when tabVisibilities was not extracted — TYPED absence, not 0', async () => {
     const r = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Bare' });
     expect(r.ok).toBe(true); if (!r.ok) return;
-    expect(r.value.data.summary.total).toBe(0);
+    // R1: a never-extracted family must render `null` in the structured
+    // summary, never `0` — `0` is indistinguishable from a checked container
+    // that declares no tabs. (Mirrors user_ability's
+    // `summary.customPermissions: null`.)
+    expect(r.value.data.summary.total).toBeNull();
+    expect(r.value.data.summary.available).toBeNull();
+    expect(r.value.data.summary.hidden).toBeNull();
+    expect(r.value.data.tabs).toEqual([]);
     expect(r.value.data.boundaryNote).toContain('not modeled');
+    expect(r.value.data.boundaryNote).toContain('Tab visibility was NOT checked');
+  });
+
+  // R1 (census 108, line 275): the decision predicate must be the SENTINEL
+  // PROPERTY (`familyWasExtracted`, hasOwnProperty), never `Array.isArray` on
+  // the value. A container whose extractor wrote `tabVisibilities` as a
+  // non-array (null, here) DID have the family extracted — it must read as
+  // CHECKED-ZERO (summary 0, ordinary boundaryNote), not as "never
+  // extracted" (summary null, "re-run /sfi-refresh").
+  it('a non-array tabVisibilities property is EXTRACTED (checked-zero), not "not extracted"', async () => {
+    const r = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Malformed' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.total).toBe(0);
+    expect(d.summary.available).toBe(0);
+    expect(d.summary.hidden).toBe(0);
+    expect(d.tabs).toEqual([]);
+    expect(d.boundaryNote).not.toContain('Tab visibility was NOT checked');
+    expect(d.boundaryNote).not.toContain('/sfi-refresh');
+    expect(d.boundaryNote).toContain('declared profile/permission-set metadata');
   });
 });
 

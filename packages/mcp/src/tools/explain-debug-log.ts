@@ -234,6 +234,13 @@ export interface ExplainDebugLogOutput {
   readonly governorRiskCrossRef: GovernorRiskCrossRef | null;
   /** Apex names referenced in the log that resolved to no vault node. */
   readonly unresolvedApex: readonly string[];
+  /**
+   * Count of DISTINCT Apex identities the log named beyond the harvesting cap
+   * (`MAX_IDENTIFIERS`) — never harvested, so never resolved, so never
+   * reflected in `unresolvedApex` either. Present ONLY when non-zero, so an
+   * untruncated response stays lean.
+   */
+  readonly identifiersDropped?: number;
   /** Which match strategies were attempted (transparency on a `none` result). */
   readonly triedStrategies: readonly string[];
   /** Concrete follow-ups — always populated. */
@@ -278,6 +285,20 @@ export interface ApexIdentifier {
   readonly name: string;
 }
 
+/** Result of harvesting Apex identities from a (possibly huge) debug log. */
+export interface CollectApexIdentifiersResult {
+  readonly identifiers: readonly ApexIdentifier[];
+  /**
+   * Count of DISTINCT identities the log named beyond the harvesting cap
+   * (`max`) — never added to `identifiers`, so never resolved against the
+   * vault, so never reflected in `unresolvedApex` either. A caller that only
+   * reads `identifiers` has no way to know the harvest was incomplete;
+   * this makes the gap explicit and countable, matching the disclosure
+   * discipline this file applies to `scannedComponents` / `uncheckedComponents`.
+   */
+  readonly droppedCount: number;
+}
+
 const VALID_APEX_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /**
@@ -294,15 +315,20 @@ const VALID_APEX_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 export const collectApexIdentifiers = (
   logText: string,
   max: number = MAX_IDENTIFIERS,
-): ApexIdentifier[] => {
+): CollectApexIdentifiersResult => {
   const seen = new Set<string>();
   const out: ApexIdentifier[] = [];
+  let droppedCount = 0;
   const add = (kind: 'ApexClass' | 'ApexTrigger', name: string | undefined): void => {
     if (name === undefined || !VALID_APEX_NAME.test(name)) return;
     const key = `${kind}:${name}`;
     if (seen.has(key)) return;
     seen.add(key);
-    if (out.length < max) out.push({ kind, name });
+    if (out.length < max) {
+      out.push({ kind, name });
+    } else {
+      droppedCount += 1;
+    }
   };
   for (const m of logText.matchAll(/\bClass\.([A-Za-z][A-Za-z0-9_]*)\./g)) add('ApexClass', m[1]);
   for (const m of logText.matchAll(/\bTrigger\.([A-Za-z][A-Za-z0-9_]*)\b/g)) add('ApexTrigger', m[1]);
@@ -328,7 +354,7 @@ export const collectApexIdentifiers = (
   )) {
     add('ApexClass', m[1]);
   }
-  return out;
+  return { identifiers: out, droppedCount };
 };
 
 /**
@@ -385,7 +411,7 @@ export const explainDebugLogHandler = async (
   const detectedStatusCode = detectStatusCode(logText);
   const flowParsed = parseFlowFault(logText);
   const apexFrame = parseApexStackFrame(logText);
-  const identifiers = collectApexIdentifiers(logText);
+  const { identifiers, droppedCount: identifiersDropped } = collectApexIdentifiers(logText);
 
   const candidates: ExplainDebugLogCandidate[] = [];
   const tried: string[] = [];
@@ -474,7 +500,8 @@ export const explainDebugLogHandler = async (
       // scoped call returns at most that one class, so there is no page to fall
       // off, and it is also cheaper than the org-wide scan it replaces.
       const mapped = new Set(mappedStaticRules);
-      for (const id of resolvedApexIds) {
+      for (let i = 0; i < resolvedApexIds.length; i += 1) {
+        const id = resolvedApexIds[i]!;
         const scoped = await governorLimitRisksHandler(ctx, { componentId: id });
         if (!scoped.ok) {
           // A scan that could not run is NOT a clean result. Record it as
@@ -493,7 +520,18 @@ export const explainDebugLogHandler = async (
           matchedRisks,
           allRisks: entry.risks,
         });
-        if (classesWithRisks.length >= MAX_RISK_CLASSES) break;
+        if (classesWithRisks.length >= MAX_RISK_CLASSES) {
+          // Budget cap reached. Everything AFTER this point in resolvedApexIds
+          // was never asked about the static engine at all — record it as
+          // UNKNOWN (same ledger as a scan that could not run), never leave it
+          // absent from every list. `scannedComponents`/`uncheckedComponents`
+          // must partition the FULL named+resolved set, with no third,
+          // unrepresented state.
+          for (const remaining of resolvedApexIds.slice(i + 1)) {
+            uncheckedApexIds.push(remaining);
+          }
+          break;
+        }
       }
       // Re-rank the apex candidates: classes carrying a MATCHED loop-risk for the
       // fired limit float up (they are the most likely runtime source).
@@ -677,6 +715,7 @@ export const explainDebugLogHandler = async (
       truncated,
       governorRiskCrossRef,
       unresolvedApex,
+      ...(identifiersDropped > 0 ? { identifiersDropped } : {}),
       triedStrategies: tried,
       nextSteps,
       confidence: topConfidence,

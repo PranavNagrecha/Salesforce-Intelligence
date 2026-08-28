@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import type { VaultManifest } from '@sf-intelligence/contracts';
+import type { CoverageEntry, VaultManifest } from '@sf-intelligence/contracts';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
@@ -485,5 +485,111 @@ describe('coverageReportHandler — shared container returned without the member
     if (!result.ok) return;
     expect(result.value.data.retrievedNotParsed).toBeUndefined();
     expect(result.value.data.disclosure).not.toContain('THE CONTAINER RETURNED WITHOUT THIS MEMBER');
+  });
+
+  // R6 DRIFT: partitionCoverage (this file) and summarizeCoverage
+  // (manifest.ts) each hand-roll the same five-way tri-state and are guarded
+  // only by a "kept in deliberate lockstep" comment in both files. A type
+  // that summary.missingCoverage flags as needing attention must land in AT
+  // LEAST ONE of covered/partial/notModeled/pending/capped/retrievedNotParsed
+  // so a reader who follows the bucketed lists can find out why it is
+  // missing — and no type may ever sit in summary.coveredTypes while also
+  // appearing in one of the non-covered buckets. Both directions are swept
+  // here over every reachable CoverageEntry shape (not just the two rows the
+  // CR-P3-3 fixture above exercises) so a future edit to one predicate that
+  // is not mirrored in the other fails loudly instead of silently dropping
+  // or double-counting a type.
+  describe('R6: partitionCoverage stays in lockstep with summarizeCoverage over every entry shape', () => {
+    const boolOptions = [true, false, undefined] as const;
+    const retrievedOptions = [0, 3] as const;
+
+    const allEntries: CoverageEntry[] = [];
+    let i = 0;
+    for (const requested of [true, false]) {
+      for (const retrieved of retrievedOptions) {
+        for (const errored of [true, false]) {
+          for (const neverModeled of [true, false]) {
+            for (const pending of boolOptions) {
+              for (const capped of boolOptions) {
+                for (const retrieveConfirmed of boolOptions) {
+                  i += 1;
+                  allEntries.push({
+                    type: `Gen${i}`,
+                    requested,
+                    retrieved,
+                    errored,
+                    neverModeled,
+                    ...(pending === undefined ? {} : { pending }),
+                    ...(capped === undefined ? {} : { capped }),
+                    ...(retrieveConfirmed === undefined ? {} : { retrieveConfirmed }),
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const genManifest: VaultManifest = {
+      ...manifest,
+      coverage: allEntries,
+    };
+    const genCtx: Context = { ...ctx, manifest: genManifest };
+
+    it('every entry lands in a bucket consistent with the summary, in both directions', async () => {
+      const result = await coverageReportHandler(genCtx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const data = result.value.data;
+
+      const coveredSet = new Set(data.covered.map((e) => e.type));
+      const nonCoveredSet = new Set([
+        ...data.partial.map((e) => e.type),
+        ...data.notModeled.map((e) => e.type),
+        ...data.pending.map((e) => e.type),
+        ...data.capped.map((e) => e.type),
+        ...(data.retrievedNotParsed ?? []).map((e) => e.type),
+        ...(data.notRequested ?? []).map((e) => e.type),
+      ]);
+      const summaryCovered = new Set(data.summary.coveredTypes);
+      const summaryMissing = new Set(data.summary.missingCoverage);
+
+      const violations: string[] = [];
+      for (const entry of allEntries) {
+        const inCovered = coveredSet.has(entry.type);
+        const inNonCovered = nonCoveredSet.has(entry.type);
+        const inSummaryCovered = summaryCovered.has(entry.type);
+        const inSummaryMissing = summaryMissing.has(entry.type);
+
+        // Direction 1: never covered-by-partition AND non-covered-by-partition
+        // at once (partitionCoverage's own buckets must be mutually exclusive).
+        if (inCovered && inNonCovered) {
+          violations.push(`${entry.type}: in BOTH covered and a non-covered bucket`);
+        }
+        // Direction 2: the summary must never call a type covered while
+        // coverage_report's own buckets call it non-covered (the exact
+        // self-contradiction the lockstep comment exists to prevent).
+        if (inSummaryCovered && inNonCovered) {
+          violations.push(`${entry.type}: summary.coveredTypes but also a non-covered bucket`);
+        }
+        // Direction 3: whatever the partition calls covered must not be a
+        // type the summary flags as still missing coverage.
+        if (inCovered && inSummaryMissing) {
+          violations.push(`${entry.type}: in covered but summary.missingCoverage flags it`);
+        }
+        // Direction 4: a type the summary says needs attention
+        // (missingCoverage) must be explainable from SOME bucket in the
+        // per-entry listing — it must not vanish from covered, partial,
+        // notModeled, pending, capped AND retrievedNotParsed all at once,
+        // which would silently drop it from every bucketed list a reader
+        // can page through even though the summary still names it.
+        if (inSummaryMissing && !inCovered && !inNonCovered) {
+          violations.push(`${entry.type}: summary.missingCoverage but in NO coverage_report bucket`);
+        }
+      }
+
+      expect(violations).toEqual([]);
+    });
   });
 });

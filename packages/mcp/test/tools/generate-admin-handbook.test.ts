@@ -428,6 +428,71 @@ describe('generateAdminHandbookHandler — full per-type scan (G2)', () => {
 // was invisible whenever its id sorted past position 500.
 // =============================================================================
 
+// =============================================================================
+// R1 / census 089 — a count table rendered from `countNodesByType` alone
+// cannot distinguish "retrieved, org genuinely has zero" from "this refresh
+// never retrieved the family". Flow is REQUESTED but `retrieved: 0` with no
+// `retrieveConfirmed` — the PARTIAL/dropped shape, not a confirmed-empty org —
+// yet the graph also holds zero Flow nodes, so the handbook's "| Flow | 0 |"
+// row is byte-identical to the confirmed-clean case unless the tool consults
+// manifest coverage the way doc-coverage-report.ts / limit-headroom-report.ts
+// do via `summarizeCoverage`.
+// =============================================================================
+describe('generateAdminHandbookHandler — coverage-incomplete family (R1 / census 089)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  const COVERAGE_GAP_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'Profile', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'PermissionSet', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'ApexClass', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'WorkflowRule', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'NamedCredential', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+      // Flow was requested, but the refresh dropped it silently (no
+      // retrieveConfirmed) — this is the PARTIAL/"not retrieved" shape, not a
+      // confirmed-empty org.
+      { type: 'Flow', requested: true, retrieved: 0, errored: false, neverModeled: false },
+    ],
+  } as VaultManifest;
+
+  // Same node seed as the base `seed` fixture, MINUS the one Flow node — the
+  // graph genuinely has zero Flow nodes, matching the coverage gap.
+  const gapSeed: ExtractionResult = {
+    nodes: seed.nodes.filter((n) => n.type !== 'Flow'),
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('coverage-gap-handbook.db');
+    store = built.store;
+    ctx = { ...built.ctx, manifest: COVERAGE_GAP_MANIFEST };
+    const imported = await importExtractionResults(store, [gapSeed]);
+    if (!imported.ok)
+      throw new Error(`coverage-gap seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('discloses that Flow coverage is incomplete instead of a bare "| Flow | 0 |"', async () => {
+    const result = await generateAdminHandbookHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const doc = result.value.data.document;
+    // The Automation Summary table still renders the floor count...
+    expect(doc.body).toContain('| Flow | 0 |');
+    // ...but a boundary must name Flow as coverage-incomplete so a reader
+    // does not read "0" as "confirmed: this org has no Flows".
+    const boundaryText = doc.boundaries.join('\n');
+    expect(boundaryText).toContain('Flow');
+    expect(boundaryText.toLowerCase()).toMatch(/not retrieved|incomplete|floor/);
+  });
+});
+
 describe('generateAdminHandbookHandler — past the 500-row page boundary (G2)', () => {
   let dir: string;
   let store: GraphStore;

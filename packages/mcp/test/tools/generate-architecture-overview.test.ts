@@ -599,3 +599,55 @@ describe('generateArchitectureOverviewHandler (under-cap graph stays byte-identi
     expect(boundaries).not.toContain('diagram capped');
   });
 });
+
+// Census 114 / R1 — the Domain Clustering section's empty-cluster message
+// asserted a specific measured cause ("every candidate was below the density
+// threshold") even when `domainClustersHandler` itself reports the clustering
+// ran on a CAPPED, partial candidate set (`candidateTruncated` +
+// `trueCandidateCounts`). A capped, partial run cannot honestly claim it
+// MEASURED every candidate and found none dense enough.
+describe('generateArchitectureOverviewHandler — domain clustering candidate truncation (census 114)', () => {
+  it('does not assert a measured density-threshold cause when the candidate enumeration was capped', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-arch-candidate-trunc-'));
+    const opened = await openGraph(join(dir, 'trunc.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const store = opened.value;
+    try {
+      // 501 mutually-isolated CustomObjects: none can share edges with any
+      // other, so greedyCluster demotes every one to "unclustered" —
+      // clusters.length === 0 — while also tripping domain-clusters'
+      // CANDIDATE_LIMIT_PER_TYPE (500), so candidateTruncated === true.
+      const N = 501;
+      const nodes: Node[] = [];
+      for (let i = 0; i < N; i++) {
+        nodes.push(
+          makeNode({ id: `CustomObject:Iso_${i.toString()}__c`, type: 'CustomObject', apiName: `Iso_${i.toString()}__c` }),
+        );
+      }
+      const imported = await importExtractionResults(store, [{ nodes, edges: [] }]);
+      if (!imported.ok) throw new Error(imported.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+
+      const result = await generateArchitectureOverviewHandler(localCtx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const doc = result.value.data.document;
+
+      // The composer must not narrate an empty cluster list with a specific
+      // asserted cause when the run was on a partial candidate set.
+      expect(doc.body).not.toContain('every candidate was below the density threshold');
+      // The derived truncation must be legible in the body...
+      expect(doc.body.toLowerCase()).toContain('cap');
+      // ...and echoed as a verbatim boundary, the same pattern already used
+      // for orgStructureTruncated / integrationDiagramTruncated.
+      const boundaries = doc.boundaries.join('\n');
+      expect(boundaries).toContain('501');
+      expect(boundaries.toLowerCase()).toContain('domain');
+    } finally {
+      await closeGraph(store);
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // 501 rows through DuckDB import + per-node edge lookups; give it headroom
+    // beyond the 5s default, matching the sibling 50-node clique test above.
+  }, 30_000);
+});

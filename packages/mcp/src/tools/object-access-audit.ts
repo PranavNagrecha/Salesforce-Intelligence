@@ -59,12 +59,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  getNodeById,
-  listEdges,
-  listNodesByIds,
-  listNodesByType,
-} from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listNodesByIds } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -73,7 +68,8 @@ import { coercePrefix } from './coerce-id.js';
 import { canonicalizeObjectScope, toObjectApiName } from './input-aliases.js';
 import { expandPermissionSetGroup, findPermissionSetGroupsContaining } from './permission-set-group.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
-import { clampedNodeScanLimit, scanHitCap } from './scan-cap.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 import {
   PERMSET_INTERSECTION_NOT_AVAILABLE,
   USER_ASSIGNMENT_NOT_IN_VAULT,
@@ -141,32 +137,33 @@ const censusSystemPermissions = async (
   ctx: Context,
   objectApiName: string,
 ): Promise<Result<SystemPermissionCensus, McpError>> => {
-  const scanLimit = clampedNodeScanLimit();
   const modifyAll = new Set<string>();
   const viewAll = new Set<string>();
   let anyNodeCarriesUserPermissions = false;
-  let scanTruncated = false;
-  for (const type of ['Profile', 'PermissionSet'] as const) {
-    const nodesResult = await listNodesByType(ctx.graph, type as ComponentType, {
-      limit: scanLimit,
+  // R6 (BRIEF-100): a single `listNodesByType` page with no OFFSET, capped at
+  // `clampedNodeScanLimit()` (<=500), left every Profile/PermissionSet past
+  // the cap unreachable and NEVER counted — the same single-page corpus scan
+  // commit 8e547076 migrated four other inventories away from. This walks the
+  // SQL `OFFSET` forward window-by-window until each type is exhausted (or
+  // the generous `FULL_SCAN_MAX_NODES` residual cap), so a granter at node
+  // 501+ is reached exactly like the first.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['Profile', 'PermissionSet']);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
     });
-    if (!nodesResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${nodesResult.error.message}`,
-      });
+  }
+  const scanTruncated = scan.value.scanIncomplete;
+  for (const node of scan.value.nodes) {
+    const perms = node.properties['userPermissions'];
+    if (!Array.isArray(perms)) continue;
+    anyNodeCarriesUserPermissions = true;
+    if (perms.includes(SYSTEM_PERMISSION_NAMES.modifyAllData)) {
+      modifyAll.add(node.id);
     }
-    if (scanHitCap(nodesResult.value.length, scanLimit)) scanTruncated = true;
-    for (const node of nodesResult.value) {
-      const perms = node.properties['userPermissions'];
-      if (!Array.isArray(perms)) continue;
-      anyNodeCarriesUserPermissions = true;
-      if (perms.includes(SYSTEM_PERMISSION_NAMES.modifyAllData)) {
-        modifyAll.add(node.id);
-      }
-      if (perms.includes(SYSTEM_PERMISSION_NAMES.viewAllData)) {
-        viewAll.add(node.id);
-      }
+    if (perms.includes(SYSTEM_PERMISSION_NAMES.viewAllData)) {
+      viewAll.add(node.id);
     }
   }
   const pointer =
@@ -187,7 +184,7 @@ const censusSystemPermissions = async (
   }
   const distinct = new Set<string>([...modifyAll, ...viewAll]);
   const truncation = scanTruncated
-    ? ` The Profile / PermissionSet scan hit the ${scanLimit}-node cap, so these counts are a FLOOR.`
+    ? ` ${fullScanTruncationNote(scan.value.incompleteTypes)}`
     : '';
   return ok({
     modeledInSummary: false,

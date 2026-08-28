@@ -47,9 +47,18 @@ import type { Context } from '../server.js';
  *                to it.
  *
  * Hand-copied to `object-360.ts` and `find-component-usages.ts` (each as
- * `NON_USAGE_EDGE_TYPES`). Only `find_dead_code`'s version is drift-tested
- * against this one, leaving the other two copies to drift silently. This is
- * technical debt: a unified definition would prevent divergence.
+ * `NON_USAGE_EDGE_TYPES`). All three copies are now drift-guarded:
+ * `find_dead_code` imports this constant and generates its SQL exclusions from
+ * it (pinned by `find-dead-code.test.ts`, "non-usage edge-type drift guard"),
+ * and the other two are pinned by source-text comparison in
+ * `apex-reachability.test.ts` — an edit to this list that is not mirrored into
+ * either copy fails CI instead of drifting silently.
+ *
+ * The remaining debt is ADOPTION, not drift: those two files still declare
+ * their own literal rather than importing this one, so they inherit nothing
+ * from the DERIVED {@link USAGE_EDGE_TYPES} partition below. The guard
+ * tolerates both shapes, so migrating a copy to
+ * `new Set(NOT_USAGE_EDGE_TYPES)` keeps the suite green.
  */
 export const NOT_USAGE_EDGE_TYPES = ['parentOf', 'grantedBy'] as const;
 

@@ -898,3 +898,25 @@ describe('whatIfMergeProfilesHandler — compatibility, apps and login restricti
     expect(r.value.data.disclosure).not.toContain('Tab visibility was NOT compared');
   });
 });
+
+describe('R6 adoption — no hand-rolled duplicate of familyWasExtracted', () => {
+  it('does not hand-roll Object.prototype.hasOwnProperty.call outside the shared helper', async () => {
+    // familyWasExtracted (absence-disclosure.ts) IS `Object.prototype.hasOwnProperty.call`
+    // for a node's properties. A second, hand-rolled call to the same primitive in this
+    // file (e.g. a dead `tabVisibilitiesExtracted` field) is an uncaught duplicate of the
+    // shared predicate: nothing stops it from drifting from familyWasExtracted's contract.
+    const { readFile } = await import('node:fs/promises');
+    const src = await readFile(
+      new URL('../../src/tools/what-if-merge-profiles.ts', import.meta.url),
+      'utf8',
+    );
+    expect(src).not.toContain('Object.prototype.hasOwnProperty.call');
+  });
+
+  it('does not carry a dead tabVisibilitiesExtracted field', async () => {
+    const src = await (
+      await import('node:fs/promises')
+    ).readFile(new URL('../../src/tools/what-if-merge-profiles.ts', import.meta.url), 'utf8');
+    expect(src).not.toContain('tabVisibilitiesExtracted');
+  });
+});

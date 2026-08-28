@@ -3,12 +3,17 @@
  *
  * Answers the admin's terror question: "what does the `{namespace}` managed
  * package touch, and what of MINE breaks if I uninstall or upgrade it?" —
- * the managed-package boundary surface. No `InstalledPackage` metadata is
- * modelled, so the tool derives package membership from the API-name
- * NAMESPACE PREFIX (the same `SBQQ__` signal the CPQ tier recognises) and
- * reports the BOUNDARY: which of your components reference the package's
- * components (the uninstall blast radius), and which of your components were
- * grafted onto the package's objects.
+ * the managed-package boundary surface. Package MEMBERSHIP is derived from the
+ * API-name NAMESPACE PREFIX (the same `SBQQ__` signal the CPQ tier recognises)
+ * — a package's own components are usually never retrieved, so the prefix, not
+ * a member list, is what identifies them. `InstalledPackage` nodes ARE modelled
+ * when the vault retrieved that family, and this tool uses them for two things:
+ * the 2-segment `Ns__Leaf` managed-member pass (see below) and, when the
+ * manifest reports that family COMPLETE, the roster of namespaces this org
+ * actually has (`collectPackageNamespaces` -> `known`). What the tool reports is
+ * the BOUNDARY: which of your components reference the package's components (the
+ * uninstall blast radius), and which of your components were grafted onto the
+ * package's objects.
  *
  * **Two modes** (presence of a package selector chooses IMPACT):
  *   - INVENTORY (no `namespace` / `packageId` / `componentId`): scan every
@@ -32,6 +37,16 @@
  *     yield a truthful non-soft verdict so the caveat and the verdict AGREE
  *     (PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-BLIND) — the enum a host acts on can
  *     never read soft-safe while a package touchpoint or blind spot is present.
+ *     IMPACT mode can also REFUSE with `invalid-query` (`path: 'namespace'`):
+ *     when the manifest reports `InstalledPackage` coverage COMPLETE, that
+ *     family is non-empty, and the requested namespace is in neither the
+ *     `InstalledPackage` roster nor any component / extension / dependency
+ *     (phantom targets included) on a scan that ran to completion, the namespace
+ *     does not exist in this org (PACKAGE-IMPACT-UNRECOGNIZED-NAMESPACE). "Not
+ *     installed" is then said out loud rather than dressed as the soft
+ *     `no-detected-dependencies`. Coverage that is errored / capped / pending /
+ *     scoped-out makes the roster non-authoritative, so no refusal is issued
+ *     there — an incomplete roster must never deny a package the org has.
  *
  * **Namespace heuristic** (`namespaceOf`): a Salesforce API name carries a
  * namespace iff its leaf component name splits into >= 3 `__`-delimited
@@ -83,6 +98,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  buildEnumerationCoverageCaveat,
   buildUsageSourceCoverageCaveat,
   type CoverageCaveat,
 } from './coverage-trust.js';
@@ -609,6 +625,50 @@ const buildImpact = async (
   const hasInbound = dependencies.length > 0 || extensions.length > 0;
   const membersPresent = packageNodes.length > 0;
   const scanIncomplete = scanTruncated || edgeScanTruncated;
+
+  // R4 (PACKAGE-IMPACT-UNRECOGNIZED-NAMESPACE). An IMPACT call naming a
+  // namespace this org does not have — most often a near-miss typo (`APXTConga`
+  // for the real `APXTConga4`) — used to fall all the way through to the bare
+  // `no-detected-dependencies`, the ONE soft verdict the whole staged policy
+  // exists to protect: "we cannot find that package at all" and "that package is
+  // installed and nothing touches it" rendered IDENTICALLY to a host keying an
+  // uninstall decision on the enum. Refuse instead — but ONLY when the refusal
+  // is provable, which needs four conditions to hold at once:
+  //
+  //   1. `installedPackagesAuthoritative` — the manifest says the
+  //      `InstalledPackage` family retrieved COMPLETELY, so `known` really is
+  //      every package installed here. This is the ADOPTED predicate
+  //      (`buildEnumerationCoverageCaveat`, coverage-trust.ts), the same one the
+  //      sibling `sfi.installed_package_catalog` uses for this exact family — NOT
+  //      a hand-rolled `known.size > 0`, which is TRUE on an `errored` / `capped`
+  //      / `pending` / scoped-`--types` refresh whose InstalledPackage rows are
+  //      stale or half-retrieved. On such a vault `known` is INCOMPLETE, and
+  //      refusing would invent a NEW confident-wrong answer: a flat denial that a
+  //      genuinely-installed package exists. There the honest soft/`review`
+  //      verdict is kept. (`known.size > 0` remains a necessary condition — a
+  //      vault modelling no InstalledPackage at all can prove nothing either way
+  //      and keeps the pre-existing prefix-heuristic behaviour unchanged.)
+  //   2. `!membersPresent` — no component in the graph carries the namespace.
+  //   3. `!hasInbound` — no extension and no dependency, INCLUDING the
+  //      phantom-target (`targetMissing`) kind: a reference to an unretrieved
+  //      managed component IS positive evidence the namespace is real.
+  //   4. `!scanIncomplete` — a truncated node/edge scan may simply not have
+  //      reached the namespace's members yet; that stays `incomplete-scan`.
+  const installedPackagesAuthoritative =
+    known.size > 0 && buildEnumerationCoverageCaveat(ctx, 'InstalledPackage') === undefined;
+  if (!hasInbound && !membersPresent && !scanIncomplete && installedPackagesAuthoritative && !known.has(targetLc)) {
+    const knownList = [...known.values()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return err({
+      kind: 'invalid-query',
+      message:
+        `namespace '${target}' does not match any InstalledPackage in this vault (checked ` +
+        `case-insensitively), and no component, extension, or dependency in the graph carries ` +
+        `it either. Installed packages here: ${knownList.join(', ')}. Check spelling/case, or ` +
+        `omit 'namespace' to list every visible package.`,
+      path: 'namespace',
+    });
+  }
+
   const coverageCaveat = hasInbound
     ? undefined
     : buildUsageSourceCoverageCaveat(
@@ -651,6 +711,20 @@ const buildImpact = async (
  * The `sfi.package_impact` MCP tool. INVENTORY mode (no `namespace`) lists
  * every managed package visible in the vault; IMPACT mode (`namespace`)
  * returns the uninstall blast radius for one package.
+ *
+ * **IMPACT mode can return `invalid-query`** (`path: 'namespace'`) for two
+ * distinct reasons, and both are refusals rather than a silent fall-back:
+ *   - an UNRECOGNIZABLE selector (`packageId` / `componentId` / `namespacePrefix`
+ *     that resolves to no namespace) — never a silent slide into full INVENTORY;
+ *   - an UNRECOGNIZED namespace (PACKAGE-IMPACT-UNRECOGNIZED-NAMESPACE): the
+ *     vault's `InstalledPackage` coverage is COMPLETE and non-empty, the
+ *     namespace is absent from that roster, and a COMPLETE scan found no member,
+ *     extension, or dependency (phantom targets included) carrying it. The error
+ *     message names the real installed namespaces so a near-miss typo is
+ *     self-correcting. When `InstalledPackage` coverage is errored / capped /
+ *     pending / scoped-out — or the family is not modelled at all — the roster
+ *     cannot prove absence, so the honest soft/`review` verdict is returned
+ *     instead of a refusal.
  *
  * @example
  *   const r = await packageImpactHandler(ctx, { namespace: 'SBQQ' });

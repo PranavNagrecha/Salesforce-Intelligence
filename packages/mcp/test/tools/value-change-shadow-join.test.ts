@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { Edge, ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
 import {
@@ -91,5 +92,52 @@ describe('cross-object shadow-join detection', () => {
   it('does NOT flag a keyish-named field with no External-ID master (common name, not a shadow join)', async () => {
     const a = await assess('CustomField:Account.Region_Code__c');
     expect(xobj(a)).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// R6 — detectShadowJoin's CustomField scan was a hand-rolled `listNodesByType`
+// offset loop (500 hardcoded, no `FULL_SCAN_MAX_NODES` residual ceiling, no
+// `scanIncomplete` concept at all) — a second/third copy of the walk
+// `scan-all-nodes.ts` exists to own, alongside `findValueCouplings`'s identical
+// copy for `ConditionalContext`. Neither could ever disclose a capped scan: a
+// shadow-join verdict computed over a truncated corpus still read as a
+// confident answer with no state to say "the scan did not finish".
+// =============================================================================
+describe('CustomField full-scan adoption (R6)', () => {
+  it('DRIFT GUARD: issues no hand-rolled listNodesByType CustomField/ConditionalContext scan', () => {
+    const src = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '../../src/tools/value-change-risk.ts'),
+      'utf8',
+    );
+    expect(/listNodesByType\(ctx\.graph, 'CustomField'/.test(src)).toBe(false);
+    expect(/listNodesByType\(ctx\.graph, 'ConditionalContext'/.test(src)).toBe(false);
+    expect(src).toContain('scanAllNodesOfTypes');
+  });
+
+  describe('residual scan-cap disclosure', () => {
+    const saved = {
+      window: process.env['SFI_NODE_SCAN_LIMIT'],
+      ceiling: process.env['SFI_VALUE_CHANGE_SCAN_MAX'],
+    };
+    afterEach(() => {
+      if (saved.window === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = saved.window;
+      if (saved.ceiling === undefined) delete process.env['SFI_VALUE_CHANGE_SCAN_MAX'];
+      else process.env['SFI_VALUE_CHANGE_SCAN_MAX'] = saved.ceiling;
+    });
+
+    it('discloses an incomplete CustomField scan instead of a silent confident verdict', async () => {
+      // 5 CustomField nodes are seeded; a window/ceiling of 2 leaves 3 behind it.
+      process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+      process.env['SFI_VALUE_CHANGE_SCAN_MAX'] = '2';
+      const a = await assess(`CustomField:Account.${SIS}`);
+      expect(a.disclosures.some((d) => /full scan capped/i.test(d))).toBe(true);
+    });
+
+    it('does NOT over-disclose when the CustomField scan completes', async () => {
+      const a = await assess(`CustomField:Account.${SIS}`);
+      expect(a.disclosures.some((d) => /full scan capped/i.test(d))).toBe(false);
+    });
   });
 });

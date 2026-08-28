@@ -101,6 +101,7 @@ import {
   type EntryPointKind,
   type ReachabilityVerdict,
 } from './method-reachability.js';
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 
 const APEX_CLASS_PREFIX = 'ApexClass:';
 const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
@@ -133,8 +134,13 @@ const CAPS = {
   tests: 50,
 } as const;
 
-/** Tool-local byte budget, under the dispatcher's 45 000 guard. */
-const BODY_BUDGET_BYTES = 36_000;
+/**
+ * Tool-local byte budget. DERIVED from the global response budget via
+ * {@link toolLocalPayloadBudgetBytes} rather than hard-coded, so it always sits
+ * strictly below what the dispatcher's global reducer would trim to — never a
+ * sibling constant that can drift out of order with it.
+ */
+const bodyBudgetBytes = (): number => toolLocalPayloadBudgetBytes();
 
 /**
  * A list that may have been cut. `total` is the count BEFORE the cap, always —
@@ -1513,10 +1519,11 @@ const byteLength = (value: unknown): number =>
  * never shed: they are the answer.
  */
 const fitToBudget = (out: ApexStructureOutput): ApexStructureOutput => {
-  if (byteLength(out) <= BODY_BUDGET_BYTES) return out;
+  const budget = bodyBudgetBytes();
+  if (byteLength(out) <= budget) return out;
   let current = out;
   const omitted: IncludeSection[] = [];
-  while (byteLength(current) > BODY_BUDGET_BYTES) {
+  while (byteLength(current) > budget) {
     let biggest: IncludeSection | null = null;
     let biggestBytes = 0;
     for (const section of SHEDDABLE) {
@@ -1544,7 +1551,7 @@ const fitToBudget = (out: ApexStructureOutput): ApexStructureOutput => {
     total: list.total,
     truncated: list.total > keep,
   });
-  while (byteLength(current) > BODY_BUDGET_BYTES) {
+  while (byteLength(current) > budget) {
     const methodCount = current.structure?.methods.items.length ?? 0;
     const findingCount = current.review.findings.items.length;
     if (methodCount <= 5 && findingCount <= 10) break;

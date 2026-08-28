@@ -23,6 +23,31 @@ export interface SupplementalFlowFieldWriter {
 }
 
 /**
+ * WHY the scan fell short. `truncated` is the UNION safety flag (a caller that
+ * only knows "is this proven?" reads that and nothing else); this discriminant
+ * says which axis fired, because the two have DIFFERENT causes and DIFFERENT
+ * remedies and a caller that hardcodes one of them misdiagnoses the other.
+ *
+ * - `none`               — every Flow node was walked AND every source read.
+ * - `scan-ceiling`       — the graph walk stopped at the residual ceiling
+ *                          (`SFI_FLOW_WRITER_SCAN_MAX`). There IS an un-scanned
+ *                          tail; raising the ceiling recovers it.
+ * - `unreadable-sources` — the graph walk was COMPLETE; one or more Flow SOURCE
+ *                          FILES could not be opened. There is NO un-scanned
+ *                          tail and raising the ceiling recovers NOTHING — the
+ *                          remedy is to re-refresh the vault / restore source.
+ * - `both`               — both axes fired.
+ * - `graph-error`        — the Flow graph query failed outright; NOTHING was
+ *                          scanned. Neither remedy above applies.
+ */
+export type SupplementalFlowWriterScanTruncationCause =
+  | 'none'
+  | 'scan-ceiling'
+  | 'unreadable-sources'
+  | 'both'
+  | 'graph-error';
+
+/**
  * The outcome of a {@link scanSupplementalFlowFieldWriters} walk.
  *
  * FLOW-WRITER-SCAN-CAPS-AT-500: this scan used to return a BARE
@@ -35,27 +60,124 @@ export interface SupplementalFlowFieldWriter {
  * Flow 501 read as "no supplemental writers", which is the exact silent
  * under-reporting the supplemental scan exists to eliminate.
  *
+ * FLOW-WRITER-SCAN-TWO-AXES: `truncated` alone is NOT enough for a caller to
+ * explain itself. Two independent things can leave the writer set unproven —
+ * a capped graph walk and an unreadable source tree — and they take OPPOSITE
+ * remedies. Collapsing them into one boolean traded a silent false-clean for a
+ * loud false-CAUSE: every caller hardcoded "capped at the full-scan ceiling,
+ * raise SFI_FLOW_WRITER_SCAN_MAX", which is actively wrong advice when the
+ * walk was complete and the source files had rotted. So the shape carries the
+ * axes SEPARATELY ({@link capExceeded}, {@link unreadableCount},
+ * {@link scanFailed}) plus a {@link truncationCause} discriminant, and
+ * {@link describeSupplementalFlowWriterScanBoundary} renders the one honest
+ * sentence so the three callers do not each write their own (and drift).
+ *
  * The shape mirrors its sibling `FlowConditionReaderScanResult`
  * (`flow-condition-field-readers-scan.ts`), which already pages everything and
- * reports `truncated` / `scannedCount` / `totalCount`, so the two supplemental
- * reconstructions disclose their boundaries identically.
+ * carries `scanFailed` / `scanError` ALONGSIDE `truncated` for exactly this
+ * reason, so the two supplemental reconstructions disclose their boundaries
+ * identically.
  */
 export interface SupplementalFlowWriterScanResult {
   /** One row per (Flow, mechanism) hit, sorted by `componentId`. */
   readonly writers: readonly SupplementalFlowFieldWriter[];
   /**
-   * True when the Flow walk did NOT cover every Flow in the vault — it stopped
-   * at the residual ceiling with more Flows behind it, or the graph query
-   * failed outright. Either way a writer in the un-scanned tail is MISSED, so
-   * the caller must disclose the cap rather than imply a complete scan. An
-   * empty `writers` list under `truncated: true` is UNCHECKED, never "none".
+   * The UNION safety flag: true when the writer set is NOT proven, for ANY
+   * reason — the graph walk stopped short, the graph query failed, or a Flow
+   * source file could not be read. An empty `writers` list under
+   * `truncated: true` is UNCHECKED, never "none". Kept as the union so no
+   * existing caller silently loses the flag; use {@link truncationCause} (or
+   * {@link describeSupplementalFlowWriterScanBoundary}) to say WHY.
    */
   readonly truncated: boolean;
-  /** Flow nodes actually scanned (N in the "N of M" disclosure). */
+  /**
+   * True when the graph walk itself stopped at the residual ceiling with more
+   * Flow nodes behind it — an un-scanned TAIL exists and raising
+   * `SFI_FLOW_WRITER_SCAN_MAX` recovers it. False on the source-read axis.
+   */
+  readonly capExceeded: boolean;
+  /**
+   * Flow nodes the walk REACHED but whose source was never opened — no
+   * `sourcePath` on record, or nothing readable at that path. These are NOT in
+   * an un-scanned tail and NO ceiling change recovers them; the vault's source
+   * tree is the problem. 0 when every reached Flow was read.
+   */
+  readonly unreadableCount: number;
+  /** True when the Flow graph query failed outright and NOTHING was scanned. */
+  readonly scanFailed: boolean;
+  /** The graph error message when {@link scanFailed}; `null` otherwise. */
+  readonly scanError: string | null;
+  /** Which axis (or axes) fired. `'none'` exactly when `truncated` is false. */
+  readonly truncationCause: SupplementalFlowWriterScanTruncationCause;
+  /**
+   * Flow source files actually READ and scanned (N in the "N of M"
+   * disclosure) — never a Flow the walk merely visited.
+   */
   readonly scannedCount: number;
-  /** Total Flow nodes in the vault (M). Computed only when truncated. */
+  /** Total Flow nodes in the vault (M). Resolved exactly when truncated. */
   readonly totalCount: number;
 }
+
+/**
+ * The ONE honest boundary sentence for a supplemental writer scan — `null`
+ * when the scan was complete and there is nothing to disclose.
+ *
+ * FLOW-WRITER-SCAN-TWO-AXES: `field_360`, `why_field_changed` and
+ * `safe_to_delete_field` each hand-wrote their own copy of this sentence, and
+ * all three hardcoded the ceiling cause ("un-scanned tail", "raise
+ * SFI_FLOW_WRITER_SCAN_MAX"). On the source-read axis all of those clauses are
+ * FALSE and the remedy they name cannot work. Three copies of a rule is three
+ * chances to drift, so the rule lives here, next to the state it describes,
+ * and the callers adopt it.
+ */
+export const describeSupplementalFlowWriterScanBoundary = (
+  scan: SupplementalFlowWriterScanResult,
+): string | null => {
+  const unread = scan.unreadableCount.toString();
+  const n = scan.scannedCount.toString();
+  const m = scan.totalCount.toString();
+  const missedWriter =
+    'an SObject-variable / recordUpdates writer';
+  const unreadableClause =
+    `${unread} Flow source file(s) could not be opened (no \`sourcePath\` on record, ` +
+    'or nothing readable at that path — a moved/partial source tree, or a vault whose ' +
+    'source no longer matches its graph). The graph walk itself was COMPLETE, so this ' +
+    'is NOT the full-scan ceiling and raising `SFI_FLOW_WRITER_SCAN_MAX` recovers ' +
+    'NOTHING — re-refresh the vault / restore the source tree';
+  switch (scan.truncationCause) {
+    case 'none':
+      return null;
+    case 'graph-error':
+      return (
+        'Supplemental Flow field-writer reconstruction FAILED outright — the Flow graph ' +
+        `query errored (${scan.scanError ?? 'unknown error'}) and NO Flow was scanned. ` +
+        'The supplemental writer axis is NOT CHECKED, never a proven "no such writer".'
+      );
+    case 'scan-ceiling':
+      return (
+        `Supplemental Flow field-writer reconstruction was CAPPED at ${n} of ${m} Flow ` +
+        'nodes (full-scan ceiling, `SFI_FLOW_WRITER_SCAN_MAX`) — ' +
+        `${missedWriter} in the un-scanned tail is NOT reflected in \`writers\`; treat ` +
+        'the writer set as possibly INCOMPLETE, and narrow the vault or raise the ' +
+        'ceiling to fully enumerate.'
+      );
+    case 'unreadable-sources':
+      return (
+        `Supplemental Flow field-writer reconstruction READ ${n} of ${m} Flow source ` +
+        `file(s): ${unreadableClause}. ${missedWriter} inside an unread Flow is NOT ` +
+        'reflected in `writers`; treat the writer set as possibly INCOMPLETE.'
+      );
+    case 'both':
+      return (
+        `Supplemental Flow field-writer reconstruction READ only ${n} of ${m} Flow ` +
+        'source file(s) for TWO independent reasons: the graph walk was CAPPED at the ' +
+        'full-scan ceiling (`SFI_FLOW_WRITER_SCAN_MAX`), leaving an un-scanned tail, ' +
+        `AND ${unreadableClause}. ${missedWriter} in either the un-scanned tail or an ` +
+        'unread Flow is NOT reflected in `writers`; treat the writer set as possibly ' +
+        'INCOMPLETE. Raising the ceiling addresses only the first reason.'
+      );
+  }
+};
 
 /**
  * The residual ceiling on the full `Flow` scan. Defaults to the shared
@@ -164,9 +286,33 @@ export const scanFlowXml = (
  *
  * Pages EVERY Flow node (not just the first ≤500) via the shared
  * `scanAllNodesOfTypes` full-window walk, and REPORTS whether the walk was
- * complete — see {@link SupplementalFlowWriterScanResult}. A graph query error
- * yields an EMPTY, TRUNCATED result: nothing was scanned, so the empty writer
- * list is "not checked", never a proven "no supplemental writers".
+ * complete — see {@link SupplementalFlowWriterScanResult}. `truncated` is the
+ * UNION of TWO INDEPENDENT axes. A caller DOES need to tell them apart — they
+ * have opposite remedies — so the axis that fired is reported separately in
+ * {@link SupplementalFlowWriterScanResult.truncationCause} and rendered by
+ * {@link describeSupplementalFlowWriterScanBoundary}. Reading the boolean and
+ * assuming axis 1 is a misdiagnosis, not a conservative default:
+ *
+ * 1. The graph walk itself stopped at the residual ceiling
+ *    (`flows.value.scanIncomplete`), or failed outright.
+ * 2. A Flow NODE was reached, but its source FILE could not actually be read
+ *    — no `sourcePath` on record, or the file at that path is gone
+ *    (FLOW-WRITER-SCAN-FILE-READ-IS-NOT-OPTIONAL: a moved/partial source
+ *    tree, or a stale graph pointing at a deleted file). That Flow's writes
+ *    were never checked, so it must count against completeness exactly like
+ *    an un-scanned node past the paging ceiling — `continue`-ing past it with
+ *    no accounting let a fully rotted source tree return `{writers: [],
+ *    truncated: false}`: a confident, complete-looking "no supplemental
+ *    writers" built out of files nobody actually opened. `scannedCount` only
+ *    counts Flows whose source was actually read (never a Flow the walk
+ *    merely visited), so "N of M" means what it says. There is NO un-scanned
+ *    tail on this axis and raising `SFI_FLOW_WRITER_SCAN_MAX` recovers
+ *    NOTHING, which is why it must not be reported as a ceiling cap.
+ *
+ * A graph query error yields an EMPTY, TRUNCATED result with
+ * `truncationCause: 'graph-error'`: nothing was scanned, so the empty writer
+ * list is "not checked", never a proven "no supplemental writers" — and
+ * neither remedy above applies to it either.
  */
 export const scanSupplementalFlowFieldWriters = async (
   ctx: Context,
@@ -176,13 +322,35 @@ export const scanSupplementalFlowFieldWriters = async (
   const maxNodes = flowWriterScanCeiling();
   const flows = await scanAllNodesOfTypes(ctx.graph, ['Flow'], maxNodes);
   if (!flows.ok) {
-    return { writers: [], truncated: true, scannedCount: 0, totalCount: 0 };
+    // Nothing was scanned: an empty writer list here is "not checked", never a
+    // proven "no supplemental writers". `capExceeded` is FALSE — no ceiling was
+    // involved, so a caller must not advise raising one.
+    return {
+      writers: [],
+      truncated: true,
+      capExceeded: false,
+      unreadableCount: 0,
+      scanFailed: true,
+      scanError: flows.error.message,
+      truncationCause: 'graph-error',
+      scannedCount: 0,
+      totalCount: 0,
+    };
   }
   const out: SupplementalFlowFieldWriter[] = [];
+  let readCount = 0;
+  let unreadableCount = 0;
   for (const node of flows.value.nodes) {
-    if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) continue;
+    if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
+      // No source on record at all — this Flow's writes could not be
+      // checked. Count it against completeness rather than silently
+      // skipping it: see FLOW-WRITER-SCAN-FILE-READ-IS-NOT-OPTIONAL above.
+      unreadableCount += 1;
+      continue;
+    }
     try {
       const xml = await readFile(join(ctx.vaultRoot, node.sourcePath), 'utf-8');
+      readCount += 1;
       const hits = scanFlowXml(xml, objectApiName, fieldApiName);
       for (const hit of hits) {
         out.push({
@@ -193,19 +361,42 @@ export const scanSupplementalFlowFieldWriters = async (
         });
       }
     } catch {
-      // unreadable source — skip
+      // Source path on record, but unreadable (moved/partial tree,
+      // permissions, deleted file) — same accounting as a missing
+      // sourcePath: this Flow was NOT checked, not "checked and clean".
+      unreadableCount += 1;
     }
   }
   out.sort((a, b) =>
     a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0,
   );
-  const truncated = flows.value.scanIncomplete;
-  const scannedCount = flows.value.nodes.length;
+  // FLOW-WRITER-SCAN-TWO-AXES: keep the axes SEPARATE, then union them into
+  // `truncated`. The union is the safety flag; the discriminant is the reason.
+  const capExceeded = flows.value.scanIncomplete;
+  const truncated = capExceeded || unreadableCount > 0;
+  const truncationCause: SupplementalFlowWriterScanTruncationCause = capExceeded
+    ? unreadableCount > 0
+      ? 'both'
+      : 'scan-ceiling'
+    : unreadableCount > 0
+      ? 'unreadable-sources'
+      : 'none';
+  const scannedCount = readCount;
   // Only pay for the true total (M) when we actually need to disclose "N of M".
-  let totalCount = scannedCount;
+  let totalCount = flows.value.nodes.length;
   if (truncated) {
     const total = await countNodesByType(ctx.graph, 'Flow');
     if (total.ok) totalCount = total.value;
   }
-  return { writers: out, truncated, scannedCount, totalCount };
+  return {
+    writers: out,
+    truncated,
+    capExceeded,
+    unreadableCount,
+    scanFailed: false,
+    scanError: null,
+    truncationCause,
+    scannedCount,
+    totalCount,
+  };
 };

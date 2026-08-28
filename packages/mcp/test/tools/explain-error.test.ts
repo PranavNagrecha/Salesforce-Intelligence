@@ -531,3 +531,141 @@ describe('explain_error — natural input aliases', () => {
     expect(parsed.error.issues.some((i) => i.path.join('.') === 'errorText')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R4 — the `object` hint must be VERIFIED against the vault before it is
+// threaded into any graph read (VR filter / duplicate-rule filter /
+// object-automation cross-reference), never string-templated on faith.
+// ---------------------------------------------------------------------------
+
+describe('explain_error — object hint verification (R4)', () => {
+  it('fails closed with a named invalid-query on a mistyped object hint, instead of a confident empty automation cross-reference', async () => {
+    const r = await explainErrorHandler(ctx, {
+      errorText:
+        'CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY, OpportunityTrigger: execution of AfterUpdate caused by System.Exception',
+      object: 'Acount', // typo for "Account" — and not the same as "Opportunity" either
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('Acount');
+  });
+
+  it('a wrong-CASE object hint resolves to the vault exact casing before the object-automation cross-reference runs, instead of silently cross-referencing zero automation', async () => {
+    const r = await explainErrorHandler(ctx, {
+      errorText:
+        'CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY, OpportunityTrigger: execution of AfterUpdate caused by System.Exception',
+      object: 'opportunity', // vault holds "Opportunity" — case differs
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.categoryExplanation?.objectAutomation?.map((a) => a.componentId).sort()).toEqual([
+      'ApexTrigger:OpportunityTrigger',
+      'Flow:Opportunity_After_Save',
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R1 — `objectAutomation` is byte-budget capped at MAX_OBJECT_AUTOMATION (25);
+// the cap must carry a `truncated` signal and must sort the FULL set before
+// slicing, never slice-then-sort an arbitrary edge-order subset.
+// ---------------------------------------------------------------------------
+
+describe('explain_error — object-automation truncation (R1)', () => {
+  it('caps objectAutomation at 25 AND discloses objectAutomationTruncated: true on an object with more automation than the cap', async () => {
+    const n = 30;
+    const triggerIds = Array.from(
+      { length: n },
+      (_, i) => `ApexTrigger:CaseAutomation_${String(i).padStart(2, '0')}`,
+    );
+    const extra: ExtractionResult = {
+      nodes: [
+        node({ id: 'CustomObject:Case', type: 'CustomObject', apiName: 'Case' }),
+        ...triggerIds.map((id, i) =>
+          node({
+            id,
+            type: 'ApexTrigger',
+            apiName: `CaseAutomation_${String(i).padStart(2, '0')}`,
+            properties: { triggerObject: 'Case', status: 'Active' },
+          }),
+        ),
+      ],
+      edges: triggerIds.map((fromId) =>
+        edge({ fromId, toId: 'CustomObject:Case', edgeType: 'triggersOn' }),
+      ),
+    };
+    const imp = await importExtractionResults(store, [extra]);
+    expect(imp.ok).toBe(true);
+
+    const r = await explainErrorHandler(ctx, {
+      errorText:
+        'CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY, CaseAutomation_00: execution of AfterUpdate caused by System.Exception',
+      object: 'Case',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cat = r.value.data.categoryExplanation;
+    expect(cat?.objectAutomation).toHaveLength(25);
+    expect(cat?.objectAutomationTruncated).toBe(true);
+    // The 25 kept must be the alphabetically-first 25 of the FULL 30 (proves a
+    // sort over the whole set, not a sort of an arbitrary 25-item slice).
+    const ids = (cat?.objectAutomation ?? []).map((a) => a.componentId);
+    const expectedFirst25 = [...triggerIds].sort().slice(0, 25);
+    expect(ids).toEqual(expectedFirst25);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R6 — the DuplicateRule scan must page past the 500-node single-page cap,
+// exactly as the sibling ValidationRule scan in this same file does.
+// ---------------------------------------------------------------------------
+
+describe('explain_error — DuplicateRule full-scan pagination (R6)', () => {
+  it('finds an active duplicate rule past the 500-row single-page cap, instead of reading only the alphabetical first page', async () => {
+    const bigTempDir = mkdtempSync(join(tmpdir(), 'sfi-explain-error-r6-'));
+    const o = await openGraph(join(bigTempDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    const bigStore = o.value;
+    try {
+      // 500 filler rules that sort BEFORE the target — id-ASC digits < 'z' —
+      // so the target lands at row 501, past a single un-paged 500-row page.
+      const filler = Array.from({ length: 500 }, (_, i) =>
+        node({
+          id: `DuplicateRule:Lead.Filler_${String(i).padStart(4, '0')}`,
+          type: 'DuplicateRule',
+          apiName: `Lead.Filler_${String(i).padStart(4, '0')}`,
+          parentId: 'CustomObject:Lead',
+          properties: { isActive: false, alertText: 'filler' },
+        }),
+      );
+      const target = node({
+        id: 'DuplicateRule:Lead.zzz_Target_Rule',
+        type: 'DuplicateRule',
+        apiName: 'Lead.zzz_Target_Rule',
+        label: 'Target Rule',
+        parentId: 'CustomObject:Lead',
+        properties: { isActive: true, alertText: 'Possible match on Lead.' },
+      });
+      const seedBig: ExtractionResult = {
+        nodes: [node({ id: 'CustomObject:Lead', type: 'CustomObject', apiName: 'Lead' }), ...filler, target],
+        edges: [],
+      };
+      const imp = await importExtractionResults(bigStore, [seedBig]);
+      expect(imp.ok).toBe(true);
+      const bigCtx: Context = { vaultRoot: bigTempDir, manifest: MANIFEST, graph: bigStore };
+
+      const r = await explainErrorHandler(bigCtx, {
+        errorText: 'DUPLICATES_DETECTED, Possible match on Lead.',
+        object: 'Lead',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const dups = r.value.data.candidates.filter((c) => c.strategy === 'duplicate-rule');
+      expect(dups.map((c) => c.componentId)).toContain('DuplicateRule:Lead.zzz_Target_Rule');
+    } finally {
+      await closeGraph(bigStore);
+      rmSync(bigTempDir, { recursive: true, force: true });
+    }
+  });
+});

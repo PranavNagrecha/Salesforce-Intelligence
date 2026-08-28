@@ -288,9 +288,22 @@ export const generateArchitectureOverviewHandler = async (
   ].join('\n');
 
   // Domain Clustering diagram + per-domain section.
+  //
+  // Census 114 / R1: `domainClustersHandler` already discloses when its
+  // candidate enumeration was CAPPED before clustering ran
+  // (`domains.candidateTruncated` + `domains.trueCandidateCounts`) — the
+  // clustering in that case ran on a partial candidate set, so "no clusters"
+  // cannot honestly be narrated as a measured density-threshold finding. An
+  // empty list under a capped enumeration gets an honest "capped, not
+  // measured" line instead of asserting a specific cause the tool never
+  // actually checked for the missing candidates.
   const domainsLines: string[] = ['## Domain Clustering', ''];
   if (domains.clusters.length === 0) {
-    domainsLines.push('_(no clusters surfaced — every candidate was below the density threshold)_');
+    domainsLines.push(
+      domains.candidateTruncated === true
+        ? '_(no clusters surfaced — candidate enumeration was capped before clustering ran; this is NOT a measured density-threshold result — see Boundaries)_'
+        : '_(no clusters surfaced — every candidate was below the density threshold)_',
+    );
   } else {
     domainsLines.push('```mermaid');
     domainsLines.push('graph LR');
@@ -448,6 +461,17 @@ export const generateArchitectureOverviewHandler = async (
   if (integrationDiagramTruncated) {
     boundaries.push(
       `Integration Topology diagram capped: showing the first ${Math.min(allIntegrationNodes.length, INTEGRATION_DIAGRAM_CAP).toString()} of ${allIntegrationNodes.length.toString()} integration surfaces as diagram nodes — the Type/Count table covers ALL of them, but only the first ${INTEGRATION_DIAGRAM_CAP.toString()} are pictured. See \`sfi.integration_map\` for the full per-surface list.`,
+    );
+  }
+  // Census 114 / R1: forward domain_clusters' own candidate-truncation
+  // disclosure rather than discarding it — a capped candidate enumeration
+  // means the clustering (empty OR non-empty) ran on a partial candidate set.
+  if (domains.candidateTruncated === true) {
+    const perType = Object.entries(domains.trueCandidateCounts ?? {})
+      .map(([type, count]) => `${type}: ${(count ?? 0).toString()}`)
+      .join(', ');
+    boundaries.push(
+      `Domain Clustering candidate enumeration capped: at least one of CustomObject / ApexClass / Flow exceeds the 500-per-type candidate limit (true counts — ${perType}) — clustering ran on a PARTIAL candidate set. See \`sfi.domain_clusters\` for the full disclosure.`,
     );
   }
 

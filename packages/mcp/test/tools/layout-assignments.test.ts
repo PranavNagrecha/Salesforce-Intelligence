@@ -417,3 +417,100 @@ describe('layoutAssignmentsHandler — extraction gap', () => {
     expect(r.value.data.boundaryNote).toContain('not modeled');
   });
 });
+
+// R6/MEDIUM (brief 095, line 418): a MIXED-era vault — some profiles carry the
+// extracted `layoutAssignments` property, some do not (an incremental refresh
+// that only re-extracted a subset). The old `anyProfileHadAssignments` was an
+// ANY across every profile, so ONE carrier (Admin/Sales in the top-level
+// `seed`) silently suppressed the disclosure for the non-carrying profile
+// (NoData) — the admin sees a complete-looking summary with no caveat that
+// NoData's assignments (if any exist in the real org) are unmodeled.
+describe('layoutAssignmentsHandler — mixed-era extraction (per-container disclosure)', () => {
+  it('discloses the specific profile(s) that were never extracted, even when other profiles WERE', async () => {
+    const r = await layoutAssignmentsHandler(ctx, { componentId: LAYOUT });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Admin/Sales data is still real and present (extraction gap must not
+    // blank out the profiles that WERE extracted).
+    expect(r.value.data.assignments.length).toBeGreaterThan(0);
+    // The non-carrying profile must be named, not silently folded into "no
+    // assignments" alongside the carrying profiles.
+    expect(r.value.data.boundaryNote).toContain('Profile:NoData');
+    expect(r.value.data.boundaryNote).toContain('NOT');
+  });
+
+  it('does not disclose an extraction gap when every profile carries the property', async () => {
+    const fullDir = mkdtempSync(join(tmpdir(), 'sfi-layout-assignments-full-'));
+    const opened = await openGraph(join(fullDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const fullStore = opened.value;
+    const imported = await importExtractionResults(fullStore, [
+      {
+        nodes: [
+          node({ id: LAYOUT, type: 'Layout', apiName: 'Account.Account Layout' }),
+          node({
+            id: 'Profile:Only',
+            type: 'Profile',
+            apiName: 'Only',
+            properties: {
+              layoutAssignments: [{ layout: 'Account-Account Layout', recordType: null }],
+            },
+          }),
+        ],
+        edges: [],
+      } as ExtractionResult,
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const fullCtx: Context = { vaultRoot: fullDir, manifest: MANIFEST, graph: fullStore };
+    try {
+      const r = await layoutAssignmentsHandler(fullCtx, { componentId: LAYOUT });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.boundaryNote).not.toContain('carries no extracted');
+      expect(r.value.data.boundaryNote).not.toContain('not modeled');
+    } finally {
+      await closeGraph(fullStore);
+      rmSync(fullDir, { recursive: true, force: true });
+    }
+  });
+
+  // R1: a profile whose refresh CHECKED layoutAssignments and found none can
+  // legitimately store `layoutAssignments: null` (or any non-array shape) —
+  // that is CHECKED-empty, not never-extracted. The disclosure decision must
+  // key off property PRESENCE (hasOwnProperty), never off whether the stored
+  // value happens to be an array.
+  it('does not misread an explicit non-array layoutAssignments value as "never extracted"', async () => {
+    const nullDir = mkdtempSync(join(tmpdir(), 'sfi-layout-assignments-null-'));
+    const opened = await openGraph(join(nullDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const nullStore = opened.value;
+    const imported = await importExtractionResults(nullStore, [
+      {
+        nodes: [
+          node({ id: LAYOUT, type: 'Layout', apiName: 'Account.Account Layout' }),
+          node({
+            id: 'Profile:CheckedEmpty',
+            type: 'Profile',
+            apiName: 'CheckedEmpty',
+            properties: { layoutAssignments: null },
+          }),
+        ],
+        edges: [],
+      } as ExtractionResult,
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    const nullCtx: Context = { vaultRoot: nullDir, manifest: MANIFEST, graph: nullStore };
+    try {
+      const r = await layoutAssignmentsHandler(nullCtx, { componentId: LAYOUT });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // A single checked-empty profile must not read as an extraction gap.
+      expect(r.value.data.boundaryNote).not.toContain('Profile:CheckedEmpty');
+      expect(r.value.data.boundaryNote).not.toContain('not modeled');
+      expect(r.value.data.boundaryNote).not.toContain('carries no extracted');
+    } finally {
+      await closeGraph(nullStore);
+      rmSync(nullDir, { recursive: true, force: true });
+    }
+  });
+});

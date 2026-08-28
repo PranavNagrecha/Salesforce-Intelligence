@@ -23,6 +23,7 @@ import {
   methodReachabilityHandler,
   methodReachabilityInputSchema,
 } from '../../src/tools/method-reachability.js';
+import { responseReductionCap } from '../../src/tools/response-budget.js';
 
 import { measureGraphQueries } from './_graph-query-budget.js';
 
@@ -450,7 +451,7 @@ describe('methodReachabilityHandler — bounded graph queries (transitive)', () 
     ],
   };
 
-  it('golden: the batched upstream reachability is byte-identical to the pre-batch output', async () => {
+  it('golden: the batched upstream reachability preserves the pre-batch verdict, entry-point set and reaching tests', async () => {
     const result = await withStore(goldenSeed, (localCtx) =>
       methodReachabilityHandler(localCtx, { classApiName: 'ApexClass:Target' }),
     );
@@ -498,7 +499,154 @@ describe('methodReachabilityHandler — bounded graph queries (transitive)', () 
       walkedEdgeTypes: USAGE_EDGE_TYPES,
       soundness: { complete: true, blindSpots: [], staticCoverage: 'full' },
       disclosure: result.value.data.disclosure,
+      depthTruncated: false,
+      depthCapBoundaryCount: 0,
+      depthCapBoundaryIds: [],
     });
+  });
+
+  // R1 (depth axis) — the census finding at method-reachability.ts:96. A walk
+  // whose frontier is still non-empty when REACHABILITY_BFS_DEPTH cuts it off
+  // must be distinguishable from a walk whose frontier ran out on its own.
+  // Chain of 4 upstream hops: L4 -> L3 -> L2 -> L1 -> Target. The BFS (depth
+  // cap 3) discovers Target(0), L1(1), L2(2), L3(3) and never queries L3's own
+  // incoming edges, so L4 is invisible AND the walk must say so.
+  const seedDeepChain: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:Target', apiName: 'Target', properties: { isTest: false } }),
+      makeNode({ id: 'ApexClass:L1', apiName: 'L1', properties: { isTest: false } }),
+      makeNode({ id: 'ApexClass:L2', apiName: 'L2', properties: { isTest: false } }),
+      makeNode({ id: 'ApexClass:L3', apiName: 'L3', properties: { isTest: false } }),
+      makeNode({
+        id: 'ApexClass:L4',
+        apiName: 'L4',
+        properties: { isRestResource: true, isTest: false },
+      }),
+    ],
+    edges: [
+      makeEdge({ fromId: 'ApexClass:L1', toId: 'ApexClass:Target', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:L2', toId: 'ApexClass:L1', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:L3', toId: 'ApexClass:L2', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:L4', toId: 'ApexClass:L3', edgeType: 'callsApex' }),
+    ],
+  };
+
+  it('flags depthTruncated:true with the boundary id when the frontier is still non-empty at the depth-3 cap', async () => {
+    const result = await withStore(seedDeepChain, (localCtx) =>
+      methodReachabilityHandler(localCtx, { classApiName: 'ApexClass:Target' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // L4 (the actual REST entry point, 4 hops away) never enters entryPoints —
+    // that half of the behaviour is untouched. What must change is that the
+    // response says the walk was cut off, not that it found nothing.
+    expect(result.value.data.verdict).toBe('likely-dead-code');
+    expect(result.value.data.entryPoints).toEqual([]);
+    expect(result.value.data.depthTruncated).toBe(true);
+    expect(result.value.data.depthCapBoundaryCount).toBe(1);
+    expect(result.value.data.depthCapBoundaryIds).toEqual(['ApexClass:L3']);
+    expect(result.value.data.disclosure).toMatch(/depth/i);
+    expect(result.value.data.disclosure).toMatch(/L3|boundary|unexplored|cap/i);
+  });
+
+  it('flags depthTruncated:false when the frontier empties on its own before the depth-3 cap', async () => {
+    // Two-hop chain: L1 -> Target, L2 -> L1. L2 has no further callers, so the
+    // walk's frontier is genuinely empty by depth 2 — nothing was left behind.
+    const seedShallowChain: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:Target', apiName: 'Target', properties: { isTest: false } }),
+        makeNode({ id: 'ApexClass:L1', apiName: 'L1', properties: { isTest: false } }),
+        makeNode({ id: 'ApexClass:L2', apiName: 'L2', properties: { isTest: false } }),
+      ],
+      edges: [
+        makeEdge({ fromId: 'ApexClass:L1', toId: 'ApexClass:Target', edgeType: 'callsApex' }),
+        makeEdge({ fromId: 'ApexClass:L2', toId: 'ApexClass:L1', edgeType: 'callsApex' }),
+      ],
+    };
+    const result = await withStore(seedShallowChain, (localCtx) =>
+      methodReachabilityHandler(localCtx, { classApiName: 'ApexClass:Target' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('likely-dead-code');
+    expect(result.value.data.depthTruncated).toBe(false);
+    expect(result.value.data.depthCapBoundaryCount).toBe(0);
+    expect(result.value.data.depthCapBoundaryIds).toEqual([]);
+  });
+
+  // R1 (depth axis), PAYLOAD half. A residual frontier is unbounded in WIDTH —
+  // a few hundred callers three hops off a shared utility class is ordinary —
+  // so the honesty fields must not scale with it. Before the cap, the
+  // unbounded `depthCapBoundaryIds` plus its unbounded prose echo measured
+  // ~33.8 KB of `data` at width 300 and blows past the response budget at 600,
+  // where the global reducer is free to drop the `verdict` and `entryPoints`
+  // this tool exists to report — an honesty field destroying the answer it was
+  // added to qualify. The existing width test above is at DEPTH 1, where
+  // nothing lands at the cap, so it cannot pin this.
+  //
+  // Chain: {B0..Bn} -> Deep2 -> Deep1 -> Target, so every B lands at depth 3.
+  const seedWideBoundary = (width: number): ExtractionResult => ({
+    nodes: [
+      makeNode({ id: 'ApexClass:Target', apiName: 'Target', properties: { isTest: false } }),
+      makeNode({ id: 'ApexClass:Deep1', apiName: 'Deep1', properties: { isTest: false } }),
+      makeNode({ id: 'ApexClass:Deep2', apiName: 'Deep2', properties: { isTest: false } }),
+      ...Array.from({ length: width }, (_u, i) =>
+        makeNode({
+          id: `ApexClass:BoundaryCaller${i}`,
+          apiName: `BoundaryCaller${i}`,
+          properties: { isTest: false },
+        }),
+      ),
+    ],
+    edges: [
+      makeEdge({ fromId: 'ApexClass:Deep1', toId: 'ApexClass:Target', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:Deep2', toId: 'ApexClass:Deep1', edgeType: 'callsApex' }),
+      ...Array.from({ length: width }, (_u, i) =>
+        makeEdge({
+          fromId: `ApexClass:BoundaryCaller${i}`,
+          toId: 'ApexClass:Deep2',
+          edgeType: 'callsApex',
+        }),
+      ),
+    ],
+  });
+
+  const runWideBoundary = async (width: number) => {
+    const result = await withStore(seedWideBoundary(width), (localCtx) =>
+      methodReachabilityHandler(localCtx, { classApiName: 'ApexClass:Target' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('handler failed');
+    return {
+      data: result.value.data,
+      bytes: Buffer.byteLength(JSON.stringify(result.value.data), 'utf8'),
+    };
+  };
+
+  it('a 600-wide depth-3 boundary still flags depthTruncated AND fits the response byte budget', async () => {
+    const wide = await runWideBoundary(600);
+    // The detection is uncapped: the flag fires and the COUNT is the true 600.
+    expect(wide.data.depthTruncated).toBe(true);
+    expect(wide.data.depthCapBoundaryCount).toBe(600);
+    expect(wide.data.entryPoints).toEqual([]);
+    expect(wide.data.verdict).toBe('likely-dead-code');
+    // The PUBLISHED list is capped, and the prose says the count, not the list.
+    expect(wide.data.depthCapBoundaryIds.length).toBeLessThanOrEqual(20);
+    expect(wide.data.disclosure).toContain('600 node(s) were discovered at the boundary');
+    expect(wide.data.disclosure).not.toContain('BoundaryCaller599');
+    // The budget the global reducer actually trims a body down to. Unbounded,
+    // this payload measured ~67 KB against a ~39 000 cap.
+    expect(wide.bytes).toBeLessThan(responseReductionCap());
+  });
+
+  it('the depth-cap disclosure does NOT scale with boundary width (60 vs 600)', async () => {
+    const narrow = await runWideBoundary(60);
+    const wide = await runWideBoundary(600);
+    expect(narrow.data.depthCapBoundaryCount).toBe(60);
+    expect(wide.data.depthCapBoundaryCount).toBe(600);
+    // Only the printed count changes width (2 digits -> 3, twice). Unbounded,
+    // the delta would be ~540 extra ids in the array plus ~540 in the prose.
+    expect(wide.bytes - narrow.bytes).toBeLessThan(200);
   });
 
   // Target has `width` direct callers (a wide frontier at depth 1); none are

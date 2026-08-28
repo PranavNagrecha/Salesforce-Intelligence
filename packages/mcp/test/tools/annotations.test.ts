@@ -112,6 +112,98 @@ describe('sfi.annotations (read)', () => {
     if (!keyed.ok) return;
     expect(keyed.value.data.annotations.map((a) => a.value)).toEqual(['deprecated']);
   });
+
+  // R1 (BRIEF 063): `proposeAnnotationHandler` already publishes `componentExists`
+  // (line 151-152 of annotations.ts) precisely because a proposal on a phantom
+  // subject is "allowed but flagged". The read path shares the same `ctx.graph`
+  // handle and omitted the same check, so a real, un-annotated component and a
+  // typo'd/wrong-case componentId were BOTH `annotations: [], totalCount: 0` —
+  // indistinguishable. `componentExists` must be `null` for a whole-vault query
+  // (the question does not apply), and boolean when componentId is given.
+  it('distinguishes a phantom componentId from a real-but-unannotated one', async () => {
+    const wholeVault = await annotationsHandler(ctx, {});
+    expect(wholeVault.ok).toBe(true);
+    if (!wholeVault.ok) return;
+    expect(wholeVault.value.data.componentExists).toBeNull();
+
+    const real = await annotationsHandler(ctx, { componentId: 'ApexClass:Alpha' });
+    expect(real.ok).toBe(true);
+    if (!real.ok) return;
+    expect(real.value.data.annotations).toEqual([]);
+    expect(real.value.data.componentExists).toBe(true);
+
+    // Wrong-case is a first-class case per the brief's traps, not a mere typo.
+    const wrongCase = await annotationsHandler(ctx, { componentId: 'apexclass:Alpha' });
+    expect(wrongCase.ok).toBe(true);
+    if (!wrongCase.ok) return;
+    expect(wrongCase.value.data.annotations).toEqual([]);
+    expect(wrongCase.value.data.componentExists).toBe(false);
+
+    const typo = await annotationsHandler(ctx, { componentId: 'ApexClass:NotInGraph' });
+    expect(typo.ok).toBe(true);
+    if (!typo.ok) return;
+    expect(typo.value.data.annotations).toEqual([]);
+    expect(typo.value.data.componentExists).toBe(false);
+  });
+
+  // R2 (BRIEF 063): neither `sfi.annotations` nor `sfi.review_annotations`
+  // advertised (or enforced) a `limit`/`offset`/`cursor`, so a vault with more
+  // curated rows than fit one response had NO way to reach the tail — the
+  // dropped rows were genuinely unreachable through the tool.
+  it('pages a large overlay instead of returning it unbounded and unresumable', async () => {
+    const at = '2026-06-10T03:00:00.000Z';
+    // The overlay is last-write-wins per (componentId, key) — ANNOTATION_KEYS
+    // has only 5 members, so distinct rows require distinct componentIds, not
+    // repeated writes to the same pair.
+    const total = 250;
+    for (let i = 0; i < total; i += 1) {
+      await appendAnnotationEvent(tempDir, {
+        componentId: `CustomField:Bulk__c.Field${String(i).padStart(4, '0')}__c`,
+        key: 'note',
+        value: `bulk-note-${String(i).padStart(4, '0')}`,
+        author: 'pranav',
+        source: 'human',
+        confirmed: true,
+        at,
+        op: 'set',
+      });
+    }
+    const first = await annotationsHandler(ctx, { limit: 100 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.value.data.totalCount).toBe(total);
+    expect(first.value.data.annotations.length).toBe(100);
+    expect(first.value.data.hasMore).toBe(true);
+    expect(first.value.data.nextOffset).toBe(100);
+
+    const second = await annotationsHandler(ctx, {
+      limit: 100,
+      offset: first.value.data.nextOffset ?? undefined,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.value.data.annotations.length).toBe(100);
+
+    const third = await annotationsHandler(ctx, { limit: 100, offset: 200 });
+    expect(third.ok).toBe(true);
+    if (!third.ok) return;
+    expect(third.value.data.annotations.length).toBe(total - 200);
+    expect(third.value.data.hasMore).toBe(false);
+    expect(third.value.data.nextOffset).toBeNull();
+
+    // The full 250 rows are reachable across pages, and never dumped unbounded
+    // in one response (the default page is bounded, not `total`).
+    const seen = new Set<string>();
+    for (const a of [...first.value.data.annotations, ...second.value.data.annotations, ...third.value.data.annotations]) {
+      seen.add(a.value);
+    }
+    expect(seen.size).toBe(total);
+
+    const noLimit = await annotationsHandler(ctx, {});
+    expect(noLimit.ok).toBe(true);
+    if (!noLimit.ok) return;
+    expect(noLimit.value.data.annotations.length).toBeLessThan(total);
+  });
 });
 
 describe('sfi.propose_annotation', () => {
@@ -194,6 +286,37 @@ describe('sfi.review_annotations / confirm / reject (R8-ANNOTATION-REVIEW)', () 
     expect(scoped.ok).toBe(true);
     if (!scoped.ok) return;
     expect(scoped.value.data.proposals.map((p) => p.value)).toEqual(['deprecated']);
+  });
+
+  // R2 (BRIEF 063): same unbounded/unresumable read as `sfi.annotations`, on
+  // `sfi.review_annotations`.
+  it('pages unconfirmed proposals instead of returning them all unbounded', async () => {
+    const at = '2026-06-10T04:00:00.000Z';
+    const total = 250;
+    for (let i = 0; i < total; i += 1) {
+      await appendAnnotationEvent(tempDir, {
+        componentId: `CustomField:Bulk__c.Field${String(i).padStart(4, '0')}__c`,
+        key: 'note',
+        value: `proposal-${String(i).padStart(4, '0')}`,
+        author: 'ai',
+        source: 'ai',
+        confirmed: false,
+        at,
+        op: 'set',
+      });
+    }
+    const page = await reviewAnnotationsHandler(ctx, { limit: 50 });
+    expect(page.ok).toBe(true);
+    if (!page.ok) return;
+    expect(page.value.data.totalCount).toBe(total);
+    expect(page.value.data.proposals.length).toBe(50);
+    expect(page.value.data.hasMore).toBe(true);
+    expect(page.value.data.nextOffset).toBe(50);
+
+    const unbounded = await reviewAnnotationsHandler(ctx, {});
+    expect(unbounded.ok).toBe(true);
+    if (!unbounded.ok) return;
+    expect(unbounded.value.data.proposals.length).toBeLessThan(total);
   });
 
   it('confirm promotes an AI proposal to human-confirmed; idempotent when already confirmed', async () => {

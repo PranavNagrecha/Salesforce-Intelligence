@@ -59,6 +59,24 @@ const seed: ExtractionResult = {
     }),
     // A profile from a pre-extraction / stale vault: NO recordTypeVisibilities key.
     node({ id: 'Profile:Bare', type: 'Profile', apiName: 'Bare', label: 'Bare', properties: {} }),
+    // A profile whose `recordTypeVisibilities` key IS present but serialized as
+    // `null` rather than `[]` — R1: extracted (the key is carried), so this
+    // must NOT read as "not modeled" the way an `Array.isArray` test would.
+    node({
+      id: 'Profile:NullRt',
+      type: 'Profile',
+      apiName: 'NullRt',
+      label: 'NullRt',
+      properties: { recordTypeVisibilities: null },
+    }),
+    // Real CustomObject nodes so the R4 object-existence check has something
+    // to verify against. `Opportunity` exists but the Sales profile grants no
+    // record types on it (the "exists, but empty for this profile" case).
+    // Note: NO node for 'Casee' (typo) — that stays an absent-from-vault case.
+    node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account', label: 'Account', properties: {} }),
+    node({ id: 'CustomObject:Case', type: 'CustomObject', apiName: 'Case', label: 'Case', properties: {} }),
+    node({ id: 'CustomObject:Lead', type: 'CustomObject', apiName: 'Lead', label: 'Lead', properties: {} }),
+    node({ id: 'CustomObject:Opportunity', type: 'CustomObject', apiName: 'Opportunity', label: 'Opportunity', properties: {} }),
   ],
   edges: [],
 };
@@ -184,6 +202,21 @@ describe('recordtypeAvailabilityHandler', () => {
     expect(r.value.data.boundaryNote).not.toMatch(/not modeled/);
     expect(r.value.data.boundaryNote).toMatch(/recordTypeVisibilities/);
   });
+
+  // R1 (BRIEF 073, line 232): the family sentinel is whether the node CARRIES
+  // the property, never `Array.isArray`. A present-but-`null` value (extracted,
+  // just serialized as `null` instead of `[]`) must NOT read as "not modeled" —
+  // `Array.isArray(null)` disagrees with the sentinel and would misreport it.
+  it('a present-but-null recordTypeVisibilities is EXTRACTED, not "not modeled" (R1 sentinel, not Array.isArray)', async () => {
+    const r = await recordtypeAvailabilityHandler(ctx, { componentId: 'Profile:NullRt' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objects).toEqual([]);
+    // The property WAS carried (even though its value is null) — this is a
+    // checked, declared zero, not an unmodeled family.
+    expect(r.value.data.boundaryNote).not.toMatch(/not modeled/);
+    expect(r.value.data.boundaryNote).toMatch(/Declared from/);
+  });
 });
 
 // =============================================================================
@@ -281,5 +314,57 @@ describe('recordtypeAvailabilityHandler — profile subject + object filter (gua
     expect(res.value.data.appliedScope.object).toBe('Opportunity');
     // The property WAS extracted — so it is not the "not modeled" disclosure.
     expect(res.value.data.boundaryNote).not.toMatch(/not modeled/);
+  });
+});
+
+// =============================================================================
+// R4 (BRIEF 073, line 270): the object filter must be VERIFIED against the
+// vault before it narrows the result. A typo'd / never-retrieved / wrong-case
+// object name must be REFUSED (`invalid-query`), never answered with a
+// declared-looking empty.
+// =============================================================================
+describe('recordtypeAvailabilityHandler — object filter is verified against the vault (R4)', () => {
+  it('a typo object name (no CustomObject node in the vault) is refused, not a declared empty', async () => {
+    const parsed = recordtypeAvailabilityInputSchema.safeParse({
+      profileApiName: 'Sales',
+      objectApiName: 'Casee',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const res = await recordtypeAvailabilityHandler(ctx, parsed.data);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.kind).toBe('invalid-query');
+    // Must NOT silently answer "0 record types" for a nonexistent object.
+    expect(res.error.message).toContain('Casee');
+  });
+
+  it('a wrong-case object name resolves via the vault case-variant probe (not a silent empty)', async () => {
+    // The vault holds `CustomObject:Case`; the caller passes lower-case
+    // 'case'. Pre-fix, string-templating `CustomObject:case` was never
+    // checked against the vault at all — the filter matched the profile's own
+    // (correctly-cased) recordTypeVisibilities entries by pure string
+    // lower-casing, so this happened to still "work" by accident. The point
+    // of R4 is that it now goes through the SAME verified path as a typo, and
+    // resolves to the vault's exact casing.
+    const parsed = recordtypeAvailabilityInputSchema.safeParse({
+      profileApiName: 'Sales',
+      objectApiName: 'case',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const res = await recordtypeAvailabilityHandler(ctx, parsed.data);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.data.appliedScope.object).toBe('Case');
+    expect(res.value.data.objects.map((o) => o.object)).toEqual(['Case']);
+  });
+
+  it('an unscoped call (no object) is unaffected — still byte-shaped as before', async () => {
+    const res = await recordtypeAvailabilityHandler(ctx, { componentId: SALES });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.data.appliedScope.object).toBeNull();
+    expect(res.value.data.objects.map((o) => o.object)).toEqual(['Account', 'Case', 'Lead']);
   });
 });

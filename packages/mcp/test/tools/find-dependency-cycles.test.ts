@@ -326,4 +326,31 @@ describe('findDependencyCyclesHandler — component / name scope (guard)', () =>
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
   });
+
+  // R4 (brief 068): a componentId with a CORRECT Apex prefix but naming a class
+  // that was NEVER SCANNED (typo, managed-package class, or a class the refresh
+  // never retrieved) must be refused as invalid-query, never confused with the
+  // legitimate "in the vault but in no cycle" honest-empty case above (X).
+  it('a componentId naming a class NOT IN THE VAULT is invalid-query, not an honest empty', async () => {
+    const r = await findDependencyCyclesHandler(ctx, {
+      componentId: 'ApexClass:OrderServcie',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('OrderServcie');
+  });
+});
+
+// R5 (brief 068): roster.ts advertises `additionalProperties: false` for this
+// tool, but the Zod schema was a plain z.object — zod strips unknown keys by
+// default instead of rejecting them, so the contract and the runtime disagree.
+describe('findDependencyCyclesInputSchema — unknown keys (R5, advertised additionalProperties:false)', () => {
+  it('rejects an unrecognized key instead of silently stripping it', () => {
+    const parsed = findDependencyCyclesInputSchema.safeParse({
+      componentId: 'ApexClass:A',
+      componentid: 'ApexClass:A', // lowercase-d typo of componentId
+    });
+    expect(parsed.success).toBe(false);
+  });
 });

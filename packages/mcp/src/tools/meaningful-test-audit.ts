@@ -36,33 +36,40 @@
  *     Zod-stripped and the caller got the org-wide leaderboard
  *     (MEANINGFUL-TEST-AUDIT-SILENTLY-IGNORES-TARGET). `appliedScope` always
  *     echoes which scope ran so a target is never silently ignored.
- *   - When `classFilter` is supplied, the scan narrows to the named
- *     ApexClass ids (unknown / non-test ids are silently dropped).
+ *   - When `classFilter` is supplied, the named ApexClass ids are resolved by
+ *     DIRECT id lookup (`listNodesByIds`, the batched `getNodeById`), NOT by
+ *     membership in the org-wide walk — so existence is never a function of
+ *     that walk's residual ceiling and a real class sorting past the ceiling is
+ *     never refused as absent. An id with NO ApexClass row at all (typo, wrong
+ *     case, or never retrieved) is refused as `invalid-query` rather than
+ *     silently dropped — the same "refuse an unresolvable scope, never silently
+ *     widen or empty it" posture `resolveExistingObjectScope` codifies for
+ *     object scopes. An id that DOES resolve to an ApexClass but is not
+ *     `isTest` is still narrowed out silently (the caller named a real,
+ *     non-test class on purpose).
  *   - When `qualityIssues` is absent the v2.1 R2 recognizer pass has
  *     not run; the report still emits per-test entries with
  *     `fakeAssertionCount: 0` and the disclosure clarifies the gap.
- *   - Pagination: scans the FULL ApexClass set by paging
- *     `listNodesByType(ApexClass)` to exhaustion (not just the first
- *     500), so the ranking and `totalTestClassCount` cover every test
- *     class — a test sorted past row 500 used to be silently dropped
- *     from both. `countNodesByType` is the loop's belt cross-check.
+ *   - Pagination: the org-wide and `nameContains` scopes scan the FULL
+ *     ApexClass set via the shared `scanAllNodesOfTypes` multi-window walk
+ *     (not just the first 500), so the ranking and `totalTestClassCount`
+ *     cover every test class — a test sorted past row 500 used to be silently
+ *     dropped from both. A pathological ApexClass count past the walk's
+ *     residual ceiling discloses `scanIncomplete` via `fullScanTruncationNote`
+ *     instead of scanning unbounded with no way to say so. The `classFilter`
+ *     scope does not run that walk at all (it resolves ids directly), so its
+ *     answer is complete and carries no truncation note.
  */
 
 import type {
   ComponentId,
-  ComponentType,
   McpError,
   McpResponse,
   Node,
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  countNodesByType,
-  getNodeById,
-  listEdges,
-  listNodesByType,
-} from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listNodesByIds } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -70,42 +77,19 @@ import type { Context } from '../server.js';
 import { coercePrefix } from './coerce-id.js';
 import { mergeInputAliases } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
-import { nodeScanLimit } from './scan-cap.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES, fullScanTruncationNote } from './scan-cap.js';
 
 /**
- * Hard ceiling on a single `listNodesByType` page. `nodeScanLimit()` is
- * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
- * offset loop without seeding 500+ nodes, but the graph layer rejects
- * `limit > 500` — so every page request is clamped here.
+ * Residual ceiling on the full ApexClass multi-window walk. Defaults to the
+ * house-wide {@link FULL_SCAN_MAX_NODES}; `SFI_MEANINGFUL_TEST_SCAN_MAX`
+ * overrides it so a test can exercise the truncated-disclosure path without
+ * seeding 20 000 nodes. Mirrors `history_tracking_gaps`'s
+ * `historyScanCeiling` / `flow_fault_audit`'s `SFI_FLOW_FAULT_SCAN_MAX`.
  */
-const PAGE_CAP = 500;
-const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
-
-/**
- * Load EVERY ApexClass node, not just the first page. A single
- * `listNodesByType` page caps at 500 (id ASC), so an org with > 500 classes
- * used to drop the tail — a test class sorted past the cap vanished from the
- * ranking and from `totalTestClassCount`. Page by `pageSize()` accumulating
- * until a short page proves the type is exhausted, with `countNodesByType` as a
- * belt cross-check so a page that unexpectedly returns full cannot loop forever.
- * The common case (org under the cap) runs exactly one sub-cap page —
- * byte-identical.
- */
-const loadAllNodes = async (
-  ctx: Context,
-  type: ComponentType,
-): Promise<Result<readonly Node[], string>> => {
-  const total = await countNodesByType(ctx.graph, type);
-  if (!total.ok) return err(total.error.message);
-  const limit = pageSize();
-  const all: Node[] = [];
-  for (let offset = 0; ; offset += limit) {
-    const page = await listNodesByType(ctx.graph, type, { limit, offset });
-    if (!page.ok) return err(page.error.message);
-    all.push(...page.value);
-    if (page.value.length < limit || all.length >= total.value) break;
-  }
-  return ok(all);
+const meaningfulTestScanCeiling = (): number => {
+  const v = Number(process.env['SFI_MEANINGFUL_TEST_SCAN_MAX']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
 };
 
 /** Canonical id prefix every `classFilter` entry must carry. */
@@ -417,6 +401,102 @@ const compareEntries = (
 };
 
 /**
+ * The candidate test classes a scope resolved to, plus the truncation note the
+ * scope owes the caller (`null` when the scope answered completely).
+ */
+interface ScopedCandidates {
+  readonly candidates: readonly Node[];
+  readonly truncationNote: string | null;
+}
+
+/**
+ * Resolve an explicit `classFilter` scope by DIRECT id lookup — the batched
+ * `listNodesByIds` (the same absent-id null-skip `getNodeById` performs, in one
+ * round-trip) — never by membership in the org-wide walk.
+ *
+ * MEANINGFUL-TEST-AUDIT-CLASSFILTER-REFUSES-PAST-CAP: deciding "does this id
+ * exist?" from `scanAllNodesOfTypes`'s node set makes existence a function of
+ * {@link meaningfulTestScanCeiling}. A real ApexClass sorting past that ceiling
+ * would be refused as absent — a confident falsehood that additionally
+ * prescribes `/sfi-refresh`, a remedy that can never fix it. An id lookup is
+ * exact, is bounded by {@link CLASS_FILTER_MAX} ids, and is immune to the
+ * ceiling; it also makes a class-filter answer COMPLETE, so this branch owes no
+ * truncation note.
+ *
+ * MEANINGFUL-TEST-AUDIT-CLASSFILTER-SILENTLY-DROPS-UNRESOLVED: an id with no
+ * ApexClass row at all (a typo, wrong case, or a class the refresh never
+ * retrieved) can never contribute a row — refuse rather than let it silently
+ * collapse into an honest-looking `totalTestClassCount: 0`. An id that DOES
+ * resolve but is not `isTest` is narrowed out silently (the caller may be
+ * intentionally naming a real production class).
+ */
+const classFilterCandidates = async (
+  ctx: Context,
+  filterSet: ReadonlySet<string>,
+): Promise<Result<ScopedCandidates, McpError>> => {
+  const filterIds = [...filterSet] as ComponentId[];
+  const resolved = await listNodesByIds(ctx.graph, filterIds);
+  if (!resolved.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${resolved.error.message}`,
+    });
+  }
+  const resolvedIds = new Set(resolved.value.map((n) => n.id));
+  const unresolved = filterIds.filter((id) => !resolvedIds.has(id));
+  if (unresolved.length > 0) {
+    return err({
+      kind: 'invalid-query',
+      message: `classFilter id(s) do not match any ApexClass in this vault: ${unresolved.map((id) => `'${id}'`).join(', ')} — verify the id (including case), or run /sfi-refresh if the vault may be stale`,
+      path: 'classFilter',
+    });
+  }
+  // `listNodesByIds` is unordered; sort by id ASC so ties in `compareEntries`
+  // break the same way the org-wide walk's row order breaks them.
+  const ordered = [...resolved.value].sort((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
+  return ok({
+    candidates: ordered.filter((node) => isTestClass(node)),
+    truncationNote: null,
+  });
+};
+
+/**
+ * Resolve the org-wide (or `nameContains`-narrowed) scope via the shared
+ * {@link scanAllNodesOfTypes} multi-window walk, carrying its `scanIncomplete`
+ * state out as a {@link fullScanTruncationNote} the caller appends to the
+ * disclosure.
+ */
+const scannedCandidates = async (
+  ctx: Context,
+  nameNeedle: string | null,
+): Promise<Result<ScopedCandidates, McpError>> => {
+  const ceiling = meaningfulTestScanCeiling();
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['ApexClass'], ceiling);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
+    });
+  }
+  const candidates: Node[] = [];
+  for (const node of scan.value.nodes) {
+    if (!isTestClass(node)) continue;
+    if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
+      continue;
+    }
+    candidates.push(node);
+  }
+  return ok({
+    candidates,
+    truncationNote: scan.value.scanIncomplete
+      ? fullScanTruncationNote(scan.value.incompleteTypes, ceiling)
+      : null,
+  });
+};
+
+/**
  * The `sfi.meaningful_test_audit` MCP tool. Lists every test class
  * with a heuristic assertion-density score and ranks by
  * fake-assertion count DESC.
@@ -513,14 +593,6 @@ export const meaningfulTestAuditHandler = async (
     return coveringTestsMode(ctx, input.targetClass, input);
   }
 
-  const classesRes = await loadAllNodes(ctx, 'ApexClass');
-  if (!classesRes.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${classesRes.error}`,
-    });
-  }
-
   // Filter to test classes; optionally narrow by classFilter (explicit ids) or
   // nameContains (case-insensitive substring on the api name). The two are
   // mutually exclusive (refused above), so at most one filter is active.
@@ -531,17 +603,13 @@ export const meaningfulTestAuditHandler = async (
   const nameNeedle =
     input.nameContains !== undefined ? input.nameContains.toLowerCase() : null;
 
-  const candidates: Node[] = [];
-  for (const node of classesRes.value) {
-    if (!isTestClass(node)) continue;
-    if (filterSet !== null && !filterSet.has(node.id)) continue;
-    if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
-      continue;
-    }
-    candidates.push(node);
-  }
+  const scoped =
+    filterSet !== null
+      ? await classFilterCandidates(ctx, filterSet)
+      : await scannedCandidates(ctx, nameNeedle);
+  if (!scoped.ok) return err(scoped.error);
 
-  const entries = candidates.map(buildEntry);
+  const entries = scoped.value.candidates.map(buildEntry);
   entries.sort(compareEntries);
 
   const appliedScope: MeaningfulTestAuditScope =
@@ -554,13 +622,18 @@ export const meaningfulTestAuditHandler = async (
   const paged = pageEntries(ctx, entries, input);
   if (!paged.ok) return err(paged.error);
 
+  const disclosure =
+    scoped.value.truncationNote !== null
+      ? `${paged.value.disclosure} ${scoped.value.truncationNote}`
+      : paged.value.disclosure;
+
   return ok({
     data: {
       // The FULL count, never the page — the paging note points back at it.
       totalTestClassCount: entries.length,
       tests: paged.value.page,
       appliedScope,
-      disclosure: paged.value.disclosure,
+      disclosure,
       ...paged.value.pagingFields,
     },
     vaultState: {

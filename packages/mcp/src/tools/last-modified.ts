@@ -36,6 +36,11 @@
  * a CustomField pre-enrichment vault that already had freshness from
  * the DX-source extractor's `<lastModifiedDate>` element) still
  * resolves to `enriched: true` because the data IS present.
+ *
+ * The properties-overlay-then-legacy-fallback precedence is sourced from
+ * the shared `freshness-fields.ts` leaf module (not duplicated locally)
+ * so this tool and `sfi.changed_since` cannot silently diverge on how a
+ * node's freshness is read.
  */
 
 import type {
@@ -48,6 +53,12 @@ import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import {
+  extractApiVersion,
+  extractLastModifiedBy,
+  extractLastModifiedDate,
+} from './freshness-fields.js';
 
 /**
  * Verbatim disclosure surfaced when neither the v1.7 enriched overlay
@@ -108,74 +119,6 @@ export interface LastModifiedOutput {
   readonly apiVersion: number | null;
   readonly disclosure: string;
 }
-
-/**
- * Extract the freshness `lastModifiedDate` for a node. Prefers
- * `properties.lastModifiedDate` (the v1.7 enricher's overlay) and falls
- * back to the legacy top-level `lastModifiedDate` field. Returns `null`
- * when neither source carries a value. Mirrors the equivalent helper
- * in `changed-since.ts` for behavioral consistency between the two
- * v1.7 freshness tools.
- */
-const extractLastModifiedDate = (
-  legacy: string | null,
-  properties: Readonly<Record<string, unknown>>,
-): string | null => {
-  const propsValue = properties['lastModifiedDate'];
-  if (typeof propsValue === 'string' && propsValue.length > 0) {
-    return propsValue;
-  }
-  if (typeof legacy === 'string' && legacy.length > 0) {
-    return legacy;
-  }
-  return null;
-};
-
-/**
- * Extract the `lastModifiedBy.id` / `.name` pair from a node. Prefers
- * the v1.7 enricher's `properties.lastModifiedBy: { id, name }` overlay
- * and falls back to the legacy string-only top-level `lastModifiedBy`
- * field (which is treated as the id with an empty name). Returns
- * `null` when neither source carries a value.
- */
-const extractLastModifiedBy = (
-  legacy: string | null,
-  properties: Readonly<Record<string, unknown>>,
-): { id: string; name: string } | null => {
-  const propsValue = properties['lastModifiedBy'];
-  if (propsValue !== undefined && propsValue !== null && typeof propsValue === 'object') {
-    const obj = propsValue as { id?: unknown; name?: unknown };
-    const id = typeof obj.id === 'string' ? obj.id : '';
-    const name = typeof obj.name === 'string' ? obj.name : '';
-    if (id.length > 0 || name.length > 0) {
-      return { id, name };
-    }
-  }
-  if (typeof legacy === 'string' && legacy.length > 0) {
-    return { id: legacy, name: '' };
-  }
-  return null;
-};
-
-/**
- * Extract the API version for a node. Prefers `properties.apiVersion`
- * (the v1.7 enricher's overlay) and falls back to the legacy top-level
- * `apiVersion: number | null` field on the Node interface. Returns
- * `null` when neither source carries a value.
- */
-const extractApiVersion = (
-  legacy: number | null,
-  properties: Readonly<Record<string, unknown>>,
-): number | null => {
-  const propsValue = properties['apiVersion'];
-  if (typeof propsValue === 'number' && Number.isFinite(propsValue)) {
-    return propsValue;
-  }
-  if (typeof legacy === 'number' && Number.isFinite(legacy)) {
-    return legacy;
-  }
-  return null;
-};
 
 /**
  * The `sfi.last_modified` handler. Looks up the node, extracts the

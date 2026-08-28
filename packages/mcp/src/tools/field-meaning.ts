@@ -52,7 +52,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -63,8 +63,12 @@ import {
 } from './coverage-trust.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
-import { normalizePicklistValues } from './picklist-values.js';
+import {
+  normalizePicklistValues,
+  resolveGlobalValueSetValues,
+} from './picklist-values.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -73,12 +77,14 @@ const CUSTOM_FIELD_PREFIX = 'CustomField:';
 const SIMILAR_FIELDS_LIMIT = 3;
 
 /**
- * Page size for the full-corpus CustomField scan. `listNodesByType` caps a
- * page at 500 (LIST_MAX_LIMIT) and DEFAULTS to 50 when no limit is passed —
- * so the similarity scan must page through every field with an explicit
- * limit + offset or it silently considers only the first 50 fields by id.
+ * The picklist-family dataTypes whose declared value set the custom-field
+ * extractor records under `properties.picklistValues` (or leaves inline-null
+ * for a GlobalValueSet reference). Mirrors `explain-field.ts`'s
+ * `PICKLIST_DATA_TYPES` / the extractor's own `PICKLIST_TYPES` gate — for
+ * every other dataType `picklistValues` is `null` by construction, so it is
+ * never worth following `usesValueSet` off-node.
  */
-const SIMILAR_FIELDS_PAGE_SIZE = 500;
+const PICKLIST_DATA_TYPES: readonly string[] = ['Picklist', 'MultiselectPicklist'];
 
 /**
  * Verbatim boundaries surfaced in every response. The skill may add
@@ -106,6 +112,26 @@ const BOUNDARY_ZERO_READS =
   'A zero here means no value-consuming edge was found among the metadata families this vault retrieved. It is not proof the field is unused — reports, dashboards, list-view filters, and dynamic Apex are named in `boundaries` where they are not covered.';
 const BOUNDARY_INACTIVE_PICKLIST_VALUES =
   'This picklist has inactive value(s) (isActive: false) — they are RETAINED but not selectable for new records; existing records may still hold them. They are listed-and-marked, not dropped.';
+/**
+ * R1: fires when the field is picklist-typed, `picklistValues` has no inline
+ * definition, AND the `usesValueSet` edge either does not exist or does not
+ * resolve to a GlobalValueSet node this vault carries. Mirrors
+ * `explain-field.ts`'s `NON_INLINE_VALUE_SET_NOTE` verbatim so the two
+ * surfaces read identically for the same field — without it, `null` here is
+ * indistinguishable from "this picklist truly has no values".
+ */
+const BOUNDARY_NON_INLINE_VALUE_SET =
+  'This field is picklist-typed but its value set was not inline in the field metadata — ' +
+  'commonly a GlobalValueSet reference. The declared values live on that GlobalValueSet ' +
+  'component, and this vault carries no resolvable usesValueSet link (vaults refreshed at ' +
+  '0.1.10+ resolve it automatically); `null` here means "not inline", NOT "no values".';
+/**
+ * R6: fires when the full CustomField corpus scan behind `similarFields`
+ * stopped at the residual node cap with strictly more fields behind it — a
+ * pathological-org disclosure, not a normal-org occurrence.
+ */
+const BOUNDARY_SIMILAR_FIELDS_SCAN_INCOMPLETE =
+  'The similar-fields corpus scan stopped at a residual node cap before covering every CustomField in the vault — similarFields may miss a genuine match past the cap.';
 
 /**
  * Zod schema for the `sfi.field_meaning` tool input.
@@ -290,14 +316,20 @@ const parentTypeApiName = (node: Node): string => {
  * the object shape `{ value, isActive, label?, default? }` (re-extracted
  * vault); both normalize to the contract output, carrying `isActive` honestly
  * (absent / bare-string ⇒ `true`). Inactive values are LISTED-and-marked, not
- * dropped — existing records may hold them. Returns `null` when no picklist
- * data exists, preserving the "this is not a picklist" signal.
+ * dropped — existing records may hold them. Returns `null` only when
+ * `properties.picklistValues` is not an array at all — that covers BOTH
+ * "not a picklist" and "picklist, but the value set is not inline" (the
+ * GlobalValueSet case; the caller resolves that separately via
+ * `usesValueSet`). An empty array is preserved AS an empty array — a real
+ * zero-value inline definition is a different, checked fact from "unknown"
+ * and must not read the same as either (R1: the two used to collapse into
+ * the same `null`).
  */
 const readPicklistValues = (
   node: Node,
 ): readonly FieldMeaningPicklistValue[] | null => {
   const normalized = normalizePicklistValues(node.properties['picklistValues']);
-  if (normalized === null || normalized.length === 0) return null;
+  if (normalized === null) return null;
   return normalized.map((entry) => ({
     value: entry.value,
     label: entry.label ?? entry.value,
@@ -412,37 +444,37 @@ const tokenOverlap = (a: Set<string>, b: Set<string>): number => {
   return unionSize === 0 ? 0 : shared / unionSize;
 };
 
+/** {@link findSimilarFields}'s result: the ranked top-N plus the shared scan's residual-cap disclosure. */
+interface SimilarFieldsResult {
+  readonly fields: readonly FieldMeaningSimilarField[];
+  /** True only when the corpus scan hit `FULL_SCAN_MAX_NODES` with strictly more CustomFields behind it. */
+  readonly scanIncomplete: boolean;
+}
+
 /**
- * Find similar fields by token overlap. Enumerates every CustomField
- * in the graph and scores by overlap of label-tokens + apiName-tokens.
- * Returns the top `SIMILAR_FIELDS_LIMIT` ranked by score DESC then
- * id ASC. Excludes the seed field itself.
+ * Find similar fields by token overlap. Enumerates every CustomField in the
+ * graph via the shared {@link scanAllNodesOfTypes} multi-window walk (R6 —
+ * this used to be a private copy of that same offset-windowing loop, with
+ * `500` hardcoded in place of the shared `NODE_SCAN_HARD_CAP`) and scores by
+ * overlap of label-tokens + apiName-tokens. Returns the top
+ * `SIMILAR_FIELDS_LIMIT` ranked by score DESC then id ASC, plus whether the
+ * corpus scan itself was left incomplete by a pathological-org residual cap.
+ * Excludes the seed field itself.
  */
 const findSimilarFields = async (
   ctx: Context,
   seed: Node,
-): Promise<Result<readonly FieldMeaningSimilarField[], string>> => {
+): Promise<Result<SimilarFieldsResult, string>> => {
   const seedTokens = new Set<string>();
   for (const tok of tokenize(seed.apiName)) seedTokens.add(tok);
   for (const tok of tokenize(readFieldLabel(seed))) seedTokens.add(tok);
-  if (seedTokens.size === 0) return ok([]);
+  if (seedTokens.size === 0) return ok({ fields: [], scanIncomplete: false });
 
-  // Page through EVERY CustomField — a single unbounded listNodesByType
-  // defaults to 50 rows, truncating the similarity corpus to the first 50
-  // fields by id (so the top-N is drawn from a tiny alphabetical prefix and
-  // misses genuine matches like an identical-name field on a later object).
-  const allFields: Node[] = [];
-  for (let offset = 0; ; offset += SIMILAR_FIELDS_PAGE_SIZE) {
-    const page = await listNodesByType(ctx.graph, 'CustomField', {
-      limit: SIMILAR_FIELDS_PAGE_SIZE,
-      offset,
-    });
-    if (!page.ok) {
-      return err(page.error.message);
-    }
-    allFields.push(...page.value);
-    if (page.value.length < SIMILAR_FIELDS_PAGE_SIZE) break;
+  const scanResult = await scanAllNodesOfTypes(ctx.graph, ['CustomField']);
+  if (!scanResult.ok) {
+    return err(scanResult.error.message);
   }
+  const allFields = scanResult.value.nodes;
 
   const scored: FieldMeaningSimilarField[] = [];
   for (const candidate of allFields) {
@@ -466,7 +498,10 @@ const findSimilarFields = async (
     }
     return a.fieldId < b.fieldId ? -1 : a.fieldId > b.fieldId ? 1 : 0;
   });
-  return ok(scored.slice(0, SIMILAR_FIELDS_LIMIT));
+  return ok({
+    fields: scored.slice(0, SIMILAR_FIELDS_LIMIT),
+    scanIncomplete: scanResult.value.scanIncomplete,
+  });
 };
 
 /**
@@ -591,7 +626,22 @@ export const fieldMeaningHandler = async (
     return err({ kind: 'internal', message: similarResult.error });
   }
 
-  const picklistValues = readPicklistValues(node);
+  const fieldType = readFieldType(node);
+  let picklistValues = readPicklistValues(node);
+  // R1: a picklist-typed field whose inline `picklistValues` is null may be
+  // GlobalValueSet-driven (0.1.10+ vaults resolve the usesValueSet edge) —
+  // resolve it so the answer carries the real values instead of reading as
+  // "no values" (see `explain-field.ts`, which already does this).
+  if (picklistValues === null && PICKLIST_DATA_TYPES.includes(fieldType)) {
+    const fromGvs = await resolveGlobalValueSetValues(ctx, fieldId);
+    if (fromGvs !== null) {
+      picklistValues = fromGvs.values.map((entry) => ({
+        value: entry.value,
+        label: entry.label ?? entry.value,
+        isActive: entry.isActive,
+      }));
+    }
+  }
 
   const boundaries: string[] = [
     BOUNDARY_VOCABULARY_ORG_SPECIFIC,
@@ -609,8 +659,17 @@ export const fieldMeaningHandler = async (
   if (picklistValues !== null && picklistValues.some((v) => !v.isActive)) {
     boundaries.push(BOUNDARY_INACTIVE_PICKLIST_VALUES);
   }
+  // R1: still null after the GVS resolution attempt above — the value set
+  // is genuinely not reachable from this node, so say so instead of letting
+  // `null` read like a checked-and-empty picklist.
+  if (picklistValues === null && PICKLIST_DATA_TYPES.includes(fieldType)) {
+    boundaries.push(BOUNDARY_NON_INLINE_VALUE_SET);
+  }
   if (usageResult.value.incomingReads === 0) {
     boundaries.push(BOUNDARY_ZERO_READS);
+  }
+  if (similarResult.value.scanIncomplete) {
+    boundaries.push(BOUNDARY_SIMILAR_FIELDS_SCAN_INCOMPLETE);
   }
 
   return ok({
@@ -619,14 +678,14 @@ export const fieldMeaningHandler = async (
       apiName: node.apiName,
       label: readFieldLabel(node),
       description: readFieldDescription(node),
-      type: readFieldType(node),
+      type: fieldType,
       parentObjectId: node.parentId,
       parentObjectApiName: parentTypeApiName(node),
       picklistValues,
       usageFrequency: usageResult.value,
       sourceOfTruth: sourceOfTruthRead.classification,
       semanticCategory: semanticCategoryRead.classification,
-      similarFields: similarResult.value,
+      similarFields: similarResult.value.fields,
       boundaries,
     },
     vaultState: {

@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type {
   ExtractionResult,
@@ -374,5 +375,34 @@ describe('disambiguateConceptsHandler — full CustomField corpus scan', () => {
     expect(result.value.data.conceptA.matchingFields[0]?.fieldId).toBe(
       'CustomField:Acct.zzz_Status__c',
     );
+  });
+});
+
+describe('disambiguate-concepts — R6 full-scan adoption (BRIEF-082)', () => {
+  // The census finding (brief 082, R6/MEDIUM): this file hand-rolled its own
+  // `listNodesByType` + `offset` walk instead of adopting the shared
+  // `scanAllNodesOfTypes` helper, so it carries none of that helper's honesty
+  // machinery (FULL_SCAN_MAX_NODES residual ceiling, `incompleteTypes`,
+  // `scanIncomplete`) — nothing to disclose if the corpus scan is ever
+  // incomplete on a tool whose entire output is a claim about the WHOLE org's
+  // field vocabulary. This is a source-shape guard in the same spirit as the
+  // full-scan-adoption.test.ts deny-list (which does not cover this file —
+  // that is exactly the gap brief 082 reports).
+  const SRC_PATH = join(
+    dirname(fileURLToPath(new URL(import.meta.url))),
+    '../../src/tools/disambiguate-concepts.ts',
+  );
+
+  const stripComments = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+  it('issues no hand-rolled listNodesByType corpus scan', () => {
+    const src = stripComments(readFileSync(SRC_PATH, 'utf8'));
+    expect(/listNodesByType\(/.test(src)).toBe(false);
+  });
+
+  it('calls the shared scanAllNodesOfTypes helper', () => {
+    const src = readFileSync(SRC_PATH, 'utf8');
+    expect(src).toContain('scanAllNodesOfTypes');
   });
 });

@@ -229,7 +229,16 @@ describe('historyTrackingGapsHandler', () => {
     expect(result.value.data.scope).toEqual({ mode: 'org-wide', fieldsScanned: 5 });
     // 3 gaps total: SSN__c (Contact), Diagnosis__c (Patient__c), SSN__c (Legacy__c).
     expect(result.value.data.summary.totalGapFields).toBe(3);
-    expect(result.value.data.summary.byClassification).toEqual({ pii: 2, sensitive: 1 });
+    // `protected` is a THIRD counter key, always present (0 here — this fixture
+    // seeds no protected-class field). It was previously absent from the shape
+    // entirely; the source cited this pinned two-key contract as the reason the
+    // protected tier was skipped, so an always-emitted 0 is what makes the
+    // counter honest: a real 0 rather than a missing axis.
+    expect(result.value.data.summary.byClassification).toEqual({
+      pii: 2,
+      sensitive: 1,
+      protected: 0,
+    });
     expect(result.value.data.summary.byGapKind).toEqual({
       'object-history-disabled': 1,
       'field-not-tracked': 2,
@@ -692,5 +701,154 @@ describe('historyTrackingGapsHandler — residual scan-cap disclosure', () => {
     expect(
       (result.value.data.trust.completeness.missingCoverage ?? []).join(' '),
     ).not.toMatch(/full scan capped/i);
+  });
+});
+
+// =============================================================================
+// PROTECTED-CLASS BUCKET — the fourth classification the shared recognizer mints.
+//
+// Real-org symptom this pins: on a person object the sweep returned 54 gaps
+// (`byClassification {pii, sensitive}` only), `objectsWithHistoryDisabled: 0`,
+// `trust.completeness.status: 'complete'` and a six-item `trust.limitations[]`
+// — while 19 non-formula `trackHistory=false` protected-class fields (race,
+// ethnicity, religion, disability status, gender identity, veteran flag,
+// citizenship) on that same object appeared in NEITHER `groups[].fields` NOR
+// `untrackable[]`, and nothing in the envelope said the bucket was skipped.
+// A certified-complete answer that silently omits the most regulated bucket is
+// the defect; the shared `isRegulatedPiiClassification` predicate in
+// @sf-intelligence/patterns exists precisely so `protected` is never missed.
+// =============================================================================
+
+const PROT_OBJ = 'CustomObject:Obj_P__c';
+const PROT_ETHNICITY = 'CustomField:Obj_P__c.Ethnicity__c'; // protected/protected-class, untracked -> GAP
+const PROT_DISABILITY = 'CustomField:Obj_P__c.Disability_Status__c'; // protected, untracked -> GAP
+const PROT_TRACKED_VETERAN = 'CustomField:Obj_P__c.Veteran_Status__c'; // protected but trackHistory TRUE -> not a gap
+const PROT_FORMULA_RELIGION = 'CustomField:Obj_P__c.Religion_Derived__c'; // protected + formula -> untrackable, not a gap
+const PROT_PII_EMAIL = 'CustomField:Obj_P__c.Personal_Email__c'; // pii control, untracked -> GAP
+
+const protectedSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: PROT_OBJ,
+      type: 'CustomObject',
+      apiName: 'Obj_P__c',
+      properties: { enableHistory: true },
+    }),
+    makeNode({
+      id: PROT_ETHNICITY,
+      apiName: 'Ethnicity__c',
+      parentId: PROT_OBJ,
+      properties: { dataType: 'Text', trackHistory: false },
+    }),
+    makeNode({
+      id: PROT_DISABILITY,
+      apiName: 'Disability_Status__c',
+      parentId: PROT_OBJ,
+      properties: { dataType: 'Text', trackHistory: false },
+    }),
+    makeNode({
+      id: PROT_TRACKED_VETERAN,
+      apiName: 'Veteran_Status__c',
+      parentId: PROT_OBJ,
+      properties: { dataType: 'Text', trackHistory: true },
+    }),
+    makeNode({
+      id: PROT_FORMULA_RELIGION,
+      apiName: 'Religion_Derived__c',
+      parentId: PROT_OBJ,
+      properties: { dataType: 'Text', trackHistory: false, isFormula: true },
+    }),
+    makeNode({
+      id: PROT_PII_EMAIL,
+      apiName: 'Personal_Email__c',
+      parentId: PROT_OBJ,
+      properties: { dataType: 'Email', trackHistory: false },
+    }),
+  ],
+  edges: [],
+};
+
+describe('historyTrackingGapsHandler — protected-class bucket', () => {
+  let protDir: string;
+  let protStore: GraphStore;
+  let protCtx: Context;
+
+  beforeAll(async () => {
+    protDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-history-gaps-protected-'));
+    const opened = await openGraph(join(protDir, 'history-gaps-protected.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    protStore = opened.value;
+    const imported = await importExtractionResults(protStore, [protectedSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    protCtx = { vaultRoot: protDir, manifest: FIXTURE_MANIFEST, graph: protStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(protStore);
+    rmSync(protDir, { recursive: true, force: true });
+  });
+
+  it('flags an untracked protected-class field as a gap (the bucket is not dropped)', async () => {
+    const result = await historyTrackingGapsHandler(protCtx, { objectApiName: 'Obj_P__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.groups.flatMap((g) => g.fields.map((f) => f.id));
+    expect(ids).toContain(PROT_ETHNICITY);
+    expect(ids).toContain(PROT_DISABILITY);
+    const ethnicity = result.value.data.groups
+      .flatMap((g) => g.fields)
+      .find((f) => f.id === PROT_ETHNICITY);
+    expect(ethnicity?.classification).toBe('protected');
+    expect(ethnicity?.category).toBe('protected-class');
+    expect(ethnicity?.gapKind).toBe('field-not-tracked');
+  });
+
+  it('counts protected gaps in summary.byClassification instead of silently zeroing them', async () => {
+    const result = await historyTrackingGapsHandler(protCtx, { objectApiName: 'Obj_P__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.byClassification).toEqual({
+      pii: 1,
+      sensitive: 0,
+      protected: 2,
+    });
+    expect(result.value.data.summary.totalGapFields).toBe(3);
+  });
+
+  it('trust.limitations names the protected tier it audits, so the disclosure matches the analysis', async () => {
+    const result = await historyTrackingGapsHandler(protCtx, { objectApiName: 'Obj_P__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const limitations = result.value.data.trust.limitations.join(' ');
+    expect(limitations).toMatch(/protected/i);
+    expect(limitations).toMatch(/protected-class/i);
+    // The certification and the coverage must agree: a `complete` status is only
+    // honest while every regulated tier the recognizer mints is actually swept.
+    expect(result.value.data.trust.completeness.status).toBe('complete');
+    expect(Object.keys(result.value.data.summary.byClassification).sort()).toEqual([
+      'pii',
+      'protected',
+      'sensitive',
+    ]);
+  });
+
+  it('does NOT flag a protected-class field whose trackHistory is true', async () => {
+    const result = await historyTrackingGapsHandler(protCtx, { objectApiName: 'Obj_P__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.groups.flatMap((g) => g.fields.map((f) => f.id));
+    expect(ids).not.toContain(PROT_TRACKED_VETERAN);
+  });
+
+  it('segregates a protected-class FORMULA field into untrackable[], never into groups', async () => {
+    const result = await historyTrackingGapsHandler(protCtx, { objectApiName: 'Obj_P__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.groups.flatMap((g) => g.fields.map((f) => f.id));
+    expect(ids).not.toContain(PROT_FORMULA_RELIGION);
+    const untracked = result.value.data.untrackable.find((u) => u.id === PROT_FORMULA_RELIGION);
+    expect(untracked).toBeDefined();
+    expect(untracked?.classification).toBe('protected');
+    expect(untracked?.reason).toBe('formula');
   });
 });

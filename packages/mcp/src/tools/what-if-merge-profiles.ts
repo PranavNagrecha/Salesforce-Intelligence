@@ -299,13 +299,6 @@ interface ProfileSettings {
   readonly fieldPermissions: ReadonlyMap<string, 'edit' | 'read' | 'none'>;
   readonly apexClassAccess: ReadonlyMap<string, boolean>;
   readonly tabVisibilities: ReadonlyMap<string, string>;
-  /**
-   * Whether `properties.tabVisibilities` was present on this profile node
-   * (extracted), vs absent (the refresh never modeled tab visibility). An
-   * absent property must NOT read as "agreed / no conflicts" — see the
-   * tab-visibility honesty gate in the handler.
-   */
-  readonly tabVisibilitiesExtracted: boolean;
   readonly layoutAssignments: ReadonlyMap<string, string>;
   readonly recordTypeVisibilities: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
   /** `<applicationVisibilities>` keyed by application api name. */
@@ -323,6 +316,12 @@ interface ProfileSettings {
    * / `apex-class-access` come from `grantedBy` EDGES, not from a node
    * property, so there is no key whose absence distinguishes "never extracted"
    * from "extracted, none" — inventing one would fabricate a signal.
+   *
+   * `extracted['tab-visibility']` is the source of truth for whether
+   * `properties.tabVisibilities` was present on the profile node
+   * (extracted) vs absent (the refresh never modeled tab visibility). An
+   * absent property must NOT read as "agreed / no conflicts" — see the
+   * tab-visibility honesty gate in the handler.
    */
   readonly extracted: Readonly<Record<string, boolean>>;
 }
@@ -567,10 +566,6 @@ const gatherProfileSettings = async (
     fieldPermissions: grantsResult.value.fieldPermissions,
     apexClassAccess: grantsResult.value.apexClassAccess,
     tabVisibilities: readTabVisibilities(profile),
-    tabVisibilitiesExtracted: Object.prototype.hasOwnProperty.call(
-      profile.properties,
-      'tabVisibilities',
-    ),
     layoutAssignments: readLayoutAssignments(profile),
     recordTypeVisibilities: readRecordTypeVisibilities(profile),
     applicationVisibilities: readApplicationVisibilities(profile),

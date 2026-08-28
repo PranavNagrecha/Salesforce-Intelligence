@@ -535,10 +535,23 @@ export const getComponentHandler = async (
   // Fetch outgoing edges for structured grounding: `referenceIds` gives callers
   // canonical component ids without needing to parse markdown prose, eliminating
   // false hallucination flags in synthesize_answer on referenced ids.
+  //
+  // R1-539: a failed query here MUST propagate as `internal`, not collapse to
+  // an empty list — `referenceIds: []` (and, on the metadata-probe path,
+  // `referenceCount: 0`) is a grounding claim ("this component references
+  // nothing"), not a blank. Every other graph failure in this handler
+  // (`getNodeById` above) already propagates as `internal`; this query must
+  // match that convention rather than swallow the error.
   const edgesResult = await listEdges(ctx.graph, node.id, { direction: 'out' });
-  const allReferenceIds: ComponentId[] = edgesResult.ok
-    ? [...new Set(edgesResult.value.map((e) => e.toId))].sort()
-    : [];
+  if (!edgesResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `listEdges query failed: ${edgesResult.error.message}`,
+    });
+  }
+  const allReferenceIds: ComponentId[] = [
+    ...new Set(edgesResult.value.map((e) => e.toId)),
+  ].sort();
 
   // R6-31: `maxBodyBytes` 0 or small means the caller is probing existence /
   // key metadata, not asking for the rendered document. Below this

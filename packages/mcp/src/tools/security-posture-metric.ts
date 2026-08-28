@@ -9,9 +9,28 @@
  * across refreshes (scores cannot be recomputed from hash-only snapshot nodes).
  */
 
+import { summarizeCoverage } from '@sf-intelligence/vault';
+
 import type { Context } from '../server.js';
 
 import { permissionRiskReportHandler } from './synthesis-reports.js';
+
+/**
+ * The metadata families `permissionRiskReportHandler`'s headline
+ * (over-privilege) and CRUD/FLS sub-analyses actually read from. Scoped
+ * deliberately narrow — NOT the whole-vault coverage surface — so a
+ * permanently not-modeled family elsewhere in the org (ListView,
+ * SessionSettings, …) never withholds this metric forever; only an
+ * ACTIONABLE gap (a requested family that errored / never confirmed
+ * retrieved) in a family this specific report depends on does.
+ */
+const SECURITY_POSTURE_REQUIRED_COVERAGE = [
+  'Profile',
+  'PermissionSet',
+  'PermissionSetGroup',
+  'ApexClass',
+  'ApexTrigger',
+] as const;
 
 export type SecurityGradeLetter = 'A' | 'B' | 'C' | 'D' | 'F';
 
@@ -45,8 +64,13 @@ export const securityPostureMetricsFromFindingCount = (
 
 /**
  * Best-effort capture of security posture metrics for the current vault.
- * Returns `undefined` when the underlying report fails — snapshot create
- * must still succeed without metrics.
+ * Returns `undefined` — a typed absence, never a graded zero — when the
+ * underlying report fails outright, OR when it "succeeded" but ran on
+ * metadata the report's own headline depends on that was not actually
+ * retrieved. A finding COUNT derived from a coverage-degraded run is not a
+ * proven zero: it was not checked, so it has no count (the same
+ * `findingCount: null` law `ComposedAnalysis` encodes for composed
+ * reports). Snapshot create must still succeed without metrics.
  */
 export const captureSecurityPostureMetrics = async (
   ctx: Context,
@@ -54,6 +78,28 @@ export const captureSecurityPostureMetrics = async (
   try {
     const perm = await permissionRiskReportHandler(ctx, { limit: 50 });
     if (!perm.ok) return undefined;
+
+    // Coverage gate scoped to what this report reads (Profile / PermissionSet
+    // / PermissionSetGroup / ApexClass / ApexTrigger — never the whole
+    // manifest): none of these five is ever a permanently not-modeled family
+    // for this product, so `missingCoverage` here means "not requested" or
+    // "requested but errored / not confirmed retrieved" — either way, the
+    // over-privilege / CRUD-FLS headline this metric grades was computed over
+    // data that was not actually retrieved. Scoping to this list (rather than
+    // reading the report's own whole-vault `trust.completeness`) is what
+    // keeps this metric from being withheld forever by an UNRELATED
+    // permanently-unmodeled family elsewhere in the vault (e.g. ListView).
+    const coverage = summarizeCoverage(ctx.manifest, [
+      ...SECURITY_POSTURE_REQUIRED_COVERAGE,
+    ]);
+    if (coverage.missingCoverage.length > 0) return undefined;
+
+    // `auditTotals` is null iff the CRUD/FLS sub-analysis errored (its
+    // findings never made it into `findings.length` at all) — the same
+    // signal `permissionRiskReportHandler` already exposes for this failure
+    // mode, unread until now.
+    if (perm.value.data.auditTotals === null) return undefined;
+
     return securityPostureMetricsFromFindingCount(
       perm.value.data.findings.length,
     );

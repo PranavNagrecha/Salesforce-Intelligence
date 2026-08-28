@@ -2174,3 +2174,196 @@ describe('live roster byte-fit invariant (CENSUS-029 R6)', () => {
     expect(r.value.data.returned).toBe(r.value.data.users.length);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Picklist pre-validation for a GLOBAL-VALUE-SET-backed field.
+//
+// A GlobalValueSet-driven picklist stores NOTHING in
+// `properties.picklistValues` (the CustomField extractor only fills that from
+// an inline `<valueSetDefinition>`; it writes `valueSetName` instead and emits
+// a `usesValueSet` edge). The live picklist pre-validation used to read only
+// the inline property and answer the gap scanner with a bare `present` boolean,
+// so such a field fell through BOTH scanners: the mismatch scanner saw no
+// values and skipped it as "not a picklist", the gap scanner saw a known node
+// and skipped it as validated. A typo'd literal therefore produced a confident,
+// undisclosed 0.
+// ---------------------------------------------------------------------------
+describe('live_count / live_sample picklist pre-validation on a GlobalValueSet-backed field', () => {
+  const gvsNode = (
+    overrides: Partial<Node> & Pick<Node, 'id'>,
+  ): Node => ({
+    type: 'CustomObject',
+    apiName: 'X',
+    label: null,
+    parentId: null,
+    sourcePath: 'unused.xml',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...overrides,
+  });
+  const gvsSeed: ExtractionResult = {
+    nodes: [
+      gvsNode({ id: 'CustomObject:Widget__c', apiName: 'Widget__c' }),
+      // Values live on a GlobalValueSet that IS modeled -> resolvable.
+      gvsNode({
+        id: 'CustomField:Widget__c.Region__c',
+        type: 'CustomField',
+        apiName: 'Region__c',
+        parentId: 'CustomObject:Widget__c',
+        properties: { dataType: 'Picklist', valueSetName: 'RegionSet' },
+      }),
+      // Values live on a GlobalValueSet the refresh never modeled (pre-0.1.10
+      // vault / value set not retrieved) -> UNRESOLVABLE.
+      gvsNode({
+        id: 'CustomField:Widget__c.Tier__c',
+        type: 'CustomField',
+        apiName: 'Tier__c',
+        parentId: 'CustomObject:Widget__c',
+        properties: { dataType: 'Picklist', valueSetName: 'TierSet' },
+      }),
+      // A genuinely non-picklist known field: no inline values, no value set.
+      gvsNode({
+        id: 'CustomField:Widget__c.Notes__c',
+        type: 'CustomField',
+        apiName: 'Notes__c',
+        parentId: 'CustomObject:Widget__c',
+        properties: { dataType: 'Text' },
+      }),
+      gvsNode({
+        id: 'GlobalValueSet:RegionSet',
+        type: 'GlobalValueSet',
+        apiName: 'RegionSet',
+        properties: {
+          values: [
+            { value: 'North America', isActive: true },
+            { value: 'EMEA', isActive: true },
+          ],
+        },
+      }),
+    ],
+    edges: [
+      {
+        fromId: 'CustomField:Widget__c.Region__c',
+        toId: 'GlobalValueSet:RegionSet',
+        edgeType: 'usesValueSet',
+        confidence: 'declared',
+        source: 'custom-field-extractor',
+        properties: {},
+      },
+    ],
+  };
+  let gvsDir: string;
+  let gvsStore: GraphStore;
+  let gvsCtx: Context;
+  beforeAll(async () => {
+    gvsDir = mkdtempSync(join(tmpdir(), 'sfi-live-gvs-picklist-'));
+    const opened = await openGraph(join(gvsDir, 'g.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    gvsStore = opened.value;
+    const imported = await importExtractionResults(gvsStore, [gvsSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    gvsCtx = {
+      manifest: FIXTURE_MANIFEST,
+      graph: gvsStore,
+      liveCapability: mintLiveCapability('primary'),
+    } as Context;
+  });
+  afterAll(() => {
+    rmSync(gvsDir, { recursive: true, force: true });
+  });
+
+  const zeroCount: ExecCommand = async () => ({
+    stdout: JSON.stringify({ result: { totalSize: 0, records: [{ expr0: 0 }] } }),
+    stderr: '',
+  });
+  const emptySample: ExecCommand = async () => ({
+    stdout: JSON.stringify({ result: { totalSize: 0, records: [] } }),
+    stderr: '',
+  });
+
+  it('reports a VALUE MISMATCH when the literal misses the RESOLVED global value set', async () => {
+    const r = await liveCountHandler(
+      gvsCtx,
+      {
+        liveEnabled: true,
+        soql: "SELECT COUNT() FROM Widget__c WHERE Region__c = 'EMEIA'",
+      },
+      zeroCount,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.picklistMismatches).toBeDefined();
+    expect(r.value.data.picklistMismatches?.[0]?.field).toBe('Region__c');
+    expect(r.value.data.picklistMismatches?.[0]?.definedValues.map((v) => v.value)).toEqual([
+      'North America',
+      'EMEA',
+    ]);
+    expect(r.value.data.rendered).toMatch(/not a defined picklist value/i);
+  });
+
+  it('stays silent when the literal IS a value of the resolved global value set', async () => {
+    const r = await liveCountHandler(
+      gvsCtx,
+      {
+        liveEnabled: true,
+        soql: "SELECT COUNT() FROM Widget__c WHERE Region__c = 'EMEA'",
+      },
+      zeroCount,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.picklistMismatches).toBeUndefined();
+    expect(r.value.data.picklistValidationGaps).toBeUndefined();
+    expect(r.value.data.count).toBe(0);
+  });
+
+  it('refuses to assert a 0 when the field IS a picklist whose value set is UNRESOLVABLE', async () => {
+    const r = await liveCountHandler(
+      gvsCtx,
+      {
+        liveEnabled: true,
+        soql: "SELECT COUNT() FROM Widget__c WHERE Tier__c = 'Gold'",
+      },
+      zeroCount,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/cannot answer the question without querying live data/i);
+  });
+
+  it('discloses the unresolvable value set as a GAP on live_sample (which does not refuse)', async () => {
+    const r = await liveSampleHandler(
+      gvsCtx,
+      {
+        liveEnabled: true,
+        soql: "SELECT Id FROM Widget__c WHERE Tier__c = 'Gold'",
+      },
+      emptySample,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.picklistValidationGaps).toBeDefined();
+    expect(r.value.data.picklistValidationGaps?.[0]?.field).toBe('Tier__c');
+    expect(r.value.data.picklistValidationGaps?.[0]?.disclosure).toMatch(
+      /global value set `TierSet`/,
+    );
+  });
+
+  it('does NOT invent a gap for a known field that is genuinely not a picklist', async () => {
+    const r = await liveCountHandler(
+      gvsCtx,
+      {
+        liveEnabled: true,
+        soql: "SELECT COUNT() FROM Widget__c WHERE Notes__c = 'anything'",
+      },
+      zeroCount,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.picklistValidationGaps).toBeUndefined();
+    expect(r.value.data.picklistMismatches).toBeUndefined();
+  });
+});

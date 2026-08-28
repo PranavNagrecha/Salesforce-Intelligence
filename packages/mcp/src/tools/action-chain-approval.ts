@@ -64,6 +64,7 @@ import { listEdges, listNodesByIds } from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted } from './absence-disclosure.js';
 import {
   type ChainComponentRef,
   type ChainStep,
@@ -312,7 +313,7 @@ interface HookListState {
 /** Read one hook list off the process node, tracking whether it was extracted. */
 const readHookActions = (node: Node, key: string): HookListState => ({
   actions: asNamedTypedList(node.properties[key]),
-  extracted: key in node.properties,
+  extracted: familyWasExtracted(node.properties, key),
 });
 
 /**

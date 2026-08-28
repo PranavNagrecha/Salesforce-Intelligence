@@ -19,10 +19,34 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { buildCoverageCaveat } from '../../src/tools/coverage-trust.js';
 import {
   whatIfChangeFieldTypeHandler,
   whatIfChangeFieldTypeInputSchema,
 } from '../../src/tools/what-if-change-field-type.js';
+
+// Mirrors the tool's own (unexported) `FIELD_CHANGE_REQUIRED_COVERAGE` — the
+// same list `FIXTURE_MANIFEST.coverage` below is built from, kept as one
+// named list here so the drift test can build the expected caveat directly
+// off the shared module rather than guessing at the tool's private constant.
+const FIELD_CHANGE_REQUIRED_COVERAGE = [
+  'CustomField',
+  'ValidationRule',
+  'Flow',
+  'ApexClass',
+  'ApexTrigger',
+  'Layout',
+  'LightningComponentBundle',
+  'AuraDefinitionBundle',
+  'VisualforcePage',
+  'VisualforceComponent',
+  'WorkflowRule',
+  'Report',
+  'Dashboard',
+  'ListView',
+  'ReportType',
+  'FlexiPage',
+] as const;
 
 const completeCoverage = (types: readonly string[]): readonly CoverageEntry[] =>
   types.map((type) => ({
@@ -616,6 +640,42 @@ describe('whatIfChangeFieldTypeHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.currentType).toBe('Picklist');
     expect(result.value.data.compatibility).toBe('forward-compatible');
+  });
+
+  // R6 drift test: the coverage caveat this tool emits must be the SAME
+  // sentence `buildCoverageCaveat` (coverage-trust.ts) renders for every other
+  // what-if tool, not a hand-rolled second copy that can drift from it. A
+  // partial-coverage manifest (ApexClass errored) on an otherwise
+  // forward-compatible transition (which would be `safe` with full coverage)
+  // proves both halves of R6 at once: the caveat message text, and the
+  // safe -> review downgrade.
+  it('emits the shared buildCoverageCaveat wording and downgrades safe to review when coverage is partial', async () => {
+    const partialManifest: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: (FIXTURE_MANIFEST.coverage ?? []).map((entry) =>
+        entry.type === 'ApexClass'
+          ? { ...entry, retrieved: 0, errored: true }
+          : entry,
+      ),
+    };
+    const partialCtx: Context = { ...ctx, manifest: partialManifest };
+
+    const result = await whatIfChangeFieldTypeHandler(partialCtx, {
+      fieldId: PICK_FIELD,
+      newType: 'Picklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.compatibility).toBe('forward-compatible');
+    expect(result.value.data.verdict).toBe('review');
+    expect(result.value.data.coverageCaveat).toBeDefined();
+    const expected = buildCoverageCaveat(
+      partialCtx,
+      FIELD_CHANGE_REQUIRED_COVERAGE,
+      'Field-type change impact',
+    );
+    expect(expected).toBeDefined();
+    expect(result.value.data.coverageCaveat?.message).toBe(expected?.message);
   });
 });
 

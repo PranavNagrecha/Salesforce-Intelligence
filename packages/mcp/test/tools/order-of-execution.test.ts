@@ -1685,6 +1685,97 @@ describe('orderOfExecutionHandler — FIX 3: budget allocation, paging, and phas
     if (replay.ok) return;
     expect(replay.error.kind).toBe('invalid-query');
   });
+
+  it('FAIL-BEFORE/PASS-AFTER (R2): when the byte budget tail-drops steps OUT of an already-paged event, paging.byEvent.returnedCount matches the surviving soe array and the resume cursor never skips steps', async () => {
+    const limit = 50;
+    const r = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      limit,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const update = allEvents(d).update;
+
+    // Precondition: the byte budget genuinely cut steps out of this page —
+    // otherwise this test exercises nothing.
+    expect(update.soe.length).toBeLessThan(limit);
+    expect(d.paging).toBeDefined();
+    const pagedUpdate = d.paging?.byEvent.update;
+    expect(pagedUpdate).toBeDefined();
+
+    // `returnedCount` must describe the array it sits beside, not the
+    // pre-byte-trim page size the pager originally cut.
+    expect(pagedUpdate?.returnedCount).toBe(update.soe.length);
+    expect(pagedUpdate?.hasMore).toBe(true);
+
+    // Following the resume pointer must never re-start PAST the last step
+    // actually delivered for this event — that is exactly how steps 31-50
+    // would be silently skipped.
+    const nextOffset =
+      pagedUpdate?.nextCursor != null
+        ? (JSON.parse(
+            Buffer.from(pagedUpdate.nextCursor, 'base64url').toString('utf8'),
+          ) as { o: number }).o
+        : d.paging?.nextCursor != null
+          ? (JSON.parse(
+              Buffer.from(d.paging.nextCursor, 'base64url').toString('utf8'),
+            ) as { o: number }).o
+          : undefined;
+    if (nextOffset !== undefined) {
+      expect(nextOffset).toBeLessThanOrEqual(update.soe.length);
+    }
+
+    // The top-level resume cursor, when followed, must not skip content for
+    // update EITHER: decode it and confirm it resolves to an offset at or
+    // before what was actually delivered for update.
+    if (d.paging?.nextCursor != null) {
+      const decoded = JSON.parse(
+        Buffer.from(d.paging.nextCursor, 'base64url').toString('utf8'),
+      ) as { o: number };
+      expect(decoded.o).toBeLessThanOrEqual(update.soe.length);
+    }
+  });
+
+  it('BITE PROOF (R2): resuming at the (corrected) nextCursor after a byte-trimmed page never skips a step for the event it was trimmed hardest on', async () => {
+    const limit = 50;
+    const first = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      limit,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const d1 = first.value.data;
+    const update1 = allEvents(d1).update;
+    expect(update1.soe.length).toBeLessThan(limit); // precondition: byte-trimmed
+    const cursor = d1.paging?.nextCursor;
+
+    if (cursor === undefined) {
+      // No safe forward progress was nameable (every event exhausted at the
+      // same point) — acceptable ONLY when there is genuinely nothing left.
+      expect(d1.paging?.byEvent.update?.hasMore).toBe(true);
+      return;
+    }
+
+    const second = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'ShipmentLeg__c',
+      limit,
+      cursor,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const update2 = allEvents(second.value.data).update;
+    const firstStepIndices = new Set(update1.soe.map((s) => s.stepIndex));
+    const secondFirstStepIndex = update2.soe[0]?.stepIndex;
+    // The very next step after the last one page 1 actually delivered must be
+    // reachable from page 2 — it must NOT already be past a step page 1 never
+    // showed. A skip would put page 2's first index strictly ABOVE
+    // (max(firstStepIndices) + 1).
+    const maxFirst = Math.max(...firstStepIndices);
+    if (secondFirstStepIndex !== undefined) {
+      expect(secondFirstStepIndex).toBeLessThanOrEqual(maxFirst + 1);
+    }
+  });
 });
 
 describe('orderOfExecutionInputSchema — FIX 12: .strict() and the missing `event` knob', () => {

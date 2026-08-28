@@ -92,6 +92,7 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   countNodesByType,
+  danglingTargetSummary,
   listEdgesForNodes,
   listNodesByType,
 } from '@sf-intelligence/graph';
@@ -380,6 +381,12 @@ export interface UnusedComponentsOutput {
      *                        on any org can close it.
      *   - `confirmed-empty`— the retrieve is confirmed clean and the org
      *                        genuinely holds none. The zero IS checked.
+     *   - `referenced-but-absent` — the manifest calls the retrieve confirmed
+     *                        clean, but the vault's OWN graph carries
+     *                        declared/parsed edges naming specific members of
+     *                        this family that no node exists for. The
+     *                        certification is contradicted by the vault's own
+     *                        references; the zero is NOT checked.
      *   - `coverage-unknown` — a legacy vault with no coverage rows; which of
      *                        the above applies cannot be determined.
      */
@@ -387,6 +394,7 @@ export interface UnusedComponentsOutput {
       | 'not-retrieved'
       | 'never-modeled'
       | 'confirmed-empty'
+      | 'referenced-but-absent'
       | 'coverage-unknown';
     readonly note: string;
   }[];
@@ -712,6 +720,109 @@ const scanType = async (
 };
 
 /**
+ * UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH.
+ *
+ * A family the vault holds ZERO nodes of, while the vault's OWN edges name
+ * specific members of it. That is a self-contradiction the manifest cannot
+ * see: the coverage row says `{requested: true, retrieved: 0,
+ * retrieveConfirmed: true}` (which `summarizeCoverage` reads as COVERED, and
+ * this tool then certified as "the 0 IS a checked zero"), while every retrieved
+ * referrer in the graph points at members that were never brought back.
+ *
+ * Measured on a real vault: ZERO nodes of a folder-scoped family, 79 `declared`
+ * edges from approval processes and workflow alerts naming 30 distinct members
+ * of it. `sfi.retrieve_blindspot_report` reported that family `partial` in the
+ * same run — the product held the true statement and the false one and shipped
+ * the false one on the tool an architect builds a leave-behind list from.
+ *
+ * Why the upstream fact cannot be trusted for such a family: a bare wildcard
+ * retrieve of a FOLDER-SCOPED metadata type returns nothing whether or not the
+ * org holds any, so "retrieve completed, zero members" is guaranteed and can
+ * never be evidence of absence. The graph's dangling references are the
+ * arbiter and they win.
+ */
+interface ReferencedButAbsentFamily {
+  /** Non-heuristic edges pointing at members of this family that do not exist. */
+  readonly referenceEdges: number;
+  /** Distinct missing member ids those edges name. */
+  readonly distinctTargets: number;
+}
+
+/**
+ * Confidence tiers whose dangling references are strong enough to unseat a
+ * "confirmed-empty" certification. `heuristic` is DELIBERATELY excluded: that
+ * is the unresolved-Apex-scanner phantom tier `sfi.retrieve_blindspot_report`
+ * rolls up as documented noise, and a phantom must never be able to convert a
+ * genuinely checked zero into a hedge — the false-positive direction is just as
+ * dishonest as the false-negative one this fixes.
+ */
+const CONTRADICTING_CONFIDENCE: ReadonlySet<string> = new Set([
+  'declared',
+  'parsed',
+]);
+
+/**
+ * Which of `candidates` are REFERENCED BUT ABSENT: zero nodes in the vault, yet
+ * one or more non-heuristic edges name a member of them.
+ *
+ * Adopts the SHARED `danglingTargetSummary` graph query (the same anti-join
+ * `sfi.retrieve_blindspot_report` is built on) rather than re-deriving a second
+ * notion of "referenced but never retrieved" here — the two tools contradicting
+ * each other on the same vault in the same run is the defect being fixed.
+ *
+ * Fails CLOSED: a graph error propagates to the caller as an error rather than
+ * silently restoring the certified zero.
+ */
+const referencedButAbsentFamilies = async (
+  ctx: Context,
+  candidates: readonly string[],
+): Promise<Result<ReadonlyMap<string, ReferencedButAbsentFamily>, McpError>> => {
+  const out = new Map<string, ReferencedButAbsentFamily>();
+  if (candidates.length === 0) return ok(out);
+  const summary = await danglingTargetSummary(ctx.graph);
+  if (!summary.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${summary.error.message}`,
+    });
+  }
+  const wanted = new Set(candidates);
+  const tallies = new Map<string, { edges: number; targets: number }>();
+  for (const group of summary.value) {
+    if (!wanted.has(group.targetType)) continue;
+    if (!CONTRADICTING_CONFIDENCE.has(group.confidence)) continue;
+    const prev = tallies.get(group.targetType) ?? { edges: 0, targets: 0 };
+    tallies.set(group.targetType, {
+      edges: prev.edges + group.edgeCount,
+      // Groups are split by (edgeType, confidence), so distinct-target counts
+      // can overlap across groups of the same family. Sum is the honest upper
+      // bound on "at least this many members are named"; it is only ever used
+      // to say the number is non-zero and to size the disclosure.
+      targets: prev.targets + group.distinctTargets,
+    });
+  }
+  for (const [type, tally] of tallies) {
+    // Only a WHOLLY absent family is a contradiction of "the org holds none".
+    // A family with nodes plus some dangling members (managed-package members,
+    // a community context outside the retrieve scope) is the ordinary blind
+    // spot `coverageCaveat` already covers — not a false certification.
+    const count = await countNodesByType(ctx.graph, type as ComponentType);
+    if (!count.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${count.error.message}`,
+      });
+    }
+    if (count.value > 0) continue;
+    out.set(type, {
+      referenceEdges: tally.edges,
+      distinctTargets: tally.targets,
+    });
+  }
+  return ok(out);
+};
+
+/**
  * UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN: classify WHY a scanned type produced no
  * instances to scan, from the manifest's per-type coverage row. A zero that
  * means "the refresh never retrieved this family" and a zero that means "the
@@ -720,12 +831,18 @@ const scanType = async (
 const classifyUncheckedType = (
   ctx: Context,
   type: ComponentType,
+  /**
+   * The vault's own contradiction of a clean-retrieve claim for this family,
+   * when it has one. See {@link referencedButAbsentFamilies}.
+   */
+  contradiction: ReferencedButAbsentFamily | undefined,
 ): {
   readonly type: string;
   readonly reason:
     | 'not-retrieved'
     | 'never-modeled'
     | 'confirmed-empty'
+    | 'referenced-but-absent'
     | 'coverage-unknown';
   readonly note: string;
 } => {
@@ -745,6 +862,17 @@ const classifyUncheckedType = (
     };
   }
   if (coverage.coveredTypes.includes(type)) {
+    // UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH: the manifest calls the
+    // retrieve confirmed-clean, but the graph names members of this family that
+    // no node exists for. The vault contradicts its own coverage row, so the
+    // certification does not ship.
+    if (contradiction !== undefined) {
+      return {
+        type,
+        reason: 'referenced-but-absent',
+        note: `\`${type}\`: 0 unused, and that 0 is NOT a checked zero. ZERO \`${type}\` components exist in this vault, yet its own graph carries ${contradiction.referenceEdges} declared/parsed reference edge(s) naming up to ${contradiction.distinctTargets} distinct \`${type}\` member(s) that were never retrieved — the manifest's "retrieve confirmed, zero members" row is contradicted by the vault's own references. A folder-scoped metadata family is the usual cause: a bare wildcard retrieve returns nothing for one whether or not the org has any, so "retrieve completed, zero members" cannot be evidence of absence. Treat this 0 as NOT CHECKED. Run \`sfi.retrieve_blindspot_report\` to see which components reference the missing \`${type}\` members, then re-run \`/sfi-refresh\` (folder-qualified members) before reading this 0 as "nothing unused".`,
+      };
+    }
     return {
       type,
       reason: 'confirmed-empty',
@@ -823,9 +951,26 @@ export const unusedComponentsHandler = async (
       | 'not-retrieved'
       | 'never-modeled'
       | 'confirmed-empty'
+      | 'referenced-but-absent'
       | 'coverage-unknown';
     readonly note: string;
   }[] = [];
+
+  // UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH. Computed ONCE for both
+  // axes before any scanning:
+  //   - SCANNED axis  — a scanned family with zero instances whose members the
+  //     graph nevertheless names cannot be certified a "checked zero".
+  //   - REFERRER axis — a family in UNUSED_REQUIRED_COVERAGE that is wholly
+  //     absent yet referenced is a retrieve gap `summarizeCoverage` scores as
+  //     COVERED (its row reads `retrieved: 0, retrieveConfirmed: true`), so
+  //     `assertUsageCompleteness` never names it. Everything whose only
+  //     referrers live in that family then reads "unused" off a corpus that
+  //     was never retrieved.
+  const absentFamilies = await referencedButAbsentFamilies(ctx, [
+    ...new Set<string>([...types, ...UNUSED_REQUIRED_COVERAGE]),
+  ]);
+  if (!absentFamilies.ok) return err(absentFamilies.error);
+  const referencedButAbsent = absentFamilies.value;
 
   for (const type of types) {
     const result = await scanType(ctx, type, objectId);
@@ -838,7 +983,9 @@ export const unusedComponentsHandler = async (
     byType[type] = result.value.components.length;
     allUnused.push(...result.value.components);
     if (result.value.vaultInstances === 0) {
-      uncheckedTypes.push(classifyUncheckedType(ctx, type));
+      uncheckedTypes.push(
+        classifyUncheckedType(ctx, type, referencedButAbsent.get(type)),
+      );
     }
   }
 
@@ -874,12 +1021,62 @@ export const unusedComponentsHandler = async (
   //     blindSpot EVEN on a fully-covered vault, so its "unused" reads "not
   //     checked", not proven "none". `blindPlaneTypes` is the scanned type set.
   // Computed BEFORE pagination because its size feeds the page byte budget.
-  const coverageCaveat = assertUsageCompleteness(ctx, {
+  const retrieveCaveat = assertUsageCompleteness(ctx, {
     usageFamilies: UNUSED_REQUIRED_COVERAGE,
     blindPlaneTypes: types,
     purpose: 'Unused status',
     fireOnUnknownCoverage: true,
   }).caveat;
+
+  // REFERRER axis of UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH. A
+  // referrer family that is wholly absent yet referenced never reaches
+  // `missingCoverage` on its own, because its coverage row reads COVERED. Fold
+  // it in here so the machine-readable gap list, the `blindSpots` array and the
+  // prose a host reads aloud all name it — and so `trust.completeness` below
+  // (which is DERIVED from this caveat) can never say `complete` while an
+  // absence verdict rests on a corpus that was never retrieved.
+  const referrerGaps = UNUSED_REQUIRED_COVERAGE.filter((family) =>
+    referencedButAbsent.has(family),
+  );
+  const referrerBlindSpots = referrerGaps.map((family) => ({
+    plane: family,
+    kind: 'not-retrieved' as const,
+    detail: `The vault holds ZERO \`${family}\` components, yet its own graph carries ${referencedButAbsent.get(family)?.referenceEdges ?? 0} declared/parsed reference edge(s) naming members of \`${family}\` that were never retrieved. Anything whose only referrers live in \`${family}\` reads "unused" off a corpus that is not in this vault.`,
+  }));
+  const referrerSentence =
+    referrerGaps.length === 0
+      ? ''
+      : ` The vault ALSO holds zero components of ${referrerGaps
+          .map((f) => `\`${f}\``)
+          .join(
+            ', ',
+          )} while its own references name specific members of ${referrerGaps.length === 1 ? 'that family' : 'those families'} — referenced but never retrieved, so treat absence of a reference FROM ${referrerGaps.length === 1 ? 'it' : 'them'} as "not checked", not "none".`;
+  const coverageCaveat: CoverageCaveat | undefined =
+    referrerGaps.length === 0
+      ? retrieveCaveat
+      : retrieveCaveat === undefined
+        ? {
+            status: 'partial',
+            missingCoverage: [...referrerGaps].sort(),
+            message: `Unused status cannot be confirmed because the vault has incomplete coverage for: ${[
+              ...referrerGaps,
+            ]
+              .sort()
+              .join(', ')}.${referrerSentence}`,
+            blindSpots: referrerBlindSpots,
+          }
+        : {
+            ...retrieveCaveat,
+            status: 'partial',
+            missingCoverage: [
+              ...new Set([...retrieveCaveat.missingCoverage, ...referrerGaps]),
+            ].sort(),
+            message: `${retrieveCaveat.message}${referrerSentence}`,
+            blindSpots: [
+              ...(retrieveCaveat.blindSpots ?? []),
+              ...referrerBlindSpots,
+            ],
+          };
 
   const scoped = typesExplicit || objectId !== null;
 

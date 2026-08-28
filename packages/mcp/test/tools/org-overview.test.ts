@@ -157,7 +157,11 @@ const seed: ExtractionResult = {
     makeNode({ id: PROFILE_REP, type: 'Profile', apiName: 'Rep' }),
 
     // Automation surface: 2 workflow rules (1 active, 1 inactive), 1 approval
-    // process (active), 2 flows (1 active, 1 inactive), 1 trigger.
+    // process (active), 2 flows (1 active, 1 inactive), 1 trigger (inactive).
+    // The trigger carries `status` because `packages/extractors/src/
+    // apex-trigger.ts` lists `status` in META_REQUIRED_ELEMENTS and writes it
+    // unconditionally into baseProperties — a property-less ApexTrigger is NOT
+    // the extractor's contract.
     makeNode({
       id: WORKFLOW_RULE_ACTIVE,
       type: 'WorkflowRule',
@@ -192,6 +196,7 @@ const seed: ExtractionResult = {
       id: APEX_TRIGGER,
       type: 'ApexTrigger',
       apiName: 'AccountTrigger',
+      properties: { status: 'Inactive' },
     }),
 
     // Frontend surface: 1 LWC + 1 VF page + 1 VF component (no Aura).
@@ -379,9 +384,13 @@ describe('orgOverviewHandler (empty graph)', () => {
     expect(d.automationSummary.activeRatio).toBe(0);
     expect(d.frontendSummary.lwcBundles).toBe(0);
     expect(d.frontendSummary.legacyVfDebtRatio).toBe(0);
-    // Legacy-debt indicators report zero and bucket to 'low'.
+    // Legacy-debt indicators report zero counts, but an empty vault never
+    // retrieved WorkflowRule/ApprovalProcess NOR the frontend family vfPages
+    // feeds from — R2 (BRIEF 071 line 707): the old code bucketed this
+    // unretrieved zero as a confident 'low' migration candidate. The typed
+    // absence must surface as 'not-checked', not a graded verdict.
     expect(d.legacyDebtIndicators.workflowRules).toBe(0);
-    expect(d.legacyDebtIndicators.migrationCandidate).toBe('low');
+    expect(d.legacyDebtIndicators.migrationCandidate).toBe('not-checked');
     // Vault state is copied from the manifest.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
 
@@ -508,9 +517,18 @@ describe('orgOverviewHandler (seeded graph)', () => {
     expect(summary.approvalProcesses).toBe(1);
     expect(summary.flows).toBe(2);
     expect(summary.apexTriggers).toBe(1);
-    // Total = 6 automation items. Active = 1 WF + 1 AP + 1 Flow + 1
-    // ApexTrigger = 4. Ratio = 4 / 6.
-    expect(summary.activeRatio).toBeCloseTo(4 / 6, 5);
+    // R1 (BRIEF 071 line 419): every one of the six automation nodes carries
+    // its extracted status axis, so all six are MEASURED — nothing is guessed
+    // and nothing is typed-absent. Active = 1 WorkflowRule + 1 ApprovalProcess
+    // + 1 Flow = 3 of 6; the ApexTrigger's `status: 'Inactive'` is read, not
+    // assumed. The old code guessed EVERY ApexTrigger active and read 4 / 6.
+    expect(summary.activeRatio).toBeCloseTo(3 / 6, 5);
+    expect(summary.activeStatusUnknownCount).toBe(0);
+    // A vault where every automation node carries its status must NOT emit the
+    // typed-absence disclosure.
+    expect(result.value.data.boundaries.join(' ')).not.toMatch(
+      /active\/inactive status was not extracted/i,
+    );
     // Ratio must be bounded [0, 1].
     expect(summary.activeRatio).toBeGreaterThanOrEqual(0);
     expect(summary.activeRatio).toBeLessThanOrEqual(1);
@@ -791,5 +809,289 @@ describe('orgOverviewHandler — past the 500-row page boundary (G2)', () => {
     // 2 Active of 502 Flows. The old page measured 500 Drafts -> 0.
     expect(d.componentCounts['Flow']).toBe(502);
     expect(d.automationSummary.activeRatio).toBeCloseTo(2 / 502, 10);
+  });
+});
+
+// =============================================================================
+// R1 (BRIEF 071, line 419): `isActiveAutomation` folded "no status/active
+// property extracted" into "active" with no sentinel and no disclosure — the
+// exact typed-absence collapse absence-disclosure.ts's header names. A Flow
+// with no `status` (a vault whose refresh predates status extraction) and a
+// WorkflowRule with no `active` were silently counted as active numerator hits.
+//
+// The CORRECTION recorded here (verifier reject, second pass): an ApexTrigger
+// DOES carry an extracted status axis. `packages/extractors/src/apex-trigger.ts`
+// lists `status` in META_REQUIRED_ELEMENTS (line 25), parses it (line 142) and
+// writes `status: meta.status` into baseProperties unconditionally; three other
+// tools in this package already read it as the trigger's active axis
+// (`automation-build-advisor.ts` `isActiveTrigger`, `soe-active.ts`,
+// `what-if-disable-trigger.ts`). Hard-coding ApexTrigger to typed-absence made
+// the tool assert "status was not extracted" about metadata that IS in the
+// vault — a fabricated disclosure, which is worse than the guess it replaced.
+// So the trigger is measured on `status === 'Active'`, exactly like a Flow, and
+// only a genuinely property-less node (a pre-status stale vault) is unknown.
+// =============================================================================
+
+describe('orgOverviewHandler — automation status typed absence (R1)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  const FLOW_KNOWN_ACTIVE = 'Flow:KnownActive';
+  const FLOW_KNOWN_INACTIVE = 'Flow:KnownInactive';
+  const FLOW_UNKNOWN_STATUS = 'Flow:UnknownStatus';
+  const WF_KNOWN_ACTIVE = 'WorkflowRule:KnownActive';
+  const WF_UNKNOWN_ACTIVE = 'WorkflowRule:UnknownActive';
+  const AP_KNOWN_INACTIVE = 'ApprovalProcess:KnownInactive';
+  const TRIGGER_KNOWN_ACTIVE_A = 'ApexTrigger:KnownActiveA';
+  const TRIGGER_KNOWN_ACTIVE_B = 'ApexTrigger:KnownActiveB';
+  const TRIGGER_KNOWN_INACTIVE = 'ApexTrigger:KnownInactive';
+  const TRIGGER_STALE_VAULT = 'ApexTrigger:StaleVault';
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-orgoverview-activeabsence-'));
+    const opened = await openGraph(join(dir, 'activeabsence.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: FLOW_KNOWN_ACTIVE,
+            type: 'Flow',
+            apiName: 'KnownActive',
+            properties: { status: 'Active' },
+          }),
+          makeNode({
+            id: FLOW_KNOWN_INACTIVE,
+            type: 'Flow',
+            apiName: 'KnownInactive',
+            properties: { status: 'Draft' },
+          }),
+          // Simulates a vault whose refresh predates Flow.status extraction:
+          // the property key is entirely absent, not present-and-empty.
+          makeNode({
+            id: FLOW_UNKNOWN_STATUS,
+            type: 'Flow',
+            apiName: 'UnknownStatus',
+            properties: {},
+          }),
+          makeNode({
+            id: WF_KNOWN_ACTIVE,
+            type: 'WorkflowRule',
+            apiName: 'KnownActive',
+            properties: { active: true },
+          }),
+          // Simulates a vault whose refresh predates WorkflowRule.active
+          // extraction.
+          makeNode({
+            id: WF_UNKNOWN_ACTIVE,
+            type: 'WorkflowRule',
+            apiName: 'UnknownActive',
+            properties: {},
+          }),
+          makeNode({
+            id: AP_KNOWN_INACTIVE,
+            type: 'ApprovalProcess',
+            apiName: 'KnownInactive',
+            properties: { active: false },
+          }),
+          // Realistic ApexTriggers: the extractor writes `status`
+          // unconditionally, so these are MEASURED, never typed-absent.
+          makeNode({
+            id: TRIGGER_KNOWN_ACTIVE_A,
+            type: 'ApexTrigger',
+            apiName: 'KnownActiveA',
+            properties: { status: 'Active' },
+          }),
+          makeNode({
+            id: TRIGGER_KNOWN_ACTIVE_B,
+            type: 'ApexTrigger',
+            apiName: 'KnownActiveB',
+            properties: { status: 'Active' },
+          }),
+          makeNode({
+            id: TRIGGER_KNOWN_INACTIVE,
+            type: 'ApexTrigger',
+            apiName: 'KnownInactive',
+            properties: { status: 'Inactive' },
+          }),
+          // The ONLY honest unknown-trigger case: a stale vault imported
+          // before the trigger extractor wrote `status` at all. Labelled as
+          // stale, NOT as the permanent ApexTrigger contract.
+          makeNode({
+            id: TRIGGER_STALE_VAULT,
+            type: 'ApexTrigger',
+            apiName: 'StaleVault',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('computes activeRatio only from nodes with a known status, never guessing on absence', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // 10 automation nodes total. 7 carry a known status/active property
+    // (2 Flow, 1 WorkflowRule, 1 ApprovalProcess, 3 ApexTrigger): active =
+    // FLOW_KNOWN_ACTIVE + WF_KNOWN_ACTIVE + 2 Active triggers = 4; inactive =
+    // FLOW_KNOWN_INACTIVE + AP_KNOWN_INACTIVE + 1 Inactive trigger = 3.
+    // The 3 carrying no property at all (1 Flow, 1 WorkflowRule, 1 stale-vault
+    // ApexTrigger) must NOT be folded into either bucket.
+    expect(d.automationSummary.activeRatio).toBeCloseTo(4 / 7, 10);
+    // The unknown count must be reported, separately from the measured
+    // active/inactive tally — never silently assumed active. The three
+    // status-carrying triggers are NOT in it.
+    expect(d.automationSummary.activeStatusUnknownCount).toBe(3);
+  });
+
+  it('discloses the automation-status typed-absence boundary by name', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.boundaries.join(' ')).toMatch(/active\/inactive status/i);
+    expect(d.boundaries.join(' ')).toMatch(/3/);
+    // The disclosure must NOT claim ApexTrigger has no isActive axis — the
+    // extractor writes `status` unconditionally, so that clause would be a
+    // fabricated absence claim about metadata that is present in the vault.
+    expect(d.boundaries.join(' ')).not.toMatch(/ApexTrigger has no isActive/i);
+  });
+});
+
+// =============================================================================
+// Regression guard for the verifier's REJECT of the first R1 attempt: the fix
+// had hardcoded ApexTrigger to typed-absence, so an org of nothing but healthy,
+// status-carrying triggers reported activeRatio 0, activeStatusUnknownCount N,
+// and a boundary asserting the status "was not extracted" — about metadata the
+// extractor writes unconditionally. This is the assertion that catches it.
+// =============================================================================
+
+describe('orgOverviewHandler — triggers-only org, every status extracted (R1)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-orgoverview-triggersonly-'));
+    const opened = await openGraph(join(dir, 'triggersonly.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexTrigger:AlphaTrigger',
+            type: 'ApexTrigger',
+            apiName: 'AlphaTrigger',
+            properties: { status: 'Active' },
+          }),
+          makeNode({
+            id: 'ApexTrigger:BetaTrigger',
+            type: 'ApexTrigger',
+            apiName: 'BetaTrigger',
+            properties: { status: 'Inactive' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('measures ApexTrigger.status instead of fabricating a not-extracted claim', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.automationSummary.apexTriggers).toBe(2);
+    // Both triggers carry the extractor's REQUIRED `status` element, so both
+    // are measured: 1 of 2 active.
+    expect(d.automationSummary.activeStatusUnknownCount).toBe(0);
+    expect(d.automationSummary.activeRatio).toBeCloseTo(1 / 2, 10);
+    // ...and the typed-absence disclosure must not fire at all.
+    expect(d.boundaries.join(' ')).not.toMatch(
+      /active\/inactive status was not extracted/i,
+    );
+    expect(d.boundaries.join(' ')).not.toMatch(/ApexTrigger has no isActive/i);
+  });
+});
+
+// =============================================================================
+// R2 (BRIEF 071, line 707): `migrationCandidate` bucketed
+// `workflowRules + approvalProcesses + vfPages` into 'low' | 'medium' | 'high'
+// with no not-checked state, even though `coverage.workflowRulesRetrieved`
+// and `coverage.frontendRetrieved` already know when those counts are
+// unretrieved zeros rather than verified zeros.
+// =============================================================================
+
+describe('orgOverviewHandler — migrationCandidate typed absence (R2)', () => {
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-orgoverview-migrationcandidate-'));
+    const opened = await openGraph(join(dir, 'migrationcandidate.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [
+      {
+        // WorkflowRule/ApprovalProcess WERE retrieved (legacyTotal = 2, which
+        // buckets 'low' by count alone) but the frontend family (VisualforcePage
+        // included) was NEVER retrieved — no frontend nodes at all and no
+        // coverage-complete marker for it.
+        nodes: [
+          makeNode({
+            id: 'WorkflowRule:Retrieved',
+            type: 'WorkflowRule',
+            apiName: 'Retrieved',
+            properties: { active: true },
+          }),
+          makeNode({
+            id: 'ApprovalProcess:Retrieved',
+            type: 'ApprovalProcess',
+            apiName: 'Retrieved',
+            properties: { active: true },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not grade a verdict from an unretrieved vfPages count, even when the other legacy families are known', async () => {
+    const r = await orgOverviewHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.coverage.workflowRulesRetrieved).toBe(true);
+    expect(d.coverage.frontendRetrieved).toBe(false);
+    // legacyTotal (2 + 0) would bucket 'low' by count alone; the verdict must
+    // instead say it was never fully checked, not assert a confident 'low'.
+    expect(d.legacyDebtIndicators.migrationCandidate).toBe('not-checked');
   });
 });

@@ -254,6 +254,53 @@ const vfReferencesSeed: ExtractionResult = {
 };
 
 // =============================================================================
+// Suite 3b: a class that calls its own static method (R3 self-match).
+// apex-edges.ts aggregates call sites by called-class name with no
+// comparison against the owning class, so `RecursiveService` invoking
+// its own `RecursiveService.helper()` produces a genuine
+// `ApexClass:RecursiveService -> ApexClass:RecursiveService` edge in
+// the graph. It also has ONE real external caller so the fix can be
+// proven to keep the real referrer while dropping the self-edge.
+// =============================================================================
+
+const APEX_RECURSIVE = 'ApexClass:RecursiveService';
+const APEX_REAL_CALLER = 'ApexClass:RecursiveServiceCaller';
+
+const selfMatchSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: APEX_RECURSIVE,
+      type: 'ApexClass',
+      apiName: 'RecursiveService',
+    }),
+    makeNode({
+      id: APEX_REAL_CALLER,
+      type: 'ApexClass',
+      apiName: 'RecursiveServiceCaller',
+    }),
+  ],
+  edges: [
+    // The class calling its own static method — a self-edge, not usage
+    // by anything else.
+    makeEdge({
+      fromId: APEX_RECURSIVE,
+      toId: APEX_RECURSIVE,
+      edgeType: 'callsApex',
+      confidence: 'parsed',
+      properties: { line: 9 },
+    }),
+    // A genuine external caller — must still be reported.
+    makeEdge({
+      fromId: APEX_REAL_CALLER,
+      toId: APEX_RECURSIVE,
+      edgeType: 'callsApex',
+      confidence: 'parsed',
+      properties: { line: 3 },
+    }),
+  ],
+};
+
+// =============================================================================
 // Suite 4: many-referrers field for limit-truncation tests. Five LWC
 // bundles all read from the same field. Used to verify stable
 // truncation by id ASC.
@@ -312,6 +359,7 @@ beforeAll(async () => {
     mixedSeed,
     lwcCallsApexSeed,
     vfReferencesSeed,
+    selfMatchSeed,
     crowdedSeed,
   ]);
   if (!imported.ok) {
@@ -477,6 +525,21 @@ describe('findCodeUsagesHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.usages.length).toBe(0);
+  });
+
+  it('R3: excludes a class calling its own method (self-edge) but keeps a genuine external caller', async () => {
+    const result = await findCodeUsagesHandler(ctx, {
+      targetId: APEX_RECURSIVE,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const usages = result.value.data.usages;
+    // Only the real external caller should be reported; the self-edge
+    // (RecursiveService -> RecursiveService) must not inflate the count
+    // or appear as a usage of itself.
+    expect(usages.map((u) => u.id)).toEqual([APEX_REAL_CALLER]);
+    expect(usages.map((u) => u.id)).not.toContain(APEX_RECURSIVE);
+    expect(result.value.data.totalCount).toBe(1);
   });
 
   it('returns an empty list when nodeTypes is explicitly empty', async () => {

@@ -1191,3 +1191,165 @@ describe('techDebtScoreHandler — unchecked zero vs checked zero', () => {
     expect(codeQualityRec).not.toContain('FLOOR');
   });
 });
+
+// =============================================================================
+// R1 — the legacyAutomation axis composes over
+// `sfi.process_builder_migration_candidates`, which caps its internal
+// WorkflowRule/Flow/ApprovalProcess scan at 500 nodes per type (`LIST_PAGE_SIZE`)
+// and honestly discloses the cap via `scanTruncated` + `trueTypeCounts` on its
+// own response. This composer must read that disclosure and EXCLUDE the axis
+// (same as any other extractor-not-run category) rather than score a capped,
+// alphabetically-first subset at full confidence.
+// =============================================================================
+describe('techDebtScoreHandler — legacyAutomation scan-truncation honesty (R1)', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-scantrunc-'));
+    const opened = await openGraph(join(tempDir, 'tds-scantrunc.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    // 501 WorkflowRule nodes — one past process-builder-migration-candidates'
+    // internal LIST_PAGE_SIZE (500) cap, so its own countNodesByType cross-check
+    // sets scanTruncated: true and trueTypeCounts.workflowRules = 501.
+    const nodes: Node[] = [];
+    for (let i = 0; i < 501; i++) {
+      nodes.push(
+        makeNode({
+          id: `WorkflowRule:Account.WR${i}`,
+          type: 'WorkflowRule',
+          apiName: `Account.WR${i}`,
+          properties: { active: true },
+        }),
+      );
+    }
+    const imp = await importExtractionResults(store, [{ nodes, edges: [] }]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('excludes legacyAutomation rather than scoring a scan-capped subset at full confidence', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const excludedCats = r.value.data.excludedCategories.map((e) => e.category);
+    expect(excludedCats).toContain('legacyAutomation');
+    expect(r.value.data.categories.legacyAutomation.rawCount).toBeNull();
+    expect(r.value.data.categories.legacyAutomation.contribution).toBe(0);
+  });
+
+  // The exclusion must NOT borrow `'extractor-not-run'`: that reason is the
+  // key that appends the verbatim Q115 boundary, whose remedy is "run the
+  // appropriate refresh command" — a remedy that cannot lift a 500-node scan
+  // cap. A disclosure tool emitting a dead-end remedy as fact is the same
+  // class of defect this brief exists to remove, so the reason is
+  // `'insufficient-data'` (the extractor DID run; the read was capped).
+  it('reports the scan-cap exclusion as insufficient-data, not extractor-not-run', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const entry = r.value.data.excludedCategories.find(
+      (e) => e.category === 'legacyAutomation',
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.reason).toBe('insufficient-data');
+    // The note must still carry the remedy that DOES work.
+    expect(entry?.note).toContain('process_builder_migration_candidates');
+    expect(entry?.note).not.toMatch(/refresh/i);
+  });
+
+  it('does not recommend a refresh when the ONLY non-user exclusion is the scan cap', async () => {
+    // Opt every other axis out by hand so the scan-cap exclusion is the only
+    // machine-decided one left; any 'run the appropriate refresh command' text
+    // in `boundaries` can then only have come from the scan-cap door.
+    const r = await techDebtScoreHandler(ctx, {
+      excludeCategories: [
+        'deadWeight',
+        'codeQuality',
+        'freshness',
+        'apiVersions',
+        'unassignedGrants',
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const machineExcluded = r.value.data.excludedCategories.filter(
+      (e) => e.reason !== 'user-opted-out',
+    );
+    expect(machineExcluded.map((e) => e.category)).toEqual(['legacyAutomation']);
+    // Asserted BEFORE the reason so the bite proof shows the dead-end remedy
+    // itself, not just the reason string that would have produced it.
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).not.toContain('run the appropriate refresh command');
+    expect(machineExcluded[0]?.reason).toBe('insufficient-data');
+  });
+});
+
+// =============================================================================
+// R6 — `loadAllNodes` used to be a private re-implementation of the shared
+// `scanAllNodesOfTypes` multi-window walk: its own 500 `PAGE_CAP`, its own
+// `countNodesByType` cross-check, NO residual `FULL_SCAN_MAX_NODES` ceiling,
+// and no way for a caller to learn a walk was capped (`scanIncomplete` /
+// `incompleteTypes`). Adopting the shared helper closes both gaps. This test
+// forces the residual cap via the test-only `SFI_TECH_DEBT_SCAN_MAX_NODES`
+// override (mirrors `scan-all-nodes.test.ts`'s own explicit-`maxNodes` seam)
+// so the cap is provably reachable WITHOUT seeding 20 000 real rows.
+// =============================================================================
+describe('techDebtScoreHandler — full-node-scan residual-cap disclosure (R6)', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-residualcap-'));
+    const opened = await openGraph(join(tempDir, 'tds-residualcap.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    // 3 ApexClass nodes; with windowSize 1 and a residual maxNodes of 2, the
+    // walk reads node 1, node 2 (scannedThisType hits the cap), probes for a
+    // 3rd, finds it, and stops — incomplete, 2 of 3 nodes actually loaded.
+    const imp = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({ id: 'ApexClass:Aaa', apiName: 'Aaa', apiVersion: 58 }),
+          makeNode({ id: 'ApexClass:Bbb', apiName: 'Bbb', apiVersion: 58 }),
+          makeNode({ id: 'ApexClass:Ccc', apiName: 'Ccc', apiVersion: 58 }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    process.env['SFI_TECH_DEBT_SCAN_MAX_NODES'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+    delete process.env['SFI_TECH_DEBT_SCAN_MAX_NODES'];
+  });
+
+  it('discloses a capped full-node scan in boundaries instead of scoring silently off a partial subset', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).toContain('Full scan capped');
+    expect(r.value.data.boundaries.join(' ')).toContain('ApexClass');
+    expect(r.value.data.boundaries.join(' ')).toContain('INCOMPLETE');
+  });
+});

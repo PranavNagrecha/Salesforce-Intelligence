@@ -111,7 +111,7 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.event_subscribers': { bound: 'paginated', note: 'offset + CR-22 cursor over the catalog AND the single-event subscriber list; the scan itself now walks every page (scanAllNodesOfTypes) instead of one 500-node listNodesByType (0.3.3)' },
   'sfi.diff_snapshots': { bound: 'paginated', note: 'section cursor: pages the largest of added/removed/modified + discloses the others (CR-22)' },
   'sfi.domain_clusters': { bound: 'paginated', note: 'per-cluster member section cursor + cluster-count byte budget + CR-RV12 candidateTruncated (CR-22)' },
-  'sfi.org_history': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.org_history': { bound: 'paginated', note: 'offset + CR-22 cursor over the most-recent-first history (adopted paginateLegacy/decodeCursor in 0.3.3; it was a bare top-N truncator with no resume before that)' },
   'sfi.record_creation_paths': { bound: 'handler-capped', note: 'limit (default 100, max 500) caps creators+triggers lists; full counts + creatorsTruncated/triggersTruncated disclosure, no cursor (0.2.0)' },
   'sfi.unused_components': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.unused_fields_deep': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },

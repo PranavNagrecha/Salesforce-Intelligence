@@ -57,7 +57,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -73,6 +73,8 @@ import {
   type PageableSection,
   type SectionDisclosure,
 } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Per-response byte budget for the designated list's page. */
 const EMPTY_QUEUES_BYTE_BUDGET = 38_000;
@@ -81,8 +83,6 @@ const EMPTY_QUEUES_BYTE_BUDGET = 38_000;
 const EMPTY_QUEUES_MAX_LIMIT = 500;
 /** Default `limit`. */
 const EMPTY_QUEUES_DEFAULT_LIMIT = 100;
-/** Internal page-size cap. */
-const LIST_PAGE_SIZE = 500;
 
 /**
  * Age threshold for `isLikelyStale`: 180 days. A queue/group with zero
@@ -208,15 +208,19 @@ export interface EmptyQueuesAndGroupsOutput {
    */
   readonly coverageCaveat?: CoverageCaveat;
   /**
-   * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) dropped Queue
-   * and/or Group nodes BEFORE emptiness was computed — so the lists (and totals)
-   * cover only the first 500 of that type. Present ONLY when actually true so a
-   * ≤500-node org's golden does not move.
+   * R6 (BRIEF-084 scan-tail-unreachable): TRUE only when the multi-window
+   * `scanAllNodesOfTypes` walk hit its residual `FULL_SCAN_MAX_NODES` ceiling
+   * for Queue and/or Group with strictly more nodes behind it — a
+   * pathological type far above any real org. The walk itself pages the SQL
+   * `OFFSET` forward until each type is exhausted, so a normal >500-Queue org
+   * is fully scanned and this is honestly false (strictly stronger than the
+   * old single 500-row page, which silently dropped the tail). Present ONLY
+   * when actually true so a normal org's golden does not move.
    */
   readonly scanTruncated?: boolean;
-  /** CR-RV12: true org-wide Queue count (only when the Queue scan was capped). */
+  /** Queue nodes actually scanned (only when the Queue walk was incomplete). */
   readonly totalQueueNodes?: number;
-  /** CR-RV12: true org-wide Group count (only when the Group scan was capped). */
+  /** Group nodes actually scanned (only when the Group walk was incomplete). */
   readonly totalGroupNodes?: number;
   /**
    * CR-22 opaque continuation token, present ONLY when the designated list
@@ -390,18 +394,27 @@ export const emptyQueuesAndGroupsHandler = async (
 
   const queues: EmptyQueueEntry[] = [];
   let unknownMemberCountQueues = 0;
+  // R6 (BRIEF-084 scan-tail-unreachable): a single un-offset `listNodesByType`
+  // page caps the SCAN axis at 500 id-ASC nodes, so a Queue/Group sorted past
+  // row 500 was never fetched at all — no cursor could ever reach it, even
+  // though `scanTruncated` honestly reported the true total. `scanAllNodesOfTypes`
+  // pages the SQL OFFSET forward until each type is exhausted, closing the gap;
+  // its `scanIncomplete` flag replaces the old hand-rolled `countNodesByType`
+  // comparison with one derived value (see scan-all-nodes.ts module doc).
+  let scanQueuesIncomplete = false;
+  let totalQueueNodesScanned = 0;
 
   if (typeFilter === 'Queue' || typeFilter === 'both') {
-    const qRes = await listNodesByType(ctx.graph, 'Queue', {
-      limit: LIST_PAGE_SIZE,
-    });
+    const qRes = await scanAllNodesOfTypes(ctx.graph, ['Queue']);
     if (!qRes.ok) {
       return err({
         kind: 'internal',
         message: `graph query failed: ${qRes.error.message}`,
       });
     }
-    for (const queue of qRes.value) {
+    scanQueuesIncomplete = qRes.value.scanIncomplete;
+    totalQueueNodesScanned = qRes.value.nodes.length;
+    for (const queue of qRes.value.nodes) {
       const ns = namespacePrefixOf(queue.apiName);
       if (!includeManaged && ns !== null) continue;
       if (!nameMatches(queue, nameNeedle)) continue;
@@ -449,18 +462,20 @@ export const emptyQueuesAndGroupsHandler = async (
 
   const groups: EmptyGroupEntry[] = [];
   let unknownMemberCountGroups = 0;
+  let scanGroupsIncomplete = false;
+  let totalGroupNodesScanned = 0;
 
   if (typeFilter === 'Group' || typeFilter === 'both') {
-    const gRes = await listNodesByType(ctx.graph, 'Group', {
-      limit: LIST_PAGE_SIZE,
-    });
+    const gRes = await scanAllNodesOfTypes(ctx.graph, ['Group']);
     if (!gRes.ok) {
       return err({
         kind: 'internal',
         message: `graph query failed: ${gRes.error.message}`,
       });
     }
-    for (const group of gRes.value) {
+    scanGroupsIncomplete = gRes.value.scanIncomplete;
+    totalGroupNodesScanned = gRes.value.nodes.length;
+    for (const group of gRes.value.nodes) {
       const ns = namespacePrefixOf(group.apiName);
       if (!includeManaged && ns !== null) continue;
       if (!nameMatches(group, nameNeedle)) continue;
@@ -511,28 +526,20 @@ export const emptyQueuesAndGroupsHandler = async (
   // layered on top and emitted only when the designated list is actually paged.
   const truncated = truncatedQ || truncatedG;
 
-  // CR-RV12 honest SCAN-cap disclosure: the per-type scan above is capped at
-  // LIST_PAGE_SIZE, so on a >500-node org both the lists AND totalQueues/
-  // totalGroups silently under-count. Compare a TRUE count against the cap; when
-  // a scan saturated, surface scanTruncated + the true node counts. Emitted only
-  // when actually capped so a ≤500-node org's golden does not move.
-  let scanQueuesCapped = false;
-  let scanGroupsCapped = false;
-  let totalQueueNodes = 0;
-  let totalGroupNodes = 0;
-  if (typeFilter === 'Queue' || typeFilter === 'both') {
-    const c = await countNodesByType(ctx.graph, 'Queue');
-    if (!c.ok) return err({ kind: 'internal', message: `graph query failed: ${c.error.message}` });
-    totalQueueNodes = c.value;
-    scanQueuesCapped = c.value > LIST_PAGE_SIZE;
+  // R6 (BRIEF-084): scanTruncated now reflects the `scanAllNodesOfTypes`
+  // residual-cap disclosure captured while walking each type above — not a
+  // hand-rolled `countNodesByType` comparison against a single 500-row page.
+  // A normal org (even 800+ queues) is fully walked, so this stays honestly
+  // false and every node is reachable through the OUTPUT cursor below.
+  const scanTruncated = scanQueuesIncomplete || scanGroupsIncomplete;
+  const incompleteScanTypes = [
+    ...(scanQueuesIncomplete ? ['Queue'] : []),
+    ...(scanGroupsIncomplete ? ['Group'] : []),
+  ];
+  const boundaries: string[] = [...BOUNDARIES];
+  if (scanTruncated) {
+    boundaries.push(fullScanTruncationNote(incompleteScanTypes));
   }
-  if (typeFilter === 'Group' || typeFilter === 'both') {
-    const c = await countNodesByType(ctx.graph, 'Group');
-    if (!c.ok) return err({ kind: 'internal', message: `graph query failed: ${c.error.message}` });
-    totalGroupNodes = c.value;
-    scanGroupsCapped = c.value > LIST_PAGE_SIZE;
-  }
-  const scanTruncated = scanQueuesCapped || scanGroupsCapped;
 
   // CR-22 section cursor: page ONE designated list (queues by default; groups
   // when type:'Group') and disclose the other honestly. On resume the handler
@@ -605,7 +612,7 @@ export const emptyQueuesAndGroupsHandler = async (
       totalGroups: sortedGroups.length,
       unknownMemberCountQueues,
       unknownMemberCountGroups,
-      boundaries: BOUNDARIES,
+      boundaries,
       truncated,
       // Present ONLY when a name filter was passed, so a bare call stays
       // byte-identical to the pre-filter golden.
@@ -621,8 +628,8 @@ export const emptyQueuesAndGroupsHandler = async (
       ...(scanTruncated
         ? {
             scanTruncated: true,
-            ...(scanQueuesCapped ? { totalQueueNodes } : {}),
-            ...(scanGroupsCapped ? { totalGroupNodes } : {}),
+            ...(scanQueuesIncomplete ? { totalQueueNodes: totalQueueNodesScanned } : {}),
+            ...(scanGroupsIncomplete ? { totalGroupNodes: totalGroupNodesScanned } : {}),
           }
         : {}),
       ...(emitCursor

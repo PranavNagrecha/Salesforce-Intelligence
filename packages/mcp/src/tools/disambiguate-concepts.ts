@@ -41,10 +41,12 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
  * Verbatim Q155 honesty anchor (PLAN-v2.9 §7). Frozen here so the test
@@ -57,15 +59,6 @@ const BOUNDARY_Q155 =
 /** Default and ceiling for the per-bucket `matchingFields` slice. */
 const MATCHING_FIELDS_DEFAULT_LIMIT = 50;
 const MATCHING_FIELDS_MAX_LIMIT = 200;
-
-/**
- * Page size for the full CustomField corpus scan. Equal to the graph layer's
- * `LIST_MAX_LIMIT` so each page round-trips the maximum allowed; we page with
- * `offset` until exhausted. Disambiguation compares concepts across EVERY
- * field, so a single default-50 page (or even a single 500 page) silently
- * under-counts on real orgs (acme has 1034 CustomFields).
- */
-const CUSTOM_FIELD_PAGE_SIZE = 500;
 
 /**
  * Zod schema for the `sfi.disambiguate_concepts` tool input.
@@ -442,23 +435,19 @@ export const disambiguateConceptsHandler = async (
 
   // Scan the ENTIRE CustomField corpus, not just the graph layer's default
   // first page (50 rows): disambiguation compares concepts across all of the
-  // org's fields. `listNodesByType` caps a single call at 500, so page through
-  // with `offset` until a short page signals exhaustion.
-  const fields: Node[] = [];
-  for (let offset = 0; ; offset += CUSTOM_FIELD_PAGE_SIZE) {
-    const fieldsResult = await listNodesByType(ctx.graph, 'CustomField', {
-      limit: CUSTOM_FIELD_PAGE_SIZE,
-      offset,
+  // org's fields. `scanAllNodesOfTypes` windows the SQL `OFFSET` forward until
+  // the type is exhausted (or its residual `FULL_SCAN_MAX_NODES` ceiling is
+  // hit), carrying the full-scan honesty machinery this tool's whole-corpus
+  // claim (`totalMatchCount`, the per-axis `differences`) depends on — an
+  // `incompleteTypes` residual to disclose if the scan is ever incomplete.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomField']);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
     });
-    if (!fieldsResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${fieldsResult.error.message}`,
-      });
-    }
-    fields.push(...fieldsResult.value);
-    if (fieldsResult.value.length < CUSTOM_FIELD_PAGE_SIZE) break;
   }
+  const fields: readonly Node[] = scan.value.nodes;
 
   // Buckets carry the FULL match set; the analysis below runs over it and the
   // display cap is applied only when serialising (capForDisplay).
@@ -466,9 +455,11 @@ export const disambiguateConceptsHandler = async (
   const bucketB = buildBucket(input.conceptB, fields);
   const anyTruncated =
     bucketA.totalMatchCount > limit || bucketB.totalMatchCount > limit;
-  const boundaries = anyTruncated
-    ? [BOUNDARY_Q155, BOUNDARY_TRUNCATED]
-    : [BOUNDARY_Q155];
+  const boundaries: string[] = [BOUNDARY_Q155];
+  if (anyTruncated) boundaries.push(BOUNDARY_TRUNCATED);
+  if (scan.value.scanIncomplete) {
+    boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
+  }
 
   // Same-concept short-circuit. Return mirror buckets + empty
   // differences + null suggested-when-to-use; skill refuses upstream.

@@ -13,7 +13,7 @@
  * refresh, as recorded at that time — not recomputed.
  */
 
-import type { McpError, McpResponse } from '@sf-intelligence/contracts';
+import type { McpError, McpResponse, PageInfo } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { z } from 'zod';
 
@@ -23,11 +23,19 @@ import {
 } from '../history-store.js';
 import type { Context } from '../server.js';
 
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 
+/** Tool name — used to bind/verify a CR-22 continuation cursor to this query. */
+const TOOL_NAME = 'sfi.org_history';
+
 export const orgHistoryInputSchema = z.object({
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  offset: z.number().int().min(0).optional(),
+  /** CR-22 continuation cursor from a prior truncated response. Overrides `offset` when present. */
+  cursor: z.string().optional(),
 });
 
 export type OrgHistoryInput = z.infer<typeof orgHistoryInputSchema>;
@@ -42,6 +50,15 @@ export interface OrgHistoryOutput {
   readonly netComponentChange: number | null;
   /** Timeline, most recent first, capped at `limit`. */
   readonly entries: readonly OrgHistoryEntry[];
+  readonly limit: number;
+  readonly offset: number;
+  /** True when strictly more history exists past `entries` — the typed truncation flag. */
+  readonly truncated: boolean;
+  /** Present only when `truncated`: the offset to resume from. */
+  readonly nextOffset?: number;
+  /** Present only when `truncated`: opaque continuation cursor for the next page. */
+  readonly nextCursor?: string;
+  readonly pageInfo?: PageInfo;
   readonly boundaries: readonly string[];
 }
 
@@ -71,8 +88,35 @@ export const orgHistoryHandler = async (
     return err({ kind: 'internal', message: `failed to read history: ${String(cause)}` });
   }
 
-  // Most-recent-first slice for display.
-  const entries = [...history.chronological].reverse().slice(0, limit);
+  // org_history takes no narrowing args beyond the paging knobs, so the
+  // fingerprint is constant — it still binds a cursor to this tool + vault.
+  const fingerprint = argsFingerprint({});
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL_NAME,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // Most-recent-first ordering, then a typed CR-22 page over it.
+  const mostRecentFirst = [...history.chronological].reverse();
+  const paged = paginateLegacy(mostRecentFirst, {
+    offset,
+    limit,
+    binding: {
+      tool: TOOL_NAME,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
     data: {
@@ -80,7 +124,12 @@ export const orgHistoryHandler = async (
       firstRefreshedAt: history.firstRefreshedAt,
       lastRefreshedAt: history.lastRefreshedAt,
       netComponentChange: history.netComponentChange,
-      entries,
+      entries: paged.items,
+      limit,
+      offset,
+      truncated,
+      ...(truncated ? { nextOffset: offset + paged.items.length } : {}),
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       boundaries: BOUNDARIES,
     },
     vaultState: { sourceTreeHash: ctx.manifest.sourceTreeHash, refreshedAt: ctx.manifest.refreshedAt },

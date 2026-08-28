@@ -40,6 +40,8 @@ import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph'
 
 import type { Context } from '../server.js';
 
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES, fullScanTruncationNote } from './scan-cap.js';
 import {
   classifyField,
   lookupIdentityCatalog,
@@ -401,6 +403,18 @@ const gateFederationIdentifier = async (
 };
 
 /**
+ * Residual ceiling on the CustomField / ConditionalContext full-scans below,
+ * per node type. Defaults to the house-wide {@link FULL_SCAN_MAX_NODES};
+ * `SFI_VALUE_CHANGE_SCAN_MAX` overrides it so a test can exercise the
+ * truncated-disclosure path without seeding 20 000 nodes. Mirrors
+ * `history_tracking_gaps`'s `SFI_HISTORY_TRACKING_SCAN_MAX`.
+ */
+const valueChangeScanCeiling = (): number => {
+  const v = Number(process.env['SFI_VALUE_CHANGE_SCAN_MAX']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
+};
+
+/**
  * Detect a cross-object "shadow join": a key field replicated by NAME on
  * other objects with no formal relationship, so the copies are value-joined
  * and a value change on one side silently desyncs the others (no
@@ -412,37 +426,34 @@ const gateFederationIdentifier = async (
 const detectShadowJoin = async (
   ctx: Context,
   classification: FieldClassification,
-): Promise<Result<BucketHit | null, McpError>> => {
+): Promise<Result<{ readonly hit: BucketHit | null; readonly incompleteTypes: readonly string[] }, McpError>> => {
   const { object, field, upsertKey } = classification;
   const keyish = upsertKey.isUpsertKey || /(_ID|_SIS_ID|Key|_uuid|_guid|Code)__c$/i.test(field);
-  if (!keyish) return ok(null);
+  if (!keyish) return ok({ hit: null, incompleteTypes: [] });
 
-  const all: Node[] = [];
-  let offset = 0;
-  for (;;) {
-    const res = await listNodesByType(ctx.graph, 'CustomField', { limit: 500, offset });
-    if (!res.ok) return err({ kind: 'internal', message: `graph query failed: ${res.error.message}` });
-    all.push(...res.value);
-    if (res.value.length < 500) break;
-    offset += 500;
-  }
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomField'], valueChangeScanCeiling());
+  if (!scan.ok) return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  const { nodes: all, incompleteTypes } = scan.value;
   const objOf = (n: Node): string => parseFieldId(n.id)?.object ?? '?';
   const sameName = all.filter((n) => parseFieldId(n.id)?.field === field);
-  if (sameName.length <= 1) return ok(null);
+  if (sameName.length <= 1) return ok({ hit: null, incompleteTypes });
   const masters = sameName.filter((n) => n.properties['externalId'] === true);
-  if (masters.length === 0) return ok(null); // common name, not a keyed shadow join
+  if (masters.length === 0) return ok({ hit: null, incompleteTypes }); // common name, not a keyed shadow join
   const otherObjects = sameName.filter((n) => objOf(n) !== object);
-  if (otherObjects.length === 0) return ok(null);
+  if (otherObjects.length === 0) return ok({ hit: null, incompleteTypes });
 
   const masterObjs = [...new Set(masters.map(objOf))].sort();
   const copyObjs = [...new Set(sameName.filter((n) => n.properties['externalId'] !== true).map(objOf))].sort();
   const thisIsMaster = upsertKey.signals.includes('externalId');
   return ok({
-    bucket: 'cross-object',
-    severity: thisIsMaster ? 'high' : 'medium',
-    confidence: 'likely',
-    summary: `'${field}' is replicated on ${sameName.length} objects — External-ID key on [${masterObjs.join(', ')}]${copyObjs.length > 0 ? `, plain copy on [${copyObjs.join(', ')}]` : ''}. These are value-joined with no formal relationship; changing the value here can silently desync the copies.`,
-    evidence: sameName.map((n) => n.id).sort(),
+    hit: {
+      bucket: 'cross-object',
+      severity: thisIsMaster ? 'high' : 'medium',
+      confidence: 'likely',
+      summary: `'${field}' is replicated on ${sameName.length} objects — External-ID key on [${masterObjs.join(', ')}]${copyObjs.length > 0 ? `, plain copy on [${copyObjs.join(', ')}]` : ''}. These are value-joined with no formal relationship; changing the value here can silently desync the copies.`,
+      evidence: sameName.map((n) => n.id).sort(),
+    },
+    incompleteTypes,
   });
 };
 
@@ -471,25 +482,20 @@ const normalizeExpr = (expr: unknown): string =>
 const findValueCouplings = async (
   ctx: Context,
   fieldId: string,
-): Promise<Result<{ readonly expressions: string[]; readonly literals: string[] }, McpError>> => {
+): Promise<Result<{ readonly expressions: string[]; readonly literals: string[]; readonly incompleteTypes: readonly string[] }, McpError>> => {
   const leaf = parseFieldId(fieldId)?.field ?? fieldId;
   const re = new RegExp(`\\b${leaf}\\b`);
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['ConditionalContext'], valueChangeScanCeiling());
+  if (!scan.ok) return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
   const matched: Node[] = [];
-  let offset = 0;
-  for (;;) {
-    const res = await listNodesByType(ctx.graph, 'ConditionalContext', { limit: 500, offset });
-    if (!res.ok) return err({ kind: 'internal', message: `graph query failed: ${res.error.message}` });
-    for (const n of res.value) {
-      const refs = Array.isArray(n.properties['fieldRefs']) ? (n.properties['fieldRefs'] as unknown[]) : [];
-      const expr = n.properties['expression'];
-      if (refs.includes(fieldId) || (typeof expr === 'string' && re.test(expr))) matched.push(n);
-    }
-    if (res.value.length < 500) break;
-    offset += 500;
+  for (const n of scan.value.nodes) {
+    const refs = Array.isArray(n.properties['fieldRefs']) ? (n.properties['fieldRefs'] as unknown[]) : [];
+    const expr = n.properties['expression'];
+    if (refs.includes(fieldId) || (typeof expr === 'string' && re.test(expr))) matched.push(n);
   }
   const expressions = [...new Set(matched.map((n) => normalizeExpr(n.properties['expression'])).filter((s) => s.length > 0))].slice(0, 8);
   const literals = [...new Set(matched.flatMap((n) => extractQuotedLiterals(String(n.properties['expression'] ?? ''))))].slice(0, 12);
-  return ok({ expressions, literals });
+  return ok({ expressions, literals, incompleteTypes: scan.value.incompleteTypes });
 };
 
 /**
@@ -521,7 +527,10 @@ export const assessValueChange = async (
   if (mutable) {
     const shadow = await detectShadowJoin(ctx, classification);
     if (!shadow.ok) return err(shadow.error);
-    if (shadow.value !== null) buckets = [...buckets, shadow.value];
+    if (shadow.value.hit !== null) buckets = [...buckets, shadow.value.hit];
+    if (shadow.value.incompleteTypes.length > 0) {
+      extraDisclosures.push(fullScanTruncationNote(shadow.value.incompleteTypes, valueChangeScanCeiling()));
+    }
   }
   // Declarative value-literal couplings: a ConditionalContext that compares
   // this field to a literal IS automation evidence — create the automation
@@ -529,6 +538,9 @@ export const assessValueChange = async (
   if (mutable) {
     const cp = await findValueCouplings(ctx, node.id);
     if (!cp.ok) return err(cp.error);
+    if (cp.value.incompleteTypes.length > 0) {
+      extraDisclosures.push(fullScanTruncationNote(cp.value.incompleteTypes, valueChangeScanCeiling()));
+    }
     if (cp.value.expressions.length > 0) {
       const existing = buckets.find((b) => b.bucket === 'automation');
       const enriched: BucketHit = {

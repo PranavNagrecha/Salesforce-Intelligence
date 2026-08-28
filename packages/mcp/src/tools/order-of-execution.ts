@@ -45,6 +45,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageCursorToken,
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -66,7 +67,13 @@ import {
   type ReceiverVerifiableStep,
 } from './apex-receiver.js';
 import { resolveObjectAliasInVault } from './input-aliases.js';
-import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  argsFingerprint,
+  decodeCursor,
+  encodeCursor,
+  PAGE_CURSOR_VERSION,
+  paginateLegacy,
+} from './page-cursor.js';
 import {
   buildInactiveSummary,
   type InactiveConfiguredFirer,
@@ -1871,6 +1878,78 @@ export const orderOfExecutionHandler = async (
       stepsOmitted: budget.stepsOmitted + budget2.stepsOmitted,
     };
     attachEnvelopeHonesty(budget);
+  }
+
+  // FIX 16 (R2). `pagedByEvent` above was frozen from `paginateLegacy` BEFORE
+  // `enforceSoeByteBudget` ran; the byte-budget's last-resort tail step-drop
+  // (Pass 4) can shed steps from a container that IS a page slice, leaving
+  // `paging.byEvent[event].returnedCount`/`hasMore`/`nextCursor` describing a
+  // page larger than the `soe` array now holds. Left alone, `nextCursor`
+  // resumes at `offset + <the pre-trim page size>` and SKIPS the steps the
+  // byte budget cut out of the middle of the page — silent data loss a
+  // resuming caller has no way to detect, unlike the `phasesOmitted` axis
+  // above which names the shortfall but does not touch this pointer. Reconcile
+  // every paged event's counters against what `byEvent[event].soe` actually
+  // holds now, and re-mint ONE shared resume cursor at the SMALLEST corrected
+  // offset across paged events — the shared `limit`/`offset` apply to every
+  // event identically (see `OOE_PAGING_NOTE`), so any other offset would still
+  // skip whichever event was cut hardest. When no paged event kept even one
+  // more step than before, forward progress cannot be guaranteed and the
+  // pointer is dropped rather than left wrong (mirrors
+  // `reconcileHandlerPageAfterGlobalTrim`'s page-cursor.ts contract: correct
+  // when a safe resume point is nameable, otherwise remove — never leave a
+  // pointer that reads as trustworthy but is not).
+  if (data.paging !== undefined) {
+    const paging = data.paging;
+    let anyCorrected = false;
+    const correctedByEvent: Partial<Record<SoeEvent, PageInfo>> = {};
+    const keptCounts: number[] = [];
+    for (const event of requestedEvents) {
+      const entry = paging.byEvent[event];
+      const perEvent = byEvent[event];
+      if (entry === undefined || perEvent === undefined) continue;
+      const actual = perEvent.soe.length;
+      if (actual < entry.returnedCount) {
+        anyCorrected = true;
+        correctedByEvent[event] = {
+          totalCount: entry.totalCount,
+          returnedCount: actual,
+          hasMore: true,
+          // The per-event pointer cannot be resolved in isolation — the ONE
+          // resume offset below is shared across every event on this page —
+          // so it carries no cursor of its own; `paging.nextCursor` is the
+          // single source of truth for resuming.
+          nextCursor: null,
+        };
+      } else {
+        correctedByEvent[event] = entry;
+      }
+      keptCounts.push(actual);
+    }
+    if (anyCorrected) {
+      const safeOffset =
+        keptCounts.length > 0
+          ? pageOffset + Math.min(...keptCounts)
+          : pageOffset;
+      let nextCursor: string | undefined;
+      if (safeOffset > pageOffset) {
+        const token: PageCursorToken = {
+          v: PAGE_CURSOR_VERSION,
+          t: 'sfi.order_of_execution',
+          h: ctx.manifest.sourceTreeHash,
+          o: safeOffset,
+          q: pageFingerprint,
+        };
+        nextCursor = encodeCursor(token);
+      }
+      data.paging = {
+        limit: paging.limit,
+        offset: paging.offset,
+        byEvent: correctedByEvent,
+        note: paging.note,
+        ...(nextCursor !== undefined ? { nextCursor } : {}),
+      };
+    }
   }
 
   return ok({

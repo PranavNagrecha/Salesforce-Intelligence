@@ -67,11 +67,17 @@ export type CpqQuoteTemplateBreakdownInput = z.infer<
 /**
  * One inferred section entry. The `fieldName` is the source field
  * token (the values-mirror key that triggered the recognition); the
- * `reference` is the field's value verbatim.
+ * `reference` is the field's value verbatim, or the empty string when
+ * the value is genuinely absent OR was withheld as masked — `isMasked`
+ * is the only thing that distinguishes those two cases. Mirrors the
+ * `isMasked` convention on `lookup-record.ts` / `explain-field.ts`:
+ * the recognition layer detects masking explicitly and must not let
+ * the empty-string placeholder erase that fact.
  */
 export interface CpqQuoteTemplateSection {
   readonly fieldName: string;
   readonly reference: string;
+  readonly isMasked: boolean;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -110,7 +116,8 @@ const readBooleanProperty = (node: Node, key: string): boolean =>
  * values are coerced to their string representation so the section
  * reference round-trips through JSON. Masked values are surfaced as
  * the empty string — the recognition layer MUST NOT fabricate a
- * masked value.
+ * masked value — but `isMasked: true` records the fact so the empty
+ * string is never conflated with a genuinely blank/absent value.
  */
 const readSections = (node: Node): readonly CpqQuoteTemplateSection[] => {
   const rawValues = node.properties['values'];
@@ -123,13 +130,13 @@ const readSections = (node: Node): readonly CpqQuoteTemplateSection[] => {
     if (!fieldName.startsWith(SECTION_FIELD_PREFIX)) continue;
     const isMasked = obj['isMasked'] === true;
     if (isMasked) {
-      sections.push({ fieldName, reference: '' });
+      sections.push({ fieldName, reference: '', isMasked: true });
       continue;
     }
     const rawValue = obj['value'];
     const reference =
       rawValue === null || rawValue === undefined ? '' : String(rawValue);
-    sections.push({ fieldName, reference });
+    sections.push({ fieldName, reference, isMasked: false });
   }
   // Sort by field name for deterministic emission order.
   return sections.sort((a, b) =>

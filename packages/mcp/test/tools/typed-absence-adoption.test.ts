@@ -188,7 +188,10 @@ describe('typed-absence adoption (roster-universal drift gate)', () => {
   // shared and a ratchet anyone can quietly re-tighten in passing is not a ratchet.
   // That is the behaviour this constant was written to produce, so it is recorded
   // here rather than in a changelog: the gate held.
-  const BASELINE = 88;
+  // RE-TIGHTENED AGAIN, 88 -> 85, as the MEDIUM/LOW wave landed. Same rule as the
+  // 93 -> 88 step: the number only moves here, once, deliberately, and never by an
+  // agent passing through on other work.
+  const BASELINE = 85;
 
   it('the hand-rolled-predicate count may only shrink (ratchet)', () => {
     const violations: string[] = [];

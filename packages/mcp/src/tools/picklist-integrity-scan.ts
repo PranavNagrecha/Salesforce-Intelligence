@@ -65,6 +65,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -78,6 +79,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { readFieldDataType } from './field-properties.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { extractEqualityLiterals } from './picklist-literal-check.js';
 import {
   normalizePicklistValues,
@@ -85,6 +87,9 @@ import {
 } from './picklist-values.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+
+/** Tool name stamped onto minted cursors and checked on resume (R6 / CR-22). */
+const PICKLIST_INTEGRITY_SCAN_TOOL = 'sfi.picklist_integrity_scan';
 
 /** Inclusive upper bound on `limit` (the shared enumeration-style cap). */
 const PICKLIST_INTEGRITY_MAX_LIMIT = 500;
@@ -148,10 +153,17 @@ const PICKLIST_INTEGRITY_RESTRICTED_DISCLOSURE =
  *     handler. The slice is over FIELDS-with-findings, not individual findings —
  *     a field with 4 orphaned literals counts as 1 entry in the limit budget.
  *   - `offset`: optional zero-based offset for paging the FIELD list forward.
+ *   - `cursor`: optional opaque continuation token from a prior truncated
+ *     page's `nextCursor` (R6 / CR-22, via `paginateLegacy`). Bound to this
+ *     tool + the vault's `sourceTreeHash`, so a cursor minted before a refresh
+ *     is rejected with `invalid-query` instead of silently reading the wrong
+ *     page — a raw `offset` carried across a refresh cannot be checked this
+ *     way. An explicit `cursor` wins over `offset` when both are given.
  */
 export const picklistIntegrityScanInputSchema = z.object({
   limit: z.number().int().min(1).max(PICKLIST_INTEGRITY_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
@@ -268,6 +280,15 @@ export interface PicklistIntegrityScanOutput {
   readonly offset?: number;
   /** Offset to pass on the next call. Present only when `truncated`. */
   readonly nextOffset?: number;
+  /**
+   * Opaque continuation token, present ONLY when this page was truncated.
+   * Prefer this over `nextOffset` to resume — it is bound to this tool and
+   * the vault's `sourceTreeHash`, so it is rejected outright if replayed
+   * after a refresh instead of silently reading the wrong page.
+   */
+  readonly nextCursor?: string;
+  /** Structured page info mirroring `nextCursor` (used by the seam detector). */
+  readonly pageInfo?: PageInfo;
 }
 
 // ---------------------------------------------------------------------------
@@ -866,7 +887,20 @@ export const picklistIntegrityScanHandler = async (
   input: PicklistIntegrityScanInput,
 ): Promise<Result<McpResponse<PicklistIntegrityScanOutput>, McpError>> => {
   const limit = input.limit ?? PICKLIST_INTEGRITY_DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
+  // This tool takes no filter args beyond limit/offset/cursor, so the
+  // fingerprint is constant — it still binds the cursor to THIS tool + vault,
+  // rejecting a cursor minted by a different tool or before a stale-vault swap.
+  const fingerprint = argsFingerprint({});
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: PICKLIST_INTEGRITY_SCAN_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
 
   const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomField']);
   if (!scan.ok) {
@@ -959,8 +993,28 @@ export const picklistIntegrityScanHandler = async (
     a.fieldId < b.fieldId ? -1 : a.fieldId > b.fieldId ? 1 : 0,
   );
 
-  const slice = fieldFindings.slice(offset, offset + limit);
-  const truncated = offset + slice.length < fieldFindings.length;
+  // R6: call the shared pager instead of open-coding slice + truncated +
+  // nextOffset — it adds a bound-checked `nextCursor` on top of the same
+  // `items` / `hasMore` / `nextOffset` shape this handler already emitted, so
+  // an in-budget response stays byte-identical. `fieldFindings` is already
+  // sorted to a total order by `fieldId` (unique per field) just above, so
+  // `fieldId` is a safe tiebreak key for the minted cursor. No per-handler
+  // byte budget (offset/limit only, matching pre-fix behavior) — the global
+  // response-budget guard backstops any oversized page.
+  const paged = paginateLegacy(fieldFindings, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    keyOf: (f) => f.fieldId,
+    binding: {
+      tool: PICKLIST_INTEGRITY_SCAN_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   const boundaries: string[] = [
     PICKLIST_INTEGRITY_SCOPE_DISCLOSURE,
@@ -1004,6 +1058,9 @@ export const picklistIntegrityScanHandler = async (
       trust,
       ...(isPaged ? { limit, offset } : {}),
       ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type {
   Edge,
@@ -1100,5 +1101,381 @@ describe('packageImpactHandler — review verdict on an un-provable absence', ()
     expect(r.value.data.verdict).not.toBe('no-detected-dependencies');
     expect(r.value.data.coverageCaveat).toBeDefined();
     expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Flow');
+  });
+});
+
+// =============================================================================
+// SOURCE-TEXT LITERALS shared by the R6 drift guard and the truncated-scan test
+// below. `IDENTITY_SCAN_MAX` is module-PRIVATE in packages/graph/src/queries.ts
+// (not exported — see needsOrchestrator), so the only way for a test to know
+// the real ceiling without minting a THIRD copy of the number is to read it out
+// of the source. Both reads are asserted non-null inside the tests that use
+// them, so a deleted / moved / renamed literal fails loudly rather than
+// silently skipping the guard.
+// =============================================================================
+const TEST_DIR = fileURLToPath(new URL('.', import.meta.url));
+const GRAPH_QUERIES_SRC = join(TEST_DIR, '..', '..', '..', 'graph', 'src', 'queries.ts');
+const PACKAGE_IMPACT_SRC = join(TEST_DIR, '..', '..', 'src', 'tools', 'package-impact.ts');
+
+const readNumericLiteral = (path: string, pattern: RegExp): number | null => {
+  const m = readFileSync(path, 'utf8').match(pattern);
+  const captured = m?.[1];
+  // `null` (not 0, not NaN) when the literal is gone, so the tests below can
+  // assert non-null and fail LOUDLY instead of comparing two absences.
+  return captured === undefined ? null : Number(captured.replace(/_/g, ''));
+};
+
+/** `const IDENTITY_SCAN_MAX = 100_000;` in packages/graph/src/queries.ts. */
+const GRAPH_IDENTITY_SCAN_MAX = readNumericLiteral(
+  GRAPH_QUERIES_SRC,
+  /const IDENTITY_SCAN_MAX = ([\d_]+);/,
+);
+/** This tool's hand-copied mirror: `identities.length >= 100_000`. */
+const TOOL_IDENTITY_SCAN_MIRROR = readNumericLiteral(
+  PACKAGE_IMPACT_SRC,
+  /identities\.length >= ([\d_]+)/,
+);
+
+// =============================================================================
+// R4 — PACKAGE-IMPACT-UNRECOGNIZED-NAMESPACE. A `namespace` that is in NEITHER
+// the vault's `InstalledPackage` roster NOR any component / extension /
+// dependency (phantom targets included), on a COMPLETE scan, is not a namespace
+// this org has — most often a near-miss typo. The tool must REFUSE, never fall
+// through to the bare soft `no-detected-dependencies` (the verdict a host keys
+// an uninstall decision on): "we cannot find that package" and "that package is
+// installed and nothing touches it" must not render identically.
+//
+// The refusal is gated on FOUR conditions, and each gate has its own case here
+// because each one, if it fired wrongly, would manufacture a NEW confident-wrong
+// answer — a flat denial that a package the org genuinely has is installed:
+//   1. InstalledPackage coverage COMPLETE (adopted predicate) + roster non-empty
+//   2. no visible members
+//   3. no inbound touchpoint, INCLUDING phantom-target ones
+//   4. the scan ran to completion
+// =============================================================================
+describe('packageImpactHandler — unrecognized namespace refusal (R4)', () => {
+  const KNOWN_PKG_SEED: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: 'InstalledPackage:APXTConga4',
+        type: 'InstalledPackage',
+        apiName: 'APXTConga4',
+      }),
+      // A real component under the REAL namespace — proves the positive-match
+      // (regression) path keeps working after the fix.
+      makeNode({
+        id: 'CustomObject:APXTConga4__Thing__c',
+        type: 'CustomObject',
+        apiName: 'APXTConga4__Thing__c',
+      }),
+    ],
+    edges: [],
+  };
+
+  let dir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-'));
+    const opened = await openGraph(join(dir, 'known.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    localStore = opened.value;
+    const imp = await importExtractionResults(localStore, [KNOWN_PKG_SEED]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a near-miss typo of a real installed package with invalid-query, naming the real one', async () => {
+    const r = await packageImpactHandler(localCtx, { namespace: 'APXTConga' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('namespace');
+    expect(r.error.message).toContain('APXTConga4');
+  });
+
+  it('is case-insensitive: the REAL namespace in a different case is never refused', async () => {
+    const r = await packageImpactHandler(localCtx, { namespace: 'apxtconga4' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.packageComponentCount).toBe(1);
+  });
+
+  it('still answers normally for the REAL namespace (no over-refusal)', async () => {
+    const r = await packageImpactHandler(localCtx, { namespace: 'APXTConga4' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.packageComponentCount).toBe(1);
+    expect(r.value.data.verdict).not.toBe('no-detected-dependencies');
+  });
+
+  it('an installed-but-unused package (0 members, 0 extensions, 0 deps) is NOT refused — it IS known', async () => {
+    // A second known package with literally nothing else touching it: `known`
+    // recognizes it, so the bare/soft verdict path (not the refusal) applies.
+    const dir2 = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-unused-'));
+    const opened = await openGraph(join(dir2, 'unused.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const store2 = opened.value;
+    const imp = await importExtractionResults(store2, [
+      {
+        nodes: [
+          makeNode({
+            id: 'InstalledPackage:UnusedPkg',
+            type: 'InstalledPackage',
+            apiName: 'UnusedPkg',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    const ctx2: Context = { vaultRoot: dir2, manifest: FIXTURE_MANIFEST, graph: store2 };
+    const r = await packageImpactHandler(ctx2, { namespace: 'UnusedPkg' });
+    await closeGraph(store2);
+    rmSync(dir2, { recursive: true, force: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.packageComponentCount).toBe(0);
+    expect(r.value.data.verdict).toBe('no-detected-dependencies');
+  });
+
+  it('never refuses on a vault with NO InstalledPackage metadata at all (the pre-existing prefix-heuristic mode)', async () => {
+    // The top-level `ctx` fixture carries zero InstalledPackage nodes, so
+    // known.size === 0 there — the new gate is OFF and the pre-existing soft
+    // verdict for a genuinely-untracked vault must survive unchanged.
+    const r = await packageImpactHandler(ctx, { namespace: 'TOTALLYUNKNOWNNS' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.verdict).toBe('no-detected-dependencies');
+  });
+
+  // ---------------------------------------------------------------------------
+  // GATE 1 — InstalledPackage coverage must be COMPLETE, not merely non-empty.
+  //
+  // The rejected first cut hand-rolled `known.size > 0` as its proxy for
+  // "InstalledPackage retrieval is AUTHORITATIVE here". It is not: a manifest row
+  // that is `errored` / `capped` / `pending` / not-requested (a scoped `--types`
+  // refresh) leaves STALE-or-PARTIAL InstalledPackage nodes in the graph, so
+  // `known.size > 0` is TRUE while `known` is INCOMPLETE. Refusing there invents
+  // a brand-new confident-wrong answer — a flat `invalid-query` denying a package
+  // the org actually HAS installed, printed alongside an incomplete roster.
+  // The fix adopts `buildEnumerationCoverageCaveat(ctx, 'InstalledPackage')`
+  // (coverage-trust.ts), the same predicate the sibling
+  // `sfi.installed_package_catalog` already uses for this exact family.
+  //
+  // Every manifest below covers DEFAULT_USAGE_SOURCE_FAMILIES completely, so the
+  // usage-source caveat is silent and the ONLY variable across these cases is the
+  // InstalledPackage coverage row itself.
+  // ---------------------------------------------------------------------------
+  const coveredUsageFamilies = DEFAULT_USAGE_SOURCE_FAMILIES.map((type) => ({
+    type,
+    requested: true,
+    retrieved: 2,
+    errored: false,
+    neverModeled: false,
+  }));
+  const manifestWithInstalledPackageRow = (
+    row: Partial<{
+      requested: boolean;
+      retrieved: number;
+      errored: boolean;
+      neverModeled: boolean;
+      pending: boolean;
+      capped: boolean;
+    }>,
+  ): VaultManifest => ({
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      ...coveredUsageFamilies,
+      {
+        type: 'InstalledPackage',
+        requested: true,
+        retrieved: 1,
+        errored: false,
+        neverModeled: false,
+        ...row,
+      },
+    ],
+    coverageComputedAt: '2026-05-29T12:00:00.000Z',
+  });
+
+  it('CONTROL: on a vault whose InstalledPackage coverage is COMPLETE, the typo is still refused', async () => {
+    const r = await packageImpactHandler(
+      { ...localCtx, manifest: manifestWithInstalledPackageRow({}) },
+      { namespace: 'APXTConga' },
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  // Each of these is a vault where InstalledPackage nodes EXIST (known.size > 0)
+  // but the retrieval behind them is NOT authoritative. A refusal here would deny
+  // a genuinely-installed package.
+  const nonAuthoritativeCoverage: readonly (readonly [string, VaultManifest])[] = [
+    ['errored', manifestWithInstalledPackageRow({ errored: true })],
+    ['capped', manifestWithInstalledPackageRow({ capped: true })],
+    ['pending', manifestWithInstalledPackageRow({ pending: true, retrieved: 0 })],
+    // Scoped `--types` refresh: the row survives from an older run, marked
+    // not-requested, while stale InstalledPackage nodes persist in the graph.
+    ['not-requested (scoped --types refresh)', manifestWithInstalledPackageRow({ requested: false })],
+    // Scoped refresh that never wrote an InstalledPackage row at all: coverage
+    // rows EXIST (so the vault is not "legacy"), but say nothing about this family.
+    [
+      'no InstalledPackage row at all on a coverage-carrying manifest',
+      {
+        ...FIXTURE_MANIFEST,
+        coverage: coveredUsageFamilies,
+        coverageComputedAt: '2026-05-29T12:00:00.000Z',
+      } as VaultManifest,
+    ],
+  ];
+
+  for (const [label, manifest] of nonAuthoritativeCoverage) {
+    it(`does NOT refuse an unknown namespace when InstalledPackage coverage is ${label}`, async () => {
+      const r = await packageImpactHandler({ ...localCtx, manifest }, { namespace: 'APXTConga' });
+      // The roster cannot prove absence, so the honest soft/`review` verdict
+      // stands — NEVER a confident `invalid-query` denial.
+      expect(r.ok).toBe(true);
+      if (!r.ok || r.value.data.mode !== 'impact') return;
+      expect(r.value.data.packageComponentCount).toBe(0);
+      expect(['no-detected-dependencies', 'review']).toContain(r.value.data.verdict);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GATE 4 — `!scanIncomplete`. A namespace with ZERO visible members can never
+  // trip `edgeScanTruncated` (that is `packageNodes.length > EDGE_SCAN_CAP`), so
+  // the only reachable truncation is the whole-vault identity scan hitting the
+  // graph's IDENTITY_SCAN_MAX. Drive that by intercepting `listNodeIdentities`'
+  // own SQL on the real store — the roster row is kept in the padded result so
+  // `known` stays non-empty and GATE 1 is NOT what is being measured here.
+  // A truncated scan may simply not have REACHED the namespace's members, so it
+  // must yield `incomplete-scan`, never the refusal.
+  // ---------------------------------------------------------------------------
+  it('does NOT refuse on a TRUNCATED whole-vault scan — it yields incomplete-scan', async () => {
+    expect(GRAPH_IDENTITY_SCAN_MAX).not.toBeNull();
+    const cap = GRAPH_IDENTITY_SCAN_MAX as number;
+    const paddedRows: readonly Record<string, unknown>[] = [
+      {
+        id: 'InstalledPackage:APXTConga4',
+        type: 'InstalledPackage',
+        api_name: 'APXTConga4',
+        parent_id: null,
+      },
+      ...Array.from({ length: cap - 1 }, (_unused, i) => ({
+        id: `CustomObject:Filler${i}__c`,
+        type: 'CustomObject',
+        api_name: `Filler${i}__c`,
+        parent_id: null,
+      })),
+    ];
+    expect(paddedRows.length).toBe(cap);
+
+    const realRunAndReadAll = localStore.connection.runAndReadAll.bind(localStore.connection);
+    const truncatingConnection = {
+      runAndReadAll: async (sql: string, params: unknown) => {
+        if (sql.includes('SELECT id, type, api_name, parent_id FROM nodes')) {
+          return { getRowObjectsJS: () => paddedRows };
+        }
+        return realRunAndReadAll(sql, params as never);
+      },
+    } as unknown as GraphStore['connection'];
+    const truncatedCtx: Context = {
+      ...localCtx,
+      graph: { ...localStore, connection: truncatingConnection } as GraphStore,
+    };
+
+    const r = await packageImpactHandler(truncatedCtx, { namespace: 'APXTConga' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    expect(r.value.data.scanTruncated).toBe(true);
+    expect(r.value.data.verdict).toBe('incomplete-scan');
+  });
+
+  // ---------------------------------------------------------------------------
+  // GATE 3 — `!hasInbound`, phantom-target arm. A managed package's INTERNAL
+  // components are usually never retrieved, so a reference from YOUR metadata to
+  // one of them is a DANGLING (`targetMissing`) edge: the namespace has zero
+  // NODES yet is demonstrably real. That dependency is positive evidence, so the
+  // namespace must NOT be refused even though it is absent from the roster.
+  // ---------------------------------------------------------------------------
+  it('does NOT refuse a roster-absent namespace whose ONLY evidence is a phantom-target dependency', async () => {
+    const dir3 = mkdtempSync(join(tmpdir(), 'sfi-mcp-pkg-known-phantom-'));
+    const opened = await openGraph(join(dir3, 'phantom.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const store3 = opened.value;
+    const imp = await importExtractionResults(store3, [
+      {
+        nodes: [
+          // A DIFFERENT package is the only one in the roster, so the namespace
+          // under test is roster-absent — exactly the refusal precondition.
+          makeNode({
+            id: 'InstalledPackage:APXTConga4',
+            type: 'InstalledPackage',
+            apiName: 'APXTConga4',
+          }),
+          makeNode({ id: 'ApexClass:My_Caller', type: 'ApexClass', apiName: 'My_Caller' }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:My_Caller',
+            // Phantom: 3-segment managed id, no node in the graph, and its
+            // namespace is in no InstalledPackage row.
+            toId: 'CustomObject:Ghostpkg__Widget__c',
+            edgeType: 'references',
+            confidence: 'heuristic',
+          }),
+        ],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    const ctx3: Context = { vaultRoot: dir3, manifest: FIXTURE_MANIFEST, graph: store3 };
+    const r = await packageImpactHandler(ctx3, { namespace: 'Ghostpkg' });
+    await closeGraph(store3);
+    rmSync(dir3, { recursive: true, force: true });
+
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'impact') return;
+    // Zero retrieved members, yet a real touchpoint — the opposite of "this
+    // namespace does not exist".
+    expect(r.value.data.packageComponentCount).toBe(0);
+    expect(
+      r.value.data.yourDependencies.map((d) => `${d.fromId} -> ${d.toId}`),
+    ).toContain('ApexClass:My_Caller -> CustomObject:Ghostpkg__Widget__c');
+    expect(r.value.data.verdict).toBe('has-dependencies');
+  });
+});
+
+// =============================================================================
+// R6 — hand-copied mirror of `packages/graph/src/queries.ts`'s module-PRIVATE
+// `IDENTITY_SCAN_MAX`: this file's `scanTruncated` literal must stay in sync,
+// and until the ideal fix lands (export it, or have `listNodeIdentities` return
+// its own `truncated` flag — both are shared-file edits, escalated under
+// needsOrchestrator), this drift guard is the only thing that would catch the
+// two numbers diverging. A comment alone is not a guard.
+// =============================================================================
+describe('scanTruncated ceiling — IDENTITY_SCAN_MAX drift guard (R6)', () => {
+  it('the identities.length >= N literal here matches queries.ts IDENTITY_SCAN_MAX exactly', () => {
+    // Both reads are asserted non-null FIRST: a deleted, moved, or renamed
+    // literal must fail loudly rather than make the equality vacuous.
+    expect(GRAPH_IDENTITY_SCAN_MAX).not.toBeNull();
+    expect(TOOL_IDENTITY_SCAN_MIRROR).not.toBeNull();
+
+    // If this fails: packages/graph/src/queries.ts's IDENTITY_SCAN_MAX moved
+    // without this file's hand-copied mirror moving with it. A truncated
+    // whole-vault scan would then silently report itself COMPLETE
+    // (scanTruncated stays false past the real, now-lower cap), and any
+    // namespace whose members sort past the new cut would read a soft-safe
+    // `no-detected-dependencies` from a scan that never actually saw it.
+    expect(TOOL_IDENTITY_SCAN_MIRROR).toBe(GRAPH_IDENTITY_SCAN_MAX);
   });
 });

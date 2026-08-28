@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1017,14 +1017,22 @@ describe('unusedFieldsDeepHandler — live cross-check is bounded (CR-CAP-L5 tim
     expect(fields.every((f) => f.livePopulation === undefined)).toBe(true);
     expect(fields.every((f) => f.confidence === 'high')).toBe(true);
     // Neither the not-checked NOR the cap disclosure appears: the block was
-    // skipped, not failed-soft. boundaries stays the base static set (2 entries).
+    // skipped, not failed-soft.
+    //
+    // This assertion USED to be `boundaries.length === 2` — a hardcoded total
+    // that pinned the whole disclosure set to police one LIVE-plane fact. That
+    // literal then FAILED the moment the tool started disclosing an honest
+    // static blind spot (the un-retrieved `ReportType` plane on this fixture
+    // vault), i.e. the test would have blocked a disclosure being ADDED. The
+    // claim under test is "the LIVE block was skipped", so assert exactly that:
+    // no live-plane disclosure, and nothing that mentions the live cross-check.
     expect(r.value.data.boundaries).not.toContain(
       'static-only verdict; live population not checked',
     );
     expect(
       r.value.data.boundaries.some((b) => b.includes('high-confidence fields on this page')),
     ).toBe(false);
-    expect(r.value.data.boundaries.length).toBe(2);
+    expect(r.value.data.boundaries.some((b) => /live population/i.test(b))).toBe(false);
   });
 });
 
@@ -1658,5 +1666,330 @@ describe('unusedFieldsDeepHandler — format: proposal (Finding #35)', () => {
       await closeGraph(s);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// =============================================================================
+// REAL-ORG REGRESSIONS (all names below are PLACEHOLDERS).
+//
+// Three defects verified against a production vault through the real MCP
+// server, all of the same family: the tool CERTIFIED an answer it had not
+// checked.
+//
+//   D1  A Flow that writes a field through an SObject variable / a
+//       `<recordUpdates><inputAssignments>` block mints NO `writesTo` edge, so
+//       tier 1 read clean and the field was listed `confidence: 'high'` unused.
+//       The per-field sibling (`safe_to_delete_field`) consults the SAME
+//       supplemental source scan and returns `blocking` for those fields — the
+//       org-wide surface simply never asked.
+//   D2  ReportType `<columns>` are RETRIEVED but deliberately NOT modeled by the
+//       extractor (every ReportType node carries `columnsModeled: false`), so a
+//       field that is an explicit report-type column had zero inbound edges and
+//       was packaged into a deploy-ready destructiveChanges.xml.
+//   D3  `trust.completeness: 'complete'` with `limitations: []` on a response
+//       whose own `boundaries` named real limitations, whose page was
+//       truncated, and whose per-field sibling said `partial` on the identical
+//       vault — because this tool kept a PRIVATE required-coverage list that
+//       had drifted from the shared `CustomField` usage-source family list.
+// =============================================================================
+
+const REAL_ORG_MANIFEST: VaultManifest = {
+  ...FIXTURE_MANIFEST,
+  coverageComputedAt: '2026-05-27T14:40:00.000Z',
+  coverage: [
+    { type: 'CustomField', requested: true, retrieved: 10, errored: false, neverModeled: false },
+    { type: 'ValidationRule', requested: true, retrieved: 2, errored: false, neverModeled: false },
+    { type: 'Flow', requested: true, retrieved: 3, errored: false, neverModeled: false },
+    { type: 'ApexClass', requested: true, retrieved: 4, errored: false, neverModeled: false },
+    { type: 'ApexTrigger', requested: true, retrieved: 1, errored: false, neverModeled: false },
+    { type: 'Layout', requested: true, retrieved: 2, errored: false, neverModeled: false },
+    { type: 'WorkflowRule', requested: true, retrieved: 1, errored: false, neverModeled: false },
+    { type: 'LightningComponentBundle', requested: true, retrieved: 1, errored: false, neverModeled: false },
+    { type: 'AuraDefinitionBundle', requested: true, retrieved: 1, errored: false, neverModeled: false },
+    { type: 'VisualforcePage', requested: true, retrieved: 1, errored: false, neverModeled: false },
+    { type: 'VisualforceComponent', requested: true, retrieved: 1, errored: false, neverModeled: false },
+    // The two families the vault genuinely capped — exactly what the per-field
+    // sibling reports as `missingCoverage` on the same vault.
+    { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false },
+    { type: 'Dashboard', requested: true, retrieved: 0, errored: false, neverModeled: false },
+  ],
+} as VaultManifest;
+
+describe('unused_fields_deep — real-org regressions', () => {
+  const OBJ = 'CustomObject:Obj_A__c';
+
+  /** Spin up an isolated vault dir + graph, seeded by the caller. */
+  const withVault = async (
+    seedFn: (dir: string) => Promise<ExtractionResult>,
+    run: (ctx: Context) => Promise<void>,
+    manifest: VaultManifest = REAL_ORG_MANIFEST,
+  ): Promise<void> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-real-'));
+    const opened = await openGraph(join(dir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const seeded = await seedFn(dir);
+      const imp = await importExtractionResults(s, [seeded]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      await run({
+        vaultRoot: dir,
+        manifest,
+        graph: s,
+        liveCapability: mintLiveCapability('opt-in'),
+      });
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  // --- D1: the unconsulted supplemental Flow-writer scan ---------------------
+
+  it('D1: does NOT list a field an Active Flow writes through an SObject-variable assignment', async () => {
+    await withVault(
+      async (dir) => {
+        const flowRel = 'source/flows/Flow_B.flow-meta.xml';
+        mkdirSync(join(dir, 'source', 'flows'), { recursive: true });
+        writeFileSync(
+          join(dir, flowRel),
+          `<?xml version="1.0" encoding="UTF-8"?>
+<Flow>
+  <status>Active</status>
+  <variables>
+    <name>RecVar</name>
+    <dataType>SObject</dataType>
+    <objectType>Obj_A__c</objectType>
+  </variables>
+  <assignments>
+    <assignmentItems>
+      <assignToReference>RecVar.WrittenByFlowVar__c</assignToReference>
+    </assignmentItems>
+  </assignments>
+  <recordUpdates>
+    <inputAssignments>
+      <field>WrittenByFlowDml__c</field>
+    </inputAssignments>
+  </recordUpdates>
+</Flow>`,
+          'utf-8',
+        );
+        return {
+          nodes: [
+            makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' }),
+            makeNode({
+              id: 'Flow:Flow_B',
+              type: 'Flow',
+              apiName: 'Flow_B',
+              sourcePath: flowRel,
+              properties: { status: 'Active' },
+            }),
+            makeNode({
+              id: 'CustomField:Obj_A__c.WrittenByFlowVar__c',
+              apiName: 'WrittenByFlowVar__c',
+              parentId: OBJ,
+              properties: { dataType: 'Text' },
+            }),
+            makeNode({
+              id: 'CustomField:Obj_A__c.WrittenByFlowDml__c',
+              apiName: 'WrittenByFlowDml__c',
+              parentId: OBJ,
+              properties: { dataType: 'Text' },
+            }),
+            makeNode({
+              id: 'CustomField:Obj_A__c.ActuallyUnused__c',
+              apiName: 'ActuallyUnused__c',
+              parentId: OBJ,
+              properties: { dataType: 'Text' },
+            }),
+          ],
+          edges: [
+            makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.WrittenByFlowVar__c', edgeType: 'parentOf' }),
+            makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.WrittenByFlowDml__c', edgeType: 'parentOf' }),
+            makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.ActuallyUnused__c', edgeType: 'parentOf' }),
+          ],
+        };
+      },
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, { objectApiName: 'Obj_A__c' });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        const ids = r.value.data.fields.map((f) => f.id);
+        // The control MUST still be listed — this is a targeted exclusion, not a blanket floor.
+        expect(ids).toContain('CustomField:Obj_A__c.ActuallyUnused__c');
+        expect(ids).not.toContain('CustomField:Obj_A__c.WrittenByFlowVar__c');
+        expect(ids).not.toContain('CustomField:Obj_A__c.WrittenByFlowDml__c');
+        // ... and the exclusion is DISCLOSED, never a silent drop.
+        expect(r.value.data.boundaries.join(' ')).toMatch(/flow-field-writers-scan/i);
+      },
+    );
+  });
+
+  // --- D2: ReportType columns are retrieved but never modeled ---------------
+
+  it('D2: does NOT package a field that is an explicit ReportType column into destructiveChanges.xml', async () => {
+    await withVault(
+      async (dir) => {
+        const rtRel = 'source/reportTypes/RT_C.reportType-meta.xml';
+        mkdirSync(join(dir, 'source', 'reportTypes'), { recursive: true });
+        writeFileSync(
+          join(dir, rtRel),
+          `<?xml version="1.0" encoding="UTF-8"?>
+<ReportType>
+  <baseObject>Obj_A__c</baseObject>
+  <sections>
+    <columns>
+      <field>ReportTypeColumn__c</field>
+      <table>Obj_A__c</table>
+    </columns>
+    <columns>
+      <field>SameNameOtherObject__c</field>
+      <table>Obj_Z__c</table>
+    </columns>
+  </sections>
+</ReportType>`,
+          'utf-8',
+        );
+        return {
+          nodes: [
+            makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' }),
+            makeNode({
+              id: 'ReportType:RT_C',
+              type: 'ReportType',
+              apiName: 'RT_C',
+              sourcePath: rtRel,
+              // The extractor stamps this on EVERY ReportType: the per-column
+              // identity graph is a deferred follow-up, so "0 inbound edges"
+              // from this family is NOT CHECKED, never proven none.
+              properties: { columnsModeled: false, columnCount: 2 },
+            }),
+            makeNode({
+              id: 'CustomField:Obj_A__c.ReportTypeColumn__c',
+              apiName: 'ReportTypeColumn__c',
+              parentId: OBJ,
+              properties: { dataType: 'Text' },
+            }),
+            // Same api name, DIFFERENT object — must NOT be suppressed by the
+            // other object's column (no name-only matching).
+            makeNode({
+              id: 'CustomField:Obj_A__c.SameNameOtherObject__c',
+              apiName: 'SameNameOtherObject__c',
+              parentId: OBJ,
+              properties: { dataType: 'Text' },
+            }),
+          ],
+          edges: [
+            makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.ReportTypeColumn__c', edgeType: 'parentOf' }),
+            makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.SameNameOtherObject__c', edgeType: 'parentOf' }),
+          ],
+        };
+      },
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, {
+          objectApiName: 'Obj_A__c',
+          format: 'proposal',
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        const destructive =
+          r.value.data.proposal?.files.find((f) => f.path === 'destructiveChanges.xml')
+            ?.contents ?? '';
+        expect(destructive).not.toContain('<members>Obj_A__c.ReportTypeColumn__c</members>');
+        // Control: a same-named column on ANOTHER table must not suppress this one.
+        expect(destructive).toContain('<members>Obj_A__c.SameNameOtherObject__c</members>');
+        expect(r.value.data.boundaries.join(' ')).toMatch(/ReportType/);
+      },
+    );
+  });
+
+  // --- D3: the certification the tool did not earn --------------------------
+
+  it('D3: trust.limitations carries every boundary the same envelope discloses', async () => {
+    await withVault(
+      async () => ({
+        nodes: [
+          makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' }),
+          makeNode({
+            id: 'CustomField:Obj_A__c.Lonely__c',
+            apiName: 'Lonely__c',
+            parentId: OBJ,
+            properties: { dataType: 'Text' },
+          }),
+        ],
+        edges: [
+          makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.Lonely__c', edgeType: 'parentOf' }),
+        ],
+      }),
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, { objectApiName: 'Obj_A__c' });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        const { trust, boundaries } = r.value.data;
+        for (const boundary of boundaries) {
+          expect(trust.limitations).toContain(boundary);
+        }
+      },
+    );
+  });
+
+  it('D3: reports the SAME missingCoverage the per-field sibling reports on the same vault', async () => {
+    await withVault(
+      async () => ({
+        nodes: [
+          makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' }),
+          makeNode({
+            id: 'CustomField:Obj_A__c.Lonely__c',
+            apiName: 'Lonely__c',
+            parentId: OBJ,
+            properties: { dataType: 'Text' },
+          }),
+        ],
+        edges: [
+          makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.Lonely__c', edgeType: 'parentOf' }),
+        ],
+      }),
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, { objectApiName: 'Obj_A__c' });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        const completeness = r.value.data.trust.completeness;
+        // The vault capped Report + Dashboard. The per-field delete-safety tool
+        // names both; this tool certified `complete` because it kept a private
+        // required-coverage list that omitted them.
+        expect(completeness.status).not.toBe('complete');
+        expect(completeness.missingCoverage ?? []).toEqual(
+          expect.arrayContaining(['Report', 'Dashboard']),
+        );
+      },
+    );
+  });
+
+  it('D3: a TRUNCATED page names the truncation in trust.limitations', async () => {
+    await withVault(
+      async () => {
+        const nodes: Node[] = [makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' })];
+        const edges: Edge[] = [];
+        for (let i = 0; i < 5; i += 1) {
+          const id = `CustomField:Obj_A__c.Pad_${i}__c`;
+          nodes.push(
+            makeNode({ id, apiName: `Pad_${i}__c`, parentId: OBJ, properties: { dataType: 'Text' } }),
+          );
+          edges.push(makeEdge({ fromId: OBJ, toId: id, edgeType: 'parentOf' }));
+        }
+        return { nodes, edges };
+      },
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, {
+          objectApiName: 'Obj_A__c',
+          limit: 2,
+        });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect(r.value.data.truncated).toBe(true);
+        expect(r.value.data.trust.limitations.join(' ')).toMatch(
+          /this response carries 2 of 5/i,
+        );
+      },
+    );
   });
 });

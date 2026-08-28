@@ -28,8 +28,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import {
   firstNonEmpty,
+  resolveExistingObjectScope,
   toCustomObjectId,
   toObjectApiName,
   toProfileOrPermSetId,
@@ -226,11 +228,15 @@ export const recordtypeAvailabilityHandler = async (
   }
 
   const raw = node.properties['recordTypeVisibilities'];
-  // An ABSENT `recordTypeVisibilities` key means the surface was not extracted
-  // (a pre-extraction / stale vault), NOT that the container sees no record
-  // types — so an empty result must disclose "not modeled", like tab_availability.
-  const extracted = Array.isArray(raw);
-  const entries: RawEntry[] = extracted ? (raw as RawEntry[]) : [];
+  // R1: whether the family was extracted is decided by whether the node
+  // CARRIES the `recordTypeVisibilities` property AT ALL, never by whether the
+  // array is empty — `Array.isArray` alone disagrees with the sentinel for a
+  // present-but-null value (extracted, serialized as `null` rather than `[]`,
+  // which `Array.isArray` would misreport as "never extracted"). Adopts the
+  // shared sentinel `effective_permissions` already calls for this exact
+  // property, so the two tools cannot drift into a sixth hand-rolled wording.
+  const extracted = familyWasExtracted(node.properties, 'recordTypeVisibilities');
+  const entries: RawEntry[] = Array.isArray(raw) ? (raw as RawEntry[]) : [];
 
   // Group by object. A `recordType` of `Object.RecordType` splits at the first
   // dot; entries with no dotted record type (the rare null "default for object"
@@ -263,15 +269,28 @@ export const recordtypeAvailabilityHandler = async (
     })
     .sort((a, b) => (a.object < b.object ? -1 : a.object > b.object ? 1 : 0));
 
-  // Optional OBJECT filter: narrow the per-object record types to the object the
-  // caller named (case-insensitive on the object api name). An unmatched object
-  // yields an HONEST empty for that profile, not the profile's whole RT map.
-  const objectFilter = input.object;
+  // R4: verify the OBJECT FILTER exists in the vault BEFORE using it to narrow
+  // the result. A string-templated `CustomObject:${name}` filter answered a
+  // typo, a real object in the WRONG CASE, and an object the refresh never
+  // retrieved all with the same confident-looking "zero record types" —
+  // because `extracted` is true, that empty read as a DECLARED zero, not a
+  // refusal. Adopts the shared `resolveExistingObjectScope` (the object axis
+  // was already separated from the container axis by this tool's own
+  // preprocess, so the existence check drops straight in ahead of the
+  // filter) — the same primitive `flow_fault_audit` /
+  // `flow_bulkification_audit` migrated their object scope onto.
+  // `null` = no object named (bare call, unscoped, byte-identical to before);
+  // a resolved scope carries the vault's exact-cased object name; an
+  // unresolvable / wrong-case-ambiguous object → `invalid-query`, never a
+  // silent empty.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, { object: input.object });
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
   const objects =
-    objectFilter === undefined
+    scope === null
       ? allObjects
       : allObjects.filter(
-          (o) => o.object.toLowerCase() === objectFilter.toLowerCase(),
+          (o) => o.object.toLowerCase() === scope.object.toLowerCase(),
         );
 
   const visibleRecordTypes = objects.reduce(
@@ -281,11 +300,18 @@ export const recordtypeAvailabilityHandler = async (
 
   const boundaryNote = extracted
     ? 'Declared from `recordTypeVisibilities` (the record types this profile/permission set can pick when creating a record). The user must also be ASSIGNED this container, and Create needs the object Create permission (`object_access_audit`).'
-    : 'This Profile/PermissionSet carries no extracted `recordTypeVisibilities` property — re-run `/sfi-refresh`; the empty list is "not modeled", not a verified "no record types".';
+    : notExtractedFamilyDisclosure({
+        subject: 'Record-type visibility',
+        verb: 'checked',
+        sentinelProperty: 'recordTypeVisibilities',
+        containers: [componentId],
+        surface: '`objects` / `summary.objects`',
+        zeroReading: '"no record types"',
+      });
 
   return ok({
     data: {
-      appliedScope: { componentId, object: objectFilter ?? null },
+      appliedScope: { componentId, object: scope?.object ?? null },
       componentId,
       granterType: node.type === 'PermissionSet' ? 'PermissionSet' : 'Profile',
       granterLabel: node.label ?? node.apiName,

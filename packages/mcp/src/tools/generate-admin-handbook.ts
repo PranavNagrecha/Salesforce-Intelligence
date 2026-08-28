@@ -33,6 +33,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { countNodesByType } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -50,6 +51,31 @@ import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 
 /** Top-N cap for the Main Objects and Recent Changes lists. */
 const TOP_N = 10;
+
+/**
+ * Every metadata family this handbook tallies into a count table (Main
+ * Objects, Automation Summary, Permission Structure, Integration Topology,
+ * Codebase Footprint). Used to compute the R1 coverage-floor disclosure below
+ * — `countNodesByType` alone cannot tell "retrieved, org genuinely has zero"
+ * from "this refresh never retrieved the family", so every count in the
+ * handbook must be paired with a coverage check over this exact type list.
+ */
+const HANDBOOK_MEASURED_TYPES: readonly ComponentType[] = [
+  'CustomObject',
+  'Profile',
+  'PermissionSet',
+  'WorkflowRule',
+  'ApprovalProcess',
+  'Flow',
+  'ApexTrigger',
+  'ApexClass',
+  'NamedCredential',
+  'AuthProvider',
+  'ExternalService',
+  'ExternalDataSource',
+  'LightningComponentBundle',
+  'VisualforcePage',
+];
 
 /** The PersonaFocus enum the input accepts. */
 const PERSONA_FOCUS_VALUES = [
@@ -113,6 +139,32 @@ const countNodes = async (
   }
   return ok(result.value);
 };
+
+/**
+ * True when the manifest reports `complete` coverage for a family (or
+ * coverage is unknown — a pre-v4/legacy vault is not false-flagged). Mirrors
+ * the identical helper in `doc-coverage-report.ts` / `limit-headroom-report.ts`
+ * (an R6 duplication the census flagged; those two files are off-limits to
+ * this fix — see `needsOrchestrator`).
+ */
+const coverageComplete = (ctx: Context, type: ComponentType): boolean => {
+  const summary = summarizeCoverage(ctx.manifest, [type]);
+  if (!summary.coverageKnown) return true; // legacy vault — do not false-flag
+  return summary.status === 'complete';
+};
+
+/**
+ * R1: build the coverage-floor boundary naming every measured family whose
+ * retrieve the manifest cannot confirm complete. A count table row of `0` for
+ * an incomplete family reads identically to a confirmed-empty org unless this
+ * fires — this is the disclosure that tells them apart.
+ */
+const buildCoverageFloorDisclosure = (
+  incompleteFamilies: readonly string[],
+): string =>
+  incompleteFamilies.length > 0
+    ? `Coverage floor: this vault's refresh did not confirm complete retrieval for ${[...incompleteFamilies].sort().join(', ')} — counts for these families above are a floor (possibly under-counted, or the family was dropped entirely), not a confirmed total. A row reading \`0\` for one of these families means "not confirmed retrieved", not "confirmed the org has none".`
+    : 'All metadata families this handbook counts are fully covered per the manifest.';
 
 /** Escape a markdown table cell. */
 const escapeCell = (raw: string): string =>
@@ -466,10 +518,18 @@ export const generateAdminHandbookHandler = async (
     sectionConfidence['Codebase Footprint'] = 'declared';
   }
 
+  // R1: coverage honesty across every family the count tables tally. A `0`
+  // row for a family whose retrieve the manifest cannot confirm complete
+  // must not read as a confirmed-empty org.
+  const incompleteFamilies = HANDBOOK_MEASURED_TYPES.filter(
+    (t) => !coverageComplete(ctx, t),
+  );
+
   const boundaries: string[] = [
     Q125_FRESHNESS_DISCLOSURE.replace('{TIMESTAMP}', refreshedAt),
     INHERITED_CONFIDENCE_DISCLOSURE,
     STRUCTURAL_DISCLOSURE,
+    buildCoverageFloorDisclosure(incompleteFamilies),
   ];
 
   // Component ids: every node of every type, scanned to exhaustion via

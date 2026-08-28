@@ -61,6 +61,29 @@ describe('orgHistoryHandler', () => {
     expect(r.value.data.entries[0]?.refreshedAt).toBe('2026-05-15T00:00:00Z'); // most recent first
   });
 
+  it('R2 repro: carries typed truncation state when history exceeds limit', async () => {
+    const lines = Array.from({ length: 5 }, (_, i) =>
+      JSON.stringify({
+        refreshedAt: `2026-05-0${i + 1}T00:00:00Z`,
+        sourceTreeHash: `h${i}`,
+        sourceTreeHashChanged: true,
+        componentDeltas: {},
+        edgeDeltas: {},
+        totalComponents: 100 + i,
+      }),
+    );
+    writeHistory(lines);
+    const r = await orgHistoryHandler(ctx, { limit: 2 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.entries.length).toBe(2);
+    expect(r.value.data.refreshCount).toBe(5);
+    // The response must carry an explicit truncation flag and a resume pointer,
+    // not just a derivable comparison between entries.length and refreshCount.
+    expect((r.value.data as unknown as { truncated?: boolean }).truncated).toBe(true);
+    expect((r.value.data as unknown as { nextOffset?: number }).nextOffset).toBe(2);
+  });
+
   it('skips malformed lines defensively', async () => {
     writeHistory([
       '{ not valid json',

@@ -333,4 +333,24 @@ describe('glossary aliases (P13-ANNOT-glossary-resolve)', () => {
     if (!r.ok) return;
     expect(r.value.data.candidates.every((c) => c.matchKind !== 'glossary-alias')).toBe(true);
   });
+
+  it('R4 ADVERSARIAL: a type-scoped query never resolves via a glossary alias outside the requested type', async () => {
+    // The alias points at a CustomField; the caller scopes the query to
+    // CustomObject only. The alias must be excluded, not silently promoted
+    // to `exact` outside the requested type.
+    await annotate('CustomField:Contact.Email__c', 'primary correspondence address');
+    const r = await resolveHandler(ctx, {
+      query: 'primary correspondence address',
+      types: ['CustomObject'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.candidates.every((c) => c.type === 'CustomObject'),
+    ).toBe(true);
+    expect(r.value.data.candidates.some((c) => c.matchKind === 'glossary-alias')).toBe(
+      false,
+    );
+    expect(r.value.data.disposition).not.toBe('exact');
+  });
 });

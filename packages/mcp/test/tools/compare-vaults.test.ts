@@ -9,7 +9,7 @@
  * structural diff.
  */
 
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,6 +36,7 @@ import {
   compareVaultsHandler,
   compareVaultsInputSchema,
 } from '../../src/tools/compare-vaults.js';
+import { toolLocalPayloadBudgetBytes } from '../../src/tools/response-budget.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -865,5 +866,341 @@ describe('compareVaultsHandler — edgeDrift ROW cap (R6-12)', () => {
     expect(rowCap).toBeDefined();
     expect(rowCap?.edgesAdded.length).toBe(50);
     expect(edgeDrift.truncated).toBe(true);
+  });
+});
+
+describe('compareVaultsHandler — R2 byte budget (shapeModified drift)', () => {
+  let budgetRoot: string;
+  let budgetCtx: Context;
+  let budgetStoreA: GraphStore;
+  let budgetStoreB: GraphStore;
+
+  // 50 properties, each holding a value JUST under DRIFT_MAX_VALUE_BYTES
+  // (2 000) so `boundValue` passes every one through VERBATIM (no
+  // per-value summarisation) and `collectDrift`'s row cap (also 50) is hit
+  // EXACTLY, not exceeded — so `driftTruncated` is false too. Every
+  // existing row-count gate reports "fits"; only an actual byte count
+  // reveals that one component alone inlines ~200 KB.
+  const bigValue = (fill: string): string => fill.repeat(990); // ~1 990 bytes incl. quotes
+
+  beforeAll(async () => {
+    budgetRoot = await mkdtemp(join(tmpdir(), 'sfi-r2-compare-vaults-byte-budget-'));
+    const pathA = join(budgetRoot, 'budget-a');
+    const pathB = join(budgetRoot, 'budget-b');
+    await mkdir(join(pathA, 'graph'), { recursive: true });
+    await mkdir(join(pathB, 'graph'), { recursive: true });
+    await saveManifest(pathA, FIXTURE_MANIFEST);
+    await saveManifest(pathB, { ...FIXTURE_MANIFEST, sourceTreeHash: 'sha256:budget-b' });
+
+    const openedA = await openGraph(vaultPaths(pathA).graphDb);
+    if (!openedA.ok) throw new Error(`openGraph A failed: ${openedA.error.message}`);
+    budgetStoreA = openedA.value;
+    const openedB = await openGraph(vaultPaths(pathB).graphDb);
+    if (!openedB.ok) throw new Error(`openGraph B failed: ${openedB.error.message}`);
+    budgetStoreB = openedB.value;
+
+    const propsA: Record<string, string> = {};
+    const propsB: Record<string, string> = {};
+    for (let i = 0; i < 50; i += 1) {
+      const key = `prop_${i.toString().padStart(2, '0')}`;
+      propsA[key] = bigValue('a');
+      propsB[key] = bigValue('b');
+    }
+
+    const nodeA = makeNode({
+      id: 'ApexClass:BigDrift',
+      type: 'ApexClass',
+      apiName: 'BigDrift',
+      properties: propsA,
+    });
+    const nodeB = makeNode({
+      id: 'ApexClass:BigDrift',
+      type: 'ApexClass',
+      apiName: 'BigDrift',
+      properties: propsB,
+    });
+
+    const impA = await importExtractionResults(budgetStoreA, [{ nodes: [nodeA], edges: [] }]);
+    if (!impA.ok) throw new Error(`seed A import failed: ${impA.error.message}`);
+    const impB = await importExtractionResults(budgetStoreB, [{ nodes: [nodeB], edges: [] }]);
+    if (!impB.ok) throw new Error(`seed B import failed: ${impB.error.message}`);
+
+    await registerVault(budgetRoot, 'budget-a', pathA);
+    await registerVault(budgetRoot, 'budget-b', pathB);
+
+    budgetCtx = { vaultRoot: pathA, manifest: FIXTURE_MANIFEST, graph: budgetStoreA };
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = budgetRoot;
+  }, 30_000);
+
+  afterAll(async () => {
+    delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    await closeGraph(budgetStoreA);
+    await closeGraph(budgetStoreB);
+    await rm(budgetRoot, { recursive: true, force: true });
+  });
+
+  it('never claims a complete diff while the actual response bytes blow the tool-local budget', async () => {
+    const r = await compareVaultsHandler(budgetCtx, {
+      vaultA: 'budget-a',
+      vaultB: 'budget-b',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+
+    // Every ROW-COUNT gate alone would report "everything fits" — this is
+    // exactly the shape the R2 defect exploited: the TRUE totals are small.
+    expect(r.value.data.summary.shapeModifiedCount).toBe(1);
+    expect(r.value.data.shapeModified.length).toBeLessThanOrEqual(200);
+
+    // The actual serialized response must land at/under the response
+    // budget — this is the invariant the census finding says nothing here
+    // measures. Un-fixed, this response is ~200 KB (50 rows x 2 sides x
+    // ~1 990 bytes); fixed, `paginate`'s forward-progress slimmer shortens
+    // the one oversized row to fit.
+    // Derived from `response-budget.ts`, never a hard-coded sibling literal:
+    // this is the exact cap the handler fits its own payload to, so the
+    // assertion tracks `SFI_MAX_RESPONSE_BYTES` instead of going stale.
+    const actualBytes = Buffer.byteLength(JSON.stringify(r.value), 'utf8');
+    expect(actualBytes).toBeLessThanOrEqual(toolLocalPayloadBudgetBytes());
+
+    // Because a row had to be shortened to make that budget, the tool must
+    // NOT claim a complete diff, and must say so via `shapeModifiedPage`,
+    // not merely via `truncated` (a bare boolean is not a resume pointer).
+    expect(r.value.data.truncated).toBe(true);
+    expect(r.value.data.disclosure).not.toMatch(/^Complete diff/);
+    expect(r.value.data.shapeModifiedPage).toBeDefined();
+    expect(r.value.data.shapeModifiedPage?.byteTrimmed).toBe(true);
+  });
+
+  it('resumes a byte-truncated shapeModified page via the minted nextCursor / offset (R2 resume pointer)', async () => {
+    // A distinct scenario from the single-oversized-row case above: TWO
+    // components, each individually small enough to ship whole, together
+    // just over the per-page byte budget — so the FIRST page truncates on
+    // the SECOND item (hasMore: true, a real resumable cursor), rather than
+    // slimming a lone unsliceable row.
+    const twoRoot = await mkdtemp(join(tmpdir(), 'sfi-r2-compare-vaults-two-row-'));
+    const pathA = join(twoRoot, 'two-a');
+    const pathB = join(twoRoot, 'two-b');
+    await mkdir(join(pathA, 'graph'), { recursive: true });
+    await mkdir(join(pathB, 'graph'), { recursive: true });
+    await saveManifest(pathA, FIXTURE_MANIFEST);
+    await saveManifest(pathB, { ...FIXTURE_MANIFEST, sourceTreeHash: 'sha256:two-b' });
+    const openedA = await openGraph(vaultPaths(pathA).graphDb);
+    if (!openedA.ok) throw new Error(`openGraph A failed: ${openedA.error.message}`);
+    const twoStoreA = openedA.value;
+    const openedB = await openGraph(vaultPaths(pathB).graphDb);
+    if (!openedB.ok) throw new Error(`openGraph B failed: ${openedB.error.message}`);
+    const twoStoreB = openedB.value;
+
+    try {
+      const nodesA: Node[] = [];
+      const nodesB: Node[] = [];
+      for (const suffix of ['One', 'Two']) {
+        const propsA: Record<string, string> = {};
+        const propsB: Record<string, string> = {};
+        for (let i = 0; i < 20; i += 1) {
+          const key = `prop_${i.toString().padStart(2, '0')}`;
+          propsA[key] = bigValue('a');
+          propsB[key] = bigValue('b');
+        }
+        nodesA.push(
+          makeNode({
+            id: `ApexClass:Big_${suffix}`,
+            type: 'ApexClass',
+            apiName: `Big_${suffix}`,
+            properties: propsA,
+          }),
+        );
+        nodesB.push(
+          makeNode({
+            id: `ApexClass:Big_${suffix}`,
+            type: 'ApexClass',
+            apiName: `Big_${suffix}`,
+            properties: propsB,
+          }),
+        );
+      }
+      const impA = await importExtractionResults(twoStoreA, [{ nodes: nodesA, edges: [] }]);
+      if (!impA.ok) throw new Error(`seed A import failed: ${impA.error.message}`);
+      const impB = await importExtractionResults(twoStoreB, [{ nodes: nodesB, edges: [] }]);
+      if (!impB.ok) throw new Error(`seed B import failed: ${impB.error.message}`);
+      await registerVault(twoRoot, 'two-a', pathA);
+      await registerVault(twoRoot, 'two-b', pathB);
+      const twoCtx: Context = { vaultRoot: pathA, manifest: FIXTURE_MANIFEST, graph: twoStoreA };
+      process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = twoRoot;
+
+      const page1 = await compareVaultsHandler(twoCtx, { vaultA: 'two-a', vaultB: 'two-b' });
+      expect(page1.ok).toBe(true);
+      if (!page1.ok) return;
+      expect(page1.value.data.summary.shapeModifiedCount).toBe(2);
+      // Two ~80 KB components together blow the ~40 KB budget, so the
+      // FIRST page genuinely stops short (verified: hasMore true, only 1
+      // of the 2 components shipped) rather than slimming a lone row.
+      expect(page1.value.data.shapeModifiedPage?.hasMore).toBe(true);
+      expect(page1.value.data.shapeModified.length).toBeLessThan(2);
+      const cursor = page1.value.data.shapeModifiedPage?.nextCursor;
+      expect(cursor).not.toBeNull();
+      expect(typeof cursor).toBe('string');
+
+      const page2 = await compareVaultsHandler(twoCtx, {
+        vaultA: 'two-a',
+        vaultB: 'two-b',
+        cursor: cursor as string,
+      });
+      expect(page2.ok).toBe(true);
+      if (!page2.ok) return;
+      // The union of both pages' ids covers BOTH components, exactly once
+      // each — the resume advances, it does not skip or repeat.
+      const idsSeen = [
+        ...page1.value.data.shapeModified.map((c) => c.id),
+        ...page2.value.data.shapeModified.map((c) => c.id),
+      ];
+      expect(new Set(idsSeen).size).toBe(2);
+      expect(idsSeen.length).toBe(2);
+    } finally {
+      delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+      await closeGraph(twoStoreA);
+      await closeGraph(twoStoreB);
+      await rm(twoRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('compare_vaults — R2 verifier round 2 (markdown budget, disclosure honesty, refit parity)', () => {
+  /**
+   * ~1 990 bytes per value incl. quotes — just under `DRIFT_MAX_VALUE_BYTES`
+   * (2 000) so `boundValue` passes it through VERBATIM.
+   */
+  const bigValue = (fill: string): string => fill.repeat(990);
+
+  /** Seed a two-vault registry from explicit node lists and return a ready Context. */
+  const seedPair = async (
+    prefix: string,
+    nodesA: readonly Node[],
+    nodesB: readonly Node[],
+  ): Promise<{
+    readonly ctx: Context;
+    readonly dispose: () => Promise<void>;
+  }> => {
+    const root = await mkdtemp(join(tmpdir(), prefix));
+    const pathA = join(root, 'a');
+    const pathB = join(root, 'b');
+    await mkdir(join(pathA, 'graph'), { recursive: true });
+    await mkdir(join(pathB, 'graph'), { recursive: true });
+    await saveManifest(pathA, FIXTURE_MANIFEST);
+    await saveManifest(pathB, { ...FIXTURE_MANIFEST, sourceTreeHash: 'sha256:round2-b' });
+    const openedA = await openGraph(vaultPaths(pathA).graphDb);
+    if (!openedA.ok) throw new Error(`openGraph A failed: ${openedA.error.message}`);
+    const openedB = await openGraph(vaultPaths(pathB).graphDb);
+    if (!openedB.ok) throw new Error(`openGraph B failed: ${openedB.error.message}`);
+    const impA = await importExtractionResults(openedA.value, [
+      { nodes: [...nodesA], edges: [] },
+    ]);
+    if (!impA.ok) throw new Error(`seed A import failed: ${impA.error.message}`);
+    const impB = await importExtractionResults(openedB.value, [
+      { nodes: [...nodesB], edges: [] },
+    ]);
+    if (!impB.ok) throw new Error(`seed B import failed: ${impB.error.message}`);
+    await registerVault(root, 'r2-a', pathA);
+    await registerVault(root, 'r2-b', pathB);
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = root;
+    return {
+      ctx: { vaultRoot: pathA, manifest: FIXTURE_MANIFEST, graph: openedA.value },
+      dispose: async () => {
+        delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+        await closeGraph(openedA.value);
+        await closeGraph(openedB.value);
+        await rm(root, { recursive: true, force: true });
+      },
+    };
+  };
+
+  it('does not claim "every bucket is under the 200-component cap" while shipping 250 shapeModified rows', async () => {
+    // 250 components, one TINY drift property each: the whole bucket fits the
+    // byte budget, so the fast path ships all 250 unpaged. The row-count cap
+    // is no longer enforced on this bucket — so a disclosure asserting it is
+    // a claim the code does not honour.
+    const nodesA: Node[] = [];
+    const nodesB: Node[] = [];
+    for (let i = 0; i < 250; i += 1) {
+      const id = `ApexClass:Small_${i.toString().padStart(3, '0')}`;
+      const apiName = `Small_${i.toString().padStart(3, '0')}`;
+      nodesA.push(makeNode({ id, type: 'ApexClass', apiName, properties: { v: 'a' } }));
+      nodesB.push(makeNode({ id, type: 'ApexClass', apiName, properties: { v: 'b' } }));
+    }
+    const seeded = await seedPair('sfi-r2-cv-250-', nodesA, nodesB);
+    try {
+      const r = await compareVaultsHandler(seeded.ctx, { vaultA: 'r2-a', vaultB: 'r2-b' });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      // Precondition: the fast path really did ship more than the cap.
+      expect(d.summary.shapeModifiedCount).toBe(250);
+      expect(d.shapeModified.length).toBeGreaterThan(200);
+      // The defect: a sentence asserting a cap the handler no longer applies.
+      expect(d.disclosure).not.toMatch(/every bucket is under the 200-component cap/);
+      // ...and whatever it DOES say must be consistent with what shipped.
+      expect(d.disclosure).toContain('250');
+    } finally {
+      await seeded.dispose();
+    }
+  }, 60_000);
+
+  it('fits the response byte budget on format: "markdown" too (the markdown is composed AFTER the fit loop)', async () => {
+    // The same 50-fat-property single component the JSON-path test uses. The
+    // JSON path fits; `renderCompareVaultsMarkdown` re-inlines every drift
+    // valueA/valueB, so the markdown path is ~2x and blows the ceiling unless
+    // the refit loop measures the COMPOSED response.
+    const props = (fill: string): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (let i = 0; i < 50; i += 1) out[`prop_${i.toString().padStart(2, '0')}`] = bigValue(fill);
+      return out;
+    };
+    const node = (fill: string): Node =>
+      makeNode({
+        id: 'ApexClass:BigDriftMd',
+        type: 'ApexClass',
+        apiName: 'BigDriftMd',
+        properties: props(fill),
+      });
+    const seeded = await seedPair('sfi-r2-cv-md-', [node('a')], [node('b')]);
+    try {
+      const r = await compareVaultsHandler(seeded.ctx, {
+        vaultA: 'r2-a',
+        vaultB: 'r2-b',
+        format: 'markdown',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.markdown).toBeDefined();
+      const bytes = Buffer.byteLength(JSON.stringify(r.value), 'utf8');
+      expect(bytes).toBeLessThanOrEqual(toolLocalPayloadBudgetBytes());
+      // And it must still be honest about having been fitted.
+      expect(r.value.data.truncated).toBe(true);
+      expect(r.value.data.disclosure).not.toMatch(/^Complete diff/);
+    } finally {
+      await seeded.dispose();
+    }
+  }, 60_000);
+
+  it('drift test: the refit constants stay identical to compare-profile-across-vaults.ts (R6 — a "mirrors" comment is not a guard)', async () => {
+    // The measure/refit loop is duplicated across the two cross-vault tools.
+    // De-duplicating it needs an edit to a SHARED module (page-cursor.ts /
+    // response-budget.ts) that this agent may not make, so until the
+    // orchestrator hoists it, this DRIFT TEST — not a comment — is what
+    // binds the two copies.
+    const read = async (rel: string): Promise<string> =>
+      readFile(new URL(rel, import.meta.url), 'utf8');
+    const mine = await read('../../src/tools/compare-vaults.ts');
+    const sibling = await read('../../src/tools/compare-profile-across-vaults.ts');
+    const grab = (src: string, name: string): string | undefined =>
+      new RegExp(`const ${name} = ([0-9_]+);`).exec(src)?.[1];
+    for (const name of ['MIN_PAGE_BYTE_BUDGET', 'PAGE_REFIT_STEP_BYTES']) {
+      const a = grab(mine, name);
+      const b = grab(sibling, name);
+      expect(a, `${name} missing from compare-vaults.ts`).toBeDefined();
+      expect(b, `${name} missing from compare-profile-across-vaults.ts`).toBeDefined();
+      expect(a, `${name} drifted between the two copies`).toBe(b);
+    }
   });
 });

@@ -268,6 +268,23 @@ const compareUsages = (a: CodeUsage, b: CodeUsage): number => {
 };
 
 /**
+ * R3 self-match guard: `listEdges(targetId, { direction: 'in' })` can
+ * return a genuine self-loop — `apex-edges.ts` aggregates Apex call
+ * sites by the CALLED class name with no comparison against the
+ * OWNING class, so `MyClass` invoking its own static method
+ * (`MyClass.doThing()`, everyday Apex) produces
+ * `ApexClass:MyClass -> ApexClass:MyClass`. A class does not "use"
+ * itself in the sense this tool answers ("what code uses this?"); an
+ * unfiltered self-edge would make an otherwise-unreferenced class read
+ * as having one usage — the exact false positive that keeps dead code
+ * looking alive. Every incoming edge here has `toId === input.targetId`
+ * by construction (that's what `direction: 'in'` means), so the check
+ * reduces to comparing `fromId` against the target.
+ */
+const isSelfReferencingEdge = (edge: Edge, targetId: string): boolean =>
+  edge.fromId === targetId;
+
+/**
  * Resolve one incoming edge into a `CodeUsage` when its source node is
  * one of `CODE_NODE_TYPES` and its type passes the caller's optional
  * `nodeTypes` filter. Returns `null` for non-code sources (intentional
@@ -347,6 +364,9 @@ export const findCodeUsagesHandler = async (
   const usages: CodeUsage[] = [];
   for (const edge of edgesResult.value) {
     if (!allowedEdgeTypes.has(edge.edgeType)) {
+      continue;
+    }
+    if (isSelfReferencingEdge(edge, input.targetId)) {
       continue;
     }
     const resolved = await resolveCodeUsage(ctx, edge, allowedNodeTypes);

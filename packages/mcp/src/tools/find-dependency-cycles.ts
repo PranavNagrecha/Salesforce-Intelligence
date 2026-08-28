@@ -64,14 +64,21 @@ const FIND_DEPENDENCY_CYCLES_TOOL = 'sfi.find_dependency_cycles';
  *     the full graph), but the RETURNED clusters + counts reflect the scope, and
  *     `appliedScope` is echoed. Omit both for the org-wide cycle list.
  */
-export const findDependencyCyclesInputSchema = z.object({
-  componentId: z.string().min(1).optional(),
-  nameContains: z.string().min(1).optional(),
-  limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-  // CR-22: page cursor for walking the full cycle list when truncated.
-  offset: z.number().int().min(0).optional(),
-  cursor: z.string().min(1).optional(),
-});
+export const findDependencyCyclesInputSchema = z
+  .object({
+    componentId: z.string().min(1).optional(),
+    nameContains: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+    // CR-22: page cursor for walking the full cycle list when truncated.
+    offset: z.number().int().min(0).optional(),
+    cursor: z.string().min(1).optional(),
+  })
+  // roster.ts advertises `additionalProperties: false` for this tool; `.strict()`
+  // makes the runtime validator match that contract — an unrecognized key (e.g.
+  // a typo'd `componentid`) is refused rather than silently stripped by zod's
+  // default "strip unknown keys" behavior, which would otherwise fall through to
+  // an org-wide answer for a call that asked to be scoped.
+  .strict();
 
 export type FindDependencyCyclesInput = z.infer<
   typeof findDependencyCyclesInputSchema
@@ -303,6 +310,20 @@ export const findDependencyCyclesHandler = async (
   }
   const apexNodes: readonly Node[] = scan.value.nodes;
   const apexIds = new Set<ComponentId>(apexNodes.map((n) => n.id));
+
+  // R4: a componentId scope must be a class/trigger the scan ACTUALLY FOUND.
+  // resolveCycleScope only validated the id PREFIX (ApexClass:/ApexTrigger:) —
+  // a typo, a managed-package class, or a class the refresh never retrieved
+  // would otherwise pass that gate, match no cluster below, and return the
+  // same shape as a real class with no cycle (an honest empty for X above).
+  // Refuse before Tarjan runs rather than silently mint that false honest-empty.
+  if (scopeComponent !== null && !apexIds.has(scopeComponent)) {
+    return err({
+      kind: 'invalid-query',
+      message: `componentId '${scopeComponent}' was not found in the vault's Apex scan (no matching ApexClass/ApexTrigger node) — verify the name/case, or run /sfi-refresh if it may be new or the vault stale`,
+      path: 'componentId',
+    });
+  }
 
   const adjResult = await buildAdjacency(ctx, apexIds);
   if (!adjResult.ok) return err({ kind: 'internal', message: `graph query failed: ${adjResult.error}` });

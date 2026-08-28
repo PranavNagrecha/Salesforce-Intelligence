@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -619,5 +619,175 @@ describe('fieldMeaningHandler — value-consuming edge vocabulary (FIX 5)', () =
     expect(data.boundaries).toContain(
       'A zero here means no value-consuming edge was found among the metadata families this vault retrieved. It is not proof the field is unused — reports, dashboards, list-view filters, and dynamic Apex are named in `boundaries` where they are not covered.',
     );
+  });
+});
+
+/**
+ * R1 — a picklist's `picklistValues` collapses THREE distinct states into
+ * one `null`: (a) not a picklist, (b) a real zero-value inline definition,
+ * (c) a GlobalValueSet-driven picklist whose values live off-node. The
+ * sibling `explain_field` distinguishes all three and resolves (c) through
+ * the `usesValueSet` edge (`resolveGlobalValueSetValues`); this tool did
+ * neither, so the SAME field answers differently depending which tool is
+ * asked, and a GVS-driven picklist reads as "no values" with no boundary
+ * naming the gap.
+ */
+describe('fieldMeaningHandler — picklist honesty (R1)', () => {
+  const R1_ACCOUNT = 'CustomObject:Account';
+  const EMPTY_INLINE_FIELD = 'CustomField:Account.Empty_Picklist__c';
+  const GVS_FIELD_ID = 'CustomField:Account.Region__c';
+  const GVS_ID = 'GlobalValueSet:Region_Codes';
+  const UNRESOLVED_GVS_FIELD_ID = 'CustomField:Account.Segment__c';
+  const NON_PICKLIST_FIELD = 'CustomField:Account.Plain_Text__c';
+
+  let r1Dir: string;
+  let r1Store: GraphStore;
+  let r1Ctx: Context;
+
+  beforeAll(async () => {
+    const nodes: Node[] = [
+      makeNode({ id: R1_ACCOUNT, type: 'CustomObject', apiName: 'Account' }),
+      makeNode({
+        id: EMPTY_INLINE_FIELD,
+        apiName: 'Empty_Picklist__c',
+        label: 'Empty Picklist',
+        parentId: R1_ACCOUNT,
+        properties: {
+          label: 'Empty Picklist',
+          type: 'Picklist',
+          // A real inline definition declaring ZERO values — distinct from
+          // "not a picklist" and from "values live elsewhere".
+          picklistValues: [],
+        },
+      }),
+      makeNode({
+        id: GVS_FIELD_ID,
+        apiName: 'Region__c',
+        label: 'Region',
+        parentId: R1_ACCOUNT,
+        properties: {
+          label: 'Region',
+          type: 'Picklist',
+          picklistValues: null,
+        },
+      }),
+      makeNode({
+        id: GVS_ID,
+        type: 'GlobalValueSet',
+        apiName: 'Region_Codes',
+        label: 'Region Codes',
+        properties: {
+          values: ['EMEA', 'APAC', 'AMER'],
+        },
+      }),
+      makeNode({
+        id: UNRESOLVED_GVS_FIELD_ID,
+        apiName: 'Segment__c',
+        label: 'Segment',
+        parentId: R1_ACCOUNT,
+        properties: {
+          label: 'Segment',
+          type: 'Picklist',
+          // No inline values AND no usesValueSet edge — pre-0.1.10 vault, or
+          // the value set truly was not retrieved. Must stay honestly null
+          // but say WHY, not read like a checked-and-empty picklist.
+          picklistValues: null,
+        },
+      }),
+      makeNode({
+        id: NON_PICKLIST_FIELD,
+        apiName: 'Plain_Text__c',
+        label: 'Plain Text',
+        parentId: R1_ACCOUNT,
+        properties: {
+          label: 'Plain Text',
+          type: 'Text',
+        },
+      }),
+    ];
+    const edges: Edge[] = [
+      makeEdge({ fromId: R1_ACCOUNT, toId: EMPTY_INLINE_FIELD, edgeType: 'parentOf' }),
+      makeEdge({ fromId: R1_ACCOUNT, toId: GVS_FIELD_ID, edgeType: 'parentOf' }),
+      makeEdge({ fromId: R1_ACCOUNT, toId: UNRESOLVED_GVS_FIELD_ID, edgeType: 'parentOf' }),
+      makeEdge({ fromId: R1_ACCOUNT, toId: NON_PICKLIST_FIELD, edgeType: 'parentOf' }),
+      makeEdge({ fromId: GVS_FIELD_ID, toId: GVS_ID, edgeType: 'usesValueSet' }),
+    ];
+    r1Dir = mkdtempSync(join(tmpdir(), 'sfi-fm-picklist-'));
+    const opened = await openGraph(join(r1Dir, 'picklist.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    r1Store = opened.value;
+    const imported = await importExtractionResults(r1Store, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    r1Ctx = { vaultRoot: r1Dir, manifest: FIXTURE_MANIFEST, graph: r1Store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(r1Store);
+    rmSync(r1Dir, { recursive: true, force: true });
+  });
+
+  it('returns an empty array — not null — for a real zero-value inline picklist definition', async () => {
+    const result = await fieldMeaningHandler(r1Ctx, {
+      fieldId: EMPTY_INLINE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.picklistValues).toEqual([]);
+    expect(result.value.data.picklistValues).not.toBeNull();
+  });
+
+  it('stays null for a genuinely non-picklist field', async () => {
+    const result = await fieldMeaningHandler(r1Ctx, {
+      fieldId: NON_PICKLIST_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.picklistValues).toBeNull();
+  });
+
+  it('resolves a GlobalValueSet-driven picklist through the usesValueSet edge instead of reporting null', async () => {
+    const result = await fieldMeaningHandler(r1Ctx, { fieldId: GVS_FIELD_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.picklistValues).toEqual([
+      { value: 'EMEA', label: 'EMEA', isActive: true },
+      { value: 'APAC', label: 'APAC', isActive: true },
+      { value: 'AMER', label: 'AMER', isActive: true },
+    ]);
+  });
+
+  it('discloses a non-inline picklist with no resolvable value set as a named boundary, not a silent null', async () => {
+    const result = await fieldMeaningHandler(r1Ctx, {
+      fieldId: UNRESOLVED_GVS_FIELD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.picklistValues).toBeNull();
+    expect(
+      result.value.data.boundaries.some(
+        (b) => b.includes('GlobalValueSet') && b.includes('not inline'),
+      ),
+    ).toBe(true);
+  });
+});
+
+/**
+ * R6 — the similar-fields corpus scan was a second copy of
+ * `scanAllNodesOfTypes`'s offset-windowing loop, guarded only by a comment,
+ * with a private `SIMILAR_FIELDS_PAGE_SIZE = 500` standing in for the shared
+ * `NODE_SCAN_HARD_CAP`. A behavioral test cannot distinguish the two
+ * (both walk the full corpus identically today) — this is a duplication /
+ * drift-risk finding, so the bite proof is a source-level adoption guard:
+ * it fails while the private loop exists and passes once field-meaning.ts
+ * calls the shared helper instead.
+ */
+describe('fieldMeaningHandler — similar-fields scan adoption (R6)', () => {
+  it('derives the CustomField corpus scan from the shared scanAllNodesOfTypes helper, not a private hardcoded page-size loop', () => {
+    const src = readFileSync(
+      new URL('../../src/tools/field-meaning.ts', import.meta.url),
+      'utf8',
+    );
+    expect(src).toMatch(/scanAllNodesOfTypes/);
+    expect(src).not.toMatch(/SIMILAR_FIELDS_PAGE_SIZE/);
   });
 });

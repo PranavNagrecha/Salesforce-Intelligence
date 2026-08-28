@@ -295,11 +295,33 @@ describe('explainFormulaHandler', () => {
     expect(data.functions).toEqual([]);
     expect(data.fieldReferences).toEqual([]);
     expect(data.literals).toEqual([]);
-    expect(data.hasConditionalLogic).toBe(false);
+    // R1: the tokenizer never completed its pass, so hasConditionalLogic
+    // was never actually checked — it must be the typed-absence `null`,
+    // not a confident `false`. `false` reads as "this formula has no
+    // conditional logic", which is flatly wrong here: the source visibly
+    // contains `IF` and `ISBLANK`.
+    expect(data.hasConditionalLogic).toBeNull();
     // The nesting-depth counter runs independently — for this
     // unbalanced expression, two open parens never close, so the
     // counter sees a depth of 2 before EOF.
     expect(data.nestingDepth).toBe(2);
+  });
+
+  it('does not assert hasConditionalLogic: false on a parse failure for a formula that visibly uses IF', async () => {
+    // Regression for R1/MEDIUM (census line 782): on the tokenizer-failure
+    // path, hasConditionalLogic was shipped as a bare `false` — a confident
+    // assertion of "no conditional logic" — even when the unparsed source
+    // plainly contains IF/AND/OR/NOT/CASE. The field must be typed absence
+    // (null), never a value the tokenizer never actually computed.
+    const result = await explainFormulaHandler(ctx, {
+      formulaExpression: "IF(ISBLANK(Status__c), \"a\", \"b\"",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.parseError).toBeDefined();
+    expect(data.hasConditionalLogic).not.toBe(false);
+    expect(data.hasConditionalLogic).toBeNull();
   });
 
   it('surfaces parseError for an unterminated string literal', async () => {

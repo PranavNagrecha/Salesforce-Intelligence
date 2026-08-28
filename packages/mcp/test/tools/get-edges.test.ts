@@ -203,16 +203,36 @@ describe('getEdgesHandler', () => {
     expect(result.value.data.edges[0]!.confidence).toBe('declared');
   });
 
-  it('returns an empty edge list when the nodeId is unknown', async () => {
+  it('returns an empty edge list AND a nodeNotFound disclosure when the nodeId is unknown', async () => {
     const result = await getEdgesHandler(ctx, {
       nodeId: 'CustomObject:DoesNotExist',
     });
-    // listEdges cannot distinguish "no node" from "node has no edges";
-    // both surface as a successful empty result.
+    // `getEdgesHandler` resolves the node once the edge list comes back empty,
+    // so "no such node" is told apart from "node exists, isolated" (R1):
+    // the empty edge list is real, but it must not read as a proven "no
+    // edges" — it is "no such node" and must say so.
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.edges.length).toBe(0);
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
+    expect(result.value.data.nodeNotFound).toBeDefined();
+    expect(result.value.data.nodeNotFound).toContain('CustomObject:DoesNotExist');
+    // A non-existent node cannot be "isolated" — no coverage caveat blaming
+    // an un-retrieved dependency family for it.
+    expect(result.value.data.coverageCaveat).toBeUndefined();
+  });
+
+  it('returns an empty edge list with NO nodeNotFound when the node exists but is genuinely isolated', async () => {
+    // `CustomField:A.Region__c` is seeded as a real node with zero incident
+    // edges — the "isolated" empty is legitimate here, unlike the unknown-id
+    // case above, so no `nodeNotFound` disclosure should appear.
+    const result = await getEdgesHandler(ctx, {
+      nodeId: 'CustomField:A.Region__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.edges.length).toBe(0);
+    expect(result.value.data.nodeNotFound).toBeUndefined();
   });
 });
 

@@ -27,7 +27,6 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -40,6 +39,8 @@ import {
 } from './input-aliases.js';
 import { composeSoeForEvents, type SoeStep } from './order-of-execution.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -235,6 +236,12 @@ export interface LifecycleAppliedScope {
   readonly excludedStepCount: number;
   /** The component ids of those excluded steps (deduped). */
   readonly excludedComponentIds: readonly ComponentId[];
+  /**
+   * True when the RecordType full-scan behind this scope stopped at the
+   * residual cap with more of this object's record types unread — `resolved
+   * RecordTypes` and `excludedStepCount` may both be incomplete (R1).
+   */
+  readonly scanIncomplete: boolean;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -341,6 +348,13 @@ interface ResolvedScope {
   readonly appliedScopeKind: 'recordType' | 'businessProcess';
   readonly requested: string;
   readonly inScope: ReadonlySet<string>;
+  /**
+   * True when the RecordType walk behind this scope stopped at the full-scan
+   * residual cap ({@link scanAllNodesOfTypes}'s `scanIncomplete`) with more
+   * RecordType nodes on this object left unread — an honest "this may not be
+   * every record type" flag rather than a silent one (R1).
+   */
+  readonly scanIncomplete: boolean;
 }
 
 /**
@@ -375,14 +389,26 @@ const resolveRecordTypeScope = async (
     return ok(null);
   }
 
-  // Fetch the org's RecordType nodes (cap is the node-scan max; real orgs carry
-  // well under it across all objects) and keep the ones on this object.
-  const rtResult = await listNodesByType(ctx.graph, 'RecordType', { limit: 500 });
+  // Fetch this object's RecordType nodes with a FULL multi-window scan
+  // narrowed by `parentId` — never a single 500-row page over the RecordType
+  // TYPE org-wide. RecordType nodes are per (object x record type) across the
+  // whole org, so a single-page cap shared by every object drops whichever
+  // object's ids sort last (LIFECYCLE-PROCESS-RECORDTYPE-SCAN-CAP); narrowing
+  // to `parent_id = CustomObject:{object}` at the SQL layer both fixes that
+  // (this object's own RecordTypes are read in full, regardless of how many
+  // OTHER objects' RecordTypes precede them in id order) and makes the
+  // per-object walk cheap. `scanIncomplete` still discloses the residual
+  // {@link FULL_SCAN_MAX_NODES} cap for the pathological case of one object
+  // carrying more record types than that ceiling.
+  const rtResult = await scanAllNodesOfTypes(ctx.graph, ['RecordType'], {
+    parentId: toCustomObjectId(object) as ComponentId,
+  });
   if (!rtResult.ok) {
     return err({ kind: 'internal', message: rtResult.error.message });
   }
+  const objectRecordTypes: readonly Node[] = rtResult.value.nodes;
+  const scanIncomplete = rtResult.value.scanIncomplete;
   const prefix = `RecordType:${object}.`;
-  const objectRecordTypes: Node[] = rtResult.value.filter((n) => n.id.startsWith(prefix));
   const devNameOf = (n: Node): string => n.id.slice(prefix.length);
 
   if (requestedRecordType !== null) {
@@ -395,13 +421,16 @@ const resolveRecordTypeScope = async (
           `No RecordType \`${requestedRecordType}\` on \`${object}\`. ` +
           (known.length > 0
             ? `Known record types: ${known.join(', ')}.`
-            : `This object has no extracted record types.`),
+            : scanIncomplete
+              ? `This object's RecordType scan did not finish, so this may be a false negative, not a confirmed absence. ${fullScanTruncationNote(['RecordType'])}`
+              : `This object has no extracted record types.`),
       });
     }
     return ok({
       appliedScopeKind: 'recordType',
       requested: requestedRecordType,
       inScope: new Set([requestedRecordType]),
+      scanIncomplete,
     });
   }
 
@@ -437,13 +466,16 @@ const resolveRecordTypeScope = async (
         `No RecordType on \`${object}\` uses BusinessProcess \`${requestedBusinessProcess}\`. ` +
         (knownBps.length > 0
           ? `Known business processes: ${knownBps.join(', ')}.`
-          : `This object's record types declare no business process.`),
+          : scanIncomplete
+            ? `This object's RecordType scan did not finish, so this may be a false negative, not a confirmed absence. ${fullScanTruncationNote(['RecordType'])}`
+            : `This object's record types declare no business process.`),
     });
   }
   return ok({
     appliedScopeKind: 'businessProcess',
     requested: requestedBusinessProcess!,
     inScope: new Set(inScope),
+    scanIncomplete,
   });
 };
 
@@ -527,6 +559,7 @@ export const lifecycleProcessHandler = async (
           resolvedRecordTypes: [...scope.inScope].sort(),
           excludedStepCount: rawExcludedStepCount,
           excludedComponentIds: [...excludedIdSet].sort(),
+          scanIncomplete: scope.scanIncomplete,
         };
 
   const coupledAutomation = allSteps.filter((s) => s.coupledToField || s.coupledToValue);
@@ -623,6 +656,9 @@ export const lifecycleProcessHandler = async (
         `\`summary.totalSteps\` (${total}) is the POST-exclusion total: ${appliedScope.excludedStepCount} excluded + ${total} returned reconciles to the ${perEvent.summary.totalSteps} step(s) the unscoped composition holds for this event. ` +
         `This is a SAFE, conservative filter: only positive-equality record-type gates are excluded — unconditional automation (which fires for every record type) and negated gates are RETAINED, so a step is never wrongly dropped. RecordType scoping via hard-coded 18-char RecordTypeId literals or record-type logic encoded in a formula this parser does not read is NOT filtered; treat the scoped chain as "everything that can fire for this record type", not a per-record guarantee.`,
     );
+    if (appliedScope.scanIncomplete) {
+      disclosures.push(fullScanTruncationNote(['RecordType']));
+    }
   }
   if (truncated || offset > 0) {
     disclosures.push(

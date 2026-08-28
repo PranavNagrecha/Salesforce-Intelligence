@@ -41,9 +41,11 @@
  *      tokenizer counts but doesn't extract). `type` is
  *      `'number' | 'string'`.
  *   5. **Conditional logic** — `hasConditionalLogic: true` when the
- *      function list includes IF / CASE / AND / OR / NOT. The
- *      renderer uses this to decide whether to surface a "this
- *      formula uses conditional logic" header.
+ *      function list includes IF / CASE / AND / OR / NOT (`false` when
+ *      it doesn't, `null` when the tokenizer failed before the check
+ *      could run — see Error path below). The renderer uses this to
+ *      decide whether to surface a "this formula uses conditional
+ *      logic" header.
  *   6. **Nesting depth** — the maximum parenthesis nesting depth.
  *      Counted in a single pass over the source character stream;
  *      the renderer uses this as a complexity signal ("a 5-deep
@@ -56,7 +58,11 @@
  *   - `parseError` set to the tokenizer's error message.
  *   - `functions`, `fieldReferences`, `globalReferences`, `literals`
  *     are empty arrays.
- *   - `hasConditionalLogic` is false.
+ *   - `hasConditionalLogic` is `null` — typed absence, not a confident
+ *     `false`. The tokenizer never finished its pass, so whether the
+ *     formula uses IF/CASE/AND/OR/NOT was never actually checked; a
+ *     bare `false` would misreport a formula that visibly contains
+ *     `IF(...)` as having no conditional logic.
  *   - `nestingDepth` is computed against the partial source (the
  *     paren-depth counter runs independently of the tokenizer's
  *     fail-fast loop, so callers see a depth signal even on broken
@@ -264,7 +270,13 @@ export interface ExplainFormulaOutput {
   readonly fieldReferences: readonly ExplainFormulaFieldReference[];
   readonly globalReferences: readonly ExplainFormulaGlobalReference[];
   readonly literals: readonly ExplainFormulaLiteral[];
-  readonly hasConditionalLogic: boolean;
+  /**
+   * `null` on the tokenizer-failure path (typed absence — the tokenizer
+   * never reached far enough to check for IF/CASE/AND/OR/NOT, so the
+   * question was never answered). A `boolean` value means the check
+   * actually ran.
+   */
+  readonly hasConditionalLogic: boolean | null;
   readonly nestingDepth: number;
   readonly parseError?: string;
   readonly disclosure: string;
@@ -779,7 +791,11 @@ export const explainFormulaHandler = async (
         fieldReferences: [],
         globalReferences: [],
         literals: [],
-        hasConditionalLogic: false,
+        // Typed absence, not a confident "no conditional logic" — the
+        // tokenizer never completed its pass, so IF/CASE/AND/OR/NOT was
+        // never actually checked. A bare `false` here would misreport a
+        // formula that visibly contains `IF(...)` as having none.
+        hasConditionalLogic: null,
         nestingDepth,
         parseError: tokenized.error.message,
         disclosure: DISCLOSURE,

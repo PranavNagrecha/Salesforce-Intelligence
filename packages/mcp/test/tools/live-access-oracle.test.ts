@@ -49,7 +49,10 @@ import {
 } from '../../src/live-consent.js';
 import type { Context } from '../../src/server.js';
 import { effectivePermissionsHandler } from '../../src/tools/effective-permissions.js';
-import { liveAccessOracleHandler } from '../../src/tools/live-access-oracle.js';
+import {
+  liveAccessOracleHandler,
+  liveAccessOracleInputSchema,
+} from '../../src/tools/live-access-oracle.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 import { grantTestLiveAccess } from '../helpers/live-test-grant.js';
 
@@ -671,5 +674,22 @@ describe('additivity — the offline path is untouched', () => {
     // Still the offline engine's OWN (overstating) answer — the oracle reports
     // the disagreement, it never silently corrects the offline surface.
     expect(account?.allowCreate).toBe(true);
+  });
+});
+
+// R5 (brief 097): roster.ts advertises `additionalProperties: false` for
+// `sfi.live_access_oracle`, but the Zod schema was a plain z.object — zod
+// strips unknown keys by default instead of rejecting them, so a typo'd
+// container-override key (e.g. `permissionSetId` singular, or `profileID`
+// with a capital D) is silently dropped rather than refused, and the tool
+// falls through to a derived container bundle the caller never asked for.
+describe('liveAccessOracleInputSchema — unknown keys (R5, advertised additionalProperties:false)', () => {
+  it('rejects an unrecognized key instead of silently stripping it', () => {
+    const parsed = liveAccessOracleInputSchema.safeParse({
+      user: 'someone@example.com',
+      objects: ['Account'],
+      permissionSetId: 'PermissionSet:X', // singular typo of permissionSetIds
+    });
+    expect(parsed.success).toBe(false);
   });
 });

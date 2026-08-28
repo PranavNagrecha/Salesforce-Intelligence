@@ -168,13 +168,35 @@ describe('collectApexIdentifiers', () => {
       'Class.AccountHandler.recalc: line 12, column 1',
       'Trigger.AccountTrigger: line 3, column 1',
     ].join('\n');
-    const ids = collectApexIdentifiers(log);
+    const ids = collectApexIdentifiers(log).identifiers;
     expect(ids).toContainEqual({ kind: 'ApexClass', name: 'AccountHandler' });
     expect(ids).toContainEqual({ kind: 'ApexTrigger', name: 'AccountTrigger' });
   });
   it('de-duplicates repeated identities', () => {
-    const ids = collectApexIdentifiers('Class.Foo.a: line 1\nClass.Foo.b: line 2');
+    const ids = collectApexIdentifiers('Class.Foo.a: line 1\nClass.Foo.b: line 2').identifiers;
     expect(ids.filter((i) => i.name === 'Foo').length).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // R1/MEDIUM (line 305): names past the MAX_IDENTIFIERS (50) harvesting cap
+  // are silently dropped — never added to `identifiers`, so never resolved,
+  // so never reflected in `unresolvedApex` either. The caller has no way to
+  // know the harvest was incomplete.
+  // -------------------------------------------------------------------------
+  it('FAIL-BEFORE/PASS-AFTER: reports a count of identifiers dropped past the harvesting cap', () => {
+    // 55 distinct class names, strictly more than MAX_IDENTIFIERS (50).
+    const log = Array.from(
+      { length: 55 },
+      (_, i) => `Class.Deep${String(i).padStart(2, '0')}.run: line 1, column 1`,
+    ).join('\n');
+    const result = collectApexIdentifiers(log);
+    expect(result.identifiers).toHaveLength(50);
+    expect(result.droppedCount).toBe(5);
+  });
+
+  it('reports zero dropped when the harvest fits under the cap', () => {
+    const result = collectApexIdentifiers('Class.Foo.a: line 1\nClass.Bar.b: line 2');
+    expect(result.droppedCount).toBe(0);
   });
 });
 
@@ -255,6 +277,30 @@ describe('explainDebugLogHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.detectedStatusCode).toBe('UNABLE_TO_LOCK_ROW');
+  });
+
+  it('surfaces identifiersDropped end-to-end when a log names more classes than the harvesting cap', async () => {
+    const logText = Array.from(
+      { length: 55 },
+      (_, i) => `Class.Deep${String(i).padStart(2, '0')}.run: line 1, column 1`,
+    ).join('\n');
+    const r = await explainDebugLogHandler(ctx, { logText });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // None of these classes are in the fixture vault — exactly 50 (the cap)
+    // are harvested and therefore unresolved; the 5 past the cap are counted
+    // separately, not silently absent from every field.
+    expect(r.value.data.unresolvedApex).toHaveLength(50);
+    expect(r.value.data.identifiersDropped).toBe(5);
+  });
+
+  it('omits identifiersDropped when the harvest fits under the cap', async () => {
+    const r = await explainDebugLogHandler(ctx, {
+      logText: 'Class.AccountHandler.recalc: line 12, column 1',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.identifiersDropped).toBeUndefined();
   });
 });
 
@@ -448,5 +494,85 @@ describe('explainDebugLogHandler — governor cross-reference scope (page-bounda
     expect(result.value.data.unresolvedApex).toContain('ApexClass:NotInThisVaultService');
     const xref = result.value.data.governorRiskCrossRef;
     expect(xref?.scannedComponents).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R1/MEDIUM (line 496): the per-class governor-risk scan breaks at
+// MAX_RISK_CLASSES (25) without recording the un-scanned remainder anywhere.
+// A resolved class that sorted past the cap landed in NEITHER
+// `scannedComponents` NOR `uncheckedComponents` — a third, unrepresented
+// state the ledger's own JSDoc (:213-218) says should not exist.
+// ---------------------------------------------------------------------------
+
+const NAMED_RISKY_COUNT = 30; // strictly > MAX_RISK_CLASSES (25)
+const cappedClassId = (i: number): string => `ApexClass:Cap${String(i).padStart(2, '0')}`;
+
+/** A log naming, IN ORDER, every one of `NAMED_RISKY_COUNT` distinct classes,
+ * plus a fired SOQL limit so the governor cross-reference activates. */
+const cappedLog = (): string => {
+  const frames = Array.from(
+    { length: NAMED_RISKY_COUNT },
+    (_, i) => `Class.${cappedClassId(i).slice('ApexClass:'.length)}.run: line 1, column 1`,
+  );
+  return [
+    '61.0 APEX_CODE,FINEST;APEX_PROFILING,INFO;DB,INFO;SYSTEM,DEBUG',
+    '09:00:00.1 (1000000)|EXECUTION_STARTED',
+    '09:00:00.9 (900000000)|LIMIT_USAGE_FOR_NS|(default)|',
+    '  Number of SOQL queries: 101 out of 100',
+    '09:00:00.9 (902000000)|FATAL_ERROR|System.LimitException: Too many SOQL queries: 101',
+    '',
+    ...frames,
+    '09:00:00.9 (903000000)|EXECUTION_FINISHED',
+  ].join('\n');
+};
+
+describe('explainDebugLogHandler — governor cross-reference budget cap (unrepresented remainder)', () => {
+  let capDir: string;
+  let capStore: GraphStore;
+  let capCtx: Context;
+
+  beforeAll(async () => {
+    capDir = mkdtempSync(join(tmpdir(), 'sfi-explain-debug-log-cap-'));
+    const o = await openGraph(join(capDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    capStore = o.value;
+    const nodes: Node[] = Array.from({ length: NAMED_RISKY_COUNT }, (_, i) =>
+      node({
+        id: cappedClassId(i),
+        type: 'ApexClass',
+        apiName: cappedClassId(i).slice('ApexClass:'.length),
+        properties: { qualityIssues: [riskyIssue(1)] },
+      }),
+    );
+    const im = await importExtractionResults(capStore, [{ nodes, edges: [] }]);
+    if (!im.ok) throw new Error(im.error.message);
+    capCtx = { vaultRoot: capDir, manifest: MANIFEST, graph: capStore };
+  });
+  afterAll(async () => {
+    await closeGraph(capStore);
+    rmSync(capDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: every named+resolved class ends up in scannedComponents or uncheckedComponents — never neither', async () => {
+    const result = await explainDebugLogHandler(capCtx, { logText: cappedLog() });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const xref = result.value.data.governorRiskCrossRef;
+    expect(xref).not.toBeNull();
+    if (xref === null) return;
+
+    // All 30 named classes resolved (they're all in the vault) — sanity check
+    // that none accidentally landed in unresolvedApex.
+    expect(result.value.data.unresolvedApex).toEqual([]);
+
+    const accounted = new Set([
+      ...xref.scannedComponents,
+      ...(xref.uncheckedComponents ?? []),
+    ]);
+    const missing = Array.from({ length: NAMED_RISKY_COUNT }, (_, i) => cappedClassId(i)).filter(
+      (id) => !accounted.has(id),
+    );
+    expect(missing).toEqual([]);
   });
 });

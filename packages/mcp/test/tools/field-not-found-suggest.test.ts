@@ -4,7 +4,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
+import type {
+  ComponentId,
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
 import {
   closeGraph,
   importExtractionResults,
@@ -55,8 +60,23 @@ const seed: ExtractionResult = {
       apiVersion: null,
       properties: {},
     },
+    {
+      id: 'CustomObject:Lead',
+      type: 'CustomObject',
+      apiName: 'Lead',
+      label: 'Lead',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    },
     makeField('CustomField:Account.Industry', 'Industry', 'CustomObject:Account'),
     makeField('CustomField:Account.AnnualRevenue', 'AnnualRevenue', 'CustomObject:Account'),
+    // Same field api name on a SECOND object: the parent scope has to keep
+    // doing real work after the case fix, not be quietly dropped.
+    makeField('CustomField:Lead.Industry', 'Industry', 'CustomObject:Lead'),
   ],
   edges: [],
 };
@@ -103,12 +123,67 @@ describe('buildFieldResolveSuggestions — FLD-04', () => {
   });
 });
 
+describe('buildFieldResolveSuggestions — parent-object scope', () => {
+  it('still scopes to the named parent when the object id is exactly cased', async () => {
+    const suggestions = await buildFieldResolveSuggestions(
+      ctx,
+      'CustomField:Account.Industy',
+    );
+    expect(suggestions.map((s) => s.componentId)).toContain(
+      'CustomField:Account.Industry',
+    );
+    // The identically-named field on the OTHER object must not leak in.
+    expect(suggestions.map((s) => s.componentId)).not.toContain(
+      'CustomField:Lead.Industry',
+    );
+  });
+
+  it('suggests for a WRONG-CASE object prefix (ids are case-sensitive, api names are not)', async () => {
+    const suggestions = await buildFieldResolveSuggestions(
+      ctx,
+      'CustomField:account.Industy',
+    );
+    expect(suggestions.map((s) => s.componentId)).toContain(
+      'CustomField:Account.Industry',
+    );
+    // Case-INSENSITIVE resolution, not case-insensitive identity: the fold
+    // picks the one vault object whose api name matches, not every object.
+    expect(suggestions.map((s) => s.componentId)).not.toContain(
+      'CustomField:Lead.Industry',
+    );
+  });
+
+  it('does not apply a parent filter for an object that is not in the vault', async () => {
+    const suggestions = await buildFieldResolveSuggestions(
+      ctx,
+      'CustomField:Acount.Industy',
+    );
+    // An unverified `CustomObject:Acount` filter can only ever return zero.
+    expect(suggestions.map((s) => s.componentId)).toContain(
+      'CustomField:Account.Industry',
+    );
+  });
+});
+
 describe('fieldNotFoundError', () => {
   it('attaches resolveSuggestions on component-not-found', async () => {
     const err = await fieldNotFoundError(
       ctx,
       'CustomField:Account.Industy',
       'no CustomField with id CustomField:Account.Industy',
+    );
+    expect(err.kind).toBe('component-not-found');
+    expect(err.resolveSuggestions?.length).toBeGreaterThan(0);
+    expect(err.message).toMatch(/resolveSuggestions/);
+  });
+});
+
+describe('fieldNotFoundError — wrong-case parent', () => {
+  it('attaches suggestions for a miscased field id', async () => {
+    const err = await fieldNotFoundError(
+      ctx,
+      'CustomField:account.Industy' as ComponentId,
+      'no CustomField with id CustomField:account.Industy',
     );
     expect(err.kind).toBe('component-not-found');
     expect(err.resolveSuggestions?.length).toBeGreaterThan(0);

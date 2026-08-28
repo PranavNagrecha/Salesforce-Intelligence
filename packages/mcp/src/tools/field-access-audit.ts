@@ -38,6 +38,14 @@
  *
  * Honesty axis (per the v2.0d.0 spec):
  *
+ *   - Every axis below is also shipped IN THE PAYLOAD as `boundaryNote`, and
+ *     that note NAMES the four sentinel keys (`summary.profilesWithUnknown`,
+ *     `summary.permSetsWithUnknown`, `update.flsEditWithoutObjectRow`,
+ *     `update.objectRowNote`) whose purpose is to stop a zero being read as a
+ *     verified negative. A sentinel the caller is never told to look for does
+ *     not do its job, and the tools/list description is read BEFORE the call —
+ *     the note is read at the moment the numbers are interpreted.
+ *
  *   - This is the PERMISSION-GRANT-LEVEL audit. Sharing rule cross-
  *     walks (criteria-based sharing, manual sharing, account teams)
  *     are deferred to a future v2.0d.1 extension. The tool does NOT
@@ -276,6 +284,22 @@ export interface FieldAccessAuditOutput {
   readonly viaApexAccess: readonly ApexAccessRoute[];
   /** Who can actually UPDATE the field (FLS-edit ∩ object-edit ∩ type-writable). */
   readonly update: FieldUpdateAccess;
+  /**
+   * The tool's honesty axes, IN THE RESPONSE — the surface a caller reads at
+   * the moment it interprets the numbers, not the tools/list description it
+   * read before calling.
+   *
+   * It names the four keys whose whole purpose is to stop a zero being read as
+   * a verified negative — `summary.profilesWithUnknown` /
+   * `summary.permSetsWithUnknown` (an all-zero read/edit split is NOT "no
+   * access" while a grant's level is merely unpopulated) and
+   * `update.flsEditWithoutObjectRow` / `update.objectRowNote` (an empty
+   * `canUpdate` is NOT a proven denial while object-edit went unchecked) —
+   * because a sentinel nobody is told to look for does not do its job.
+   * Mirrors `tab_availability` / `recordtype_availability`, which ship the
+   * same field for the same reason.
+   */
+  readonly boundaryNote: string;
 }
 
 /**
@@ -335,6 +359,69 @@ const compareGrants = (a: AccessGrant, b: AccessGrant): number => {
  */
 const compareApexAccess = (a: ApexAccessRoute, b: ApexAccessRoute): number =>
   a.apexClassId < b.apexClassId ? -1 : a.apexClassId > b.apexClassId ? 1 : 0;
+
+/**
+ * The invariant half of {@link FieldAccessAuditOutput.boundaryNote}.
+ *
+ * Every key named here is named because the handler EMITS it and reading it as
+ * a plain number produces a false negative:
+ *
+ *  - `summary.*WithUnknown` counts grants that are REAL but whose read/edit
+ *    level this vault's extractor never populated. Without the name in front of
+ *    the caller, `profilesWithRead: 0, profilesWithEdit: 0` reads as "nobody can
+ *    see this field" on precisely the vault where that is wrong.
+ *  - `update.flsEditWithoutObjectRow` counts grantors holding FLS Edit whose
+ *    parent-object permission row is ABSENT from the vault. They are excluded
+ *    from `canUpdate` because object-edit was NOT CHECKED — a different claim
+ *    from a proven denial.
+ *
+ * Kept as one module constant rather than inlined so the prose cannot drift
+ * away from the shape it describes without this file changing.
+ */
+const BOUNDARY_NOTE_BASE =
+  'Permission-grant level ONLY: sharing rules (criteria-based, owner-based, manual, ' +
+  'account teams) are NOT walked here — "could this user see this field on THAT record" ' +
+  'is `sfi.why_cant_user_see_record`. `summary` counts the FULL grant set on six axes: ' +
+  'profilesWithRead, profilesWithEdit, profilesWithUnknown, permSetsWithRead, ' +
+  'permSetsWithEdit, permSetsWithUnknown — the two `*WithUnknown` counts are REAL grants ' +
+  'whose read/edit level this vault\'s extractor did not populate, so an all-zero ' +
+  'profilesWithRead/profilesWithEdit is NOT a verified "no access" while either is ' +
+  'non-zero. In `update`, `canUpdate` is FLS-edit ∩ object-edit, and ' +
+  'flsEditWithoutObjectRow counts grantors with FLS Edit but NO objectPermissions row ' +
+  'for the parent object in this vault — object edit was not checked for them, so an ' +
+  'empty `canUpdate` beside a non-zero flsEditWithoutObjectRow is an UNPROVEN denial, ' +
+  'not a denial (objectRowNote spells it out whenever that count is non-zero). ' +
+  '`viaApexAccess` is HEURISTIC: readsFrom/writesTo edges flag the source file, not the ' +
+  'runtime user — pair it with "who can execute this class" via `sfi.get_edges`. ' +
+  'Container grants only; the user-assignment roster is not in the offline vault.';
+
+/**
+ * Compose the response-level boundary note, appending the live counts for each
+ * sentinel that actually fired on THIS field so the caller is told the number,
+ * not merely the key name.
+ */
+const buildBoundaryNote = (
+  summary: FieldAccessAuditSummary,
+  update: FieldUpdateAccess,
+): string => {
+  const unknownGrants = summary.profilesWithUnknown + summary.permSetsWithUnknown;
+  const parts = [BOUNDARY_NOTE_BASE];
+  if (unknownGrants > 0) {
+    parts.push(
+      `ON THIS FIELD: ${unknownGrants} grant(s) carry an unpopulated read/edit level ` +
+        `(profilesWithUnknown ${summary.profilesWithUnknown}, permSetsWithUnknown ` +
+        `${summary.permSetsWithUnknown}); do not read the read/edit split as complete.`,
+    );
+  }
+  if (update.flsEditWithoutObjectRow > 0) {
+    parts.push(
+      `ON THIS FIELD: object edit was NOT CHECKED for ${update.flsEditWithoutObjectRow} ` +
+        `FLS-edit grantor(s) (flsEditWithoutObjectRow); canUpdate is therefore a lower ` +
+        `bound, not a complete answer.`,
+    );
+  }
+  return parts.join(' ');
+};
 
 /**
  * The `sfi.field_access_audit` MCP tool. Returns the permission-grant
@@ -627,6 +714,17 @@ export const fieldAccessAuditHandler = async (
       },
       viaApexAccess: [...viaApex].sort(compareApexAccess),
       update,
+      boundaryNote: buildBoundaryNote(
+        {
+          profilesWithRead,
+          profilesWithEdit,
+          profilesWithUnknown,
+          permSetsWithRead,
+          permSetsWithEdit,
+          permSetsWithUnknown,
+        },
+        update,
+      ),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

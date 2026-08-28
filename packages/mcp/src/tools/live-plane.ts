@@ -55,9 +55,14 @@ import { runLiveQuery, runLiveRest } from './live-session.js';
 import {
   scanSoqlForPicklistMismatches,
   scanSoqlForValidationGaps,
+  type FieldPicklistState,
   type PicklistLiteralMismatch,
   type PicklistValidationGap,
 } from './picklist-literal-check.js';
+import {
+  normalizePicklistValues,
+  resolveGlobalValueSetValues,
+} from './picklist-values.js';
 import {
   STALE_CHECK_TYPE_COUNT,
   STALE_CHECK_TYPE_LIST,
@@ -797,21 +802,30 @@ const collectPicklistMismatches = async (
 
 /**
  * Synchronous-friendly wrapper: gather every referenced field's vault node up
- * front (one graph read per distinct field), then run the pure scanners. A
- * direct field present in the vault feeds the mismatch scanner; a direct field
- * absent from the vault (or a relationship path, never resolvable offline) feeds
- * the validation-gap scanner.
+ * front (one graph read per distinct field), then run the pure scanners.
+ *
+ * The per-field facts are carried as a {@link FieldPicklistState}, NOT as a
+ * bare present/absent boolean. A boolean cannot express the GlobalValueSet
+ * case — node PRESENT, `properties.picklistValues` absent (the CustomField
+ * extractor fills that only from an inline `<valueSetDefinition>`; for a shared
+ * value set it writes `valueSetName` and emits a `usesValueSet` edge instead).
+ * Answering the gap scanner with `true` there made such a field fall through
+ * BOTH scanners: the mismatch scanner saw no values and skipped it as "not a
+ * picklist", the gap scanner saw a known node and skipped it as validated, so a
+ * typo'd literal produced a confident, undisclosed 0. The value set is now
+ * resolved off the edge (same reader `what_if_remove_picklist_value` uses) and,
+ * when it cannot be resolved, the field is declared a GAP.
  */
 const scanSoqlForPicklistMismatchesSync = async (
   ctx: Context,
   soql: string,
   fromObject: string,
 ): Promise<PicklistValidationResult> => {
+  // The DECLARED values (inline, or resolved off the usesValueSet edge) the
+  // mismatch scanner checks literals against.
   const picklistCache = new Map<string, unknown>();
-  // Which direct fields the vault KNOWS (node exists), regardless of whether
-  // they carry an inline picklist definition. A known non-picklist field is a
-  // benign skip; an UNKNOWN field is a pre-validation gap to disclose.
-  const knownFields = new Set<string>();
+  // What the vault knows about each direct field, for the gap scanner.
+  const fieldState = new Map<string, FieldPicklistState>();
   // Collect each referenced direct field once (skip relationship paths — only a
   // direct `Object.Field` picklist can be resolved from the vault here).
   const fieldRefs = new Set<string>();
@@ -821,20 +835,37 @@ const scanSoqlForPicklistMismatchesSync = async (
     if (ref !== undefined && !ref.includes('.')) fieldRefs.add(ref);
   }
   for (const field of fieldRefs) {
-    const r = await getNodeById(ctx.graph, `CustomField:${fromObject}.${field}`);
-    const present = r.ok && r.value !== null;
-    if (present) {
-      knownFields.add(field);
-      picklistCache.set(field, r.value!.properties['picklistValues']);
+    const fieldId: ComponentId = `CustomField:${fromObject}.${field}`;
+    const r = await getNodeById(ctx.graph, fieldId);
+    if (!r.ok || r.value === null) {
+      fieldState.set(field, { present: false });
+      continue;
     }
+    const props = r.value.properties;
+    const inline = props['picklistValues'];
+    const hasInline = normalizePicklistValues(inline) !== null;
+    // Only walk the edge when there is something to walk to: no inline values
+    // AND a value-set name (which the extractor omits for every non-GVS field).
+    const resolved =
+      !hasInline && typeof props['valueSetName'] === 'string'
+        ? ((await resolveGlobalValueSetValues(ctx, fieldId))?.values ?? undefined)
+        : undefined;
+    picklistCache.set(field, hasInline ? inline : (resolved ?? null));
+    fieldState.set(field, {
+      present: true,
+      picklistValues: inline,
+      valueSetName: props['valueSetName'],
+      ...(resolved !== undefined ? { resolvedValueSetValues: resolved } : {}),
+    });
   }
   const mismatches = scanSoqlForPicklistMismatches(soql, (ref) =>
     ref.includes('.') ? null : picklistCache.get(ref) ?? null,
   );
   // A relationship path is never resolvable offline; a direct field is a gap
-  // only when its vault node is absent (managed-package / not-modeled).
+  // when its vault node is absent (managed-package / not-modeled) OR when it IS
+  // a picklist whose global value set could not be resolved.
   const validationGaps = scanSoqlForValidationGaps(soql, (ref) =>
-    ref.includes('.') ? false : knownFields.has(ref),
+    ref.includes('.') ? false : (fieldState.get(ref) ?? { present: false }),
   );
   return { mismatches, validationGaps };
 };

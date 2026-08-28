@@ -311,3 +311,64 @@ describe('namingConventionReportHandler: empty scoped result is disclosed (FIX 2
     expect(data.analyzed.objectsBelowMinimumGroupSize).toBe(1);
   });
 });
+
+/**
+ * R4 — an object scope must be VERIFIED against the vault before it is used.
+ *
+ * `CustomField:{name}.*` is parsed for STRING SHAPE only; the recognizer then
+ * filters `groups` by `parentApiName`, so a name that matches no vault object
+ * yields `filtered = []` and `scopedObjectCustomFieldCount = 0` — a
+ * confidently-narrated "0 custom fields" answer about an object that does
+ * not exist, instead of a refusal.
+ */
+describe('namingConventionReportHandler: object scope must exist in the vault (R4)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const nodes: Node[] = [parentObject('Account')];
+    for (let i = 0; i < 20; i++) {
+      nodes.push(field('Account', `Acc_Field${i.toString()}__c`));
+    }
+    // A real object for the wrong-case case, seeded with enough custom
+    // fields to actually observe a convention — proving the wrong-case call
+    // reaches the SAME data as the correctly-cased one, not an empty result.
+    nodes.push(parentObject('Contact'));
+    for (let i = 0; i < 20; i++) {
+      nodes.push(field('Contact', `Con_Field${i.toString()}__c`));
+    }
+    const built = await makeCtx('r4-object-scope.db', nodes);
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('refuses a scope naming an object absent from the vault, instead of narrating 0 fields', async () => {
+    const result = await namingConventionReportHandler(ctx, {
+      scope: 'CustomField:Widget__c.*',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('Widget__c');
+  });
+
+  it('resolves a wrong-case object name to the vault-exact object and reports real observations', async () => {
+    const result = await namingConventionReportHandler(ctx, {
+      scope: 'CustomField:contact.*',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Pre-fix: `contact` !== `Contact` under the recognizer's exact-match
+    // filter, so this silently returned an empty-but-narrated result for an
+    // object that in fact has 20 custom fields and an observable convention.
+    expect(result.value.data.observations.length).toBeGreaterThan(0);
+    for (const obs of result.value.data.observations) {
+      expect(obs.scope).toBe('CustomField:Contact.*');
+    }
+    expect(result.value.data.note).toBeUndefined();
+  });
+});

@@ -143,6 +143,16 @@ export interface CoverageReportOutput {
    * listed type's absence from any answer as "none" — nothing has looked.
    */
   readonly retrievedNotParsed?: readonly CoverageEntry[];
+  /**
+   * R6-DRIFT: types present in the manifest but NOT requested by this
+   * refresh — a scoped `--types` run that pulled only part of the metadata
+   * surface (mirrors `summarizeCoverage`'s `notRequestedTypes` in
+   * manifest.ts). Genuinely absent from the vault, not merely never
+   * modeled, so it is folded into `summary.missingCoverage` there and
+   * belongs in its own bucket here rather than silently disappearing from
+   * every per-entry list. Present ONLY when non-empty.
+   */
+  readonly notRequested?: readonly CoverageEntry[];
   /** Present while a staged refresh is mid-build (tier progress). */
   readonly stagedBuild?: {
     readonly tier: number;
@@ -257,9 +267,10 @@ const partitionCoverage = (
   entries: readonly CoverageEntry[],
   unparsed: ReadonlySet<string>,
 ): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending' | 'capped'> & {
-  // Always an array HERE (the handler decides whether to emit the key), unlike
-  // the optional output field.
+  // Always arrays HERE (the handler decides whether to emit the optional
+  // output keys), unlike the two optional output fields.
   readonly retrievedNotParsed: readonly CoverageEntry[];
+  readonly notRequested: readonly CoverageEntry[];
 } => {
   const isRetrievedNotParsed = (entry: CoverageEntry): boolean =>
     unparsed.has(entry.type) &&
@@ -298,6 +309,13 @@ const partitionCoverage = (
       (entry) => entry.capped === true && entry.pending !== true && !entry.neverModeled,
     ),
     retrievedNotParsed: entries.filter(isRetrievedNotParsed),
+    // R6-DRIFT: mirrors summarizeCoverage's `notRequestedTypes` filter
+    // (manifest.ts) exactly — `!requested && !neverModeled`. Without this
+    // bucket a scoped-refresh type that summarizeCoverage correctly folds
+    // into `missingCoverage` had no home in ANY of the buckets above (they
+    // all require `entry.requested`), so it vanished from every per-entry
+    // list coverage_report exposes even though the summary still named it.
+    notRequested: entries.filter((entry) => !entry.requested && !entry.neverModeled),
   };
 };
 
@@ -312,7 +330,7 @@ export const coverageReportHandler = async (
     ctx.manifest,
     input.type === undefined ? undefined : [input.type],
   );
-  const { retrievedNotParsed, ...partitions } = partitionCoverage(
+  const { retrievedNotParsed, notRequested, ...partitions } = partitionCoverage(
     entries,
     retrievedNotParsedTypes(ctx.manifest),
   );
@@ -349,6 +367,7 @@ export const coverageReportHandler = async (
       // Present ONLY when the vault actually has the condition, so a vault
       // whose containers were all dispatched serialises exactly as before.
       ...(retrievedNotParsed.length > 0 ? { retrievedNotParsed } : {}),
+      ...(notRequested.length > 0 ? { notRequested } : {}),
       ...(staged !== undefined
         ? { stagedBuild: { tier: staged.tier, totalTiers: staged.totalTiers } }
         : {}),

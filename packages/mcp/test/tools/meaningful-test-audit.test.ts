@@ -216,6 +216,34 @@ describe('meaningfulTestAuditHandler', () => {
     expect(r.value.data.tests.length).toBe(0);
   });
 
+  it('refuses a well-formed classFilter id that matches no ApexClass in the vault (typo)', async () => {
+    // MEANINGFUL-TEST-AUDIT-CLASSFILTER-SILENTLY-DROPS-UNRESOLVED: before the
+    // fix, a well-formed but nonexistent id (e.g. a typo of a real test
+    // class) was silently filtered out, returning `totalTestClassCount: 0`
+    // with no distinguishable signal from "checked, found nothing wrong".
+    // The handler must refuse — the caller's filter is unresolvable, not
+    // legitimately empty.
+    const r = await meaningfulTestAuditHandler(ctx, {
+      classFilter: ['ApexClass:AccountServiceTets'],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain("'ApexClass:AccountServiceTets'");
+    expect(r.error.path).toBe('classFilter');
+  });
+
+  it('refuses when only SOME classFilter ids are unresolved, citing just those', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {
+      classFilter: ['ApexClass:HighFakeTest', 'ApexClass:TotallyMadeUp'],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain("'ApexClass:TotallyMadeUp'");
+    expect(r.error.message).not.toContain("'ApexClass:HighFakeTest'");
+  });
+
   it('refuses an empty classFilter array with invalid-query', async () => {
     // Regression for journal 0160: the empty-array case is ambiguous
     // ("no filter" vs "filter to nothing"). Supersedes the journal
@@ -558,6 +586,90 @@ describe('meaningfulTestAuditHandler — past-cap roster (CR-12 de-cap)', () => 
       ['appliedScope', 'disclosure', 'tests', 'totalTestClassCount'].sort(),
     );
     expect(r.value.data.appliedScope).toEqual({ mode: 'org-wide' });
+  });
+});
+
+describe('meaningfulTestAuditHandler — R6 full-scan residual-cap disclosure (scanAllNodesOfTypes adoption)', () => {
+  // MEANINGFUL-TEST-AUDIT-LOADALLNODES-NO-RESIDUAL-CAP: the hand-rolled
+  // `loadAllNodes` had NO ceiling and no `scanIncomplete` typed state at all —
+  // a pathological ApexClass count walked unbounded with no way to disclose
+  // an incomplete scan. `SFI_MEANINGFUL_TEST_SCAN_MAX` only exists after
+  // adopting `scanAllNodesOfTypes`; under the old code this env var was never
+  // read, so the walk always ran to completion (`totalTestClassCount: 5`,
+  // no truncation note) regardless of its value.
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    process.env['SFI_MEANINGFUL_TEST_SCAN_MAX'] = '3';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+    delete process.env['SFI_MEANINGFUL_TEST_SCAN_MAX'];
+  });
+
+  it('discloses an incomplete scan and under-reports the count rather than walking unbounded silently', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Ceiling of 3 stops the walk after the first 3 (of 6) ApexClass nodes —
+    // fewer than the full 5 test classes — and the disclosure must say so.
+    expect(r.value.data.totalTestClassCount).toBeLessThan(5);
+    expect(r.value.data.disclosure).toMatch(/Full scan capped at 3 nodes per type/);
+    expect(r.value.data.disclosure).toMatch(/scanTruncated/);
+  });
+
+  it('resolves a classFilter id that sorts PAST the residual scan ceiling', async () => {
+    // MEANINGFUL-TEST-AUDIT-CLASSFILTER-REFUSES-PAST-CAP: the unresolved-id
+    // refusal must NOT be decided by membership in the org-wide walk, because
+    // that walk is capped. Fixture ids sort ASC as CleanDenseTest,
+    // CleanSparseTest, HighFakeTest, LegacyTest, NotATest, OneFakeTest — so
+    // with a ceiling of 3, OneFakeTest is past the cap yet unquestionably
+    // EXISTS. Refusing it as "does not match any ApexClass in this vault" is a
+    // confident falsehood that also prescribes /sfi-refresh, a remedy that can
+    // never help. The filter must resolve ids by direct id lookup instead.
+    const r = await meaningfulTestAuditHandler(ctx, {
+      classFilter: ['ApexClass:OneFakeTest'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalTestClassCount).toBe(1);
+    expect(r.value.data.tests[0]?.testClassId).toBe('ApexClass:OneFakeTest');
+    expect(r.value.data.tests[0]?.fakeAssertionCount).toBe(1);
+  });
+
+  it('still refuses a genuinely nonexistent classFilter id while the scan is capped', async () => {
+    // Control for the case above: making the check ceiling-independent must
+    // not neuter the R1 refusal. A typo still has no row at all.
+    const r = await meaningfulTestAuditHandler(ctx, {
+      classFilter: ['ApexClass:OneFakeTets'],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain("'ApexClass:OneFakeTets'");
+    expect(r.error.path).toBe('classFilter');
+  });
+
+  it('does not stamp a truncation note on a class-filter answer resolved by id', async () => {
+    // The class-filter answer is resolved id-by-id, so it is COMPLETE even
+    // while the org-wide walk would truncate — disclosing scanTruncated here
+    // would be over-disclosure about a scan this branch never performed.
+    const r = await meaningfulTestAuditHandler(ctx, {
+      classFilter: ['ApexClass:HighFakeTest', 'ApexClass:OneFakeTest'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalTestClassCount).toBe(2);
+    expect(r.value.data.disclosure).not.toMatch(/Full scan capped/);
+  });
+
+  it('stays silent about capping when the ceiling comfortably exceeds the corpus', async () => {
+    process.env['SFI_MEANINGFUL_TEST_SCAN_MAX'] = '1000';
+    const r = await meaningfulTestAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalTestClassCount).toBe(5);
+    expect(r.value.data.disclosure).not.toMatch(/Full scan capped/);
   });
 });
 

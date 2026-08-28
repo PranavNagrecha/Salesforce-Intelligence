@@ -89,6 +89,8 @@ import {
   type EdgeDriftOutput,
 } from './cross-vault-edge-drift.js';
 import { openVaultReadOnly } from './cross-vault-open.js';
+import { argsFingerprint, decodeCursor, paginate } from './page-cursor.js';
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 
 export type { ComponentEdgeDrift, EdgeDiffEntry, EdgeDriftOutput } from './cross-vault-edge-drift.js';
 
@@ -107,6 +109,15 @@ const VOLATILE_PROPERTY_PATHS = new Set<string>([
 ]);
 
 /**
+ * Ceiling on a caller-supplied `limit` for the `shapeModified` byte-budget
+ * pager (R2). Declared here, ahead of the schema, because the schema
+ * references it directly at module-init time. The byte budget usually
+ * binds well before this row count does — see the caps comment above
+ * `COMPARE_MAX_PER_BUCKET`.
+ */
+const COMPARE_VAULTS_MAX_LIMIT = 500;
+
+/**
  * Zod schema for `sfi.compare_vaults`. Both aliases are required; the
  * optional `objectFilter` / `typeFilter` flags narrow the diff. The
  * `includeVolatileProperties` flag (default false) controls the
@@ -120,6 +131,14 @@ export const compareVaultsInputSchema = z.object({
   includeVolatileProperties: z.boolean().optional(),
   /** `'markdown'` adds a rendered drift-table dashboard to the response. */
   format: z.enum(['json', 'markdown']).optional(),
+  // R2: byte-aware paging knobs for the `shapeModified` bucket, the vector
+  // that can inline a fat drift array past the response budget — a fixed
+  // row count cannot bound it (see the byte-budget comment above
+  // `COMPARE_MAX_PER_BUCKET`). Echo `nextCursor` to resume, or set `offset`
+  // directly.
+  limit: z.number().int().min(1).max(COMPARE_VAULTS_MAX_LIMIT).optional(),
+  offset: z.number().int().nonnegative().optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export type CompareVaultsInput = z.infer<typeof compareVaultsInputSchema>;
@@ -165,14 +184,41 @@ export interface CompareVaultsOutput {
     readonly unchangedCount: number;
   };
   /**
-   * True when any inlined bucket was clipped to `COMPARE_MAX_PER_BUCKET`
-   * or any `drift` array to `DRIFT_MAX_ROWS` / a value summarised. The
-   * `summary` counts remain the true totals regardless.
+   * True when `added`/`removed` were clipped to `COMPARE_MAX_PER_BUCKET`,
+   * any `drift` array hit `DRIFT_MAX_ROWS` / a value was summarised, OR
+   * (R2) `shapeModified` itself stopped short of the response byte budget
+   * — see `shapeModifiedPage`. The `summary` counts remain the true
+   * totals regardless.
    */
   readonly truncated: boolean;
-  /** Verbatim honesty note about the size caps and, when truncated, how to narrow. */
+  /** Verbatim honesty note about the size caps and, when truncated, how to narrow or resume. */
   readonly disclosure: string;
   readonly boundaries: readonly string[];
+  /**
+   * R2: present ONLY when the `shapeModified` bucket was measured against
+   * the actual response byte budget rather than shipped whole — either
+   * because the caller supplied paging input (`limit`/`offset`/`cursor`)
+   * or because the FULL bucket would not fit. `hasMore: true` means
+   * `shapeModified` here is a PARTIAL page of the true
+   * `summary.shapeModifiedCount` total; echo `nextCursor` (or advance
+   * `offset` by `shapeModified.length`) to fetch the rest. Absent means
+   * `shapeModified` above is the complete bucket (still subject to the
+   * per-component `drift` caps).
+   */
+  readonly shapeModifiedPage?: {
+    readonly limit: number;
+    readonly offset: number;
+    readonly hasMore: boolean;
+    readonly nextOffset: number | null;
+    readonly nextCursor: string | null;
+    /**
+     * True when a row (or a row's individual `drift` values) had to be
+     * shortened to fit the budget — distinct from `hasMore`: a single fat
+     * component can be the ONLY row (`hasMore: false`, nothing to page to)
+     * while still being byte-trimmed to fit.
+     */
+    readonly byteTrimmed: boolean;
+  };
   /**
    * R6-12: present ONLY when vaultA's and vaultB's manifests report different
    * sf-intelligence product versions — an edge-set (or node) difference between
@@ -360,15 +406,32 @@ const hashProperties = (
  * Output-size caps. compare_vaults diffs two whole vaults; on orgs that
  * share almost nothing the `added`/`removed` buckets each hold thousands
  * of entries and a single `shapeModified` row can inline a fat Profile's
- * 20 KB grant matrix — a 1.4 MB context bomb in one response. We cap the
- * inlined lists (the `summary` counts stay the TRUE totals) and summarise
- * oversized property values, mirroring the `get_subgraph` /`get_impact`
- * node/edge caps. Narrow with `typeFilter` / `objectFilter` for a complete
- * slice.
+ * 20 KB grant matrix — a 1.4 MB context bomb in one response. `added` /
+ * `removed` rows are fixed-shape (id/type/apiName, no `drift`), so the
+ * ROW-COUNT cap below is a byte-safe bound for them. `shapeModified` rows
+ * carry a variable-size `drift` array — 50 rows (the cap) at just under
+ * `DRIFT_MAX_VALUE_BYTES` each is ~200 KB in ONE row, so that bucket is
+ * additionally self-fitted to the actual response byte budget via
+ * `page-cursor.ts#paginate` (R2 — see `pageShapeModified` below); the
+ * row-count cap here no longer applies to it. Narrow with `typeFilter` /
+ * `objectFilter` for a complete slice.
  */
 const COMPARE_MAX_PER_BUCKET = 200;
 const DRIFT_MAX_ROWS = 50;
 const DRIFT_MAX_VALUE_BYTES = 2_000;
+/** Default page size for the `shapeModified` byte-budget pager. */
+const COMPARE_VAULTS_DEFAULT_LIMIT = 200;
+/** Pager byte-budget floor — mirrors `compare-profile-across-vaults.ts`. */
+const MIN_PAGE_BYTE_BUDGET = 256;
+/** Refit step for the measure/correct loop below the derived budget. */
+const PAGE_REFIT_STEP_BYTES = 64;
+/**
+ * Passes of the measure/refit loop. The sibling cross-vault tool uses 3,
+ * which suffices when the measured payload IS the page; `compare_vaults`
+ * additionally renders the same drift values into `markdown`, roughly
+ * doubling the composed size, so each correction only halves the overshoot.
+ */
+const PAGE_REFIT_ATTEMPTS = 6;
 
 /**
  * Replace a property value whose canonical-JSON size exceeds
@@ -495,6 +558,30 @@ export const compareVaultsHandler = async (
     });
   }
 
+  // R2: byte-aware paging binding for the `shapeModified` bucket. Bound
+  // to the NARROWING args only (never `limit`/`offset`/`cursor`/`format`),
+  // so a resumed page can't be replayed against a different query.
+  const pageBinding = {
+    tool: 'sfi.compare_vaults',
+    vaultHash: ctx.manifest.sourceTreeHash,
+    argsFingerprint: argsFingerprint({
+      vaultA: input.vaultA,
+      vaultB: input.vaultB,
+      objectFilter: input.objectFilter,
+      typeFilter: input.typeFilter,
+      includeVolatileProperties: includeVolatile,
+    }),
+  };
+  let shapeModifiedOffset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, pageBinding);
+    if (!decoded.ok) return err(decoded.error);
+    shapeModifiedOffset = decoded.value.o;
+  }
+  const shapeModifiedLimit = input.limit ?? COMPARE_VAULTS_DEFAULT_LIMIT;
+  const shapeModifiedPagingRequested =
+    input.cursor !== undefined || input.offset !== undefined || input.limit !== undefined;
+
   // Refuse when the registry doesn't even exist yet — gives the skill
   // a single boundary surface instead of two alias-not-found errors.
   const registry = await loadRegistry(registryRoot);
@@ -608,16 +695,14 @@ export const compareVaultsHandler = async (
     const removedCount = removed.length;
     const shapeModifiedCount = shapeModified.length;
 
+    // `added`/`removed` rows are fixed-shape (id/type/apiName, no `drift`),
+    // so the row-count cap alone is a byte-safe bound for them.
     const clip = (rows: readonly ComponentDiff[]): readonly ComponentDiff[] =>
       rows.length > COMPARE_MAX_PER_BUCKET ? rows.slice(0, COMPARE_MAX_PER_BUCKET) : rows;
+    const addedPage = clip(added);
+    const removedPage = clip(removed);
     const bucketsClipped =
-      addedCount > COMPARE_MAX_PER_BUCKET ||
-      removedCount > COMPARE_MAX_PER_BUCKET ||
-      shapeModifiedCount > COMPARE_MAX_PER_BUCKET;
-    const truncated = bucketsClipped || anyDriftTruncated;
-    const disclosure = truncated
-      ? `Output capped: per-bucket lists are clipped to ${COMPARE_MAX_PER_BUCKET} components (lowest ids first) and/or drift to ${DRIFT_MAX_ROWS} rows per component, with property values over ${DRIFT_MAX_VALUE_BYTES} bytes summarised. The \`summary\` counts are the TRUE totals — only the inlined \`added\`/\`removed\`/\`shapeModified\` lists are partial. Narrow with \`typeFilter\` or \`objectFilter\` for a complete, reviewable slice.`
-      : `Complete diff; every bucket is under the ${COMPARE_MAX_PER_BUCKET}-component cap.`;
+      addedCount > COMPARE_MAX_PER_BUCKET || removedCount > COMPARE_MAX_PER_BUCKET;
 
     const boundaries: string[] = [
       VOLATILE_FILTER_DISCLOSURE,
@@ -627,40 +712,193 @@ export const compareVaultsHandler = async (
     if (versionCaveat.readFailureNote !== undefined) boundaries.push(versionCaveat.readFailureNote);
     if (versionCaveat.caveat !== undefined) boundaries.push(versionCaveat.caveat);
 
-    const base: CompareVaultsOutput = {
-      vaultA: vaultARefResult.value,
-      vaultB: vaultBRefResult.value,
-      filter: {
-        object: input.objectFilter,
-        type: input.typeFilter,
-        includeVolatileProperties: includeVolatile,
-      },
-      added: clip(added),
-      removed: clip(removed),
-      shapeModified: clip(shapeModified),
-      edgeDrift,
-      summary: {
-        addedCount,
-        removedCount,
-        shapeModifiedCount,
-        unchangedCount,
-      },
-      truncated,
-      disclosure,
-      boundaries,
-      ...(versionCaveat.caveat !== undefined ? { extractorVersionCaveat: versionCaveat.caveat } : {}),
+    const vaultState = {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
     };
-    const data =
-      input.format === 'markdown'
-        ? { ...base, markdown: renderCompareVaultsMarkdown(base) }
-        : base;
+    const bytesOf = (v: unknown): number => Buffer.byteLength(JSON.stringify(v) ?? 'null', 'utf8');
+
+    // R2: `shapeModified` rows carry a variable-size `drift` array — the
+    // row-count cap above cannot bound their BYTES (one component's drift
+    // can inline ~200 KB while `shapeModifiedCount` is 1). `disclosure` and
+    // `truncated` must reflect an ACTUAL byte overrun, not just row counts.
+    const disclosureFor = (
+      shapeModifiedPartial: boolean,
+      shapeModifiedRowCount: number,
+      responseOverBudget: boolean,
+    ): string => {
+      const anyTruncation =
+        bucketsClipped || anyDriftTruncated || shapeModifiedPartial || responseOverBudget;
+      if (!anyTruncation) {
+        // DERIVED from what actually shipped, never a blanket cap claim.
+        // Since R2 the `shapeModified` bucket is BYTE-bound, not row-bound —
+        // it legitimately ships more than `COMPARE_MAX_PER_BUCKET` rows when
+        // they fit — so the old sentence ("every bucket is under the
+        // 200-component cap") asserted a cap this handler no longer enforces
+        // on that bucket. The cap claim is now scoped to the two buckets that
+        // ARE row-capped, and the third is described by its real bound.
+        return `Complete diff; \`added\` (${addedCount}) and \`removed\` (${removedCount}) are within the ${COMPARE_MAX_PER_BUCKET}-component cap, and all ${shapeModifiedRowCount} shape-modified components are inlined in full within the response byte budget.`;
+      }
+      const notes: string[] = [];
+      if (bucketsClipped) {
+        notes.push(
+          `\`added\`/\`removed\` clipped to ${COMPARE_MAX_PER_BUCKET} components (lowest ids first)`,
+        );
+      }
+      if (anyDriftTruncated) {
+        notes.push(
+          `a component's \`drift\` capped at ${DRIFT_MAX_ROWS} rows, with property values over ${DRIFT_MAX_VALUE_BYTES} bytes summarised`,
+        );
+      }
+      if (shapeModifiedPartial) {
+        notes.push(
+          '`shapeModified` is a PAGE fitted to the response byte budget (see `shapeModifiedPage`) — rows and/or individual drift values may be shortened; echo `nextCursor` when present (or advance `offset`) to fetch remaining rows',
+        );
+      }
+      if (responseOverBudget) {
+        notes.push(
+          'the COMPOSED response (markdown included, when requested) is still over the response byte budget after refitting — the fixed-shape `added`/`removed`/`edgeDrift` sections alone exceed it, so the envelope-level reducer will drop rows and EVERY inlined list must be treated as partial',
+        );
+      }
+      return `Output capped: ${notes.join('; ')}. The \`summary\` counts are the TRUE totals — only the inlined \`added\`/\`removed\`/\`shapeModified\` lists are partial. Narrow with \`typeFilter\` or \`objectFilter\` for a complete, reviewable slice.`;
+    };
+
+    const buildBase = (
+      shapeModifiedRows: readonly ComponentDiff[],
+      shapeModifiedPage: CompareVaultsOutput['shapeModifiedPage'],
+      responseOverBudget = false,
+    ): CompareVaultsOutput => {
+      // `shapeModified` is NOT the whole bucket when the pager stopped short
+      // (`hasMore`), shortened a row (`byteTrimmed`), OR started past the
+      // beginning (`offset > 0` — a resumed page is a tail, not a diff).
+      const shapeModifiedPartial =
+        shapeModifiedPage !== undefined &&
+        (shapeModifiedPage.hasMore ||
+          shapeModifiedPage.byteTrimmed ||
+          shapeModifiedPage.offset > 0);
+      return {
+        vaultA: vaultARefResult.value,
+        vaultB: vaultBRefResult.value,
+        filter: {
+          object: input.objectFilter,
+          type: input.typeFilter,
+          includeVolatileProperties: includeVolatile,
+        },
+        added: addedPage,
+        removed: removedPage,
+        shapeModified: shapeModifiedRows,
+        edgeDrift,
+        summary: {
+          addedCount,
+          removedCount,
+          shapeModifiedCount,
+          unchangedCount,
+        },
+        truncated:
+          bucketsClipped || anyDriftTruncated || shapeModifiedPartial || responseOverBudget,
+        disclosure: disclosureFor(
+          shapeModifiedPartial,
+          shapeModifiedRows.length,
+          responseOverBudget,
+        ),
+        boundaries,
+        ...(shapeModifiedPage !== undefined ? { shapeModifiedPage } : {}),
+        ...(versionCaveat.caveat !== undefined ? { extractorVersionCaveat: versionCaveat.caveat } : {}),
+      };
+    };
+
+    // R2 (verifier round 2): `format: 'markdown'` re-inlines EVERY drift
+    // `valueA`/`valueB` a second time (`renderCompareVaultsMarkdown` above),
+    // so a payload whose JSON fits can still be ~2x over the ceiling once the
+    // markdown string is attached. Measured on a 50-fat-property component:
+    // JSON 33 KB (fits), markdown 63 KB (39% over the hard client ceiling).
+    // The markdown is therefore composed BEFORE measurement, and every fit
+    // decision below measures the COMPOSED response, not just `base`.
+    const compose = (b: CompareVaultsOutput): CompareVaultsOutput =>
+      input.format === 'markdown' ? { ...b, markdown: renderCompareVaultsMarkdown(b) } : b;
+    const composedBytes = (b: CompareVaultsOutput): number =>
+      bytesOf({ data: compose(b), vaultState });
+
+    // Self-fit `shapeModified` to the ACTUAL tool-local byte budget via the
+    // shared `page-cursor.ts#paginate` — mirrors the measure/correct-refit
+    // loop `compare-profile-across-vaults.ts` uses for its own grant-diff
+    // arrays. `paginate` guarantees forward progress (a single oversized row
+    // is slimmed and shipped alone, never an empty page) and mints a
+    // resumable `nextCursor` whenever it stops short.
+    const pageShapeModified = (): CompareVaultsOutput => {
+      const globalBudget = toolLocalPayloadBudgetBytes();
+      const scaffold = buildBase([], {
+        limit: shapeModifiedLimit,
+        offset: shapeModifiedOffset,
+        hasMore: true,
+        nextOffset: null,
+        nextCursor: null,
+        byteTrimmed: true,
+      });
+      const reserve = composedBytes(scaffold);
+      let pageBudget = Math.max(MIN_PAGE_BYTE_BUDGET, globalBudget - reserve);
+      let result: CompareVaultsOutput = scaffold;
+      // `PAGE_REFIT_ATTEMPTS` passes: measure, correct for the minted cursor,
+      // then correct for the second-order change. On `format: 'markdown'` the
+      // composed payload is ~2x the page's own bytes, so each correction only
+      // roughly HALVES the overshoot — three passes are not enough there,
+      // hence the higher cap. Forward progress never depends on this loop:
+      // `paginate` guarantees a non-empty page at any budget.
+      for (let attempt = 0; attempt < PAGE_REFIT_ATTEMPTS; attempt += 1) {
+        const paged = paginate(shapeModified, {
+          offset: shapeModifiedOffset,
+          limit: shapeModifiedLimit,
+          byteBudget: pageBudget,
+          binding: pageBinding,
+          keyOf: (row) => row.id,
+        });
+        const hasMore = paged.pageInfo.hasMore;
+        const candidate = buildBase(paged.items, {
+          limit: shapeModifiedLimit,
+          offset: shapeModifiedOffset,
+          hasMore,
+          nextOffset: hasMore ? shapeModifiedOffset + paged.items.length : null,
+          nextCursor: paged.pageInfo.nextCursor,
+          byteTrimmed: paged.byteTrimmed,
+        });
+        const size = composedBytes(candidate);
+        result = candidate;
+        if (size <= globalBudget) break;
+        const shrunk = Math.max(
+          MIN_PAGE_BYTE_BUDGET,
+          pageBudget - (size - globalBudget) - PAGE_REFIT_STEP_BYTES,
+        );
+        if (shrunk === pageBudget) break;
+        pageBudget = shrunk;
+      }
+      return result;
+    };
+
+    let base: CompareVaultsOutput;
+    if (!shapeModifiedPagingRequested) {
+      // FAST PATH: the caller asked for no page — try the FULL, unpaged
+      // `shapeModified` bucket first, so a typical small diff stays
+      // byte-identical to the pre-R2 shape (no `shapeModifiedPage` field).
+      // Measured COMPOSED, so `format: 'markdown'` cannot slip past it.
+      const whole = buildBase(shapeModified, undefined);
+      base =
+        composedBytes(whole) <= toolLocalPayloadBudgetBytes() ? whole : pageShapeModified();
+    } else {
+      base = pageShapeModified();
+    }
+
+    // Last honesty guard. `shapeModified` is the only bucket this handler can
+    // shrink; `added`/`removed`/`edgeDrift` are row-capped and their markdown
+    // renderings are not. If the composed response is STILL over budget after
+    // refitting, the envelope reducer will drop rows — so the tool must not
+    // ship a completeness claim beside a payload it knows will be cut.
+    if (composedBytes(base) > toolLocalPayloadBudgetBytes()) {
+      base = buildBase(base.shapeModified, base.shapeModifiedPage, true);
+    }
 
     return ok({
-      data,
-      vaultState: {
-        sourceTreeHash: ctx.manifest.sourceTreeHash,
-        refreshedAt: ctx.manifest.refreshedAt,
-      },
+      data: compose(base),
+      vaultState,
     });
   } finally {
     await openA.value.dispose();

@@ -92,3 +92,32 @@ describe('phantomAwareNotFoundMessage — CR-CAP-17 standard-field disclosure', 
     expect(msg).toBe('no CustomField with id CustomField:Widget__c.Color__c');
   });
 });
+
+describe('phantomAwareNotFoundMessage — R1 query-failure honesty', () => {
+  it('does NOT report a confident not-found when listEdges fails (query error, not zero references)', async () => {
+    // A closed store makes any subsequent query throw inside listEdges,
+    // which returns err(...) rather than ok([]) — this is the
+    // query-FAILED case, distinct from a genuine zero-inbound-edges case.
+    const failDir = mkdtempSync(join(tmpdir(), 'sfi-phantom-node-fail-'));
+    const opened = await openGraph(join(failDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const failStore = opened.value;
+    await closeGraph(failStore);
+    const failCtx: Context = { vaultRoot: failDir, manifest: MANIFEST, graph: failStore };
+
+    const msg = await phantomAwareNotFoundMessage(
+      failCtx,
+      'ApexClass:Widget__c' as ComponentId,
+      'ApexClass',
+    );
+
+    // The pre-fix code coerces a failed query to refs=0 and returns the
+    // flat "no <kind> with id <id>" — the strongest possible false claim
+    // that the component does not exist. A query failure must instead
+    // say the check could not be performed.
+    expect(msg).not.toBe('no ApexClass with id ApexClass:Widget__c');
+    expect(msg.toLowerCase()).toContain('could not check');
+
+    rmSync(failDir, { recursive: true, force: true });
+  });
+});

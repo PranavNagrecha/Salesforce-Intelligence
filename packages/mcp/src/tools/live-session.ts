@@ -326,10 +326,133 @@ export const runLiveRest = async (
 };
 
 /**
- * Convenience: run a SOQL query through the guard and return the parsed
- * `result.totalSize` (or `records[0].expr0` for an aggregate COUNT()), with the
- * cache/budget metadata. The single primitive every blast-radius / population
- * count is built on.
+ * TRUE for the bare `SELECT COUNT()` form, FALSE for an aggregate
+ * `SELECT COUNT(<field>)`. This distinction decides WHICH field of the org's
+ * response carries the answer, and getting it wrong is silent:
+ *
+ *   `SELECT COUNT() FROM Account`   -> {totalSize: 45231, records: []}
+ *   `SELECT COUNT(Id) FROM Account` -> {totalSize: 1, records: [{expr0: 45231}]}
+ *
+ * So the reader must branch on the query FORM, never on which property happens
+ * to be non-nullish first — `totalSize ?? records[0].expr0` answers "1 record"
+ * for an org holding 45,231.
+ */
+export const isBareCountForm = (normalizedSoql: string): boolean =>
+  /^select\s+count\s*\(\s*\)/i.test(normalizedSoql);
+
+/** What {@link readLiveCountEnvelope} could establish from the org's response. */
+export type LiveCountRead =
+  | { readonly read: true; readonly count: number }
+  | { readonly read: false; readonly reason: string };
+
+/** Read one aggregate row's count column (`expr0`, or a caller-supplied alias). */
+export const aggregateRowCount = (row: unknown): number | null => {
+  if (row === null || typeof row !== 'object') return null;
+  const rec = row as Record<string, unknown>;
+  const direct = rec['expr0'];
+  if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
+  // `SELECT COUNT(Id) total FROM X` names the column `total`, not `expr0`.
+  for (const [key, value] of Object.entries(rec)) {
+    if (key === 'attributes') continue;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return null;
+};
+
+/**
+ * Read a record count out of a `sf data query --json` envelope, or say it could
+ * NOT be read. There is deliberately no `?? 0` tail: {@link runSfJson} validates
+ * neither `status` nor `result` (it only proves the CLI exited 0 and stdout was
+ * JSON), so every envelope shape this reader does not recognise used to become a
+ * confident `count: 0` — an answer that says "production is empty" when the
+ * truth is "the org's reply was not understood". A NOT-READ count is a typed
+ * absence the caller discloses, never a zero.
+ */
+export const readLiveCountEnvelope = (
+  payload: unknown,
+  normalizedSoql: string,
+): LiveCountRead => {
+  const envelope =
+    payload !== null && typeof payload === 'object'
+      ? (payload as { result?: unknown })
+      : undefined;
+  const result = envelope?.result;
+  if (result === null || result === undefined || typeof result !== 'object') {
+    return {
+      read: false,
+      reason:
+        'the org response carried no `result` object (the sf CLI exited 0 and ' +
+        'returned JSON, but not a query result)',
+    };
+  }
+  const shaped = result as {
+    totalSize?: unknown;
+    records?: unknown;
+  };
+  if (isBareCountForm(normalizedSoql)) {
+    // Bare COUNT(): the row count IS totalSize; `records` is empty by design.
+    return typeof shaped.totalSize === 'number' && Number.isFinite(shaped.totalSize)
+      ? { read: true, count: shaped.totalSize }
+      : {
+          read: false,
+          reason:
+            'the org response carried no numeric `result.totalSize` for a bare ' +
+            'SELECT COUNT() query',
+        };
+  }
+  // Aggregate COUNT(<field>): `totalSize` is the number of AGGREGATE ROWS
+  // (always 1 without GROUP BY), never the record count. The answer is the
+  // single aggregate row's count column.
+  const rows = shaped.records;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return {
+      read: false,
+      reason:
+        'an aggregate SELECT COUNT(<field>) query returned no aggregate row to ' +
+        'read the count from',
+    };
+  }
+  if (rows.length > 1) {
+    return {
+      read: false,
+      reason:
+        `an aggregate SELECT COUNT(<field>) query returned ${rows.length} aggregate ` +
+        'rows; a single record count cannot be read from a grouped result',
+    };
+  }
+  const value = aggregateRowCount(rows[0]);
+  return value === null
+    ? {
+        read: false,
+        reason:
+          'the aggregate row carried no numeric count column (expected `expr0` or ' +
+          'a numeric alias)',
+      }
+    : { read: true, count: value };
+};
+
+/**
+ * Verbatim disclosure carried by the error {@link liveCount} returns when
+ * {@link readLiveCountEnvelope} could not read a count, so no caller can read
+ * the absence as a measured zero.
+ */
+export const LIVE_COUNT_NOT_READ_DISCLOSURE =
+  'Live count NOT READ: the org answered, but its response could not be read as a ' +
+  'record count. This is NOT a count of zero and must not be reported as "no records".';
+
+/**
+ * Convenience: run a COUNT SOQL query through the guard and return the record
+ * count with the cache/budget metadata. The single primitive every blast-radius
+ * / population count is built on.
+ *
+ * The count is read by {@link readLiveCountEnvelope}, which branches on the
+ * query FORM (bare `COUNT()` -> `result.totalSize`; aggregate `COUNT(<field>)`
+ * -> the single aggregate row's count column). An envelope it cannot read comes
+ * back as an ERROR carrying {@link LIVE_COUNT_NOT_READ_DISCLOSURE}, never as
+ * `count: 0` — every caller already fails soft on `!ok` (population check ->
+ * `status: 'error'`, blast-radius -> `partial`, whatif -> live section omitted),
+ * so an unreadable org reply now discloses instead of certifying an empty
+ * production object.
  */
 export const liveCount = async (
   org: string,
@@ -338,11 +461,14 @@ export const liveCount = async (
 ): Promise<Result<{ count: number } & LiveQueryOk, McpError>> => {
   const r = await runLiveQuery(org, ['data', 'query', '--query', soql], exec);
   if (!r.ok) return r;
-  const payload = r.value.value as {
-    result?: { totalSize?: number; records?: readonly { expr0?: number }[] };
-  };
-  const count = payload.result?.totalSize ?? payload.result?.records?.[0]?.expr0 ?? 0;
-  return ok({ count, ...r.value });
+  const read = readLiveCountEnvelope(r.value.value, soql.trim().replace(/\s+/g, ' '));
+  if (!read.read) {
+    return err({
+      kind: 'internal',
+      message: `${LIVE_COUNT_NOT_READ_DISCLOSURE} Reason: ${read.reason}.`,
+    });
+  }
+  return ok({ count: read.count, ...r.value });
 };
 
 // ---------------------------------------------------------------------------

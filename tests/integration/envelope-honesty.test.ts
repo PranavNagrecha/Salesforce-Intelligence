@@ -466,3 +466,70 @@ describe('marker-set drift', () => {
     expect(typedAbsenceMarker(all)).toBeNull();
   });
 });
+
+/**
+ * LAW 2's document-shaped branch — the exemption, and its fence.
+ *
+ * Two of the pagination predicates compare a published count against the
+ * longest array the payload shipped. That is sound for a list and a guaranteed
+ * false accusation for a GENERATOR, whose rows are rendered into
+ * `document.body` and whose only arrays are metadata (`boundaries[]`).
+ *
+ * An exemption with no fence is just a hole, so both directions are asserted:
+ * the generator shape is exempt, and every near-miss is NOT.
+ */
+describe('pagination completeness — the document-shaped exemption is fenced', () => {
+  const GENERATOR_DOC = {
+    frontmatter: {
+      title: 'Compliance Report',
+      generatedAt: '2026-08-28T00:00:00.000Z',
+      sourceTreeHash: 'sha256:fixture',
+      componentIds: [],
+    },
+    body: 'x'.repeat(400),
+    sectionConfidence: {},
+    boundaries: ['a boundary'],
+  };
+  // A count that names no array: the exact shape both predicates fire on.
+  const page = { totalCount: 305, returnedCount: 1, hasMore: true, nextCursor: 'tok' };
+
+  const paginationFindings = (data: Record<string, unknown>): readonly HonestyFinding[] =>
+    auditEnvelope('sfi.probe', envelopeOf(data)).findings.filter(
+      (f) => f.rule === 'pagination-completeness',
+    );
+
+  it('EXEMPT: a real GeneratedDocument payload is not accused of withholding rows', () => {
+    expect(paginationFindings({ document: GENERATOR_DOC, pageInfo: page })).toEqual([]);
+  });
+
+  it('and the exemption is COUNTED, never silent', () => {
+    const { checks } = auditEnvelope('sfi.probe', envelopeOf({ document: GENERATOR_DOC, pageInfo: page }));
+    expect(checks.paginationDocumentShaped).toBe(1);
+    // A list-shaped payload must not increment it.
+    const list = auditEnvelope('sfi.probe', envelopeOf({ rows: [1], pageInfo: page }));
+    expect(list.checks.paginationDocumentShaped ?? 0).toBe(0);
+  });
+
+  for (const [why, doc] of [
+    ['`document` is a bare string, not the declared object', 'x'.repeat(400)],
+    ['`document` is an ARRAY of rows wearing the name', [1, 2, 3]],
+    ['no frontmatter — any object could claim the exemption otherwise', { body: 'x'.repeat(400) }],
+    [
+      'frontmatter without a sourceTreeHash',
+      { frontmatter: { title: 't' }, body: 'x'.repeat(400) },
+    ],
+    [
+      'a body too short to be a rendered document',
+      { frontmatter: { sourceTreeHash: 'sha256:x' }, body: 'tiny' },
+    ],
+  ] as const) {
+    it(`NOT EXEMPT: ${why}`, () => {
+      const findings = paginationFindings({ document: doc, pageInfo: page });
+      expect(
+        findings.length,
+        'a near-miss of the generator shape must still be measured — otherwise the ' +
+          'exemption is a rename away for any list-shaped tool',
+      ).toBeGreaterThan(0);
+    });
+  }
+});

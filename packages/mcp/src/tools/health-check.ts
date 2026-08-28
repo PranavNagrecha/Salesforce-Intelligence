@@ -106,7 +106,10 @@ export type HealthCheckInput = z.infer<typeof healthCheckInputSchema>;
  *     so clients can render a stable list.
  *   - `checks`: per-check booleans for programmatic consumers.
  *     `sourceHashMatches` is nullable because it's skipped when
- *     `source/` is missing (common in fresh clones). `uncoveredTypesOk`
+ *     `source/` is missing (common in fresh clones). `renderComplete` is
+ *     likewise nullable: `null` when the render-desync probe itself could
+ *     not run (query threw or failed) — verified-clean and never-checked
+ *     are distinct states, never collapsed into `true`. `uncoveredTypesOk`
  *     becomes `false` when the manifest's skip-counter records more
  *     than `SKIPPED_FILES_DEGRADED_THRESHOLD` files in unknown
  *     directories (architectural-bug-fix observability).
@@ -131,9 +134,12 @@ export interface HealthCheckOutput {
      * recorded at render time — a partially-rendered vault (e.g. built by
      * older code) where components resolve but have no `.md` file, so
      * `get_component` fails with "vault file missing". A fresh
-     * `/sfi-refresh` re-renders everything.
+     * `/sfi-refresh` re-renders everything. `null` when the desync probe
+     * itself could not run for one or more recorded types (query threw or
+     * failed) — render-completeness is UNVERIFIED, not confirmed clean; a
+     * desync cannot be ruled out.
      */
-    readonly renderComplete: boolean;
+    readonly renderComplete: boolean | null;
   }>;
   readonly coverage: CoverageSummary;
   readonly reason?: 'uncovered-types-detected';
@@ -369,11 +375,24 @@ const probeSourceHash = async (
  * per recorded type, short-circuiting on the first desync. It only flags
  * positive counts (a type recorded as 0 is skipped: an empty placeholder
  * manifest must not read as a desync).
+ *
+ * Tri-state, mirroring `probeSourceHash`:
+ *   - `complete === true`:  every recorded type was actually queried and
+ *     none showed a desync.
+ *   - `complete === false`: a desync was found (definite — wins over any
+ *     later unverified type, since a known problem outranks an unknown one).
+ *   - `complete === null`:  at least one type's query threw or returned
+ *     `!ok` before a desync was found, so render-completeness for that type
+ *     was never actually checked. A query that never ran is not evidence of
+ *     "no desync" — collapsing it into `true` would be the exact
+ *     NEVER-SCANNED-vs-SCANNED-AND-CLEAN conflation this file's own
+ *     `probeSourceHash` pattern exists to avoid.
  */
 const probeRenderComplete = async (
   ctx: Context,
-): Promise<{ complete: boolean; issue: string | null }> => {
+): Promise<{ complete: boolean | null; issue: string | null }> => {
   const recorded = ctx.manifest.components ?? {};
+  let unverifiedType: string | null = null;
   for (const [type, count] of Object.entries(recorded)) {
     if (typeof count !== 'number' || count <= 0) continue;
     let probe;
@@ -383,15 +402,29 @@ const probeRenderComplete = async (
         offset: count,
       });
     } catch {
-      // A malformed type string must not crash the diagnostic probe.
+      // The query itself threw (malformed type string, closed/unreadable
+      // store, etc). This type's render-completeness is UNKNOWN, not
+      // clean — remember it and keep walking the rest, since a later type
+      // finding a definite desync still wins.
+      unverifiedType ??= type;
       continue;
     }
-    if (probe.ok && probe.value.length > 0) {
+    if (!probe.ok) {
+      unverifiedType ??= type;
+      continue;
+    }
+    if (probe.value.length > 0) {
       return {
         complete: false,
         issue: `vault appears partially rendered: the graph holds more \`${type}\` nodes than the manifest records (${count}). Some components will resolve but have no vault file. Run \`/sfi-refresh\` to re-render the vault.`,
       };
     }
+  }
+  if (unverifiedType !== null) {
+    return {
+      complete: null,
+      issue: `render-completeness could not be verified for \`${unverifiedType}\` (graph query failed) — a partially-rendered vault cannot be ruled out; re-run once the graph is readable`,
+    };
   }
   return { complete: true, issue: null };
 };

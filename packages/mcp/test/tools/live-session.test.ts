@@ -23,6 +23,12 @@ const countingExec = (totalSize = 5): { exec: ExecCommand; calls: () => number }
   return { exec, calls: () => calls };
 };
 
+/** A mock `sf` returning a caller-supplied `sf ... --json` envelope verbatim. */
+const envelopeExec = (envelope: unknown): ExecCommand => async () => ({
+  stdout: JSON.stringify(envelope),
+  stderr: '',
+});
+
 /**
  * A mock `sf` whose call resolution is held until `release()` is invoked — used
  * to exercise CONCURRENT in-flight identical queries (the cache-stampede path).
@@ -215,6 +221,59 @@ describe('liveCount convenience', () => {
     expect(r.value.count).toBe(42);
     expect(r.value.cached).toBe(false);
     expect(typeof r.value.remainingBudget).toBe('number');
+  });
+
+  it('reports a REAL measured zero as a count of zero, not as an unreadable envelope', async () => {
+    const exec = envelopeExec({ result: { totalSize: 0, records: [], done: true } });
+    const r = await liveCount('org', 'SELECT COUNT() FROM Account WHERE Z__c = null', exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.count).toBe(0);
+  });
+
+  it('does NOT fabricate a zero when the org response carries no `result` object', async () => {
+    // `runSfJson` proves only that the CLI exited 0 and stdout was JSON — it
+    // validates neither `status` nor `result`. An envelope this reader cannot
+    // understand must be a typed absence, never "production is empty".
+    const exec = envelopeExec({ status: 1, name: 'UnexpectedShape', message: 'nope' });
+    const r = await liveCount('org', 'SELECT COUNT() FROM Account WHERE N__c = null', exec);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message).toContain('NOT READ');
+    expect(r.error.message).toContain('no `result` object');
+  });
+
+  it('does NOT fabricate a zero when a bare COUNT() envelope carries no numeric totalSize', async () => {
+    const exec = envelopeExec({ result: { records: [], done: true } });
+    const r = await liveCount('org', 'SELECT COUNT() FROM Account WHERE T__c = null', exec);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message).toContain('NOT READ');
+    expect(r.error.message).toContain('totalSize');
+  });
+
+  it('reads the AGGREGATE row for SELECT COUNT(<field>), not totalSize (which is 1)', async () => {
+    // `SELECT COUNT(Id) FROM Account` -> {totalSize: 1, records: [{expr0: 45231}]}.
+    // Preferring whichever property is non-nullish FIRST answers 1 record.
+    const exec = envelopeExec({ result: { totalSize: 1, records: [{ expr0: 45231 }] } });
+    const r = await liveCount('org', 'SELECT COUNT(Id) FROM Account', exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.count).toBe(45231);
+  });
+
+  it('reads a named aggregate alias, and refuses a grouped aggregate result', async () => {
+    const aliased = envelopeExec({ result: { totalSize: 1, records: [{ total: 7 }] } });
+    const a = await liveCount('org', 'SELECT COUNT(Id) total FROM Contact', aliased);
+    expect(a.ok).toBe(true);
+    if (a.ok) expect(a.value.count).toBe(7);
+
+    const grouped = envelopeExec({
+      result: { totalSize: 2, records: [{ expr0: 3 }, { expr0: 9 }] },
+    });
+    const g = await liveCount('org', 'SELECT COUNT(Id) FROM Lead', grouped);
+    expect(g.ok).toBe(false);
+    if (!g.ok) expect(g.error.message).toContain('NOT READ');
   });
 });
 

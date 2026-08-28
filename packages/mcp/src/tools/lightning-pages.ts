@@ -32,8 +32,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { firstNonEmpty, resolveObjectAlias } from './input-aliases.js';
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
+import { firstNonEmpty, resolveObjectAliasInVault } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 const OBJECT_PREFIX = 'CustomObject:';
 const FLEXIPAGE_PREFIX = 'FlexiPage:';
@@ -42,6 +45,16 @@ const MAX_LIMIT = 250;
 
 const ACTIVATION_DISCLOSURE =
   'Which profile / record type / app / form factor ACTIVATES (is served) a Lightning page is NOT in the retrieved FlexiPage metadata — it is a separate Lightning App Builder assignment. This lists the pages that EXIST for the object (and `layout_for_user` covers CLASSIC layouts); it does not resolve which page a specific user sees.';
+
+/**
+ * R1 TYPED ABSENCE sentinel: the property EVERY extracted FlexiPage node
+ * carries (even `null`), written by the same extractor pass that mints the
+ * `references` FlexiPage -> CustomObject edge object mode reads. A FlexiPage
+ * node from a refresh that predates that extractor is a bare node with NO
+ * `sobjectType` key at all — `familyWasExtracted` distinguishes that from a
+ * genuinely-checked page whose object happens to be unset.
+ */
+const FLEXIPAGE_SOBJECT_SENTINEL = 'sobjectType';
 
 export const lightningPagesInputSchema = z
   .object({
@@ -117,7 +130,29 @@ export interface LightningPagesOutput {
   readonly pageType?: string | null;
   /** flexipage mode: the page's label. */
   readonly masterLabel?: string | null;
-  readonly summary: { readonly pages: number };
+  /**
+   * `null` (never a verified `0`) when, in OBJECT mode, NOT ONE FlexiPage node
+   * in the vault carries the extracted {@link FLEXIPAGE_SOBJECT_SENTINEL} and
+   * this object's own page list came back empty — the `flexiPageObject`
+   * family was never extracted, so nothing was checked. flexipage mode always
+   * reports the concrete `1`.
+   */
+  readonly summary: { readonly pages: number | null };
+  /**
+   * OBJECT mode only: how many FlexiPage nodes in the vault carry no
+   * extracted `sobjectType` — i.e. were never examined for a `flexiPageObject`
+   * edge at all. `0` on a fully-extracted vault. Any positive value means
+   * `pages` / `summary.pages` may be a FLOOR (an unchecked FlexiPage could
+   * target this same object and simply never mint the edge), spelled out in
+   * `activationDisclosure`.
+   */
+  readonly pagesExtractionNotChecked?: number;
+  /**
+   * OBJECT mode only: true when the FlexiPage scan behind
+   * {@link LightningPagesOutput.pagesExtractionNotChecked} stopped at the
+   * full-scan residual cap, so more unchecked pages may exist behind it.
+   */
+  readonly pagesScanTruncated?: boolean;
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
@@ -168,7 +203,15 @@ export const lightningPagesHandler = async (
   // L2 Alias OS: resolve an OBJECT scope from object / objectApiName / objectId
   // or a CustomObject: componentId (a reverse-mode FlexiPage: componentId is
   // NOT an object alias). Disagreeing object aliases -> invalid-query.
-  const objScope = resolveObjectAlias(input, {
+  //
+  // R6 (census brief 069, line 171): the VAULT-AWARE resolver, not the sync
+  // one — `object_access_audit` / `flow_bulkification_audit` /
+  // `flow_fault_audit` route the same way. The sync resolver alone turns
+  // `objectApiName: 'contact'` into `CustomObject:contact`, an id no vault
+  // holds even though `CustomObject:Contact` is right there; the vault-aware
+  // resolver probes case variants and corrects it before the
+  // `component-not-found` check below ever runs.
+  const objScope = await resolveObjectAliasInVault(ctx.graph, input, {
     bareComponentIdIsObject: false,
     required: false,
   });
@@ -278,6 +321,32 @@ export const lightningPagesHandler = async (
   // resume over this list cannot dup or skip; no extra tiebreak is needed.
   pages.sort((a, b) => (a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0));
 
+  // ------------------------------------------------------------------
+  // R1 TYPED ABSENCE — did this refresh extract FlexiPage `sobjectType` (and
+  // therefore the `flexiPageObject` edge) AT ALL?
+  //
+  // `pages: []` above reads IDENTICALLY for "checked, this object genuinely
+  // has no Lightning pages" and "this vault's refresh predates the extractor
+  // pass that writes `sobjectType`, so no FlexiPage ever mints a
+  // `flexiPageObject` edge to ANY object". The FlexiPage node this object's
+  // OWN empty edge set came back from cannot answer that (it never emitted
+  // anything to look at) — the sentinel lives on the whole FlexiPage corpus,
+  // scanned with the shared multi-window walk so a corpus past the 500-row
+  // `listNodesByType` ceiling is not alphabetically capped.
+  // ------------------------------------------------------------------
+  const flexiPageScan = await scanAllNodesOfTypes(ctx.graph, ['FlexiPage']);
+  if (!flexiPageScan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${flexiPageScan.error.message}` });
+  }
+  const flexiPagesNotChecked: string[] = [];
+  let flexiPagesChecked = 0;
+  for (const fp of flexiPageScan.value.nodes) {
+    if (familyWasExtracted(fp.properties, FLEXIPAGE_SOBJECT_SENTINEL)) flexiPagesChecked += 1;
+    else flexiPagesNotChecked.push(fp.id);
+  }
+  flexiPagesNotChecked.sort();
+  const pagesScanTruncated = flexiPageScan.value.scanIncomplete;
+
   // CR-22 (object mode only): resolve the resume offset — an echoed cursor wins
   // over an explicit `offset`; a stale/forged cursor (changed componentId,
   // different tool, or refreshed vault) is rejected with `invalid-query`. The
@@ -315,6 +384,36 @@ export const lightningPagesHandler = async (
   const hasMore = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
   const objectApiName = componentId.slice(OBJECT_PREFIX.length);
+
+  // The case-1 sentence comes from the ONE shared builder (R6-adjacent module
+  // reuse) — the same template `who_can_run` renders for its own extraction
+  // vintage gap, so the two cannot drift into two wordings of one blind spot.
+  const notExtractedNote =
+    flexiPagesNotChecked.length > 0
+      ? notExtractedFamilyDisclosure({
+          subject: 'Lightning page object references',
+          verb: 'checked',
+          pluralSubject: true,
+          sentinelProperty: FLEXIPAGE_SOBJECT_SENTINEL,
+          containers: flexiPagesNotChecked,
+          surface: '`pages` / `summary.pages`',
+          zeroReading: '"no Lightning pages exist for this object"',
+        })
+      : null;
+  // Leading, because it is an UNDERSTATEMENT of what exists: a reader who
+  // stops after one sentence must still learn the enumeration may be short.
+  const baseDisclosure =
+    notExtractedNote === null ? ACTIVATION_DISCLOSURE : `${notExtractedNote} ${ACTIVATION_DISCLOSURE}`;
+  const activationDisclosure = pagesScanTruncated
+    ? `${baseDisclosure} ${fullScanTruncationNote(flexiPageScan.value.incompleteTypes)}`
+    : baseDisclosure;
+
+  // NOTHING was checked and nothing was found → `null`, never a verified `0`.
+  // A page that WAS found makes the count a real floor, so it stays a number
+  // even on a mixed-vintage vault (the shortfall is disclosed, not nulled).
+  const pagesSummary =
+    total === 0 && flexiPagesChecked === 0 && flexiPagesNotChecked.length > 0 ? null : total;
+
   return ok({
     data: {
       componentId,
@@ -322,14 +421,16 @@ export const lightningPagesHandler = async (
       mode: 'object',
       object: objectApiName,
       pages: page,
-      summary: { pages: total },
+      summary: { pages: pagesSummary },
+      pagesExtractionNotChecked: flexiPagesNotChecked.length,
+      pagesScanTruncated,
       limit,
       offset: objOffset,
       hasMore,
       truncated: hasMore || objOffset > 0,
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'declared',
-      activationDisclosure: ACTIVATION_DISCLOSURE,
+      activationDisclosure,
     },
     vaultState,
   });

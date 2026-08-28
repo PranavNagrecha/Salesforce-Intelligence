@@ -972,6 +972,40 @@ describe('getComponentHandler', () => {
     );
   });
 
+  it('propagates a failed outgoing-edge query as `internal` instead of silently emptying referenceIds (R1-539)', async () => {
+    // `listEdges(ctx.graph, node.id, { direction: 'out' })` on the normal
+    // (non-metadata-probe) path used `.ok ? ... : []` — a genuine graph query
+    // failure (DB gone away, corrupted index, etc.) reads identically to "this
+    // node has zero outgoing edges". That is a grounding claim
+    // (`data.referenceIds: []`), not a blank: synthesize_answer and any LLM
+    // caller reads it as "checked, nothing referenced" rather than "not
+    // checked". Every OTHER graph failure in this handler (getNodeById, the
+    // node-not-found path) propagates as `internal` — this one alone was
+    // swallowed. Reproduce by making the `edges` query fail while the `nodes`
+    // query (getNodeById) keeps succeeding on the SAME store.
+    const realRunAndReadAll = store.connection.runAndReadAll.bind(store.connection);
+    const failingConnection = {
+      runAndReadAll: async (sql: string, params: unknown) => {
+        if (sql.includes('FROM edges')) {
+          throw new Error('simulated edge query failure');
+        }
+        return realRunAndReadAll(sql, params as never);
+      },
+    } as unknown as GraphStore['connection'];
+    const failingCtx: Context = {
+      ...ctx,
+      graph: { ...store, connection: failingConnection } as GraphStore,
+    };
+
+    const result = await getComponentHandler(failingCtx, {
+      id: 'CustomObject:Account',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('internal');
+    expect(result.error.message).toContain('listEdges');
+  });
+
   describe('R6-31: metadata-probe mode (maxBodyBytes 0 / small)', () => {
     it('maxBodyBytes: 0 on a huge node returns ok with a bounded metadata envelope (was oversize before the fix)', async () => {
       const result = await getComponentHandler(ctx, {

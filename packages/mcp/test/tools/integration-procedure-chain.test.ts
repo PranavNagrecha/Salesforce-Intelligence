@@ -460,8 +460,10 @@ describe('integrationProcedureChainHandler', () => {
     // The REST URL is `parsed` (per the task's honesty axis: URLs are
     // not verified).
     expect(rest?.endpointConfidence).toBe('parsed');
-    // Rest endpoints are not graph nodes; targetId is always null.
+    // Rest endpoints are not graph nodes; targetId is always null and
+    // no resolution is ever attempted.
     expect(rest?.targetId).toBeNull();
+    expect(rest?.targetResolution).toBe('not-applicable');
 
     // DataRaptor endpoint resolves the canonical `targetId`.
     const dr = endpoints.find((e) => e.kind === 'dataraptor');
@@ -469,6 +471,7 @@ describe('integrationProcedureChainHandler', () => {
     expect(dr?.stepName).toBe('ExtractContactInfo');
     expect(dr?.target).toBe('ExtractContactMapper');
     expect(dr?.targetId).toBe(DATA_TRANSFORM_ID);
+    expect(dr?.targetResolution).toBe('resolved');
     expect(dr?.endpointConfidence).toBe('parsed');
 
     // Nested IP endpoint resolves to the IP node keyed by omniProcessKey.
@@ -477,6 +480,7 @@ describe('integrationProcedureChainHandler', () => {
     expect(ip?.stepName).toBe('InvokeChildProcedure');
     expect(ip?.target).toBe('Sample_ChildProcedure');
     expect(ip?.targetId).toBe(NESTED_IP_ID);
+    expect(ip?.targetResolution).toBe('resolved');
     expect(ip?.endpointConfidence).toBe('parsed');
 
     // Remote Action surfaces `class.method` verbatim; v3.2 does NOT
@@ -487,6 +491,7 @@ describe('integrationProcedureChainHandler', () => {
     expect(remote?.stepName).toBe('callApex');
     expect(remote?.target).toBe('AccountLinkingService.validate');
     expect(remote?.targetId).toBeNull();
+    expect(remote?.targetResolution).toBe('not-applicable');
     expect(remote?.endpointConfidence).toBe('parsed');
   });
 
@@ -546,11 +551,95 @@ describe('integrationProcedureChainHandler', () => {
     expect(endpoints.length).toBe(2);
     for (const ep of endpoints) {
       expect(ep.targetId).toBeNull();
+      // A genuine miss (the lookup ran and found nothing) is
+      // `'not-in-vault'`, distinct from a graph query FAILURE
+      // (`'lookup-failed'`, covered separately below).
+      expect(ep.targetResolution).toBe('not-in-vault');
     }
     // The `target` (verbatim name from the XML) is still populated so
     // the renderer can flag the dangling reference.
     expect(endpoints[0]?.target).toBe('DoesNotExistMapper');
     expect(endpoints[1]?.target).toBe('DoesNotExistIP');
+  });
+
+  it('tells a graph query failure apart from a genuine absence when resolving a dataraptor target', async () => {
+    // Stage an IP whose DataRaptor bundle name would resolve fine —
+    // the poisoned connection below makes the LOOKUP throw rather
+    // than making the target genuinely missing. This proves the
+    // handler does not collapse "the graph query failed" into the
+    // same `targetId: null` shape it uses for "not in this vault".
+    const poisonPath = join(tempDir, 'fixtures', 'Poison_Procedure_1.oip-meta.xml');
+    await writeFile(
+      poisonPath,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<OmniIntegrationProcedure xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>true</isIntegrationProcedure>
+    <name>Poison</name>
+    <omniProcessElements>
+        <name>callPoisonedMapper</name>
+        <propertySetConfig>{ &quot;bundle&quot; : &quot;PoisonBundle&quot; }</propertySetConfig>
+        <sequenceNumber>1.0</sequenceNumber>
+        <type>DataRaptor Extract Action</type>
+    </omniProcessElements>
+    <omniProcessKey>Poison</omniProcessKey>
+    <omniProcessType>Integration Procedure</omniProcessType>
+    <uniqueName>Poison_Procedure_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniIntegrationProcedure>`,
+      'utf-8',
+    );
+    const poisonSeed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: 'OmniIntegrationProcedure:Poison_Procedure_1',
+          type: 'OmniIntegrationProcedure',
+          apiName: 'Poison_Procedure_1',
+          sourcePath: poisonPath,
+          properties: { omniProcessKey: 'Poison', isActive: true },
+        }),
+      ],
+      edges: [],
+    };
+    const imported = await importExtractionResults(store, [poisonSeed]);
+    expect(imported.ok).toBe(true);
+
+    // A connection that behaves exactly like the real one EXCEPT for
+    // the one lookup this test targets, which it fails outright —
+    // simulating a graph query error rather than a real miss.
+    const poisonedId = 'OmniDataTransform:PoisonBundle';
+    const realConnection = store.connection;
+    const poisonedConnection = {
+      runAndReadAll: (
+        sql: string,
+        params: Parameters<GraphStore['connection']['runAndReadAll']>[1],
+      ) => {
+        if (Array.isArray(params) && params[0] === poisonedId) {
+          throw new Error('simulated graph query failure');
+        }
+        return realConnection.runAndReadAll(sql, params);
+      },
+    } as unknown as GraphStore['connection'];
+    const poisonedCtx: Context = {
+      ...ctx,
+      graph: { connection: poisonedConnection, instance: store.instance },
+    };
+
+    const result = await integrationProcedureChainHandler(poisonedCtx, {
+      integrationProcedureId: 'OmniIntegrationProcedure:Poison_Procedure_1',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const endpoints = result.value.data.externalEndpoints;
+    expect(endpoints.length).toBe(1);
+    const ep = endpoints[0];
+    // Both a query failure and a genuine absence currently surface
+    // `targetId: null` — that part is unavoidable since there is no
+    // id to report either way. What must NOT be true is that the two
+    // are INDISTINGUISHABLE: a caller must be able to tell "the graph
+    // query failed" apart from "this target lives outside the vault".
+    expect(ep?.targetId).toBeNull();
+    expect(ep?.targetResolution).toBe('lookup-failed');
   });
 
   it('parses the Response Action additionalOutput into responseShape', async () => {

@@ -101,12 +101,16 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
-import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { type CoverageCaveat, type Verdict } from './coverage-trust.js';
+import {
+  applyCoverageToVerdict,
+  buildCoverageCaveat,
+  type CoverageCaveat,
+  type Verdict,
+} from './coverage-trust.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { readFieldDataType } from './field-properties.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
@@ -232,19 +236,12 @@ export interface WhatIfChangeFieldTypeOutput {
 const DISCLOSURE =
   "v2.3 what-if analysis is composition over the v2.2 vault state. Compatibility classification follows a fixed per-transition matrix; edge cases (e.g., very-short Text → LongTextArea, Lookup → Text where the foreign-key semantic is acceptable as a string) may behave compatibly in practice. Dynamic SOQL, reflective field access (`obj.get('FieldName')`), and runtime computation are invisible to the recognizer; review the listed impacts before applying the change.";
 
-const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
-  const coverage = summarizeCoverage(ctx.manifest, FIELD_CHANGE_REQUIRED_COVERAGE);
-  if (coverage.status === 'complete') return undefined;
-  const missingCoverage = coverage.missingCoverage.length > 0
-    ? coverage.missingCoverage
-    : [...FIELD_CHANGE_REQUIRED_COVERAGE];
-  return {
-    status: coverage.status === 'partial' ? 'partial' : 'unknown',
-    missingCoverage,
-    message:
-      `Field-type change impact is incomplete because the vault lacks coverage for: ${missingCoverage.join(', ')}. Absence of impacts in those families means "not checked", not "safe".`,
-  };
-};
+// Delegates to the shared `buildCoverageCaveat` (coverage-trust.ts) so this
+// tool's caveat sentence cannot drift from the rest of the what-if family —
+// see `what-if-remove-picklist-value.ts` for the sibling that already shares
+// this exact call shape.
+const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined =>
+  buildCoverageCaveat(ctx, FIELD_CHANGE_REQUIRED_COVERAGE, 'Field-type change impact');
 
 /**
  * The field-type compatibility matrix. Rows are `from`, columns are
@@ -814,9 +811,7 @@ export const whatIfChangeFieldTypeHandler = async (
 
   const coverageCaveat = coverageCaveatFor(ctx);
   const rawVerdict = aggregateVerdict(sortedImpacts);
-  const verdict = rawVerdict === 'safe' && coverageCaveat !== undefined
-    ? 'review'
-    : rawVerdict;
+  const verdict = applyCoverageToVerdict(rawVerdict, coverageCaveat, 'safe', 'review');
 
   return ok({
     data: {

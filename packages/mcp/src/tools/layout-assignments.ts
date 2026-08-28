@@ -50,6 +50,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { mergeInputAliases, resolveObjectAlias, toLayoutId } from './input-aliases.js';
 import {
   canonicaliseLayoutId,
@@ -319,12 +320,23 @@ export const layoutAssignmentsHandler = async (
   const assignments: LayoutAssignmentRef[] = [];
   const distinctProfiles = new Set<string>();
   const distinctLayouts = new Set<string>();
-  let anyProfileHadAssignments = false;
+  // R1: per-CONTAINER absence, not an ANY across every profile. Keyed off
+  // property PRESENCE (`familyWasExtracted`, hasOwnProperty) rather than
+  // `readLayoutAssignments`'s array-shape check, so a profile that was
+  // CHECKED and stored a non-array "none" value (e.g. `null`) is never
+  // misread as never-extracted. On a mixed-era vault (an incremental refresh
+  // that only re-extracted a subset of profiles) an ANY silently suppressed
+  // the disclosure the moment ONE profile carried the property, so the
+  // non-carrying profiles' assignments were counted as zero with no caveat.
+  const notExtractedProfileIds: string[] = [];
 
   for (const profile of scan.value.nodes) {
+    if (!familyWasExtracted(profile.properties, 'layoutAssignments')) {
+      notExtractedProfileIds.push(profile.id);
+      continue;
+    }
     const entries = readLayoutAssignments(profile);
-    if (entries === null) continue; // property absent on this profile
-    anyProfileHadAssignments = true;
+    if (entries === null) continue; // property present but not the recognised shape
     for (const entry of entries) {
       if (!layoutTargetsObject(entry.layout, object)) continue;
       const canonical = canonicaliseLayoutId(entry.layout, object);
@@ -415,9 +427,18 @@ export const layoutAssignmentsHandler = async (
   const objectModeNote = isObjectMode
     ? `Object mode: assignments across all ${distinctLayouts.size} layout(s) of \`${object}\` (each row carries its \`layoutId\`). `
     : '';
-  const boundaryNote = anyProfileHadAssignments
-    ? `${objectModeNote}${SCOPE_NOTE}${pageNote}${scanNote}`
-    : `${objectModeNote}No profile in this vault carries an extracted \`layoutAssignments\` property, so layout assignments could not be evaluated — the result is "not modeled", not a verified "no assignments". Re-run \`/sfi-refresh\` to populate it. ${SCOPE_NOTE}${scanNote}`;
+  const boundaryNote =
+    notExtractedProfileIds.length === 0
+      ? `${objectModeNote}${SCOPE_NOTE}${pageNote}${scanNote}`
+      : `${objectModeNote}${notExtractedFamilyDisclosure({
+          subject: 'Layout assignments',
+          verb: 'checked',
+          pluralSubject: true,
+          sentinelProperty: 'layoutAssignments',
+          containers: [...notExtractedProfileIds].sort(),
+          surface: '`assignments` / `summary.assignments`',
+          zeroReading: '"no assignments"',
+        })} ${SCOPE_NOTE}${pageNote}${scanNote}`;
 
   return ok({
     data: {

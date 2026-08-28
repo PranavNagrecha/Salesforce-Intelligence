@@ -20,7 +20,8 @@
  *       (CustomObject) booleans the extractors already capture verbatim from
  *       the DX-source XML (`custom-field.ts` / `custom-object.ts`).
  *
- * A GAP is a field the recognizer classifies `pii` or `sensitive` whose
+ * A GAP is a field the recognizer classifies into any of its REGULATED tiers
+ * (`pii`, `sensitive`, or `protected` — the protected-class attributes) whose
  * declared `trackHistory` is `false` (or absent, which the extractor
  * normalizes to `false` — Salesforce's own default). Every gap additionally
  * carries whether its PARENT OBJECT has history enabled at all:
@@ -30,10 +31,14 @@
  * rather than folded indistinguishably into the plain per-field gap.
  *
  * Honesty axis (load-bearing):
- *   - PII/sensitive classification is HEURISTIC — the SAME recognizer
+ *   - Regulated classification is HEURISTIC — the SAME recognizer
  *     `sfi.pii_inventory` uses, with the same false-positive/false-negative
  *     shape (a field with no name/type/description signal classifies
- *     `public` even if it stores PII at runtime).
+ *     `public` even if it stores regulated data at runtime). WHICH tiers count
+ *     as regulated is not restated here: the sweep gates on the shared
+ *     `isRegulatedPiiClassification` predicate, so `pii`, `sensitive` and
+ *     `protected` are all audited and a future tier cannot be dropped by a
+ *     stale local copy of the list.
  *   - `trackHistory` / `enableHistory` absence is a DECLARED fact read
  *     directly from the field/object's own metadata — not inferred. Absence
  *     of the XML element is Salesforce's own default (`false`) and is
@@ -81,7 +86,9 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   detectPiiClassificationWithReason,
+  isRegulatedPiiClassification,
   type PiiCategory,
+  type PiiClassification,
 } from '@sf-intelligence/patterns';
 import { z } from 'zod';
 
@@ -101,6 +108,31 @@ import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { FULL_SCAN_MAX_NODES, fullScanTruncationNote } from './scan-cap.js';
 
 const TOOL_NAME = 'sfi.history_tracking_gaps';
+
+/**
+ * The classification tiers this sweep audits — DERIVED from the shared
+ * `isRegulatedPiiClassification` predicate's own return type, not re-listed.
+ *
+ * HISTORY-GAPS-DROPS-THE-PROTECTED-BUCKET: this used to be a locally written
+ * `'pii' | 'sensitive'` union, and the field loop gated on a matching ad-hoc
+ * `!== 'pii' && !== 'sensitive'` check with a comment deferring the third tier
+ * "to preserve the pinned byClassification contract". The recognizer mints a
+ * `protected` tier (protected-class attributes: race, ethnicity, religion,
+ * disability, citizenship / national origin, veteran / military status, gender
+ * identity) and the sweep silently skipped ALL of it — while still reporting
+ * `trust.completeness: complete` with a six-item `trust.limitations[]` that
+ * never named the omission. On a real person object that hid nineteen
+ * non-formula `trackHistory=false` protected-class fields behind a 54-row
+ * "complete" remediation list.
+ *
+ * The union is now DERIVED from the recognizer's own `PiiClassification` by
+ * subtracting the two non-regulated tiers, and the runtime gate is the shared
+ * `isRegulatedPiiClassification` predicate — never a second local list. The two
+ * cannot drift apart silently: `byClassification` is a
+ * `Record<RegulatedClassification, number>` indexed by the value the predicate
+ * narrows, so a tier added to one side and not the other stops compiling.
+ */
+type RegulatedClassification = Exclude<PiiClassification, 'public' | 'unknown'>;
 
 /** Inclusive upper bound on `limit`. Mirrors `pii_inventory`'s `PII_INVENTORY_MAX_LIMIT`. */
 const MAX_LIMIT = 500;
@@ -178,7 +210,7 @@ export interface HistoryUntrackableField {
   readonly objectApiName: string;
   /** Declared field data type (Summary, AutoNumber, or the formula's return type). */
   readonly type: string;
-  readonly classification: 'pii' | 'sensitive';
+  readonly classification: RegulatedClassification;
   readonly category: PiiCategory;
   /** Which platform rule makes this field non-trackable. */
   readonly reason: HistoryUntrackableReason;
@@ -197,7 +229,7 @@ export interface HistoryGapField {
   readonly isFormula: boolean;
   /** A synthesized platform system/audit field (Id, CreatedDate, …) — not itself declared in DX source. */
   readonly isSystem: boolean;
-  readonly classification: 'pii' | 'sensitive';
+  readonly classification: RegulatedClassification;
   readonly category: PiiCategory;
   /** Why the recognizer classified this field (the rule that fired). */
   readonly piiReason: string;
@@ -236,7 +268,7 @@ export interface HistoryTrackingGapsSummary {
   readonly objectsWithGaps: number;
   /** Distinct objects contributing at least one `object-history-disabled` finding. */
   readonly objectsWithHistoryDisabled: number;
-  readonly byClassification: Readonly<Record<'pii' | 'sensitive', number>>;
+  readonly byClassification: Readonly<Record<RegulatedClassification, number>>;
   readonly byGapKind: Readonly<Record<HistoryGapKind, number>>;
   /** Count of PII/sensitive fields Salesforce CANNOT history-track by field type — informational, NOT actionable gaps. */
   readonly untrackableFields: number;
@@ -286,7 +318,7 @@ export interface HistoryTrackingGapsOutput {
 }
 
 const STATIC_LIMITATIONS: readonly string[] = Object.freeze([
-  'PII/sensitive classification reuses the pii_inventory heuristic recognizer over the field\'s declared API name, data type, and description — a field with no matching signal classifies public even if it stores PII at runtime; treat every flag as a starting point for compliance review, not the final word.',
+  'Regulated classification reuses the pii_inventory heuristic recognizer over the field\'s declared API name, data type, and description, across all three regulated tiers it mints — pii, sensitive and protected (protected-class: race, ethnicity, religion, disability, citizenship / national origin, veteran / military status, gender identity). A field with no matching signal classifies public even if it stores regulated data at runtime, so it is NOT audited here; treat every flag as a starting point for compliance review, not the final word, and never read a field\'s absence as proof it has an audit trail.',
   'trackHistory / enableHistory absence is a DECLARED fact read directly from the field\'s / object\'s own metadata (the extractor\'s Salesforce-matching false default for an omitted XML element) — not inferred.',
   'An object whose CustomObject metadata was never retrieved into the vault reports objectHistoryEnabled: null (unknown) — never silently assumed enabled or disabled.',
   'Salesforce does not support history tracking on formula, roll-up-summary, auto-number, or synthesized platform system/audit fields regardless of the declared flags — turning tracking on for them is impossible. Such PII/sensitive fields are segregated into untrackable[] (severity none) and excluded from groups and from summary.totalGapFields (which counts only actionable gaps); their full count is summary.untrackableFields / byUntrackableReason.',
@@ -496,7 +528,11 @@ const classifyHistoryGaps = async (
 
   const matched: { objectApiName: string; field: HistoryGapField }[] = [];
   const untrackable: HistoryUntrackableField[] = [];
-  const byClassification: Record<'pii' | 'sensitive', number> = { pii: 0, sensitive: 0 };
+  const byClassification: Record<RegulatedClassification, number> = {
+    pii: 0,
+    sensitive: 0,
+    protected: 0,
+  };
   const byGapKind: Record<HistoryGapKind, number> = {
     'object-history-disabled': 0,
     'field-not-tracked': 0,
@@ -519,14 +555,11 @@ const classifyHistoryGaps = async (
     fieldsScanned += 1;
 
     const detection = detectPiiClassificationWithReason(node);
-    // NOTE: the newer `protected` tier (protected-class attributes: race / ethnicity /
-    // disability / citizenship / …) is intentionally NOT yet gated here — this sweep still
-    // considers only `pii` / `sensitive`, so a protected-class field lacking history
-    // tracking is not surfaced as a gap. Deferred to preserve the pinned byClassification
-    // contract; tracked as a follow-up to extend this sweep to `protected`.
-    if (detection.piiClassification !== 'pii' && detection.piiClassification !== 'sensitive') {
-      continue;
-    }
+    // Every regulated tier the shared recognizer mints — `pii`, `sensitive` AND
+    // `protected` — is audited, via the one predicate whose own doc says callers
+    // must use it "rather than an ad-hoc `=== 'pii' || === 'sensitive'` check,
+    // so `protected` is never missed". See {@link RegulatedClassification}.
+    if (!isRegulatedPiiClassification(detection.piiClassification)) continue;
     if (readTrackHistory(node.properties)) continue; // tracked — not a gap.
 
     const objectId = resolveParentObjectId(node);

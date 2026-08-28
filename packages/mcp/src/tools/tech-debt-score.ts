@@ -32,7 +32,10 @@
  * reason; when ANY category is excluded with reason
  * `'extractor-not-run'`, the response's `boundaries[]` appends the
  * verbatim Q115 disclosure so the skill can surface it BEFORE the
- * score band.
+ * score band. An axis excluded because a scan was CAPPED (the data
+ * exists, it just was not all read) carries `'insufficient-data'`
+ * instead, precisely so the Q115 "run the appropriate refresh
+ * command" remedy is NOT emitted for a cap no refresh can lift.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -45,7 +48,6 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -70,7 +72,8 @@ import {
   NOT_APEX_TYPES,
   type QualityScanTypeCoverage,
 } from './quality-scan-coverage.js';
-import { nodeScanLimit } from './scan-cap.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES, fullScanTruncationNote } from './scan-cap.js';
 import {
   unassignedPermissionSetsHandler,
 } from './unassigned-permission-sets.js';
@@ -82,13 +85,19 @@ import {
 } from './unused-fields-deep.js';
 
 /**
- * Hard ceiling on a single `listNodesByType` page. `nodeScanLimit()` is
- * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
- * offset loop without seeding 500+ nodes, but it does NOT clamp at 500, and the
- * graph layer rejects `limit > 500` — so every page request is clamped here.
+ * Test-only override for the residual cap `loadAllNodes` passes to the shared
+ * `scanAllNodesOfTypes` walk. Unset (`undefined`) in production, where the
+ * walk uses its own default ({@link FULL_SCAN_MAX_NODES}, 20 000 — far above
+ * any real org). A test sets `SFI_TECH_DEBT_SCAN_MAX_NODES` to force the
+ * residual cap (and the `scanIncomplete` boundary disclosure it drives) without
+ * seeding 20 000 real rows — the same test-seam pattern `SFI_NODE_SCAN_LIMIT`
+ * already gives the per-window size (`clampedNodeScanLimit`, read internally
+ * by `scanAllNodesOfTypes`).
  */
-const PAGE_CAP = 500;
-const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
+const scanMaxNodesOverride = (): number | undefined => {
+  const v = Number(process.env['SFI_TECH_DEBT_SCAN_MAX_NODES']);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined;
+};
 
 /**
  * Load EVERY node of a single ComponentType, not just the first page. The
@@ -96,26 +105,34 @@ const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
  * qualityIssues, lastModifiedDate) and must be computed over the COMPLETE set —
  * a single `listNodesByType` page caps at 500 (id ASC), so an org with > 500 of
  * a scanned type used to score off only the first page (a saturated, wrong
- * composite). Page by `pageSize()` accumulating until a short page proves the
- * type is exhausted, with `countNodesByType` as a belt cross-check so a page
- * that unexpectedly returns full cannot loop forever. The common case (type
- * under the cap) runs exactly one sub-cap page — byte-identical.
+ * composite).
+ *
+ * R6 adoption: this used to be a private re-implementation of the multi-window
+ * offset walk (its own 500 `PAGE_CAP`, its own `countNodesByType` cross-check),
+ * which had already diverged from the shared {@link scanAllNodesOfTypes} in two
+ * ways — no {@link FULL_SCAN_MAX_NODES} residual ceiling (a pathological type
+ * walked unbounded) and no way for a caller to learn a walk was capped. Now a
+ * thin delegate: every type the residual cap actually bit on is appended to
+ * `incompleteAcc` (when the caller passes one) so the composer can disclose it
+ * — see the `scanIncomplete` boundary in {@link techDebtScoreHandler}.
+ *
+ * The residual ceiling is passed as the BARE `maxNodes` number rather than an
+ * options object: that is the shared helper's long-standing third-argument
+ * form and the only one this file needs, so this call site does not depend on
+ * any newer overload of a module it does not own.
  */
 const loadAllNodes = async (
   ctx: Context,
   type: ComponentType,
+  incompleteAcc?: Set<string>,
 ): Promise<Result<readonly Node[], string>> => {
-  const total = await countNodesByType(ctx.graph, type);
-  if (!total.ok) return err(total.error.message);
-  const limit = pageSize();
-  const all: Node[] = [];
-  for (let offset = 0; ; offset += limit) {
-    const page = await listNodesByType(ctx.graph, type, { limit, offset });
-    if (!page.ok) return err(page.error.message);
-    all.push(...page.value);
-    if (page.value.length < limit || all.length >= total.value) break;
+  const maxNodes = scanMaxNodesOverride() ?? FULL_SCAN_MAX_NODES;
+  const r = await scanAllNodesOfTypes(ctx.graph, [type], maxNodes);
+  if (!r.ok) return err(r.error.message);
+  if (incompleteAcc !== undefined) {
+    for (const t of r.value.incompleteTypes) incompleteAcc.add(t);
   }
-  return ok(all);
+  return ok(r.value.nodes);
 };
 
 /**
@@ -247,6 +264,18 @@ type ScoreBand =
   | 'high-debt'
   | 'critical-debt';
 
+/**
+ * Why an axis is not scored.
+ * - `'user-opted-out'` — the caller passed it in `excludeCategories`.
+ * - `'extractor-not-run'` — the backing family was never extracted/retrieved,
+ *   so a refresh is a real remedy (this is the reason that appends
+ *   {@link Q115_DISCLOSURE}).
+ * - `'insufficient-data'` — the family WAS extracted but the measurement is
+ *   incomplete (e.g. a sub-tool capped its scan), so the count would be a sum
+ *   with an unchecked term. A refresh cannot fix this, so the Q115 refresh
+ *   remedy is deliberately NOT emitted; the per-exclusion `note` carries the
+ *   remedy that actually applies.
+ */
 type ExcludedReason = 'user-opted-out' | 'extractor-not-run' | 'insufficient-data';
 
 /**
@@ -477,6 +506,7 @@ const weightedScore = (
  */
 const computeApiVersionDistribution = async (
   ctx: Context,
+  incompleteAcc?: Set<string>,
 ): Promise<
   Result<
     {
@@ -488,7 +518,7 @@ const computeApiVersionDistribution = async (
     string
   >
 > => {
-  const r = await loadAllNodes(ctx, 'ApexClass');
+  const r = await loadAllNodes(ctx, 'ApexClass', incompleteAcc);
   if (!r.ok) return err(r.error);
   let below30 = 0;
   let below40 = 0;
@@ -527,6 +557,7 @@ const computeApiVersionDistribution = async (
  */
 const computeCodeQualityCounts = async (
   ctx: Context,
+  incompleteAcc?: Set<string>,
 ): Promise<
   Result<
     | {
@@ -543,7 +574,8 @@ const computeCodeQualityCounts = async (
 > => {
   const fetchType = async (
     type: ComponentType,
-  ): Promise<Result<readonly Node[], string>> => loadAllNodes(ctx, type);
+  ): Promise<Result<readonly Node[], string>> =>
+    loadAllNodes(ctx, type, incompleteAcc);
   const cs = await fetchType('ApexClass');
   if (!cs.ok) return err(cs.error);
   const ts = await fetchType('ApexTrigger');
@@ -592,6 +624,7 @@ const computeCodeQualityCounts = async (
  */
 const computeFreshnessCounts = async (
   ctx: Context,
+  incompleteAcc?: Set<string>,
 ): Promise<
   Result<
     | {
@@ -622,7 +655,7 @@ const computeFreshnessCounts = async (
   const oneYearAgo = Date.now() - 365 * 24 * 60 * 60 * 1000;
   const twoYearsAgo = Date.now() - 2 * 365 * 24 * 60 * 60 * 1000;
   for (const t of types) {
-    const r = await loadAllNodes(ctx, t);
+    const r = await loadAllNodes(ctx, t, incompleteAcc);
     if (!r.ok) return err(r.error);
     for (const n of r.value) {
       if (n.lastModifiedDate === null) continue;
@@ -776,7 +809,15 @@ export const techDebtScoreHandler = async (
   const lc = lcRes.value.data;
   const activeWorkflowRulesCount = lc.totalWorkflowRules;
   const activeProcessBuildersCount = lc.totalProcessBuilders;
-  const apiVersionsRes = await computeApiVersionDistribution(ctx);
+  // R6: types whose full-node scan (deadWeight/apiVersions/codeQuality/
+  // freshness axes, via `loadAllNodes` -> the shared `scanAllNodesOfTypes`)
+  // stopped at the residual FULL_SCAN_MAX_NODES cap with more nodes behind it
+  // — collected across every axis so one boundary can disclose all of them.
+  const scanIncompleteTypes = new Set<string>();
+  const apiVersionsRes = await computeApiVersionDistribution(
+    ctx,
+    scanIncompleteTypes,
+  );
   if (!apiVersionsRes.ok) {
     return err({ kind: 'internal', message: apiVersionsRes.error });
   }
@@ -789,14 +830,14 @@ export const techDebtScoreHandler = async (
   const apiVersionsRaw = deprecatedApiVersionApexCount;
 
   // -- codeQuality category — null when v2.1 hasn't shipped to this vault.
-  const cqRes = await computeCodeQualityCounts(ctx);
+  const cqRes = await computeCodeQualityCounts(ctx, scanIncompleteTypes);
   if (!cqRes.ok) return err({ kind: 'internal', message: cqRes.error });
   const cq = cqRes.value;
   const codeQualityRaw = cq === null ? 0 : cq.critical + cq.high;
   const codeQualityExtractorRan = cq !== null;
 
   // -- freshness category — null when v1.7 R2 hasn't run.
-  const frRes = await computeFreshnessCounts(ctx);
+  const frRes = await computeFreshnessCounts(ctx, scanIncompleteTypes);
   if (!frRes.ok) return err({ kind: 'internal', message: frRes.error });
   const fr = frRes.value;
   const freshnessRaw = fr === null ? 0 : fr.olderThan1Year;
@@ -856,6 +897,42 @@ export const techDebtScoreHandler = async (
       note:
         `${unknownNote}v1.7 R2 permission-set assignment data is not populated. ` +
         'Run `sfi refresh --classify-permissions` to enrich grant data.',
+    });
+  }
+  // R1: `sfi.process_builder_migration_candidates` caps its internal
+  // WorkflowRule/Flow/ApprovalProcess scan at 500 nodes per type and honestly
+  // discloses it on its OWN response via `scanTruncated` + `trueTypeCounts`
+  // (never in `totalWorkflowRules`/`totalProcessBuilders`, which stay counted
+  // from the capped, alphabetically-first page). A capped scan is the same
+  // kind of unchecked term the coverage gate below excludes for — it just
+  // arrives through a different door (a sub-tool's cap, not missing retrieve
+  // coverage) — so this axis is EXCLUDED, not scored on a partial subset.
+  //
+  // The reason is `'insufficient-data'`, NOT `'extractor-not-run'`: the
+  // extractor DID run and the family IS retrieved — the sub-tool's per-type
+  // page cap is what made the term unchecked. That distinction is
+  // load-bearing, because `'extractor-not-run'` is the key that appends the
+  // verbatim Q115 boundary ("To compute the missing categories, run the
+  // appropriate refresh command") further down, and no refresh can lift a
+  // 500-node scan cap — emitting it here would be a dead-end remedy stated as
+  // fact by a disclosure tool. The note below carries the remedy that DOES
+  // work (page the sub-tool's cursor directly).
+  if (lc.scanTruncated === true && !excludedByUser.has('legacyAutomation')) {
+    const trueCounts = lc.trueTypeCounts ?? {};
+    const cappedRows: readonly (readonly [string, number | undefined])[] = [
+      ['WorkflowRule', trueCounts.workflowRules],
+      ['Flow (Process Builder)', trueCounts.flows],
+      ['ApprovalProcess', trueCounts.approvalProcesses],
+    ];
+    const capped = cappedRows
+      .filter((pair): pair is readonly [string, number] => pair[1] !== undefined)
+      .map(([label, count]) => `${label}: ${count} actual vs a 500-node scan cap`)
+      .join(', ');
+    excluded.push({
+      category: 'legacyAutomation',
+      reason: 'insufficient-data',
+      note:
+        `sfi.process_builder_migration_candidates capped its internal scan at 500 nodes per type (${capped}), so activeWorkflowRulesCount/activeProcessBuildersCount would be counted from an alphabetically-first subset, not the complete org. This axis's raw count would be a sum with an UNCHECKED term, so it is EXCLUDED from the score rather than scored on a capped subset. Call \`sfi.process_builder_migration_candidates\` directly and page its cursor for the complete inventory.`,
     });
   }
 
@@ -1114,6 +1191,10 @@ export const techDebtScoreHandler = async (
 
   // Compose boundaries: always include direction + weight scheme +
   // exclusion note (verbatim Q115 disclosure when extractor-not-run).
+  // The gate is deliberately `'extractor-not-run'` only — Q115's remedy is
+  // "run the appropriate refresh command", which is true for a family that
+  // was never extracted and FALSE for an `'insufficient-data'` exclusion
+  // (a capped scan; refreshing re-reads the same capped window).
   const boundaries: string[] = [
     SCORE_DIRECTION_DISCLOSURE,
     WEIGHT_SCHEME_DISCLOSURE,
@@ -1138,6 +1219,14 @@ export const techDebtScoreHandler = async (
   // When freshness is excluded the extractor-not-run note already covers it.
   if (freshnessExtractorRan && !excludedSet.has('freshness')) {
     boundaries.push(NEVER_MODIFIED_UNAVAILABLE_DISCLOSURE);
+  }
+  // R6: at least one full-node scan behind the apiVersions/codeQuality/
+  // freshness axes (each backed by `loadAllNodes` -> `scanAllNodesOfTypes`)
+  // hit the residual FULL_SCAN_MAX_NODES cap with more nodes behind it — those
+  // axes' counts are a floor, not the complete org, until the vault is
+  // narrower or the cap is raised.
+  if (scanIncompleteTypes.size > 0) {
+    boundaries.push(fullScanTruncationNote([...scanIncompleteTypes].sort()));
   }
   // TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. The composite used to print the
   // Q115 "missing axes are EXCLUDED, not assumed zero" boundary while scoring

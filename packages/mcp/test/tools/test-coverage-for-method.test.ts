@@ -607,3 +607,315 @@ describe('testCoverageForMethodHandler — classApiName / componentId / apiName 
     expect(r.error.kind).toBe('invalid-query');
   });
 });
+
+// =============================================================================
+// REAL-ORG REGRESSION (TCFM-CERTIFIED-ZERO): the single most common Apex
+// coverage topology in Salesforce is TRIGGER/DML-MEDIATED — a test does DML on
+// an object, the object's trigger fires, the trigger calls a helper class. That
+// path is NOT an edge in this graph (`coversTest` is declared in contracts and
+// emitted by NO extractor, so no vault has ever held one), and the test class
+// has no callsApex/dispatchesAsync edge to the helper. On the owner's real vault
+// the tool answered `totalCoveringCount: 0` AND stamped it
+// `soundness { complete: true, blindSpots: [], staticCoverage: 'full' }` — a
+// certified zero over a topology the data model provably cannot represent. The
+// same tool asked about the TRIGGER in the same upstream walk answered
+// `complete: false`, so the certification was self-contradictory.
+//
+// These cases pin: (1) the certification is gone, (2) the un-traversed usage
+// edge types are NAMED in a typed field, (3) the trigger-mediated candidates are
+// actually COMPUTED from triggersOn + writesTo rather than merely disclaimed,
+// and (4) the prose a host reads aloud says a 0 is not "nothing covers this".
+// =============================================================================
+describe('testCoverageForMethodHandler — trigger/DML-mediated coverage (TCFM-CERTIFIED-ZERO)', () => {
+  let dirT: string;
+  let storeT: GraphStore;
+  let ctxT: Context;
+
+  beforeAll(async () => {
+    dirT = mkdtempSync(join(tmpdir(), 'sfi-mcp-tcfm-trigger-'));
+    const opened = await openGraph(join(dirT, 't.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    storeT = opened.value;
+    const imp = await importExtractionResults(storeT, [
+      {
+        nodes: [
+          // `qualityIssues: []` = the recognizer RAN and found nothing, which is
+          // what a real refreshed vault carries on an ApexClass. That is exactly the
+          // state in which the tool used to answer `complete: true` while the trigger
+          // one hop upstream (no `qualityIssues` on ApexTrigger nodes) answered
+          // `complete: false` — the self-contradiction inside one walk.
+          makeNode({
+            id: 'ApexClass:Helper_C',
+            apiName: 'Helper_C',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+          makeNode({
+            id: 'ApexTrigger:Trigger_B',
+            apiName: 'Trigger_B',
+            type: 'ApexTrigger',
+            sourcePath: 'unused.trigger',
+            properties: {},
+          }),
+          makeNode({
+            id: 'CustomObject:Obj_A__c',
+            apiName: 'Obj_A__c',
+            type: 'CustomObject',
+            sourcePath: 'unused.object-meta.xml',
+            properties: {},
+          }),
+          makeNode({
+            id: 'CustomField:Obj_A__c.F1__c',
+            apiName: 'F1__c',
+            type: 'CustomField',
+            parentId: 'CustomObject:Obj_A__c',
+            sourcePath: 'unused.field-meta.xml',
+            properties: {},
+          }),
+          // Covers Helper_C ONLY by doing DML on Obj_A__c — no Apex-to-Apex edge.
+          makeNode({ id: 'ApexClass:Helper_CTest', apiName: 'Helper_CTest', properties: { isTest: true } }),
+          // Reaches Helper_C directly AND writes the object — must not be listed twice.
+          makeNode({ id: 'ApexClass:DirectCallerTest', apiName: 'DirectCallerTest', properties: { isTest: true } }),
+          // A class with NO trigger anywhere upstream — control.
+          makeNode({
+            id: 'ApexClass:Lonely_C',
+            apiName: 'Lonely_C',
+            properties: { isTest: false, qualityIssues: [] },
+          }),
+          // Bare-name resolution: a trigger with no same-named class.
+          makeNode({
+            id: 'ApexTrigger:Lone_T',
+            apiName: 'Lone_T',
+            type: 'ApexTrigger',
+            sourcePath: 'unused.trigger',
+            properties: {},
+          }),
+          // Bare-name ambiguity: a class AND a trigger share one api name.
+          makeNode({ id: 'ApexClass:Dual_D', apiName: 'Dual_D', properties: { isTest: false } }),
+          makeNode({
+            id: 'ApexTrigger:Dual_D',
+            apiName: 'Dual_D',
+            type: 'ApexTrigger',
+            sourcePath: 'unused.trigger',
+            properties: {},
+          }),
+        ],
+        edges: [
+          makeEdge({ fromId: 'ApexTrigger:Trigger_B', toId: 'ApexClass:Helper_C', edgeType: 'callsApex' }),
+          makeEdge({ fromId: 'ApexTrigger:Trigger_B', toId: 'CustomObject:Obj_A__c', edgeType: 'triggersOn' }),
+          makeEdge({ fromId: 'ApexClass:Helper_CTest', toId: 'CustomField:Obj_A__c.F1__c', edgeType: 'writesTo' }),
+          makeEdge({ fromId: 'ApexClass:DirectCallerTest', toId: 'ApexClass:Helper_C', edgeType: 'callsApex' }),
+          makeEdge({ fromId: 'ApexClass:DirectCallerTest', toId: 'CustomField:Obj_A__c.F1__c', edgeType: 'writesTo' }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctxT = { vaultRoot: dirT, manifest: FIXTURE_MANIFEST, graph: storeT };
+  });
+
+  afterAll(async () => {
+    await closeGraph(storeT);
+    rmSync(dirT, { recursive: true, force: true });
+  });
+
+  it('never certifies a coverage answer complete while the DML-mediated path is unrepresentable', async () => {
+    const r = await testCoverageForMethodHandler(ctxT, {
+      classApiName: 'Helper_C',
+      methodName: 'methodX',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.soundness.complete).toBe(false);
+    expect(r.value.data.soundness.staticCoverage).toBe('partial');
+    const spot = r.value.data.soundness.blindSpots.find((b) => b.kind === 'unwalked-edge-type');
+    expect(spot).toBeDefined();
+    // The gap is NAMED in a typed field a machine consumer cannot skip.
+    expect(spot?.unwalkedEdgeTypes ?? []).toContain('references');
+  });
+
+  it('answers the class and the trigger on the SAME walk with the same completeness claim', async () => {
+    const byClass = await testCoverageForMethodHandler(ctxT, { classApiName: 'ApexClass:Helper_C' });
+    const byTrigger = await testCoverageForMethodHandler(ctxT, {
+      componentId: 'ApexTrigger:Trigger_B',
+    });
+    expect(byClass.ok && byTrigger.ok).toBe(true);
+    if (!byClass.ok || !byTrigger.ok) return;
+    expect(byClass.value.data.soundness.complete).toBe(byTrigger.value.data.soundness.complete);
+    expect(byClass.value.data.soundness.complete).toBe(false);
+  });
+
+  it('computes the trigger-mediated candidate tests from triggersOn + writesTo', async () => {
+    const r = await testCoverageForMethodHandler(ctxT, { classApiName: 'ApexClass:Helper_C' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Direct-call coverage is unchanged.
+    expect(r.value.data.coveringTestClasses.map((c) => c.id)).toEqual(['ApexClass:DirectCallerTest']);
+    const tm = r.value.data.triggerMediatedCoverage;
+    expect(tm).not.toBeNull();
+    expect(tm?.triggers).toEqual(['ApexTrigger:Trigger_B']);
+    expect(tm?.triggerObjects).toEqual(['CustomObject:Obj_A__c']);
+    const ids = (tm?.candidateTestClasses ?? []).map((c) => c.id);
+    // The test that ONLY does DML is found...
+    expect(ids).toContain('ApexClass:Helper_CTest');
+    // ...and a test already reported as a DIRECT coverer is not double-listed.
+    expect(ids).not.toContain('ApexClass:DirectCallerTest');
+    expect(tm?.candidateTestCount).toBe(1);
+    expect(tm?.confidence).toBe('heuristic');
+  });
+
+  it('omits the trigger-mediated block when no trigger is on the upstream path', async () => {
+    const r = await testCoverageForMethodHandler(ctxT, { classApiName: 'ApexClass:Lonely_C' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.triggerMediatedCoverage).toBeNull();
+    // Still never certified: writesTo/triggersOn were not traversed either.
+    expect(r.value.data.soundness.complete).toBe(false);
+    const spot = r.value.data.soundness.blindSpots.find((b) => b.kind === 'unwalked-edge-type');
+    expect(spot?.unwalkedEdgeTypes ?? []).toContain('triggersOn');
+  });
+
+  it('says in the prose that a zero is not "no test covers this"', async () => {
+    const byClass = await testCoverageForMethodHandler(ctxT, { classApiName: 'ApexClass:Helper_C' });
+    const byMethod = await testCoverageForMethodHandler(ctxT, {
+      classApiName: 'ApexClass:Helper_C',
+      methodName: 'methodX',
+    });
+    expect(byClass.ok && byMethod.ok).toBe(true);
+    if (!byClass.ok || !byMethod.ok) return;
+    for (const d of [byClass.value.data.disclosure, byMethod.value.data.disclosure]) {
+      expect(d).toMatch(/coversTest/);
+      expect(d).toMatch(/triggerMediatedCoverage/);
+      expect(d).toMatch(/NEVER "no test covers this"/);
+    }
+  });
+});
+
+// =============================================================================
+// REAL-ORG REGRESSION (TCFM-TRIGGER-BARE-NAME): the contract says the target is
+// "an ApexClass: or ApexTrigger: id (accepted interchangeably as classApiName,
+// componentId, or apiName — a bare name or the canonical id)". In fact a bare
+// name was hard-prefixed `ApexClass:`, so EVERY ApexTrigger in a vault was
+// unreachable by bare name through all three selectors — and the error text then
+// read "no ApexClass or ApexTrigger with id ApexClass:X", asserting a two-family
+// search the echoed id disproves.
+// =============================================================================
+describe('testCoverageForMethodHandler — bare ApexTrigger name (TCFM-TRIGGER-BARE-NAME)', () => {
+  let dirB: string;
+  let storeB: GraphStore;
+  let ctxB: Context;
+
+  beforeAll(async () => {
+    dirB = mkdtempSync(join(tmpdir(), 'sfi-mcp-tcfm-bare-'));
+    const opened = await openGraph(join(dirB, 't.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    storeB = opened.value;
+    const imp = await importExtractionResults(storeB, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexTrigger:Lone_T',
+            apiName: 'Lone_T',
+            type: 'ApexTrigger',
+            sourcePath: 'unused.trigger',
+            properties: {},
+          }),
+          makeNode({ id: 'ApexClass:Dual_D', apiName: 'Dual_D', properties: { isTest: false } }),
+          makeNode({
+            id: 'ApexTrigger:Dual_D',
+            apiName: 'Dual_D',
+            type: 'ApexTrigger',
+            sourcePath: 'unused.trigger',
+            properties: {},
+          }),
+        ],
+        edges: [
+          // Referenced by this org, definition never retrieved — a PHANTOM. The
+          // bare-name branch probes two ids; it must not lose the phantom
+          // disclosure the single-id branch has always given.
+          makeEdge({
+            fromId: 'ApexTrigger:Lone_T',
+            toId: 'ApexClass:Phantom_P',
+            edgeType: 'callsApex',
+          }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctxB = { vaultRoot: dirB, manifest: FIXTURE_MANIFEST, graph: storeB };
+  });
+
+  afterAll(async () => {
+    await closeGraph(storeB);
+    rmSync(dirB, { recursive: true, force: true });
+  });
+
+  it('resolves a bare trigger name through all three selectors', async () => {
+    for (const input of [
+      { classApiName: 'Lone_T' },
+      { apiName: 'Lone_T' },
+      { componentId: 'Lone_T' },
+    ]) {
+      const r = await testCoverageForMethodHandler(ctxB, input);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.appliedScope.component).toBe('ApexTrigger:Lone_T');
+      expect(r.value.data.classApiName).toBe('ApexTrigger:Lone_T');
+    }
+  });
+
+  it('does not claim it searched ApexTrigger when only an ApexClass id was given', async () => {
+    const r = await testCoverageForMethodHandler(ctxB, { classApiName: 'ApexClass:Nope_X' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.message).not.toMatch(/ApexTrigger/);
+  });
+
+  it('names BOTH ids actually looked up when a bare name matches nothing', async () => {
+    const r = await testCoverageForMethodHandler(ctxB, { classApiName: 'Nope_X' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.message).toMatch(/ApexClass:Nope_X/);
+    expect(r.error.message).toMatch(/ApexTrigger:Nope_X/);
+  });
+
+  it('still discloses a PHANTOM when the bare name was probed against both families', async () => {
+    const r = await testCoverageForMethodHandler(ctxB, { classApiName: 'Phantom_P' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    // The two-id probe must not downgrade "referenced but never retrieved" to a
+    // flat "does not exist".
+    expect(r.error.message).toMatch(/never retrieved into the vault/);
+    expect(r.error.message).toMatch(/ApexTrigger:Phantom_P/);
+  });
+
+  it('refuses to silently pick when a bare name matches BOTH a class and a trigger', async () => {
+    const r = await testCoverageForMethodHandler(ctxB, { apiName: 'Dual_D' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/ApexClass:Dual_D/);
+    expect(r.error.message).toMatch(/ApexTrigger:Dual_D/);
+  });
+
+  it('an explicit kind alongside the same bare name disambiguates rather than rejecting', async () => {
+    const r = await testCoverageForMethodHandler(ctxB, {
+      classApiName: 'Dual_D',
+      componentId: 'ApexTrigger:Dual_D',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.component).toBe('ApexTrigger:Dual_D');
+  });
+
+  it('two selectors naming DIFFERENT components are still invalid-query', async () => {
+    const r = await testCoverageForMethodHandler(ctxB, {
+      classApiName: 'ApexClass:Dual_D',
+      componentId: 'ApexTrigger:Lone_T',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

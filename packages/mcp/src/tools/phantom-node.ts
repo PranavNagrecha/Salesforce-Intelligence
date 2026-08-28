@@ -68,7 +68,15 @@ export const phantomAwareNotFoundMessage = async (
   kindLabel: string,
 ): Promise<string> => {
   const inbound = await listEdges(ctx.graph, id, { direction: 'in' });
-  const refs = inbound.ok ? inbound.value.length : 0;
+  // R1: a FAILED query is a third state, not "zero references". `refs` is
+  // `null` when the query failed — collapsing that into 0 would drive the
+  // confident bare not-found below for a transient graph error, which is
+  // exactly the false "this doesn't exist" claim this module exists to
+  // eliminate (see header). The CDC structural branch below is a fact about
+  // id SHAPE alone, true whether or not the query succeeded, so it still
+  // runs first and merely omits the edge-count addendum when refs is
+  // unknown (same as when refs is genuinely 0 — no claim either way).
+  const refs = inbound.ok ? inbound.value.length : null;
   // CHANGEEVENT-IS-NOT-A-RETRIEVE-GAP: a `CustomObject:{X}ChangeEvent` target is
   // a Change Data Capture stream the platform synthesises; the Metadata API
   // emits no component for it on ANY org. The generic phantom message below ends
@@ -84,7 +92,7 @@ export const phantomAwareNotFoundMessage = async (
       `configuration and the Metadata API never emits it as a component, so no ` +
       `\`sfi refresh\` on any org can put it in this vault. This is STRUCTURAL, not a ` +
       `coverage gap` +
-      (refs > 0
+      (refs !== null && refs > 0
         ? `; ${refs} edge(s) in this org already point at it (e.g. an Apex CDC trigger ` +
           `or a channel member).`
         : '.') +
@@ -92,6 +100,14 @@ export const phantomAwareNotFoundMessage = async (
         ? ` Read \`CustomObject:${parent}\` for the object itself, or ` +
           `\`sfi.cdc_subscribers\` for what reacts to the stream.`
         : ' Use `sfi.cdc_subscribers` for what reacts to the stream.')
+    );
+  }
+  if (refs === null) {
+    return (
+      `could not check for inbound references to \`${id}\` — the graph query ` +
+      `failed, so this is NOT a confident "not found": \`${id}\` may exist in the ` +
+      `org (referenced or not) and this check simply could not run. Retry the query ` +
+      `rather than treating this as proof of absence.`
     );
   }
   if (refs === 0) {

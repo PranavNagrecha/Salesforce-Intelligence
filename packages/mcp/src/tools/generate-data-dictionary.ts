@@ -52,6 +52,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { buildEnumerationCoverageCaveatFor } from './coverage-trust.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /**
@@ -106,6 +107,22 @@ export const ERD_SCOPE_DISCLOSURE =
 
 /** Canonical id prefix for the CustomObject node type. */
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
+
+/**
+ * R1: the metadata families the Validation Rules / Page Layouts / Related
+ * Triggers-and-Flows sections enumerate over. A bare "_(no validation
+ * rules)_" / "_(no apex triggers)_" etc. is a proven "none" ONLY when the
+ * family was actually (confirmedly) retrieved into the vault — on a refresh
+ * that skipped or errored on one of these, the same empty section is "not
+ * checked". Mirrors `org-card.ts`'s identical use of
+ * `buildEnumerationCoverageCaveatFor` for its own automation counts.
+ */
+const DATA_DICTIONARY_ENUMERATED_FAMILIES: readonly string[] = [
+  'ValidationRule',
+  'Layout',
+  'ApexTrigger',
+  'Flow',
+];
 
 /**
  * Zod schema for the `sfi.generate_data_dictionary` tool input.
@@ -957,12 +974,26 @@ export const generateDataDictionaryHandler = async (
     'Related Triggers and Flows': 'parsed',
   };
 
+  // R1: distinguish "this object genuinely has no validation rules / layouts
+  // / triggers / flows" from "the ValidationRule / Layout / ApexTrigger /
+  // Flow family was never (confirmedly) retrieved into this vault" — a bare
+  // 0 in any of those four sections is otherwise a false "none" on a vault
+  // whose refresh skipped or errored on the family. `coverageKnown === false`
+  // (a pre-v4 vault with no `coverage` array) keeps the historical silent
+  // behavior, same as every other `buildEnumerationCoverageCaveatFor` caller.
+  const enumerationCoverageCaveat = buildEnumerationCoverageCaveatFor(
+    ctx,
+    DATA_DICTIONARY_ENUMERATED_FAMILIES,
+    'The data dictionary sections',
+  );
+
   const boundaries: string[] = [
     Q125_FRESHNESS_DISCLOSURE.replace('{TIMESTAMP}', refreshedAt),
     INHERITED_CONFIDENCE_DISCLOSURE,
     STRUCTURAL_DISCLOSURE,
     ERD_SCOPE_DISCLOSURE,
     ...(erd.disclosure !== undefined ? [erd.disclosure] : []),
+    ...(enumerationCoverageCaveat !== undefined ? [enumerationCoverageCaveat.message] : []),
   ];
 
   const budget = generatedDocByteBudget();

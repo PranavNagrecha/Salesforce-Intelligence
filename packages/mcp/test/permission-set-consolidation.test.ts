@@ -22,10 +22,24 @@
  *   - the page cursor equals the served count on a budget-trimmed page.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import type { ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../src/server.js';
 import { packToByteBudget } from '../src/tools/limit-headroom-report.js';
 import {
   compileGrantKeys,
   computeConsolidationCore,
+  permissionSetConsolidationHandler,
   rankCandidates,
   DEFAULT_MIN_OVERLAP,
   type ConsolidationCandidate,
@@ -297,5 +311,104 @@ describe('permission_set_consolidation grant-key compilation', () => {
         'tab:Account:Visible',
       ].sort(),
     );
+  });
+});
+
+/**
+ * R6 — the handler's self-fit target must be the DERIVED tool-local budget
+ * (`toolLocalPayloadBudgetBytes()`), never a hard-coded sibling of the
+ * default global budget. A fixture large enough to comfortably fit the
+ * DEFAULT budget but not a tightened `SFI_MAX_RESPONSE_BYTES` override proves
+ * whether the self-fit actually reacts to the override.
+ */
+describe('permission_set_consolidation handler — response-budget target (R6)', () => {
+  const PAIR_COUNT = 30;
+
+  const FIXTURE_MANIFEST: VaultManifest = {
+    version: '0.2.0',
+    refreshedAt: '2026-06-01T10:00:00Z',
+    sourceOrg: 'me@example.com',
+    components: { PermissionSet: PAIR_COUNT * 2 },
+    edges: {},
+    sourceTreeHash: 'sha256:permission-set-consolidation-budget-fixture',
+  };
+
+  const makeNode = (id: string, perms: readonly string[]): Node => ({
+    id: id as Node['id'],
+    type: 'PermissionSet',
+    apiName: id.slice('PermissionSet:'.length),
+    label: null,
+    parentId: null,
+    sourcePath: `permissionsets/${id.slice('PermissionSet:'.length)}.permissionset-meta.xml`,
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: { userPermissions: perms },
+  });
+
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-psc-budget-'));
+    const nodes: Node[] = [];
+    for (let i = 0; i < PAIR_COUNT; i += 1) {
+      // Padded so each candidate serializes to a non-trivial size: a
+      // 30-candidate page is comfortably under the 36 KB default target but
+      // nowhere near fitting a tightened few-KB override.
+      const base = `Perm_${String(i).padStart(3, '0')}_${'x'.repeat(40)}`;
+      nodes.push(makeNode(`PermissionSet:PS_Sub_${i}`, [base]));
+      nodes.push(makeNode(`PermissionSet:PS_Super_${i}`, [base, `${base}_extra`]));
+    }
+    const seed: ExtractionResult = { nodes, edges: [] };
+    const opened = await openGraph(join(tempDir, 'psc-budget.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store } as Context;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('fits all candidates under the DEFAULT budget (baseline, not byte-trimmed)', async () => {
+    const r = await permissionSetConsolidationHandler(ctx, { limit: 100 });
+    if (!r.ok) throw new Error(`handler failed: ${r.error.kind} ${r.error.message}`);
+    expect(r.value.data.candidates.length).toBe(PAIR_COUNT);
+    expect(r.value.data.byteTrimmed).toBeUndefined();
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a tightened SFI_MAX_RESPONSE_BYTES must actually change the self-fit page', async () => {
+    const previous = process.env['SFI_MAX_RESPONSE_BYTES'];
+    const under = async (override: string): Promise<{ length: number; byteTrimmed: boolean | undefined }> => {
+      process.env['SFI_MAX_RESPONSE_BYTES'] = override;
+      const r = await permissionSetConsolidationHandler(ctx, { limit: 100 });
+      if (!r.ok) throw new Error(`handler failed: ${r.error.kind} ${r.error.message}`);
+      return { length: r.value.data.candidates.length, byteTrimmed: r.value.data.byteTrimmed };
+    };
+    try {
+      // SMALL is derived (toolLocalPayloadBudgetBytes()) to sit far below
+      // what 30 padded candidates need; LARGE is derived to comfortably fit
+      // all of them. A self-fit that actually reacts to the override must
+      // serve fewer candidates (and mark byteTrimmed) under SMALL than under
+      // LARGE. A self-fit still targeting the OLD hard-coded 36 000 constant
+      // ignores both overrides and serves the identical untrimmed page for
+      // each, so this differential is exactly what a hard-coded target gets
+      // wrong regardless of which two override values are chosen.
+      const small = await under('4000');
+      const large = await under('44000');
+
+      expect(large.length).toBe(PAIR_COUNT);
+      expect(large.byteTrimmed).toBeUndefined();
+      expect(small.length).toBeLessThan(large.length);
+      expect(small.byteTrimmed).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+      else process.env['SFI_MAX_RESPONSE_BYTES'] = previous;
+    }
   });
 });

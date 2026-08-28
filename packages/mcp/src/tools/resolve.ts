@@ -244,7 +244,11 @@ export const resolveHandler = async (
   let disposition: ResolveDisposition = result.value.disposition;
   let aliasResolution = result.value;
   if (disposition !== 'exact') {
-    const alias = await resolveGlossaryAlias(ctx, input.query);
+    const alias = await resolveGlossaryAlias(
+      ctx,
+      input.query,
+      input.types as readonly ComponentType[] | undefined,
+    );
     if (alias.length > 0) {
       const aliasIds = new Set(alias.map((a) => a.componentId));
       baseCandidates = [

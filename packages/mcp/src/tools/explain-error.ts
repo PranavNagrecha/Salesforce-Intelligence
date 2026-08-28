@@ -78,7 +78,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import { STATUS_CODE_TAXONOMY } from '../knowledge/loader.js';
@@ -89,10 +89,9 @@ import {
   LIMIT_TO_STATIC_RULES,
   parseGovernorLimit,
 } from './governor-limit-signature.js';
-import { mergeInputAliases } from './input-aliases.js';
-
-/** Page size for the full ValidationRule scan (LIST_MAX_LIMIT is 500). */
-const VR_SCAN_PAGE_SIZE = 500;
+import { mergeInputAliases, resolveExistingObjectScope } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Byte-budget guard: the candidate list is capped, with a `truncated` flag. */
 const MAX_CANDIDATES = 25;
@@ -130,7 +129,14 @@ const apexRuntimeExceptionGap = (exceptionName: string): string =>
 
 const explainErrorInputBaseSchema = z.object({
   errorText: z.string().min(1),
-  /** Optional SObject narrowing hint (the object the save was on). */
+  /**
+   * Optional SObject narrowing hint (the object the save was on). VERIFIED
+   * against the vault via `resolveExistingObjectScope` (R4) before it is used
+   * — a typo or wrong-case name fails closed with a named `invalid-query`
+   * rather than silently reading as "no rule/automation on this object";
+   * a hint that differs from the vault only by case is resolved to the
+   * vault's exact casing before it filters anything.
+   */
   object: z.string().min(1).optional(),
 });
 
@@ -216,6 +222,14 @@ export interface StatusCodeCategory {
    * Category-level: any of them COULD have produced it — not a specific match.
    */
   readonly objectAutomation?: readonly ObjectAutomationRef[];
+  /**
+   * True when more automation was declared on the object than
+   * {@link ObjectAutomationRef}'s byte-budget cap could carry — present only
+   * alongside `objectAutomation` (R1). A reader must not read a full
+   * `objectAutomation` list as the complete cross-reference without checking
+   * this flag.
+   */
+  readonly objectAutomationTruncated?: boolean;
 }
 
 export interface ExplainErrorOutput {
@@ -458,53 +472,51 @@ const matchValidationRules = async (
   ctx: Context,
   message: string,
   objectHint: string | undefined,
-): Promise<Result<ExplainErrorCandidate[], string>> => {
+): Promise<Result<{ candidates: ExplainErrorCandidate[]; incompleteTypes: readonly string[] }, string>> => {
+  // R6 adoption: the shared full multi-window walk (windows the SQL OFFSET
+  // forward until the type is exhausted) replaces a hand-rolled duplicate of
+  // the identical loop, and — unlike the hand-rolled version — discloses when
+  // a pathological org left the walk incomplete.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['ValidationRule']);
+  if (!scan.ok) return err(scan.error.message);
   const out: ExplainErrorCandidate[] = [];
-  for (let offset = 0; ; offset += VR_SCAN_PAGE_SIZE) {
-    const page = await listNodesByType(ctx.graph, 'ValidationRule', {
-      limit: VR_SCAN_PAGE_SIZE,
-      offset,
-    });
-    if (!page.ok) return err(page.error.message);
-    for (const node of page.value) {
-      const ruleMsg = node.properties['errorMessage'];
-      if (typeof ruleMsg !== 'string' || ruleMsg.length === 0) continue;
-      const obj = objectOf(node);
-      if (objectHint !== undefined && obj !== null && normObject(obj) !== normObject(objectHint)) {
-        continue;
-      }
-      const match = scoreVrMatch(message, ruleMsg);
-      if (match === null) continue;
-      const active = typeof node.properties['active'] === 'boolean' ? (node.properties['active'] as boolean) : null;
-      const formula =
-        typeof node.properties['errorConditionFormula'] === 'string'
-          ? (node.properties['errorConditionFormula'] as string)
-          : null;
-      out.push({
-        strategy: 'validation-rule',
-        componentId: node.id,
-        type: node.type,
-        apiName: node.apiName,
-        label: node.label,
-        objectApiName: obj,
-        active,
-        confidence: match.confidence,
-        matchKind: match.matchKind,
-        why:
-          match.matchKind === 'exact'
-            ? `Its declared errorMessage exactly matches the pasted validation message${active === false ? ' (NOTE: this rule is currently INACTIVE — an active rule with the same message may be the live source)' : ''}.`
-            : match.matchKind === 'normalized'
-              ? 'Its errorMessage matches the pasted message ignoring case/whitespace/trailing punctuation.'
-              : 'Its errorMessage is a substring of (or contains) the pasted message.',
-        detail: {
-          errorConditionFormula: formula,
-          matchedErrorMessage: ruleMsg,
-        },
-      });
+  for (const node of scan.value.nodes) {
+    const ruleMsg = node.properties['errorMessage'];
+    if (typeof ruleMsg !== 'string' || ruleMsg.length === 0) continue;
+    const obj = objectOf(node);
+    if (objectHint !== undefined && obj !== null && normObject(obj) !== normObject(objectHint)) {
+      continue;
     }
-    if (page.value.length < VR_SCAN_PAGE_SIZE) break;
+    const match = scoreVrMatch(message, ruleMsg);
+    if (match === null) continue;
+    const active = typeof node.properties['active'] === 'boolean' ? (node.properties['active'] as boolean) : null;
+    const formula =
+      typeof node.properties['errorConditionFormula'] === 'string'
+        ? (node.properties['errorConditionFormula'] as string)
+        : null;
+    out.push({
+      strategy: 'validation-rule',
+      componentId: node.id,
+      type: node.type,
+      apiName: node.apiName,
+      label: node.label,
+      objectApiName: obj,
+      active,
+      confidence: match.confidence,
+      matchKind: match.matchKind,
+      why:
+        match.matchKind === 'exact'
+          ? `Its declared errorMessage exactly matches the pasted validation message${active === false ? ' (NOTE: this rule is currently INACTIVE — an active rule with the same message may be the live source)' : ''}.`
+          : match.matchKind === 'normalized'
+            ? 'Its errorMessage matches the pasted message ignoring case/whitespace/trailing punctuation.'
+            : 'Its errorMessage is a substring of (or contains) the pasted message.',
+      detail: {
+        errorConditionFormula: formula,
+        matchedErrorMessage: ruleMsg,
+      },
+    });
   }
-  return ok(out);
+  return ok({ candidates: out, incompleteTypes: scan.value.incompleteTypes });
 };
 
 /** Strategy 2: resolve the flow named in a fault email to a real Flow node. */
@@ -643,20 +655,26 @@ const matchApex = async (
 const matchDuplicateRules = async (
   ctx: Context,
   objectHint: string | undefined,
-): Promise<Result<{ candidates: ExplainErrorCandidate[]; note: string | null }, string>> => {
+): Promise<
+  Result<{ candidates: ExplainErrorCandidate[]; note: string | null; incompleteTypes: readonly string[] }, string>
+> => {
   if (objectHint === undefined) {
     return ok({
       candidates: [],
       note:
         'A duplicate-record error was recognized, but no `object` hint was given — pass the SObject to list its active duplicate rules.',
+      incompleteTypes: [],
     });
   }
   const candidates: ExplainErrorCandidate[] = [];
-  const page = await listNodesByType(ctx.graph, 'DuplicateRule', {
-    limit: VR_SCAN_PAGE_SIZE,
-  });
-  if (!page.ok) return err(page.error.message);
-  for (const node of page.value) {
+  // R6 adoption: was a single un-paged `listNodesByType` call — on an org past
+  // 500 DuplicateRules that read only the alphabetical first page and the
+  // sibling ValidationRule scan windowed correctly right above it in this same
+  // file. The shared full-scan walk closes the gap AND discloses the residual
+  // cap.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['DuplicateRule']);
+  if (!scan.ok) return err(scan.error.message);
+  for (const node of scan.value.nodes) {
     const obj = objectOf(node);
     if (obj === null || normObject(obj) !== normObject(objectHint)) continue;
     const active = node.properties['isActive'] === true;
@@ -686,15 +704,30 @@ const matchDuplicateRules = async (
       candidates.length === 0
         ? `No active duplicate rule on "${objectHint}" is in this vault.`
         : null,
+    incompleteTypes: scan.value.incompleteTypes,
   });
 };
 
-/** Cross-reference: the triggers/flows declared on the hinted object. */
+/**
+ * Cross-reference: the triggers/flows declared on the hinted object.
+ *
+ * `objectId` is the ALREADY-VERIFIED, exactly-cased `CustomObject:` id
+ * (`resolveExistingObjectScope`'s output) — never a string-templated hint, so
+ * a typo or a wrong-cased object name fails closed at the caller instead of
+ * silently cross-referencing zero automation for a component that either
+ * doesn't exist or exists under a different case (R4).
+ *
+ * The full edge set is collected and SORTED before the byte-budget slice
+ * (R1) — slicing first, as the old code did, kept an arbitrary edge-order
+ * subset and then presented it in tidy id-ASC order, which reads as "the
+ * first 25 alphabetically" when it was actually "an arbitrary 25, then
+ * sorted". `truncated` is returned alongside so the caller can disclose the
+ * cap instead of the shape carrying no truncation signal at all.
+ */
 const objectAutomation = async (
   ctx: Context,
-  objectHint: string,
-): Promise<Result<ObjectAutomationRef[], string>> => {
-  const objectId = `CustomObject:${objectHint}` as ComponentId;
+  objectId: ComponentId,
+): Promise<Result<{ refs: ObjectAutomationRef[]; truncated: boolean }, string>> => {
   const edgesR = await listEdges(ctx.graph, objectId, {
     direction: 'in',
     edgeType: 'triggersOn',
@@ -713,10 +746,9 @@ const objectAutomation = async (
       type: n?.type ?? (edge.fromId.slice(0, edge.fromId.indexOf(':')) as ComponentType),
       apiName: n?.apiName ?? edge.fromId,
     });
-    if (out.length >= MAX_OBJECT_AUTOMATION) break;
   }
   out.sort((a, b) => (a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0));
-  return ok(out);
+  return ok({ refs: out.slice(0, MAX_OBJECT_AUTOMATION), truncated: out.length > MAX_OBJECT_AUTOMATION });
 };
 
 // ---------------------------------------------------------------------------
@@ -741,7 +773,22 @@ export const explainErrorHandler = async (
   input: ExplainErrorInput,
 ): Promise<Result<McpResponse<ExplainErrorOutput>, McpError>> => {
   const errorText = input.errorText;
-  const objectHint = input.object;
+  // EXPLAIN-ERROR-UNVERIFIED-OBJECT-HINT (R4): the `object` hint is threaded
+  // into three graph reads below (VR filter, DuplicateRule filter, object-
+  // automation cross-reference). A raw string-templated hint made a typo, a
+  // wrong-CASE object, or a managed-package/never-retrieved object read as a
+  // confident "no rule/automation on this object" instead of a refusal.
+  // `resolveExistingObjectScope` verifies the hint against the vault AND
+  // rewrites it to the vault's exact casing before anything downstream uses
+  // it; a bare call (no `object`) stays byte-identical (`scope === null`).
+  // `unhandledPrefix: 'refuse'` because this tool has no reverse-mode
+  // `componentId` branch of its own.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input, {
+    unhandledPrefix: 'refuse',
+  });
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
+  const objectHint = scope?.object;
   const detectedStatusCode = detectStatusCode(errorText);
   const flowParsed = parseFlowFault(errorText);
   const apexFrame = parseApexStackFrame(errorText);
@@ -751,6 +798,9 @@ export const explainErrorHandler = async (
   const tried: string[] = [];
   const boundaries: string[] = [];
   const nextSteps: string[] = [];
+  // R6: full-scan residual-incompleteness types, accumulated across the
+  // ValidationRule and DuplicateRule walks below and disclosed once.
+  const scanIncompleteTypes = new Set<string>();
 
   // Strategy 1 — validation rule. Attempt with the FCVE-extracted segment; or,
   // when the paste carries NO other structured shape, the bare message. Never
@@ -767,7 +817,8 @@ export const explainErrorHandler = async (
     tried.push('validation-rule (message match against ValidationRule.errorMessage)');
     const vrR = await matchValidationRules(ctx, vrMessage, objectHint);
     if (!vrR.ok) return err({ kind: 'internal', message: vrR.error });
-    candidates.push(...vrR.value);
+    candidates.push(...vrR.value.candidates);
+    for (const t of vrR.value.incompleteTypes) scanIncompleteTypes.add(t);
   }
 
   // Strategy 2 — flow fault.
@@ -795,6 +846,7 @@ export const explainErrorHandler = async (
     if (!dupR.ok) return err({ kind: 'internal', message: dupR.error });
     candidates.push(...dupR.value.candidates);
     if (dupR.value.note !== null) boundaries.push(dupR.value.note);
+    for (const t of dupR.value.incompleteTypes) scanIncompleteTypes.add(t);
   }
 
   // Strategy 5 — status-code taxonomy (category-level, never a specific match).
@@ -803,10 +855,12 @@ export const explainErrorHandler = async (
     tried.push('status-code taxonomy (category-level classification)');
     const tax = STATUS_CODE_TAXONOMY[detectedStatusCode]!;
     let automation: readonly ObjectAutomationRef[] | undefined;
-    if (tax.crossRefObjectAutomation && objectHint !== undefined) {
-      const autoR = await objectAutomation(ctx, objectHint);
+    let automationTruncated = false;
+    if (tax.crossRefObjectAutomation && scope !== null) {
+      const autoR = await objectAutomation(ctx, scope.componentId as ComponentId);
       if (!autoR.ok) return err({ kind: 'internal', message: autoR.error });
-      automation = autoR.value;
+      automation = autoR.value.refs;
+      automationTruncated = autoR.value.truncated;
     }
     categoryExplanation = {
       statusCode: detectedStatusCode,
@@ -814,7 +868,9 @@ export const explainErrorHandler = async (
       explanation: tax.explanation,
       producedByTypes: tax.producedByTypes,
       categoryLevel: true,
-      ...(automation !== undefined ? { objectAutomation: automation } : {}),
+      ...(automation !== undefined
+        ? { objectAutomation: automation, objectAutomationTruncated: automationTruncated }
+        : {}),
     };
   }
 
@@ -923,6 +979,9 @@ export const explainErrorHandler = async (
   boundaries.push(
     'Error-to-source mapping is string matching against declared metadata, not a runtime execution trace — a candidate is where the error MOST LIKELY came from.',
   );
+  if (scanIncompleteTypes.size > 0) {
+    boundaries.push(fullScanTruncationNote([...scanIncompleteTypes].sort()));
+  }
   if (candidates.some((c) => c.strategy === 'validation-rule' && c.matchKind !== 'exact')) {
     boundaries.push(
       'Validation-rule matches below `exact` are fuzzy — the org may reuse one message across rules, or the message may have been edited since the error fired.',

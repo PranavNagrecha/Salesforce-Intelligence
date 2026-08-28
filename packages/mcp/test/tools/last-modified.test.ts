@@ -267,6 +267,50 @@ describe('lastModifiedHandler — vault-state envelope', () => {
   });
 });
 
+describe('R6 — freshness field extraction is sourced from a shared module', () => {
+  // Census finding: extractLastModifiedDate/extractLastModifiedBy live as a
+  // SECOND private copy in changed-since.ts, held in sync only by a JSDoc
+  // comment ("mirrors the equivalent helper in changed-since.ts"). A comment
+  // is not a guard — the fix is a shared leaf module (freshness-fields.ts,
+  // same shape as field-properties.ts in this shard) that last-modified.ts
+  // imports its extractors from, rather than defining its own copies.
+  it('exports extractLastModifiedDate / extractLastModifiedBy / extractApiVersion from freshness-fields.ts', async () => {
+    const shared = await import('../../src/tools/freshness-fields.js');
+    expect(typeof shared.extractLastModifiedDate).toBe('function');
+    expect(typeof shared.extractLastModifiedBy).toBe('function');
+    expect(typeof shared.extractApiVersion).toBe('function');
+  });
+
+  it('the shared extractLastModifiedDate prefers properties over the legacy field', async () => {
+    const { extractLastModifiedDate } = await import('../../src/tools/freshness-fields.js');
+    expect(
+      extractLastModifiedDate('2020-01-01T00:00:00.000Z', {
+        lastModifiedDate: '2026-05-12T00:00:00.000Z',
+      }),
+    ).toBe('2026-05-12T00:00:00.000Z');
+    expect(extractLastModifiedDate('2020-01-01T00:00:00.000Z', {})).toBe(
+      '2020-01-01T00:00:00.000Z',
+    );
+    expect(extractLastModifiedDate(null, {})).toBeNull();
+  });
+
+  it('the shared extractLastModifiedBy prefers the properties {id,name} object over the legacy string', async () => {
+    const { extractLastModifiedBy } = await import('../../src/tools/freshness-fields.js');
+    expect(
+      extractLastModifiedBy('005xxBB', { lastModifiedBy: { id: '005xxAA', name: 'Alice' } }),
+    ).toEqual({ id: '005xxAA', name: 'Alice' });
+    expect(extractLastModifiedBy('005xxBB', {})).toEqual({ id: '005xxBB', name: '' });
+    expect(extractLastModifiedBy(null, {})).toBeNull();
+  });
+
+  it('the shared extractApiVersion prefers properties.apiVersion over the legacy number', async () => {
+    const { extractApiVersion } = await import('../../src/tools/freshness-fields.js');
+    expect(extractApiVersion(60.0, { apiVersion: 62.0 })).toBe(62.0);
+    expect(extractApiVersion(60.0, {})).toBe(60.0);
+    expect(extractApiVersion(null, {})).toBeNull();
+  });
+});
+
 describe('lastModifiedHandler — disclosure invariants', () => {
   it('always emits a non-empty disclosure string regardless of enrichment state', async () => {
     const enriched = await lastModifiedHandler(ctx, {

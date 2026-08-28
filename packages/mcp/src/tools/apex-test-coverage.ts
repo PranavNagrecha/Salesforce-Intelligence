@@ -28,27 +28,15 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  countNodesByType,
-  getNodeById,
-  listEdges,
-  listNodesByType,
-} from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
-import { nodeScanLimit } from './scan-cap.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
-/**
- * Hard ceiling on a single `listNodesByType` page. `nodeScanLimit()` is
- * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
- * offset loop without seeding 500+ nodes, but it does NOT clamp at 500, and the
- * graph layer rejects `limit > 500` — so every page request is clamped here.
- */
-const PAGE_CAP = 500;
-const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 
@@ -110,8 +98,16 @@ export interface ApexTestCoverageOutput {
   /** Present in org-wide mode: non-test classes with no incoming test reference (capped at `limit`). */
   readonly untestedClasses?: readonly ComponentId[];
   readonly summary: {
-    readonly testClasses: number;
-    readonly nonTestClasses: number;
+    /**
+     * Org-wide roster counts. `null` in single-class mode: the roster is
+     * deliberately never loaded there (single-class mode answers off the
+     * target's own uncapped inbound edges), so these are NOT-COMPUTED, not
+     * zero — a hardcoded `0` here used to read as "this org has 0 test
+     * classes" to a caller who only asked about one class. Real numbers only
+     * in org-wide mode.
+     */
+    readonly testClasses: number | null;
+    readonly nonTestClasses: number | null;
     readonly classesWithTestReferences: number;
     readonly classesWithoutTestReferences: number;
     readonly truncated: boolean;
@@ -141,6 +137,23 @@ const BOUNDARIES: readonly string[] = Object.freeze([
   'STATIC reference coverage, NOT runtime line-coverage %. A test referencing a class does not prove it exercises every line; the authoritative number comes from running the org Apex tests.',
   'Dynamic invocation (Type.forName, mocking frameworks, indirect dispatch) is invisible to the v1.x scanner, so a class shown as untested may still be covered at runtime — verify before assuming zero coverage.',
   'A test class is identified by `properties.isTest === true` (set by the extractor); managed-package and SeeAllData tests are out of scope.',
+]);
+
+/**
+ * Appended only to the single-class-mode boundary list. Single-class mode
+ * deliberately never loads the org-wide roster (it answers off the target's
+ * own uncapped inbound edges), so `summary.testClasses` /
+ * `summary.nonTestClasses` are NOT-COMPUTED (`null`) here, not a real zero —
+ * mirroring `profile-security.ts`'s `sessionSecuritySettings: null` for a
+ * value it did not read. Call the tool with no class selector for the
+ * real org-wide counts.
+ */
+const SINGLE_CLASS_ROSTER_NOT_COMPUTED_BOUNDARY =
+  'summary.testClasses and summary.nonTestClasses are org-wide roster counts; they are `null` here (NOT a real 0) because single-class mode never loads the org-wide roster. Call sfi.apex_test_coverage with no class selector for the real org-wide counts.';
+
+const SINGLE_CLASS_BOUNDARIES: readonly string[] = Object.freeze([
+  ...BOUNDARIES,
+  SINGLE_CLASS_ROSTER_NOT_COMPUTED_BOUNDARY,
 ]);
 
 const APEX_CLASS_PREFIX = 'ApexClass:';
@@ -179,34 +192,6 @@ const resolveRequestedClass = (
 };
 
 const isTest = (n: Node): boolean => n.properties['isTest'] === true;
-
-/**
- * Load EVERY ApexClass node, not just the first page. `listNodesByType` caps a
- * single page at 500 (id ASC), so an org with > 500 classes used to drop the
- * tail — and a covering test sorted past the cap looked like it didn't exist,
- * turning the deploy-gate verdict into a false "untested" (the H6 false
- * negative). Page by `pageSize()` accumulating until a short page proves the
- * type is exhausted, with `countNodesByType` as a belt cross-check. The common
- * case (org under the cap) runs exactly one sub-cap page — byte-identical.
- */
-const loadAllApexClasses = async (
-  ctx: Context,
-): Promise<Result<readonly Node[], string>> => {
-  const total = await countNodesByType(ctx.graph, 'ApexClass');
-  if (!total.ok) return err(total.error.message);
-  const limit = pageSize();
-  const all: Node[] = [];
-  for (let offset = 0; ; offset += limit) {
-    const page = await listNodesByType(ctx.graph, 'ApexClass', { limit, offset });
-    if (!page.ok) return err(page.error.message);
-    all.push(...page.value);
-    // Primary guard: a short page means the type is exhausted (id-ASC order
-    // guarantees forward progress). Count is a belt cross-check so a page that
-    // unexpectedly returns full cannot loop forever.
-    if (page.value.length < limit || all.length >= total.value) break;
-  }
-  return ok(all);
-};
 
 /**
  * Build a map from non-test ApexClass id → set of test-class ids that emit a
@@ -265,12 +250,16 @@ export const apexTestCoverageHandler = async (
   }
 
   // Org-wide mode: load EVERY ApexClass (not just the first page) so the
-  // untested-class backlog and counts cover the full org.
-  const rosterResult = await loadAllApexClasses(ctx);
+  // untested-class backlog and counts cover the full org. `scanAllNodesOfTypes`
+  // is the shared multi-window OFFSET walker (`scan-all-nodes.ts`) — adopting it
+  // in place of a hand-rolled copy of the same loop also gains the
+  // `FULL_SCAN_MAX_NODES` residual cap and the `scanIncomplete` disclosure
+  // channel a bespoke loop had neither of.
+  const rosterResult = await scanAllNodesOfTypes(ctx.graph, ['ApexClass']);
   if (!rosterResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${rosterResult.error}` });
+    return err({ kind: 'internal', message: `graph query failed: ${rosterResult.error.message}` });
   }
-  const all = rosterResult.value;
+  const all = rosterResult.value.nodes;
   const tests = all.filter(isTest);
   const nonTests = all.filter((n) => !isTest(n));
   const nonTestIds = new Set<ComponentId>(nonTests.map((n) => n.id));
@@ -284,11 +273,13 @@ export const apexTestCoverageHandler = async (
   const classesWithRefs = [...nonTestIds].filter((id) => (coverage.get(id)?.size ?? 0) > 0);
   const classesWithoutRefs = [...nonTestIds].filter((id) => (coverage.get(id)?.size ?? 0) === 0);
 
-  // The offset loop exhausts the ApexClass type, so the SCAN dimension is
-  // honestly complete; the only remaining truncation is the explicit,
-  // caller-controlled `limit` slice on the output list below. `untestedClasses`
-  // is a list of UNIQUE ComponentIds (from `nonTestIds`, a Set), so the id-ASC
-  // sort is already a STRICT TOTAL order — no tiebreak needed for resume.
+  // The offset loop exhausts the ApexClass type (short of the
+  // FULL_SCAN_MAX_NODES residual cap — see `scanIncomplete` below), so the SCAN
+  // dimension is honestly complete in the normal case; the only remaining
+  // truncation is the explicit, caller-controlled `limit` slice on the output
+  // list below. `untestedClasses` is a list of UNIQUE ComponentIds (from
+  // `nonTestIds`, a Set), so the id-ASC sort is already a STRICT TOTAL order —
+  // no tiebreak needed for resume.
   const sortedUntested = [...classesWithoutRefs].sort((a, b) =>
     a < b ? -1 : a > b ? 1 : 0,
   );
@@ -324,6 +315,14 @@ export const apexTestCoverageHandler = async (
   const emitCursor = paged.nextCursor !== null;
   const isPaged = truncated || offset > 0;
 
+  // Residual full-scan cap (FULL_SCAN_MAX_NODES): false in the normal case
+  // (the ApexClass type walked to exhaustion); true only for a pathological
+  // org past the residual cap, in which case the roster counts below are an
+  // honest under-count rather than a silent one.
+  const boundaries = rosterResult.value.scanIncomplete
+    ? [...BOUNDARIES, fullScanTruncationNote(rosterResult.value.incompleteTypes)]
+    : BOUNDARIES;
+
   return ok({
     data: {
       mode: 'org-wide',
@@ -336,7 +335,7 @@ export const apexTestCoverageHandler = async (
         classesWithoutTestReferences: classesWithoutRefs.length,
         truncated,
       },
-      boundaries: BOUNDARIES,
+      boundaries,
       ...(isPaged ? { limit, offset } : {}),
       ...(truncated ? { nextOffset: offset + untestedClasses.length } : {}),
       ...(emitCursor
@@ -408,13 +407,15 @@ const singleClass = async (
         status: coveringTests.length > 0 ? 'has-test-references' : 'no-test-references-found',
       },
       summary: {
-        testClasses: 0,
-        nonTestClasses: 0,
+        // NOT-COMPUTED, never a real zero: single-class mode deliberately
+        // never loads the org-wide roster (see SINGLE_CLASS_ROSTER_NOT_COMPUTED_BOUNDARY).
+        testClasses: null,
+        nonTestClasses: null,
         classesWithTestReferences: coveringTests.length > 0 ? 1 : 0,
         classesWithoutTestReferences: coveringTests.length > 0 ? 0 : 1,
         truncated: false,
       },
-      boundaries: BOUNDARIES,
+      boundaries: SINGLE_CLASS_BOUNDARIES,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

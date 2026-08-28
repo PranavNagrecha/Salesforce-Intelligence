@@ -85,6 +85,7 @@ import {
 } from '../history-store.js';
 import type { Context } from '../server.js';
 
+import { familyWasExtracted } from './absence-disclosure.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, fullScanTruncationNote } from './scan-cap.js';
@@ -270,13 +271,19 @@ export interface IntegrationSummary {
 }
 
 /**
- * Automation-surface tally. `activeRatio` is the fraction of
- * automation that's flagged active (where the v1.x extractors
- * surfaced an `isActive` property); orgs whose `Flow.status` is
- * `'Active'`, whose `WorkflowRule.active` is `true`, and whose
- * `ApexTrigger` has no isActive=false marker contribute to the
- * active numerator. Bounded `[0, 1]`; reports `0` when the
- * automation count itself is zero (no division by zero).
+ * Automation-surface tally. `activeRatio` is the fraction of active
+ * automation **among the automation items whose active/inactive status was
+ * actually extracted** — `Flow.status`, `ApexTrigger.status`,
+ * `WorkflowRule.active` and `ApprovalProcess.active` when the node carries
+ * the property. All four families DO carry their axis on a current vault, so
+ * on a freshly refreshed org `activeStatusUnknownCount` is `0`. An automation
+ * node that does not carry the property — a stale vault whose refresh
+ * predates that extraction — is typed absence, not a measured `false`: it is
+ * excluded from both the numerator and the denominator and counted in
+ * `activeStatusUnknownCount` instead of being guessed as active. Bounded
+ * `[0, 1]`; reports `0` when the measured count itself is zero, which means
+ * NOT MEASURED rather than "0% active" — read it together with
+ * `activeStatusUnknownCount`, and the `boundaries[]` entry says so.
  */
 export interface AutomationSummary {
   readonly workflowRules: number;
@@ -284,6 +291,12 @@ export interface AutomationSummary {
   readonly flows: number;
   readonly apexTriggers: number;
   readonly activeRatio: number;
+  /**
+   * Count of automation nodes (of any of the four types) whose
+   * active/inactive status was NOT extracted — excluded from `activeRatio`
+   * rather than folded into the active numerator. See {@link AutomationSummary}.
+   */
+  readonly activeStatusUnknownCount: number;
 }
 
 /**
@@ -306,13 +319,19 @@ export interface FrontendSummary {
  * heuristic on `(workflowRules + approvalProcesses + vfPages)`: the
  * three buckets are `'low' | 'medium' | 'high'` per the thresholds
  * `MIGRATION_LOW_THRESHOLD` (`< 5`) and `MIGRATION_MEDIUM_THRESHOLD`
- * (`<= 30`).
+ * (`<= 30`) — but ONLY when both addend families were actually
+ * retrieved (`coverage.workflowRulesRetrieved` AND
+ * `coverage.frontendRetrieved`, since `vfPages` feeds the sum). When
+ * either family was not retrieved, `migrationCandidate` reports
+ * `'not-checked'` rather than bucketing a sum that may contain an
+ * unverified zero — the same typed-absence law as the `boundaries[]`
+ * disclosures for those two families, applied to the verdict they feed.
  */
 export interface LegacyDebtIndicators {
   readonly workflowRules: number;
   readonly approvalProcesses: number;
   readonly vfPages: number;
-  readonly migrationCandidate: 'low' | 'medium' | 'high';
+  readonly migrationCandidate: 'low' | 'medium' | 'high' | 'not-checked';
 }
 
 /**
@@ -408,32 +427,53 @@ const numericProperty = (
 };
 
 /**
- * Determine whether a Node represents "active" automation. Each of
- * the four automation types stores its active flag under a different
- * property key (Flow uses `status === 'Active'`, WorkflowRule uses
- * `active: true`, ApprovalProcess uses `active: true`, ApexTrigger
- * lacks an `isActive` axis in the v0.1 extractor and is conservatively
- * counted as active). The function returns false only when the
- * property is explicitly present and false-equivalent.
+ * Typed-absence result for one automation node's active/inactive status.
+ * `known: false` means the node does not carry the sentinel property at
+ * all — per {@link familyWasExtracted}'s law, that is NEVER-CHECKED, not a
+ * measured `false`, and `active` is meaningless in that case (always
+ * `false`, ignored by every caller).
  */
-const isActiveAutomation = (node: Node): boolean => {
+interface AutomationActiveStatus {
+  readonly known: boolean;
+  readonly active: boolean;
+}
+
+/**
+ * Determine an automation Node's active/inactive status, or disclose that it
+ * was never extracted. The four automation types store their active flag
+ * under two property keys: `Flow` and `ApexTrigger` both carry a `status`
+ * string that reads `'Active'` when live, while `WorkflowRule` and
+ * `ApprovalProcess` carry a boolean `active`. Every one of the four IS
+ * extracted — `packages/extractors/src/apex-trigger.ts` lists `status` in
+ * `META_REQUIRED_ELEMENTS` and writes `status: meta.status` into
+ * `baseProperties` unconditionally, which is why `automation-build-advisor`'s
+ * `isActiveTrigger`, `soe-active` and `what-if-disable-trigger` all read it as
+ * the trigger's active axis; this function deliberately matches that
+ * predicate rather than inventing a fourth rule.
+ *
+ * Decided by {@link familyWasExtracted} — whether the node CARRIES the
+ * property — never by treating a missing property as a guessed value. Only a
+ * genuinely property-less node (a stale vault whose refresh predates that
+ * extraction) reports `known: false`. Hardcoding any type to `known: false`
+ * would make the tool ASSERT that metadata was not extracted when it is
+ * present in the vault, which is a fabricated absence claim — a worse defect
+ * than the guess this replaced.
+ */
+const automationActiveStatus = (node: Node): AutomationActiveStatus => {
   const props = node.properties;
-  if (node.type === 'Flow') {
+  if (node.type === 'Flow' || node.type === 'ApexTrigger') {
+    if (!familyWasExtracted(props, 'status')) return { known: false, active: false };
     const status = props['status'];
-    if (typeof status === 'string') return status === 'Active';
-    // No status field — be honest and count as active. Inactive Flows
-    // explicitly set status; missing status means the v0.1 extractor
-    // could not determine it, in which case "still likely active" is
-    // the safer prior for a tour intended to flag debt.
-    return true;
+    return { known: true, active: typeof status === 'string' && status === 'Active' };
   }
   if (node.type === 'WorkflowRule' || node.type === 'ApprovalProcess') {
+    if (!familyWasExtracted(props, 'active')) return { known: false, active: false };
     const active = props['active'];
-    if (typeof active === 'boolean') return active;
-    return true;
+    return { known: true, active: typeof active === 'boolean' && active };
   }
-  // ApexTrigger has no extracted isActive in v0.1; count as active.
-  return true;
+  // Defensive default for a type outside AUTOMATION_TYPES_FOR_SUMMARY: no
+  // known active axis, so typed absence rather than a guess.
+  return { known: false, active: false };
 };
 
 /**
@@ -660,12 +700,18 @@ export const orgOverviewHandler = async (
   const automationCount = (type: ComponentType): number =>
     componentCounts[type] ?? 0;
   let activeAutomationCount = 0;
-  let totalAutomationCount = 0;
+  let measuredAutomationCount = 0;
+  let activeStatusUnknownCount = 0;
   for (const type of AUTOMATION_TYPES_FOR_SUMMARY) {
     const nodes = nodesByType.get(type) ?? [];
     for (const node of nodes) {
-      totalAutomationCount += 1;
-      if (isActiveAutomation(node)) activeAutomationCount += 1;
+      const status = automationActiveStatus(node);
+      if (!status.known) {
+        activeStatusUnknownCount += 1;
+        continue;
+      }
+      measuredAutomationCount += 1;
+      if (status.active) activeAutomationCount += 1;
     }
   }
   const automationSummary: AutomationSummary = {
@@ -674,9 +720,10 @@ export const orgOverviewHandler = async (
     flows: automationCount('Flow'),
     apexTriggers: automationCount('ApexTrigger'),
     activeRatio:
-      totalAutomationCount === 0
+      measuredAutomationCount === 0
         ? 0
-        : activeAutomationCount / totalAutomationCount,
+        : activeAutomationCount / measuredAutomationCount,
+    activeStatusUnknownCount,
   };
 
   const frontendCount = (type: ComponentType): number =>
@@ -695,16 +742,50 @@ export const orgOverviewHandler = async (
       frontendTotal === 0 ? 0 : (vfPages + vfComponents) / frontendTotal,
   };
 
+  // Coverage honesty (PLAN-v4.0 axis): a 0 in a summary family is only "none"
+  // if that family was actually retrieved. Families absent from this org's
+  // retrieve manifest report 0 too. A family counts as retrieved when it has
+  // ANY nodes (proof it was pulled) OR the manifest's coverage marks it
+  // complete; otherwise the tour must NOT assert "0 integration surfaces" /
+  // "0 workflow rules" when it never looked. Computed here, ahead of Stage 6,
+  // because `legacyDebtIndicators.migrationCandidate` must be gated by the
+  // same retrieval facts that gate the `workflowRules` / `vfPages` tallies it
+  // is bucketed from — a verdict minted from an unretrieved zero is exactly
+  // the typed-absence collapse this axis exists to prevent.
+  const familyRetrieved = (types: readonly string[]): boolean =>
+    types.some((t) => (componentCounts[t] ?? 0) > 0) ||
+    summarizeCoverage(ctx.manifest, types).status === 'complete';
+
+  const integrationRetrieved = familyRetrieved(INTEGRATION_TYPES_FOR_SUMMARY);
+  const workflowRulesRetrieved = familyRetrieved([
+    'WorkflowRule',
+    'ApprovalProcess',
+  ]);
+  const frontendRetrieved = familyRetrieved([
+    'LightningComponentBundle',
+    'AuraDefinitionBundle',
+    'VisualforcePage',
+    'VisualforceComponent',
+  ]);
+
   // Stage 6: legacy-debt indicators.
   const workflowRulesCount = componentCounts['WorkflowRule'] ?? 0;
   const approvalProcessesCount = componentCounts['ApprovalProcess'] ?? 0;
   const vfPagesCount = componentCounts['VisualforcePage'] ?? 0;
   const legacyTotal = workflowRulesCount + approvalProcessesCount + vfPagesCount;
+  // `legacyTotal` sums a WorkflowRule/ApprovalProcess family and a vfPages
+  // family that carry INDEPENDENT retrieval facts (`workflowRulesRetrieved`,
+  // `frontendRetrieved`); either one being unretrieved means the sum
+  // contains an unverified zero, so the verdict must not bucket it as if
+  // every addend were measured.
   const legacyDebtIndicators: LegacyDebtIndicators = {
     workflowRules: workflowRulesCount,
     approvalProcesses: approvalProcessesCount,
     vfPages: vfPagesCount,
-    migrationCandidate: bucketMigrationCandidate(legacyTotal),
+    migrationCandidate:
+      workflowRulesRetrieved && frontendRetrieved
+        ? bucketMigrationCandidate(legacyTotal)
+        : 'not-checked',
   };
 
   // Stage 7: largest apex classes. Read from the pre-fetched
@@ -768,28 +849,6 @@ export const orgOverviewHandler = async (
     });
   }
 
-  // Coverage honesty (PLAN-v4.0 axis): a 0 in a summary family is only "none"
-  // if that family was actually retrieved. Families absent from this org's
-  // retrieve manifest report 0 too. A family counts as retrieved when it has
-  // ANY nodes (proof it was pulled) OR the manifest's coverage marks it
-  // complete; otherwise the tour must NOT assert "0 integration surfaces" /
-  // "0 workflow rules" when it never looked.
-  const familyRetrieved = (types: readonly string[]): boolean =>
-    types.some((t) => (componentCounts[t] ?? 0) > 0) ||
-    summarizeCoverage(ctx.manifest, types).status === 'complete';
-
-  const integrationRetrieved = familyRetrieved(INTEGRATION_TYPES_FOR_SUMMARY);
-  const workflowRulesRetrieved = familyRetrieved([
-    'WorkflowRule',
-    'ApprovalProcess',
-  ]);
-  const frontendRetrieved = familyRetrieved([
-    'LightningComponentBundle',
-    'AuraDefinitionBundle',
-    'VisualforcePage',
-    'VisualforceComponent',
-  ]);
-
   const boundaries: string[] = [];
   if (!integrationRetrieved) {
     boundaries.push(
@@ -803,14 +862,32 @@ export const orgOverviewHandler = async (
     boundaries.push(
       `Legacy automation (WorkflowRule, ApprovalProcess) was not retrieved — those ` +
         `tallies read zero only because the families were not pulled, so they mean ` +
-        `"not checked", not "none".`,
+        `"not checked", not "none", and legacyDebtIndicators.migrationCandidate reports ` +
+        `'not-checked' rather than bucketing an unretrieved zero.`,
     );
   }
   if (!frontendRetrieved) {
     boundaries.push(
       `Frontend bundles (LightningComponentBundle, AuraDefinitionBundle, ` +
         `VisualforcePage, VisualforceComponent) were not retrieved — the frontend ` +
-        `and legacy-debt tallies mean "not checked", not "none".`,
+        `tallies mean "not checked", not "none", and legacyDebtIndicators.migrationCandidate ` +
+        `reports 'not-checked' rather than bucketing an unretrieved vfPages zero.`,
+    );
+  }
+  if (automationSummary.activeStatusUnknownCount > 0) {
+    boundaries.push(
+      `Automation active/inactive status was not extracted for ` +
+        `${automationSummary.activeStatusUnknownCount} of ` +
+        `${automationSummary.activeStatusUnknownCount + measuredAutomationCount} automation ` +
+        `item(s) (those Flow/ApexTrigger/WorkflowRule/ApprovalProcess nodes were imported ` +
+        `by a refresh predating status extraction — re-run /sfi-refresh to close it) — ` +
+        `activeRatio is computed only over the ${measuredAutomationCount} item(s) with a ` +
+        `known status; those ${automationSummary.activeStatusUnknownCount} are NOT assumed ` +
+        `active.` +
+        (measuredAutomationCount === 0
+          ? ` No automation item carried a status at all, so activeRatio reads 0 meaning ` +
+            `NOT MEASURED, not "0% active".`
+          : ''),
     );
   }
   // Residual full-scan cap (FULL_SCAN_MAX_NODES). False in the normal case now

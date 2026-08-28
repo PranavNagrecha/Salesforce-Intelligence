@@ -68,8 +68,12 @@ const seed: ExtractionResult = {
       type: 'Flow',
       apiName: 'Lead_Score_Update',
       properties: {
+        // Real extractor shape: Flow lifecycle is the `status` STRING; the
+        // extractor never writes a boolean `active` onto a Flow node. These
+        // fixtures used to seed `active: true`, which is why the suite stayed
+        // green while the tool returned a certified zero on a real vault.
         processType: 'Workflow',
-        active: true,
+        status: 'Active',
         decisionCount: 3,
         actionCount: 2,
         timeTriggerCount: 0,
@@ -81,7 +85,7 @@ const seed: ExtractionResult = {
       apiName: 'NotAProcessBuilder',
       properties: {
         processType: 'AutoLaunchedFlow',
-        active: true,
+        status: 'Active',
       },
     }),
     makeNode({
@@ -399,7 +403,7 @@ const scopeSeed: ExtractionResult = {
       type: 'Flow',
       apiName: 'Account_PB',
       parentId: OBJ_ACCOUNT,
-      properties: { processType: 'Workflow', active: true, decisionCount: 1, actionCount: 1 },
+      properties: { processType: 'Workflow', status: 'Active', decisionCount: 1, actionCount: 1 },
     }),
   ],
   edges: [],
@@ -635,5 +639,183 @@ describe('coverage-aware-zero — automation families not retrieved', () => {
     expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('WorkflowRule');
     expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('ApprovalProcess');
     expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Flow');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FLOW-LIFECYCLE-IS-STATUS-NOT-ACTIVE
+//
+// The Flow extractor's REQUIRED_ELEMENTS are `label` / `processType` / `status`
+// and its ALLOWED_STATUS enum is Active | Draft | Obsolete | InvalidDraft. It
+// NEVER writes a boolean `active` property onto a Flow node. Every fixture in
+// the block above seeds `active: true` on its Flow nodes — a node shape the real
+// extractor cannot produce — which is why the whole suite stayed green while the
+// tool returned a certified `totalProcessBuilders: 0` on a vault holding an
+// Active Process Builder. These cases seed Flow nodes in the shape the extractor
+// ACTUALLY emits.
+// ---------------------------------------------------------------------------
+const BOUNDARIES_WHEN_ALL_KNOWN = [
+  "the complexity classification is heuristic based on edge counts and time-trigger presence; complex business logic in a single-decision Process Builder may rank as 'simple' but require manual review for migration.",
+  'the migration tool itself (Setup → Migrate to Flow) does not run here — this tool produces the inventory and per-rule guidance.',
+];
+
+describe('processBuilderMigrationCandidatesHandler — Flow lifecycle (extractor shape)', () => {
+  const PB_ACTIVE = 'Flow:Process_A';
+  const PB_OBSOLETE = 'Flow:Process_B';
+  const PB_NO_STATUS = 'Flow:Process_C';
+
+  const lifecycleSeed: ExtractionResult = {
+    nodes: [
+      // Real extractor shape: `status`, no `active`.
+      makeNode({
+        id: PB_ACTIVE,
+        type: 'Flow',
+        apiName: 'Process_A',
+        properties: {
+          processType: 'Workflow',
+          status: 'Active',
+          decisionCount: 1,
+          actionCount: 1,
+          timeTriggerCount: 0,
+        },
+      }),
+      makeNode({
+        id: PB_OBSOLETE,
+        type: 'Flow',
+        apiName: 'Process_B',
+        properties: {
+          processType: 'Workflow',
+          status: 'Obsolete',
+          decisionCount: 1,
+          actionCount: 1,
+          timeTriggerCount: 0,
+        },
+      }),
+      // A vault whose refresh predates Flow lifecycle extraction: the node
+      // carries NO `status` property at all. Unknown is not inactive.
+      makeNode({
+        id: PB_NO_STATUS,
+        type: 'Flow',
+        apiName: 'Process_C',
+        properties: { processType: 'Workflow', decisionCount: 1, actionCount: 1 },
+      }),
+    ],
+    edges: [
+      makeEdge({
+        fromId: PB_ACTIVE,
+        toId: 'CustomField:Obj_A__c.Field_A__c',
+        edgeType: 'writesTo',
+      }),
+    ],
+  };
+
+  let lcDir: string;
+  let lcStore: GraphStore;
+  let lcCtx: Context;
+
+  beforeAll(async () => {
+    lcDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pbmc-lifecycle-'));
+    const opened = await openGraph(join(lcDir, 'pbmc-lifecycle.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    lcStore = opened.value;
+    const imported = await importExtractionResults(lcStore, [lifecycleSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    lcCtx = { vaultRoot: lcDir, manifest: FIXTURE_MANIFEST, graph: lcStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(lcStore);
+    rmSync(lcDir, { recursive: true, force: true });
+  });
+
+  it('surfaces a status=Active Process Builder on the default (activeOnly) call', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(lcCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.processBuilders.map((p) => p.id);
+    expect(ids).toContain(PB_ACTIVE);
+    expect(
+      r.value.data.processBuilders.find((p) => p.id === PB_ACTIVE)?.isActive,
+    ).toBe(true);
+  });
+
+  it('does not certify a zero when an Active Process Builder exists', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(lcCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalProcessBuilders).toBeGreaterThan(0);
+  });
+
+  it('still excludes a status=Obsolete Process Builder under activeOnly', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(lcCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.processBuilders.map((p) => p.id)).not.toContain(PB_OBSOLETE);
+  });
+
+  it('reports the raw lifecycle status per candidate rather than a bare boolean', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(lcCtx, {
+      activeOnly: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const byId = new Map(r.value.data.processBuilders.map((p) => [p.id, p]));
+    expect(byId.get(PB_ACTIVE)?.status).toBe('Active');
+    expect(byId.get(PB_OBSOLETE)?.status).toBe('Obsolete');
+    expect(byId.get(PB_OBSOLETE)?.isActive).toBe(false);
+  });
+
+  // R1 typed absence: a node that CARRIES NO `status` was never scanned for
+  // lifecycle. Collapsing that into `isActive: false` and dropping it is the
+  // exact certified-zero this finding is about, one refresh-version earlier.
+  it('keeps a status-less Process Builder under activeOnly and types it as unknown', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(lcCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    const unknown = d.processBuilders.find((p) => p.id === PB_NO_STATUS);
+    expect(unknown).toBeDefined();
+    expect(unknown?.isActive).toBeNull();
+    expect(unknown?.status).toBeNull();
+    expect(d.lifecycleUnknown?.processBuilders).toContain(PB_NO_STATUS);
+    expect(d.lifecycleUnknown?.disclosure).toMatch(/NOT/);
+    expect(d.boundaries.some((b) => /lifecycle/i.test(b))).toBe(true);
+  });
+
+  it('omits the lifecycleUnknown block on a vault where every node carries a lifecycle', async () => {
+    const cleanDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pbmc-lifecycle-clean-'));
+    const opened = await openGraph(join(cleanDir, 'clean.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const cleanStore = opened.value;
+    try {
+      const imported = await importExtractionResults(cleanStore, [
+        {
+          nodes: [
+            makeNode({
+              id: PB_ACTIVE,
+              type: 'Flow',
+              apiName: 'Process_A',
+              properties: { processType: 'Workflow', status: 'Active' },
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      if (!imported.ok) throw new Error(imported.error.message);
+      const cleanCtx: Context = {
+        vaultRoot: cleanDir,
+        manifest: FIXTURE_MANIFEST,
+        graph: cleanStore,
+      };
+      const r = await processBuilderMigrationCandidatesHandler(cleanCtx, {});
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalProcessBuilders).toBe(1);
+      expect(r.value.data.lifecycleUnknown).toBeUndefined();
+      expect(r.value.data.boundaries).toEqual(BOUNDARIES_WHEN_ALL_KNOWN);
+    } finally {
+      await closeGraph(cleanStore);
+      rmSync(cleanDir, { recursive: true, force: true });
+    }
   });
 });

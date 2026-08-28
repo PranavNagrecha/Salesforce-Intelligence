@@ -6,17 +6,22 @@
  * type, and confidence, and PAGED by `limit`/`offset` (with `totalCount` /
  * `hasMore` / `nextOffset`) so a hub node's edge set can't overflow the
  * response — the paging is applied here, NOT in `listEdges`, whose full result
- * the analysis tools depend on. Unknown nodeIds resolve to `ok({ edges: [] })` —
- * the graph cannot distinguish "no node" from "node exists but is
- * isolated", and either is a valid empty result for this tool. Malformed
- * inputs (unknown `edgeType`, unknown `direction`, unknown `confidence`)
- * are rejected at the Zod boundary, so callers learn `invalid-query`
- * instead of receiving a silently-empty list.
+ * the analysis tools depend on. A whole-empty result (`totalCount === 0`)
+ * resolves the node ONCE (`getNodeById`) to tell "no node with this id"
+ * apart from "node exists but is isolated" — the graph CAN distinguish the
+ * two, so an unknown/mistyped/phantom id gets `nodeNotFound` (phantom-aware,
+ * via `phantom-node.ts`) instead of a `coverageCaveat` that misattributes the
+ * emptiness to a retrieve gap and points the caller at a refresh that can
+ * never manufacture a node for a bad id. Malformed inputs (unknown
+ * `edgeType`, unknown `direction`, unknown `confidence`) are rejected at the
+ * Zod boundary, so callers learn `invalid-query` instead of receiving a
+ * silently-empty list.
  */
 
 import {
   EDGE_TYPES,
   UNPRODUCED_EDGE_TYPES,
+  type ComponentId,
   type ConfidenceLevel,
   type Edge,
   type McpError,
@@ -24,7 +29,7 @@ import {
   type PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -35,6 +40,7 @@ import {
   GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
 } from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /**
  * The `ConfidenceLevel` values declared by `@sf-intelligence/contracts`.
@@ -70,7 +76,7 @@ const GET_EDGES_BYTE_BUDGET = 38_000;
  * Zod schema for the `sfi.get_edges` tool input.
  *
  *   - `nodeId`: required, non-empty string. Unknown ids surface as an
- *     empty edge list, not a Zod-level rejection.
+ *     empty edge list (with `nodeNotFound` set), not a Zod-level rejection.
  *   - `direction`: optional; one of `'in' | 'out' | 'both'`. The longer
  *     `'incoming'` / `'outgoing'` forms (used in some docs/clients) are
  *     accepted and normalized. Defaults to `'both'` inside
@@ -98,6 +104,18 @@ export const getEdgesInputSchema = z.object({
 
 /** Parsed input shape, inferred from `getEdgesInputSchema`. */
 export type GetEdgesInput = z.infer<typeof getEdgesInputSchema>;
+
+/**
+ * Derive a human type label from a canonical id's `Type:` prefix, for
+ * `phantomAwareNotFoundMessage`'s `kindLabel` argument. `get_edges` accepts
+ * ANY node type (not one fixed kind like most `phantomAwareNotFoundMessage`
+ * callers), so the label is read off the id itself; a malformed id with no
+ * colon falls back to the generic `'component'`.
+ */
+const kindLabelFromNodeId = (id: string): string => {
+  const colon = id.indexOf(':');
+  return colon > 0 ? id.slice(0, colon) : 'component';
+};
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface GetEdgesOutput {
@@ -138,6 +156,19 @@ export interface GetEdgesOutput {
    * refresh on any org, because the producer does not exist in the product.
    */
   readonly unproducedEdgeType?: string;
+  /**
+   * Present ONLY when `totalCount === 0` AND `nodeId` itself resolves to no
+   * node in this vault — a typo, a wrong-case id, or a component this org
+   * references but never retrieved (a managed-package phantom). Carries the
+   * `phantomAwareNotFoundMessage` verdict, which distinguishes "genuinely
+   * unknown" from "referenced but not retrieved" and names the reference
+   * count for the latter. Mutually exclusive with `coverageCaveat`: when the
+   * node itself is not found, blaming an un-retrieved dependency FAMILY for
+   * the empty edge list would be wrong (no refresh manufactures a node for a
+   * bad id), so this replaces it instead of stacking beside it. Absent when
+   * the node resolves (whether it has edges or is legitimately isolated).
+   */
+  readonly nodeNotFound?: string;
 }
 
 /**
@@ -221,14 +252,40 @@ export const getEdgesHandler = async (
   // exactly when `paginateLegacy` produced a non-null nextCursor.
   const emitCursor = paged.nextCursor !== null;
 
-  // I3b (empty ≠ none): only when the WHOLE edge set is empty do we risk the
-  // host reading "no edges" as a proven "nothing depends on this" — attach a
-  // coverage caveat naming the dependency families the vault did NOT fully
-  // retrieve. Non-empty pages are untouched.
-  const coverageCaveat =
-    paged.totalCount === 0
-      ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
-      : undefined;
+  // I3b (empty ≠ none), split by WHICH kind of empty this is: only when the
+  // whole edge set is empty do we risk the host reading "no edges" as a
+  // proven "nothing depends on this" — but the graph CAN tell "node exists,
+  // legitimately isolated" apart from "no such node", so resolve it once
+  // here rather than blaming a retrieve-coverage gap for both alike.
+  let coverageCaveat: CoverageCaveat | undefined;
+  let nodeNotFound: string | undefined;
+  if (paged.totalCount === 0) {
+    const nodeLookup = await getNodeById(ctx.graph, input.nodeId as ComponentId);
+    if (!nodeLookup.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${nodeLookup.error.message}`,
+      });
+    }
+    if (nodeLookup.value === null) {
+      // Not a node in this vault at all: typo, wrong case, or a phantom
+      // (referenced but never retrieved). `phantomAwareNotFoundMessage`
+      // tells the two apart and names the reference count for the latter —
+      // strictly more honest than a generic "family wasn't retrieved"
+      // caveat, which would send the caller to re-run a refresh that can
+      // never produce a node for a bad id.
+      nodeNotFound = await phantomAwareNotFoundMessage(
+        ctx,
+        input.nodeId as ComponentId,
+        kindLabelFromNodeId(input.nodeId),
+      );
+    } else {
+      // The node IS in the vault and genuinely has no incident edges — the
+      // "isolated" read is legitimate, so the coverage caveat about
+      // un-retrieved dependency families applies here as before.
+      coverageCaveat = buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE);
+    }
+  }
 
   // Same "empty ≠ none" hazard, different and more absolute cause: the caller
   // asked for an edge type the product NEVER emits, so `[]` is structurally
@@ -254,6 +311,7 @@ export const getEdgesHandler = async (
       ...(note !== undefined ? { note } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(unproducedEdgeType !== undefined ? { unproducedEdgeType } : {}),
+      ...(nodeNotFound !== undefined ? { nodeNotFound } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

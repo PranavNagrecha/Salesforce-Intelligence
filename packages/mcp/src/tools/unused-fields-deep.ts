@@ -85,6 +85,9 @@
  *     deletion.
  */
 
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import type {
   ComponentId,
   ComponentType,
@@ -112,7 +115,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { offlineTrust } from './coverage-trust.js';
+import { offlineTrust, usageSourceFamiliesFor } from './coverage-trust.js';
+import { scanFlowXml } from './flow-field-writers-scan.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
 import { probeLiveAccess } from './live-plane.js';
 import {
@@ -132,7 +136,8 @@ import {
   reportDashboardUsageDetail,
   type ReportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
-import { nodeScanLimit } from './scan-cap.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { FULL_SCAN_MAX_NODES, nodeScanLimit } from './scan-cap.js';
 
 const UNUSED_FIELDS_DEEP_TOOL = 'sfi.unused_fields_deep';
 
@@ -144,20 +149,29 @@ const UNUSED_FIELDS_DEEP_TOOL = 'sfi.unused_fields_deep';
  */
 const PROPOSAL_REPORT_EXCLUSION_EVIDENCE_CAP = 25;
 
-/** Metadata families exercised by the eight-tier unused-field cross-walk. */
-const UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE = [
-  'CustomField',
-  'ValidationRule',
-  'WorkflowRule',
-  'Layout',
-  'ApexClass',
-  'ApexTrigger',
-  'Flow',
-  'LightningComponentBundle',
-  'AuraDefinitionBundle',
-  'VisualforcePage',
-  'VisualforceComponent',
-] as const;
+/**
+ * Metadata families whose retrieve coverage this tool's verdict depends on.
+ *
+ * UNUSED-FIELDS-DEEP-CERTIFIES-COMPLETENESS-IT-DID-NOT-EARN: this used to be a
+ * PRIVATE, hand-copied 11-family list, and it had DRIFTED from the vetted
+ * `CustomField` producer set that `safe_to_delete_field` / `review_change` /
+ * `unused_components` all share. The drift was not cosmetic — it was the whole
+ * defect. On a real vault whose `Report` / `Dashboard` pulls were capped, the
+ * per-field delete-safety tool reported `completeness: 'partial'` with
+ * `missingCoverage: ['Report','Dashboard']` for a field, while THIS tool
+ * reported the identical field at `confidence: 'high'` under
+ * `trust: {completeness: {status: 'complete'}, limitations: []}` — because
+ * neither family appeared in the private list, so `summarizeCoverage` was never
+ * asked about them. `trust` is the block a host keys on for a go/no-go, and it
+ * said "complete, no limitations" over an analysis whose own `boundaries`
+ * described a capped analytics pull two keys above it.
+ *
+ * DERIVED from the ONE shared list (R6 adoption) so the two tools can no longer
+ * disagree about the same vault: a family added there is automatically checked
+ * here.
+ */
+const UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE: readonly string[] =
+  usageSourceFamiliesFor('CustomField');
 
 const completenessForUnusedFieldsDeep = (
   ctx: Context,
@@ -1113,6 +1127,220 @@ const sortCleanupFindings = (
     .map((finding, index) => ({ ...finding, rank: index + 1 }));
 
 // ---------------------------------------------------------------------------
+// SUPPLEMENTAL SOURCE-FILE CROSS-CHECK (the two planes the GRAPH does not hold)
+//
+// The eight tiers above all read the GRAPH. Two whole families of real,
+// declared, retrieved usage never reach the graph as an edge, so a field used
+// ONLY through one of them passed all eight tiers and was published as
+// `confidence: 'high'` unused — and, under `format: 'proposal'`, packaged into
+// a deploy-ready `destructiveChanges.xml`:
+//
+//   PLANE 1 — Flow writes routed through an SObject VARIABLE. A Flow that
+//     writes a field via `<assignToReference>SomeVar.Field__c` or a
+//     `<recordCreates>` / `<recordUpdates>` `<inputAssignments><field>` block
+//     (rather than `$Record`) mints NO `writesTo` edge. The product already
+//     knows this: `safe_to_delete_field`, `field_360` and `why_field_changed`
+//     each reconstruct those writers from the Flow SOURCE via the shared
+//     `flow-field-writers-scan`. This ORG-WIDE surface never consulted it, so
+//     the per-field tool returned `blocking` for fields this tool was listing
+//     at `high` confidence on the same vault, in the same session.
+//
+//   PLANE 2 — ReportType `<columns>`. The ReportType family IS retrieved and IS
+//     modelled, but the extractor deliberately defers the per-column
+//     `<field>`/`<table>` identity graph and stamps every ReportType node with
+//     `columnsModeled: false` (see `packages/extractors/src/enterprise-metadata.ts`).
+//     That is a TYPED "never scanned" marker sitting in the graph, and the
+//     eight-tier walk ignored it: a field that is an explicit column of a
+//     custom report type had zero inbound edges and read as dead. This is NOT
+//     the capped-analytics boundary the tool already discloses — that boundary
+//     is about the Report/Dashboard usage fold, a different family.
+//
+// Both are read from the vault's own source tree, the same way the shared Flow
+// writer scan does, and both are BOUNDED and DISCLOSED: a plane whose walk
+// could not complete downgrades to "not checked" instead of implying a clean
+// sweep. This runs ONCE per call over the fields that already survived all
+// eight tiers (never per field), so the cost is one pass over two source
+// directories, not a per-candidate re-read.
+// ---------------------------------------------------------------------------
+
+/** Outcome of the two supplemental source-file planes. */
+interface SupplementalUsageScan {
+  /** Field id → the evidence lines that disqualify it. */
+  readonly hits: ReadonlyMap<string, readonly string[]>;
+  /** Verbatim disclosures to append to the response `boundaries`. */
+  readonly disclosures: readonly string[];
+}
+
+/** Bare `<field>` / `<assignToReference>` tokens in a Flow XML — a PREFILTER. */
+const flowFieldTokens = (xml: string): ReadonlySet<string> => {
+  const out = new Set<string>();
+  let m: RegExpExecArray | null;
+  const fieldTag = /<field>([^<]+)<\/field>/g;
+  while ((m = fieldTag.exec(xml)) !== null) if (m[1] !== undefined) out.add(m[1]);
+  const assign = /<assignToReference>[^<.]*\.([^<]+)<\/assignToReference>/g;
+  while ((m = assign.exec(xml)) !== null) if (m[1] !== undefined) out.add(m[1]);
+  return out;
+};
+
+/**
+ * One ReportType file's columns, keyed `Table.Field`.
+ *
+ * A `<table>` holding a DOT is a relationship PATH out of the base object
+ * (`Base.Children__r`), whose last segment is a relationship api name, not an
+ * object api name — it cannot be resolved to a `CustomObject` from the report
+ * type alone. Those columns are COUNTED (so the residual can be disclosed) but
+ * never used to suppress a field: matching on the bare field name would delete-
+ * protect an unrelated same-named field on another object, which is a different
+ * lie in the other direction.
+ */
+const reportTypeColumnKeys = (
+  xml: string,
+): { readonly keys: readonly string[]; readonly unattributed: number } => {
+  const keys: string[] = [];
+  let unattributed = 0;
+  const columnBlock = /<columns>([\s\S]*?)<\/columns>/g;
+  let block: RegExpExecArray | null;
+  while ((block = columnBlock.exec(xml)) !== null) {
+    const body = block[1] ?? '';
+    const field = /<field>([^<]+)<\/field>/.exec(body)?.[1];
+    const table = /<table>([^<]+)<\/table>/.exec(body)?.[1];
+    if (field === undefined || table === undefined) continue;
+    if (table.includes('.')) {
+      unattributed += 1;
+      continue;
+    }
+    keys.push(`${table}.${field}`);
+  }
+  return { keys, unattributed };
+};
+
+/**
+ * Cross-check the fields that survived all eight graph tiers against the two
+ * source-only usage planes. Returns the disqualifying evidence plus the
+ * verbatim disclosures the response must carry.
+ */
+const scanSupplementalUsagePlanes = async (
+  ctx: Context,
+  candidates: readonly UnusedFieldDeepEntry[],
+): Promise<SupplementalUsageScan> => {
+  const hits = new Map<string, string[]>();
+  const disclosures: string[] = [];
+  if (candidates.length === 0) return { hits, disclosures };
+  const addHit = (fieldId: string, reason: string): void => {
+    const existing = hits.get(fieldId);
+    if (existing === undefined) hits.set(fieldId, [reason]);
+    else existing.push(reason);
+  };
+
+  // --- PLANE 1: Flow writers the extractor did not stamp as an edge ---------
+  const flows = await scanAllNodesOfTypes(ctx.graph, ['Flow'], FULL_SCAN_MAX_NODES);
+  if (!flows.ok) {
+    disclosures.push(
+      'the supplemental Flow field-writer cross-check (`flow-field-writers-scan`) could NOT run on this call (the Flow node walk failed), so a field written by a Flow through an SObject variable or a `<recordCreates>`/`<recordUpdates>` `<inputAssignments>` block — neither of which mints a `writesTo` edge — may be listed here as unused. Treat every row on this response as NOT CHECKED against that plane; `sfi.safe_to_delete_field` runs the same scan per field.',
+    );
+  } else {
+    let flowsRead = 0;
+    let flowsUnreadable = 0;
+    for (const flow of flows.value.nodes) {
+      if (typeof flow.sourcePath !== 'string' || flow.sourcePath.length === 0) {
+        flowsUnreadable += 1;
+        continue;
+      }
+      let xml: string;
+      try {
+        xml = await readFile(join(ctx.vaultRoot, flow.sourcePath), 'utf-8');
+      } catch {
+        // Source on record but unreadable: this Flow was NOT checked. Count it
+        // against completeness rather than let a rotted source tree read as a
+        // clean sweep (the same accounting `flow-field-writers-scan` applies).
+        flowsUnreadable += 1;
+        continue;
+      }
+      flowsRead += 1;
+      // Cheap token prefilter, then the SHARED `scanFlowXml` predicate decides.
+      // The verdict is never re-derived here: this tool and the per-field tools
+      // must agree about the same Flow, so only ONE implementation may exist.
+      const tokens = flowFieldTokens(xml);
+      for (const candidate of candidates) {
+        if (!tokens.has(candidate.apiName)) continue;
+        const writes = scanFlowXml(xml, candidate.parentObjectApiName, candidate.apiName);
+        for (const write of writes) {
+          addHit(
+            candidate.id,
+            `${candidate.id} — WRITTEN by Flow \`${flow.apiName}\` via \`${write.mechanism}\` (reconstructed by \`flow-field-writers-scan\` from the Flow source; this write mints no \`writesTo\` edge, so the eight graph tiers could not see it). Confirm the Flow before deleting.`,
+          );
+        }
+      }
+    }
+    if (flows.value.scanIncomplete || flowsUnreadable > 0) {
+      const total = await countNodesByType(ctx.graph, 'Flow');
+      const totalCount = total.ok ? total.value : flows.value.nodes.length;
+      disclosures.push(
+        `the supplemental Flow field-writer cross-check read ${flowsRead} of ${totalCount} Flow(s) — a Flow in the un-read tail that writes a field through an SObject variable or an \`<inputAssignments>\` block mints no \`writesTo\` edge, so for those Flows the absence of a writer is NOT CHECKED, never proven "none".`,
+      );
+    }
+  }
+
+  // --- PLANE 2: ReportType columns (retrieved, deliberately not modelled) ---
+  const reportTypes = await scanAllNodesOfTypes(
+    ctx.graph,
+    ['ReportType'],
+    FULL_SCAN_MAX_NODES,
+  );
+  if (!reportTypes.ok) {
+    disclosures.push(
+      'the supplemental ReportType column cross-check could NOT run on this call (the ReportType node walk failed). Every ReportType node carries `columnsModeled: false` — the extractor does not model per-column `<field>`/`<table>` identity — so a field used only as a custom report-type column has ZERO inbound edges and may be listed here as unused.',
+    );
+  } else if (reportTypes.value.nodes.length === 0) {
+    disclosures.push(
+      'no `ReportType` was found in this vault, so custom report-type columns were NOT checked. A field used only as a report-type column has zero inbound edges and would be listed here as unused — refresh with the `ReportType` family to close this plane.',
+    );
+  } else {
+    const columnKeys = new Set<string>();
+    let rtRead = 0;
+    let rtUnreadable = 0;
+    let unattributedColumns = 0;
+    for (const rt of reportTypes.value.nodes) {
+      if (typeof rt.sourcePath !== 'string' || rt.sourcePath.length === 0) {
+        rtUnreadable += 1;
+        continue;
+      }
+      let xml: string;
+      try {
+        xml = await readFile(join(ctx.vaultRoot, rt.sourcePath), 'utf-8');
+      } catch {
+        rtUnreadable += 1;
+        continue;
+      }
+      rtRead += 1;
+      const parsed = reportTypeColumnKeys(xml);
+      unattributedColumns += parsed.unattributed;
+      for (const key of parsed.keys) columnKeys.add(key);
+    }
+    for (const candidate of candidates) {
+      const key = `${candidate.parentObjectApiName}.${candidate.apiName}`;
+      if (!columnKeys.has(key)) continue;
+      addHit(
+        candidate.id,
+        `${candidate.id} — an explicit COLUMN of a custom ReportType (read from the retrieved report-type source; every ReportType node carries \`columnsModeled: false\`, so this usage exists in no edge). Deleting the field breaks that report type and every saved report built on it.`,
+      );
+    }
+    if (reportTypes.value.scanIncomplete || rtUnreadable > 0) {
+      disclosures.push(
+        `the supplemental ReportType column cross-check read ${rtRead} of ${reportTypes.value.nodes.length + rtUnreadable} ReportType(s); columns in the un-read tail were NOT CHECKED.`,
+      );
+    }
+    if (unattributedColumns > 0) {
+      disclosures.push(
+        `${unattributedColumns} ReportType column(s) sit under a RELATIONSHIP-PATH \`<table>\` (\`Base.Children__r\`) whose last segment is a relationship api name, not an object — those columns could not be attributed to an object and were NOT used to hold a field back. A field used only through such a column can still appear in this list.`,
+      );
+    }
+  }
+
+  return { hits, disclosures };
+};
+
+// ---------------------------------------------------------------------------
 // Finding #35 `format: 'proposal'` — LOCAL destructiveChanges.xml bundle.
 // ---------------------------------------------------------------------------
 
@@ -1148,6 +1376,18 @@ export const buildUnusedFieldsProposal = (
     readonly fieldId: string;
     readonly detail: ReportDashboardUsageDetail;
   }[],
+  /**
+   * Fields the supplemental SOURCE-FILE cross-check held out of the unused set
+   * (a Flow write that mints no edge, or a ReportType column). These are the
+   * rows that used to land IN this destructiveChanges.xml at `confidence:
+   * 'high'`, so the bundle must say they exist and why they are gone — a
+   * silently shorter member list is how the artifact stayed authoritative-
+   * looking while being wrong.
+   */
+  supplementalExcluded?: readonly {
+    readonly fieldId: string;
+    readonly reasons: readonly string[];
+  }[],
 ): ProposalArtifact => {
   const high = pageFields.filter((f) => f.confidence === 'high');
   const mediumCount = pageFields.filter((f) => f.confidence === 'medium').length;
@@ -1169,6 +1409,18 @@ export const buildUnusedFieldsProposal = (
   if (high.length > included.length) {
     excluded.push(
       `Only the first ${included.length} of ${high.length} high-confidence fields on this page were packaged (proposal cap ${PROPOSAL_MAX_COMPONENTS}); page or narrow with \`objectId\` for the rest.`,
+    );
+  }
+
+  const supplementalReasons: string[] = [];
+  if (supplementalExcluded !== undefined && supplementalExcluded.length > 0) {
+    const sample = supplementalExcluded.slice(0, PROPOSAL_REPORT_EXCLUSION_EVIDENCE_CAP);
+    for (const row of sample) supplementalReasons.push(...row.reasons);
+    excluded.push(
+      `${supplementalExcluded.length} field(s) were HELD OUT of this delete set by the supplemental source-file cross-check (a Flow write routed through an SObject variable or an \`<inputAssignments>\` block, which mints no \`writesTo\` edge; or an explicit column of a custom ReportType, a family whose per-column identity the extractor does not model). Without that cross-check these fields would have been packaged here at \`confidence: 'high'\`.` +
+        (supplementalExcluded.length > sample.length
+          ? ` Evidence capped at ${PROPOSAL_REPORT_EXCLUSION_EVIDENCE_CAP} named rows.`
+          : ''),
     );
   }
 
@@ -1199,6 +1451,7 @@ export const buildUnusedFieldsProposal = (
     sourceTreeHash: vaultState.sourceTreeHash,
     refreshedAt: vaultState.refreshedAt,
     reasons: [
+      ...supplementalReasons,
       ...reportBreakReasons,
       ...included.map((f) => `${f.id} — ${f.recommendedAction}`),
     ],
@@ -1406,7 +1659,27 @@ export const unusedFieldsDeepHandler = async (
     });
   }
 
-  const sorted = [...entries].sort(compareById);
+  // SUPPLEMENTAL SOURCE-FILE CROSS-CHECK — the two planes the graph does not
+  // hold (see `scanSupplementalUsagePlanes`). Run ONCE over the fields that
+  // already survived all eight graph tiers: a field this proves is written by a
+  // Flow, or is an explicit ReportType column, is NOT unused and is held out of
+  // the list exactly like a report/dashboard-used field, with its evidence
+  // carried into `format: 'proposal'` so the delete bundle states what it
+  // dropped and why.
+  const supplemental = await scanSupplementalUsagePlanes(ctx, entries);
+  const supplementalExcluded: { readonly fieldId: string; readonly reasons: readonly string[] }[] =
+    [];
+  const survivors: UnusedFieldDeepEntry[] = [];
+  for (const entry of entries) {
+    const reasons = supplemental.hits.get(entry.id);
+    if (reasons !== undefined && reasons.length > 0) {
+      supplementalExcluded.push({ fieldId: entry.id, reasons });
+      continue;
+    }
+    survivors.push(entry);
+  }
+
+  const sorted = [...survivors].sort(compareById);
 
   const byParentObject: Record<string, number> = {};
   const byConfidence: Record<'high' | 'medium' | 'low', number> = {
@@ -1419,8 +1692,6 @@ export const unusedFieldsDeepHandler = async (
       (byParentObject[e.parentObjectApiName] ?? 0) + 1;
     byConfidence[e.confidence] += 1;
   }
-  const trust = offlineTrust(ctx, completenessForUnusedFieldsDeep(ctx));
-
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers every NARROWING arg — the resolved object scope plus
   // the two exclude flags — so a token can't replay across a different
@@ -1447,10 +1718,35 @@ export const unusedFieldsDeepHandler = async (
   // existing 36 KB byteBudget so the per-page trim stays equivalent.
   // `byParentObject` / `byConfidence` / `totalCount` keep the UNFILTERED counts
   // so the trim never understates how many unused fields exist.
+  const supplementalBoundaries: string[] = [
+    ...supplemental.disclosures,
+    ...(supplementalExcluded.length > 0
+      ? [
+          `${supplementalExcluded.length} field(s) that passed all eight GRAPH tiers were HELD OUT of this list by the supplemental source-file cross-check — they are written by a Flow through a path that mints no \`writesTo\` edge (reconstructed by \`flow-field-writers-scan\`, the same scan \`sfi.safe_to_delete_field\` runs per field), or are explicit columns of a custom ReportType (a family whose per-column identity the extractor does not model, \`columnsModeled: false\`). \`totalCount\` and \`byConfidence\` are AFTER that exclusion.`,
+        ]
+      : []),
+  ];
+
+  // The response's DISCLOSURE block is no longer a fixed ~1.6 KB: the
+  // supplemental planes add their own boundaries, and `trust.limitations` now
+  // carries the same strings a second time (DERIVED — see the trust build
+  // below). `UNUSED_FIELDS_DEEP_BYTE_BUDGET` bounds the ROWS, so leaving it
+  // unadjusted would spend the headroom that keeps the whole envelope under the
+  // global ~45 KB MCP guard. Charge the disclosure block against the row budget
+  // (×2 for the boundaries/limitations pair) so a longer, more honest disclosure
+  // costs ROWS — which page — instead of silently pushing the envelope over the
+  // guard, which does not.
+  const disclosureCharge =
+    2 * Buffer.byteLength(JSON.stringify([...BOUNDARIES, ...supplementalBoundaries]), 'utf8');
+  const rowByteBudget = Math.max(
+    8_000,
+    UNUSED_FIELDS_DEEP_BYTE_BUDGET - disclosureCharge,
+  );
+
   const paged = paginateLegacy(sorted, {
     offset,
     limit,
-    byteBudget: UNUSED_FIELDS_DEEP_BYTE_BUDGET,
+    byteBudget: rowByteBudget,
     keyOf: (e) => e.id,
     binding: {
       tool: UNUSED_FIELDS_DEEP_TOOL,
@@ -1581,7 +1877,42 @@ export const unusedFieldsDeepHandler = async (
         ]
       : []),
   ];
-  const boundaries = liveBoundaries.length > 0 ? [...BOUNDARIES, ...liveBoundaries] : BOUNDARIES;
+  const boundaries: readonly string[] = [
+    ...BOUNDARIES,
+    ...supplementalBoundaries,
+    ...liveBoundaries,
+  ];
+
+  // UNUSED-FIELDS-DEEP-CERTIFIES-COMPLETENESS-IT-DID-NOT-EARN.
+  //
+  // `trust` is the block a host LLM keys on to decide how hard to hedge, and it
+  // is the block most likely to be quoted verbatim. This tool used to emit
+  // `{completeness: {status: 'complete'}, limitations: []}` on a 28-of-427
+  // TRUNCATED page whose own `data.boundaries` — two keys above, in the same
+  // envelope — named three real limitations, while the per-field sibling
+  // (`safe_to_delete_field`) reported `partial` for the very same fields on the
+  // very same vault. A host reading only `trust` led with "complete analysis,
+  // no limitations" over a list of DELETION candidates.
+  //
+  // `limitations` is DERIVED from the boundaries this response actually carries
+  // (plus the page-truncation fact `truncated` states structurally), so the two
+  // cannot drift into contradiction: a boundary added anywhere above is a
+  // limitation here by construction, and there is no second hand-maintained
+  // copy to forget. Completeness itself now comes from the SHARED CustomField
+  // usage-source family list (see UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE).
+  const trust = offlineTrust(
+    ctx,
+    completenessForUnusedFieldsDeep(ctx),
+    UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE,
+    [
+      ...(truncated
+        ? [
+            `PARTIAL PAGE: this response carries ${fields.length} of ${sorted.length} unused field(s) (offset ${offset}). The rows past this page were NOT returned — resume with \`nextOffset\` / \`nextCursor\` before treating this list as the org's full cleanup set.`,
+          ]
+        : []),
+      ...boundaries,
+    ],
+  );
 
   const vaultState = {
     sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -1621,6 +1952,7 @@ export const unusedFieldsDeepHandler = async (
       boundaries,
       vaultState,
       reportExcluded,
+      supplementalExcluded,
     );
     return ok({ data: { ...dataWithoutCsv, proposal }, vaultState });
   }

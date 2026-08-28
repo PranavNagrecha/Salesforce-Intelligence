@@ -28,6 +28,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { resolveContainerAlias, resolveObjectAlias } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
@@ -113,10 +114,19 @@ export interface TabAvailabilityOutput {
     readonly object?: string;
   };
   readonly tabs: readonly TabVisibilityRow[];
+  /**
+   * `null` in every field when `tabVisibilities` was never extracted for this
+   * container ({@link familyWasExtracted} false) — a TYPED absence, distinct
+   * from `0` (checked, this container/scope declares no tabs). Collapsing
+   * the two to `0` is exactly the bug this shape exists to prevent: a
+   * consumer reading the structured summary (rather than prose in
+   * `boundaryNote`) could not otherwise tell "never checked" from "checked,
+   * holds none". Mirrors `user_ability`'s `summary.customPermissions: null`.
+   */
   readonly summary: {
-    readonly total: number;
-    readonly available: number;
-    readonly hidden: number;
+    readonly total: number | null;
+    readonly available: number | null;
+    readonly hidden: number | null;
   };
   readonly limit: number;
   readonly offset: number;
@@ -174,10 +184,20 @@ export const tabAvailabilityHandler = async (
   }
 
   const raw = node.properties['tabVisibilities'];
-  const extracted = Array.isArray(raw);
+  // TYPED ABSENCE: whether the family was extracted is decided by the
+  // SENTINEL PROPERTY (`familyWasExtracted`, a `hasOwnProperty` check), never
+  // by `Array.isArray` on its value. The extractor always writes
+  // `tabVisibilities` as an array (`[]` when the source declares none), so
+  // `Array.isArray` and `hasOwnProperty` agree on every real vault — but a
+  // property that IS present and non-array (a malformed/foreign write) must
+  // still read as CHECKED, not as "never extracted"; collapsing that case
+  // into not-extracted is what sent a checked container to "re-run
+  // /sfi-refresh" for metadata that was, in fact, modeled.
+  const extracted = familyWasExtracted(node.properties, 'tabVisibilities');
+  const rawList = Array.isArray(raw) ? (raw as RawTabVis[]) : [];
   const rows: TabVisibilityRow[] = [];
   if (extracted) {
-    for (const item of raw as RawTabVis[]) {
+    for (const item of rawList) {
       if (typeof item.tab !== 'string') continue;
       const visibility = typeof item.visibility === 'string' ? item.visibility : 'unknown';
       rows.push({ tab: item.tab, visibility, available: AVAILABLE_VISIBILITIES.has(visibility) });
@@ -272,7 +292,14 @@ export const tabAvailabilityHandler = async (
   const boundaryNote =
     (extracted
       ? 'Tab visibility is declared profile/permission-set metadata. A tab being "available" does not by itself grant object access — the user also needs the object permission (`object_access_audit`). The user must be ASSIGNED this profile/permission set (runtime, not modeled).'
-      : 'This Profile/PermissionSet carries no extracted `tabVisibilities` property — re-run `/sfi-refresh`; the empty list is "not modeled", not a verified "no tabs".') +
+      : notExtractedFamilyDisclosure({
+          subject: 'Tab visibility',
+          verb: 'checked',
+          sentinelProperty: 'tabVisibilities',
+          containers: [componentId],
+          surface: '`tabs` / `summary`',
+          zeroReading: '"no tabs"',
+        })) +
     (scopedObject !== null
       ? ` Scoped to object \`${scopedObject.object}\`: matched by tab-naming convention (the object api name, or \`standard-<Object>\`); an empty result means no such tab is declared on this container, not that the object has no tab.`
       : '');
@@ -287,7 +314,9 @@ export const tabAvailabilityHandler = async (
         ...(scopedObject !== null ? { componentId, object: scopedObject.object } : {}),
       },
       tabs: page,
-      summary: { total, available, hidden: total - available },
+      summary: extracted
+        ? { total, available, hidden: total - available }
+        : { total: null, available: null, hidden: null },
       limit,
       offset,
       hasMore,

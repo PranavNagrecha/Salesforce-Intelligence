@@ -108,6 +108,14 @@ export interface HonestyChecks {
    * `scopeRefusal`, the exemption has become the rule and wants re-examining.
    */
   readonly scopeRefusalExemptUnavailable?: number;
+  /**
+   * Payloads whose pagination could NOT be row-matched because the answer is a
+   * rendered document rather than a list. Counted for the same reason as
+   * `scopeRefusalExemptUnavailable`: an unmeasurable payload must be visible,
+   * not silent. If this number ever approaches `pagination`, the row-matching
+   * half of law 2 has stopped measuring most of the roster.
+   */
+  readonly paginationDocumentShaped?: number;
 }
 
 /** Result of auditing one envelope. */
@@ -345,6 +353,52 @@ const collectAbsenceSites = (data: unknown): readonly AbsenceSite[] => {
 };
 
 /** Lengths of every array directly under `data`, by key. */
+/**
+ * A DOCUMENT-SHAPED payload: the page's rows were RENDERED INTO PROSE, so no
+ * array under `data` can be matched against `totalCount` / `returnedCount`.
+ *
+ * Six generators ship this shape (`generate_compliance_report`,
+ * `generate_data_dictionary`, `generate_admin_handbook`, …): the answer is one
+ * markdown string, and the rows it covers exist only inside it. Two of the
+ * pagination predicates below compare a published count against the longest
+ * array actually shipped — a sound test for a list, and a guaranteed false
+ * accusation for a document, where the longest array is zero.
+ *
+ * DELIBERATELY NARROW, because this is a hole if it is wide. It keys on the
+ * product's OWN declared shape: `GeneratedDocument`
+ * (`generate-data-dictionary.ts`) is `{ frontmatter: {title, generatedAt,
+ * sourceTreeHash, componentIds}, body: string, sectionConfidence, boundaries }`,
+ * and this requires the `frontmatter` + substantial `body` to be present.
+ *
+ * TWO WRONG CUTS BEFORE THIS ONE, both recorded because each looked right:
+ *   1. "carries no arrays" — a generator legitimately ships `boundaries[]`
+ *      alongside its prose, so the branch never fired. Metadata is not rows.
+ *   2. "`document` is a long string" — `document` is an OBJECT; the markdown is
+ *      under `document.body`. Measured against the demo vault rather than
+ *      assumed, which is how both errors were caught.
+ *
+ * What stops this being a hole is the SHAPE, not a name: a list-shaped tool
+ * cannot reach this branch by renaming its rows, because it would have to grow
+ * a `frontmatter` with a `sourceTreeHash` and a multi-hundred-character `body`.
+ * A tool with no `document` key is measured exactly as before. And the branch is
+ * COUNTED (`paginationDocumentShaped`) rather than silently skipped: an
+ * unmeasurable payload nobody can see is how a gate stops gating.
+ */
+const DOCUMENT_MIN_BODY_CHARS = 200;
+
+const isDocumentShaped = (data: JsonObject): boolean => {
+  const document = data['document'];
+  if (!isObject(document)) return false;
+  const frontmatter = document['frontmatter'];
+  const body = document['body'];
+  return (
+    isObject(frontmatter) &&
+    typeof frontmatter['sourceTreeHash'] === 'string' &&
+    typeof body === 'string' &&
+    body.length >= DOCUMENT_MIN_BODY_CHARS
+  );
+};
+
 const shippedRowCounts = (data: JsonObject): ReadonlyMap<string, number> => {
   const counts = new Map<string, number>();
   for (const [key, value] of Object.entries(data)) {
@@ -425,9 +479,10 @@ const auditPagination = (
   tool: string,
   data: JsonObject,
   envelope: JsonObject,
-): { findings: readonly HonestyFinding[]; evaluated: number } => {
+): { findings: readonly HonestyFinding[]; evaluated: number; documentShaped: boolean } => {
   const page = pageView(data);
-  if (Object.keys(page).length === 0) return { findings: [], evaluated: 0 };
+  if (Object.keys(page).length === 0)
+    return { findings: [], evaluated: 0, documentShaped: false };
 
   const rows = shippedRowCounts(data);
   const lengths = [...rows.values()];
@@ -444,7 +499,9 @@ const auditPagination = (
   // P1 — a payload that shipped fewer rows than it counted may not claim
   // completeness. This is the `who_can_access_object` archetype verbatim:
   // 109 of 218 rows with `hasMore: false` and `truncated: false`.
+  const documentShaped = isDocumentShaped(data);
   if (
+    !documentShaped &&
     typeof totalCount === 'number' &&
     totalCount > longest + offset &&
     hasMore !== true &&
@@ -522,7 +579,7 @@ const auditPagination = (
   }
 
   // P6 — `returnedCount` must name a list that exists at that length.
-  if (typeof returnedCount === 'number' && !lengths.includes(returnedCount)) {
+  if (!documentShaped && typeof returnedCount === 'number' && !lengths.includes(returnedCount)) {
     findings.push({
       rule: 'pagination-completeness',
       tool,
@@ -533,7 +590,7 @@ const auditPagination = (
     });
   }
 
-  return { findings, evaluated: 1 };
+  return { findings, evaluated: 1, documentShaped };
 };
 
 /**
@@ -645,6 +702,7 @@ export const auditEnvelope = (tool: string, envelope: unknown): HonestyAudit => 
       typedAbsence: absence.evaluated,
       pagination: pagination.evaluated,
       scopeRefusal: 0,
+      ...(pagination.documentShaped ? { paginationDocumentShaped: 1 } : {}),
     },
   };
 };
