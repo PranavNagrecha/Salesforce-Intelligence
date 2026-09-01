@@ -1,6 +1,22 @@
 /// <reference types="vitest/globals" />
 
-import type { CoverageEntry, VaultManifest } from '@sf-intelligence/contracts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import type {
+  CoverageEntry,
+  Edge,
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
@@ -40,13 +56,38 @@ const manifest: VaultManifest = {
   ],
 };
 
-const ctx: Context = {
-  vaultRoot: '/tmp/not-used',
-  manifest,
-  graph: {} as Context['graph'],
-  // INFRA-12-DEEP: coverage_report is livePlane:opt-in; unit tests bypass dispatch.
-  liveCapability: mintLiveCapability('opt-in'),
-};
+// REFERENCED-BUT-ABSENT: `coverageReportHandler` now queries the graph
+// (`referencedButAbsentFamilies`, shared with list_components/
+// unused_components) for every confirmed-clean-zero row, so `ctx.graph` must
+// be a REAL store — a `{}` stub made every such query fail closed and every
+// test below fail with it. A real but EMPTY store (no nodes, no edges) is
+// behaviorally identical to the old stub for every test that predates this
+// fix: zero edges means `referencedButAbsentFamilies` always resolves to an
+// empty map, so no existing assertion changes.
+let graphDir: string;
+let graphStore: GraphStore;
+let ctx: Context;
+
+beforeAll(async () => {
+  graphDir = mkdtempSync(join(tmpdir(), 'sfi-coverage-report-'));
+  const opened = await openGraph(join(graphDir, 'coverage.db'));
+  if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+  graphStore = opened.value;
+  const imported = await importExtractionResults(graphStore, [{ nodes: [], edges: [] }]);
+  if (!imported.ok) throw new Error('empty seed import failed');
+  ctx = {
+    vaultRoot: graphDir,
+    manifest,
+    graph: graphStore,
+    // INFRA-12-DEEP: coverage_report is livePlane:opt-in; unit tests bypass dispatch.
+    liveCapability: mintLiveCapability('opt-in'),
+  };
+});
+
+afterAll(async () => {
+  await closeGraph(graphStore);
+  rmSync(graphDir, { recursive: true, force: true });
+});
 
 describe('coverageReportHandler', () => {
   it('partitions covered, partial, and not-modeled metadata families', async () => {
@@ -417,20 +458,27 @@ describe('coverageReportHandler — assignmentData (ENGINE-ARC §6)', () => {
 // and NOT "the product cannot parse that container yet".
 // =============================================================================
 describe('coverageReportHandler — shared container returned without the member', () => {
-  const unparsedCtx: Context = {
-    ...ctx,
-    manifest: {
-      ...manifest,
-      skippedDirectories: { settings: 139 },
-      coverage: [
-        { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
-        { type: 'SessionSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
-        { type: 'FieldServiceSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
-        // Confirmed-empty, but its own container IS dispatched — stays covered.
-        { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
-      ],
-    },
-  };
+  // Built in a nested beforeAll (not at describe-body scope) because it
+  // spreads the module-level `ctx`, which the file-level beforeAll above
+  // populates with a real GraphStore — describe bodies run at COLLECTION
+  // time, before any beforeAll, so `ctx` would still be unset here.
+  let unparsedCtx: Context;
+  beforeAll(() => {
+    unparsedCtx = {
+      ...ctx,
+      manifest: {
+        ...manifest,
+        skippedDirectories: { settings: 139 },
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'SessionSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'FieldServiceSettings', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+          // Confirmed-empty, but its own container IS dispatched — stays covered.
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        ],
+      },
+    };
+  });
 
   it('moves the unparsed types out of covered into their own bucket and discloses why', async () => {
     const result = await coverageReportHandler(unparsedCtx, {});
@@ -535,7 +583,12 @@ describe('coverageReportHandler — shared container returned without the member
       ...manifest,
       coverage: allEntries,
     };
-    const genCtx: Context = { ...ctx, manifest: genManifest };
+    // Same collection-vs-runtime ordering issue as `unparsedCtx` above:
+    // spreads `ctx`, so it must wait for the file-level beforeAll.
+    let genCtx: Context;
+    beforeAll(() => {
+      genCtx = { ...ctx, manifest: genManifest };
+    });
 
     it('every entry lands in a bucket consistent with the summary, in both directions', async () => {
       const result = await coverageReportHandler(genCtx, {});
@@ -591,5 +644,172 @@ describe('coverageReportHandler — shared container returned without the member
 
       expect(violations).toEqual([]);
     });
+  });
+});
+
+// =============================================================================
+// UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH, coverage_report's half.
+//
+// Same shared fact `unusedComponentsHandler` reads via
+// `referencedButAbsentFamilies` (`../../src/tools/referenced-but-absent.js`)
+// and `listComponentsHandler` now reads too. Measured on a real production
+// vault: a folder-scoped metadata family with 0 nodes, and dozens of
+// `declared` edges from other retrieved components naming specific members of
+// it that were never retrieved. Before this fix, `coverage_report` called
+// that family `covered` — the exact reading `unused_components` and
+// `list_components` were independently found to disagree with on the same
+// vault, same run.
+// =============================================================================
+describe('coverageReportHandler — a certified zero its own graph contradicts', () => {
+  const REFERENCED_ABSENT_A = 'EmailTemplate:Folder_A/Template_B';
+  const REFERENCED_ABSENT_B = 'EmailTemplate:Folder_A/Template_C';
+  const ALERT_A = 'WorkflowAlert:Obj_A__c.Alert_D';
+  const APPROVAL_A = 'ApprovalProcess:Obj_A__c.Approval_E';
+  const PHANTOM_TARGET = 'GlobalValueSet:Phantom_G';
+  const PHANTOM_SOURCE = 'ApexClass:Scanner_H';
+
+  const makeDanglingNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'ApexClass',
+    apiName: 'Unused',
+    label: null,
+    parentId: null,
+    sourcePath: 'unused.cls',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...overrides,
+  });
+
+  const makeEdge = (
+    overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>,
+  ): Edge => ({
+    confidence: 'declared',
+    source: 'unit-test',
+    properties: {},
+    ...overrides,
+  });
+
+  /** EmailTemplate/GlobalValueSet/Letterhead all read "requested, confirmed
+   *  clean, zero members" — the exact upstream fact `covered` is built on.
+   *  Letterhead has no dangling referrer at all, so it is the control: a
+   *  genuinely confirmed-empty type must read unchanged. */
+  const danglingManifest: VaultManifest = {
+    ...manifest,
+    coverage: [
+      { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'EmailTemplate', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'GlobalValueSet', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'Letterhead', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+    ],
+  };
+
+  let danglingDir: string;
+  let danglingStore: GraphStore;
+  let danglingCtx: Context;
+
+  beforeAll(async () => {
+    danglingDir = mkdtempSync(join(tmpdir(), 'sfi-coverage-report-dangling-'));
+    const opened = await openGraph(join(danglingDir, 'dangling.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    danglingStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        // NO EmailTemplate node exists. These are the referrers that name
+        // templates the refresh never brought back.
+        makeDanglingNode({ id: ALERT_A, type: 'WorkflowAlert', apiName: 'Obj_A__c.Alert_D' }),
+        makeDanglingNode({ id: APPROVAL_A, type: 'ApprovalProcess', apiName: 'Obj_A__c.Approval_E' }),
+        makeDanglingNode({ id: PHANTOM_SOURCE, type: 'ApexClass', apiName: 'Scanner_H' }),
+      ],
+      edges: [
+        makeEdge({ fromId: ALERT_A, toId: REFERENCED_ABSENT_A, edgeType: 'references' }),
+        makeEdge({ fromId: APPROVAL_A, toId: REFERENCED_ABSENT_A, edgeType: 'sendsEmail' }),
+        makeEdge({ fromId: APPROVAL_A, toId: REFERENCED_ABSENT_B, edgeType: 'references' }),
+        // A HEURISTIC scanner phantom at a wholly-absent family — must NOT be
+        // strong enough to unseat a checked zero (same rule
+        // `unused_components` enforces via CONTRADICTING_CONFIDENCE).
+        makeEdge({
+          fromId: PHANTOM_SOURCE,
+          toId: PHANTOM_TARGET,
+          edgeType: 'references',
+          confidence: 'heuristic',
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(danglingStore, [seed]);
+    if (!imported.ok) throw new Error('importExtractionResults failed');
+    danglingCtx = {
+      vaultRoot: danglingDir,
+      manifest: danglingManifest,
+      graph: danglingStore,
+      liveCapability: mintLiveCapability('opt-in'),
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(danglingStore);
+    rmSync(danglingDir, { recursive: true, force: true });
+  });
+
+  it('moves a family its own edges contradict OUT of covered and INTO partial', async () => {
+    const result = await coverageReportHandler(danglingCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+
+    expect(data.covered.map((e) => e.type)).not.toContain('EmailTemplate');
+    expect(data.partial.map((e) => e.type)).toContain('EmailTemplate');
+    // The control: nothing dangles at Letterhead, so it stays covered.
+    expect(data.covered.map((e) => e.type)).toContain('Letterhead');
+    expect(data.partial.map((e) => e.type)).not.toContain('Letterhead');
+    // The heuristic-only phantom must NOT unseat GlobalValueSet's checked zero.
+    expect(data.covered.map((e) => e.type)).toContain('GlobalValueSet');
+    expect(data.partial.map((e) => e.type)).not.toContain('GlobalValueSet');
+  });
+
+  it('names the contradiction (edge count, distinct member count) in a typed field', async () => {
+    const result = await coverageReportHandler(danglingCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const entry = result.value.data.referencedButAbsent?.find((e) => e.type === 'EmailTemplate');
+    expect(entry).toBeDefined();
+    expect(entry?.referenceEdges).toBe(3);
+    // Groups are split by (edgeType, confidence) and summed as an honest
+    // UPPER BOUND (a `references` group and a `sendsEmail` group both name
+    // REFERENCED_ABSENT_A, so the sum over-counts rather than deduping
+    // globally) — same arithmetic `unused_components` uses for this identical
+    // fixture shape.
+    expect(entry?.distinctTargets).toBe(3);
+    expect(entry?.retrieveConfirmed).toBe(true);
+    expect(entry?.retrieved).toBe(0);
+  });
+
+  it('names the same contradiction in the disclosure prose, matching the other two tools\' framing', async () => {
+    const result = await coverageReportHandler(danglingCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.disclosure).toContain('REFERENCED BUT ABSENT');
+    expect(data.disclosure).toContain('NOT A CHECKED ZERO');
+    expect(data.disclosure).toContain('3 declared/parsed reference edge(s)');
+    expect(data.disclosure).toContain('retrieve_blindspot_report');
+    expect(data.trust.limitations[0]).toBe(data.disclosure);
+  });
+
+  it('widens trust.completeness so the report cannot read complete while partial[] lists the contradiction', async () => {
+    const result = await coverageReportHandler(danglingCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.trust.completeness.status).not.toBe('complete');
+    expect(data.trust.completeness.missingCoverage).toContain('EmailTemplate');
+  });
+
+  it('is inert on a vault with no referenced-but-absent condition (empty graph)', async () => {
+    const result = await coverageReportHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.referencedButAbsent).toBeUndefined();
+    expect(result.value.data.disclosure).not.toContain('REFERENCED BUT ABSENT');
   });
 });

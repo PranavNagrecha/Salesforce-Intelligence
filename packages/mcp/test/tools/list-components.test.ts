@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
+  Edge,
   ExtractionResult,
   Node,
   VaultManifest,
@@ -375,6 +376,166 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
     if (!r.ok) return;
     expect(r.value.data.retrievalHint).toContain('/sfi-refresh');
     expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Report');
+  });
+});
+
+// =============================================================================
+// LIST-COMPONENTS-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH.
+//
+// Same shared fact `unusedComponentsHandler` reads via
+// `referencedButAbsentFamilies` (`../../src/tools/referenced-but-absent.js`),
+// exercised here through list_components's own org-wide "none in the org"
+// branch. Measured on a real production vault: a folder-scoped metadata
+// family with 0 nodes, while the vault's own `declared`/`parsed` edges (from
+// other retrieved components) name specific members of it that were never
+// retrieved. Before this fix, `list_components` certified that as "none in
+// the org" — the exact sentence `unused_components` and `coverage_report`
+// were independently found to disagree with on the same vault, same run.
+// =============================================================================
+describe('listComponentsHandler — a certified zero its own graph contradicts', () => {
+  const REFERENCED_ABSENT_A = 'EmailTemplate:Folder_A/Template_B';
+  const REFERENCED_ABSENT_B = 'EmailTemplate:Folder_A/Template_C';
+  const ALERT_A = 'WorkflowAlert:Obj_A__c.Alert_D';
+  const APPROVAL_A = 'ApprovalProcess:Obj_A__c.Approval_E';
+  const PHANTOM_TARGET = 'GlobalValueSet:Phantom_G';
+  const PHANTOM_SOURCE = 'ApexClass:Scanner_H';
+
+  const makeDanglingNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'ApexClass',
+    apiName: 'Unused',
+    label: null,
+    parentId: null,
+    sourcePath: 'unused.cls',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...overrides,
+  });
+
+  const makeEdge = (
+    overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>,
+  ): Edge => ({
+    confidence: 'declared',
+    source: 'unit-test',
+    properties: {},
+    ...overrides,
+  });
+
+  /** EmailTemplate/GlobalValueSet/Letterhead all read "requested, confirmed
+   *  clean, zero members" — the exact upstream fact the org-wide "none in the
+   *  org" branch is built on. Letterhead has no dangling referrer at all, so
+   *  it is the control: a genuinely confirmed-empty type must read unchanged. */
+  const confirmedCleanManifest: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      {
+        type: 'EmailTemplate',
+        requested: true,
+        retrieved: 0,
+        retrieveConfirmed: true,
+        errored: false,
+        neverModeled: false,
+      },
+      {
+        type: 'GlobalValueSet',
+        requested: true,
+        retrieved: 0,
+        retrieveConfirmed: true,
+        errored: false,
+        neverModeled: false,
+      },
+      {
+        type: 'Letterhead',
+        requested: true,
+        retrieved: 0,
+        retrieveConfirmed: true,
+        errored: false,
+        neverModeled: false,
+      },
+    ],
+  };
+
+  let danglingDir: string;
+  let danglingStore: GraphStore;
+  let danglingCtx: Context;
+
+  beforeAll(async () => {
+    danglingDir = mkdtempSync(join(tmpdir(), 'sfi-list-components-dangling-'));
+    const opened = await openGraph(join(danglingDir, 'dangling.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    danglingStore = opened.value;
+    const imported = await importExtractionResults(danglingStore, [
+      {
+        nodes: [
+          // NO EmailTemplate node exists. These are the referrers that name
+          // templates the refresh never brought back.
+          makeDanglingNode({ id: ALERT_A, type: 'WorkflowAlert', apiName: 'Obj_A__c.Alert_D' }),
+          makeDanglingNode({
+            id: APPROVAL_A,
+            type: 'ApprovalProcess',
+            apiName: 'Obj_A__c.Approval_E',
+          }),
+          makeDanglingNode({ id: PHANTOM_SOURCE, type: 'ApexClass', apiName: 'Scanner_H' }),
+        ],
+        edges: [
+          makeEdge({ fromId: ALERT_A, toId: REFERENCED_ABSENT_A, edgeType: 'references' }),
+          makeEdge({ fromId: APPROVAL_A, toId: REFERENCED_ABSENT_A, edgeType: 'sendsEmail' }),
+          makeEdge({ fromId: APPROVAL_A, toId: REFERENCED_ABSENT_B, edgeType: 'references' }),
+          // A HEURISTIC scanner phantom at a wholly-absent family — must NOT
+          // be strong enough to unseat a checked zero (same rule
+          // `unused_components` enforces via CONTRADICTING_CONFIDENCE).
+          makeEdge({
+            fromId: PHANTOM_SOURCE,
+            toId: PHANTOM_TARGET,
+            edgeType: 'references',
+            confidence: 'heuristic',
+          }),
+        ],
+      },
+    ]);
+    if (!imported.ok) throw new Error('importExtractionResults failed');
+    danglingCtx = {
+      vaultRoot: danglingDir,
+      manifest: confirmedCleanManifest,
+      graph: danglingStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(danglingStore);
+    rmSync(danglingDir, { recursive: true, force: true });
+  });
+
+  it('does NOT certify "none in the org" for a family its own edges name members of', async () => {
+    const r = await listComponentsHandler(danglingCtx, { type: 'EmailTemplate' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components).toEqual([]);
+    expect(r.value.data.retrievalHint).toBeDefined();
+    // Neither sentence a reader of the old bug saw may survive.
+    expect(r.value.data.retrievalHint).not.toContain('this is "none in the org"');
+    // The contradiction is quantified and named as NOT CHECKED, matching the
+    // fact `unused_components` reports for the identical fixture shape.
+    expect(r.value.data.retrievalHint).toContain('NOT CHECKED');
+    expect(r.value.data.retrievalHint).toContain('3 declared/parsed reference edge(s)');
+    expect(r.value.data.retrievalHint).toContain('retrieve_blindspot_report');
+  });
+
+  it('a heuristic-only dangling reference does NOT unseat a confirmed-empty zero', async () => {
+    const r = await listComponentsHandler(danglingCtx, { type: 'GlobalValueSet' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.retrievalHint).toContain('this is "none in the org"');
+  });
+
+  it('leaves a genuinely confirmed-empty type unchanged when nothing dangles at it', async () => {
+    const r = await listComponentsHandler(danglingCtx, { type: 'Letterhead' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.retrievalHint).toBe(
+      'The last refresh retrieved `Letterhead` and found none — this is "none in the org", not "not retrieved".',
+    );
   });
 });
 

@@ -38,6 +38,7 @@ import { listValidationRuleDocsForParent } from './component-doc-fallback.js';
 import { buildEnumerationCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
 import { resolveExistingObjectScope, toCustomObjectId } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, encodeCursor, PAGE_CURSOR_VERSION } from './page-cursor.js';
+import { referencedButAbsentFamilies } from './referenced-but-absent.js';
 
 const LIST_COMPONENTS_TOOL = 'sfi.list_components';
 
@@ -970,8 +971,25 @@ export const listComponentsHandler = async (
       retrievalHint =
         `No \`${input.type}\` under \`${effectiveParentId}\`, and none anywhere else in this vault either — the last refresh retrieved \`${input.type}\` and found zero. That is "none in the org" for the TYPE; this query measured a parent narrow, so it is not separately proof about that parent.`;
     } else {
+      // LIST-COMPONENTS-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH: before
+      // certifying this as a genuine org-wide zero, check the SAME shared fact
+      // `sfi.unused_components` and `sfi.coverage_report` consult
+      // (`referencedButAbsentFamilies`, ./referenced-but-absent.js). A type with
+      // zero nodes whose vault-wide coverage row reads "requested, confirmed
+      // clean, zero members" can still be contradicted by the vault's OWN
+      // `declared`/`parsed` edges naming members of it that were never
+      // retrieved — the folder-scoped-family blind spot (a bare wildcard
+      // retrieve of such a type returns nothing whether or not the org holds
+      // any). Three tools reading the same certified zero and disagreeing about
+      // it on the same vault run is the defect this closes — see
+      // `referenced-but-absent.js` for the full writeup.
+      const absent = await referencedButAbsentFamilies(ctx, [input.type]);
+      if (!absent.ok) return err(absent.error);
+      const contradiction = absent.value.get(input.type);
       retrievalHint =
-        `The last refresh retrieved \`${input.type}\` and found none — this is "none in the org", not "not retrieved".`;
+        contradiction === undefined
+          ? `The last refresh retrieved \`${input.type}\` and found none — this is "none in the org", not "not retrieved".`
+          : `No \`${input.type}\` in this vault, and that 0 is NOT a checked zero. The coverage row reads "requested, confirmed clean, zero members" — the vault's OWN graph contradicts it: ${contradiction.referenceEdges} declared/parsed reference edge(s) name up to ${contradiction.distinctTargets} distinct \`${input.type}\` member(s) that were never retrieved. A folder-scoped metadata family is the usual cause: a bare wildcard retrieve returns nothing for one whether or not the org has any, so "retrieve completed, zero members" cannot be evidence of absence here. Treat this as NOT CHECKED, never "none in the org" — run \`sfi.retrieve_blindspot_report\` to see which components reference the missing \`${input.type}\` members, then re-run \`/sfi-refresh\` (folder-qualified members) before concluding the org has none.`;
     }
   }
 

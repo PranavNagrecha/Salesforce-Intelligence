@@ -90,12 +90,7 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  countNodesByType,
-  danglingTargetSummary,
-  listEdgesForNodes,
-  listNodesByType,
-} from '@sf-intelligence/graph';
+import { countNodesByType, listEdgesForNodes, listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -109,6 +104,10 @@ import {
 import { firstNonEmpty, resolveExistingObjectScope } from './input-aliases.js';
 import { COMPONENT_TYPES } from './list-components.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  type ReferencedButAbsentFamily,
+  referencedButAbsentFamilies,
+} from './referenced-but-absent.js';
 import {
   ANALYTICS_COVERAGE_TYPES,
   reportDashboardUsageDetail,
@@ -927,92 +926,13 @@ const scanType = async (
  * same run — the product held the true statement and the false one and shipped
  * the false one on the tool an architect builds a leave-behind list from.
  *
- * Why the upstream fact cannot be trusted for such a family: a bare wildcard
- * retrieve of a FOLDER-SCOPED metadata type returns nothing whether or not the
- * org holds any, so "retrieve completed, zero members" is guaranteed and can
- * never be evidence of absence. The graph's dangling references are the
- * arbiter and they win.
+ * `sfi.list_components` and `sfi.coverage_report` had the SAME false-positive
+ * (a "none in the org" / "covered" reading of the same certified zero), so the
+ * fact this section reads — {@link referencedButAbsentFamilies} — now lives in
+ * `./referenced-but-absent.js`, shared across all three rather than re-derived
+ * per tool. See that module for why the upstream fact cannot be trusted for a
+ * folder-scoped family and why `heuristic` edges cannot unseat a checked zero.
  */
-interface ReferencedButAbsentFamily {
-  /** Non-heuristic edges pointing at members of this family that do not exist. */
-  readonly referenceEdges: number;
-  /** Distinct missing member ids those edges name. */
-  readonly distinctTargets: number;
-}
-
-/**
- * Confidence tiers whose dangling references are strong enough to unseat a
- * "confirmed-empty" certification. `heuristic` is DELIBERATELY excluded: that
- * is the unresolved-Apex-scanner phantom tier `sfi.retrieve_blindspot_report`
- * rolls up as documented noise, and a phantom must never be able to convert a
- * genuinely checked zero into a hedge — the false-positive direction is just as
- * dishonest as the false-negative one this fixes.
- */
-const CONTRADICTING_CONFIDENCE: ReadonlySet<string> = new Set([
-  'declared',
-  'parsed',
-]);
-
-/**
- * Which of `candidates` are REFERENCED BUT ABSENT: zero nodes in the vault, yet
- * one or more non-heuristic edges name a member of them.
- *
- * Adopts the SHARED `danglingTargetSummary` graph query (the same anti-join
- * `sfi.retrieve_blindspot_report` is built on) rather than re-deriving a second
- * notion of "referenced but never retrieved" here — the two tools contradicting
- * each other on the same vault in the same run is the defect being fixed.
- *
- * Fails CLOSED: a graph error propagates to the caller as an error rather than
- * silently restoring the certified zero.
- */
-const referencedButAbsentFamilies = async (
-  ctx: Context,
-  candidates: readonly string[],
-): Promise<Result<ReadonlyMap<string, ReferencedButAbsentFamily>, McpError>> => {
-  const out = new Map<string, ReferencedButAbsentFamily>();
-  if (candidates.length === 0) return ok(out);
-  const summary = await danglingTargetSummary(ctx.graph);
-  if (!summary.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${summary.error.message}`,
-    });
-  }
-  const wanted = new Set(candidates);
-  const tallies = new Map<string, { edges: number; targets: number }>();
-  for (const group of summary.value) {
-    if (!wanted.has(group.targetType)) continue;
-    if (!CONTRADICTING_CONFIDENCE.has(group.confidence)) continue;
-    const prev = tallies.get(group.targetType) ?? { edges: 0, targets: 0 };
-    tallies.set(group.targetType, {
-      edges: prev.edges + group.edgeCount,
-      // Groups are split by (edgeType, confidence), so distinct-target counts
-      // can overlap across groups of the same family. Sum is the honest upper
-      // bound on "at least this many members are named"; it is only ever used
-      // to say the number is non-zero and to size the disclosure.
-      targets: prev.targets + group.distinctTargets,
-    });
-  }
-  for (const [type, tally] of tallies) {
-    // Only a WHOLLY absent family is a contradiction of "the org holds none".
-    // A family with nodes plus some dangling members (managed-package members,
-    // a community context outside the retrieve scope) is the ordinary blind
-    // spot `coverageCaveat` already covers — not a false certification.
-    const count = await countNodesByType(ctx.graph, type as ComponentType);
-    if (!count.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${count.error.message}`,
-      });
-    }
-    if (count.value > 0) continue;
-    out.set(type, {
-      referenceEdges: tally.edges,
-      distinctTargets: tally.targets,
-    });
-  }
-  return ok(out);
-};
 
 /**
  * UNUSED-UNCHECKED-ZERO-READS-AS-CLEAN: classify WHY a scanned type produced no

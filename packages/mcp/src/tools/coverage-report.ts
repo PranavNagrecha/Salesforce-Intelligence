@@ -12,7 +12,7 @@ import type {
   McpResponse,
   TrustSummary,
 } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   ACTIVE_HOLDERS_COMPLETE_SUBJECT,
   readFacts,
@@ -33,6 +33,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { probeLiveAccess } from './live-plane.js';
+import {
+  type ReferencedButAbsentFamily,
+  referencedButAbsentFamilies,
+} from './referenced-but-absent.js';
 import { ASSIGNMENT_DATA_LIVE_TOOLS } from './vault-assignment-disclosure.js';
 
 /** CR-CAP-20 — cap on the ranked uncovered-families list. */
@@ -94,6 +98,49 @@ export const retrievedNotParsedDisclosure = (types: readonly string[]): string =
   );
 };
 
+/**
+ * A `covered` row (`{requested: true, retrieved: 0, retrieveConfirmed: true}`)
+ * whose type the vault's OWN graph names members of via `declared`/`parsed`
+ * edges that were never retrieved — the shared
+ * UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH fact
+ * (`./referenced-but-absent.js`), read here so `sfi.coverage_report` cannot
+ * certify a zero as `covered` that `sfi.unused_components` and
+ * `sfi.list_components` are, on the SAME vault, already refusing to certify.
+ * Not a member-file-shaped gap like {@link retrievedNotParsedDisclosure} — the
+ * cause here is a folder-scoped metadata family, where a bare wildcard
+ * retrieve returns nothing whether or not the org holds any member, so
+ * "retrieve completed, zero members" is never itself evidence of absence.
+ */
+export interface ReferencedButAbsentCoverageEntry extends CoverageEntry {
+  /** Non-heuristic (`declared`/`parsed`) edges naming members of this family. */
+  readonly referenceEdges: number;
+  /** Distinct missing member ids those edges name. */
+  readonly distinctTargets: number;
+}
+
+/**
+ * Disclosure sentence for {@link ReferencedButAbsentCoverageEntry} rows.
+ * Empty string for an empty list, so a vault without the condition serialises
+ * exactly as before.
+ */
+export const referencedButAbsentDisclosure = (
+  entries: readonly ReferencedButAbsentCoverageEntry[],
+): string => {
+  if (entries.length === 0) return '';
+  const clauses = entries
+    .map(
+      (e) =>
+        `\`${e.type}\` (${e.referenceEdges} declared/parsed reference edge(s) naming ${e.distinctTargets} distinct member(s))`,
+    )
+    .join(', ');
+  return (
+    ` REFERENCED BUT ABSENT — NOT A CHECKED ZERO: ${clauses}.` +
+    ' Each reads "requested, confirmed clean, zero members" upstream — the ONE signal this report otherwise trusts to call a zero-member family `covered` — but the vault\'s OWN graph contradicts it: non-heuristic edges from other retrieved components name specific members of these families that were never retrieved.' +
+    ' A folder-scoped metadata family is the usual cause: a bare wildcard retrieve of one returns nothing whether or not the org holds any, so "retrieve completed, zero members" can never be evidence of absence for these — they are moved OUT of `covered` and INTO `partial` here.' +
+    ' Run `sfi.retrieve_blindspot_report` to see which components reference the missing members, then re-run `/sfi-refresh` (folder-qualified members) before reading any of these as "the org has none".'
+  );
+};
+
 export const COVERAGE_DISCLOSURE =
   "Coverage describes what the last `sf project retrieve` requested and returned — not what exists in the org. A type listed under `notModeled` is not analyzed by this product at all; its absence from any result means 'not checked', never 'none'. Re-run `/sfi-refresh` after widening your retrieve manifest to close a gap. `topUncoveredFamilies` ranks (by skipped-file volume) directories that WERE retrieved but not modeled by an extractor — a listed family is retrieved-but-not-modeled, never 'absent'.";
 
@@ -143,6 +190,19 @@ export interface CoverageReportOutput {
    * listed type's absence from any answer as "none" — nothing has looked.
    */
   readonly retrievedNotParsed?: readonly CoverageEntry[];
+  /**
+   * UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH: types whose coverage row
+   * reads `{requested: true, retrieved: 0, retrieveConfirmed: true}` — a
+   * confirmed-clean zero, `covered` by every upstream signal — that the
+   * vault's OWN `declared`/`parsed` edges nonetheless name members of. Moved
+   * OUT of `covered` and into `partial` (never read as "the org has none");
+   * each row also appears in `partial` and carries `referenceEdges` /
+   * `distinctTargets` naming the contradiction. Present ONLY when non-empty.
+   * Reads the SAME shared fact `sfi.unused_components` and
+   * `sfi.list_components` consult (`referenced-but-absent.js`) so the three
+   * tools cannot certify a zero one of them has already refused to certify.
+   */
+  readonly referencedButAbsent?: readonly ReferencedButAbsentCoverageEntry[];
   /**
    * R6-DRIFT: types present in the manifest but NOT requested by this
    * refresh — a scoped `--types` run that pulled only part of the metadata
@@ -263,14 +323,25 @@ export const buildAssignmentDataCoverage = async (
 // confirmed-clean `retrieved: 0` is not evidence of an empty org — it must
 // leave `covered`, and it does not belong in `partial` either (a re-retrieve
 // does not change it: the container already came back without the member).
+// REFERENCED-BUT-ABSENT: unlike the two carve-outs above, this one CANNOT be
+// kept in lockstep with `summarizeCoverage` — the fact it reads
+// (`referencedButAbsentFamilies`, `./referenced-but-absent.js`) requires the
+// GRAPH, which `summarizeCoverage` (manifest.ts) has no access to by
+// construction. So `covered`/`partial` here and `summary` (still the raw,
+// unmodified `summarizeCoverage` output, read elsewhere e.g. by
+// `sfi.health_check`) may legitimately disagree on these types; `trust`
+// below is independently widened so THIS tool's own honesty verdict does not
+// read `complete` while its own `partial[]` lists the contradiction.
 const partitionCoverage = (
   entries: readonly CoverageEntry[],
   unparsed: ReadonlySet<string>,
+  referencedButAbsent: ReadonlyMap<string, ReferencedButAbsentFamily>,
 ): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending' | 'capped'> & {
   // Always arrays HERE (the handler decides whether to emit the optional
-  // output keys), unlike the two optional output fields.
+  // output keys), unlike the three optional output fields.
   readonly retrievedNotParsed: readonly CoverageEntry[];
   readonly notRequested: readonly CoverageEntry[];
+  readonly referencedButAbsentEntries: readonly ReferencedButAbsentCoverageEntry[];
 } => {
   const isRetrievedNotParsed = (entry: CoverageEntry): boolean =>
     unparsed.has(entry.type) &&
@@ -280,6 +351,19 @@ const partitionCoverage = (
     !entry.errored &&
     !entry.neverModeled &&
     entry.pending !== true;
+  // A confirmed-clean zero the vault's OWN graph contradicts. Checked AFTER
+  // isRetrievedNotParsed so a type can never be double-classified — the
+  // shared-container reason wins when both apply (mirrors the FIX-2
+  // "pending wins over capped" precedent below: one honesty state per type).
+  const isReferencedButAbsent = (entry: CoverageEntry): boolean =>
+    referencedButAbsent.has(entry.type) &&
+    entry.requested &&
+    entry.retrieved === 0 &&
+    entry.retrieveConfirmed === true &&
+    !entry.errored &&
+    !entry.neverModeled &&
+    entry.pending !== true &&
+    !isRetrievedNotParsed(entry);
   return {
     covered: entries.filter(
       (entry) =>
@@ -289,13 +373,19 @@ const partitionCoverage = (
         !entry.neverModeled &&
         entry.pending !== true &&
         entry.capped !== true &&
-        !isRetrievedNotParsed(entry),
+        !isRetrievedNotParsed(entry) &&
+        !isReferencedButAbsent(entry),
     ),
+    // A referenced-but-absent type joins `partial` (never `covered`): the
+    // vault's own contradicting edges are the same honest-uncertainty shape
+    // as an unconfirmed empty retrieve, not a distinct build outcome like
+    // `retrievedNotParsed` — see `referencedButAbsentDisclosure` for detail.
     partial: entries.filter(
       (entry) =>
         entry.requested &&
         ((entry.retrieved === 0 && entry.retrieveConfirmed !== true) ||
-          entry.errored) &&
+          entry.errored ||
+          isReferencedButAbsent(entry)) &&
         !entry.neverModeled &&
         entry.pending !== true &&
         entry.capped !== true,
@@ -316,6 +406,16 @@ const partitionCoverage = (
     // all require `entry.requested`), so it vanished from every per-entry
     // list coverage_report exposes even though the summary still named it.
     notRequested: entries.filter((entry) => !entry.requested && !entry.neverModeled),
+    referencedButAbsentEntries: entries
+      .filter(isReferencedButAbsent)
+      .map((entry) => {
+        const contradiction = referencedButAbsent.get(entry.type);
+        return {
+          ...entry,
+          referenceEdges: contradiction?.referenceEdges ?? 0,
+          distinctTargets: contradiction?.distinctTargets ?? 0,
+        };
+      }),
   };
 };
 
@@ -330,11 +430,33 @@ export const coverageReportHandler = async (
     ctx.manifest,
     input.type === undefined ? undefined : [input.type],
   );
-  const { retrievedNotParsed, notRequested, ...partitions } = partitionCoverage(
-    entries,
-    retrievedNotParsedTypes(ctx.manifest),
-  );
+  // UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH, coverage_report's half.
+  // Candidates are ONLY the confirmed-clean-zero rows — the ones that would
+  // otherwise land in `covered` purely on `retrieveConfirmed === true` — so a
+  // vault with no such row never touches the graph at all (matches `entries`
+  // filtered by `input.type` when one is given).
+  const confirmedEmptyTypes = entries
+    .filter((entry) => entry.retrieved === 0 && entry.retrieveConfirmed === true)
+    .map((entry) => entry.type);
+  const absentFamilies = await referencedButAbsentFamilies(ctx, confirmedEmptyTypes);
+  if (!absentFamilies.ok) return err(absentFamilies.error);
+  const referencedButAbsent = absentFamilies.value;
+  const { retrievedNotParsed, notRequested, referencedButAbsentEntries, ...partitions } =
+    partitionCoverage(entries, retrievedNotParsedTypes(ctx.manifest), referencedButAbsent);
   const missingCoverage = summary.missingCoverage;
+  // `trust.completeness` is THIS tool's own honesty verdict over its own
+  // `covered`/`partial` buckets — widened here so it cannot read `complete`
+  // while `partial[]` (above) already lists the contradiction. `summary`
+  // itself (below) stays the raw, unmodified `summarizeCoverage` output: that
+  // function has no graph access and other callers (e.g. `sfi.health_check`)
+  // depend on it being byte-identical to the manifest-only fact.
+  const referencedButAbsentTypes = referencedButAbsentEntries.map((entry) => entry.type);
+  const completenessMissingCoverage =
+    referencedButAbsentTypes.length === 0
+      ? missingCoverage
+      : [...new Set([...missingCoverage, ...referencedButAbsentTypes])].sort();
+  const completenessStatus =
+    referencedButAbsentTypes.length === 0 ? summary.status : ('partial' as const);
   const staged = ctx.manifest.staged;
   // CR-CAP-20: rank retrieved-but-not-modeled families and cap the list.
   // Inert ([]) when `skippedDirectories` is empty/absent (clean vault).
@@ -353,7 +475,10 @@ export const coverageReportHandler = async (
   const retrievedNotParsedNote = retrievedNotParsedDisclosure(
     retrievedNotParsed.map((entry) => entry.type),
   );
-  const disclosure = COVERAGE_DISCLOSURE + retrievedNotParsedNote;
+  // Same treatment for the graph-contradicted rows — appended ONLY when the
+  // vault has the condition, so an unaffected vault serialises unchanged.
+  const referencedButAbsentNote = referencedButAbsentDisclosure(referencedButAbsentEntries);
+  const disclosure = COVERAGE_DISCLOSURE + retrievedNotParsedNote + referencedButAbsentNote;
   const mixedNote =
     freshness.overall === 'mixed'
       ? `Mixed family freshness: oldest evidence at ${freshness.oldestEvidenceAt ?? 'unknown'} — a scoped refresh left some families older than the vault-wide refreshedAt.`
@@ -368,6 +493,9 @@ export const coverageReportHandler = async (
       // whose containers were all dispatched serialises exactly as before.
       ...(retrievedNotParsed.length > 0 ? { retrievedNotParsed } : {}),
       ...(notRequested.length > 0 ? { notRequested } : {}),
+      ...(referencedButAbsentEntries.length > 0
+        ? { referencedButAbsent: referencedButAbsentEntries }
+        : {}),
       ...(staged !== undefined
         ? { stagedBuild: { tier: staged.tier, totalTiers: staged.totalTiers } }
         : {}),
@@ -380,8 +508,10 @@ export const coverageReportHandler = async (
         confidence: summary.coverageKnown ? 'declared' : 'unknown',
         freshness,
         completeness: {
-          status: summary.status,
-          ...(missingCoverage.length > 0 ? { missingCoverage } : {}),
+          status: completenessStatus,
+          ...(completenessMissingCoverage.length > 0
+            ? { missingCoverage: completenessMissingCoverage }
+            : {}),
         },
         limitations: [
           disclosure,
