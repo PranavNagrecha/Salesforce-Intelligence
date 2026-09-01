@@ -2064,3 +2064,222 @@ describe('unused_fields_deep — real-org regressions', () => {
     );
   });
 });
+
+// =============================================================================
+// ACTIVITY-POLYMORPHIC re-check (real-org honesty-bug campaign): a shared
+// Activity custom field can be materialized as up to three graph nodes
+// (CustomField:Activity/Task/Event.<field>) that are ONE physical field.
+// `sfi.safe_to_delete_field` already discloses this ("Polymorphic Activity
+// attribution"); `sfi.find_dead_code` gained its own query-time sibling
+// re-check for the same reason (see its ACTIVITY_POLYMORPHIC_DISCLOSURE).
+// `unused_fields_deep` had ZERO awareness of it — its tier 1
+// (`noIncomingEdges`) is scored per graph NODE, so a representation with a
+// real Flow/Apex-minted structural edge on a SIBLING node (not itself) still
+// certified `confidence: 'high'` on all eight tiers.
+//
+// Verified against a real production vault: `CustomField:Task.<field>`
+// carried a real `writesTo` edge (parsed-confidence Apex AST) while
+// `CustomField:Event.<field>` — the SAME physical field — had zero incoming
+// edges of any kind (the import-time polymorphic mirror never ran on that
+// vault), so `unused_fields_deep` reported the Event representation
+// `confidence: 'high'` with a "consider deletion" recommendation. This
+// fixture reproduces that shape WITHOUT relying on the import-time mirror
+// being absent: the sibling's only edge is `usedInLayout`, which
+// `mintPolymorphicActivityFieldEdges` never mirrors (it only covers
+// readsFrom/writesTo/references) AND which none of tiers 2, 3, 4, 5, or 7
+// (the api-name TEXT corpora — tier 3 in particular scans Layout NODE
+// `properties.layoutSections` text, not incoming edges) can see either — so
+// a query-time cross-check against the sibling's own edges is the only thing
+// that catches it, on a freshly-imported fixture just as on a stale real
+// vault.
+// =============================================================================
+describe('unusedFieldsDeepHandler — Activity-polymorphic re-check (real-org honesty campaign)', () => {
+  let aDir: string;
+  let aStore: GraphStore;
+  let aCtx: Context;
+
+  const TASK_ID = 'CustomObject:Task';
+  const EVENT_ID = 'CustomObject:Event';
+  const ACCOUNT2_ID = 'CustomObject:Account';
+
+  beforeAll(async () => {
+    aDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ufd-activity-'));
+    const opened = await openGraph(join(aDir, 'ufd-activity.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    aStore = opened.value;
+
+    const aSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: TASK_ID, type: 'CustomObject', apiName: 'Task' }),
+        makeNode({ id: EVENT_ID, type: 'CustomObject', apiName: 'Event' }),
+        makeNode({ id: 'Layout:Task.TaskLayout', type: 'Layout', apiName: 'TaskLayout' }),
+        // Task representation: a real `usedInLayout` edge — a placement
+        // `mintPolymorphicActivityFieldEdges` never mirrors (it only covers
+        // readsFrom/writesTo/references) and unused-fields-deep's OWN tier 3
+        // never sees either (tier 3 scans Layout NODE properties as TEXT, not
+        // incoming edges — this Layout node carries no such property), so it
+        // reproduces the gap even on a freshly-imported fixture.
+        makeNode({
+          id: 'CustomField:Task.Shared__c',
+          type: 'CustomField',
+          apiName: 'Shared__c',
+          parentId: TASK_ID,
+          properties: { dataType: 'Text' },
+        }),
+        // Event representation of the SAME physical field: zero incoming
+        // edges of its own, and no minted mirror → the base eight-tier
+        // cascade alone certifies this `confidence: 'high'`.
+        makeNode({
+          id: 'CustomField:Event.Shared__c',
+          type: 'CustomField',
+          apiName: 'Shared__c',
+          parentId: EVENT_ID,
+          properties: { dataType: 'Text' },
+        }),
+        // Control: a multi-rep Activity field with ZERO usage on every
+        // existing representation — must stay `confidence: 'high'`. Proves
+        // the re-check never manufactures a dependency that is not there.
+        makeNode({
+          id: 'CustomField:Task.TrulyDeadShared__c',
+          type: 'CustomField',
+          apiName: 'TrulyDeadShared__c',
+          parentId: TASK_ID,
+          properties: { dataType: 'Text' },
+        }),
+        makeNode({
+          id: 'CustomField:Event.TrulyDeadShared__c',
+          type: 'CustomField',
+          apiName: 'TrulyDeadShared__c',
+          parentId: EVENT_ID,
+          properties: { dataType: 'Text' },
+        }),
+        // Control: a SOLO Activity-family field — no Task/Event/Activity
+        // sibling exists at all — must stay `confidence: 'high'` too
+        // (nothing to cross-check against).
+        makeNode({
+          id: 'CustomField:Task.SoloNoSibling__c',
+          type: 'CustomField',
+          apiName: 'SoloNoSibling__c',
+          parentId: TASK_ID,
+          properties: { dataType: 'Text' },
+        }),
+        // Negative control: an unrelated, non-Activity-family dead
+        // CustomField — the re-check (and its disclosure) must not touch it.
+        makeNode({ id: ACCOUNT2_ID, type: 'CustomObject', apiName: 'Account' }),
+        makeNode({
+          id: 'CustomField:Account.Unrelated__c',
+          type: 'CustomField',
+          apiName: 'Unrelated__c',
+          parentId: ACCOUNT2_ID,
+          properties: { dataType: 'Text' },
+        }),
+      ],
+      edges: [
+        makeEdge({ fromId: TASK_ID, toId: 'CustomField:Task.Shared__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: EVENT_ID, toId: 'CustomField:Event.Shared__c', edgeType: 'parentOf' }),
+        makeEdge({
+          fromId: TASK_ID,
+          toId: 'CustomField:Task.TrulyDeadShared__c',
+          edgeType: 'parentOf',
+        }),
+        makeEdge({
+          fromId: EVENT_ID,
+          toId: 'CustomField:Event.TrulyDeadShared__c',
+          edgeType: 'parentOf',
+        }),
+        makeEdge({
+          fromId: TASK_ID,
+          toId: 'CustomField:Task.SoloNoSibling__c',
+          edgeType: 'parentOf',
+        }),
+        makeEdge({
+          fromId: ACCOUNT2_ID,
+          toId: 'CustomField:Account.Unrelated__c',
+          edgeType: 'parentOf',
+        }),
+        makeEdge({
+          fromId: 'Layout:Task.TaskLayout',
+          toId: 'CustomField:Task.Shared__c',
+          edgeType: 'usedInLayout',
+          confidence: 'declared',
+          source: 'layout-extractor',
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(aStore, [aSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+
+    aCtx = { vaultRoot: aDir, manifest: FIXTURE_MANIFEST, graph: aStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(aStore);
+    rmSync(aDir, { recursive: true, force: true });
+  });
+
+  it('downgrades a zero-edge Activity-family representation from `high` to `medium` when a sibling has a real usage edge no text tier covers', async () => {
+    const r = await unusedFieldsDeepHandler(aCtx, { objectApiName: 'Event', staticOnly: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const f = r.value.data.fields.find((x) => x.id === 'CustomField:Event.Shared__c');
+    expect(f).toBeDefined();
+    expect(f?.confidence).toBe('medium');
+    // The eight-tier checks are still all "clean" for THIS node — the
+    // downgrade layers ON TOP of the tier verdicts, it does not fake one.
+    expect(f?.checks.noIncomingEdges).toBe(true);
+    expect(f?.recommendedAction).toContain('ACTIVITY-POLYMORPHIC CROSS-CHECK');
+    expect(f?.recommendedAction).toContain('CustomField:Task.Shared__c');
+  });
+
+  it('never lists the representation that actually carries the edge (tier 1 excludes it directly, same as any other used field)', async () => {
+    const r = await unusedFieldsDeepHandler(aCtx, { objectApiName: 'Task', staticOnly: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const f = r.value.data.fields.find((x) => x.id === 'CustomField:Task.Shared__c');
+    expect(f).toBeUndefined();
+  });
+
+  it('STILL certifies `confidence: \'high\'` when EVERY existing representation has zero usage edges (control — no overclaiming)', async () => {
+    const r = await unusedFieldsDeepHandler(aCtx, { staticOnly: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const task = r.value.data.fields.find((x) => x.id === 'CustomField:Task.TrulyDeadShared__c');
+    const event = r.value.data.fields.find((x) => x.id === 'CustomField:Event.TrulyDeadShared__c');
+    expect(task?.confidence).toBe('high');
+    expect(event?.confidence).toBe('high');
+  });
+
+  it('STILL certifies `confidence: \'high\'` for a solo Activity-family field with no sibling representation at all (control)', async () => {
+    const r = await unusedFieldsDeepHandler(aCtx, { staticOnly: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const f = r.value.data.fields.find((x) => x.id === 'CustomField:Task.SoloNoSibling__c');
+    expect(f?.confidence).toBe('high');
+  });
+
+  it('discloses the Activity-polymorphic re-check in boundaries when a high-confidence Activity/Task/Event field is in scope', async () => {
+    const r = await unusedFieldsDeepHandler(aCtx, { objectApiName: 'Event', staticOnly: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).toContain('Activity-family CustomField re-check');
+    expect(r.value.data.boundaries.join(' ')).toMatch(/1 field\(s\) in this result set were downgraded/);
+  });
+
+  it('does NOT disclose the Activity-polymorphic re-check when no Activity/Task/Event field is in scope', async () => {
+    const r = await unusedFieldsDeepHandler(aCtx, { objectApiName: 'Account', staticOnly: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const f = r.value.data.fields.find((x) => x.id === 'CustomField:Account.Unrelated__c');
+    expect(f?.confidence).toBe('high');
+    expect(r.value.data.boundaries.join(' ')).not.toContain('Activity-family CustomField re-check');
+  });
+
+  it('`byConfidence` already reflects the downgrade (computed AFTER the re-check, unlike the live-population cross-check)', async () => {
+    const r = await unusedFieldsDeepHandler(aCtx, { objectApiName: 'Event', staticOnly: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.byConfidence.medium).toBeGreaterThanOrEqual(1);
+    const f = r.value.data.fields.find((x) => x.id === 'CustomField:Event.Shared__c');
+    expect(f?.confidence).toBe('medium');
+  });
+});

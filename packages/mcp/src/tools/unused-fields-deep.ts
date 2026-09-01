@@ -63,6 +63,32 @@
  * surfaced — v2.4's eight-tier check catches what v2.0b's incoming-
  * edge-only check misses.
  *
+ * **ACTIVITY-POLYMORPHIC re-check** (real-org honesty-bug campaign) — a
+ * shared Activity custom field can be materialized as up to three graph
+ * nodes, `CustomField:Activity/Task/Event.<field>`, that are ONE physical
+ * field (see `sfi.safe_to_delete_field`'s "Polymorphic Activity
+ * attribution" limitation and `sfi.find_dead_code`'s own sibling
+ * re-check). Tiers 2, 3, 4, 5, and 7 above match by API-NAME TEXT across a
+ * vault-wide corpus, so they already catch a sibling's usage regardless of
+ * which representation is being scored — but tier 1 (incoming edges) is
+ * scored per graph NODE ID, so a Flow-minted `readsFrom` / `writesTo` edge
+ * that structurally attaches to only ONE representation (e.g.
+ * `CustomField:Task.<field>`) is invisible to a sibling representation
+ * (`CustomField:Event.<field>`) that is otherwise clean across all eight
+ * tiers. The import-time `mintPolymorphicActivityFieldEdges` mirror is
+ * SUPPOSED to copy such an edge onto every existing sibling, but that
+ * mirror is a best-effort heuristic — absent entirely on a vault refreshed
+ * before it existed, and under-mounted on the incremental
+ * apply-change-set path — so a field surviving all eight tiers is, for
+ * this family only, additionally cross-checked at QUERY TIME against its
+ * OTHER EXISTING representations' own incoming edges before its
+ * `confidence` is finalized: a representation with a live sibling is
+ * downgraded from `high` to `medium` rather than removed from the list
+ * (see {@link ACTIVITY_POLYMORPHIC_FIELD_DISCLOSURE}). This never
+ * manufactures a dependency that is not there — a field with zero usage on
+ * EVERY existing representation (or no sibling representation at all)
+ * keeps its eight-tier verdict unchanged.
+ *
  * **Standard / managed-package defaults** — by default, standard fields
  * and managed-package fields are excluded from the scan. Standard
  * fields are operationally unsafe to delete; managed-package fields'
@@ -77,7 +103,12 @@
  *     AND not in a managed package.
  *   - `medium`: at least one invisibility warning applies (e.g., the
  *     formula-text check pattern-matched but apex-scanner had blind
- *     spots that could still hide a reference). This tier is the
+ *     spots that could still hide a reference), OR a live production
+ *     population cross-check found data despite the static "unused"
+ *     verdict, OR the field is one of up to three Activity/Task/Event
+ *     representations of the SAME physical field and another EXISTING
+ *     representation has a real incoming usage edge this one does not
+ *     (see the ACTIVITY-POLYMORPHIC re-check above). This tier is the
  *     v2.4-honest "no static evidence of use, but the scanner has
  *     known blind spots" surface.
  *   - `low`: the field is in a protected category (standard or
@@ -100,6 +131,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
+  ACTIVITY_POLYMORPHIC_SLOTS,
   countNodesByType,
   listEdgesForNodes,
   listNodesByType,
@@ -290,6 +322,38 @@ const BOUNDARIES: readonly string[] = Object.freeze([
   "even after checking incoming edges (including parsed-confidence Apex AST field reads from inline static SOQL and constant-string Database.query literals), formula expressions, layout placements, SOQL strings, conditional contexts, LWC / Aura / VF references, and integration exposure, the scanner cannot see string-BUILT dynamic SOQL, LWC dynamic field access (record[fieldName]), Apex reflective access (obj.get(...)), or runtime metadata references. Treat a 'high-confidence unused' flag as 'no static evidence of use' rather than 'definitely unused.'",
   'report column / filter and dashboard component usage is folded onto CustomField nodes from the default capped reports pull (top 500 by usage; beyond-cap members stay pending). Fields with no folded `usedInReport` / `usedInDashboard` stamp may still be used only in reports or dashboards outside that cap — run `sfi refresh --with-reports` for a full uncapped pull, or `sfi refresh --no-reports` to skip entirely.',
 ]);
+
+/**
+ * ACTIVITY-POLYMORPHIC re-check disclosure (real-org honesty-bug campaign;
+ * D2 parity with `sfi.find_dead_code`'s own re-check and
+ * `sfi.safe_to_delete_field`'s "Polymorphic Activity attribution"
+ * limitation — see the module doc above for the full mechanism). Appended
+ * to `boundaries` ONLY when this response contains at least one field that
+ * is an Activity/Task/Event-family CustomField AND survived all eight
+ * tiers at `confidence: 'high'` — whether or not the re-check actually
+ * downgraded it — so a caller understands ANY high-confidence verdict in
+ * this family already passed a sibling cross-check, and any downgrade is
+ * transparent rather than a silent confidence drop.
+ */
+const ACTIVITY_POLYMORPHIC_FIELD_DISCLOSURE =
+  'Activity-family CustomField re-check: a shared Activity custom field can be materialized as up to three graph nodes — `CustomField:Activity/Task/Event.<field>` — that are ONE physical field (see `sfi.safe_to_delete_field`\'s "Polymorphic Activity attribution" limitation). Tiers 2-5 and 7 above (formula/layout/SOQL-string/unresolved-Apex/ConditionalContext text) already match by api-name text across the whole vault regardless of representation, but tier 1 (incoming edges) is scored per graph node — a Flow-minted `readsFrom`/`writesTo` edge that structurally attaches to only ONE representation is invisible to a sibling that is otherwise clean. Before this tool certifies `confidence: \'high\'` on one of these three nodes, it cross-checks the OTHER EXISTING representations\' own incoming usage edges directly — not the precomputed import-time polymorphic mirror alone, which is absent entirely on a vault refreshed before it existed and under-mounted on the incremental apply-change-set path — and downgrades to `medium` when a sibling has a real dependent this candidate does not. A surviving `confidence: \'high\'` verdict in this family found NO incoming usage edge on ANY existing representation. Residual blind spot: a representation that is not itself vaulted as a node cannot be cross-checked. Cross-check with `sfi.find_dead_code` / `sfi.safe_to_delete_field` before deleting any field in this family.';
+
+/** Lower-cased set of {@link ACTIVITY_POLYMORPHIC_SLOTS} for O(1) membership
+ *  testing — reused rather than re-declared so this tool's notion of "is
+ *  this an Activity/Task/Event-family object" cannot drift from the graph
+ *  layer's (the same set `mintPolymorphicActivityFieldEdges` and
+ *  `sfi.find_dead_code`'s own re-check gate on). */
+const ACTIVITY_POLYMORPHIC_SLOT_SET: ReadonlySet<string> = new Set(
+  ACTIVITY_POLYMORPHIC_SLOTS,
+);
+
+/**
+ * True when `objectApiName` is one of the three Activity-polymorphic slots
+ * (`Activity` / `Task` / `Event`) — the family a shared Activity custom
+ * field can be materialized as.
+ */
+const isActivityPolymorphicObjectApiName = (objectApiName: string): boolean =>
+  ACTIVITY_POLYMORPHIC_SLOT_SET.has(objectApiName.toLowerCase());
 
 /** Zod schema for the `sfi.unused_fields_deep` tool input. */
 export const unusedFieldsDeepInputSchema = z.object({
@@ -935,6 +999,91 @@ const parseParentApiName = (fieldId: ComponentId): string | null => {
   const dot = rest.indexOf('.');
   if (dot === -1) return null;
   return rest.slice(0, dot);
+};
+
+/** One EXISTING Activity/Task/Event sibling representation with a real
+ *  incoming usage edge the candidate itself does not have. */
+interface ActivityPolymorphicLiveSibling {
+  readonly siblingId: ComponentId;
+  readonly siblingObjectApiName: string;
+}
+
+/**
+ * ACTIVITY-POLYMORPHIC re-check (real-org honesty-bug campaign) — see the
+ * module doc and {@link ACTIVITY_POLYMORPHIC_FIELD_DISCLOSURE} for the full
+ * rationale. Builds, ONCE per scan, a map from a zero-structural-evidence
+ * Activity/Task/Event CustomField id to the OTHER EXISTING representation
+ * that DOES carry a real incoming usage edge — the fact tier 1
+ * (`noIncomingEdges`) cannot see because it is scored per graph node, not
+ * per physical field.
+ *
+ * `customFields` is `corpora.customFields` — the FULL org-wide CustomField
+ * roster `buildCorpora` already pages to exhaustion — so a sibling on an
+ * object OUTSIDE the caller's `objectId` scope is still found; a scan
+ * narrowed to `CustomObject:Event` must still see a live `Task` sibling.
+ *
+ * Bounded cost: filters to the Activity/Task/Event slots first (a small
+ * slice of any vault's fields — 292 of 4,296 on a real production vault),
+ * groups by api name, and fires exactly ONE additional batched
+ * `listEdgesForNodes` round trip for the multi-representation subset. A
+ * vault with no Activity/Task/Event field, or none with more than one
+ * EXISTING representation, costs one empty-map return and no graph query.
+ *
+ * Fails CLOSED: a graph error propagates to the caller as an error rather
+ * than silently treating every candidate as sibling-free.
+ */
+const buildActivityPolymorphicLiveSiblingIndex = async (
+  ctx: Context,
+  customFields: readonly Node[],
+): Promise<Result<ReadonlyMap<ComponentId, ActivityPolymorphicLiveSibling>, string>> => {
+  const activityFields = customFields.filter((f) => {
+    const parent = parseParentApiName(f.id);
+    return parent !== null && isActivityPolymorphicObjectApiName(parent);
+  });
+  if (activityFields.length === 0) return ok(new Map());
+
+  const groups = new Map<string, Node[]>();
+  for (const f of activityFields) {
+    const key = f.apiName.toLowerCase();
+    const arr = groups.get(key);
+    if (arr !== undefined) arr.push(f);
+    else groups.set(key, [f]);
+  }
+
+  const multiRepIds: ComponentId[] = [];
+  for (const members of groups.values()) {
+    if (members.length > 1) for (const m of members) multiRepIds.push(m.id);
+  }
+  if (multiRepIds.length === 0) return ok(new Map());
+
+  const incomingResult = await listEdgesForNodes(ctx.graph, multiRepIds, {
+    direction: 'in',
+  });
+  if (!incomingResult.ok) return err(incomingResult.error.message);
+  const incomingById = incomingResult.value;
+  const hasRealUsage = (id: ComponentId): boolean =>
+    !checkNoIncomingEdgesFromEdges(incomingById.get(id) ?? []);
+
+  const index = new Map<ComponentId, ActivityPolymorphicLiveSibling>();
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    for (const candidate of members) {
+      // The candidate's OWN structural evidence, if any, is already tier
+      // 1's job — this re-check only ever adds a caveat for a field that
+      // tier 1 already called clean.
+      if (hasRealUsage(candidate.id)) continue;
+      const liveSibling = members.find(
+        (s) => s.id !== candidate.id && hasRealUsage(s.id),
+      );
+      if (liveSibling !== undefined) {
+        index.set(candidate.id, {
+          siblingId: liveSibling.id,
+          siblingObjectApiName: parseParentApiName(liveSibling.id) ?? '',
+        });
+      }
+    }
+  }
+  return ok(index);
 };
 
 /**
@@ -1699,7 +1848,53 @@ export const unusedFieldsDeepHandler = async (
     survivors.push(entry);
   }
 
-  const sorted = [...survivors].sort(compareById);
+  // ---- ACTIVITY-POLYMORPHIC re-check (real-org honesty-bug campaign) -----
+  //
+  // See the module doc and {@link ACTIVITY_POLYMORPHIC_FIELD_DISCLOSURE} for
+  // the full rationale. Scoped to `confidence: 'high'` Activity/Task/Event
+  // survivors ONLY — a `low` (protected) or already-`medium` entry needs no
+  // further downgrade, and this is the small slice of any vault's fields
+  // that can even belong to the family — so a vault that never touches
+  // Activity/Task/Event never pays for the extra graph query.
+  const hasActivityFamilyHighCandidate = survivors.some(
+    (e) => e.confidence === 'high' && isActivityPolymorphicObjectApiName(e.parentObjectApiName),
+  );
+  let activityPolymorphicDowngrades = 0;
+  let finalFields = survivors;
+  if (hasActivityFamilyHighCandidate) {
+    const siblingIndexResult = await buildActivityPolymorphicLiveSiblingIndex(
+      ctx,
+      corpora.customFields,
+    );
+    if (!siblingIndexResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${siblingIndexResult.error}`,
+      });
+    }
+    const siblingIndex = siblingIndexResult.value;
+    if (siblingIndex.size > 0) {
+      finalFields = survivors.map((entry) => {
+        if (entry.confidence !== 'high') return entry;
+        const sibling = siblingIndex.get(entry.id);
+        if (sibling === undefined) return entry;
+        activityPolymorphicDowngrades += 1;
+        return {
+          ...entry,
+          confidence: 'medium' as const,
+          recommendedAction:
+            `ACTIVITY-POLYMORPHIC CROSS-CHECK: this field shares CustomField:Activity/Task/Event.${entry.apiName} ` +
+            `with another EXISTING representation (${sibling.siblingId}) that has a real incoming usage edge this ` +
+            `one does not — the import-time polymorphic mirror either has not run on this vault or does not cover ` +
+            `the referring edge type, so "no static evidence of use" on THIS representation does not mean the ` +
+            `physical field is unused; confidence downgraded from high to medium. Cross-check with ` +
+            `sfi.find_dead_code / sfi.safe_to_delete_field before deleting. ${entry.recommendedAction}`,
+        };
+      });
+    }
+  }
+
+  const sorted = [...finalFields].sort(compareById);
 
   const byParentObject: Record<string, number> = {};
   const byConfidence: Record<'high' | 'medium' | 'low', number> = {
@@ -1747,6 +1942,24 @@ export const unusedFieldsDeepHandler = async (
       : []),
   ];
 
+  // ACTIVITY-POLYMORPHIC re-check disclosure: fires whenever this response
+  // contains at least one Activity/Task/Event-family field that survived all
+  // eight tiers at `confidence: 'high'` (see
+  // {@link hasActivityFamilyHighCandidate} above) — whether or not the
+  // re-check actually downgraded one, so a caller understands ANY
+  // high-confidence verdict in this family already passed the sibling
+  // cross-check.
+  const activityPolymorphicBoundaries: string[] = hasActivityFamilyHighCandidate
+    ? [
+        ACTIVITY_POLYMORPHIC_FIELD_DISCLOSURE,
+        ...(activityPolymorphicDowngrades > 0
+          ? [
+              `${activityPolymorphicDowngrades} field(s) in this result set were downgraded from \`high\` to \`medium\` by the Activity-polymorphic re-check — \`byConfidence\` / \`totalCount\` already reflect the downgrade (computed AFTER it, unlike the live-population cross-check below).`,
+            ]
+          : []),
+      ]
+    : [];
+
   // The response's DISCLOSURE block is no longer a fixed ~1.6 KB: the
   // supplemental planes add their own boundaries, and `trust.limitations` now
   // carries the same strings a second time (DERIVED — see the trust build
@@ -1757,7 +1970,11 @@ export const unusedFieldsDeepHandler = async (
   // costs ROWS — which page — instead of silently pushing the envelope over the
   // guard, which does not.
   const disclosureCharge =
-    2 * Buffer.byteLength(JSON.stringify([...BOUNDARIES, ...supplementalBoundaries]), 'utf8');
+    2 *
+    Buffer.byteLength(
+      JSON.stringify([...BOUNDARIES, ...supplementalBoundaries, ...activityPolymorphicBoundaries]),
+      'utf8',
+    );
   const rowByteBudget = Math.max(
     8_000,
     UNUSED_FIELDS_DEEP_BYTE_BUDGET - disclosureCharge,
@@ -1900,6 +2117,7 @@ export const unusedFieldsDeepHandler = async (
   const boundaries: readonly string[] = [
     ...BOUNDARIES,
     ...supplementalBoundaries,
+    ...activityPolymorphicBoundaries,
     ...liveBoundaries,
   ];
 
