@@ -81,6 +81,7 @@ export type {
 export type { CallerIdentity, Context, ServerError } from './server.js';
 export {
   V01_TOOLS,
+  CORE_PROFILE_TOOLS,
   dispatchTool,
   registerTools,
   MCP_LIVE_TOOL_ANNOTATIONS,

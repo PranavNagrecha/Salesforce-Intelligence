@@ -25,7 +25,22 @@ import {
   importExtractionResults,
   openGraph,
 } from '@sf-intelligence/graph';
+import { CORE_PROFILE_TOOLS, V01_TOOLS } from '@sf-intelligence/mcp';
 import { vaultPaths } from '@sf-intelligence/vault';
+
+// A tool this build does NOT advertise under `core` — derived from the same
+// roster the server itself gates on, not a hardcoded name. A hand-picked
+// example (`sfi.org_overview`, used here until it was promoted into
+// CORE_PROFILE_TOOLS by the AUDIT-F6 roster-expansion fix) is exactly the
+// kind of second source of truth that drifts silently the moment the core
+// roster changes — which is what broke this exact check on CI's first real
+// run against the expanded roster.
+const NON_CORE_EXAMPLE_TOOL = V01_TOOLS.find(
+  (t) => !t.hidden && !CORE_PROFILE_TOOLS.has(t.name),
+)?.name;
+if (NON_CORE_EXAMPLE_TOOL === undefined) {
+  throw new Error('no non-core tool found — every advertised tool is now core?');
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const BIN = join(here, '..', 'cli', 'bin', 'sfi.js');
@@ -111,9 +126,10 @@ const newClient = (cwd, env) => {
 console.log('e2e MCP smoke\n');
 
 // === Scenario 1: WITH a vault — graph queries must return data ===
-// Pin full here: default advertise profile is core (19 tools); the dedicated
-// "# core profile" block below asserts that default. This block exercises the
-// full roster + graph-backed tools that are not in core.
+// Pin full here: default advertise profile is core (CORE_PROFILE_TOOLS.size
+// tools, derived — see the import above); the dedicated "# core profile"
+// block below asserts that default. This block exercises the full roster +
+// graph-backed tools that are not in core.
 console.log('# with vault');
 const { vaultParent } = await buildVault();
 const a = newClient(vaultParent, { SFI_TOOL_PROFILE: 'full' });
@@ -147,28 +163,32 @@ try {
 } finally {
   await a.client.close().catch(() => {});
 }
-// === Scenario 1b: core profile (AUDIT-F6) — 19 schemas advertised AND
-// directly invokable; non-core tools only via sfi.run_analysis.
+// === Scenario 1b: core profile (AUDIT-F6) — CORE_PROFILE_TOOLS.size schemas
+// advertised AND directly invokable; non-core tools only via sfi.run_analysis.
 console.log('\n# core profile');
 const cp = newClient(vaultParent, { SFI_TOOL_PROFILE: 'core' });
 try {
   await cp.client.connect(cp.transport);
   const coreTools = await cp.client.listTools();
-  check('core profile advertises exactly 19 schemas', coreTools.tools.length === 19, `got ${coreTools.tools.length}`);
-  const denied = await callText(cp.client, 'sfi.org_overview', {});
+  check(
+    `core profile advertises exactly ${CORE_PROFILE_TOOLS.size} schemas`,
+    coreTools.tools.length === CORE_PROFILE_TOOLS.size,
+    `got ${coreTools.tools.length}`,
+  );
+  const denied = await callText(cp.client, NON_CORE_EXAMPLE_TOOL, {});
   check(
     'non-advertised tool is NOT directly invokable under core',
     denied.includes('not directly invokable') || denied.includes('invalid-query'),
     denied.slice(0, 160),
   );
-  const viaGateway = await callText(cp.client, 'sfi.run_analysis', { name: 'sfi.org_overview', args: {} });
+  const viaGateway = await callText(cp.client, 'sfi.run_analysis', { name: NON_CORE_EXAMPLE_TOOL, args: {} });
   check('run_analysis reaches non-core tools under core', viaGateway.includes('"data"'), viaGateway.slice(0, 100));
   const full = newClient(vaultParent, { SFI_TOOL_PROFILE: 'full' });
   try {
     await full.client.connect(full.transport);
-    const direct = await callText(full.client, 'sfi.org_overview', {});
+    const direct = await callText(full.client, NON_CORE_EXAMPLE_TOOL, {});
     check('full profile allows direct non-core calls', direct.includes('"data"'), direct.slice(0, 100));
-    const viaFullGw = await callText(full.client, 'sfi.run_analysis', { name: 'sfi.org_overview', args: {} });
+    const viaFullGw = await callText(full.client, 'sfi.run_analysis', { name: NON_CORE_EXAMPLE_TOOL, args: {} });
     check('run_analysis byte-identical under full', viaFullGw === direct, viaFullGw.slice(0, 100));
   } finally {
     await full.client.close().catch(() => {});
