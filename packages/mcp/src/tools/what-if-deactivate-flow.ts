@@ -24,6 +24,7 @@
  *   | sendsEmail (out) | Email templates the Flow sent     | metadata-blocker | blocking |
  *   | references/subflow (out) | Subflows THIS Flow invokes    | metadata-blocker | blocking |
  *   | references/subflow (IN)  | Parent Flows that invoke THIS Flow as a subflow | broken-caller | blocking if any Active |
+ *   | references/embeddedFlow (IN) | FlexiPages whose Flow component embeds THIS Flow | embedded-caller | blocking |
  *
  * **An entry point is not a dependent.** `triggersOn` (and `listensTo`,
  * if the extractor ever mints one from a Flow) is the Flow's OWN START
@@ -42,12 +43,25 @@
  * R6-02 adds the INCOMING side. Before it the composer walked only
  * OUTGOING edges, so a subflow called by N parents had zero surfaced
  * dependents and read `safe` to deactivate — a wrong destructive verdict.
- * The incoming `references` edges (confidence `declared`, `referenceKind:
- * 'subflow'`) are now walked: each parent Flow is a BROKEN CALLER whose
- * subflow-call step fails at runtime on deactivation. Only
- * `referenceKind: 'subflow'` counts — a FlexiPage that merely EMBEDS the
- * flow, or any `grantedBy` / `parentOf` edge, is access/structure, not a
- * broken subflow caller (access ≠ usage).
+ * The incoming `references` edges (confidence `declared`) are now walked and
+ * split by `referenceKind` into the two real incoming dependents this vault
+ * can name:
+ *   - `subflow` — a PARENT FLOW invokes this Flow as a subflow. Every
+ *     invocation of an ACTIVE parent fails at runtime on deactivation.
+ *     Surfaced as `broken-caller`.
+ *   - `embeddedFlow` — a Lightning record page (FlexiPage) embeds this Flow
+ *     via a Flow component (`flowruntime:interview`). The component actively
+ *     invokes the Flow at render time, so a user who opens that page after
+ *     deactivation sees a runtime error in that region — a real dependency,
+ *     not passive access. Surfaced as `embedded-caller`. (This edge used to
+ *     be excluded here on the theory that a FlexiPage embed is "access, not
+ *     usage" — the same discipline `find_component_usages` applies to
+ *     `grantedBy` / `parentOf`. That analogy does not hold for this edge:
+ *     `find_component_usages` itself does NOT exclude `embeddedFlow`
+ *     references from its usage tier, only `grantedBy` and `parentOf` — an
+ *     embedded Flow component is an active invocation, not a grant.)
+ * Every OTHER incoming `references` kind, plus `grantedBy` / `parentOf`, stays
+ * excluded as genuine passive access/structure.
  *
  * Outgoing structural edges (`parentOf`, `firesWhen`) are NOT impacts:
  * they describe the Flow's own composition, not its downstream effect.
@@ -99,7 +113,12 @@
  * to the heuristic walker — the subflow modeling is DECLARED `<subflows>`
  * metadata only, not the Apex `Flow.Interview` invocation path; the caller
  * should spot-check Apex callers via `sfi.find_code_usages` targeting the
- * Flow id.
+ * Flow id. Similarly, an `embedded-caller` impact names the FlexiPage that
+ * embeds this Flow, but NOT whether that page is actually assigned to an app
+ * / profile / record page layout a user would ever open — that activation
+ * assignment is not in the retrieved FlexiPage metadata (see
+ * `sfi.lightning_pages`'s activation disclosure), so the impact is surfaced
+ * unconditionally rather than gated on a signal this vault does not have.
  *
  * Implementation notes:
  *   - `flowId` is required to start with `Flow:`. Other prefixes return
@@ -180,6 +199,14 @@ const FLOW_PREFIX = 'Flow:';
  * distinct from `metadata-blocker` (which names this Flow's own OUTGOING
  * effects that stop). A `broken-caller` from an ACTIVE parent forces the
  * headline verdict to `blocking`; see {@link aggregateVerdict}.
+ *
+ * `embedded-caller` is a SIBLING incoming-dependent extension: a Lightning
+ * page (FlexiPage) whose Flow component EMBEDS this Flow. Different in
+ * degree from `broken-caller` — a subflow call fails on every invocation of
+ * an Active parent, while an embedded Flow component only errors when a user
+ * opens that specific page — but it is a real, active invocation (not
+ * passive access), so it always forces `blocking`; see
+ * {@link aggregateVerdict}.
  */
 type Category =
   | 'metadata-blocker'
@@ -189,6 +216,7 @@ type Category =
   | 'invisible-risk'
   | 'configuration-only'
   | 'broken-caller'
+  | 'embedded-caller'
   /**
    * A dependency THIS Flow consumes (a record / field it reads), not a
    * dependent on it. Surfaced for completeness and EXCLUDED from the verdict
@@ -364,7 +392,7 @@ export interface WhatIfDeactivateFlowOutput {
  * tool surface uniform.
  */
 const DISCLOSURE =
-  "v2.3 what-if analysis is composition over the v2.2 vault state. Deactivating a Flow stops the downstream effects listed in impacts; entries with category 'input-only' are dependencies the Flow CONSUMES (records / fields it reads) and stop nothing downstream, and entryPoints names where the Flow starts rather than anything it affects; the Flow's definition remains in the org and a later reactivation restores the effects. R6-02: parent Flows that invoke this Flow as a subflow (declared <subflows> calls) are now surfaced as broken-caller impacts — an ACTIVE parent forces a blocking verdict because its subflow-call step fails at runtime. Apex code that invokes the Flow via Flow.Interview or @InvocableMethod chains is STILL invisible to the heuristic walker, as are non-metadata launch points (quick actions, buttons, screen-flow entry); review callers via sfi.find_code_usages targeting the Flow id before relying on this finding.";
+  "v2.3 what-if analysis is composition over the v2.2 vault state. Deactivating a Flow stops the downstream effects listed in impacts; entries with category 'input-only' are dependencies the Flow CONSUMES (records / fields it reads) and stop nothing downstream, and entryPoints names where the Flow starts rather than anything it affects; the Flow's definition remains in the org and a later reactivation restores the effects. R6-02: parent Flows that invoke this Flow as a subflow (declared <subflows> calls) are now surfaced as broken-caller impacts — an ACTIVE parent forces a blocking verdict because its subflow-call step fails at runtime. Lightning pages whose Flow component EMBEDS this Flow (declared embeddedFlow references) are surfaced as embedded-caller impacts and always force a blocking verdict — unlike a subflow call, the error only appears when a user opens that page, and this vault does not record whether the page is assigned to an active app / profile / record page layout. Apex code that invokes the Flow via Flow.Interview or @InvocableMethod chains is STILL invisible to the heuristic walker, as are non-metadata launch points (quick actions, buttons, screen-flow entry); review callers via sfi.find_code_usages targeting the Flow id before relying on this finding.";
 
 /**
  * Verbatim: what a `safe` structural verdict does NOT prove. Emitted whenever
@@ -643,7 +671,7 @@ const isVerdictBearing = (impact: { readonly category: Category }): boolean =>
  * Aggregate the verdict-bearing impacts into the STRUCTURAL severity. The
  * cascade mirrors R2a's `aggregateVerdict`:
  *   - no verdict-bearing impact → `safe` (plus `notProvenHarmless`).
- *   - any `metadata-blocker` → `blocking`.
+ *   - any `metadata-blocker` OR `embedded-caller` → `blocking`.
  *   - any non-blocker `code-needs-update` / `integration-touch` → `risky`.
  *   - only `configuration-only` / `broken-caller` → `risky` (the finding
  *     still warrants attention even though the deploy itself won't fail).
@@ -655,6 +683,14 @@ const isVerdictBearing = (impact: { readonly category: Category }): boolean =>
  * because whether a parent is currently live depends on its `status`, which
  * this category-only cascade does not carry. A subflow whose only callers are
  * inactive (Draft / Obsolete) is surfaced but stays `risky`, not `safe`.
+ *
+ * `embedded-caller` impacts (a FlexiPage whose Flow component embeds this
+ * Flow) are graded `blocking` UNCONDITIONALLY here, unlike `broken-caller` —
+ * there is no "Active parent" equivalent to gate on: this vault does not
+ * record whether a FlexiPage is assigned to an app / profile / record page
+ * layout (see `sfi.lightning_pages`), so a page whose embed will genuinely
+ * error for its next visitor must not read `risky` on the strength of a
+ * signal this refresh cannot see.
  */
 const aggregateVerdict = (
   impacts: readonly { readonly category: Category }[],
@@ -662,7 +698,9 @@ const aggregateVerdict = (
   const dependents = impacts.filter(isVerdictBearing);
   if (dependents.length === 0) return 'safe';
   for (const impact of dependents) {
-    if (impact.category === 'metadata-blocker') return 'blocking';
+    if (impact.category === 'metadata-blocker' || impact.category === 'embedded-caller') {
+      return 'blocking';
+    }
   }
   for (const impact of dependents) {
     if (
@@ -720,6 +758,11 @@ const resolveRuntimeState = (
  * runtime — the verdict must not sit below `blocking`. Non-active parents
  * (Draft / Obsolete / InvalidDraft) are still surfaced as `broken-caller`
  * impacts but do not force the escalation here.
+ *
+ * `broken-caller`-specific: `embedded-caller` impacts (FlexiPage embeds) never
+ * reach this escalation because `aggregateVerdict` already grades them
+ * `blocking` unconditionally — there is no `status` field to gate on for a
+ * FlexiPage.
  */
 const escalateForActiveCallers = (
   verdict: Verdict,
@@ -782,17 +825,18 @@ const collectFiringConditions = async (
   return ok(out);
 };
 
-/** Result of the incoming broken-caller walk. */
-interface BrokenCallerScan {
+/** Result of the incoming `references` walk (broken callers + embedded callers). */
+interface IncomingReferenceScan {
   readonly impacts: readonly WhatIfImpactItem[];
   /**
-   * Callers whose SOURCE node is not in this vault. The subflow-call edge is
-   * declared, so the caller exists and breaks; only its identity and its
-   * `status` are unknown here. Never dropped — a subflow whose only parent is
-   * out of vault used to read `safe`.
+   * Callers/embedders whose SOURCE node is not in this vault. The edge is
+   * declared, so the source exists and the effect is real; only its identity
+   * (and, for a subflow caller, its `status`) are unknown here. Never
+   * dropped — a subflow whose only parent, or a Flow whose only embedding
+   * page, is out of vault used to read `safe`.
    */
   readonly unresolved: readonly WhatIfUnresolvedImpact[];
-  /** True when at least one broken caller has `status === 'Active'`. */
+  /** True when at least one broken (subflow) caller has `status === 'Active'`. */
   readonly hasActiveBrokenCaller: boolean;
 }
 
@@ -807,54 +851,71 @@ const readCallerStatus = (node: Node): string => {
 };
 
 /**
- * R6-02: the INCOMING side. Walk `references` edges pointing AT this Flow and
- * keep only the ones a PARENT Flow emitted to invoke it as a subflow
- * (`properties.referenceKind === 'subflow'`). Each such parent is a BROKEN
- * CALLER on deactivation — deactivating this subflow makes the parent's
- * subflow-call step fail at runtime.
+ * R6-02 (+ embedded-caller extension): the INCOMING side. Walk `references`
+ * edges pointing AT this Flow and split them by `referenceKind` into the two
+ * real incoming dependents this vault can name:
  *
- * Honesty (access ≠ usage): only `references` edges with `referenceKind:
- * 'subflow'` are counted. Other incoming edge types (`grantedBy`, `parentOf`,
- * `firesWhen`) and non-subflow `references` (e.g. a FlexiPage that merely
- * EMBEDS the flow) are NOT broken callers and are excluded — matching the
- * find_component_usages access-vs-usage discipline.
+ *   - `subflow` — a PARENT Flow emitted the edge to invoke this Flow as a
+ *     subflow. Each such parent is a BROKEN CALLER on deactivation —
+ *     deactivating this subflow makes the parent's subflow-call step fail at
+ *     runtime on EVERY invocation of that parent.
+ *   - `embeddedFlow` — a FlexiPage's Flow component embeds this Flow. Each
+ *     such page is an EMBEDDED CALLER on deactivation — a user who opens that
+ *     page after deactivation sees a runtime error in that component's
+ *     region. Unlike a subflow call, this does not fail on every invocation
+ *     of anything; it fails only when the page is actually visited.
  *
- * Every parent caller is surfaced as a `broken-caller` impact (full
- * transparency, with the parent's `status` in the explanation), but only an
- * ACTIVE parent sets `hasActiveBrokenCaller` — the signal
- * {@link escalateForActiveCallers} uses to force `blocking`. A subflow whose
- * only callers are inactive is surfaced but does not read `safe`.
+ * Honesty (access ≠ usage): only these two `referenceKind`s are counted.
+ * Other incoming edge types (`grantedBy`, `parentOf`, `firesWhen`) and every
+ * other `references` kind are genuinely passive access/structure and are
+ * excluded — matching the find_component_usages access-vs-usage discipline
+ * (which itself excludes only `grantedBy` / `parentOf`, never a `references`
+ * edge naming an active invocation like `embeddedFlow`).
  *
- * Sparse-graph misses (an edge whose source node was dropped) and non-Flow
- * sources (a malformed subflow edge) are skipped defensively.
+ * Every caller/embedder is surfaced as an impact (full transparency, with a
+ * Flow parent's `status` in its explanation), but only a subflow parent's
+ * `status === 'Active'` sets `hasActiveBrokenCaller` — the signal
+ * {@link escalateForActiveCallers} uses to force `blocking` for
+ * `broken-caller`. `embedded-caller` has no such conditional path: this vault
+ * cannot tell whether a FlexiPage is assigned/active, so
+ * {@link aggregateVerdict} grades every `embedded-caller` `blocking`
+ * unconditionally instead.
+ *
+ * Sparse-graph misses (an edge whose source node was dropped) and
+ * type-mismatched sources (a malformed subflow or embed edge) are skipped
+ * defensively.
  */
-const collectBrokenCallers = async (
+const collectIncomingReferenceImpacts = async (
   ctx: Context,
   flowId: ComponentId,
   flowApiName: string,
-): Promise<Result<BrokenCallerScan, string>> => {
+): Promise<Result<IncomingReferenceScan, string>> => {
   const edgesResult = await listEdges(ctx.graph, flowId, {
     direction: 'in',
     edgeType: 'references',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
-  // ONE batched fetch of every subflow caller, replacing the per-edge
-  // `getNodeById` N+1. Filter to subflow references first, then batch their
-  // sources; edge order is preserved (final response re-sorts by compareImpacts).
+  // ONE batched fetch of every subflow caller AND embedding page, replacing
+  // the per-edge `getNodeById` N+1. Filter by referenceKind first, then batch
+  // BOTH sets of sources together; edge order is preserved (final response
+  // re-sorts by compareImpacts).
   const subflowEdges = edgesResult.value.filter(
     (e) => e.properties['referenceKind'] === 'subflow',
   );
-  const parentNodesResult = await listNodesByIds(
-    ctx.graph,
-    subflowEdges.map((e) => e.fromId),
+  const embeddedFlowEdges = edgesResult.value.filter(
+    (e) => e.properties['referenceKind'] === 'embeddedFlow',
   );
-  if (!parentNodesResult.ok) return err(parentNodesResult.error.message);
-  const parentById = new Map(parentNodesResult.value.map((n) => [n.id, n]));
+  const sourceNodesResult = await listNodesByIds(ctx.graph, [
+    ...subflowEdges.map((e) => e.fromId),
+    ...embeddedFlowEdges.map((e) => e.fromId),
+  ]);
+  if (!sourceNodesResult.ok) return err(sourceNodesResult.error.message);
+  const sourceById = new Map(sourceNodesResult.value.map((n) => [n.id, n]));
   const impacts: WhatIfImpactItem[] = [];
   const unresolved: WhatIfUnresolvedImpact[] = [];
   let hasActiveBrokenCaller = false;
   for (const edge of subflowEdges) {
-    const parentNode = parentById.get(edge.fromId);
+    const parentNode = sourceById.get(edge.fromId);
     if (parentNode === undefined) {
       // The caller's node is not in this vault (a packaged parent Flow, or one
       // outside the retrieve scope). The `<subflows>` call is DECLARED, so the
@@ -895,6 +956,45 @@ const collectBrokenCallers = async (
       explanation:
         `Flow '${parentNode.apiName}' (${status}) invokes '${flowApiName}' as a subflow; ` +
         `deactivating '${flowApiName}' makes that subflow call fail — ${activeNote}.`,
+    });
+  }
+  for (const edge of embeddedFlowEdges) {
+    const pageNode = sourceById.get(edge.fromId);
+    if (pageNode === undefined) {
+      // The embedding page's node is not in this vault (one this refresh did
+      // not retrieve). The embed is DECLARED, so the page is real and its Flow
+      // component breaks on deactivation — dropping it is exactly the silent
+      // omission this fix closes for the resolvable case too.
+      unresolved.push({
+        category: 'embedded-caller',
+        componentId: edge.fromId,
+        edgeType: edge.edgeType,
+        confidence: edge.confidence,
+        targetMissing: true,
+        explanation:
+          `'${edge.fromId}' embeds '${flowApiName}' via a Flow component, but ` +
+          'that page is NOT a node in this vault (`targetMissing`) — one this ' +
+          'refresh did not retrieve. The embed is DECLARED, so a user who opens ' +
+          `that page after '${flowApiName}' is deactivated sees a runtime error ` +
+          'in that component region. Confirm the page in the org.',
+      });
+      continue;
+    }
+    if (pageNode.type !== 'FlexiPage') continue; // defensive: embedders are FlexiPages
+    impacts.push({
+      category: 'embedded-caller',
+      componentId: pageNode.id,
+      componentType: pageNode.type,
+      apiName: pageNode.apiName,
+      confidence: edge.confidence,
+      explanation:
+        `Lightning page '${pageNode.apiName}' embeds Flow '${flowApiName}' via a Flow ` +
+        `component; after deactivation, any user who opens '${pageNode.apiName}' sees ` +
+        'a runtime error in that region of the page. Unlike a subflow call, this ' +
+        'breaks only when the page is actually visited, not on every invocation. ' +
+        'This vault does not record whether the page is assigned to an active app ' +
+        '/ profile / record page layout (see sfi.lightning_pages), so confirm real ' +
+        'usage in the org before judging how often this bites.',
     });
   }
   return ok({ impacts, unresolved, hasActiveBrokenCaller });
@@ -1091,19 +1191,21 @@ const whatIfDeactivateFlowFromNode = async (
     });
   }
 
-  // R6-02: the INCOMING side. Parent Flows that invoke THIS Flow as a subflow
-  // are broken callers on deactivation — the single outgoing-edge walk above is
-  // blind to them, which is exactly why a called subflow used to read `safe`.
-  const brokenCallersResult = await collectBrokenCallers(
+  // R6-02 (+ embedded-caller): the INCOMING side. Parent Flows that invoke
+  // THIS Flow as a subflow, and FlexiPages whose Flow component embeds THIS
+  // Flow, are both dependents on deactivation — the single outgoing-edge walk
+  // above is blind to them, which is exactly why a called subflow (or an
+  // embedded Flow) used to read `safe`.
+  const incomingReferenceResult = await collectIncomingReferenceImpacts(
     ctx,
     flowId,
     flowNode.apiName,
   );
-  if (!brokenCallersResult.ok) {
-    return err({ kind: 'internal', message: brokenCallersResult.error });
+  if (!incomingReferenceResult.ok) {
+    return err({ kind: 'internal', message: incomingReferenceResult.error });
   }
-  impacts.push(...brokenCallersResult.value.impacts);
-  unresolvedImpacts.push(...brokenCallersResult.value.unresolved);
+  impacts.push(...incomingReferenceResult.value.impacts);
+  unresolvedImpacts.push(...incomingReferenceResult.value.unresolved);
 
   const sortedImpacts = [...impacts].sort(compareImpacts);
   const sortedUnresolvedImpacts = [...unresolvedImpacts].sort(compareImpacts);
@@ -1133,7 +1235,7 @@ const whatIfDeactivateFlowFromNode = async (
   // them" was answered with the word `safe`.
   const rawVerdict = escalateForActiveCallers(
     aggregateVerdict([...sortedImpacts, ...sortedUnresolvedImpacts]),
-    brokenCallersResult.value.hasActiveBrokenCaller,
+    incomingReferenceResult.value.hasActiveBrokenCaller,
   );
   const coverage = attachCoverageToWhatIf(
     ctx,

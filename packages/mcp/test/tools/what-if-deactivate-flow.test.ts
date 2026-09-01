@@ -358,6 +358,85 @@ const subflowObsoleteParentSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Suite 5b (embedded-caller fix): a Flow with NO outgoing edges and NO subflow
+// callers, embedded in a Lightning record page via a Flow component
+// (referenceKind: 'embeddedFlow', mirroring the real extractor). Before the
+// fix this read `safe` — the embed was walked (same incoming `references`
+// query as the subflow case) but silently excluded because only
+// `referenceKind: 'subflow'` was ever checked. A second, unrelated FlexiPage
+// with a non-embed reference kind proves the walk still discriminates by kind.
+// =============================================================================
+
+const EMBEDDED_FLOW_ID = 'Flow:PortalDocumentUpload';
+const EMBEDDING_PAGE_ID = 'FlexiPage:CaseRecordPage';
+const UNRELATED_PAGE_ID = 'FlexiPage:UnrelatedFieldRefPage';
+
+const embeddedCallerSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: EMBEDDED_FLOW_ID,
+      type: 'Flow',
+      apiName: 'PortalDocumentUpload',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: EMBEDDING_PAGE_ID,
+      type: 'FlexiPage',
+      apiName: 'CaseRecordPage',
+      properties: {},
+    }),
+    makeNode({
+      id: UNRELATED_PAGE_ID,
+      type: 'FlexiPage',
+      apiName: 'UnrelatedFieldRefPage',
+      properties: {},
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: EMBEDDING_PAGE_ID,
+      toId: EMBEDDED_FLOW_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'embeddedFlow' },
+    }),
+    // A non-embed reference from an unrelated page must NOT be counted.
+    makeEdge({
+      fromId: UNRELATED_PAGE_ID,
+      toId: EMBEDDED_FLOW_ID,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      properties: { referenceKind: 'fieldRef' },
+    }),
+  ],
+};
+
+// The unresolved mirror: a Flow embedded by a page that is NOT a node in this
+// vault (a page this refresh did not retrieve).
+const EMBEDDED_FLOW_ORPHAN_PAGE_ID = 'Flow:VendorPortalUpload';
+const MISSING_EMBEDDING_PAGE_ID = 'FlexiPage:Vendor_External_Page';
+
+const embeddedCallerUnresolvedSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: EMBEDDED_FLOW_ORPHAN_PAGE_ID,
+      type: 'Flow',
+      apiName: 'VendorPortalUpload',
+      properties: { status: 'Active' },
+    }),
+    // NO node for MISSING_EMBEDDING_PAGE_ID.
+  ],
+  edges: [
+    makeEdge({
+      fromId: MISSING_EMBEDDING_PAGE_ID,
+      toId: EMBEDDED_FLOW_ORPHAN_PAGE_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'embeddedFlow' },
+    }),
+  ],
+};
 
 // =============================================================================
 // Suite 6 (FIX 5): the VERDICT-CARRIES-INFORMATION fixtures. Four invented
@@ -604,6 +683,8 @@ beforeAll(async () => {
     platformEventSeed,
     subflowActiveParentsSeed,
     subflowObsoleteParentSeed,
+    embeddedCallerSeed,
+    embeddedCallerUnresolvedSeed,
     verdictSpreadSeed,
     externalTargetsSeed,
     incomingMissingSeed,
@@ -901,6 +982,82 @@ describe('whatIfDeactivateFlowHandler', () => {
     const disclosure = result.value.data.disclosure;
     expect(disclosure).toContain('subflow');
     expect(disclosure).toContain('Flow.Interview');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Embedded-caller fix: a FlexiPage whose Flow component embeds this Flow is a
+  // real dependent, not silently dropped as "access, not usage". Before the
+  // fix, a Flow with no outgoing edges and no subflow callers — but embedded in
+  // a Lightning page — read `safe`, certifying "nothing depends on this" while
+  // every visitor to that page would hit a runtime error post-deactivation.
+  // ---------------------------------------------------------------------------
+
+  it('flips a would-be-safe Flow to `blocking` when a FlexiPage embeds it via a Flow component', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: EMBEDDED_FLOW_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // FAIL-BEFORE: the Flow has NO outgoing edges and no subflow callers — pre-fix
+    // this read `safe`, exactly the false-"safe" this fix closes.
+    expect(data.verdict).toBe('blocking');
+    expect(data.structuralVerdict).toBe('blocking');
+    const embeddedCallers = data.impacts.filter(
+      (i) => i.category === 'embedded-caller',
+    );
+    expect(embeddedCallers.map((i) => i.componentId)).toEqual([EMBEDDING_PAGE_ID]);
+    expect(embeddedCallers[0]?.componentType).toBe('FlexiPage');
+    expect(embeddedCallers[0]?.apiName).toBe('CaseRecordPage');
+    expect(embeddedCallers[0]?.confidence).toBe('declared');
+    expect(embeddedCallers[0]?.explanation).toContain('embeds');
+    expect(embeddedCallers[0]?.explanation).toContain('runtime error');
+    // Honesty about degree: this must not overstate the embed as identical to a
+    // subflow call (which fails on EVERY invocation) — it fails on page visits.
+    expect(embeddedCallers[0]?.explanation).toContain('visited');
+  });
+
+  it('does NOT count a non-embed incoming reference as an embedded caller', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: EMBEDDED_FLOW_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).not.toContain(UNRELATED_PAGE_ID);
+  });
+
+  it('a Flow embedded by a page outside this vault is surfaced as unresolved, not dropped to `safe`', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: EMBEDDED_FLOW_ORPHAN_PAGE_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // Pre-fix: this edge kind was never checked at all, resolved or not — the
+    // Flow read `safe` regardless of whether the page was in-vault.
+    expect(data.structuralVerdict).not.toBe('safe');
+    expect(data.verdict).not.toBe('safe');
+    expect(data.notProvenHarmless).toBeUndefined();
+    expect(data.unresolvedImpacts).toEqual([
+      {
+        category: 'embedded-caller',
+        componentId: MISSING_EMBEDDING_PAGE_ID,
+        edgeType: 'references',
+        confidence: 'declared',
+        targetMissing: true,
+        explanation: expect.any(String) as unknown as string,
+      },
+    ]);
+  });
+
+  it('discloses the new embedded-caller modeling', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: EMBEDDED_FLOW_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.disclosure).toContain('embedded');
   });
 });
 
