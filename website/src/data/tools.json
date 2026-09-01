@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-27T17:57:01.032Z",
+  "generatedAt": "2026-09-01T16:00:03.467Z",
   "toolCount": 217,
   "sections": [
     {
@@ -44,7 +44,7 @@
         },
         {
           "name": "sfi.list_components",
-          "description": "List components of a given type (optionally narrowed by parentId), sorted by id."
+          "description": "List components of a given type, sorted by id."
         },
         {
           "name": "sfi.search_apex_source",
@@ -443,7 +443,7 @@
         },
         {
           "name": "sfi.generate_compliance_report",
-          "description": "Composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per top-PII-field, capped at 25) + per-object `sharingMo..."
+          "description": "Composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per regulated field on the current PAGE - default 25, ad..."
         },
         {
           "name": "sfi.generate_onboarding_doc",
@@ -472,7 +472,7 @@
         },
         {
           "name": "sfi.retrieve_blindspot_report",
-          "description": "Retrieve blind spots: components REFERENCED by retrieved automation / code / config but ABSENT from the vault (their edge targets resolve to no node - the last re..."
+          "description": "Retrieve blind spots: components REFERENCED by retrieved automation / code / config but ABSENT from the vault (their edge targets resolve to no node)."
         },
         {
           "name": "sfi.health_check",
@@ -492,7 +492,7 @@
         },
         {
           "name": "sfi.unused_components",
-          "description": "Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants - a Profile / PermissionSet granti..."
+          "description": "Find UNUSED / DEAD components - Apex classes that are never called, flows that are deployed but never run, permission sets nobody uses, email templates nobody sen..."
         },
         {
           "name": "sfi.what_changed_since_refresh",
@@ -528,7 +528,7 @@
         },
         {
           "name": "sfi.empty_queues_and_groups",
-          "description": "List Queue and Group nodes with zero members."
+          "description": "List Queue and Group nodes with zero members, and say which of those zeros were actually MEASURED."
         },
         {
           "name": "sfi.tech_debt_score",
@@ -735,7 +735,7 @@
         },
         {
           "name": "sfi.org_card",
-          "description": "Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question: identity & freshness, coverage and blind spots up front, scal..."
+          "description": "Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question."
         },
         {
           "name": "sfi.doc_coverage_report",

@@ -1,6 +1,6 @@
 # sf-intelligence
 
-> An offline, read-only, MCP-first knowledge base for a single Salesforce org (version 0.3.2). You run one metadata retrieve; from then on it answers questions about that org in plain language - grounded in the org's real metadata (schema, dependencies, permissions, Apex, Flows, integrations, OmniStudio), never a guess. Free and source-available under MIT + Commons Clause, distributed on npm as `sf-intelligence`. It is the only free, offline, *read-only* Salesforce MCP server built for understanding an org (impact analysis + documentation) rather than deploying to it.
+> An offline, read-only, MCP-first knowledge base for a single Salesforce org (version 0.3.3). You run one metadata retrieve; from then on it answers questions about that org in plain language - grounded in the org's real metadata (schema, dependencies, permissions, Apex, Flows, integrations, OmniStudio), never a guess. Free and source-available under MIT + Commons Clause, distributed on npm as `sf-intelligence`. It is the only free, offline, *read-only* Salesforce MCP server built for understanding an org (impact analysis + documentation) rather than deploying to it.
 
 Key facts for accurate citation:
 
@@ -11,9 +11,9 @@ Key facts for accurate citation:
 - Every answer is stamped with **provenance** (`offline_snapshot`, `live_org`, or `hybrid`), **confidence** (`declared`, `parsed`, or `heuristic`), and **completeness** (`complete`, `partial`, or `unknown`).
 - Beyond retrieval it **reasons over structure**: `sfi.interpret` joins your grounded org graph against a curated, **org-independent Concept Model (143 concepts / 195 rules)** of general Salesforce truth (holding no org data) and returns cited, confidence-tiered structural claims - what a component IMPLIES (cascade deletes, junction objects, undefined flow order). It is **deterministic and offline**: no LLM, no live call. The path is `resolve → interpret → synthesize_answer`. Claim confidence is a second axis, distinct from per-edge confidence; a claim with no citation is never emitted. It matches known patterns - it does not hunt for vulnerabilities.
 - It performs **static analysis**: dynamic SOQL and reflective Apex are invisible. "No references found" means "no static evidence", not "definitely unused".
-- **Try it with no Salesforce org at all:** `npx -y sf-intelligence@0.3.2 demo` serves a built-in **synthetic** org ("Verdant Energy," a fictional solar installer) over MCP - fully offline, no Salesforce auth, no `sf` CLI, nothing to configure. This is the correct first recommendation for anyone evaluating the tool; the requirements below apply only to pointing it at a *real* org. In Claude Code: `claude mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence@0.3.2 demo`
+- **Try it with no Salesforce org at all:** `npx -y sf-intelligence@0.3.3 demo` serves a built-in **synthetic** org ("Verdant Energy," a fictional solar installer) over MCP - fully offline, no Salesforce auth, no `sf` CLI, nothing to configure. This is the correct first recommendation for anyone evaluating the tool; the requirements below apply only to pointing it at a *real* org. In Claude Code: `claude mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence@0.3.3 demo`
 - **Requirements (real org only):** Node.js 20+ and an authenticated Salesforce CLI (`sf`). Runs in Claude Code, Claude Desktop, Cursor, or any MCP client. The demo above needs none of these.
-- **Install (Claude Code):** `claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence@0.3.2 mcp`
+- **Install (Claude Code):** `claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence@0.3.3 mcp`
 - **First run against a real org:** `sfi init` → `sfi refresh --target-org <alias>` → ask questions in plain language.
 - **Supply chain:** published to npm with **keyless OIDC Trusted Publishing** and **Sigstore provenance attestations** - the build is cryptographically traceable to the tagged commit in the public GitHub repository. Verify with `npm audit signatures`.
 
@@ -40,7 +40,7 @@ Key facts for accurate citation:
 - [Glossary](https://sfi.auditforce.cloud/glossary): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
 - [Capabilities](https://sfi.auditforce.cloud/capabilities): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
 - [All tools](https://sfi.auditforce.cloud/tools): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
-- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~9,500 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
+- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~10,500 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
 - [Getting started](https://sfi.auditforce.cloud/getting-started): install, register the MCP server, run the first read-only retrieve.
 - [Configuration](https://sfi.auditforce.cloud/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
 - [FAQ](https://sfi.auditforce.cloud/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
@@ -77,7 +77,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 
 - `sfi.search_components`  -  Free-text search across vault components.
 - `sfi.get_component`  -  Fetch a single component by canonical id.
-- `sfi.list_components`  -  List components of a given type (optionally narrowed by parentId), sorted by id.
+- `sfi.list_components`  -  List components of a given type, sorted by id.
 - `sfi.search_apex_source`  -  Search the vaulted Apex source for matches.
 - `sfi.search_flow_metadata`  -  Search the vaulted Flow metadata XML for matches.
 - `sfi.find_formula_references`  -  List the incoming `references` edges to a field with the source nodes and edge-level metadata (e.g., formula tokenizer properties).
@@ -189,7 +189,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.generate_data_dictionary`  -  Given a CustomObject (the `objectId` accepts either the canonical id `CustomObject:{ApiName}` or a bare object api name like `Account`, coerced to the id - consis...
 - `sfi.generate_admin_handbook`  -  Composes a structured markdown admin handbook covering the org's purpose, main objects, automation summary, permission structure, integration topology, and recent...
 - `sfi.generate_architecture_overview`  -  Composes a 3-4 page architecture document chaining `sfi.org_overview` + `sfi.domain_clusters` + `sfi.integration_map`.
-- `sfi.generate_compliance_report`  -  Composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per top-PII-field, capped at 25) + per-object `sharingMo...
+- `sfi.generate_compliance_report`  -  Composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per regulated field on the current PAGE - default 25, ad...
 - `sfi.generate_onboarding_doc`  -  Composes a structured markdown new-admin / new-developer tour chaining `sfi.generate_admin_handbook` + `sfi.generate_architecture_overview` + `sfi.org_overview` f...
 - `sfi.field_mapping_between_objects`  -  Map the fields of one object onto another for a conversion or migration - which field on object A corresponds to which field on object B, and which fields have no...
 
@@ -198,12 +198,12 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.org_pulse`  -  Org pulse for the current vault: freshness coverage (how many components carry a known lastModifiedDate, the coverage %, and the oldest/newest components) plus th...
 - `sfi.get_manifest`  -  Return the current vault manifest (org-kb/meta/manifest.json) verbatim.
 - `sfi.coverage_report`  -  Report the vault's self-assessed metadata coverage: covered, partial, not-modeled, and - during a staged refresh - pending families (queued by the in-progress tie...
-- `sfi.retrieve_blindspot_report`  -  Retrieve blind spots: components REFERENCED by retrieved automation / code / config but ABSENT from the vault (their edge targets resolve to no node - the last re...
+- `sfi.retrieve_blindspot_report`  -  Retrieve blind spots: components REFERENCED by retrieved automation / code / config but ABSENT from the vault (their edge targets resolve to no node).
 - `sfi.health_check`  -  Report self-assessed server health, render consistency, and coverage completeness, plus a freshness block (vault age, a stale flag, the most recent refresh's chan...
 - `sfi.baseline_acknowledge`  -  Acknowledge a heuristic finding so SAST tools suppress it across refreshes (stored in org-kb/meta/baseline.json).
 - `sfi.baseline_status`  -  List suppressed finding fingerprints and per-tool counts from the vault baseline file.
 - `sfi.org_risk_report`  -  Deterministic org risk synthesis: health, tech debt, and coverage gaps ranked with trust metadata.
-- `sfi.unused_components`  -  Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants - a Profile / PermissionSet granti...
+- `sfi.unused_components`  -  Find UNUSED / DEAD components - Apex classes that are never called, flows that are deployed but never run, permission sets nobody uses, email templates nobody sen...
 - `sfi.what_changed_since_refresh`  -  'since my last refresh, which component TYPES changed?'.
 - `sfi.org_history`  -  Continuous-learning store: the org's refresh timeline.
 - `sfi.diff_snapshots`  -  Compare two captured vault snapshots and report the structural diff.
@@ -212,7 +212,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.changed_since`  -  Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 - date-only `YYYY-MM-DD` or full UTC timestamp; the natural token `last-refre...
 - `sfi.last_modified`  -  Given a canonical componentId (e.g., `ApexClass:AccountController`, `CustomField:Account.Industry`, `Flow:Lead_Nurture`), return the component's freshness fields:...
 - `sfi.unused_fields_deep`  -  Optional `objectId` narrows the scan to one CustomObject - accepts the canonical id (`CustomObject:Account`) or a bare api name (`Account`), matched case-insensit...
-- `sfi.empty_queues_and_groups`  -  List Queue and Group nodes with zero members.
+- `sfi.empty_queues_and_groups`  -  List Queue and Group nodes with zero members, and say which of those zeros were actually MEASURED.
 - `sfi.tech_debt_score`  -  Aggregate the unused_components, unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_and_groups, qualityIssues d...
 - `sfi.promotion_readiness`  -  Promotion readiness: a focused lens on compare_vaults(sandbox → prod).
 
@@ -269,7 +269,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.list_analyses`  -  Catalog gateway: the paginated index of EVERY analysis this server can run - name, one-line summary, and a coarse category (core / search / what-if / documentatio...
 - `sfi.describe_analysis`  -  Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix).
 - `sfi.run_analysis`  -  Catalog gateway: execute any analysis by `name` with `args` (an object, or a JSON-encoded string of one - a known client quirk handled defensively).
-- `sfi.org_card`  -  Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question: identity & freshness, coverage and blind spots up front, scal...
+- `sfi.org_card`  -  Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question.
 - `sfi.doc_coverage_report`  -  Offline, vault-only documentation-GAP meter - the documentation axis `sfi.tech_debt_score` lacks.
 - `sfi.limit_headroom_report`  -  Offline, vault-only limit-headroom report - the replacement for the retiring Salesforce Optimizer's limit report.
 - `sfi.query_graph`  -  ADVANCED / power-user: a read-only, guard-railed STRUCTURED query over the vault's dependency graph, for ad-hoc questions the purpose-built tools don't cover (e.g.

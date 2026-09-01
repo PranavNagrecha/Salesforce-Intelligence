@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-27T17:57:01.032Z",
-  "version": "0.3.2",
+  "generatedAt": "2026-09-01T16:00:03.467Z",
+  "version": "0.3.3",
   "toolCount": 217,
   "skillCount": 26,
   "agentCount": 4,
@@ -13,18 +13,18 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 308,
-        "cases": 6614
+        "files": 318,
+        "cases": 7549
       },
       {
         "name": "extractors",
         "files": 87,
-        "cases": 1185
+        "cases": 1196
       },
       {
         "name": "cli",
         "files": 46,
-        "cases": 521
+        "cases": 522
       },
       {
         "name": "graph",
@@ -39,17 +39,17 @@
       {
         "name": "patterns",
         "files": 3,
-        "cases": 170
+        "cases": 181
+      },
+      {
+        "name": "vault",
+        "files": 11,
+        "cases": 156
       },
       {
         "name": "renderers",
         "files": 10,
         "cases": 154
-      },
-      {
-        "name": "vault",
-        "files": 11,
-        "cases": 150
       },
       {
         "name": "tooling-api",
@@ -62,10 +62,10 @@
         "cases": 81
       }
     ],
-    "totalCases": 9583,
-    "totalFiles": 512,
+    "totalCases": 10547,
+    "totalFiles": 522,
     "packageCount": 10,
-    "approx": 9500
+    "approx": 10500
   },
   "integrationSuiteCount": 5,
   "gates": [
@@ -90,20 +90,20 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 308,
-      "cases": 6614,
+      "files": 318,
+      "cases": 7549,
       "description": "The 217 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 87,
-      "cases": 1185,
+      "cases": 1196,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
       "files": 46,
-      "cases": 521,
+      "cases": 522,
       "description": "The sfi command-line tool"
     },
     {
@@ -121,20 +121,20 @@
     {
       "name": "patterns",
       "files": 3,
-      "cases": 170,
+      "cases": 181,
       "description": "Heuristic recognizers (PII, naming, code quality)"
+    },
+    {
+      "name": "vault",
+      "files": 11,
+      "cases": 156,
+      "description": "Vault layout, manifest, freshness"
     },
     {
       "name": "renderers",
       "files": 10,
       "cases": 154,
       "description": "Markdown vault rendering"
-    },
-    {
-      "name": "vault",
-      "files": 11,
-      "cases": 150,
-      "description": "Vault layout, manifest, freshness"
     },
     {
       "name": "tooling-api",

@@ -325,11 +325,19 @@ candidate:
   Profile / PermissionSet access grant — access is not usage). No
   callers, no triggers, no listeners. For CustomField, no incoming
   references at all (no formula refs, no Apex reads/writes, no Flow
-  record-ops, no layout placements).
+  record-ops, no layout placements) — AND, for an Activity/Task/Event-
+  family CustomField specifically (the same physical field can be
+  materialized as up to three graph nodes,
+  `CustomField:Activity/Task/Event.<field>`), no OTHER EXISTING
+  representation of that field has a real incoming usage edge either.
+  A sibling with usage this candidate does not have downgrades the
+  verdict to `uncertain` instead — see cause (d) below; the import-
+  time polymorphic mirror can under-mint or be absent, so it is not
+  trusted alone.
 - **`likely_dead`** — reached only by test classes
   (`isTest === true`) or via heuristic-only edges that may be
   stripped by dynamic SOQL / reflective access.
-- **`uncertain`** — three different causes, all suppressed by default
+- **`uncertain`** — four different causes, all suppressed by default
   and surfaced with `includeUncertain: true`: (a) reached by at least
   one EXTERNAL entry point; (b) an unproven dynamic registration — a
   dotted `superclass` (another namespace's framework instantiates its
@@ -337,8 +345,12 @@ candidate:
   incoming edges BY CONSTRUCTION and so must never be called dead;
   (c) a whole-word source re-check found the class named in
   production Apex through a static-field or type-name usage the
-  parser models as no edge. An Active / Draft / unknown-status Flow
-  is also `uncertain`, never `definitely_dead`.
+  parser models as no edge; (d) an Activity/Task/Event-family
+  CustomField (e.g. `CustomField:Task.X` vs `CustomField:Event.X`)
+  whose OTHER EXISTING representation has a real incoming usage edge
+  this one does not — it would otherwise have read `definitely_dead`.
+  An Active / Draft / unknown-status Flow is also `uncertain`, never
+  `definitely_dead`.
 
 Default invocation:
 

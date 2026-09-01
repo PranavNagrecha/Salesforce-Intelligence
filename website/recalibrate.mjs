@@ -244,6 +244,11 @@ const T = String(toolCount);
 const llmsRules = [
   [/(\*\*)\d[\d,]*( read-only tools\*\*)/, `$1${T}$2`],
   [/(\(version )\d+\.\d+\.\d+(\))/, `$1${VERSION}$2`],
+  // Every `npx -y sf-intelligence@X.Y.Z` install/demo snippet pins a version
+  // literal that goes stale exactly like the parenthetical one above — the
+  // single-match rule above only ever touched the first line, leaving the
+  // demo and install command examples advertising the PREVIOUS release.
+  [/(sf-intelligence@)\d+\.\d+\.\d+/g, `$1${VERSION}`],
 ];
 if (stats.commandCount != null) llmsRules.push([/(\*\*)\d+( slash commands\*\*)/, `$1${stats.commandCount}$2`]);
 if (stats.skillCount != null) llmsRules.push([/(ships \*\*)\d+( skills\*\*)/, `$1${stats.skillCount}$2`]);

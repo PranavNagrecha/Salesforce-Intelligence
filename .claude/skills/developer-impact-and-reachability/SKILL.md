@@ -175,7 +175,8 @@ category vocabulary is per tool: the shared six are
 `test-class-update` | `invisible-risk` | `configuration-only`, plus
 `input-only` (a dependency the component CONSUMES — deliberately
 excluded from the verdict) and, on `what_if_deactivate_flow`,
-`broken-caller`.
+`broken-caller` (a parent Flow invoking this Flow as a subflow) and
+`embedded-caller` (a FlexiPage whose Flow component embeds this Flow).
 
 **Two verdict axes, not one.** `what_if_deactivate_flow` and
 `what_if_disable_trigger` return BOTH `structuralVerdict` — what the
@@ -204,19 +205,27 @@ the subflows THIS Flow invokes (`references` / `referenceKind:
 'subflow'`). Each becomes a `WhatIfImpactItem`. **R6-02 — the incoming
 side:** parent Flows that invoke THIS Flow as a subflow are BROKEN
 CALLERS on deactivation, surfaced as a distinct `broken-caller`
-category. `structuralVerdict`: `safe` (no verdict-bearing impact) /
-`risky` (callsApex only, or broken callers that are all inactive
+category, and FlexiPages whose Flow component EMBEDS this Flow
+(`references` / `referenceKind: 'embeddedFlow'`) are EMBEDDED CALLERS,
+surfaced as a distinct `embedded-caller` category — the embed is an
+active invocation at render time, not passive access (this used to be
+excluded on the "access, not usage" theory; it no longer is).
+`structuralVerdict`: `safe` (no verdict-bearing impact) / `risky`
+(callsApex only, or broken callers that are all inactive
 Draft/Obsolete) / `blocking` (record write, trigger, email-send, or
-subflow-invocation impact, OR any broken caller that is an ACTIVE
-parent Flow — a subflow with active parents must not read `safe`).
+subflow-invocation impact; any broken caller that is an ACTIVE parent
+Flow; or ANY embedded-caller — a FlexiPage embed forces `blocking`
+UNCONDITIONALLY, because this vault cannot tell whether that page is
+assigned to an active app / profile / record page layout).
 `triggersOn` / `listensTo` are NOT impacts: they are the Flow's own
 `entryPoints[]`. The headline `verdict` is `already-inactive` whenever
 the Flow does not run today, whatever the structure says — do not
 report "deactivating this changes nothing" from an inactive Flow's
 empty impact list; report that it is already off and what still
-depends on it. Only `referenceKind: 'subflow'` incoming edges count as
-broken callers; a FlexiPage that merely embeds the flow is access, not
-a broken caller.
+depends on it. `referenceKind: 'subflow'` and `referenceKind:
+'embeddedFlow'` are the only incoming edges that count as dependents;
+every other incoming `references` kind, plus `grantedBy` / `parentOf`,
+stays excluded as passive access/structure.
 
 ```json
 { "flowId": "Flow:Set_Opportunity_Owner" }
@@ -572,7 +581,7 @@ State the per-finding confidence explicitly; don't paraphrase
 | `what_if_change_field_type` | "Lookup → Text and MasterDetail → Text are structurally compatible but lose foreign-key semantics. Roll-up summary fields, sharing-by-parent, and cascade-delete behavior change." |
 | `what_if_remove_picklist_value` | "Apex variable-based comparisons (`if (account.Industry__c == myVar)`) are invisible. Dynamic SOQL filters by picklist value are invisible. Reports / Dashboards / List Views filtered by this value are NOT extracted." |
 | `what_if_make_field_required` | "Apex `insert acc;` sites that may or may not set the field are invisible — dataflow analysis required." |
-| `what_if_deactivate_flow` | "Deactivation does NOT delete the Flow; its definition remains and a later reactivation restores every effect listed. Parent Flows invoking this Flow as a declared `<subflows>` call ARE now modeled as broken callers (an Active parent forces `blocking`); the STILL-invisible path is Apex that invokes the Flow via `Flow.Interview` or `@InvocableMethod` chains, plus non-metadata launch points (buttons, quick actions)." |
+| `what_if_deactivate_flow` | "Deactivation does NOT delete the Flow; its definition remains and a later reactivation restores every effect listed. Parent Flows invoking this Flow as a declared `<subflows>` call ARE modeled as broken callers (an Active parent forces `blocking`); Lightning pages whose Flow component EMBEDS this Flow (declared `embeddedFlow` references) ARE modeled as embedded callers and always force `blocking`. The STILL-invisible path is Apex that invokes the Flow via `Flow.Interview` or `@InvocableMethod` chains, plus non-metadata launch points (buttons, quick actions)." |
 | `what_if_disable_trigger` | "Apex code that conditionally invokes the disabled trigger logic via a static utility wrapping the same handler is invisible. Test classes using `Test.startTest()` / `Test.stopTest()` semantics may depend on the trigger firing — review test setup before disabling." |
 | `what_if_change_method_signature` | "Callers come from the default-on Apex AST call-site index (`parsed`), with the recall scanner backfilling parse-failure files (`heuristic`) — cite each caller's own confidence; dynamic dispatch via Type.forName + invoke is invisible to both. Test classes identified by @isTest + naming convention; non-convention test classes may be missed." |
 | `what_if_merge_profiles` | "Multi-profile (3+) merge is not supported in v2.3 — exactly two profiles per call. Tie-break defaults to A wins for setting types where comparators are undefined." |
