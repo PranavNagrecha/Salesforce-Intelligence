@@ -1466,6 +1466,207 @@ describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-S
 });
 
 // =============================================================================
+// ACTIVITY-POLYMORPHIC re-check (real-org honesty-bug campaign): a shared
+// Activity custom field can be materialized as up to three graph nodes
+// (CustomField:Activity/Task/Event.<field>) that are ONE physical field.
+// `safe_to_delete_field` already discloses this ("Polymorphic Activity
+// attribution"); `find_dead_code` had ZERO awareness of it and would certify
+// `definitely_dead` on a representation with a real dependent that landed on
+// a SIBLING representation only. Verified against a real production vault:
+// `CustomField:Task.<field>` carried 12 real edges (Flow decision reads +
+// a Validation Rule reference) while `CustomField:Event.<field>` — the SAME
+// physical field — had zero of any kind (no direct edge, and the
+// import-time `mintPolymorphicActivityFieldEdges` mirror had not populated
+// one either), so `find_dead_code` reported the Event representation
+// `definitely_dead`. This fixture reproduces that shape without relying on
+// the import-time mirror at all: the sibling's only edge is `usedInLayout`,
+// which `mintPolymorphicActivityFieldEdges` never mirrors (it only covers
+// readsFrom/writesTo/references) — so a query-time cross-check is the only
+// thing that can catch it, on a fresh vault or a stale one alike.
+describe('findDeadCodeHandler — Activity-polymorphic re-check (real-org honesty campaign)', () => {
+  let aDir: string;
+  let aStore: GraphStore;
+  let aCtx: Context;
+
+  beforeAll(async () => {
+    aDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fdc-activity-'));
+    const opened = await openGraph(join(aDir, 'fdc-activity.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    aStore = opened.value;
+
+    const aSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'CustomObject:Task', type: 'CustomObject', apiName: 'Task' }),
+        makeNode({ id: 'CustomObject:Event', type: 'CustomObject', apiName: 'Event' }),
+        makeNode({ id: 'Layout:Task.TaskLayout', type: 'Layout', apiName: 'TaskLayout' }),
+        // Task representation: a real usedInLayout edge — a placement
+        // `mintPolymorphicActivityFieldEdges` never mirrors (it only covers
+        // readsFrom/writesTo/references), so this reproduces the gap even on
+        // a freshly-refreshed vault, not merely a stale one.
+        makeNode({
+          id: 'CustomField:Task.Shared__c',
+          type: 'CustomField',
+          apiName: 'Shared__c',
+          parentId: 'CustomObject:Task',
+        }),
+        // Event representation of the SAME physical field: zero incoming
+        // edges of its own, and no minted mirror (usedInLayout is outside
+        // the mirror's edge-type coverage) → the base SQL cascade alone
+        // would call this definitely_dead.
+        makeNode({
+          id: 'CustomField:Event.Shared__c',
+          type: 'CustomField',
+          apiName: 'Shared__c',
+          parentId: 'CustomObject:Event',
+        }),
+        // Control: a multi-rep Activity field with ZERO usage on every
+        // existing representation — must stay definitely_dead. Proves the
+        // re-check never manufactures a dependency that is not there.
+        makeNode({
+          id: 'CustomField:Task.TrulyDeadShared__c',
+          type: 'CustomField',
+          apiName: 'TrulyDeadShared__c',
+          parentId: 'CustomObject:Task',
+        }),
+        makeNode({
+          id: 'CustomField:Event.TrulyDeadShared__c',
+          type: 'CustomField',
+          apiName: 'TrulyDeadShared__c',
+          parentId: 'CustomObject:Event',
+        }),
+        // Control: a SOLO Activity-family field — no Task/Event/Activity
+        // sibling exists at all — must stay definitely_dead too (nothing to
+        // cross-check against).
+        makeNode({
+          id: 'CustomField:Task.SoloNoSibling__c',
+          type: 'CustomField',
+          apiName: 'SoloNoSibling__c',
+          parentId: 'CustomObject:Task',
+        }),
+        // Negative control: an unrelated, non-Activity-family dead
+        // CustomField — the re-check (and its disclosure) must not touch it.
+        makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+        makeNode({
+          id: 'CustomField:Account.Unrelated__c',
+          type: 'CustomField',
+          apiName: 'Unrelated__c',
+          parentId: 'CustomObject:Account',
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'CustomObject:Task',
+          toId: 'CustomField:Task.Shared__c',
+          edgeType: 'parentOf',
+        }),
+        makeEdge({
+          fromId: 'CustomObject:Event',
+          toId: 'CustomField:Event.Shared__c',
+          edgeType: 'parentOf',
+        }),
+        makeEdge({
+          fromId: 'Layout:Task.TaskLayout',
+          toId: 'CustomField:Task.Shared__c',
+          edgeType: 'usedInLayout',
+          confidence: 'declared',
+          source: 'layout-extractor',
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(aStore, [aSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+
+    aCtx = { vaultRoot: aDir, manifest: MANIFEST, graph: aStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(aStore);
+    rmSync(aDir, { recursive: true, force: true });
+  });
+
+  it('downgrades a zero-edge Activity-family representation to `uncertain` when a sibling has a real usage edge the mirror never covers', async () => {
+    const r = await findDeadCodeHandler(aCtx, { componentId: 'CustomField:Event.Shared__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'CustomField:Event.Shared__c',
+    );
+    expect(c?.verdict).toBe('uncertain');
+    expect(c?.incomingEdgeCount).toBe(0);
+    expect(c?.reasoning).toContain('Activity/Task/Event');
+  });
+
+  it('leaves the representation that actually carries the edge unaffected (still counted, not touched by the re-check)', async () => {
+    const r = await findDeadCodeHandler(aCtx, { componentId: 'CustomField:Task.Shared__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'CustomField:Task.Shared__c',
+    );
+    expect(c?.incomingEdgeCount).toBe(1);
+    expect(c?.verdict).not.toBe('definitely_dead');
+  });
+
+  it('STILL flags a multi-rep Activity field as definitely_dead when EVERY existing representation has zero usage edges (control — no overclaiming)', async () => {
+    const r = await findDeadCodeHandler(aCtx, {
+      componentId: 'CustomField:Task.TrulyDeadShared__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'CustomField:Task.TrulyDeadShared__c',
+    );
+    expect(c?.verdict).toBe('definitely_dead');
+
+    const rSibling = await findDeadCodeHandler(aCtx, {
+      componentId: 'CustomField:Event.TrulyDeadShared__c',
+    });
+    expect(rSibling.ok).toBe(true);
+    if (!rSibling.ok) return;
+    const cSibling = rSibling.value.data.candidates.find(
+      (x) => x.componentId === 'CustomField:Event.TrulyDeadShared__c',
+    );
+    expect(cSibling?.verdict).toBe('definitely_dead');
+  });
+
+  it('STILL flags a solo Activity-family field (no sibling representation exists at all) as definitely_dead (control)', async () => {
+    const r = await findDeadCodeHandler(aCtx, {
+      componentId: 'CustomField:Task.SoloNoSibling__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'CustomField:Task.SoloNoSibling__c',
+    );
+    expect(c?.verdict).toBe('definitely_dead');
+  });
+
+  it('discloses the Activity-polymorphic re-check in boundaries when it fires', async () => {
+    const r = await findDeadCodeHandler(aCtx, { componentId: 'CustomField:Event.Shared__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'Activity-family CustomField re-check',
+    );
+  });
+
+  it('does NOT disclose the Activity-polymorphic re-check when the only dead CustomField in scope is NOT Activity/Task/Event-family', async () => {
+    const r = await findDeadCodeHandler(aCtx, {
+      componentId: 'CustomField:Account.Unrelated__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'CustomField:Account.Unrelated__c',
+    );
+    expect(c?.verdict).toBe('definitely_dead');
+    expect(r.value.data.boundaries.join(' ')).not.toContain(
+      'Activity-family CustomField re-check',
+    );
+  });
+});
+
+// =============================================================================
 // GUARD (FIND-DEAD-CODE-IGNORES-COMPONENT-SCOPE): "is {class} dead?" passes a
 // componentId, but it was Zod-stripped and every call returned the same org-wide
 // top-N candidate list. A component scope must now return ONLY that node's

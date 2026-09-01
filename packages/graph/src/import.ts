@@ -603,9 +603,15 @@ export const canonicalizeActivityPolymorphicFieldEdgeTargets = (
   }
 };
 
-/** The three polymorphic forms of a shared Activity field, in canonical priority. */
-const ACTIVITY_POLYMORPHIC_SLOTS = ['activity', 'task', 'event'] as const;
-type ActivitySlot = (typeof ACTIVITY_POLYMORPHIC_SLOTS)[number];
+/**
+ * The three polymorphic forms of a shared Activity field, in canonical
+ * priority. Exported so a consumer that needs to recognize "is this an
+ * Activity/Task/Event-family CustomField" (e.g. `find-dead-code.ts`'s
+ * sibling-representation re-check) matches this SAME set rather than
+ * hand-rolling a second, driftable notion of the family.
+ */
+export const ACTIVITY_POLYMORPHIC_SLOTS = ['activity', 'task', 'event'] as const;
+export type ActivitySlot = (typeof ACTIVITY_POLYMORPHIC_SLOTS)[number];
 
 /** Field-edge types whose target identifies a CustomField dependency. */
 const POLYMORPHIC_MIRROR_EDGE_TYPES: ReadonlySet<Edge['edgeType']> = new Set([

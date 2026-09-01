@@ -9,6 +9,7 @@
  */
 
 export {
+  ACTIVITY_POLYMORPHIC_SLOTS,
   canonicalizeActivityPolymorphicFieldEdgeTargets,
   canonicalizeApexCallEdgeTargets,
   canonicalizeFieldEdgeTargets,
@@ -19,7 +20,7 @@ export {
   importExtractionResults,
   mintPolymorphicActivityFieldEdges,
 } from './import.js';
-export type { ImportCounts } from './import.js';
+export type { ActivitySlot, ImportCounts } from './import.js';
 export {
   chooseSourcePath,
   isDxCanonicalPath,

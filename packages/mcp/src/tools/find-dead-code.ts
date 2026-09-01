@@ -18,7 +18,15 @@
  *     not model as an inbound edge — is downgraded to `uncertain` rather
  *     than reported dead. For
  *     CustomField, no incoming references at all (no formula refs, no
- *     Apex reads/writes, no Flow record-ops, no layout placements).
+ *     Apex reads/writes, no Flow record-ops, no layout placements). For an
+ *     Activity/Task/Event-family CustomField specifically (a shared
+ *     Activity custom field can be materialized as up to three graph
+ *     nodes — `CustomField:Activity/Task/Event.<field>` — that are ONE
+ *     physical field), this verdict additionally survives an
+ *     Activity-polymorphic re-check: when another EXISTING representation
+ *     of the same field has a real incoming usage edge this candidate does
+ *     not, the candidate is downgraded to `uncertain` instead (see
+ *     `ACTIVITY_POLYMORPHIC_DISCLOSURE`).
  *     For a Flow, ONLY when its status is `Obsolete` / `InvalidDraft`
  *     (R2-12): an Active / Draft / unknown-status Flow is NEVER
  *     definitely_dead — Flow edges are all OUTGOING (triggersOn /
@@ -104,7 +112,11 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result, splitPathSegments} from '@sf-intelligence/core';
-import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
+import {
+  ACTIVITY_POLYMORPHIC_SLOTS,
+  getNodeById,
+  type GraphStore,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -151,6 +163,33 @@ const ASYNC_DISPATCH_DISCLOSURE =
   'async-dispatch (Queueable/Batchable/Schedulable) is NEVER reported dead on metadata evidence alone. The dispatch that starts such a class does not have to exist in metadata: an admin who schedules a class through Setup > Schedule Apex creates a `CronTrigger` RECORD, and CronTrigger is DATA, not metadata — it is never retrieved into the vault, mints no node and no edge, and NO refresh can close that gap; `System.enqueueJob` / `Database.executeBatch` / `System.schedule` run from ANONYMOUS Apex (Developer Console, deployment script) just as well. So an absent dispatch site is the EXPECTED reading for a live scheduled job, not evidence against it, and these classes are reported `uncertain` — suppressed unless includeUncertain — never `definitely_dead` and never `likely_dead`. What the vault CAN say is reported in `reasoning`: a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class, including one guarded only by `!Test.isRunningTest()`) means the class is live at runtime; @isTest-only dispatch and no dispatch at all are both stated as "no production dispatch site is VISIBLE in this vault", which is not the same claim as "none exists". Further blind spots on the visible side: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers. Confirm the job in Setup > Scheduled Jobs / Apex Jobs before deleting anything here.';
 const CUSTOM_FIELD_DISCLOSURE =
   'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
+/**
+ * Activity/Task/Event-family CustomField disclosure (D2 parity with
+ * `safe_to_delete_field`'s "Polymorphic Activity attribution" limitation). A
+ * shared Activity custom field can be materialized as up to three graph nodes
+ * — `CustomField:Activity/Task/Event.<field>` — that are ONE physical field.
+ * `@sf-intelligence/graph`'s `mintPolymorphicActivityFieldEdges` mirrors a
+ * `readsFrom`/`writesTo`/`references` edge onto every EXISTING sibling
+ * representation at IMPORT time, but that mirror is a heuristic, name-based
+ * alias applied at import — not a live guarantee this tool can lean on
+ * blindly: it under-mints on the incremental apply-change-set path (see its
+ * docstring), it never ran at all on a vault refreshed before it existed,
+ * and it only ever covers those three edge types (a Layout placement or a
+ * ListView reference recorded on ONE sibling never propagates to the
+ * others). Trusting the precomputed `incoming` join alone would silently
+ * inherit whichever of those gaps this vault happens to have, so before
+ * `find_dead_code` certifies `definitely_dead` on one of these three nodes,
+ * it re-checks the OTHER existing representations' own incoming edges
+ * DIRECTLY, at query time — see the "ACTIVITY-POLYMORPHIC re-check" pass
+ * below. A definitely_dead verdict that survives the re-check found no
+ * incoming usage edge on ANY existing representation of the field. Residual
+ * blind spot: a representation that is not itself vaulted as a node (no
+ * Activity base node in a describe-snapshot-only vault, say) cannot be
+ * cross-checked here. Confirm with `sfi.safe_to_delete_field` before
+ * deleting any field in this family.
+ */
+const ACTIVITY_POLYMORPHIC_DISCLOSURE =
+  'Activity-family CustomField re-check: a shared Activity custom field can be materialized as up to three graph nodes — `CustomField:Activity/Task/Event.<field>` — that are ONE physical field (see `sfi.safe_to_delete_field`\'s "Polymorphic Activity attribution" limitation). Before reporting `definitely_dead` on one of these three nodes, this tool queries the OTHER EXISTING representations\' own incoming usage edges directly — not the precomputed import-time mirror alone, which is a heuristic name-based alias that under-mints on the incremental apply-change-set path, is absent entirely on a vault refreshed before it existed, and only ever covers readsFrom/writesTo/references (a Layout placement or ListView reference on one sibling never propagates to the others) — and downgrades to `uncertain` when a sibling has a real dependent this candidate does not. A `definitely_dead` verdict that survives this check found NO incoming usage edge on ANY existing representation of the field. Residual blind spot: a representation that is not itself vaulted as a node cannot be cross-checked. Cross-check with `sfi.safe_to_delete_field` before deleting any field in this family.';
 /**
  * THIS TOOL'S verdict framing for an unproven dynamic registration. The claim
  * itself — what the two predicates establish and what they do not — lives ONCE
@@ -821,6 +860,95 @@ const compareCandidates = (
 const escapeForRegex = (s: string): string =>
   s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/** Canonical id prefix for a CustomField node. */
+const CUSTOM_FIELD_ID_PREFIX = 'CustomField:';
+
+/**
+ * Lower-cased set of {@link ACTIVITY_POLYMORPHIC_SLOTS} for O(1) membership
+ * testing — reused rather than re-declared so this tool's notion of "is this
+ * an Activity/Task/Event-family object" cannot drift from the graph layer's.
+ */
+const ACTIVITY_POLYMORPHIC_SLOT_SET: ReadonlySet<string> = new Set(
+  ACTIVITY_POLYMORPHIC_SLOTS,
+);
+
+/**
+ * Split a `CustomField:{Object}.{Field}` id into its object + field parts on
+ * the FIRST `.`. Returns null when the id is not a well-formed CustomField
+ * id (no prefix, or no `.`).
+ */
+const splitCustomFieldId = (
+  id: string,
+): { readonly object: string; readonly field: string } | null => {
+  if (!id.startsWith(CUSTOM_FIELD_ID_PREFIX)) return null;
+  const body = id.slice(CUSTOM_FIELD_ID_PREFIX.length);
+  const dot = body.indexOf('.');
+  if (dot <= 0 || dot === body.length - 1) return null;
+  return { object: body.slice(0, dot), field: body.slice(dot + 1) };
+};
+
+/**
+ * True when `id` is a CustomField on one of the three Activity-polymorphic
+ * slots (`Activity` / `Task` / `Event`) — the family a shared Activity custom
+ * field can be materialized as. Reuses `ACTIVITY_POLYMORPHIC_SLOTS` from
+ * `@sf-intelligence/graph` (the same set `mintPolymorphicActivityFieldEdges`
+ * gates its mirror on) rather than a second, hand-rolled notion of the
+ * family.
+ */
+const isActivityPolymorphicFieldId = (id: string): boolean => {
+  const parts = splitCustomFieldId(id);
+  return parts !== null && ACTIVITY_POLYMORPHIC_SLOT_SET.has(parts.object.toLowerCase());
+};
+
+/**
+ * For a `definitely_dead` Activity/Task/Event-family CustomField candidate,
+ * check whether any OTHER EXISTING representation of the same physical field
+ * (case-insensitive field-name match, restricted to the Activity/Task/Event
+ * object family — see {@link isActivityPolymorphicFieldId}) has a real
+ * incoming USAGE edge (the same `NOT_USAGE_EDGE_TYPES` exclusion the main
+ * cascade uses) that this candidate does not.
+ *
+ * This is a QUERY-TIME cross-check against the sibling nodes' own edges — it
+ * does NOT read the candidate's own precomputed `incoming` join, and does NOT
+ * assume `mintPolymorphicActivityFieldEdges` already mirrored the dependency
+ * onto this candidate (see {@link ACTIVITY_POLYMORPHIC_DISCLOSURE} for why
+ * that assumption is unsafe: staleness, incremental under-minting, and the
+ * mirror's own 3-edge-type ceiling). A field genuinely dependent-free across
+ * every EXISTING representation returns false — this never manufactures a
+ * dependency that is not there.
+ */
+const hasLiveSiblingRepresentation = async (
+  store: GraphStore,
+  fieldId: string,
+): Promise<boolean> => {
+  const parts = splitCustomFieldId(fieldId);
+  if (parts === null) return false;
+  try {
+    const reader = await store.connection.runAndReadAll(
+      `SELECT 1 AS hit
+       FROM nodes n
+       JOIN edges e ON e.to_id = n.id
+       WHERE n.type = 'CustomField'
+         AND lower(n.api_name) = lower(?)
+         AND n.id <> ?
+         AND (
+           lower(n.id) LIKE 'customfield:activity.%'
+           OR lower(n.id) LIKE 'customfield:task.%'
+           OR lower(n.id) LIKE 'customfield:event.%'
+         )
+${NON_USAGE_EDGE_EXCLUSION_SQL}
+       LIMIT 1`,
+      [parts.field, fieldId],
+    );
+    return reader.getRowObjectsJS().length > 0;
+  } catch {
+    // A query failure must not fake death — fall back to "no live sibling
+    // found" so the candidate's own (already-computed) verdict stands rather
+    // than silently downgrading on an error this caller cannot see.
+    return false;
+  }
+};
+
 /**
  * Derive the ApexClass / ApexTrigger api name from a vault source path.
  * Source files are named `{ApiName}.cls` / `{ApiName}.trigger` (flat or
@@ -1178,6 +1306,62 @@ export const findDeadCodeHandler = async (
     }
   }
 
+  // ---- ACTIVITY-POLYMORPHIC re-check (definitely_dead CustomField only) --
+  //
+  // See {@link ACTIVITY_POLYMORPHIC_DISCLOSURE} for the full rationale. In
+  // short: a shared Activity custom field can be materialized as up to three
+  // graph nodes (CustomField:Activity/Task/Event.<field>) that are ONE
+  // physical field, and `safe_to_delete_field` already discloses this
+  // ("Polymorphic Activity attribution") — this tool had zero awareness of
+  // it. The import-time mirror (`mintPolymorphicActivityFieldEdges`) is
+  // SUPPOSED to copy a real edge onto every existing sibling representation,
+  // but that mirror can be missing (a vault refreshed before it existed, or
+  // under-mounted on the incremental apply-change-set path) or structurally
+  // incomplete (it only ever covers readsFrom/writesTo/references — a Layout
+  // placement never propagates). So rather than trust the precomputed
+  // `incoming` join alone, a `definitely_dead` CustomField candidate in this
+  // family is re-checked directly against its siblings' OWN incoming edges
+  // before the verdict is certified. Scoped to `definitely_dead` CustomField
+  // candidates whose object is Activity/Task/Event — a small slice of any
+  // vault's fields — so every other candidate costs nothing.
+  let activityPolymorphicDowngrades = 0;
+  const deadActivityFields = candidates.filter(
+    (c) =>
+      c.componentType === 'CustomField' &&
+      c.verdict === 'definitely_dead' &&
+      isActivityPolymorphicFieldId(c.componentId),
+  );
+  if (deadActivityFields.length > 0) {
+    const liveViaSibling = new Set<ComponentId>();
+    for (const candidate of deadActivityFields) {
+      if (await hasLiveSiblingRepresentation(ctx.graph, candidate.componentId)) {
+        liveViaSibling.add(candidate.componentId);
+      }
+    }
+    if (liveViaSibling.size > 0) {
+      candidates = candidates.map((c) =>
+        liveViaSibling.has(c.componentId)
+          ? {
+              ...c,
+              verdict: 'uncertain' as const,
+              reasoning:
+                'shares this Activity/Task/Event custom field with another EXISTING representation ' +
+                '(CustomField:Activity/Task/Event.<field> can be up to three graph nodes for ONE ' +
+                'physical field) that has a real incoming usage edge this candidate does not — not ' +
+                'dead; the import-time polymorphic mirror either has not run on this vault or does ' +
+                'not cover the referring edge type, so this is a live, query-time cross-check rather ' +
+                'than a re-assertion of an already-mirrored edge. Confirm with sfi.safe_to_delete_field ' +
+                'before deleting.',
+            }
+          : c,
+      );
+      activityPolymorphicDowngrades = liveViaSibling.size;
+      // Same reasoning as the static-usage downgrade above: the verdict flip
+      // to `uncertain` is sufficient — `includeUncertain` and the tallies
+      // below both key off `candidates`, not off a second suppression list.
+    }
+  }
+
   candidates.sort(compareCandidates);
 
   // ---- TALLY THE FULL SET, THEN FILTER THE LISTING -----------------------
@@ -1315,6 +1499,22 @@ export const findDeadCodeHandler = async (
   ) {
     boundaries.push(CUSTOM_FIELD_DISCLOSURE);
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);
+  }
+  // Disclose the Activity-polymorphic re-check whenever it downgraded a
+  // candidate OR a definitely_dead Activity/Task/Event-family CustomField
+  // survived it — so a surviving verdict is understood to have passed the
+  // sibling cross-check, and any suppression is transparent (same posture as
+  // the static-type-usage disclosure above).
+  if (
+    activityPolymorphicDowngrades > 0 ||
+    candidates.some(
+      (c) =>
+        c.componentType === 'CustomField' &&
+        c.verdict === 'definitely_dead' &&
+        isActivityPolymorphicFieldId(c.componentId),
+    )
+  ) {
+    boundaries.push(ACTIVITY_POLYMORPHIC_DISCLOSURE);
   }
 
   // DEAD-CODE-SOUNDNESS-CERTIFIED-THE-RENDERED-PAGE.
