@@ -87,6 +87,16 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   //     CR-22: the B0 audit-strengthening surfaced these as mislabeled (they
   //     were tagged `paginated` but expose only `limit`); reclassified here so
   //     the real-schema gate passes truthfully. ---
+  // OmniStudio model tools: findings stay complete; the row / node / step lists
+  // page with limit + byte trim + CR-22 cursor (bound to the component scope).
+  'sfi.omni_model': { bound: 'paginated', note: 'nodes or edges of one component; limit + byte trim + CR-22 cursor' },
+  'sfi.omni_save_trace': { bound: 'paginated', note: 'rows per answer; limit + byte trim + CR-22 cursor; findings and statusCounts stay whole-set' },
+  'sfi.omni_dead_references': { bound: 'paginated', note: 'findings; limit + byte trim + CR-22 cursor; counts stay whole-set' },
+  'sfi.omni_edit_block_audit': { bound: 'paginated', note: 'editBlocks rows; limit + byte trim + CR-22 cursor; findings stay whole-set' },
+  'sfi.omni_completion_audit': { bound: 'paginated', note: 'findings; limit + byte trim + CR-22 cursor; counts stay whole-set' },
+  'sfi.omni_form_spec': { bound: 'paginated', note: 'steps; limit + byte trim + CR-22 cursor' },
+  'sfi.omni_changed_since': { bound: 'paginated', note: 'changes[] rows (one per changed component); limit + byte trim + CR-22 cursor; summary counts stay whole-set' },
+  'sfi.omni_prefill_trace': { bound: 'paginated', note: 'rows per saved answer; limit + byte trim + CR-22 cursor; findings and statusCounts stay whole-set' },
   'sfi.automation_collisions': { bound: 'handler-capped', note: 'limit + byte-budget truncator on both findings lists; narrow the object or raise limit, no cursor (R6-15)' },
   'sfi.review_change': { bound: 'handler-capped', note: 'limit + most-dangerous-first ordering; narrow the changeset or raise limit, no cursor (R6-16)' },
   'sfi.ai_exposure_report': { bound: 'handler-capped', note: 'limit + byte-budget truncator on surfaces + piiExposures; narrow by objectApiName or raise limit, no cursor (R6-13)' },
@@ -113,6 +123,17 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.domain_clusters': { bound: 'paginated', note: 'per-cluster member section cursor + cluster-count byte budget + CR-RV12 candidateTruncated (CR-22)' },
   'sfi.org_history': { bound: 'paginated', note: 'offset + CR-22 cursor over the most-recent-first history (adopted paginateLegacy/decodeCursor in 0.3.3; it was a bare top-N truncator with no resume before that)' },
   'sfi.record_creation_paths': { bound: 'handler-capped', note: 'limit (default 100, max 500) caps creators+triggers lists; full counts + creatorsTruncated/triggersTruncated disclosure, no cursor (0.2.0)' },
+  'sfi.persona_unused_grants': { bound: 'paginated', note: 'objects[] rows; limit + byte trim + CR-22 cursor; summary counts stay whole-set, findings cover the page' },
+  'sfi.record_delete_impact': { bound: 'handler-capped', note: 'limit (default 100, max 500) caps each whoCanDelete list (grants, OmniStudio paths, Apex sites, generic deletes); totals stay whole + truncated flag, no cursor. children/guards/rollups are bounded by the object\'s relationship fields' },
+  // The 0.3.3 registration backlog — five tools that gained a page window but
+  // were never inventoried. Cleared WITH real-org probes in the QA harness
+  // (tool-smoke HIGH_FANOUT): the cross-vault pair against two registered
+  // vaults, the rest against the primary gate vault.
+  'sfi.generate_compliance_report': { bound: 'paginated', note: 'regulated fields page; limit (max 100) + offset + CR-22 cursor; every section runs over the page and says so' },
+  'sfi.compare_vaults': { bound: 'paginated', note: 'shapeModified rows; limit (max 500) + offset + CR-22 cursor + byte budget' },
+  'sfi.compare_profile_across_vaults': { bound: 'paginated', note: 'one section page at a time (paginateSection); limit (max 500) + offset + CR-22 cursor + byte budget' },
+  'sfi.annotations': { bound: 'paginated', note: 'annotation overlay rows; limit (max 1000) + offset + CR-22 cursor + byte trim' },
+  'sfi.review_annotations': { bound: 'paginated', note: 'proposed-annotation rows; limit (max 1000) + offset + CR-22 cursor + byte trim' },
   'sfi.unused_components': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.unused_fields_deep': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.governor_limit_risks': { bound: 'paginated', note: 'limit + offset + CR-22 cursor; B3 full-type scan windows past 500' },

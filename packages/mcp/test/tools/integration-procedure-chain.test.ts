@@ -19,6 +19,7 @@ import {
 
 import type { Context } from '../../src/server.js';
 import { integrationProcedureChainHandler } from '../../src/tools/integration-procedure-chain.js';
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from '../../src/tools/omni-disclosures.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -94,7 +95,7 @@ const SAMPLE_IP_XML = `<?xml version="1.0" encoding="UTF-8"?>
         <level>0.0</level>
         <name>callApex</name>
         <propertySetConfig>{
-  &quot;remoteClass&quot; : &quot;AccountLinkingService&quot;,
+  &quot;remoteClass&quot; : &quot;AcmeEnrollmentService&quot;,
   &quot;remoteMethod&quot; : &quot;validate&quot;,
   &quot;isActive&quot; : true
 }</propertySetConfig>
@@ -444,17 +445,14 @@ describe('integrationProcedureChainHandler', () => {
     const { boundaries } = result.value.data;
     expect(boundaries.length).toBe(4);
 
-    // Native-vs-Vlocity (axis 1).
-    expect(boundaries[0]).toContain(
-      'v3.2 recognizes Industries Native XML shapes',
-    );
-    expect(boundaries[0]).toContain('vlocity_cmt__');
-    expect(boundaries[0]).toContain('Mid-migration orgs may show partial coverage');
+    // Native-vs-Vlocity (axis 1) — the ONE shared sentence.
+    expect(boundaries[0]).toBe(NATIVE_VS_VLOCITY_DISCLOSURE);
 
-    // Apex-coupling deferral (axis 3).
-    expect(boundaries[1]).toContain('intra-OmniStudio call chains');
-    expect(boundaries[1]).toContain('v3.3');
-    expect(boundaries[1]).toContain('implements omnistudio.VlocityOpenInterface');
+    // Apex coupling (axis 3): calls out resolved; Apex running this IP by key is an incoming edge.
+    expect(boundaries[1]).toContain('remoteClass');
+    expect(boundaries[1]).toContain('callsApex');
+    expect(boundaries[1]).toContain('runIntegrationService');
+    expect(boundaries[1]).toContain('a key built at runtime is not seen');
 
     // OmniProcessElement record-level boundary (Q179 anchor).
     expect(boundaries[2]).toContain('OmniProcessElement');
@@ -509,15 +507,15 @@ describe('integrationProcedureChainHandler', () => {
     expect(ip?.targetResolution).toBe('resolved');
     expect(ip?.endpointConfidence).toBe('parsed');
 
-    // Remote Action surfaces `class.method` verbatim; v3.2 does NOT
-    // resolve to an Apex graph edge (that is v3.3's
-    // implementsOmniInterface follow-up).
+    // Remote Action surfaces `class.method` verbatim and resolves the
+    // class to its ApexClass node — absent from this fixture, so the
+    // reference is reported as not in the vault.
     const remote = endpoints.find((e) => e.kind === 'remote-action');
     expect(remote).toBeDefined();
     expect(remote?.stepName).toBe('callApex');
-    expect(remote?.target).toBe('AccountLinkingService.validate');
+    expect(remote?.target).toBe('AcmeEnrollmentService.validate');
     expect(remote?.targetId).toBeNull();
-    expect(remote?.targetResolution).toBe('not-applicable');
+    expect(remote?.targetResolution).toBe('not-in-vault');
     expect(remote?.endpointConfidence).toBe('parsed');
   });
 
@@ -795,7 +793,7 @@ describe('integrationProcedureChainHandler', () => {
     expect(ep?.targetId).toBe('OmniDataTransform:Sample_Mapper_2');
   });
 
-  it('reports ambiguous rather than picking a version when two IPs answer to one omniProcessKey', async () => {
+  it('names the ACTIVE version when several IP versions answer to one key, and is ambiguous only when several are active', async () => {
     const callerPath = join(tempDir, 'fixtures', 'Ambiguous_Ip_Procedure_1.oip-meta.xml');
     await writeFile(
       callerPath,
@@ -827,9 +825,8 @@ describe('integrationProcedureChainHandler', () => {
             sourcePath: callerPath,
             properties: { omniProcessKey: 'AmbiguousCaller', isActive: true },
           }),
-          // Two versions of ONE IP. Salesforce dispatches to whichever is
-          // active at RUNTIME; the vault cannot decide that statically, so
-          // the tool must not pick one and call it resolved.
+          // Two versions of ONE IP. `isActive` is the runtime switch, so the
+          // active version is the target and the other is listed beside it.
           makeNode({
             id: 'OmniIntegrationProcedure:Sample_Multi_Procedure_1',
             type: 'OmniIntegrationProcedure',
@@ -856,12 +853,127 @@ describe('integrationProcedureChainHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const ep = result.value.data.externalEndpoints[0];
-    expect(ep?.targetResolution).toBe('ambiguous');
-    expect(ep?.targetId).toBeNull();
+    expect(ep?.targetResolution).toBe('active-version');
+    expect(ep?.targetId).toBe('OmniIntegrationProcedure:Sample_Multi_Procedure_2');
     expect(ep?.targetCandidateIds).toEqual([
       'OmniIntegrationProcedure:Sample_Multi_Procedure_1',
       'OmniIntegrationProcedure:Sample_Multi_Procedure_2',
     ]);
+    expect(result.value.data.dataAccess.ipsCalled).toEqual(['OmniIntegrationProcedure:Sample_Multi_Procedure_2']);
+
+    // A second ACTIVE version: the vault cannot say which one runs.
+    const second = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'OmniIntegrationProcedure:Sample_Multi_Procedure_3',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Sample_Multi_Procedure_3',
+            sourcePath: 'unused.oip-meta.xml',
+            properties: { omniProcessKey: 'Sample_MultiKey', isActive: true },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(second.ok).toBe(true);
+    const again = await integrationProcedureChainHandler(ctx, {
+      integrationProcedureId: 'OmniIntegrationProcedure:Ambiguous_Ip_Procedure_1',
+    });
+    if (!again.ok) throw new Error('expected ok');
+    expect(again.value.data.externalEndpoints[0]).toMatchObject({ targetResolution: 'ambiguous', targetId: null });
+  });
+
+  it('walks steps nested in blocks, classifies every spelling through the catalog, and reports deletes and a mapper\'s objects', async () => {
+    const path = join(tempDir, 'fixtures', 'Nested_Ip_Procedure_1.oip-meta.xml');
+    const cfg = (o: unknown): string => JSON.stringify(o).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    await writeFile(
+      path,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<OmniIntegrationProcedure xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>true</isIntegrationProcedure>
+    <name>Nested Caller</name>
+    <omniProcessElements>
+        <childElements>
+            <name>SaveIt</name>
+            <propertySetConfig>${cfg({ bundle: 'ExtractContactMapper' })}</propertySetConfig>
+            <sequenceNumber>2.0</sequenceNumber>
+            <type>Data Mapper Load Action</type>
+        </childElements>
+        <childElements>
+            <name>CallHttp</name>
+            <propertySetConfig>${cfg({ httpUrl: 'https://api.example.com/v2/sync' })}</propertySetConfig>
+            <sequenceNumber>1.0</sequenceNumber>
+            <type>HTTP Action</type>
+        </childElements>
+        <name>Guard</name>
+        <propertySetConfig>${cfg({ executionConditionalFormula: '%go% == true' })}</propertySetConfig>
+        <sequenceNumber>1.0</sequenceNumber>
+        <type>Conditional Block</type>
+    </omniProcessElements>
+    <omniProcessElements>
+        <name>DropRows</name>
+        <propertySetConfig>${cfg({ deleteSObject: [{ Type: 'Sample_Row__c', Id: '%rowId%' }] })}</propertySetConfig>
+        <sequenceNumber>2.0</sequenceNumber>
+        <type>Delete Action</type>
+    </omniProcessElements>
+    <omniProcessKey>NestedCaller</omniProcessKey>
+    <omniProcessType>Integration Procedure</omniProcessType>
+    <uniqueName>Nested_Ip_Procedure_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniIntegrationProcedure>`,
+      'utf-8',
+    );
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [
+          makeNode({
+            id: 'OmniIntegrationProcedure:Nested_Ip_Procedure_1',
+            type: 'OmniIntegrationProcedure',
+            apiName: 'Nested_Ip_Procedure_1',
+            sourcePath: path,
+            properties: { omniProcessKey: 'NestedCaller', isActive: true },
+          }),
+          makeNode({ id: 'CustomObject:Sample_Row__c', type: 'CustomObject', apiName: 'Sample_Row__c', sourcePath: 'unused.object-meta.xml', properties: {} }),
+        ],
+        edges: [
+          {
+            fromId: DATA_TRANSFORM_ID,
+            toId: 'CustomField:Contact.Email',
+            edgeType: 'readsFrom',
+            confidence: 'parsed',
+            source: 'test',
+            properties: {},
+          },
+          {
+            fromId: DATA_TRANSFORM_ID,
+            toId: 'CustomObject:Sample_Row__c',
+            edgeType: 'writesTo',
+            confidence: 'parsed',
+            source: 'test',
+            properties: { operation: 'recordCreate' },
+          },
+        ],
+      },
+    ]);
+    expect(imported.ok).toBe(true);
+    const r = await integrationProcedureChainHandler(ctx, { integrationProcedureId: 'OmniIntegrationProcedure:Nested_Ip_Procedure_1' });
+    if (!r.ok) throw new Error(JSON.stringify(r.error));
+    const d = r.value.data;
+    expect(d.actions.map((a) => [a.path, a.depth, a.canonicalType, a.role])).toEqual([
+      ['Guard', 0, 'Conditional Block', 'block'],
+      ['Guard/CallHttp', 1, 'HTTP Action', 'rest'],
+      ['Guard/SaveIt', 1, 'DataRaptor Post Action', 'dataMapper'],
+      ['DropRows', 0, 'Delete Action', 'delete'],
+    ]);
+    expect(d.externalEndpoints.map((e) => [e.stepPath, e.kind, e.target, e.targetResolution])).toEqual([
+      ['Guard/CallHttp', 'rest', 'https://api.example.com/v2/sync', 'not-applicable'],
+      ['Guard/SaveIt', 'dataraptor', 'ExtractContactMapper', 'resolved'],
+      ['DropRows', 'delete', 'Sample_Row__c', 'resolved'],
+    ]);
+    expect(d.externalEndpoints[1]?.dataAccess).toEqual({ reads: ['Contact'], writes: ['Sample_Row__c'] });
+    expect(d.dataAccess).toMatchObject({ reads: ['Contact'], writes: ['Sample_Row__c'], deletes: ['Sample_Row__c'], mappersCalled: [DATA_TRANSFORM_ID] });
   });
 
   it('tells a graph query failure apart from a genuine absence when resolving an integration-procedure target', async () => {

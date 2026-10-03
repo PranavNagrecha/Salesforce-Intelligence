@@ -28,8 +28,9 @@
  * package needs vault helpers for path resolution).
  */
 
+import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import type {
   ComponentId,
@@ -37,9 +38,10 @@ import type {
   EdgeType,
   VaultManifest,
 } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, isDataPackPath, ok, type Result } from '@sf-intelligence/core';
 
 import { snapshotPath, vaultPaths } from './layout.js';
+import { resolveVaultSourcePath } from './source-path.js';
 
 /** JSON indentation, 2 spaces, mirrors the rest of the vault for diffability. */
 const JSON_INDENT = 2;
@@ -57,7 +59,95 @@ export interface SnapshotNode {
   readonly apiName: string;
   readonly label: string | null;
   readonly propertiesHash: string;
+  /**
+   * The component's RUNTIME SWITCH at capture time (see
+   * {@link snapshotRuntimeOf}), so a later diff can say what was active then
+   * — which the hash alone cannot. Present only on types that have one;
+   * absent on snapshots written before it was recorded.
+   */
+  readonly runtime?: SnapshotRuntime;
 }
+
+/**
+ * What decides whether a component runs, as captured: `isActive` (OmniScript,
+ * Integration Procedure, FlexCard version; DuplicateRule), `status` (Flow,
+ * ApexTrigger), `active` (ValidationRule, WorkflowRule, ApprovalProcess,
+ * assignment / auto-response / escalation rules), plus `versionNumber` and a
+ * `versionKey` grouping the versions of one OmniStudio component
+ * (`Type/SubType/Language` for a process, the name for a FlexCard / DataMapper).
+ */
+export interface SnapshotRuntime {
+  readonly isActive?: boolean;
+  readonly status?: string;
+  readonly active?: boolean;
+  readonly versionNumber?: number;
+  readonly versionKey?: string;
+  /**
+   * sha256 of the component's SOURCE at capture (OmniStudio types) — its file,
+   * or every file of its folder for a Vlocity DataPack: it changes only when
+   * the org's metadata changes — unlike `propertiesHash`, which also moves when
+   * a product upgrade extracts new properties.
+   */
+  readonly sourceHash?: string;
+}
+
+/** Component types whose snapshot rows carry a `sourceHash`. */
+export const SOURCE_HASHED_TYPES: ReadonlySet<string> = new Set(['OmniScript', 'OmniIntegrationProcedure', 'OmniUiCard', 'OmniDataTransform']);
+
+/**
+ * sha256 of a component's source, or undefined when it cannot be read. A
+ * Vlocity DataPack spans its folder (the main file plus sibling JSON files that
+ * hold its large fields), so its hash covers every file in that folder, by
+ * name — an edit to a sibling changes it, as it changes the component.
+ */
+export const sourceFileHash = async (vaultRoot: string, sourcePath: string): Promise<string | undefined> => {
+  if (sourcePath.length === 0) return undefined;
+  try {
+    const abs = resolveVaultSourcePath(vaultRoot, sourcePath);
+    if (!isDataPackPath(abs)) return createHash('sha256').update(await readFile(abs)).digest('hex');
+    const dir = dirname(abs);
+    const names = (await readdir(dir, { withFileTypes: true }))
+      .filter((e) => e.isFile())
+      .map((e) => e.name)
+      .sort();
+    const hash = createHash('sha256');
+    for (const name of names) hash.update(name).update('\0').update(await readFile(join(dir, name))).update('\0');
+    return hash.digest('hex');
+  } catch {
+    return undefined;
+  }
+};
+
+const RUNTIME_ACTIVE_TYPES = new Set(['ValidationRule', 'WorkflowRule', 'ApprovalProcess', 'AssignmentRule', 'AutoResponseRule', 'EscalationRule']);
+
+/** The runtime switch of a node's properties, or undefined for a type without one. */
+export const snapshotRuntimeOf = (
+  type: string,
+  properties: Readonly<Record<string, unknown>>,
+): SnapshotRuntime | undefined => {
+  const version = typeof properties['versionNumber'] === 'number' ? (properties['versionNumber'] as number) : undefined;
+  const str = (k: string): string => (typeof properties[k] === 'string' ? (properties[k] as string) : '');
+  switch (type) {
+    case 'OmniScript':
+    case 'OmniIntegrationProcedure':
+      return {
+        isActive: properties['isActive'] === true,
+        ...(version === undefined ? {} : { versionNumber: version }),
+        versionKey: `${str('type')}/${str('subType')}/${str('language')}`,
+      };
+    case 'OmniUiCard':
+      return { isActive: properties['isActive'] === true, ...(version === undefined ? {} : { versionNumber: version }), versionKey: str('name') };
+    case 'OmniDataTransform':
+      return { ...(version === undefined ? {} : { versionNumber: version }), versionKey: str('name') };
+    case 'DuplicateRule':
+      return { isActive: properties['isActive'] === true };
+    case 'Flow':
+    case 'ApexTrigger':
+      return typeof properties['status'] === 'string' ? { status: properties['status'] as string } : undefined;
+    default:
+      return RUNTIME_ACTIVE_TYPES.has(type) && typeof properties['active'] === 'boolean' ? { active: properties['active'] as boolean } : undefined;
+  }
+};
 
 /**
  * One snapshot edge row. The `propertiesHash` covers the edge's

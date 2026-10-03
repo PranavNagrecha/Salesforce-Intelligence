@@ -73,8 +73,18 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * deliberate (~540 KB) so the next wave does not restart the per-branch ratchet
  * the paragraph above calls the anti-pattern, and 7.4 MB is still ~3 MB below a
  * re-inlined bundle.
+ *
+ * RAISED AT INTEGRATION (7_400_000 -> 8_200_000), fourth round: the OmniStudio
+ * inside-model wave — the element catalog, field-level DataMapper and
+ * OmniStudio→Apex edges, the Apex DML index and generic-DML resolver, five new
+ * tools (record delete impact, persona unused grants, live verify, how to see,
+ * OmniStudio changed-since), the path simulator's satisfiability search, the
+ * app scope and `sfi run` — took the bundle from 7_220_179 to 7_772_335. The
+ * precise re-inline guard stayed green (antlr refs 7 of 80, external import
+ * string retained, worker 15 KB). Headroom (~430 KB) is again deliberate, and
+ * 8.2 MB is still ~5 MB below a re-inlined bundle.
  */
-const MAX_BYTES = 7_400_000;
+const MAX_BYTES = 8_200_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */

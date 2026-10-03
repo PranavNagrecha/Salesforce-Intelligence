@@ -966,9 +966,12 @@ describe('findDeadCodeHandler — output cursor (CR-22)', () => {
 });
 
 describe('findDeadCodeHandler — coverage caveat (P13-STAGED-absence-battery)', () => {
+  // OmniStudio calls Apex and reads / writes fields, so its four families are
+  // caller families too: an incomplete OmniStudio retrieve can fake death.
   const CALLER_FAMILIES = [
     'ApexClass', 'ApexTrigger', 'AuraDefinitionBundle', 'FlexiPage', 'Flow',
-    'LightningComponentBundle', 'QuickAction', 'VisualforceComponent',
+    'LightningComponentBundle', 'OmniDataTransform', 'OmniIntegrationProcedure',
+    'OmniScript', 'OmniUiCard', 'QuickAction', 'VisualforceComponent',
     'VisualforcePage',
   ];
   const completeCoverage = (): VaultManifest => ({

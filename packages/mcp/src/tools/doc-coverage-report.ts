@@ -68,6 +68,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { appScopeSchema, inAppScope, resolveAppScope, scopeContrastNote, type AppScope } from './app-scope.js';
 import { offlineTrust } from './coverage-trust.js';
 import { isNamespaced, packToByteBudget } from './limit-headroom-report.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
@@ -601,8 +602,14 @@ export interface ScopeBlock {
 export interface DocCoverageReportOutput {
   /** Measurable-vs-not-measurable scope. */
   readonly scope: ScopeBlock;
-  /** Org-wide totals across both axes + the excluded tallies. */
+  /** Totals across both axes + the excluded tallies, inside the applied app scope. */
   readonly totals: DocCoverageRollup['totals'];
+  /** The app scope applied (`scope` input, else the vault's declared one); org-wide when none. */
+  readonly appliedScope: AppScope;
+  /** The same totals org-wide, as a labelled contrast (equal to `totals` when no scope applied). */
+  readonly orgWide: { readonly totals: DocCoverageRollup['totals'] };
+  /** One sentence setting the scoped help-text gap against the org-wide one. */
+  readonly scopeNote: string;
   /** Per-object coverage, ranked LOWEST-COVERAGE-FIRST, PAGED by `limit`/`offset`. */
   readonly objects: readonly GroupDocCoverage[];
   /** The degree-ranked highest-impact undocumented components (page-independent). */
@@ -642,6 +649,8 @@ export const docCoverageReportInputSchema = z.object({
   limit: z.number().int().min(1).max(DOC_COVERAGE_MAX_LIMIT).optional(),
   /** Zero-based offset for paging the ranked object list forward. */
   offset: z.number().int().min(0).optional(),
+  /** The app's own objects and fields (see `app-scope.ts`); the scoped totals are the answer. */
+  scope: appScopeSchema.optional(),
 });
 
 export type DocCoverageReportInput = z.infer<typeof docCoverageReportInputSchema>;
@@ -677,11 +686,22 @@ export const docCoverageReportHandler = async (
   if (!degreeResult.ok) return degreeResult;
   const degreeById = degreeResult.value;
 
-  const inputs: DocNodeInput[] = scan.value.nodes.map((node) =>
+  const appScope = await resolveAppScope(ctx, input.scope);
+  const allInputs: DocNodeInput[] = scan.value.nodes.map((node) =>
     classifyNode(node, degreeById.get(node.id) ?? 0),
   );
+  const inputs = appScope.orgWide
+    ? allInputs
+    : scan.value.nodes.flatMap((node, i) => (inAppScope(appScope, node) ? [allInputs[i] as DocNodeInput] : []));
 
   const rollup = rollupDocCoverage(inputs);
+  const orgTotals = appScope.orgWide ? rollup.totals : rollupDocCoverage(allInputs).totals;
+  const scopeNote = scopeContrastNote(
+    appScope,
+    'org-owned custom fields without help text',
+    rollup.totals.helpText.undocumented,
+    orgTotals.helpText.undocumented,
+  );
 
   // Coverage honesty across the MEASURED families.
   const incompleteFamilies = MEASURED_TYPES.filter((t) => !coverageComplete(ctx, t));
@@ -726,6 +746,9 @@ export const docCoverageReportHandler = async (
     data: {
       scope,
       totals: rollup.totals,
+      appliedScope: appScope,
+      orgWide: { totals: orgTotals },
+      scopeNote,
       objects: [] as GroupDocCoverage[],
       topUndocumented: rollup.topUndocumented,
       totalObjectCount: rollup.groups.length,
@@ -751,6 +774,9 @@ export const docCoverageReportHandler = async (
     data: {
       scope,
       totals: rollup.totals,
+      appliedScope: appScope,
+      orgWide: { totals: orgTotals },
+      scopeNote,
       objects: packed.page,
       topUndocumented: rollup.topUndocumented,
       totalObjectCount: rollup.groups.length,

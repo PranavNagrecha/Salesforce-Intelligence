@@ -193,6 +193,16 @@ export interface ApexDmlSite extends SiteContext {
    * `true`, because the point of the flag is that it was WRITTEN.
    */
   readonly allOrNone: boolean | null;
+  /**
+   * The access level WRITTEN on the operation: `user` (`insert as user …`, or
+   * `AccessLevel.USER_MODE` passed to `Database.<op>`) — object, field and
+   * sharing permissions of the running user apply; `system` (`as system`,
+   * `AccessLevel.SYSTEM_MODE`) — they do not. `null` when none is written:
+   * the class's sharing keyword decides record visibility and object / field
+   * permissions are NOT enforced (Apex's default), unless the code checks
+   * them itself.
+   */
+  readonly accessLevel: 'user' | 'system' | null;
 }
 
 /** One recognised call site (callout, async dispatch, dynamic Apex). */
@@ -852,6 +862,17 @@ const readAllOrNone = (dotMethodCall: Ctx): boolean | null => {
   return null;
 };
 
+/** The access level written on a DML statement or `Database.<op>` call (see `ApexDmlSite.accessLevel`). */
+const accessLevelOf = (text: string): 'user' | 'system' | null => {
+  if (/\bAccessLevel\s*\.\s*USER_MODE\b/i.test(text) || /^\s*(insert|update|upsert|delete|undelete|merge)\s+as\s+user\b/i.test(text)) {
+    return 'user';
+  }
+  if (/\bAccessLevel\s*\.\s*SYSTEM_MODE\b/i.test(text) || /^\s*(insert|update|upsert|delete|undelete|merge)\s+as\s+system\b/i.test(text)) {
+    return 'system';
+  }
+  return null;
+};
+
 /** Normalise a trigger case (`beforeinsert` → `before insert`). */
 const triggerCaseText = (c: Ctx): string =>
   kids(c)
@@ -1068,6 +1089,7 @@ export const parseApexStructure = async (
         form: 'statement',
         resultDiscarded: null,
         allOrNone: null,
+        accessLevel: accessLevelOf(sourceTextOf(stmt)),
         ...siteContextOf(stmt),
       });
     }
@@ -1117,6 +1139,7 @@ export const parseApexStructure = async (
           form: 'database-method',
           resultDiscarded: isResultDiscarded(call),
           allOrNone: readAllOrNone(call),
+          accessLevel: accessLevelOf(sourceTextOf(call)),
           ...site,
         });
       }

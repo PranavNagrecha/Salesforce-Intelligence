@@ -44,6 +44,9 @@ import {
   listSnapshots,
   loadManifest,
   saveSnapshot,
+  snapshotRuntimeOf,
+  SOURCE_HASHED_TYPES,
+  sourceFileHash,
   vaultPaths,
   type Snapshot,
   type SnapshotEdge,
@@ -51,6 +54,8 @@ import {
   type SnapshotNode,
 } from '@sf-intelligence/vault';
 import { Command } from 'commander';
+
+import { projectDirForAction, VAULT_OPTION_HELP } from '../vault-option.js';
 
 /**
  * Error variants surfaced from the snapshot CLI commands. Wraps both
@@ -179,10 +184,12 @@ const compareEdges = (a: SnapshotEdge, b: SnapshotEdge): number => {
  */
 export const captureSnapshotGraph = async (
   store: GraphStore,
+  /** When given, OmniStudio rows also record a hash of their source file (`runtime.sourceHash`). */
+  vaultRoot?: string,
 ): Promise<Result<{ readonly nodes: readonly SnapshotNode[]; readonly edges: readonly SnapshotEdge[] }, SnapshotCommandError>> => {
   try {
     const nodeReader = await store.connection.runAndReadAll(
-      'SELECT id, type, api_name, label, properties_json FROM nodes',
+      'SELECT id, type, api_name, label, properties_json, source_path FROM nodes',
     );
     const rawNodes = nodeReader.getRowObjectsJS() as unknown as readonly RawNodeRow[];
     const nodes: SnapshotNode[] = rawNodes.map((row) => {
@@ -203,8 +210,18 @@ export const captureSnapshotGraph = async (
         apiName: row.api_name,
         label: row.label,
         propertiesHash: hashRecord(hashInput),
+        ...((runtime) => (runtime === undefined ? {} : { runtime }))(snapshotRuntimeOf(row.type, props)),
       };
     });
+    if (vaultRoot !== undefined) {
+      const pathById = new Map(rawNodes.map((r) => [r.id, (r as unknown as { source_path?: string }).source_path ?? '']));
+      for (let i = 0; i < nodes.length; i += 1) {
+        const n = nodes[i] as SnapshotNode;
+        if (!SOURCE_HASHED_TYPES.has(n.type)) continue;
+        const sourceHash = await sourceFileHash(vaultRoot, pathById.get(n.id) ?? '');
+        if (sourceHash !== undefined) nodes[i] = { ...n, runtime: { ...(n.runtime ?? {}), sourceHash } };
+      }
+    }
     nodes.sort(compareNodes);
 
     const edgeReader = await store.connection.runAndReadAll(
@@ -315,7 +332,7 @@ export const runSnapshotCreate = async (
   const store = storeResult.value;
 
   try {
-    const captured = await captureSnapshotGraph(store);
+    const captured = await captureSnapshotGraph(store, vaultRoot);
     if (!captured.ok) return captured;
     const { nodes, edges } = captured.value;
 
@@ -459,7 +476,7 @@ export const captureTransientSnapshot = async (
   }
   const store = storeResult.value;
   try {
-    const captured = await captureSnapshotGraph(store);
+    const captured = await captureSnapshotGraph(store, vaultRoot);
     if (!captured.ok) return captured;
     const { nodes, edges } = captured.value;
     const meta: SnapshotMeta = {
@@ -509,9 +526,12 @@ export const registerSnapshotCommand = (program: Command): void => {
     .command('create')
     .description('Capture a snapshot of the current vault state')
     .option('--label <label>', 'Snapshot label (default: current ISO timestamp)')
-    .action(async (flags: CreateFlags): Promise<void> => {
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (flags: CreateFlags & { vault?: string }): Promise<void> => {
+      const cwd = projectDirForAction(flags);
+      if (cwd === null) return;
       const result = await runSnapshotCreate({
-        cwd: process.cwd(),
+        cwd,
         ...(flags.label !== undefined ? { label: flags.label } : {}),
       });
       if (!result.ok) {
@@ -527,8 +547,11 @@ export const registerSnapshotCommand = (program: Command): void => {
   snapshot
     .command('list')
     .description('List every captured snapshot')
-    .action(async (): Promise<void> => {
-      const result = await runSnapshotList({ cwd: process.cwd() });
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (flags: { vault?: string }): Promise<void> => {
+      const cwd = projectDirForAction(flags);
+      if (cwd === null) return;
+      const result = await runSnapshotList({ cwd });
       if (!result.ok) {
         process.stderr.write(`sfi snapshot list: ${result.error.message}\n`);
         process.exit(1);
@@ -539,8 +562,11 @@ export const registerSnapshotCommand = (program: Command): void => {
   snapshot
     .command('delete <label>')
     .description('Delete a previously captured snapshot')
-    .action(async (label: string): Promise<void> => {
-      const result = await runSnapshotDelete({ cwd: process.cwd(), label });
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (label: string, flags: { vault?: string }): Promise<void> => {
+      const cwd = projectDirForAction(flags);
+      if (cwd === null) return;
+      const result = await runSnapshotDelete({ cwd, label });
       if (!result.ok) {
         process.stderr.write(`sfi snapshot delete: ${result.error.message}\n`);
         process.exit(1);

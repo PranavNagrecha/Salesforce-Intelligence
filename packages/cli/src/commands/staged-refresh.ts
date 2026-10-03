@@ -210,6 +210,12 @@ export interface RunStagedRefreshOptions {
   readonly targetOrg?: string;
   /** Adds the T3 folder-based Report/Dashboard pass. */
   readonly withReports?: boolean;
+  /**
+   * Run the Tooling API pass (enrichment + permission-dependency capture) on
+   * the FINAL tier only — earlier tiers are replaced by it, so enriching them
+   * would query twice for nothing.
+   */
+  readonly withToolingApi?: boolean;
   readonly onProgress?: (message: string) => void;
   /** Injectable refresh runner (tests verify sequencing / inject failures). */
   readonly refreshFn?: typeof runRefresh;
@@ -351,6 +357,7 @@ export const runStagedRefresh = async (
   }
   const plan = stagedTierPlan();
   const totalTiers = opts.withReports === true ? 4 : 3;
+  const tooling = opts.withToolingApi === true ? { withToolingApi: true } : {};
 
   const prior = await readStagedState(paths.meta);
   const done = new Set(prior?.completedTiers ?? []);
@@ -432,7 +439,7 @@ export const runStagedRefresh = async (
       // remains) so health stays honest until the build truly finishes.
       ...(opts.withReports === true
         ? { stagedMarker: { tier: 2, totalTiers, pendingTypes: [] } }
-        : {}),
+        : tooling),
     });
     if (final.status === 'failed') {
       return { result: final, tiersRun, tiersSkipped };
@@ -451,6 +458,7 @@ export const runStagedRefresh = async (
       noPull: opts.noPull,
       ...(opts.targetOrg !== undefined ? { targetOrg: opts.targetOrg } : {}),
       withReports: true,
+      ...tooling,
       onProgress: progress,
     });
     if (final.status === 'failed') {
@@ -469,6 +477,7 @@ export const runStagedRefresh = async (
       noPull: opts.noPull,
       ...(opts.targetOrg !== undefined ? { targetOrg: opts.targetOrg } : {}),
       forceSideBuild: true,
+      ...tooling,
       onProgress: progress,
     });
     if (final.status === 'failed') {

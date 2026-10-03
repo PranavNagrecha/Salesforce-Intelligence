@@ -102,7 +102,11 @@ export type EntryPointKind =
   | 'ui-controller'
   | 'framework-subclass'
   | 'callable-dispatch'
-  | 'namespaced-interface';
+  | 'namespaced-interface'
+  // An ACTIVE OmniScript, Integration Procedure or FlexCard: a user-facing
+  // (or IP-invoked) OmniStudio component whose Remote Action / Apex data
+  // source runs the class (`callsApex` edges from the OmniStudio extractors).
+  | 'omnistudio';
 
 /**
  * DYNAMIC-REGISTRATION ENTRY POINTS — the blind spot that unifying the walk
@@ -312,8 +316,18 @@ export const entryKindsFor = (
   if (isFrameworkSubclass(node)) kinds.push('framework-subclass');
   if (isCallableDispatch(node)) kinds.push('callable-dispatch');
   if (isNamespacedInterfaceImplementation(node)) kinds.push('namespaced-interface');
+  // Only the ACTIVE version of an OmniStudio component runs; an inactive one
+  // reaching the class is a saved draft, not an entry point.
+  if (OMNISTUDIO_ENTRY_TYPES.has(node.type) && node.properties['isActive'] === true) kinds.push('omnistudio');
   return kinds;
 };
+
+/** OmniStudio component types whose ACTIVE version is an entry point. */
+export const OMNISTUDIO_ENTRY_TYPES: ReadonlySet<string> = new Set([
+  'OmniScript',
+  'OmniIntegrationProcedure',
+  'OmniUiCard',
+]);
 
 /** True when every kind in `kinds` is an unproven dynamic registration. */
 export const isUnprovenRegistrationKind = (kind: EntryPointKind): boolean =>
@@ -492,4 +506,55 @@ export const countUnwalkedUsageInEdges = async (
     count += 1;
   }
   return ok({ count, byType });
+};
+
+/** One Apex class or trigger reached DOWNSTREAM from a set of entry points. */
+export interface DownstreamReach {
+  /** Hops from the nearest entry point (an entry point itself is 0). */
+  readonly depth: number;
+  /** The entry point this node was first reached from. */
+  readonly from: ComponentId;
+}
+
+/**
+ * The downstream counterpart of {@link walkUpstreamUsage}: every Apex class
+ * the given entry points can run, following OUTGOING `callsApex` and
+ * `dispatchesAsync` edges (an async job runs as the user who enqueued it) from
+ * Apex nodes, breadth-first. One batched query per depth level; phantom
+ * heuristic edges are skipped; cycle-safe. Entry points of other types (an
+ * OmniScript, an LWC) contribute their own outgoing `callsApex` edges at
+ * depth 0, so callers can seed with any component that runs Apex.
+ */
+export const walkDownstreamApex = async (
+  ctx: Context,
+  roots: readonly ComponentId[],
+  opts: { readonly maxDepth: number },
+): Promise<Result<ReadonlyMap<ComponentId, DownstreamReach>, string>> => {
+  const reached = new Map<ComponentId, DownstreamReach>();
+  let frontier: ComponentId[] = [];
+  for (const r of [...new Set(roots)].sort()) {
+    reached.set(r, { depth: 0, from: r });
+    frontier.push(r);
+  }
+  for (let depth = 0; depth < opts.maxDepth && frontier.length > 0; depth += 1) {
+    const batch = await listEdgesForNodes(ctx.graph, frontier, {
+      direction: 'out',
+      edgeTypes: ['callsApex', 'dispatchesAsync'],
+    });
+    if (!batch.ok) return err(batch.error.message);
+    const next: ComponentId[] = [];
+    for (const id of frontier) {
+      const origin = reached.get(id)?.from ?? id;
+      for (const edge of batch.value.get(id) ?? []) {
+        if (isHiddenUnresolved(edge)) continue;
+        const to = edge.toId as ComponentId;
+        if (!to.startsWith('ApexClass:') && !to.startsWith('ApexTrigger:')) continue;
+        if (reached.has(to)) continue;
+        reached.set(to, { depth: depth + 1, from: origin });
+        next.push(to);
+      }
+    }
+    frontier = next.sort();
+  }
+  return ok(reached);
 };

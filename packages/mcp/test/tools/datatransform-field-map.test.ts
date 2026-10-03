@@ -55,6 +55,7 @@ import {
 
 import type { Context } from '../../src/server.js';
 import { datatransformFieldMapHandler } from '../../src/tools/datatransform-field-map.js';
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from '../../src/tools/omni-disclosures.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -352,19 +353,8 @@ describe('datatransformFieldMapHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const boundaries = result.value.data.boundaries;
-    // The Native-vs-Vlocity disclosure (PLAN-v3.2 §4 honesty axis 1).
-    expect(
-      boundaries.some((b) =>
-        b.includes(
-          'v3.2 recognizes Industries Native XML shapes',
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      boundaries.some((b) =>
-        b.includes('Vlocity-managed-package'),
-      ),
-    ).toBe(true);
+    // The Native-vs-Vlocity disclosure (PLAN-v3.2 §4 honesty axis 1) — the ONE shared sentence.
+    expect(boundaries).toContain(NATIVE_VS_VLOCITY_DISCLOSURE);
     // The per-row confidence disclosure (load-bearing for this tool).
     expect(
       boundaries.some((b) =>

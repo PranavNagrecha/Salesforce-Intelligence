@@ -488,6 +488,13 @@ const DEAD_CODE_REQUIRED_COVERAGE: readonly string[] = [
   'FlexiPage',
   'Flow',
   'LightningComponentBundle',
+  // OmniStudio calls Apex (Remote Actions, Try Catch handlers, FlexCard Apex
+  // data sources) and reads / writes fields (DataMapper Extracts and Loads),
+  // so an incomplete OmniStudio retrieve can fake a dead verdict too.
+  'OmniDataTransform',
+  'OmniIntegrationProcedure',
+  'OmniScript',
+  'OmniUiCard',
   'QuickAction',
   'VisualforceComponent',
   'VisualforcePage',
@@ -769,6 +776,10 @@ ${UNPROVEN_REGISTRATION_SQL} AS is_unproven_registration,
                FALSE) AS from_is_test,
              COALESCE(
                r.type = 'ApexTrigger'
+                 -- An ACTIVE OmniScript / Integration Procedure / FlexCard runs
+                 -- the Apex it names (apex-reachability OMNISTUDIO_ENTRY_TYPES).
+                 OR (r.type IN ('OmniScript', 'OmniIntegrationProcedure', 'OmniUiCard')
+                     AND COALESCE(json_extract_string(r.properties_json, '$.isActive') = 'true', FALSE))
                  OR (r.type = 'ApexClass' AND (
                      COALESCE(json_extract_string(r.properties_json, '$.isRestResource') = 'true', FALSE)
                      OR COALESCE(json_extract_string(r.properties_json, '$.hasAuraEnabledMethod') = 'true', FALSE)

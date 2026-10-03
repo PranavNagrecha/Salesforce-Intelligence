@@ -36,6 +36,7 @@ const MANIFEST: VaultManifest = {
   coverage: [
     { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false },
     { type: 'ApexTrigger', requested: true, retrieved: 1, errored: false, neverModeled: false },
+    { type: 'ApexClass', requested: true, retrieved: 1, errored: false, neverModeled: false },
     { type: 'WorkflowAlert', requested: false, retrieved: 0, errored: false, neverModeled: true },
   ],
 };
@@ -70,6 +71,15 @@ const SEED: ExtractionResult = {
     edge('PermissionSet:Acme_PS', 'grantedBy', 'CustomObject:Account'), // standard-field-phantom
     edge('WorkflowRule:Acme_WR', 'references', 'WorkflowAlert:Acme.Alert1'), // blindspot-manifest (type notModeled)
     edge('ApexClass:Acme_Svc', 'readsFrom', 'CustomObject:Acme_Misc__c', 'heuristic'), // unknown (only a heuristic functional ref)
+    // An Apex class an Integration Procedure calls by name, absent from the vault.
+    {
+      fromId: 'OmniIntegrationProcedure:Acme_Save_English_1',
+      toId: 'ApexClass:Acme_FetchDomain',
+      edgeType: 'callsApex',
+      confidence: 'parsed',
+      source: 'test',
+      properties: { entryVia: 'omnistudio-remote', callSites: [{ site: 'GetDomain' }, { site: 'Retry/GetDomain' }] },
+    },
   ],
 };
 
@@ -148,6 +158,16 @@ describe('buildReferenceStub', () => {
 
   it('returns null for a genuinely-unknown id (no inbound edges)', async () => {
     expect(await buildReferenceStub(ctx, 'CustomObject:NoSuchThing__c')).toBeNull();
+  });
+
+  it('says what an absent Apex class called from OmniStudio means, and how to tell its two causes apart', async () => {
+    const stub = await buildReferenceStub(ctx, 'ApexClass:Acme_FetchDomain');
+    expect(stub?.classification).toBe('automation-critical');
+    expect(stub?.remedy).toMatch(/Called by name from OmniStudio \(1 component\(s\), 2 call site\(s\)\)/);
+    expect(stub?.remedy).toMatch(/fails at runtime/);
+    expect(stub?.remedy).toContain('sfi refresh --components ApexClass:Acme_FetchDomain');
+    // Other phantoms keep their plain remedy.
+    expect((await buildReferenceStub(ctx, 'CustomObject:Acme_Auto__c'))?.remedy).not.toMatch(/OmniStudio/);
   });
 });
 

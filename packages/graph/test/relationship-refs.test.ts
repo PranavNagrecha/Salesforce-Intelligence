@@ -413,3 +413,47 @@ describe('mintRelationshipTraversalEdges — condition relationship traversals',
     expect(edges[1]?.edgeType).toBe('readsFrom');
   });
 });
+
+const omniNode = (type: 'OmniDataTransform' | 'OmniUiCard', apiName: string, properties: Record<string, unknown>): Node => ({
+  id: `${type}:${apiName}` as ComponentId,
+  type,
+  apiName,
+  label: null,
+  parentId: null,
+  sourcePath: `omni/${apiName}.xml`,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties,
+});
+
+describe('mintRelationshipTraversalEdges — DataMapper and FlexCard paths', () => {
+  it('resolves an Extract read and a Load write onto the real field, by access', () => {
+    const dm = omniNode('OmniDataTransform', 'AcmeEnrolmentMapper_1', {
+      unresolvedTraversalRefs: [
+        { object: 'Enrolment__c', path: 'Programme__r.Status__c', access: 'read' },
+        { object: 'Enrolment__c', path: 'Programme__r.Status__c', access: 'write' },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, dm], edges);
+    expect(edges.map((e) => [e.edgeType, e.toId, e.confidence, e.properties['referenceKind']])).toEqual([
+      ['readsFrom', 'CustomField:Programme__c.Status__c', 'parsed', 'dataMapperRelationshipTraversal'],
+      ['writesTo', 'CustomField:Programme__c.Status__c', 'parsed', 'dataMapperRelationshipTraversal'],
+    ]);
+  });
+
+  it('resolves a FlexCard SOQL path, and mints nothing for an unknown relationship', () => {
+    const card = omniNode('OmniUiCard', 'AcmeEnrolmentCard_1', {
+      unresolvedTraversalRefs: [
+        { object: 'Enrolment__c', path: 'Programme__r.Status__c', access: 'read' },
+        { object: 'Enrolment__c', path: 'Nowhere__r.Status__c', access: 'read' },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, card], edges);
+    expect(edges.map((e) => [e.fromId, e.toId])).toEqual([
+      ['OmniUiCard:AcmeEnrolmentCard_1', 'CustomField:Programme__c.Status__c'],
+    ]);
+  });
+});

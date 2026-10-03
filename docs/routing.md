@@ -195,10 +195,19 @@ When **no deterministic intent matches**, the router does not simply give up.
 If nothing else stopped the route — no pending clarification, and a clean
 premise (a question naming a component the resolver cannot find gets the
 premise disclosure instead, never an advisory route) — and the semantic
-funnel's top candidate scores at or above a fixed floor
-(`FUNNEL_PRIMARY_MIN_SCORE = 0.26`, a source constant, not an env var; the
-score is a pure cosine, uninflated by regex fusion bonuses), the dead
-`unrouted` verdict is upgraded to:
+funnel's evidence clears three source-constant gates (not env vars), the dead
+`unrouted` verdict is upgraded:
+
+- **height** — the top candidate scores at or above `FUNNEL_PRIMARY_MIN_SCORE =
+  0.26` (a pure cosine, uninflated by regex fusion bonuses);
+- **breadth** — the candidates at ranks 3-8 carry at least
+  `FUNNEL_MIN_EVIDENCE_BREADTH = 0.32` between them (a one-word collision lights
+  up one tool and leaves the tail near zero; a real question spreads support);
+- **coverage** — the corpus knows at least `CONF_MIN_COVERAGE = 0.34` of the
+  user's own words (breadth alone is fooled by one word common across tool
+  descriptions: "xyzzy quantum flibbertigibbet metadata" knows 1 word of 4).
+
+The upgraded route is:
 
 - `intent: 'funnel-advisory'`
 - `route.tools`: the top-3 funnel candidates
@@ -267,10 +276,10 @@ structured `route.refusal = { kind, disclosure, readOnlyAlternative? }`.
 
 | `kind` | Trigger | What the host gets |
 | --- | --- | --- |
-| `write-imperative` | A mutation asked *of the agent* ("delete the X field for me", "go ahead and merge…"), or an EXECUTION ask ("run the X flow against test data for me", "execute the batch job") | `refused-write` intent, a read-only boundary disclosure, and a **`readOnlyAlternative`** — the simulation/read that answers the underlying question safely (`safe_to_delete_field`, `what_if_deactivate_flow`, `what_if_disable_trigger`, `what_if_change_field_type`, `what_if_merge_profiles`, `get_impact`; for execution asks `explain_flow` / `scheduled_job_catalog` / `what_happens_on_save` — by verb family). Offer it. |
+| `write-imperative` | A mutation asked *of the agent* ("delete the X field for me", "go ahead and merge…"), or an EXECUTION ask ("run the X flow against test data for me", "execute the batch job"). A run verb on an analysis NAME — "run automation risk", "execute the flow audit" — is a read and routes normally. | `refused-write` intent, a read-only boundary disclosure, and a **`readOnlyAlternative`** — the simulation/read that answers the underlying question safely (`safe_to_delete_field`, `what_if_deactivate_flow`, `what_if_disable_trigger`, `what_if_change_field_type`, `what_if_merge_profiles`, `get_impact`; for execution asks `explain_flow` / `scheduled_job_catalog` / `what_happens_on_save` — by verb family). Offer it. |
 | `injection-exfiltration` | Prompt-injection ("ignore your previous instructions…"), record-value exfiltration ("dump all SSN values"), or privilege escalation ("sudo give me full access") | `refused-injection`; `toolCandidates` and `guidance` are suppressed entirely. Do not route around it. |
 | `runtime-analytics` | Runtime/ops telemetry no tool models: per-user login events/sessions, adoption metrics, "errors this week", automation execution traces & aggregate run counts, run/failure forensics, CPU/heap profiling, debug-log retrieval, SOQL execution plans, message delivery counts & sent-message content, site click analytics, record-level before/after field history, record-access audit events ("who accessed…") | `honest-gap-runtime` with an HONEST GAP disclosure naming the nearest real reads (e.g. `live_inactive_users` covers dormancy thresholds, not login events; `live_automation_fired` infers per-record, not aggregate run counts). |
-| `out-of-scope` | Non-Salesforce asks (other systems, "email me…", write-me-code) | `out-of-scope` disclosure. |
+| `out-of-scope` | Non-Salesforce asks: other systems, another platform's own data ("how many SAP tables", "our ServiceNow tickets" — an integration question about the platform still routes), rating people ("who is the best admin"), purchasing decisions ("should I buy more licenses"), general knowledge, "email me…", write-me-code | `out-of-scope` disclosure. |
 
 **Three further kinds the table above omits.** `RefusalKind` is a seven-member
 union (`refusal-gates.ts`), and these three are honest-gap arms that fire before

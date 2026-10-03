@@ -24,6 +24,24 @@
  * until this corpus is regenerated.
  */
 
+/**
+ * Inventory asks about ONE component family, for `sfi.list_components` (the
+ * generic "enumerate every X" tool), scored as a family card
+ * ({@link LIST_COMPONENTS_TYPE_CARDS}) on its own length: a family whose
+ * per-component tools are dense in its noun (fourteen OmniStudio tools say
+ * "OmniScript" everywhere) would otherwise out-rank the inventory tool for
+ * "which OmniScripts exist", which is an enumeration, not a question about one
+ * script. A card, not utterances, so the tool's broad document is not diluted.
+ */
+const OMNISTUDIO_INVENTORY_ASKS: readonly string[] = [
+  'which OmniScripts exist in this org?',
+  'list every OmniScript and Integration Procedure we have',
+  'what Integration Procedures do we have?',
+  'show me all the FlexCards in the org',
+  'which DataRaptors and Data Mappers are deployed?',
+  'how many OmniStudio components does this org have?',
+];
+
 /** Per-tool synthetic ask-phrasings, keyed by full `sfi.*` tool name. */
 export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
   'sfi.search_components': [
@@ -178,6 +196,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'drift ranking across our sandbox fleet',
     'which org has changed the most since last baseline?',
     'which of our orgs is most out of date and needs a refresh first?',
+    // ADDITIVE (route-question order flip vs fleet_find, both "orgs in our
+    // fleet"): the DRIFT vocabulary is this tool's, so it carries it densely.
+    'rank every org by its drift from the baseline',
+    'how far has each org drifted from our golden baseline?',
+    'which sandboxes drifted furthest from the baseline config?',
+    'baseline drift score per org, worst first',
   ],
   'sfi.generate_fleet_report': [
     'give me a report across all my orgs',
@@ -244,6 +268,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what standard objects are available in this org?',
     'what standard objects does this org have?',
     'list the standard objects in this org',
+    // OmniStudio inventory asks ("which OmniScripts exist") are a family CARD
+    // (LIST_COMPONENTS_TYPE_CARDS), not lines here: in this broad document they
+    // would dilute every other inventory phrasing (custom permissions, objects).
     'show me all the triggers on Account',
     'what approval processes are deployed?',
     'list all custom labels',
@@ -863,6 +890,38 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what flows create records of this object?',
     'what is the record creation path for this object?',
   ],
+  'sfi.live_verify': [
+    'is this still true in the live org right now?',
+    'verify against the org that this permission set grants delete',
+    'which version of this OmniScript is active in the org today?',
+    'does the live org still have these validation rules?',
+    'is the compiled component for this LWC OmniScript deployed?',
+    'confirm this finding live before I send it',
+  ],
+  'sfi.how_to_see': [
+    'what is the click path to open this component?',
+    'what is the click path to this field?',
+    'where do I find this permission set object setting?',
+    'how do I open this OmniScript element in the designer?',
+    'steps to view this validation rule',
+    'give me the how-to-see steps for this finding',
+  ],
+  'sfi.persona_unused_grants': [
+    'which permissions does this persona have that nothing they use needs?',
+    'what object access does the portal user have but never use?',
+    'least privilege review for this permission set — which grants are unused?',
+    'can I remove create or edit access from this profile without breaking anything?',
+    'which objects can <PermSet> edit that no screen or code touches?',
+    'unused object permissions for a persona',
+  ],
+  'sfi.record_delete_impact': [
+    'if I delete a <Object> record, what happens to its child records?',
+    'which child records are orphaned when this parent is deleted?',
+    'does deleting this record cascade-delete anything?',
+    'what stops a <Object> record from being deleted — any delete trigger or guard?',
+    'which lookups to this object are SetNull, Cascade or Restrict?',
+    'who and what can delete records of this object?',
+  ],
   'sfi.effective_permissions': [
     'does the <Profile> profile have access to the Account object?',
     'Lead convert failed with \'missing Edit permission\' — whose perm is that?',
@@ -956,6 +1015,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'check if <Username> can create Opportunities',
     'what record types can this user access on Case?',
     'what flows can users with the <Profile> profile actually run?',
+    // ADDITIVE (guest-user recall miss): the site guest user is a user too —
+    // what it can run is this tool's question; guest_exposure_report answers
+    // what the guest profile EXPOSES org-wide.
+    'which flows is the site guest user allowed to run?',
+    'can the unauthenticated guest user run this flow?',
+    'what can the Experience Cloud guest user actually do?',
     // R3 access-diagnostics band: missing-button / failing-action symptoms.
     'a user says the Convert button is missing on a Lead — why?',
     'why does the send action fail for one user — do they need the <PermSet> permission set?',
@@ -1144,6 +1209,14 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'run a removal simulation on this field before I delete it',
     'simulate removing this field — what breaks?',
     'give me the removal simulation for Priority__c',
+    // ADDITIVE BACKFILL (OmniStudio Edit Block / record-delete displacement):
+    // "block" and "delete" now also describe an OmniScript Edit Block's delete
+    // and record-delete impact, so the FIELD-deletion phrasings that ask whether
+    // the platform would stop the delete need this tool's own words for it.
+    'would Salesforce block deleting this field?',
+    'will the platform prevent me from deleting <Field__c>?',
+    'is the deletion of this custom field blocked by something that still references it?',
+    'what stops me from deleting a field on <Object>?',
     // R5 show-me utterances
     'show me if <Field__c> is safe to delete',
     'pull up the impact analysis for deleting <Field__c>',
@@ -1156,6 +1229,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me unused permission sets',
     'which flows are deployed but never run?',
     'dead components — Apex, flows, whatever — give me the list',
+    'which components are unused across Apex, flows and objects?',
+    'list every unused component in the org grouped by type',
   ],
   'sfi.find_dependency_cycles': [
     'whats the dependency cycle situation between the Course objects — triggers on <Object1>, <Object2>, <Object3>',
@@ -1576,6 +1651,7 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
   ],
   'sfi.doc_coverage_report': [
     'which fields lack descriptions?',
+    'how many of our app\'s fields have no help text?',
     'what is our documentation coverage?',
     'show me undocumented metadata',
     'which objects have the worst documentation coverage?',
@@ -1819,6 +1895,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
   ],
   'sfi.picklist_integrity_scan': [
     'scan the org for orphaned or stale picklist value references',
+    'how many unrestricted picklists are on our own objects?',
+    'how many picklists in our app accept values outside their list?',
     'are there any validation rules or flows comparing a field to a picklist value that no longer exists?',
     'find picklist integrity problems — comparisons pointing at renamed or deactivated values',
     'which formulas reference a picklist value that is not defined on the field?',
@@ -2758,6 +2836,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which Integration Procedures call each other?',
     'explain the Integration Procedure flow for this use case',
     'walk me through the steps in the <IPName> Integration Procedure',
+    'which objects and Apex classes does this Integration Procedure touch?',
+    'what does this Integration Procedure delete?',
   ],
   'sfi.omniscript_flow': [
     'walk me through the OmniScript flow for <OmniScriptName>',
@@ -2766,6 +2846,91 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'describe the OmniScript user journey for <OmniScriptName>',
     'what Integration Procedures does this OmniScript call?',
     'what screens and steps does the <OmniScriptName> OmniScript walk the user through?',
+  ],
+  'sfi.omni_model': [
+    'show me the inside of the <OmniScriptName> OmniScript as a model',
+    'what data keys does this OmniScript element produce and read?',
+    'which Integration Procedure input does this screen action fill?',
+    'list the elements, steps and DataMapper items of this OmniStudio component',
+    'map the OmniScript elements to the keys and server calls they use',
+    'what does each step of this Integration Procedure read and output?',
+  ],
+  'sfi.omni_dead_references': [
+    'which OmniScript show rules point at fields that no longer exist?',
+    'find dead merge fields in this OmniScript',
+    'are there keys with stray spaces in our OmniStudio payloads?',
+    'which conditional views can never display because their field was renamed?',
+    'find broken placeholders that render as literal text in OmniScripts',
+    'check every OmniScript and Integration Procedure for dead references',
+  ],
+  'sfi.omni_version_diff': [
+    'what changed between version 25 and 30 of this OmniScript?',
+    'which elements were renamed in the new OmniScript version?',
+    'diff the active OmniScript against its previous version',
+    'did a rename leave show rules pointing at the old element name?',
+    'compare two versions of this Integration Procedure',
+    'what did the vendor change in the latest OmniScript version?',
+  ],
+  'sfi.omni_edit_block_audit': [
+    'does deleting a card in this OmniScript edit block delete the record?',
+    'which edit blocks only delete on screen?',
+    'does editing a card update the record or insert a duplicate?',
+    'audit the edit blocks delete wiring in <OmniScriptName>',
+    'where does the edit block delete get the record id?',
+    'which OmniScript edit blocks have a delete button with no server delete?',
+  ],
+  'sfi.omni_completion_audit': [
+    'does the section show complete even when the save failed?',
+    'which Integration Procedures mark a step complete without checking the save succeeded?',
+    'is the success flag returned by this IP ever read by the screen?',
+    'audit completion markers in our Integration Procedures',
+    'find saves whose failure is swallowed before marking complete',
+    'which screens ignore the save result from the server?',
+  ],
+  'sfi.omni_form_spec': [
+    'give me the form spec for this OmniScript for a test runner',
+    'what mask, pattern and max length does each input on this screen have?',
+    'generate sample values that satisfy every field on <OmniScriptName>',
+    'which OmniScript input patterns are invalid in the browser?',
+    'is the zip code pattern weaker than its mask?',
+    'are zip and phone fields declared consistently across our screens?',
+  ],
+  'sfi.omni_path_simulator': [
+    'which OmniScript steps are shown for these answers?',
+    'simulate the path through this OmniScript given these answers',
+    'what answers reach every step of this OmniScript?',
+    'which steps can never be shown?',
+    'given these inputs which screens will the user see?',
+    'evaluate the conditional views of this OmniScript for a test case',
+    'is there a section added for people whose entry step is hidden from them?',
+    'check this OmniScript for dead-end sections',
+  ],
+  'sfi.omni_changed_since': [
+    'what changed in OmniStudio since the last refresh?',
+    'which OmniScripts got a new active version since the audit?',
+    'did any Integration Procedure change since our evidence was gathered?',
+    'show the element-level changes between the old and new active OmniScript versions',
+    'which DataMappers changed since the previous snapshot?',
+    'has this OmniScript been edited since we tested it?',
+  ],
+  'sfi.omni_prefill_trace': [
+    'when the applicant reopens this OmniScript does the saved answer show again?',
+    'which saved answers never come back on prefill?',
+    'does the prefill return this field to the right screen element?',
+    'trace the prefill for <OmniScriptName>',
+    'why is this saved value blank when the screen reloads?',
+    'which OmniScript fields are saved but not prefilled?',
+  ],
+  'sfi.omni_save_trace': [
+    'is every answer on the <OmniScriptName> OmniScript actually saved to the database?',
+    'which answers on this OmniScript screen are never saved?',
+    'trace where the <ElementName> answer gets saved',
+    'why is this OmniScript field not saving to the record?',
+    'does the data entered on this screen reach Salesforce?',
+    'which DataMapper drops this OmniScript answer?',
+    'does the <OmniScriptName> OmniScript save the <Field> field?',
+    'does this OmniScript save what the user enters in each field?',
+    'which OmniScript answers fail to save, and where are they dropped?',
   ],
   'sfi.omniuicard_widget_breakdown': [
     'break down the widgets in this OmniUI Card',
@@ -2983,6 +3148,15 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
  * key here; do NOT append to the flat sfi.interpret utterances (that is the
  * saturated single doc this structure replaces for growth).
  */
+/**
+ * Component-family cards for `sfi.list_components`, scored like concept cards
+ * (each on its own length; the tool's score is the max with its base document),
+ * so adding a family never dilutes the others or moves any other query.
+ */
+export const LIST_COMPONENTS_TYPE_CARDS: Readonly<Record<string, readonly string[]>> = {
+  'family:omnistudio': OMNISTUDIO_INVENTORY_ASKS,
+};
+
 export const INTERPRET_CONCEPT_CARDS: Readonly<Record<string, readonly string[]>> = {
   'concept:field-longtext-richtext-not-filterable': [
     "Can I filter a report on the long text area field on Account?",
@@ -3176,6 +3350,86 @@ export const INTERPRET_CONCEPT_CARDS: Readonly<Record<string, readonly string[]>
     "Which OmniStudio components won't run at runtime?",
     "Show me the dormant OmniScript versions in this org",
     "Are any of our OmniStudio components deactivated?",
+  ],
+  'concept:lookup-delete-behavior': [
+    "What happens to child records when the parent is deleted?",
+    "Is this lookup SetNull, Cascade or Restrict?",
+    "Do child records get orphaned when I delete the parent record?",
+    "Does a cascade delete fire the child object's delete triggers?",
+    "Which lookups block deleting this record?",
+    "Will deleting this parent leave records with a blank lookup?",
+  ],
+  'concept:omnistudio-remote-apex-call': [
+    "Which OmniStudio components call this Apex class?",
+    "Is this Apex class used by an OmniScript Remote Action?",
+    "Can I delete this Apex class or is OmniStudio calling it?",
+    "Does an Integration Procedure Remote Action run in user mode?",
+    "What breaks if I rename the method an OmniScript remote action calls?",
+    "Is this Apex only called from OmniStudio?",
+  ],
+  'concept:datamapper-load-write': [
+    "Which DataMapper writes this field?",
+    "Does a DataRaptor Load create or update records?",
+    "What OmniStudio component saves this field?",
+    "Is this field written by an OmniStudio Load?",
+    "Why did renaming a screen element stop saving this field?",
+    "Which Data Mapper upserts this object?",
+  ],
+  'concept:edit-block-delete-wiring': [
+    "Does the Delete button on this Edit Block actually delete the record?",
+    "How is delete wired on an OmniScript Edit Block?",
+    "Which Integration Procedure does the Edit Block delete call?",
+    "Why does a deleted card come back on the next load?",
+    "What payload does deleteIPKey send?",
+    "Is allowDelete enough to delete the record on the server?",
+  ],
+  'concept:ip-delete-action': [
+    "Which Integration Procedures delete records of this object?",
+    "Does an OmniStudio Delete Action trigger delete automation?",
+    "What deletes these records in OmniStudio?",
+    "Is a failed delete swallowed in this Integration Procedure?",
+    "Which IP Delete Action removes this object's records?",
+    "Does deleting through an Integration Procedure cascade to child records?",
+  ],
+  'concept:picklist-restriction': [
+    "Does an unrestricted picklist accept values outside its list?",
+    "Can an API write a value that is not in this picklist?",
+    "Is this picklist restricted?",
+    "Why do records hold picklist values that are not defined?",
+    "Are global value set picklists always restricted?",
+    "What does it mean that a picklist is unrestricted?",
+  ],
+  'concept:omnistudio-dead-end-section': [
+    "Why can some applicants never start the Assets section?",
+    "Is there a section that gets added but whose first step is hidden?",
+    "Can an OmniScript section be added for people who never see its entry step?",
+    "Why does a section stay incomplete for some users forever?",
+    "What is a dead-end section in an OmniScript?",
+    "Is the entry step of this section hidden for the population it is added for?",
+  ],
+  'concept:apex-runs-omnistudio': [
+    "Which Apex classes call this Integration Procedure?",
+    "Does any Apex run this DataRaptor by name?",
+    "Will renaming this Integration Procedure break Apex?",
+    "Is this Integration Procedure only called from Apex?",
+    "How does Apex call an OmniStudio Integration Procedure?",
+    "What breaks in Apex if I deactivate this Integration Procedure?",
+  ],
+  'concept:omnistudio-managed-package-records': [
+    "Why are our Vlocity OmniScripts missing from the vault?",
+    "Does a metadata retrieve include vlocity_cmt OmniScripts?",
+    "How do I get managed-package OmniStudio components into the analysis?",
+    "Are DataRaptors in the Vlocity package records or metadata?",
+    "Is this OmniScript from a DataPack export or the retrieve?",
+    "Which OmniStudio components come from the Vlocity managed package?",
+  ],
+  'concept:dataraptor-active-flag-not-runtime-switch': [
+    "Is an inactive DataMapper dead code?",
+    "Does a DataRaptor with active false still run?",
+    "Can I delete DataMappers that are marked inactive?",
+    "Why does this inactive DataRaptor still get called?",
+    "Is the DataMapper active flag a runtime switch?",
+    "Are our inactive DataRaptors unused?",
   ],
   'concept:required-field-absent-from-all-layouts': [
     "Which required fields aren't on any page layout?",

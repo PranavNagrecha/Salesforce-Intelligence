@@ -5,8 +5,11 @@ import type { Edge, Node } from '@sf-intelligence/contracts';
  * once, and therefore the only layer that can turn a relationship traversal into
  * a real edge.
  *
- * Two producers hand it unresolved work as node properties, because neither can
- * resolve it from the single file it parsed:
+ * Producers hand it unresolved work as node properties, because none can
+ * resolve it from the single file it parsed (the fourth, `unresolvedTraversalRefs`
+ * on an OmniDataTransform, carries `{ object, path, access }` — a DataMapper
+ * Extract row reading `alias:Parent__r.Field__c` or a Load row writing a dotted
+ * path, resolved into `readsFrom` / `writesTo`):
  *
  *   `formulaRelationshipRefs`  on a CustomField — cross-object formula paths
  *                              (`Parent__r.Status__c`). The leading segment is a
@@ -297,6 +300,31 @@ export const mintRelationshipTraversalEdges = (
           });
         }
       }
+    }
+
+    // ── DataMapper / FlexCard relationship paths ────────────────────────────
+    // The OmniDataTransform extractor parks `alias:Parent__r.Field__c` (an
+    // Extract mapping row) or a dotted Load output here, and the FlexCard
+    // extractor a dotted field of a SOQL data source, each with the SObject the
+    // path starts from. Resolved like any other traversal; a path whose
+    // relationship is not in the vault mints nothing.
+    if (node.type === 'OmniDataTransform' || node.type === 'OmniUiCard') {
+      const refs = node.properties['unresolvedTraversalRefs'];
+      if (Array.isArray(refs)) {
+        for (const ref of refs) {
+          if (typeof ref !== 'object' || ref === null) continue;
+          const { object, path, access } = ref as { object?: unknown; path?: unknown; access?: unknown };
+          if (typeof object !== 'string' || typeof path !== 'string') continue;
+          const toId = resolveTraversalTarget(path, object, maps);
+          if (toId === null) continue; // resolve or drop, never guess
+          emit(node.id, toId, 'parsed', access === 'write' ? 'writesTo' : 'readsFrom', {
+            referenceKind: 'dataMapperRelationshipTraversal',
+            traversalPath: path,
+            fromObject: object,
+          });
+        }
+      }
+      continue;
     }
 
     // ── Dynamic related-list columns on a Lightning page ────────────────────

@@ -477,6 +477,10 @@ export const LIVE_TOOL_REQUIRED_SCOPES: Readonly<
   'sfi.live_picklist_usage': Object.freeze(['aggregate'] as const),
   'sfi.live_budget': Object.freeze(['aggregate'] as const),
   'sfi.live_drift_check': Object.freeze(['aggregate'] as const),
+  // Confirms one metadata / permission claim (ObjectPermissions, OmniProcess,
+  // Tooling ValidationRule / FieldDefinition / LightningComponentBundle): no
+  // record data, so the non-PII aggregate scope.
+  'sfi.live_verify': Object.freeze(['aggregate'] as const),
 
   // hybrid / live-primary non-live_* tools that call probeLiveAccess
   'sfi.blast_radius_live': Object.freeze(['aggregate'] as const),

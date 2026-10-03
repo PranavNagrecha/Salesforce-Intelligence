@@ -275,7 +275,7 @@ field.
 
 ## Tool profile (advertised roster)
 
-Under the default profile, 25 advertised tool schemas (217 registered; 5
+Under the default profile, 25 advertised tool schemas (231 registered; 5
 back-compat aliases stay hidden) form the core roster: the spine — including
 `sfi.live_consent` — plus the tools that answer the questions the package page
 advertises. That second half is DERIVED from `ADVERTISED_QUESTION_TOOLS`
@@ -682,6 +682,102 @@ fields, and termination never depends on a batch's size. The un-paged
 single-query fallback, used only when an org rejects the keyset SOQL, cannot be
 trusted to be complete and is marked `truncated`, which marks the closure
 partial (a LOWER BOUND).
+
+A refresh that asked for `--with-tooling-api` and did not write this file says
+so: the summary prints `WARNING — Permission dependencies: NOT captured
+(<cause>)` — a sign-in failure that stopped the Tooling pass early, a refused
+query, a failed write — and the refresh ends `partial` (non-zero exit). `--staged`
+runs the capture on its final tier; a targeted pull (`--components`,
+`--drain-demand-queue`) runs no Tooling pass and warns that the flag was ignored.
+
+---
+
+## App scope (`org-kb/config/app-scope.json`)
+
+An org-wide count mixes the app with installed packages and with whichever
+standard objects the retrieve happened to include, so it moves with the
+retrieve rather than with the app. Counting tools (`sfi.picklist_integrity_scan`,
+`sfi.doc_coverage_report`) answer with the app's own number and set the
+org-wide number beside it as a labelled contrast (`orgWide`, `scopeNote`).
+
+```json
+{ "namePrefixes": ["Acme_"], "namespaces": ["acme"] }
+```
+
+A component is in scope when its API name, its object, or (for a field) its
+object starts with a prefix, or carries a declared namespace (`ns__Name__c`);
+both compare case-insensitively, so the app's own fields on standard objects
+count. Per call, `scope` overrides the file; `scope: {}` asks for org-wide.
+Without the file the OmniStudio config's `appScope` applies, else no scope. An
+unreadable file is reported (`appliedScope.configError`) and the answer falls
+back to org-wide — never silently.
+
+---
+
+## Managed-package OmniStudio (`org-kb/source/vlocity/`)
+
+An org on the Vlocity managed package (`vlocity_cmt`, `vlocity_ins`,
+`vlocity_ps`) keeps its OmniScripts, Integration Procedures, DataRaptors and
+Cards as records, which no Metadata API retrieve contains. Export them with the
+Vlocity Build Tool into the vault's source folder, then refresh without
+pulling:
+
+```yaml
+# vlocity-export.yaml
+projectPath: ./org-kb/source/vlocity
+queries:
+  - OmniScript
+  - IntegrationProcedure
+  - DataRaptor
+  - VlocityCard
+```
+
+```sh
+vlocity -sfdx.username <org-alias> -job vlocity-export.yaml packExport
+sfi refresh --no-pull
+```
+
+Each DataPack folder (`<Type>/<Key>/<Key>_DataPack.json` and its sibling
+files) becomes one component, extracted by the same code as native OmniStudio
+metadata and marked `sourceFormat: vlocity-datapack`; every OmniStudio tool
+reads it. Both the `%vlocity_namespace%` placeholder and real namespace
+prefixes are read. Other DataPack types are disclosed as skipped, and the
+refresh never deletes an export. An export is a snapshot — re-export after
+changing OmniStudio in the org. OmniStudio tools say in `trust.limitations`
+when a Vlocity package is installed with no export (its components are then
+missing from the answer). The model is described in
+[docs/omnistudio](omnistudio/README.md#6-managed-package-vlocity-omnistudio).
+
+---
+
+## Choosing the vault (`--vault`)
+
+Every command that reads or writes a vault — `sfi run`, `status`, `doctor`,
+`selftest`, `snapshot`, `refresh`, `feedback export`, `gaps report`,
+`review-change` — takes `--vault <path>`: the `org-kb` folder or the folder that
+holds it. Precedence: the flag, then `SFI_VAULT`, then `./org-kb`. A named path
+with no vault is an error, never a silent fall-back. The route-gap log is
+machine-wide, so `gaps report` counts every vault unless `--vault` names one.
+
+A vault's `meta/config.json` records its own folder as `vaultRoot`. A config
+naming a different folder came with a copied or moved vault; every command that
+writes to the vault refuses it (it would write to the other vault) and prints
+the one-line fix.
+
+## Calling a tool from a script (`sfi run`)
+
+```sh
+sfi run omni_save_trace --json --omniscript Acme_Intake_English_3 --vault ./my-project
+sfi run picklist_integrity_scan --json --input '{"scope":{"namePrefixes":["Acme_"]}}'
+sfi run   # lists the tools
+```
+
+`sfi run <tool>` goes through the same dispatch as the MCP server (same
+validation, handler and response envelope). `--<arg> <value>` sets one input
+key (`--object-api-name` → `objectApiName`), typed from the tool's own input
+schema; a repeated flag builds an array; `--input` merges a JSON object first,
+for nested inputs. `--json` prints one line. The exit code is 1 when the tool
+answers with an error.
 
 ---
 

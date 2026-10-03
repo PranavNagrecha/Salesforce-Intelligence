@@ -59,6 +59,9 @@ import type { GraphStore } from '@sf-intelligence/graph';
 import {
   listSnapshots,
   loadSnapshot,
+  snapshotRuntimeOf,
+  SOURCE_HASHED_TYPES,
+  sourceFileHash,
   type Snapshot,
   type SnapshotEdge,
   type SnapshotNode,
@@ -152,6 +155,13 @@ export interface DiffSnapshotComponent {
   readonly id: ComponentId;
   readonly type: ComponentType;
   readonly apiName: string;
+  /**
+   * `modified` only: the component's runtime switch changed (activated,
+   * deactivated, status flip) — present when BOTH snapshots recorded it and
+   * the two differ. Absent otherwise (including snapshots written before
+   * runtime switches were recorded).
+   */
+  readonly runtime?: { readonly from: Readonly<Record<string, unknown>>; readonly to: Readonly<Record<string, unknown>> };
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -293,16 +303,18 @@ const parsePropertiesJson = (raw: string | null | undefined): Readonly<Record<st
  * Sorted output guarantees the same byte stream as a persisted
  * snapshot of equivalent state.
  */
-const captureLiveSnapshot = async (
+export const captureLiveSnapshot = async (
   store: GraphStore,
   manifest: Snapshot['manifest'],
+  /** When given, OmniStudio rows also record a hash of their source file (`runtime.sourceHash`). */
+  vaultRoot?: string,
 ): Promise<Result<Snapshot, McpError>> => {
   try {
     const nodeReader = await store.connection.runAndReadAll(
-      'SELECT id, type, api_name, label, properties_json FROM nodes',
+      'SELECT id, type, api_name, label, properties_json, source_path FROM nodes',
     );
     const rawNodes = nodeReader.getRowObjectsJS() as unknown as readonly RawNodeRow[];
-    const nodes: SnapshotNode[] = rawNodes
+    const mapped: SnapshotNode[] = rawNodes
       .map((row) => {
         const props = parsePropertiesJson(row.properties_json);
         const hashInput: Readonly<Record<string, unknown>> = {
@@ -317,9 +329,20 @@ const captureLiveSnapshot = async (
           apiName: row.api_name,
           label: row.label,
           propertiesHash: hashRecord(hashInput),
+          ...((runtime) => (runtime === undefined ? {} : { runtime }))(snapshotRuntimeOf(row.type, props)),
         };
       })
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const nodes: SnapshotNode[] = [];
+    const pathById = new Map(rawNodes.map((r) => [r.id, (r as unknown as { source_path?: string }).source_path ?? '']));
+    for (const n of mapped) {
+      if (vaultRoot === undefined || !SOURCE_HASHED_TYPES.has(n.type)) {
+        nodes.push(n);
+        continue;
+      }
+      const sourceHash = await sourceFileHash(vaultRoot, pathById.get(n.id) ?? '');
+      nodes.push(sourceHash === undefined ? n : { ...n, runtime: { ...(n.runtime ?? {}), sourceHash } });
+    }
 
     const edgeReader = await store.connection.runAndReadAll(
       'SELECT from_id, to_id, edge_type, confidence, source, properties_json FROM edges',
@@ -466,7 +489,23 @@ export const diffSnapshotsHandler = async (
     if (fromNode === undefined) {
       added.push(toDiffComponent(toNode));
     } else if (fromNode.propertiesHash !== toNode.propertiesHash) {
-      modified.push(toDiffComponent(toNode));
+      const rf = fromNode.runtime;
+      const rt = toNode.runtime;
+      const flipped =
+        rf !== undefined &&
+        rt !== undefined &&
+        (rf.isActive !== rt.isActive || rf.status !== rt.status || rf.active !== rt.active);
+      modified.push(
+        flipped
+          ? {
+              ...toDiffComponent(toNode),
+              runtime: {
+                from: { ...(rf.isActive === undefined ? {} : { isActive: rf.isActive }), ...(rf.status === undefined ? {} : { status: rf.status }), ...(rf.active === undefined ? {} : { active: rf.active }) },
+                to: { ...(rt.isActive === undefined ? {} : { isActive: rt.isActive }), ...(rt.status === undefined ? {} : { status: rt.status }), ...(rt.active === undefined ? {} : { active: rt.active }) },
+              },
+            }
+          : toDiffComponent(toNode),
+      );
     }
   }
   for (const [id, fromNode] of fromMap) {

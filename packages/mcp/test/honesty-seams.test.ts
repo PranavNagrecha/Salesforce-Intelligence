@@ -183,7 +183,14 @@ describe('seam 3 — run-imperative refusal arm', () => {
     'tell me the flow that runs the Populate Program logic but on Contact not Lead',
     // preposition between verb and target — an analysis ask about flows
     'run the numbers on flows in this org',
+    // the executable noun MODIFIES an analysis name — a read of that analysis
+    'Run automation risk for regression',
+    'execute the automation risk analysis',
+    'run the flow audit for this org',
   ];
+  it('still refuses a run of the executable itself next to an analysis name', () => {
+    expect(detectRefusalShape('Run automation risk then run the Order_Sync flow')?.kind).toBe('write-imperative');
+  });
   it.each(runNegatives)('does NOT refuse the run-vocabulary read: %s', (question) => {
     expect(detectRefusalShape(question)).toBeNull();
   });

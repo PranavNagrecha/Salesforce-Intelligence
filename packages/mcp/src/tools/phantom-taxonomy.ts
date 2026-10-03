@@ -147,6 +147,24 @@ export const buildReferenceStub = async (
     edgeKinds,
     ...(namespace !== undefined ? { namespace } : {}),
     demandRetrievable: classification === 'automation-critical',
-    remedy: REMEDY[classification],
+    remedy: `${REMEDY[classification]}${omniStudioCallerNote(id, edges)}`,
   };
+};
+
+/**
+ * An Apex class OmniStudio calls by name (a Remote Action's `remoteClass`)
+ * that the vault does not hold is one of two very different things: a
+ * custom class the org does not have — every such call fails at runtime —
+ * or a service of OmniStudio's own package, which is never retrievable. The
+ * metadata cannot tell them apart; a targeted retrieve can.
+ */
+const omniStudioCallerNote = (
+  id: ComponentId,
+  edges: readonly { readonly edgeType: string; readonly fromId: string; readonly properties: Readonly<Record<string, unknown>> }[],
+): string => {
+  if (!id.startsWith('ApexClass:')) return '';
+  const callers = edges.filter((e) => e.edgeType === 'callsApex' && e.properties['entryVia'] === 'omnistudio-remote');
+  if (callers.length === 0) return '';
+  const sites = callers.reduce((n, e) => n + (Array.isArray(e.properties['callSites']) ? e.properties['callSites'].length : 1), 0);
+  return ` Called by name from OmniStudio (${new Set(callers.map((e) => e.fromId)).size} component(s), ${sites} call site(s)). Either the org has no custom class by this name — every one of those calls fails at runtime — or it is a service of OmniStudio's own package, which is never retrievable; \`sfi refresh --components ${id}\` tells them apart (a retrieve that returns nothing means no such custom class exists).`;
 };

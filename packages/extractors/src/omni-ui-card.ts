@@ -10,6 +10,9 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { extractCardDataPack, isDataPackSource } from './datapack-extract.js';
+import { type ApexRemoteCall, apexRemoteTarget, buildApexRemoteEdges, literalObjectArgs } from './omnistudio/remote.js';
+import { readStaticSoql } from './omnistudio/soql.js';
 import { deriveComponentApiName } from './path-utils.js';
 
 /**
@@ -38,11 +41,12 @@ import { deriveComponentApiName } from './path-utils.js';
  *           · `DataAction` whose stringified-JSON `message` blob wraps a
  *             DataRaptor → `OmniDataTransform:{bundle}`.
  *       - The card's own `dataSource` (`<dataSourceConfig>`), when its
- *         `type` is `DataRaptor` → `OmniDataTransform:{value.bundle}`.
+ *         `type` is `DataRaptor` → `OmniDataTransform:{value.bundle}`, or
+ *         `IntegrationProcedures` → `OmniIntegrationProcedure:{value.ipMethod}`.
  *         This is the card's passive data-load on render; without it,
  *         impact analysis silently omits cards that load through a
- *         DataRaptor (8 such cards in a real state-agency org recon, e.g.
- *         openPdfPOC_Developer_2 → IEEGetDocContentVersion).
+ *         DataRaptor or an Integration Procedure (in a real state-agency
+ *         org recon most data-backed cards load through an IP).
  *
  * Edge emission rules (and disclosed boundaries):
  *   - DataRaptor (OmniDataTransform) dispatches are emitted from BOTH the
@@ -53,21 +57,23 @@ import { deriveComponentApiName } from './path-utils.js';
  *     DataRaptor dependency was invisible to impact analysis.
  *   - `Web Page` and `Custom` actions carry no OmniStudio target and stay
  *     silent.
- *   - NOT MODELED in this DataRaptor-scoped pass (real dependencies a
- *     consumer must not assume are covered): a card→Integration Procedure
- *     dependency expressed through the `dataSource` (`type:
- *     IntegrationProcedures`, `value.ipMethod`) or a DataAction `message`
- *     (inner `type: IntegrationProcedures`) — 225 + 57 such references in
- *     a real state-agency org recon — and a card→Apex dependency via an `ApexRemote`
- *     dataSource / DataAction message. These are tracked as follow-up;
- *     only DataRaptor edges land here.
- *   - The DataRaptor edge target uses the unversioned `bundle` name
- *     exactly as the OmniScript / IP extractors do (e.g.
- *     `OmniDataTransform:IEEGetDocContentVersion`), while the DataRaptor
- *     *node* id carries the file's version suffix
- *     (`OmniDataTransform:IEEGetDocContentVersion_1`). Reconciling the two
- *     is a shared downstream concern across all OmniStudio extractors, not
- *     specific to cards.
+ *   - Integration Procedure loads are modeled the same way: a `dataSource`
+ *     or DataAction `message` whose `type` is `IntegrationProcedures` names
+ *     the IP by `value.ipMethod` (its `Type_SubType` key) and emits
+ *     `dispatchesOmniAction` -> `OmniIntegrationProcedure:{ipMethod}`.
+ *   - An `ApexRemote` dataSource or DataAction message runs an Apex class:
+ *     one aggregated `callsApex` edge per class (`omnistudio/remote.ts`),
+ *     every routed `remoteMethod` in `methods[]`.
+ *   - A `Query` dataSource (static SOQL in `value.query`) emits `readsFrom`
+ *     edges to the queried object and each plain field it names; relationship
+ *     paths are left on the node (`unresolvedTraversalRefs`) for the graph
+ *     import to resolve or drop.
+ *   - Every target is the caller's KEY — the unversioned `bundle` name
+ *     (`OmniDataTransform:AcmeGetDocument`) or the IP key — exactly as the
+ *     OmniScript / IP extractors emit it, while the node ids carry the
+ *     file's version suffix (`OmniDataTransform:AcmeGetDocument_1`). The
+ *     graph import resolves each key onto the versioned node that runs
+ *     (`@sf-intelligence/graph` omni-resolve), for every OmniStudio caller.
  *
  * The `<propertySetConfig>` element carries an HTML-entity-escaped JSON
  * blob. fast-xml-parser (with the configured `processEntities`) decodes
@@ -335,19 +341,94 @@ const collectStates = (
 };
 
 /**
- * Resolve a `DataAction` Action-widget entry to a DataRaptor dispatch
- * edge. A DataAction stores its data operation in a stringified-JSON
- * `message` blob of the shape
- * `{"type":"DataRaptor"|"ApexRemote"|"IntegrationProcedures","value":{…}}`.
- * When that inner `type` is `DataRaptor`, `value.bundle` is the DataRaptor
- * name and we emit the same `dispatchesOmniAction` ->
- * `OmniDataTransform:{bundle}` edge the card's DataRaptor dataSource emits
+ * The `dataSource.type` / DataAction-`message`-`type` discriminant for an
+ * Integration Procedure load. The IP is named by `value.ipMethod` — its
+ * `Type_SubType` key, the same key an OmniScript IP Action uses.
+ */
+const INTEGRATION_PROCEDURES_TYPE = 'IntegrationProcedures';
+
+/** The data-source / DataAction discriminant for an Apex call (`value.remoteClass` / `remoteMethod`). */
+const APEX_REMOTE_TYPE = 'ApexRemote';
+
+/** The data-source discriminant for a static SOQL query (`value.query`). */
+const QUERY_TYPE = 'Query';
+
+/**
+ * Field-level reads of a card's SOQL data source: `readsFrom` the queried
+ * object and each plain field it names (SELECT, WHERE, ORDER BY / GROUP BY).
+ * Relationship paths go to the import (`unresolvedTraversalRefs`), which
+ * resolves them against the vault's lookups or drops them.
+ */
+const buildQueryReads = (
+  cardId: string,
+  dataSource: Readonly<Record<string, unknown>> | null,
+): { readonly edges: readonly Edge[]; readonly traversals: readonly { object: string; path: string; access: 'read' }[] } => {
+  if (dataSource === null || dataSource['type'] !== QUERY_TYPE) return { edges: [], traversals: [] };
+  const value = typeof dataSource['value'] === 'object' && dataSource['value'] !== null ? (dataSource['value'] as Record<string, unknown>) : {};
+  const read = readStaticSoql(value['query']);
+  if (read === null) return { edges: [], traversals: [] };
+  const props = { dispatchSource: 'dataSource', dataSourceType: QUERY_TYPE, mechanism: 'flexcard-soql' };
+  return {
+    edges: [
+      { fromId: cardId, toId: `CustomObject:${read.object}`, edgeType: 'readsFrom', confidence: 'parsed', source: EXTRACTOR_SOURCE, properties: props },
+      ...read.fields.map(
+        (f): Edge => ({ fromId: cardId, toId: `CustomField:${read.object}.${f}`, edgeType: 'readsFrom', confidence: 'parsed', source: EXTRACTOR_SOURCE, properties: props }),
+      ),
+    ],
+    traversals: read.traversals.map((path) => ({ object: read.object, path, access: 'read' as const })),
+  };
+};
+
+/** The OmniStudio target of one data load, or why there is none. */
+type LoadTarget =
+  | { readonly kind: 'target'; readonly toId: string; readonly loadType: string; readonly raw: string }
+  | { readonly kind: 'missing-key'; readonly loadType: string }
+  | { readonly kind: 'not-modeled' };
+
+/**
+ * Resolve the target of a DataRaptor or Integration Procedure load from a
+ * `{ type, value }` data-source shape — a card `dataSource` or a DataAction
+ * `message`. `ApexRemote` and every other type are `not-modeled`.
+ */
+const loadTarget = (type: unknown, value: unknown): LoadTarget => {
+  const v =
+    typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+  if (type === DATARAPTOR_TYPE) {
+    const bundle = v['bundle'];
+    if (typeof bundle !== 'string' || bundle.length === 0) {
+      return { kind: 'missing-key', loadType: DATARAPTOR_TYPE };
+    }
+    return { kind: 'target', toId: `OmniDataTransform:${bundle}`, loadType: DATARAPTOR_TYPE, raw: bundle };
+  }
+  if (type === INTEGRATION_PROCEDURES_TYPE) {
+    const ipMethod = v['ipMethod'];
+    if (typeof ipMethod !== 'string' || ipMethod.trim().length === 0) {
+      return { kind: 'missing-key', loadType: INTEGRATION_PROCEDURES_TYPE };
+    }
+    const key = ipMethod.trim();
+    return {
+      kind: 'target',
+      toId: `OmniIntegrationProcedure:${key}`,
+      loadType: INTEGRATION_PROCEDURES_TYPE,
+      raw: key,
+    };
+  }
+  return { kind: 'not-modeled' };
+};
+
+/**
+ * Resolve a `DataAction` Action-widget entry to a dispatch edge. A
+ * DataAction stores its data operation in a stringified-JSON `message` blob
+ * of the shape
+ * `{"type":"DataRaptor"|"ApexRemote"|"IntegrationProcedures","value":{…}}`:
+ *   - `DataRaptor` → `OmniDataTransform:{value.bundle}`;
+ *   - `IntegrationProcedures` → `OmniIntegrationProcedure:{value.ipMethod}`.
+ * Both are the same dependency the card's own data source models
  * (confidence `parsed` — the target lives inside the JSON blob).
  *
- * Returns `null` for non-DataRaptor message types (`ApexRemote` /
- * `IntegrationProcedures` — deliberately not modeled here) and for a
- * missing/unparseable `message`. A DataRaptor message with no `bundle`
- * is a dangling dispatch, recorded as a warning rather than an edge.
+ * Returns `null` for `ApexRemote` (not modeled — see the file header) and
+ * for a missing/unparseable `message`. A DataRaptor / IP message with no
+ * key is a dangling dispatch, recorded as a warning rather than an edge.
  */
 const buildDataActionEdge = (
   cardId: string,
@@ -355,6 +436,7 @@ const buildDataActionEdge = (
   stateAction: Readonly<Record<string, unknown>>,
   actionListIndex: number,
   warnings: string[],
+  apexCalls: ApexRemoteCall[],
 ): Edge | null => {
   const messageRaw = stateAction['message'];
   if (typeof messageRaw !== 'string' || messageRaw.trim().length === 0) {
@@ -366,26 +448,40 @@ const buildDataActionEdge = (
   } catch {
     // Best-effort: a malformed DataAction message is not an edge. Not
     // warned — DataAction message blobs are abundant and mostly Apex / IP,
-    // so a parse hiccup on a non-DataRaptor blob isn't actionable.
+    // so a parse hiccup on one isn't actionable.
     return null;
   }
   if (typeof message !== 'object' || message === null) return null;
   const msg = message as Record<string, unknown>;
-  if (msg['type'] !== DATARAPTOR_TYPE) return null;
-  const value = msg['value'];
-  const bundle =
-    typeof value === 'object' && value !== null
-      ? (value as Record<string, unknown>)['bundle']
-      : undefined;
-  if (typeof bundle !== 'string' || bundle.length === 0) {
+  // An `ApexRemote` DataAction runs an Apex class: collected here, emitted as
+  // one aggregated `callsApex` edge per class by the caller.
+  if (msg['type'] === APEX_REMOTE_TYPE) {
+    const value = typeof msg['value'] === 'object' && msg['value'] !== null ? (msg['value'] as Record<string, unknown>) : {};
+    const target = apexRemoteTarget(value['remoteClass']);
+    if (target !== null) {
+      apexCalls.push({
+        target,
+        remoteMethod: typeof value['remoteMethod'] === 'string' ? value['remoteMethod'] : null,
+        site: `${widget.stateName}/${widget.elementLabel ?? '?'}#${actionListIndex}`,
+        siteType: DATA_ACTION_TYPE,
+        objectArgs: literalObjectArgs(value),
+      });
+    }
+    return null;
+  }
+  const target = loadTarget(msg['type'], msg['value']);
+  if (target.kind === 'not-modeled') return null;
+  if (target.kind === 'missing-key') {
     warnings.push(
-      `DataAction in ${widget.stateName}/${widget.elementLabel ?? '?'} loads a DataRaptor with no bundle`,
+      target.loadType === DATARAPTOR_TYPE
+        ? `DataAction in ${widget.stateName}/${widget.elementLabel ?? '?'} loads a DataRaptor with no bundle`
+        : `DataAction in ${widget.stateName}/${widget.elementLabel ?? '?'} calls an Integration Procedure with no ipMethod`,
     );
     return null;
   }
   return {
     fromId: cardId,
-    toId: `OmniDataTransform:${bundle}`,
+    toId: target.toId,
     edgeType: 'dispatchesOmniAction',
     confidence: 'parsed',
     source: EXTRACTOR_SOURCE,
@@ -395,52 +491,41 @@ const buildDataActionEdge = (
       widgetLabel: widget.elementLabel,
       actionListIndex,
       actionType: DATA_ACTION_TYPE,
-      dataActionType: DATARAPTOR_TYPE,
-      targetRawName: bundle,
+      dataActionType: target.loadType,
+      targetRawName: target.raw,
     },
   };
 };
 
 /**
- * Build the card-level dispatch edge from the card's own `dataSource`.
- * A FlexCard whose `dataSourceConfig.dataSource.type === 'DataRaptor'`
- * loads its data by invoking that DataRaptor when it renders — the same
- * downstream dependency the OmniScript / Integration Procedure extractors
- * model as `dispatchesOmniAction` -> `OmniDataTransform:{bundle}`. Without
- * this edge, "what uses DataRaptor X?" silently omits every card that
- * loads through it (8 cards in a real state-agency org recon, including the
- * openPdfPOC cards -> IEEGetDocContentVersion).
+ * Build the card-level dispatch edge from the card's own `dataSource`. A
+ * FlexCard whose `dataSourceConfig.dataSource.type` is `DataRaptor` or
+ * `IntegrationProcedures` loads its data by invoking that component when it
+ * renders — the same downstream dependency an OmniScript models as
+ * `dispatchesOmniAction`. Without this edge, "what uses DataRaptor / IP X?"
+ * silently omits every card that loads through it.
  *
- * Only the DataRaptor dataSource type emits here. `IntegrationProcedures`
- * (-> OmniIntegrationProcedure) and `ApexRemote` (-> ApexClass) data
- * sources are real card dependencies too but are deliberately NOT modeled
- * in this DataRaptor-scoped change — see the file-header "Edge emission
- * rules" disclosure. Returns `null` when the dataSource is absent, is not
- * a DataRaptor, or carries no `value.bundle`.
+ * `ApexRemote` (-> ApexClass) data sources are real card dependencies too but
+ * are NOT modeled here — see the file-header "Edge emission rules". Returns
+ * `null` when the dataSource is absent, of another type, or names no target.
  */
 const buildDataSourceEdge = (
   cardId: string,
   dataSource: Readonly<Record<string, unknown>> | null,
 ): Edge | null => {
-  if (dataSource === null || dataSource['type'] !== DATARAPTOR_TYPE) {
-    return null;
-  }
-  const value = dataSource['value'];
-  const bundle =
-    typeof value === 'object' && value !== null
-      ? (value as Record<string, unknown>)['bundle']
-      : undefined;
-  if (typeof bundle !== 'string' || bundle.length === 0) return null;
+  if (dataSource === null) return null;
+  const target = loadTarget(dataSource['type'], dataSource['value']);
+  if (target.kind !== 'target') return null;
   return {
     fromId: cardId,
-    toId: `OmniDataTransform:${bundle}`,
+    toId: target.toId,
     edgeType: 'dispatchesOmniAction',
     confidence: 'parsed',
     source: EXTRACTOR_SOURCE,
     properties: {
       dispatchSource: 'dataSource',
-      dataSourceType: DATARAPTOR_TYPE,
-      targetRawName: bundle,
+      dataSourceType: target.loadType,
+      targetRawName: target.raw,
     },
   };
 };
@@ -469,6 +554,7 @@ const buildEdgesForWidget = (
   cardId: string,
   widget: ParsedWidget,
   warnings: string[],
+  apexCalls: ApexRemoteCall[],
 ): Edge[] => {
   if (widget.property === null) return [];
   const actionListRaw = widget.property['actionList'];
@@ -493,6 +579,7 @@ const buildEdgesForWidget = (
         stateAction,
         i,
         warnings,
+        apexCalls,
       );
       if (dataActionEdge !== null) edges.push(dataActionEdge);
       continue;
@@ -652,16 +739,18 @@ const validateRoot = (
  *
  * @example
  *   const result = await extractOmniUiCard(
- *     'force-app/main/default/omniUiCard/AccountLinkingIntro_Developer_1.ouc-meta.xml',
+ *     'force-app/main/default/omniUiCard/AcmeEnrollmentIntro_Developer_1.ouc-meta.xml',
  *   );
  *   if (result.ok) {
  *     console.log(result.value.nodes[0].id);
- *     // => 'OmniUiCard:AccountLinkingIntro_Developer_1'
+ *     // => 'OmniUiCard:AcmeEnrollmentIntro_Developer_1'
  *   }
  */
 export const extractOmniUiCard = async (
   path: string,
 ): Promise<Result<ExtractionResult, ExtractorError>> => {
+  // A managed-package (Vlocity) Card export: a DataPack folder or its main file.
+  if (await isDataPackSource(path)) return extractCardDataPack(path, extractOmniUiCardRoot);
   const xmlResult = await readAndValidateXml(path);
   if (!xmlResult.ok) return xmlResult;
 
@@ -693,9 +782,18 @@ export const extractOmniUiCard = async (
 
   const rootResult = validateRoot(parsed, path);
   if (!rootResult.ok) return rootResult;
-  const rootObj = rootResult.value;
+  return extractOmniUiCardRoot(rootResult.value, path, deriveComponentApiName(path, OMNI_UI_CARD_FILE_SUFFIX));
+};
 
-  const apiName = deriveComponentApiName(path, OMNI_UI_CARD_FILE_SUFFIX);
+/**
+ * The extraction over the parsed `<OmniUiCard>` root — the seam a converted
+ * source (a managed-package Card DataPack) enters through.
+ */
+export const extractOmniUiCardRoot = (
+  rootObj: Record<string, unknown>,
+  path: string,
+  apiName: string,
+): Result<ExtractionResult, ExtractorError> => {
   const cardId = `${NODE_TYPE}:${apiName}`;
 
   const warnings: string[] = [];
@@ -767,14 +865,35 @@ export const extractOmniUiCard = async (
   // two states emits one edge, not two — the duplicate would mask the
   // real edge count from impact-analysis tools).
   const rawEdges: Edge[] = [];
+  const apexCalls: ApexRemoteCall[] = [];
   for (const widget of actionWidgets) {
-    rawEdges.push(...buildEdgesForWidget(cardId, widget, warnings));
+    rawEdges.push(...buildEdgesForWidget(cardId, widget, warnings, apexCalls));
   }
   // The card's own `dataSource`, when it's a DataRaptor, is a downstream
   // dispatch just like the OmniScript / IP extractors model — emit it so
   // "what uses DataRaptor X?" includes cards that load through it.
   const dataSourceEdge = buildDataSourceEdge(cardId, dataSourceObj);
   if (dataSourceEdge !== null) rawEdges.push(dataSourceEdge);
+  // An `ApexRemote` data source runs an Apex class when the card renders.
+  if (dataSourceObj !== null && dataSourceObj['type'] === APEX_REMOTE_TYPE) {
+    const value =
+      typeof dataSourceObj['value'] === 'object' && dataSourceObj['value'] !== null
+        ? (dataSourceObj['value'] as Record<string, unknown>)
+        : {};
+    const target = apexRemoteTarget(value['remoteClass']);
+    if (target !== null) {
+      apexCalls.push({
+        target,
+        remoteMethod: typeof value['remoteMethod'] === 'string' ? value['remoteMethod'] : null,
+        site: 'dataSource',
+        siteType: 'dataSource',
+        objectArgs: literalObjectArgs(value),
+      });
+    }
+  }
+  const queryReads = buildQueryReads(cardId, dataSourceObj);
+  rawEdges.push(...queryReads.edges);
+  rawEdges.push(...buildApexRemoteEdges(cardId, apexCalls, EXTRACTOR_SOURCE));
   const edges = dedupeAndSortEdges(rawEdges);
 
   const node: Node = {
@@ -802,6 +921,8 @@ export const extractOmniUiCard = async (
       dataSourceType,
       dataSourceContextVariables,
       omniUiCardExtractionWarnings: warnings,
+      // OMIT-when-empty: SOQL relationship paths the graph import resolves.
+      ...(queryReads.traversals.length > 0 ? { unresolvedTraversalRefs: queryReads.traversals } : {}),
     },
   };
 

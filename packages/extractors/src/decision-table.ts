@@ -207,10 +207,10 @@ const countParameterUsages = (
  *
  * @example
  *   const result = await extractDecisionTable(
- *     'force-app/main/default/decisionTables/FPLFullTabe.decisionTable-meta.xml',
+ *     'force-app/main/default/decisionTables/AcmeIncomeThresholds.decisionTable-meta.xml',
  *   );
  *   if (result.ok) console.log(result.value.nodes[0].id);
- *   // => 'DecisionTable:FPLFullTabe'
+ *   // => 'DecisionTable:AcmeIncomeThresholds'
  */
 export const extractDecisionTable = async (
   path: string,

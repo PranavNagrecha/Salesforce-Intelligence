@@ -23,7 +23,7 @@
 // even though intent-router.ts and this module both read the tool roster. (And
 // intent-router.ts does not import this funnel, so no cycle exists in either
 // direction — verified at build time by the I1 contract test + tsc.)
-import { FUNNEL_UTTERANCES, INTERPRET_CONCEPT_CARDS } from './funnel-utterances.js';
+import { FUNNEL_UTTERANCES, INTERPRET_CONCEPT_CARDS, LIST_COMPONENTS_TYPE_CARDS } from './funnel-utterances.js';
 import type { Plane } from './intent-router.js';
 import { fuseScoresRrf, staticEmbedRanking, staticIndexAvailable } from './static-embed.js';
 import { CATEGORIES } from './tools/capabilities.js';
@@ -693,12 +693,14 @@ export const buildToolDocs = (): Map<string, string> => {
  * saturating document. Each concept card (INTERPRET_CONCEPT_CARDS) is a short,
  * self-contained utterance set vectorized on its OWN length, so ADDING a concept
  * never dilutes the others and the base card keeps every existing query's score
- * unchanged (a max only lifts). Only sfi.interpret needs this today — its document
- * grows with the reasoning Concept Model — but the mechanism is general: any tool
- * listed here is scored with cards.
+ * unchanged (a max only lifts). sfi.interpret's document grows with the reasoning
+ * Concept Model; sfi.list_components (the generic inventory tool) carries one
+ * card per component family whose per-component tools are dense in its noun.
+ * The mechanism is general: any tool listed here is scored with cards.
  */
 const TOOL_CONCEPT_CARDS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
   'sfi.interpret': INTERPRET_CONCEPT_CARDS,
+  'sfi.list_components': LIST_COMPONENTS_TYPE_CARDS,
 };
 
 /**
@@ -822,7 +824,8 @@ const CONF_HIGH_COVERAGE = 0.8;
 // catches the CLEAREST non-matches; it does NOT truncate, it forces `low`.
 const CONF_FLOOR_TOP1 = 0.09;
 // Near-zero coverage: most of the user's words were unknown to the corpus.
-const CONF_MIN_COVERAGE = 0.34;
+// Exported: the advisory-route gate in route_question reads the same floor.
+export const CONF_MIN_COVERAGE = 0.34;
 // `low` band: a thin top1−top2 lead (the #1 tool barely beats #2) UNLESS rescued
 // by a strong absolute lead or strong coverage; or sub-vault-median coverage.
 const CONF_LOW_MARGIN = 0.045;
@@ -960,6 +963,22 @@ const fuseStaticEmbeddings = (question: string, lexical: ScoredRow[]): ScoredRow
  * (cosine > 0), highest score first. Empty when the question has no indexable
  * terms. This is the funnel: the host LLM picks from what this surfaces.
  */
+/**
+ * Query COVERAGE: the fraction of the question's own distinct non-stopword
+ * tokens (raw, before synonym expansion) the funnel corpus knows — i.e. has an
+ * IDF entry for. 0 for a question with no such tokens. It says how much of
+ * what the user actually typed was understood, independent of how high any
+ * one tool scored.
+ */
+export const queryCoverage = (question: string): number => {
+  const idx = getFunnelIndex();
+  const raw = new Set(tokenize(question, true));
+  if (raw.size === 0) return 0;
+  let hits = 0;
+  for (const t of raw) if (idx.idf.has(t)) hits += 1;
+  return hits / raw.size;
+};
+
 export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => {
   const idx = getFunnelIndex();
   const planes = getPlaneByTool();

@@ -191,19 +191,19 @@ describe('recordCreationPathsHandler', () => {
     expect(r.value.data.triggerCount).toBe(1);
   });
 
-  it('qualifies the count as Flow creators and discloses that Apex inserts are unmodeled', async () => {
-    // The creator detection only sees Flow recordCreates. Apex `insert x;`
-    // (static) and Database.insert (dynamic) are NOT modeled — so an object
-    // created only by Apex (e.g. real acme Marketo_Log__c, inserted by
-    // MRK_LoggerHelper) reports 0 creators. The framing must say "Flow"
-    // (not bare "automation") and the disclosure must flag the Apex gap so
-    // "0 creators" isn't read as "nothing creates this".
+  it('names its creator classes and qualifies Apex insert attribution as inferred', async () => {
+    // Creators are Flow record-creates and OmniStudio DataMapper Loads; Apex
+    // `insert` / `upsert` sites come from the shared Apex DML index, attributed
+    // by the enclosing method naming the object — inferred, never parsed. This
+    // fixture has no Apex, so the Apex count is a checked zero with the caveat.
     const r = await recordCreationPathsHandler(ctx, { objectApiName: 'Widget__c' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.rendered).toMatch(/Flow automation/);
-    expect(r.value.data.rendered).toMatch(/Apex/);
-    expect(r.value.data.rendered).toMatch(/insert/i);
+    expect(r.value.data.rendered).toMatch(/DataMapper Load/);
+    expect(r.value.data.rendered).toMatch(/Apex insert/i);
+    expect(r.value.data.rendered).toMatch(/inferred/);
+    expect(r.value.data.apexInsertSiteCount).toBe(0);
   });
 
   // P15 oversize-enumeration guard (0.2.0 gate): the handler cap must DISCLOSE

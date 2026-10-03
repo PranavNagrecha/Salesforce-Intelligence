@@ -81,6 +81,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from './omni-disclosures.js';
+import { isDataPackSourcePath, readDataPackRoot } from './omni-source.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /** Canonical id prefix for the OmniDataTransform node type. */
@@ -220,18 +222,6 @@ export interface DatatransformFieldMapOutput {
    */
   readonly boundaries: readonly string[];
 }
-
-/**
- * The Native-vs-Vlocity-Legacy disclosure surfaced on every v3.2 tool
- * response per PLAN-v3.2 §4 honesty axis 1. Verbatim phrasing pinned
- * by Q180; downstream renderers re-emit unchanged.
- */
-const NATIVE_VS_VLOCITY_DISCLOSURE =
-  'v3.2 recognizes Industries Native XML shapes (file extensions ' +
-  '`.os-meta.xml`, `.oip-meta.xml`, `.rpt-meta.xml`, `.ouc-meta.xml`, ' +
-  '`.decisionTable-meta.xml`). Legacy Vlocity-managed-package ' +
-  'components (namespace `vlocity_cmt__`) are NOT extracted by v3.2. ' +
-  'Mid-migration orgs may show partial coverage.';
 
 /**
  * The per-row confidence disclosure. Surfaces the v3.2-R2c
@@ -409,6 +399,17 @@ const readDataTransformXml = async (
 };
 
 /**
+ * A managed-package (Vlocity) DataRaptor: its DataPack, converted to the same
+ * `<OmniDataTransform>` root the Metadata API XML parses to.
+ */
+const readDataTransformDataPack = async (
+  path: string,
+): Promise<Result<Record<string, unknown>, McpError>> => {
+  const r = await readDataPackRoot(path, 'mapper');
+  return r.ok ? r : err({ kind: 'internal', message: r.error.message, path });
+};
+
+/**
  * Project the parsed XML root into the metadata block. Mirrors the
  * v3.2-R2c extractor's property mapping so consumers see the same
  * values whether they hit this tool or `sfi.get_component`.
@@ -549,9 +550,10 @@ export const datatransformFieldMapHandler = async (
   // Re-read the source XML. The mapping rows are NOT stored on the
   // node — the v3.2-R2c extractor surfaces only top-level metadata +
   // references edges, so per-row data comes directly from the file.
-  const xmlResult = await readDataTransformXml(
-    resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath),
-  );
+  const sourceAbs = resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath);
+  const xmlResult = isDataPackSourcePath(node.sourcePath)
+    ? await readDataTransformDataPack(sourceAbs)
+    : await readDataTransformXml(sourceAbs);
   if (!xmlResult.ok) return xmlResult;
   const root = xmlResult.value;
 

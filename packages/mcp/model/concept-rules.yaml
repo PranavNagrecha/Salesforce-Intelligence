@@ -4465,6 +4465,223 @@ conceptRules:
       - OmniIntegrationProcedure
       - OmniUiCard
 
+  # Lookup delete behavior — one rule per declared deleteConstraint value on the
+  # `lookupTo` edge (custom-field.ts). componentTypes cites only grounded
+  # endpoints. declared: the constraint is read from the field's own metadata.
+  - id: rule:relationship/lookup-delete-setnull
+    concept: concept:lookup-delete-behavior
+    bind:
+      edgeType: lookupTo
+      componentTypes:
+        - CustomField
+        - CustomObject
+      edgeWhereProperty:
+        key: deleteConstraint
+        equals: SetNull
+    interpretation: 'Lookup {ids} is SetNull: deleting the parent record clears this field and the child records SURVIVE with a blank parent (orphaned); nothing cleans them up unless delete automation on the parent does. How many child records exist is a live-plane question.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+  - id: rule:relationship/lookup-delete-cascade
+    concept: concept:lookup-delete-behavior
+    bind:
+      edgeType: lookupTo
+      componentTypes:
+        - CustomField
+        - CustomObject
+      edgeWhereProperty:
+        key: deleteConstraint
+        equals: Cascade
+    interpretation: 'Lookup {ids} is Cascade: deleting the parent record deletes these child records too. Records removed by the cascade do not fire their own delete triggers or delete flows, and validation rules never run on delete.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+  - id: rule:relationship/lookup-delete-restrict
+    concept: concept:lookup-delete-behavior
+    bind:
+      edgeType: lookupTo
+      componentTypes:
+        - CustomField
+        - CustomObject
+      edgeWhereProperty:
+        key: deleteConstraint
+        equals: Restrict
+    interpretation: 'Lookup {ids} is Restrict: the parent record cannot be deleted while any child record still references it through this field.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+
+  # OmniStudio → Apex — the `callsApex` edges the OmniStudio extractors emit.
+  # parsed: the class and routed method are read from the element's
+  # propertySetConfig JSON (edge confidence parsed; weakest() keeps it).
+  - id: rule:omnistudio/remote-apex-call
+    concept: concept:omnistudio-remote-apex-call
+    bind:
+      edgeType: callsApex
+      componentTypes:
+        - OmniScript
+        - OmniIntegrationProcedure
+        - OmniUiCard
+        - ApexClass
+      edgeWhereProperty:
+        key: entryVia
+        equals: omnistudio-remote
+    interpretation: 'OmniStudio runs Apex here ({ids}): the class is entered through its routing method (invokeMethod / call) with the routed remoteMethod, in the requesting user''s session. Renaming the routed method, changing the payload keys it reads, or deleting the class breaks this OmniStudio caller at runtime, although no Apex calls it. Its DML enforces the user''s object / field permissions only where written as user / AccessLevel.USER_MODE.'
+    maxConfidence: parsed
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApexClass
+
+  # DataMapper Load field writes (`mechanism: datamapper-load`). parsed.
+  - id: rule:omnistudio/datamapper-load-write
+    concept: concept:datamapper-load-write
+    bind:
+      edgeType: writesTo
+      componentTypes:
+        - OmniDataTransform
+        - CustomField
+      edgeWhereProperty:
+        key: mechanism
+        equals: datamapper-load
+    interpretation: 'A DataMapper Load writes this field ({ids}) from the JSON key its item maps; the value is whatever the calling screen or procedure put under that key, so a key renamed upstream silently stops reaching the field. Which screens reach this Load is answered by the OmniStudio save trace.'
+    maxConfidence: parsed
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniDataTransform
+
+  # Edit Block delete wiring (`via: deleteIPKey` on the OmniScript dispatch edge). parsed.
+  - id: rule:omnistudio/edit-block-delete-wiring
+    concept: concept:edit-block-delete-wiring
+    bind:
+      edgeType: dispatchesOmniAction
+      componentTypes:
+        - OmniScript
+        - OmniIntegrationProcedure
+      edgeWhereProperty:
+        key: via
+        equals: deleteIPKey
+    interpretation: 'An Edit Block deletes saved rows through this Integration Procedure ({ids}), sending only the keys of its deleteIPExtraPayload (typically the row''s record Id). Without that payload the procedure receives no record Id.'
+    maxConfidence: parsed
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniScript
+
+  # Integration Procedure Delete Action (`mechanism: omnistudio-delete-action`). parsed.
+  - id: rule:omnistudio/ip-delete-action
+    concept: concept:ip-delete-action
+    bind:
+      edgeType: writesTo
+      componentTypes:
+        - OmniIntegrationProcedure
+        - CustomObject
+      edgeWhereProperty:
+        key: mechanism
+        equals: omnistudio-delete-action
+    interpretation: 'An Integration Procedure deletes records of this object ({ids}); the object''s delete automation and each lookup''s delete constraint apply (children orphaned, cascade-deleted, or blocking). With failOnStepError false a failed delete is swallowed.'
+    maxConfidence: parsed
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniIntegrationProcedure
+
+  # Spec §11.3 — dataraptor-active-flag-not-runtime-switch. ONE NODE rule on
+  # OmniDataTransform `active == false`. A node match carries no edge, so
+  # weakest() keeps the declared ceiling. ORG-INDEPENDENT.
+  - id: rule:omnistudio/dataraptor-active-flag-not-runtime-switch
+    concept: concept:dataraptor-active-flag-not-runtime-switch
+    bind:
+      componentTypes:
+        - OmniDataTransform
+      whereProperty:
+        key: active
+        equals: false
+    interpretation: '{ids} has active = false, but a DataMapper''s active flag is NOT a runtime switch: the OmniScript or Integration Procedure step that names its bundle still runs it. Do NOT treat it as dead, unused, or safe to delete on that flag — whether it runs is decided by whether an ACTIVE OmniScript, Integration Procedure, or FlexCard calls it (its incoming references). This names what the flag does not mean; it does NOT establish that an active caller exists.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniDataTransform
+
+  # Spec §11.6 — picklist-restriction. ONE NODE rule on CustomField
+  # `restricted == false` (custom-field.ts emits it only for a picklist with an
+  # inline value set that does not declare restricted). ORG-INDEPENDENT.
+  - id: rule:field/picklist-unrestricted
+    concept: concept:picklist-restriction
+    bind:
+      componentTypes:
+        - CustomField
+      whereProperty:
+        key: restricted
+        equals: false
+    interpretation: '{ids} is an UNRESTRICTED picklist: the platform stores any text an API call, Apex, an import, or an integration sends, not only its defined values, so comparisons against the defined values can silently miss records. Restrict it if only the defined values are valid. This names the declared setting; it does NOT establish that any record holds an undefined value.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+
+  # Apex runs OmniStudio by name — ONE EDGE rule on the scanner's
+  # `dispatchesOmniAction` edges from Apex (`via: apex`). heuristic: the key is
+  # read from a string literal by the regex scanner. ORG-INDEPENDENT.
+  - id: rule:omnistudio/apex-runs-omnistudio
+    concept: concept:apex-runs-omnistudio
+    bind:
+      edgeType: dispatchesOmniAction
+      componentTypes:
+        - ApexClass
+        - ApexTrigger
+      edgeWhereProperty:
+        key: via
+        equals: apex
+    interpretation: 'Apex runs OmniStudio by name ({ids}): the key or bundle is a string the compiler does not check, so renaming the Integration Procedure''s Type / SubType, deactivating every version, or renaming the DataRaptor breaks this caller at runtime — and the component is used even when no OmniScript or FlexCard calls it. Only literal keys are seen; a key assembled at runtime is not.'
+    maxConfidence: heuristic
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApexClass
+
+  # Managed-package (Vlocity) OmniStudio — ONE NODE rule on the InstalledPackage
+  # of a Vlocity industry namespace (installed-package.ts: `namespace` is the
+  # retrieve file's stem). ORG-INDEPENDENT.
+  - id: rule:omnistudio/vlocity-managed-package-installed
+    concept: concept:omnistudio-managed-package-records
+    bind:
+      componentTypes:
+        - InstalledPackage
+      whereProperty:
+        key: namespace
+        in:
+          - vlocity_cmt
+          - vlocity_ins
+          - vlocity_ps
+    interpretation: '{ids} is a Vlocity managed package: its OmniScripts, Integration Procedures, DataRaptors and Cards are records of the package objects, which no Metadata API retrieve contains. They are in this vault only when a Vlocity Build Tool DataPack export is placed under org-kb/source/vlocity/ and the vault is refreshed (those nodes carry sourceFormat vlocity-datapack); without one, every OmniStudio answer for this org leaves them out. This names where the components live; it does NOT establish which of them the org still runs.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - InstalledPackage
+
+  # Managed-package (Vlocity) OmniStudio — ONE NODE rule on an OmniStudio node
+  # built from a DataPack export (datapack.ts `dataPackNodeProperties`).
+  # ORG-INDEPENDENT.
+  - id: rule:omnistudio/datapack-sourced-component
+    concept: concept:omnistudio-managed-package-records
+    bind:
+      componentTypes:
+        - OmniScript
+        - OmniIntegrationProcedure
+        - OmniDataTransform
+        - OmniUiCard
+      whereProperty:
+        key: sourceFormat
+        equals: vlocity-datapack
+    interpretation: '{ids} was modelled from a Vlocity DataPack export, not from the Metadata API retrieve: it is a managed-package record, as current as that export rather than the last metadata refresh, analysed with the same rules as native OmniStudio metadata. Re-export it before relying on it for a change made in the org since the export.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniScript
+      - OmniIntegrationProcedure
+      - OmniDataTransform
+      - OmniUiCard
+
   # ARC-2 concept-expansion — rule:field/required-absent-from-all-layouts. A
   # NODE-present ANTI-JOIN (C17 shape, mirroring rule:field/deep-creation-gap-no-
   # before-save-writer): CustomField `required == true` with NO `usedInLayout` edge

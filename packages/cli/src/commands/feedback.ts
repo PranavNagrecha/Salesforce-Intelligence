@@ -6,6 +6,8 @@ import { FEEDBACK_ISSUES_URL } from '@sf-intelligence/core';
 import { gapLogPath } from '@sf-intelligence/mcp';
 import { Command } from 'commander';
 
+import { VAULT_OPTION_HELP, vaultForAction } from '../vault-option.js';
+
 /**
  * Issues channel — surfaced in doctor / README / website so feedback has a home.
  *
@@ -166,8 +168,11 @@ export const registerFeedbackCommand = (program: Command): void => {
     )
     .option('--out <file>', 'output path', 'sfi-feedback.json')
     .option('--all', 'include every vault\'s gaps + unstamped pre-0.1.10 entries (machine-global)')
-    .action(async (flags: { out: string; all?: boolean }): Promise<void> => {
-      const vaultRoot = resolve(process.cwd(), 'org-kb');
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (flags: { out: string; all?: boolean; vault?: string }): Promise<void> => {
+      const vault = vaultForAction(flags);
+      if (vault === null) return;
+      const vaultRoot = vault.vaultRoot;
       const data = await buildFeedbackExport({
         vaultRoot,
         ...(flags.all === true ? { all: true } : {}),

@@ -3,7 +3,7 @@
   "version": "0.3.3",
   "protocolVersion": "mcp",
   "tools": {
-    "total": 217,
+    "total": 231,
     "advertised": 25,
     "hidden": 5,
     "defaultProfile": "core",
@@ -103,6 +103,7 @@
         "sfi.guidance",
         "sfi.health_check",
         "sfi.history_tracking_gaps",
+        "sfi.how_to_see",
         "sfi.installed_package_catalog",
         "sfi.integration_map",
         "sfi.integration_procedure_chain",
@@ -151,6 +152,7 @@
         "sfi.live_stale_records",
         "sfi.live_storage_by_object",
         "sfi.live_user_permsets",
+        "sfi.live_verify",
         "sfi.live_zombie_accounts",
         "sfi.lookup_record",
         "sfi.meaningful_test_audit",
@@ -158,6 +160,16 @@
         "sfi.nonselective_soql",
         "sfi.object_360",
         "sfi.object_access_audit",
+        "sfi.omni_changed_since",
+        "sfi.omni_completion_audit",
+        "sfi.omni_dead_references",
+        "sfi.omni_edit_block_audit",
+        "sfi.omni_form_spec",
+        "sfi.omni_model",
+        "sfi.omni_path_simulator",
+        "sfi.omni_prefill_trace",
+        "sfi.omni_save_trace",
+        "sfi.omni_version_diff",
         "sfi.omniscript_flow",
         "sfi.omniuicard_widget_breakdown",
         "sfi.order_of_execution",
@@ -170,6 +182,7 @@
         "sfi.package_impact",
         "sfi.permission_risk_report",
         "sfi.permission_set_consolidation",
+        "sfi.persona_unused_grants",
         "sfi.picklist_integrity_scan",
         "sfi.pii_inventory",
         "sfi.process_builder_migration_candidates",
@@ -178,6 +191,7 @@
         "sfi.propose_annotation",
         "sfi.query_graph",
         "sfi.record_creation_paths",
+        "sfi.record_delete_impact",
         "sfi.recordtype_availability",
         "sfi.reject_annotation",
         "sfi.resolve",
@@ -292,6 +306,7 @@
       "sfi.live_stale_records",
       "sfi.live_storage_by_object",
       "sfi.live_user_permsets",
+      "sfi.live_verify",
       "sfi.live_zombie_accounts",
       "sfi.safe_to_delete_field",
       "sfi.unused_fields_deep",
@@ -453,9 +468,9 @@
     "edgeTypeCount": 23
   },
   "conceptModel": {
-    "concepts": 143,
-    "rules": 195,
-    "contentHash": "sha256:512868130b5d07db4deba1753633c43ecc8ff5811a2877b04b60a904b857a60d",
+    "concepts": 153,
+    "rules": 207,
+    "contentHash": "sha256:7e000d56443f076b667ab6b5c710fc241217cd4ab11ad6fe398475550793838c",
     "modelVersion": "0.0.1"
   },
   "networkCapabilities": [
@@ -467,6 +482,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:3f19e58ac59b7b39ec9c3f175af4ad1556e8315213877654ef954db624f3bf76",
-  "identityHash": "sha256:d21f7c835351b3e3b9eff4f24b847c538987679263330003e1c10d2ccf20f0eb"
+  "catalogHash": "sha256:b10a69f861c1474751f043eff8fb701645e47c0ad7f322a50e7ac069c2863da9",
+  "identityHash": "sha256:a4a8b89c6532524c3b854210d70d67eb701f379486ba1f22d3aa8d68bd000274"
 }

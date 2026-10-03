@@ -15,12 +15,25 @@ description: |
   (DecisionTable parameter shape; rows null — Q179 refusal). Triggers
   on: "OmniScript", "FlexCard", "DataRaptor", "Integration Procedure",
   "DecisionTable", "OmniStudio", "OmniUiCard", "Industries", "vlocity",
-  "omnistudio__". Discloses the v3.2 honesty axes verbatim:
-  Native-vs-Vlocity-Legacy detection is heuristic (Q180); the
-  OmniProcessElement record-level data is out of scope (Q179); the
-  Apex-to-OmniProcess coupling is a v3.3 follow-up; REST endpoint URLs
-  are `parsed`, not verified. Extends `architect-integration-topology`
-  for the OmniStudio Rest Action surface rather than replacing it.
+  "omnistudio__". Also routes the inside-the-component questions to
+  the OmniStudio model tools: does an answer reach a field
+  (`omni_save_trace`), come back on reopen (`omni_prefill_trace`),
+  point at nothing (`omni_dead_references`), change between versions
+  or since an audit (`omni_version_diff`, `omni_changed_since`), does
+  an Edit Block's Delete delete (`omni_edit_block_audit`), is a
+  section marked complete (`omni_completion_audit`), what a test
+  runner must type (`omni_form_spec`), which steps show — and which
+  sections dead-end — for given answers (`omni_path_simulator`), the
+  element tree (`omni_model`). Managed-package (Vlocity) OmniStudio
+  is answered by the same tools from a DataPack export under
+  org-kb/source/vlocity/. Discloses the honesty axes verbatim:
+  native vs managed-package source (Q180); the
+  OmniProcessElement record-level data is out of scope (Q179); calls
+  OUT to Apex are `callsApex` edges, and Apex that runs an IP or
+  DataRaptor by a literal key is a `dispatchesOmniAction` edge from
+  the class (`via: apex`); REST endpoint URLs are `parsed`, not verified.
+  Extends `architect-integration-topology` for the OmniStudio callout
+  surface rather than replacing it.
 ---
 
 # Salesforce Industries routing
@@ -44,7 +57,20 @@ carried 1,474 Industries metadata files with zero graph footprint
 
 The new edge type, `dispatchesOmniAction`, runs from any v3.2-tier
 component (OmniScript, IP, OmniUiCard) to the IP / DataRaptor / sibling
-OmniScript it invokes via an action child.
+OmniScript it invokes via an action child — resolved at import onto the
+version that RUNS (an IP / OmniScript's `isActive` is the runtime switch;
+a DataMapper's `active` flag is not, so an inactive DataMapper is not dead).
+
+**Inside the components.** Every element is parsed through one element
+catalog (`docs/omnistudio/element-catalog.md`: canonical type, every
+alternative spelling, runtime role), and the graph carries what the
+elements do: any element naming a `remoteClass` → `callsApex` (methods,
+call sites, `entryVia: omnistudio-remote`); DataMapper Extract / Turbo /
+Load → field-level `readsFrom` / `writesTo` (a Load's object write says
+`recordCreate` or `recordUpsert`); an IP Delete Action → `writesTo`
+`recordDelete`; a FlexCard SOQL data source → `readsFrom`. Every tool
+that walks the graph (dead code, impact, usage, record paths) sees them.
+The primer is `docs/omnistudio/README.md`.
 
 The load-bearing insight: **OmniStudio is a declarative-process
 surface where the "process" IS the metadata.** An OmniScript's XML
@@ -62,10 +88,15 @@ data, out of scope (Q179 anchor).
 
 The constitutional axis (Q180): **v3.2 admits the v3.1 roadmap
 closure was wrong.** The OmniStudio family was a missing extraction
-tier, not an out-of-roadmap zone. But v3.2 does NOT claim to detect
-whether an org is mid-migration from the legacy Vlocity managed
-package to Industries Native. The skill surfaces what the file
-extensions show without inferring migration state.
+tier, not an out-of-roadmap zone. Managed-package (Vlocity)
+OmniStudio — records, not metadata — is modelled from a Vlocity Build
+Tool DataPack export placed under `org-kb/source/vlocity/` (nodes
+carry `sourceFormat: vlocity-datapack`), through the same code as
+native metadata, so every tool below answers for it. The product does
+NOT claim to know whether an export is current or whether a
+mid-migration org is fully covered; every OmniStudio tool's
+`trust.limitations` says when an installed `vlocity_*` package has no
+export (its components are then missing, not absent).
 
 ## When to fire
 
@@ -74,9 +105,9 @@ triggers:
 
 ### OmniScript flow shape
 
-- **"Walk `AccountLinking_Existing_English_1` step by step."** /
+- **"Walk `Acme_Enrollment_English_1` step by step."** /
   **"What does this OmniScript do?"** — Use `sfi.omniscript_flow`
-  with `{ omniScriptId: 'OmniScript:AccountLinking_Existing_English_1' }`.
+  with `{ omniScriptId: 'OmniScript:Acme_Enrollment_English_1' }`.
 - **"What does this no-code form do when I click Submit?"** —
   Same; the dispatched-action list shows what the buttons call.
 - **"What IPs / DataRaptors does this OmniScript call?"** — Same;
@@ -84,10 +115,10 @@ triggers:
 
 ### Integration Procedure chain shape
 
-- **"Show the action chain for `AccountLiniking_MPPValidation`."** /
+- **"Show the action chain for `Acme_ValidateMember`."** /
   **"What does this IP do step by step?"** — Use
   `sfi.integration_procedure_chain` with
-  `{ integrationProcedureId: 'OmniIntegrationProcedure:AccountLiniking_MPPValidation_Procedure_1' }`.
+  `{ integrationProcedureId: 'OmniIntegrationProcedure:Acme_ValidateMember_Procedure_1' }`.
 - **"What endpoints does this Integration Procedure hit?"** /
   **"What REST callouts does this IP make?"** — Same; the
   `externalEndpoints[]` surface, grouped by kind.
@@ -106,31 +137,78 @@ triggers:
 
 ### FlexCard breakdown shape
 
-- **"What's on the `AccountLinkingIntro` FlexCard?"** /
+- **"What's on the `AcmeEnrollmentIntro` FlexCard?"** /
   **"Show me the widgets in this OmniUiCard."** — Use
   `sfi.omniuicard_widget_breakdown` with
-  `{ omniUiCardId: 'OmniUiCard:AccountLinkingIntro_Developer_1' }`.
+  `{ omniUiCardId: 'OmniUiCard:AcmeEnrollmentIntro_Developer_1' }`.
 - **"What OmniScripts / IPs does this card launch?"** — Same; the
   `dispatchedActions[]` surface.
 
 ### DecisionTable parameter shape
 
-- **"What inputs does the `FPLFullTabe` DecisionTable take?"** /
+- **"What inputs does the `AcmeIncomeThresholds` DecisionTable take?"** /
   **"Show me the DT parameters."** — Use
   `sfi.decision_table_browse` with
-  `{ decisionTableId: 'DecisionTable:FPLFullTabe' }`.
-- **"Show me the actual rows in `FPLFullTabe`."** — Use the same
+  `{ decisionTableId: 'DecisionTable:AcmeIncomeThresholds' }`.
+- **"Show me the actual rows in `AcmeIncomeThresholds`."** — Use the same
   tool, then surface the Q179 row-data refusal verbatim. **The
   rows are NOT enumerable from metadata** — do not fabricate them.
 
+### Inside the component (the OmniStudio model tools)
+
+- **"Does this screen's data actually save?"** / **"Which answers
+  never reach a field?"** — `sfi.omni_save_trace` (`omniscript`).
+- **"Does a saved answer come back when the screen reopens?"** —
+  `sfi.omni_prefill_trace`.
+- **"Which show rules, merge fields or payload keys point at
+  nothing?"** — `sfi.omni_dead_references` (whitespace keys, labels
+  compared instead of values included).
+- **"What changed between version 14 and 15?"** —
+  `sfi.omni_version_diff`. **"What changed since the audit / the last
+  refresh?"** — `sfi.omni_changed_since`.
+- **"Does the Delete button on this Edit Block delete the record?"** —
+  `sfi.omni_edit_block_audit`. **"Is this section ever marked
+  complete?"** — `sfi.omni_completion_audit`.
+- **"What does a test runner need to type into this form?"** —
+  `sfi.omni_form_spec` (masks, patterns, sample values;
+  `PATTERN_INVALID_IN_BROWSER`, `PATTERN_WEAKER_THAN_MASK`).
+- **"Which steps show for these answers?"** / **"Is there a section
+  some people are sent into but can never start?"** —
+  `sfi.omni_path_simulator` (`answers`; `DEAD_END_SECTION` for each
+  section entry declared in `org-kb/config/omnistudio.json`
+  `sectionEntries` or passed as `sections`).
+- **"Show me every element of this OmniScript / IP."** —
+  `sfi.omni_model`.
+- **"What can delete records of this object, and what happens to its
+  children?"** — `sfi.record_delete_impact` (Delete Actions and Edit
+  Block deletes included). **"Which grants does this persona never
+  use?"** — `sfi.persona_unused_grants` (OmniStudio reachability
+  included).
+
 ### Honesty-axis shapes (no happy-path tool answer)
 
-- **"What OmniStudio version is this org on?"** — Surface the
-  Q180 Native-vs-Vlocity disclosure verbatim. Do NOT claim a
-  detection.
-- **"What Apex classes call into OmniStudio?"** — Surface the v3.3
-  Apex-coupling deferral verbatim. Those edges are NOT yet in the
-  graph.
+- **"What OmniStudio version is this org on?"** — Report what the
+  vault shows: native components, DataPack-sourced ones
+  (`sourceFormat: vlocity-datapack`), and any installed `vlocity_*` /
+  `omnistudio` package (`sfi.installed_package_catalog`). Then surface
+  the Q180 Native-vs-Vlocity disclosure verbatim. Do NOT claim which
+  runtime the org uses from file shapes alone.
+- **"Our OmniScripts are in the Vlocity package — can you read
+  them?"** — Yes, from a DataPack export: `vlocity packExport` into
+  `org-kb/source/vlocity/`, then `sfi refresh --no-pull` (recipe in
+  `docs/configuration.md`). The ids follow the native form
+  (`OmniScript:<Type>_<SubType>_<Language>_<Version>`), and every tool
+  in this skill reads them.
+- **"What Apex does this OmniScript / IP call?"** — Calls OUT to Apex
+  are `callsApex` edges: `sfi.integration_procedure_chain`
+  (`remote-action` endpoints resolved to ApexClass nodes, and
+  `dataAccess.apexClasses`) or the usage tools. **"What Apex calls
+  INTO this IP / DataRaptor?"** — `sfi.find_component_usages` on the IP
+  or DataRaptor: Apex that runs it through
+  `<ns>.IntegrationProcedureService.runIntegrationService('Type_SubType', …)`
+  or `<ns>.DRGlobal.process(…, 'Bundle')` with a LITERAL key is an
+  incoming `dispatchesOmniAction` edge (`via: apex`). A key built at
+  runtime is not seen — say so rather than reporting "no Apex callers".
 - **"What user-entered data is in this OmniScript?"** — Surface the
   OmniProcessElement record-level boundary verbatim.
 
@@ -139,13 +217,13 @@ triggers:
 Defer to another skill when:
 
 - **The user asks "what calls
-  `AccountLiniking_MPPValidation`?"** (who dispatches INTO an IP).
+  `Acme_ValidateMember`?"** (who dispatches INTO an IP).
   That's a graph walk over incoming `dispatchesOmniAction` edges;
   defer to `developer-find-anywhere` → `sfi.find_field_anywhere` /
   the broader find-anywhere walk. v3.2's edges feed that walk
   without a special routing case — the edge type is in the union.
 - **The user asks "what breaks if I delete
-  `ExtractContactMPPMapper`?"** That's impact analysis over
+  `AcmeExtractContact`?"** That's impact analysis over
   incoming edges; defer to `architect-impact-analysis` →
   `sfi.get_impact`, or `developer-impact-and-reachability`. v3.2's
   `dispatchesOmniAction` edges feed into those walks.
@@ -158,11 +236,6 @@ Defer to another skill when:
 - **The user asks about a standard Flow** (`Flow:` /
   `*.flow-meta.xml`). OmniScripts and Flows are different families.
   Defer to `answering-org-questions` / the Flow tools.
-- **The user names a Vlocity-managed-package component**
-  (`vlocity_cmt__OmniScript__c`, namespace `vlocity_cmt__`). v3.2
-  does NOT extract those — they live as SObject records, not
-  metadata XML. Surface the Q180 disclosure and point at v3.3+ as
-  the potential future home.
 - **The user wants the actual DecisionTable rows, or the OmniScript
   runtime data.** That's record-level data, out of scope. Surface
   the Q179 disclosure.
@@ -174,18 +247,18 @@ Defer to another skill when:
 ## Disambiguation — name without a type
 
 When the user names a component without specifying its type ("show
-me `AccountLinking`"), the same base name can resolve to multiple
+me `AcmeEnrollment`"), the same base name can resolve to multiple
 ComponentTypes (an OmniScript, an IP, a FlexCard, all named for the
 same business process). Ask ONE disambiguation question listing the
 matching candidates across all five types before dispatching:
 
-> `AccountLinking` matches several OmniStudio components. Which one?
+> `AcmeEnrollment` matches several OmniStudio components. Which one?
 >
-> - `OmniScript:AccountLinking_Existing_English_1` (the user-facing
+> - `OmniScript:Acme_Enrollment_English_1` (the user-facing
 >   form flow) → `sfi.omniscript_flow`
-> - `OmniIntegrationProcedure:AccountLiniking_MPPValidation_Procedure_1`
+> - `OmniIntegrationProcedure:Acme_ValidateMember_Procedure_1`
 >   (the server-side action chain) → `sfi.integration_procedure_chain`
-> - `OmniUiCard:AccountLinkingIntro_Developer_1` (the FlexCard) →
+> - `OmniUiCard:AcmeEnrollmentIntro_Developer_1` (the FlexCard) →
 >   `sfi.omniuicard_widget_breakdown`
 
 Do NOT guess. The five tools have distinct id prefixes and distinct
@@ -208,7 +281,7 @@ plus the downstream IP / DataRaptor / sibling-OmniScript dispatches.
 
 ```json
 {
-  "omniScriptId": "OmniScript:AccountLinking_Existing_English_1",
+  "omniScriptId": "OmniScript:Acme_Enrollment_English_1",
   "includeChildPropertySetConfig": false
 }
 ```
@@ -237,16 +310,17 @@ cross-namespace targets).
 
 ### 2. `sfi.integration_procedure_chain` — walk an IP's action chain
 
-**Intent:** Given an IP id, return the action sequence (ordered by
-`sequenceNumber`), the downstream callouts (REST endpoints,
-DataRaptor reads, chained IPs, Remote Actions), and the response
-shape.
+**Intent:** Given an IP id, return every step — nested ones inside
+Conditional / Loop / Try-Catch blocks included — in runtime order, the
+downstream calls (HTTP endpoints, DataMappers, chained IPs, Apex,
+Delete Actions), what the chain reads / writes / deletes, and the
+response shape.
 
 **Input shape:**
 
 ```json
 {
-  "integrationProcedureId": "OmniIntegrationProcedure:AccountLiniking_MPPValidation_Procedure_1",
+  "integrationProcedureId": "OmniIntegrationProcedure:Acme_ValidateMember_Procedure_1",
   "includeChildPropertySetConfig": false
 }
 ```
@@ -255,30 +329,35 @@ shape.
 IP hit?"
 
 **Output:** `metadata` (omniProcessKey, versionNumber, isActive,
-subType, type, uniqueName), `actions[]` (ordered by sequenceNumber;
+subType, type, uniqueName), `actions[]` (runtime order, depth-first;
 each carries name, type, description, sequenceNumber, isActive,
-executionConditionalFormula), `externalEndpoints[]` (grouped by
-`kind`: `rest` / `dataraptor` / `remote-action` /
-`integration-procedure`; each carries stepName, target, targetId,
-namedCredential, `endpointConfidence: 'parsed'`), `responseShape`
-(additionalOutput + returnOnlyAdditionalOutput from the terminal
-Response Action), and `boundaries[]` (FOUR verbatim disclosures —
-Native-vs-Vlocity, v3.3 Apex deferral, record-level, REST
-reachability).
+executionConditionalFormula, `path`, `depth`, the catalog's
+`canonicalType` and `role`), `externalEndpoints[]` (each with
+`stepName` / `stepPath`, target, targetId, `targetResolution`,
+`targetCandidateIds`, namedCredential, `endpointConfidence: 'parsed'`,
+and for a resolved DataMapper `dataAccess` {reads, writes}),
+`dataAccess` (the chain's own reads / writes / deletes / apexClasses /
+ipsCalled / mappersCalled), `responseShape`, and `boundaries[]` (FOUR
+verbatim disclosures — Native-vs-Vlocity, Apex-coupling scope,
+record-level, REST reachability).
 
-The endpoints come from re-parsing the IP XML's per-action
-`propertySetConfig`, NOT from reading the edges:
-- `Rest Action` → `kind: rest`, target = `restPath`,
-  `namedCredential` alongside.
-- `DataRaptor Extract/Transform/Load Action` → `kind: dataraptor`,
-  target = `bundle`; `targetId` resolves to the
-  `OmniDataTransform:{bundle}` node when present.
-- `Integration Procedure Action` → `kind: integration-procedure`,
-  target = `integrationProcedureKey`; `targetId` resolves when the
-  IP node is in the vault.
-- `Remote Action` → `kind: remote-action`, target =
-  `{remoteClass}.{remoteMethod}`. No `targetId` — Apex→OmniProcess
-  edges are the v3.3 `implementsOmniInterface` follow-up.
+Endpoints follow the extractor's edge rules, read through the element
+catalog so every spelling counts:
+- an HTTP step (`Rest Action`, `HTTP Action`, …) → `kind: rest`,
+  target = its URL, `namedCredential` alongside.
+- ANY element naming a `bundle` → `kind: dataraptor`.
+- ANY element naming an `integrationProcedureKey` → `kind:
+  integration-procedure`.
+- ANY element naming a `remoteClass` → `kind: remote-action`, resolved
+  to its ApexClass node (or `not-in-vault`).
+- a Delete Action → `kind: delete`, one per object it deletes.
+
+DataMapper / IP targets take the graph's import-time resolution:
+`resolved` (one version), `active-version` (several; the active one
+runs), `highest-version` (a DataMapper with no single active version),
+`no-active-version` (an IP none of whose versions is active — nothing
+runs), `ambiguous` (several active); `not-in-vault` is the only value
+that asserts absence.
 
 ### 3. `sfi.datatransform_field_map` — DataRaptor source→target map
 
@@ -328,7 +407,7 @@ downstream OmniScript / IP dispatches in Action widgets.
 **Input shape:**
 
 ```json
-{ "omniUiCardId": "OmniUiCard:AccountLinkingIntro_Developer_1" }
+{ "omniUiCardId": "OmniUiCard:AcmeEnrollmentIntro_Developer_1" }
 ```
 
 **Use case:** "What's on this FlexCard?" / "What does this card
@@ -359,7 +438,7 @@ canonical schema; row content is NOT exposed.**
 **Input shape:**
 
 ```json
-{ "decisionTableId": "DecisionTable:FPLFullTabe" }
+{ "decisionTableId": "DecisionTable:AcmeIncomeThresholds" }
 ```
 
 **Use case:** "What inputs does this DecisionTable take?" / "Show me
@@ -384,11 +463,11 @@ designer's row-editor). v3.2 reaches none of those.
 | Tool result | Default render |
 |---|---|
 | `sfi.omniscript_flow` happy path | Step table ordered by `(level, sequenceNumber)` (name, type, level, isActive). Then a "downstream calls" section listing `dispatchedActions` (stepType → targetRawName → targetId or `dangling`). Surface the Native-vs-Vlocity disclosure verbatim ALWAYS. |
-| `sfi.integration_procedure_chain` happy path | Action table ordered by `sequenceNumber` (name, type, description, isActive). Then an "external endpoints" section grouped by `kind`. Then the response shape. Surface Native-vs-Vlocity + v3.3-Apex-deferral disclosures verbatim. |
+| `sfi.integration_procedure_chain` happy path | Step table in runtime order, indented by `depth` (path, type, isActive). Then the endpoints grouped by `kind`, each with its `targetResolution`. Then `dataAccess` (what the chain reads, writes, deletes, and which Apex it calls). Then the response shape. Surface the Native-vs-Vlocity and Apex-coupling disclosures verbatim. |
 | `sfi.datatransform_field_map` happy path | Metadata header (inputType, interfaceClass, active). Then the field-mapping table (mapping name, sourceField → targetField, outputObjectName, `confidence`). Then expectedInput/Output JSON when present. Surface Native-vs-Vlocity disclosure verbatim. |
 | `sfi.omniuicard_widget_breakdown` happy path | Per-state widget tree (indented by recursion depth). Then a "data source" section. Then a "dispatched actions" section. Surface the propertySetConfig-parsing disclosure verbatim. |
 | `sfi.decision_table_browse` happy path | Metadata header. Then input parameters table ordered by sequence, then output parameters table. Surface the row-data boundary disclosure verbatim ALWAYS (Q179 anchor). |
-| Any tool with `component-not-found` | "No `{ComponentType}` with id `{id}` in the vault. If your org runs Vlocity-managed-package legacy OmniStudio (namespace `vlocity_cmt__`), v3.2 does NOT extract those — their components are `vlocity_cmt__OmniScript__c` SObject records, not `.os-meta.xml` files." |
+| Any tool with `component-not-found` | "No `{ComponentType}` with id `{id}` in the vault. If your org runs managed-package (Vlocity) OmniStudio (namespace `vlocity_cmt__` / `vlocity_ins__` / `vlocity_ps__`), its components are records, not metadata: export them as DataPacks into `org-kb/source/vlocity/` and run `sfi refresh --no-pull`." Check `trust.limitations` first — it says when an installed Vlocity package has no export. |
 
 ## Honesty axes
 
@@ -396,21 +475,27 @@ The skill MUST surface these disclosures verbatim. Paraphrasing them
 is a v3.2 contract violation (PLAN-v3.2 §10). Each tool already
 bundles its disclosures into `boundaries[]`; re-emit them unchanged.
 
-### Native-vs-Vlocity-Legacy detection is heuristic (Q180 — verbatim, EVERY tool)
+### Native vs managed-package (Vlocity) source (Q180 — verbatim, EVERY tool)
 
-> v3.2 recognizes Industries Native XML shapes (file extensions
-> `.os-meta.xml`, `.oip-meta.xml`, `.rpt-meta.xml`, `.ouc-meta.xml`,
-> `.decisionTable-meta.xml`). Legacy Vlocity-managed-package
-> components (namespace `vlocity_cmt__`) are NOT extracted by v3.2.
-> Mid-migration orgs may show partial coverage.
+> Industries Native OmniStudio metadata (`.os-meta.xml`, `.oip-meta.xml`,
+> `.rpt-meta.xml`, `.ouc-meta.xml`, `.decisionTable-meta.xml`) is read from
+> the Metadata API retrieve. Managed-package (Vlocity) OmniStudio —
+> namespaces `vlocity_cmt__`, `vlocity_ins__`, `vlocity_ps__`, or the
+> `omnistudio__` managed runtime — stores OmniScripts, Integration
+> Procedures, DataRaptors and Cards as RECORDS that no Metadata API
+> retrieve contains: they are modelled only from a Vlocity Build Tool
+> DataPack export placed under org-kb/source/vlocity/ (their nodes carry
+> `sourceFormat: vlocity-datapack`), and the vault cannot tell whether that
+> export is current. Mid-migration orgs may show partial coverage.
 
-This is the constitutional re-opening marker. When the user asks
-"what OmniStudio version is this org on?", surface this verbatim. Do
-NOT attempt a clever "I detect Native because all your files are
-`.os-meta.xml`" answer. The recon found Globex's namespace
-prefix is `omnistudio__` (the Native rebrand path); the skill
-acknowledges what the file extensions show without inferring
-mid-migration state. Surfaced on EVERY v3.2 tool response.
+One shared sentence (`omni-disclosures.ts`), surfaced on EVERY
+OmniStudio tool response. When the user asks "what OmniStudio
+version is this org on?", surface it verbatim. Do NOT attempt a
+clever "I detect Native because all your files are `.os-meta.xml`"
+answer: the vault shows what was retrieved and exported, not which
+runtime the org runs. An `omnistudio` package with native components
+is the native runtime's support package; a `vlocity_*` package with
+no export means its components are missing from every answer.
 
 ### OmniProcessElement record-level data is out of scope (Q179 — verbatim)
 
@@ -433,24 +518,47 @@ flow?", this is the answer.
 
 The first v3.2 honesty anchor. `sfi.decision_table_browse` returns
 `rows: null` AND surfaces this phrase first in `boundaries[]`. When
-the user asks "show me the actual rows in `FPLFullTabe`", surface
+the user asks "show me the actual rows in `AcmeIncomeThresholds`", surface
 this verbatim and the dataSourceType-specific hint. **Do NOT
 fabricate row content** even when the metadata hints at the row
 store.
 
-### Apex coupling is a v3.3 follow-up (Q180 — verbatim)
+### Apex coupling — calls out, and Apex running OmniStudio by key (Q180 — verbatim)
 
-> v3.2 captures OmniStudio components and intra-OmniStudio call
-> chains (`dispatchesOmniAction`). The Apex-to-OmniProcess coupling
-> (`implements omnistudio.VlocityOpenInterface` etc.) is a v3.3
-> follow-up — those edges are NOT yet in the graph.
+`sfi.integration_procedure_chain`:
 
-The recon found 16 of 141 vaulted Apex classes reference OmniStudio
-APIs (`implements omnistudio.VlocityOpenInterface, Callable`) with
-zero captured edges. Surfaced on EVERY `sfi.omniscript_flow` and
-`sfi.integration_procedure_chain` response (the two tools whose
-callers might assume Apex coverage). When the user asks "what Apex
-calls into OmniStudio?", surface this verbatim.
+> Every element naming a `remoteClass` (a Remote Action, a Try Catch
+> failure handler, …) is resolved to its ApexClass — the graph carries
+> the matching `callsApex` edge from this IP. What that Apex reads or
+> writes is answered by the Apex tools, not here; a class the vault does
+> not hold (a managed-package class, or one not retrieved) is
+> `not-in-vault`. Apex that RUNS this IP by key
+> (`<ns>.IntegrationProcedureService.runIntegrationService('Type_SubType', …)`
+> with a literal key) is in the graph as an incoming
+> `dispatchesOmniAction` edge from that class (`via: apex`) — ask the
+> usage or impact tools for callers; a key built at runtime is not seen.
+
+A Remote Action whose `remoteClass` is the managed runtime's own
+`<ns>.IntegrationProcedureService` is NOT Apex: it runs the
+Integration Procedure its `remoteMethod` names, so it is listed as an
+`integration-procedure` endpoint and the save / prefill traces follow
+it into that IP.
+
+`sfi.omniscript_flow`:
+
+> This lists the intra-OmniStudio call chain (`dispatchesOmniAction`).
+> Elements that call Apex (a `remoteClass` on a Remote Action, a File
+> upload, …) are in the graph as `callsApex` edges from this OmniScript,
+> with their methods and call sites — not listed here; ask the Apex or
+> usage tools. Apex that runs an Integration Procedure or DataRaptor
+> by name (`IntegrationProcedureService` / `DRGlobal` with a literal
+> key) is in the graph as a `dispatchesOmniAction` edge from that class
+> (`via: apex`); a key built at runtime is not seen.
+
+An Apex class OmniStudio calls by name that the vault does not hold is
+either a custom class the org does not have (every call fails at
+runtime) or a service of OmniStudio's own package; its reference stub
+says so and names the targeted retrieve that tells them apart.
 
 ### REST endpoint URLs are `parsed`, not verified (verbatim, IP chain)
 
@@ -502,18 +610,19 @@ asserting "this card is empty."
 ## Refusal patterns
 
 - **Component-not-found** — refuse with the "no `{Type}` with id
-  `{id}`" message plus the Vlocity-Legacy hint when the user's id
-  pattern looks like it might be a managed-package component.
+  `{id}`" message plus the managed-package export hint when the
+  user's id pattern looks like a managed-package component.
 - **Cross-tool confusion** — when the user asks "walk the OmniScript"
   but the id resolves to an OmniIntegrationProcedure (or vice
   versa), the tool surfaces `invalid-query` "id resolved to type X,
   not Y". Clarify the kind and offer the correct tool. Do NOT retry
   the wrong tool.
-- **Vlocity-Legacy hit** — when the user names a component whose id
-  starts with `vlocity_cmt__`, refuse and surface the Q180
-  Native-vs-Vlocity disclosure verbatim, pointing at v3.3+ as the
-  potential future home. Those components live as SObject records,
-  not metadata XML.
+- **Managed-package (Vlocity) component** — when the user names a
+  `vlocity_cmt__` / `vlocity_ins__` / `vlocity_ps__` record or a
+  DataPack key: if the vault holds the export (nodes with
+  `sourceFormat: vlocity-datapack`), answer with the same tools; if
+  not, say the component is missing for want of an export — NOT
+  absent from the org — and give the export recipe.
 - **Row-data ask** — when the user asks for DecisionTable row
   content (or OmniScript runtime data), surface the Q179 disclosure
   verbatim. Do NOT fabricate rows.
@@ -521,30 +630,30 @@ asserting "this card is empty."
 ## Worked example
 
 User: *"What happens when I click Start Linking on the
-AccountLinking intro card?"*
+AcmeEnrollment intro card?"*
 
 Claude's flow:
 
 1. **Classify** → FlexCard breakdown shape (the entry point is the
    card; the button launches a downstream flow).
 2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.omniuicard_widget_breakdown", "args": { … } }` with
-   `{ "omniUiCardId": "OmniUiCard:AccountLinkingIntro_Developer_1" }`.
+   `{ "omniUiCardId": "OmniUiCard:AcmeEnrollmentIntro_Developer_1" }`.
 3. **Receive** (illustrative): `metadata.omniUiCardType: "Parent"`;
    one `Active` state with one `Action` widget (`StartLinking`);
    `dataSource.type: "DataRaptor"`; one `dispatchedActions[]` entry —
    `actionType: "OmniScript"`, `targetId:
-   "OmniScript:AccountLinking_Existing_English_1"`, `confidence:
+   "OmniScript:Acme_Enrollment_English_1"`, `confidence:
    "parsed"`; `boundaries[]` carrying the propertySetConfig-parsing
    and Native-vs-Vlocity disclosures.
 4. **Follow the dispatch** — the Start Linking action launches an
    OmniScript. Fire `sfi.run_analysis` with `{ "name": "sfi.omniscript_flow", "args": { … } }` with
-   `{ "omniScriptId": "OmniScript:AccountLinking_Existing_English_1" }`
+   `{ "omniScriptId": "OmniScript:Acme_Enrollment_English_1" }`
    to walk what happens next.
 5. **Respond:**
 
-> Clicking **Start Linking** on `OmniUiCard:AccountLinkingIntro_Developer_1`
+> Clicking **Start Linking** on `OmniUiCard:AcmeEnrollmentIntro_Developer_1`
 > launches the OmniScript
-> `OmniScript:AccountLinking_Existing_English_1`
+> `OmniScript:Acme_Enrollment_English_1`
 > (`confidence: parsed` — the target name comes from the FlexCard's
 > propertySetConfig JSON `actionList[].stateAction.omniType.Name`).
 >
@@ -563,7 +672,7 @@ Claude's flow:
 > | `goToHome` | Navigate Action | 0 |
 >
 > **Downstream calls from the OmniScript:**
-> - `extractContact` → DataRaptor `ExtractContactMPPMapper`
+> - `extractContact` → DataRaptor `AcmeExtractContact`
 >   (`dispatchesOmniAction`, `parsed`).
 > - `callUserSearch` → IP `UserSearch_Existing`
 >   (`dispatchesOmniAction`, `parsed`).
@@ -575,27 +684,31 @@ Claude's flow:
 >   authors can edit the raw blob in the OmniStudio designer; widget
 >   order in the breakdown follows the JSON's declared order, not the
 >   visual designer's drag-drop order.
-> - **Native-vs-Vlocity detection is heuristic.** v3.2 recognizes
->   Industries Native XML shapes (file extensions `.os-meta.xml`,
->   `.oip-meta.xml`, `.rpt-meta.xml`, `.ouc-meta.xml`,
->   `.decisionTable-meta.xml`). Legacy Vlocity-managed-package
->   components (namespace `vlocity_cmt__`) are NOT extracted by v3.2.
->   Mid-migration orgs may show partial coverage.
+> - **Native vs managed-package source.** Industries Native OmniStudio metadata (`.os-meta.xml`, `.oip-meta.xml`,
+>   `.rpt-meta.xml`, `.ouc-meta.xml`, `.decisionTable-meta.xml`) is read from
+>   the Metadata API retrieve. Managed-package (Vlocity) OmniStudio —
+>   namespaces `vlocity_cmt__`, `vlocity_ins__`, `vlocity_ps__`, or the
+>   `omnistudio__` managed runtime — stores OmniScripts, Integration
+>   Procedures, DataRaptors and Cards as RECORDS that no Metadata API
+>   retrieve contains: they are modelled only from a Vlocity Build Tool
+>   DataPack export placed under org-kb/source/vlocity/ (their nodes carry
+>   `sourceFormat: vlocity-datapack`), and the vault cannot tell whether that
+>   export is current. Mid-migration orgs may show partial coverage.
 > - **The OmniScript's runtime data is out of scope.** v3.2 walks the
 >   OmniScript / IP / Card metadata XML. The actual user-entered data
 >   and runtime state lives in OmniProcessElement and related SObject
 >   records; that is record-level data, out of scope for v0.1's
 >   read-the-metadata posture.
-> - **Apex coupling is a v3.3 follow-up.** If a step calls into Apex
->   via a Remote Action, the Apex-to-OmniProcess coupling
->   (`implements omnistudio.VlocityOpenInterface` etc.) is a v3.3
->   follow-up — those edges are NOT yet in the graph.
+> - **Apex calls are listed elsewhere.** A step that calls Apex is a
+>   `callsApex` edge from the OmniScript (with its methods and call
+>   sites); `sfi.omniscript_flow` lists only the OmniStudio dispatches.
+>   Apex that runs OmniStudio by a literal key is an edge from the class.
 >
 > Follow-up suggestions:
 >
 > 1. To see the REST endpoints / response shape behind
 >    `UserSearch_Existing`, run `sfi.run_analysis` with `{ "name": "sfi.integration_procedure_chain", "args": { … } }`.
-> 2. To see what `ExtractContactMPPMapper` reads, run
+> 2. To see what `AcmeExtractContact` reads, run
 >    `sfi.datatransform_field_map`.
 
 The response leads with the answer (the button launches an
@@ -607,13 +720,13 @@ v3.2 disclosures.
 
 | Mistake | Why it's wrong |
 |---|---|
-| Claiming "this org is on Industries Native" because all the files are `.os-meta.xml`. | The Q180 boundary is explicit: Native-vs-Vlocity detection is heuristic. v3.2 recognizes the Native XML shape but does NOT detect mid-migration state. Surface the disclosure verbatim; do not infer the migration posture. |
+| Claiming "this org is on Industries Native" because all the files are `.os-meta.xml`. | The vault shows what was retrieved and exported, not which runtime the org runs — a Vlocity package with no export leaves its components out entirely. Check installed packages and `trust.limitations`, surface the disclosure verbatim, and do not infer the migration posture. |
 | Fabricating DecisionTable rows when the user asks "show me the rows". | `rows` is unconditionally `null` (Q179 anchor). Row data lives in CSV uploads / SObject records. Surface the verbatim refusal + the dataSourceType-specific hint; do NOT invent row content. |
 | Treating a `dispatchedActions[]` entry with `targetId: null` as "the OmniScript is broken". | A null `targetId` is a dangling reference — the target name is in the XML but no matching component is in the vault. Common for managed-package or cross-namespace targets. Surface the `targetRawName` and flag it as dangling, not as a defect. |
 | Reporting a REST endpoint URL as "this endpoint is reachable". | v3.2 surfaces the URL with `parsed` confidence from the JSON blob; it does NOT probe, verify, or resolve the Named Credential against live state. State the REST-reachability disclosure. |
 | Collapsing the DataRaptor per-row `confidence` into a single "this mapper is parsed" claim. | Per-row confidence is the load-bearing axis. A `declared` row came from a flat XML element; a `parsed` row used a designer-controlled colon-alias path that may not resolve to a real SObject. Cite each row's confidence; do not collapse. |
 | Dispatching `sfi.omniscript_flow` against an id that resolves to an OmniIntegrationProcedure. | The tool surfaces `invalid-query` "id resolved to type X, not Y". OmniScripts and IPs share the `<omniProcessElements>` shape but are distinct types with distinct tools. Re-route to `sfi.integration_procedure_chain`; do not retry. |
-| Trying to extract a `vlocity_cmt__OmniScript__c` component. | v3.2 scopes to Industries Native metadata XML. Vlocity-managed-package legacy components live as SObject records, not `.os-meta.xml` files. Surface the Q180 disclosure and point at v3.3+. |
+| Reporting a managed-package OmniScript as absent because a tool returned `component-not-found`. | Managed-package components are records: the vault has them only from a DataPack export under `org-kb/source/vlocity/`. Say it is missing for want of an export and give the recipe; never conclude it does not exist. |
 | Asserting "this FlexCard has no widgets" when the breakdown returns an empty `states[]`. | An empty `states[]` may mean a malformed / hand-edited / non-`layer-0` propertySetConfig (the best-effort parse degrades to empty rather than failing). Surface the propertySetConfig-parsing disclosure; suggest the user check the raw blob. |
 | Skipping the verbatim boundary on a "short" or "obvious" response. | The disclosures are the buyer's protection against treating a metadata read as runtime truth. ALWAYS surface every applicable disclosure, even when the answer feels complete. |
 | Routing "what calls this IP?" to a v3.2 tool. | The v3.2 tools walk OUTGOING `dispatchesOmniAction` edges (what THIS component dispatches). "What calls INTO this" is an incoming-edge walk — defer to `developer-find-anywhere` / `architect-impact-analysis`. |
@@ -629,17 +742,17 @@ v3.2 disclosures.
   v3.2 EXTENDS but does not replace — defer there for the declared
   integration tier.
 - `developer-find-anywhere` — for "what calls
-  `AccountLiniking_MPPValidation`?" (incoming `dispatchesOmniAction`
+  `Acme_ValidateMember`?" (incoming `dispatchesOmniAction`
   edges). v3.2's edges feed the find-anywhere walk without a special
   routing case — the edge type is in the union.
 - `architect-impact-analysis` — for "what breaks if I delete
-  `ExtractContactMPPMapper`?". v0.2's `sfi.get_impact` walks every
+  `AcmeExtractContact`?". v0.2's `sfi.get_impact` walks every
   incoming edge, including `dispatchesOmniAction`.
 - `developer-impact-and-reachability` — for "what breaks if I delete
   this OmniScript / IP". v2.7's walks consume v3.2's
   `dispatchesOmniAction` edges directly.
 - `business-user-orientation` — for the business-user phrasing ("what
-  happens when I click Submit on AccountLinking"). That routes here
+  happens when I click Submit on AcmeEnrollment"). That routes here
   to `sfi.omniscript_flow`; the business-user skill verifies intent
   before dispatching.
 
@@ -647,16 +760,21 @@ v3.2 disclosures.
 
 Before sending a response, confirm:
 
-- [ ] I classified the question into one of the five OmniStudio
-      shapes (OmniScript flow / IP chain / DataRaptor map / FlexCard
-      breakdown / DecisionTable parameters) and fired the right tool.
+- [ ] I classified the question into one of the OmniStudio shapes
+      (OmniScript flow / IP chain / DataRaptor map / FlexCard
+      breakdown / DecisionTable parameters / an inside-the-component
+      question for an `omni_*` model tool) and fired the right tool.
+- [ ] For a save / prefill / dead-reference / edit-block / completion /
+      path finding, I reported its `verdict` as given — `defect` only
+      when the tool said so, `unknown` with its `unknownReason`, never
+      upgraded.
 - [ ] When the user named a component without a type, I asked ONE
       disambiguation question listing the matching candidates across
       all five ComponentTypes before dispatching.
 - [ ] I surfaced every applicable verbatim disclosure: the
       Native-vs-Vlocity disclosure (EVERY tool); the record-level
       boundary (omniscript_flow, integration_procedure_chain,
-      decision_table_browse); the v3.3 Apex deferral (omniscript_flow,
+      decision_table_browse); the Apex-coupling scope (omniscript_flow,
       integration_procedure_chain); the REST-reachability disclosure
       (integration_procedure_chain); the propertySetConfig-parsing
       disclosure (omniuicard_widget_breakdown); the per-row confidence
@@ -675,12 +793,14 @@ Before sending a response, confirm:
 - [ ] For a cross-tool id mismatch (`invalid-query` "resolved to type
       X, not Y"), I re-routed to the correct tool rather than
       retrying.
-- [ ] For a Vlocity-managed-package id (`vlocity_cmt__*`), I refused
-      with the Q180 disclosure and pointed at v3.3+.
+- [ ] For a managed-package (Vlocity) component, I answered from its
+      DataPack-sourced node when the export is in the vault, and
+      otherwise said it is missing for want of an export (not absent
+      from the org) and gave the export recipe.
 - [ ] I cited every canonical id in backticks
-      (`OmniScript:AccountLinking_Existing_English_1`,
+      (`OmniScript:Acme_Enrollment_English_1`,
       `OmniIntegrationProcedure:...`, `OmniDataTransform:...`,
-      `OmniUiCard:...`, `DecisionTable:FPLFullTabe`).
+      `OmniUiCard:...`, `DecisionTable:AcmeIncomeThresholds`).
 - [ ] When the question was about the org-wide integration topology
       (named credentials, external data sources generally), I deferred
       to `architect-integration-topology`. When it was an

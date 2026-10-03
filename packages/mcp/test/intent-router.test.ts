@@ -1148,6 +1148,16 @@ describe('router ↔ roster contract (CI gate)', () => {
   // neither routable nor grandfathered fails here — which is exactly the gap
   // that left the 11 Phase-11 access/UI tools unrouted until P12.
   const GRANDFATHERED_NON_ROUTABLE = new Set<string>([
+    // OmniStudio model tools — reachable via the hybrid-mode semantic funnel
+    // (see funnel-utterances.ts); the demoted regex router is not grown for
+    // them (BUILD-CONTRACT: the funnel is the router).
+    'sfi.omni_model', 'sfi.omni_save_trace', 'sfi.omni_dead_references',
+    'sfi.omni_version_diff', 'sfi.omni_edit_block_audit', 'sfi.omni_completion_audit',
+    'sfi.omni_form_spec', 'sfi.omni_path_simulator', 'sfi.omni_prefill_trace', 'sfi.omni_changed_since',
+    // Record-delete impact (spec F7) and persona unused grants (F6) — funnel-routed for the same reason.
+    'sfi.record_delete_impact', 'sfi.persona_unused_grants',
+    // F8: live verification of one claim, and click paths — funnel-routed.
+    'sfi.live_verify', 'sfi.how_to_see',
     // Meta / front-door / plumbing (never a question's primary answer):
     'sfi.route_question', 'sfi.synthesize_answer',
     'sfi.get_manifest', 'sfi.export_manifest', 'sfi.baseline_acknowledge',

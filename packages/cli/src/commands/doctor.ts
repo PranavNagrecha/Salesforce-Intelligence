@@ -19,6 +19,8 @@ import {
 } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
+import { projectDirForAction, VAULT_OPTION_HELP } from '../vault-option.js';
+
 import { FEEDBACK_ISSUES_URL } from './feedback.js';
 import { ORG_ALIAS_RE } from './org-alias.js';
 import {
@@ -538,8 +540,11 @@ export const registerDoctorCommand = (program: Command): void => {
   program
     .command('doctor')
     .description('Diagnose the sf-intelligence setup (CLI, vault, org auth, freshness) with fixes')
-    .action(async (): Promise<void> => {
-      const report = await runDoctor({ cwd: process.cwd() });
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (flags: { vault?: string }): Promise<void> => {
+      const cwd = projectDirForAction(flags);
+      if (cwd === null) return;
+      const report = await runDoctor({ cwd });
       process.stdout.write(formatDoctorReport(report));
       if (!report.healthy) process.exit(1);
     });

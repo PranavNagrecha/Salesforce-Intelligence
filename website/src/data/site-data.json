@@ -1,40 +1,40 @@
 {
-  "generatedAt": "2026-09-01T16:00:03.467Z",
+  "generatedAt": "2026-10-03T18:18:42.266Z",
   "version": "0.3.3",
-  "toolCount": 217,
+  "toolCount": 231,
   "skillCount": 26,
   "agentCount": 4,
   "commandCount": 5,
   "componentTypeCount": 103,
   "edgeTypeCount": 23,
-  "conceptCount": 143,
-  "conceptRuleCount": 195,
+  "conceptCount": 153,
+  "conceptRuleCount": 207,
   "tests": {
     "packages": [
       {
         "name": "mcp",
-        "files": 318,
-        "cases": 7549
+        "files": 328,
+        "cases": 7638
       },
       {
         "name": "extractors",
-        "files": 87,
-        "cases": 1196
+        "files": 94,
+        "cases": 1260
       },
       {
         "name": "cli",
-        "files": 46,
-        "cases": 522
+        "files": 48,
+        "cases": 539
       },
       {
         "name": "graph",
-        "files": 28,
-        "cases": 382
+        "files": 29,
+        "cases": 397
       },
       {
         "name": "parsers",
-        "files": 9,
-        "cases": 240
+        "files": 10,
+        "cases": 247
       },
       {
         "name": "patterns",
@@ -43,8 +43,8 @@
       },
       {
         "name": "vault",
-        "files": 11,
-        "cases": 156
+        "files": 12,
+        "cases": 159
       },
       {
         "name": "renderers",
@@ -62,10 +62,10 @@
         "cases": 81
       }
     ],
-    "totalCases": 10547,
-    "totalFiles": 522,
+    "totalCases": 10742,
+    "totalFiles": 544,
     "packageCount": 10,
-    "approx": 10500
+    "approx": 10700
   },
   "integrationSuiteCount": 5,
   "gates": [
@@ -90,32 +90,32 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 318,
-      "cases": 7549,
-      "description": "The 217 read-only tools + router + grounding layer"
+      "files": 328,
+      "cases": 7638,
+      "description": "The 231 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 87,
-      "cases": 1196,
+      "files": 94,
+      "cases": 1260,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
-      "files": 46,
-      "cases": 522,
+      "files": 48,
+      "cases": 539,
       "description": "The sfi command-line tool"
     },
     {
       "name": "graph",
-      "files": 28,
-      "cases": 382,
+      "files": 29,
+      "cases": 397,
       "description": "The DuckDB dependency-graph engine"
     },
     {
       "name": "parsers",
-      "files": 9,
-      "cases": 240,
+      "files": 10,
+      "cases": 247,
       "description": "Formula / SOQL / source tokenizers"
     },
     {
@@ -126,8 +126,8 @@
     },
     {
       "name": "vault",
-      "files": 11,
-      "cases": 156,
+      "files": 12,
+      "cases": 159,
       "description": "Vault layout, manifest, freshness"
     },
     {

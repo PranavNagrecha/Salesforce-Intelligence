@@ -75,13 +75,21 @@ export interface BlindSpot {
  *                  inactive-but-heavily-depended-on component read identically
  *                  to a genuinely inert one.
  */
-export type Verdict =
-  | 'safe'
-  | 'review'
-  | 'risky'
-  | 'blocking'
-  | 'unknown'
-  | 'already-inactive';
+export const VERDICTS = ['safe', 'review', 'risky', 'blocking', 'unknown', 'already-inactive'] as const;
+
+/** One value of {@link VERDICTS}. */
+export type Verdict = (typeof VERDICTS)[number];
+
+/**
+ * The structural verdicts — every {@link Verdict} but the runtime-state one. A
+ * tool answering `already-inactive` carries one of these as its
+ * `structuralVerdict`. Runtime lists so harnesses and renderers read the
+ * vocabulary from here instead of re-typing it (a re-typed copy went stale and
+ * graded the runtime-state verdict as a broken envelope).
+ */
+export const STRUCTURAL_VERDICTS: readonly Exclude<Verdict, 'already-inactive'>[] = VERDICTS.filter(
+  (v): v is Exclude<Verdict, 'already-inactive'> => v !== 'already-inactive',
+);
 
 /**
  * The result envelope every `what_if_*` tool's `data` payload conforms to

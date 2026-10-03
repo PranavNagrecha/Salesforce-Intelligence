@@ -106,6 +106,7 @@ import {
   extractWaveXmd,
   extractWebLink,
   extractWorkflowRule,
+  omnistudio,
   UNRESOLVED_PROFILE_PREFIX,
 } from '@sf-intelligence/extractors';
 import {
@@ -622,8 +623,14 @@ const dispatchFile = (
     const parentDir = segments[segments.length - 1];
     if (parentDir === 'lwc') return 'LightningComponentBundle';
     if (parentDir === 'aura') return 'AuraDefinitionBundle';
-    return null;
+    // A managed-package (Vlocity) DataPack folder — `<Kind>/<Key>/` — is one
+    // OmniStudio component; its extractor reads the main file and siblings.
+    return omnistudio.dataPackComponentType(segments, fileName, true);
   }
+  // The DataPack's main file itself (`<Kind>/<Key>/<Key>_DataPack.json`), for
+  // callers that classify by file (deletion reconcile, review-change).
+  const dataPackType = omnistudio.dataPackComponentType(segments, fileName, false);
+  if (dataPackType !== null) return dataPackType;
   if (segments.includes('objects')) {
     if (segments.includes('fields') && fileName.endsWith('.field-meta.xml')) return 'CustomField';
     if (segments.includes('validationRules') && fileName.endsWith('.validationRule-meta.xml')) return 'ValidationRule';
@@ -909,6 +916,15 @@ interface WalkedEntry {
   readonly isDirectory: boolean;
 }
 
+/** True when a directory holds a Vlocity DataPack main file (`*_DataPack.json`). */
+const holdsDataPack = async (dir: string): Promise<boolean> => {
+  try {
+    return (await readdir(dir)).some((name) => omnistudio.isDataPackPath(name));
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Recursively walk `currentDir` in alphabetical order, appending each
  * regular file (or v1.4 bundle directory) to `found`. Hidden entries
@@ -939,12 +955,15 @@ const walkDir = async (currentDir: string, found: WalkedEntry[]): Promise<void> 
   // both fewer string ops and immune to path-segment splits.
   const currentName = basename(currentDir);
   const isBundleParent = BUNDLE_PARENT_DIRS.has(currentName);
+  const isDataPackParent = omnistudio.dataPackKindOfDir(currentName) !== null;
   for (const entry of sorted) {
     const abs = join(currentDir, entry.name);
     if (entry.isDirectory()) {
-      if (isBundleParent) {
-        // Bundle directory: emit as a single dispatch unit; do NOT
-        // recurse. The bundle extractor reads the children itself.
+      if (isBundleParent || (isDataPackParent && (await holdsDataPack(abs)))) {
+        // Bundle directory (an LWC / Aura bundle, or a Vlocity DataPack
+        // folder): emit as a single dispatch unit; do NOT recurse. The
+        // extractor reads the children itself — and a DataPack's sibling
+        // files (`…_PropertySet.json`, `…_Mappings.json`) are part of it.
         found.push({ path: abs, isDirectory: true });
       } else {
         await walkDir(abs, found);

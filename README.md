@@ -199,7 +199,7 @@ flowchart TB
     end
 
     subgraph CONCEPT["Concept Model — ships with the package · no org data, ever"]
-        CM[["Graph B · Concept Model<br/>143 org-independent concepts / 195 rules<br/>save-order · relationships · sharing · code-shape"]]
+        CM[["Graph B · Concept Model<br/>153 org-independent concepts / 207 rules<br/>save-order · relationships · sharing · code-shape"]]
     end
 
     subgraph ASK["Ask — every question, offline on your machine"]
@@ -226,7 +226,7 @@ org is the only one that can touch Salesforce, and only after you opt in.
 Retrieval (`route_question → sfi.* → synthesize_answer`) reports *what's in the
 org*; the reasoning path (`resolve → interpret → synthesize_answer`) reports
 *what its shape implies*. `sfi.interpret` is a deterministic, offline **join** of
-the org-independent **Concept Model** (Graph B — 143 concepts / 195 rules, which
+the org-independent **Concept Model** (Graph B — 153 concepts / 207 rules, which
 never touches your org) against a grounded slice of the vault (Graph A); it runs
 with no LLM and no live read, and every claim it feeds `synthesize_answer` is
 cited and confidence-tiered. The deterministic `SFI_ROUTER_MODE=offline` mode
@@ -240,8 +240,8 @@ that two active before-save flows on one object run in an **undefined order**, o
 that an `@AuraEnabled` method is an entry point where Apex does not auto-enforce
 field-level security. SfIntelligence answers those with a small second graph.
 
-Alongside the org's grounded vault, the product ships a **Concept Model**: **143**
-org-independent, curated concepts and **195** rules that encode general Salesforce
+Alongside the org's grounded vault, the product ships a **Concept Model**: **153**
+org-independent, curated concepts and **207** rules that encode general Salesforce
 truth — save-order phases, relationship semantics, sharing posture, code-shape
 signals. No org data lives in it; the org enters reasoning **only** through the
 grounded slice at query time. The `sfi.interpret` tool **joins** the two: it
@@ -362,7 +362,7 @@ answer carries a known-coverage caveat instead of a silent blind spot.
 | --- | --- |
 | **MCP roster** | Every `sfi.*` tool is registered in code; run `sfi.capabilities` (see `productManifest`) for the live registered/advertised counts — never a handwritten number |
 | **Graph model** | A broad `ComponentType` union across **103** component types (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by **23** typed edge types — see `sfi.capabilities` for how tools group those families. Counts are pinned by `eval/product-manifest.json`. |
-| **Concept Model** | Concept Model (143 concepts / 195 rules) — org-independent, curated — JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret`. No org data lives in the model. Same figures in `eval/product-manifest.json`. |
+| **Concept Model** | Concept Model (153 concepts / 207 rules) — org-independent, curated — JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret`. No org data lives in the model. Same figures in `eval/product-manifest.json`. |
 | **26** | skills + **5** slash commands + **4** subagents (Claude Code plugin layer) that auto-activate in a session |
 
 ## What it does NOT do

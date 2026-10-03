@@ -298,25 +298,15 @@ describe('analyzeOversizeEnumeration', () => {
    * tool joins it deliberately and one that quietly acquires a `limit` fails the
    * build instead of enlarging it.
    *
-   * Each entry gained a caller-facing page window in 0.3.3 and is not yet in
-   * `HIGH_FANOUT_INVENTORY`, because registering a tool there additionally demands
-   * a real-org high-fanout probe, and those live in the QA-harness repo:
+   * EMPTY since the OmniStudio wave. The five tools that gained a page window in
+   * 0.3.3 (compare_profile_across_vaults, annotations, review_annotations,
+   * compare_vaults, generate_compliance_report) each got an inventory row WITH a
+   * real-org probe in the QA harness (tool-smoke HIGH_FANOUT; the cross-vault
+   * pair runs against two registered vaults) — the DoD this list set.
    *
-   *   sfi.compare_profile_across_vaults  `limit` + `cursor` — its grant arrays
-   *       became real when the tool started reading `grantedBy` edges.
-   *   sfi.annotations / sfi.review_annotations  `limit` + `offset` + `cursor` —
-   *       the annotation store had no page window at all; an org with a large
-   *       annotation history returned a silently-cut list.
-   *   sfi.compare_vaults  `limit` + `offset` + `cursor` — its fast path shipped
-   *       more rows than the per-bucket cap while its disclosure still read
-   *       "complete diff".
-   *   sfi.generate_compliance_report  `limit` + `offset` + `cursor` — it
-   *       advertised NO arguments at all while its own Truncation Note told the
-   *       reader to re-run with `objectFilter`, so the dropped sections were
-   *       unreachable by any call. Found by asking a real question of a real org.
-   *
-   * DoD for removing an entry: add its inventory row WITH a real-org probe, not
-   * by deleting the name from this list.
+   * DoD for adding an entry: none — a new paginated tool goes straight into
+   * `HIGH_FANOUT_INVENTORY` with its probe, or into LIMIT_TOOL_EXCLUSIONS with a
+   * reason.
    */
   it('the `declares limit but unregistered` backlog is exactly the known list', () => {
     const { violations } = analyzeOversizeEnumeration(V01_TOOLS, allProbes());
@@ -324,12 +314,6 @@ describe('analyzeOversizeEnumeration', () => {
       .filter((v) => v.message.includes('is not in HIGH_FANOUT_INVENTORY'))
       .map((v) => v.tool)
       .sort();
-    expect(backlog).toEqual([
-      'sfi.annotations',
-      'sfi.compare_profile_across_vaults',
-      'sfi.compare_vaults',
-      'sfi.generate_compliance_report',
-      'sfi.review_annotations',
-    ]);
+    expect(backlog).toEqual([]);
   });
 });

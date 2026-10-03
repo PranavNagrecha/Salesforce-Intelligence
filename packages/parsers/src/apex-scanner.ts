@@ -118,6 +118,29 @@ export interface EventSubscription {
 }
 
 /**
+ * A call from Apex INTO OmniStudio's runtime: `<ns>.IntegrationProcedureService
+ * .runIntegrationService('Type_SubType', input, options)` runs an Integration
+ * Procedure by its key, and `<ns>.DRGlobal.process(input, 'Bundle')` /
+ * `processObjectsJSON(json, 'Bundle')` runs a DataRaptor by its bundle name.
+ *
+ * `namespace` is the identifier written before the class (`omnistudio`,
+ * `vlocity_cmt`, … — or a variable, or null when none): the scanner reports
+ * what is written and the extractor decides which namespaces are OmniStudio's.
+ * `target` is the key / bundle when that argument is a STATIC string literal,
+ * else null (a key built at runtime is honestly not resolved). `offset` and
+ * `length` span `[ns.]Class.method(` in the original source.
+ */
+export interface OmniStudioApexCall {
+  readonly kind: 'integration-procedure' | 'data-mapper';
+  readonly namespace: string | null;
+  readonly className: 'IntegrationProcedureService' | 'DRGlobal';
+  readonly methodName: string;
+  readonly target: string | null;
+  readonly offset: number;
+  readonly length: number;
+}
+
+/**
  * The structured success payload from `scanApexSource`.
  *
  * `fieldAccesses` is deduplicated by `(object, field)` partitioned by
@@ -153,6 +176,11 @@ export interface ApexScannerOutput {
    * the consumer can disclose how many dynamic subscriptions were skipped.
    */
   readonly eventSubscriptions: readonly EventSubscription[];
+  /**
+   * Calls into OmniStudio's runtime services (Integration Procedures and
+   * DataRaptors run by name). Every occurrence, in source order.
+   */
+  readonly omniStudioCalls: readonly OmniStudioApexCall[];
   readonly methodBodyCount: number;
 }
 
@@ -254,6 +282,13 @@ const SOBJECT_INSTANCE_METHODS = new Set<string>([
  * (CALL-GRAPH-PHANTOM-SCHEMA-FIELDS).
  */
 const SCHEMA_DESCRIBE_MEMBERS = new Set<string>(['fields', 'fieldSets']);
+// `Schema.SObjectType.Account.getRecordTypeInfosByName()`,
+// `Schema.SObjectType.Account.fields.Name.getDescribe()`: in a describe chain
+// the token before `.method(` is an sObject or field NAME — never an Apex class.
+// A call whose receiver directly follows one of these qualifiers is dropped, so
+// the idiom no longer mints a phantom `callsApex ApexClass:Account` (it did, in
+// every org that reads record-type infos this way).
+const DESCRIBE_CHAIN_QUALIFIER = /\b(?:SObjectType|fields|fieldSets)\s*\.\s*$/i;
 
 // Match line comments, block comments, and single-quoted strings.
 // Block comments do not nest in Apex; strings honor `\` escapes.
@@ -666,6 +701,8 @@ const scanBody = (
     writeOffsets.add(emitAccess(ctx, 'write', match));
   }
   for (const match of sweepPairs(METHOD_CALL_PATTERN, body, start)) {
+    const rel = match.absOffset - start;
+    if (DESCRIBE_CHAIN_QUALIFIER.test(body.slice(Math.max(0, rel - 40), rel))) continue;
     emitCall(ctx, match);
   }
   for (const match of sweepPairs(READ_PATTERN, body, start)) {
@@ -815,6 +852,102 @@ const scanEventSubscriptions = (
   return out;
 };
 
+// `[ns.]IntegrationProcedureService.<method>(` / `[ns.]DRGlobal.<method>(`,
+// matched on the comment/string-stripped source (a commented-out call cannot
+// match). Group 1 = the qualifier before the class (a namespace, or whatever
+// identifier is written there), group 2 = the class, group 3 = the method.
+const OMNISTUDIO_RUNTIME_CALL_PATTERN =
+  /(?:\b([A-Za-z][A-Za-z0-9_]*)\s*\.\s*)?\b(IntegrationProcedureService|DRGlobal)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
+/** Which argument holds the callable name, per runtime method. */
+const OMNISTUDIO_TARGET_ARG: Readonly<Record<string, { readonly kind: OmniStudioApexCall['kind']; readonly index: number }>> = {
+  'IntegrationProcedureService.runIntegrationService': { kind: 'integration-procedure', index: 0 },
+  'DRGlobal.process': { kind: 'data-mapper', index: 1 },
+  'DRGlobal.processObjectsJSON': { kind: 'data-mapper', index: 1 },
+};
+
+/**
+ * The `index`-th argument of a call whose argument list starts at `argStart`
+ * (just after its `(`), when that argument is exactly one static
+ * single-quoted string literal; else null. The argument STRUCTURE (brackets,
+ * commas) is read from `stripped`, where comments and string contents are
+ * blanked at the same offsets — so a comma, bracket or apostrophe inside a
+ * string or a comment never splits or derails it — and the literal itself is
+ * read from the original `source`.
+ */
+const literalArgument = (
+  source: string,
+  stripped: string,
+  argStart: number,
+  end: number,
+  index: number,
+): string | null => {
+  let depth = 0;
+  // Generic type arguments (`new Map<String, Object>{…}`) hold commas too. Apex
+  // writes a generic as `Identifier<Type…>`, so `<` opens one only right after
+  // an identifier and before a type name — a comparison (`a < b`) or a map
+  // arrow (`'k' => v`) does not.
+  let angle = 0;
+  let argIndex = 0;
+  let segmentStart = argStart;
+  for (let i = argStart; i < end; i += 1) {
+    const c = stripped[i];
+    if (c === '<' && /[A-Za-z0-9_]/.test(stripped[i - 1] ?? '') && /^\s*[A-Za-z]/.test(stripped.slice(i + 1, i + 40))) {
+      angle += 1;
+      continue;
+    }
+    if (c === '>' && angle > 0) {
+      angle -= 1;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if ((c === ')' || c === ']' || c === '}') && depth > 0) depth -= 1;
+    else if ((c === ',' || c === ')') && depth === 0 && angle === 0) {
+      if (argIndex === index) {
+        const m = /^\s*'((?:\\[\s\S]|[^'\\])*)'\s*$/.exec(source.slice(segmentStart, i));
+        return m?.[1] ?? null;
+      }
+      if (c === ')') return null;
+      argIndex += 1;
+      segmentStart = i + 1;
+    }
+  }
+  return null;
+};
+
+/**
+ * Every call from Apex into OmniStudio's runtime services, in source order
+ * (see {@link OmniStudioApexCall}). Methods without a known target argument
+ * are skipped; a non-literal target is reported with `target: null`.
+ */
+const scanOmniStudioCalls = (
+  source: string,
+  stripped: string,
+  start: number,
+  end: number,
+): OmniStudioApexCall[] => {
+  const out: OmniStudioApexCall[] = [];
+  OMNISTUDIO_RUNTIME_CALL_PATTERN.lastIndex = start;
+  let m: RegExpExecArray | null;
+  while ((m = OMNISTUDIO_RUNTIME_CALL_PATTERN.exec(stripped)) !== null) {
+    if (m.index >= end) break;
+    const className = m[2] as OmniStudioApexCall['className'];
+    const methodName = m[3] as string;
+    const spec = OMNISTUDIO_TARGET_ARG[`${className}.${methodName}`];
+    if (spec === undefined) continue;
+    out.push({
+      kind: spec.kind,
+      namespace: m[1] ?? null,
+      className,
+      methodName,
+      target: literalArgument(source, stripped, m.index + m[0].length, end, spec.index),
+      offset: m.index,
+      length: m[0].length,
+    });
+  }
+  return out;
+};
+
 /**
  * Scan Apex source for field accesses and method calls using a pure
  * regex / brace-balanced heuristic. Suitable for the v0.3 release —
@@ -920,6 +1053,7 @@ export const scanApexSource = (
       outerOpen,
       outerClose,
     ),
+    omniStudioCalls: scanOmniStudioCalls(source, stripped, outerOpen, outerClose),
     methodBodyCount: bodies.length,
   });
 };

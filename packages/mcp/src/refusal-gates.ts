@@ -280,16 +280,23 @@ const WRITE_CHAINED_DUPE_DELETE =
 const RUN_VERB = '(?:run|re-?run|execute|invoke|kick\\s+off|trigger|launch|fire\\s+off)';
 const RUN_TARGET =
   '(?:flows?|triggers?|batch(?:\\s+(?:jobs?|class(?:es)?|apex))?|jobs?|apex\\s+class(?:es)?|automations?|scripts?)';
+// The executable noun must BE the thing run, not the modifier of an analysis
+// NAME: "Run automation risk for regression", "execute the flow audit", "run
+// the trigger collision report" are reads of an analysis ABOUT automation —
+// the product's own automation-risk rule routes "run automation risk".
+const RUN_ANALYSIS_HEAD =
+  '(?:risks?|reports?|audits?|analysis|analyses|scans?|scores?|reviews?|inventory|summary|overview|coverage|collisions?|conflicts?|density|sprawl|health|debt|gaps?|order|landscape|catalog|census|metrics|assessment|readiness)';
+const RUN_TARGET_HEAD = `${RUN_TARGET}\\b(?!\\s+${RUN_ANALYSIS_HEAD}\\b)`;
 // Verb→target gap: tempered so a PREPOSITION between verb and target breaks
 // the match — "run the NUMBERS ON flows" (an analysis ask about flows) never
 // reads as "run the flow". q1537's "Run the <name> flow" has no preposition.
 const RUN_GAP = "(?:(?!\\b(?:on|of|for|across|against|in|over|about)\\b)[^.?!;]){0,60}?";
 const RUN_IMPERATIVE_INITIAL = new RegExp(
-  `(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?(${RUN_VERB}\\b${RUN_GAP}\\b${RUN_TARGET}\\b[^.?!;]{0,60})`,
+  `(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?(${RUN_VERB}\\b${RUN_GAP}\\b${RUN_TARGET_HEAD}[^.?!;]{0,60})`,
   'i',
 );
 const RUN_IMPERATIVE_LEAD_IN = new RegExp(
-  `\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?(${RUN_VERB}\\b${RUN_GAP}\\b${RUN_TARGET}\\b[^.?!;]{0,60})`,
+  `\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?(${RUN_VERB}\\b${RUN_GAP}\\b${RUN_TARGET_HEAD}[^.?!;]{0,60})`,
   'i',
 );
 // R3 boundary recovery — BARE-ANAPHOR run imperative ("can you run it?",
@@ -711,6 +718,24 @@ const DRAFT_DOCUMENT_ASK =
 // guidance, not this org's metadata.
 const CAREER_ASK = /\bhow\s+do\s+i\s+become\b/i;
 
+// Another platform's OWN artifacts — "how many SAP tables do we have", "our
+// ServiceNow tickets". Only the platform + one of its native nouns gates, so an
+// integration question about the platform ("which named credential calls SAP")
+// stays routed.
+const OTHER_PLATFORM_DATA =
+  /\b(sap|oracle|workday|servicenow|netsuite|postgres(?:ql)?|mysql|snowflake|sql\s+server)\s+(?:tables?|schemas?|databases?|instances?|tickets?|modules?|transactions?)\b/i;
+// Rating PEOPLE ("who is the best admin at my company") — an opinion about
+// people, not metadata. "best practice" asks are not gated.
+const PEOPLE_RATING_ASK =
+  /\bwho(?:'s|\s+is|\s+are)\s+(?:the\s+)?(?:best|worst|smartest|laziest|most\s+(?:productive|skilled|talented))\b/i;
+// A purchasing decision ("should I buy more Salesforce licenses") — license
+// USAGE is live data the product reads; whether to BUY is not.
+const PURCHASE_ASK =
+  /\b(?:should\s+(?:i|we)\s+)?(?:buy|purchase|order)\s+(?:more\s+|additional\s+|extra\s+)?(?:salesforce\s+)?licen[cs]es?\b/i;
+// General knowledge and chit-chat with no org in it.
+const GENERAL_KNOWLEDGE_ASK =
+  /\bmeaning\s+of\s+life\b|\btell\s+me\s+a\s+joke\b|\bwrite\s+(?:me\s+)?a\s+(?:poem|song|haiku|limerick|story)\b|\bweather\s+(?:in|today|tomorrow|forecast)\b/i;
+
 const outOfScopeDisclosure = (topic: string): string =>
   `OUT OF SCOPE: sf-intelligence answers questions about this org's Salesforce ` +
   `metadata. ${topic} is outside that boundary (no external systems, no policy ` +
@@ -854,9 +879,18 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
 
   // 4 — out of scope.
   const externalSystem = EXTERNAL_SYSTEM.exec(q)?.[1];
+  const otherPlatform = OTHER_PLATFORM_DATA.exec(q)?.[1];
   const outOfScopeTopic =
     externalSystem !== undefined
       ? `"${externalSystem}"`
+      : otherPlatform !== undefined
+        ? `Another platform's own data ("${otherPlatform}")`
+      : PEOPLE_RATING_ASK.test(q)
+        ? 'An opinion about people'
+      : PURCHASE_ASK.test(q)
+        ? 'A purchasing decision'
+      : GENERAL_KNOWLEDGE_ASK.test(q)
+        ? 'General knowledge'
       : RETENTION_POLICY_ASK.test(q)
         ? 'A data-retention policy (organizational governance, not org metadata)'
         : CONSENT_PROCESS_ASK.test(q)

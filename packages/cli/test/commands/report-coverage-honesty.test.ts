@@ -133,6 +133,60 @@ describe('the written manifest never carries an unprovable report zero (end to e
       await rm(cwd, { recursive: true, force: true });
     }
   }, 30_000);
+
+  // A7 STAGED-honesty regression: every refresh that pulled no reports READ the
+  // previous manifest's capped-retrieve evidence but did not WRITE it on, so the
+  // second offline refresh in a row — or the final tier of a staged build —
+  // regressed Report / Dashboard to `pending` that a single refresh of the same
+  // source reported as captured. Offline refreshes must be idempotent.
+  it('carries the last pull\'s reportsCap evidence across consecutive --no-pull refreshes', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-report-cov-carry-'));
+    try {
+      const vaultRoot = join(cwd, 'org-kb');
+      await mkdir(join(vaultRoot, 'meta'), { recursive: true });
+      await writeFile(
+        join(vaultRoot, 'meta', 'config.json'),
+        JSON.stringify({ targetOrg: 'test-org', vaultRoot, version: '0.1.0', createdAt: '2026-10-03T00:00:00.000Z' }),
+        'utf8',
+      );
+      const objectDir = join(vaultRoot, 'source', 'objects', 'Only__c');
+      await mkdir(objectDir, { recursive: true });
+      await writeFile(
+        join(objectDir, 'Only__c.object-meta.xml'),
+        '<?xml version="1.0" encoding="UTF-8"?>\n<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">\n<deploymentStatus>Deployed</deploymentStatus>\n<label>Only</label>\n<nameField><label>Name</label><type>Text</type></nameField>\n<pluralLabel>Onlys</pluralLabel>\n<sharingModel>ReadWrite</sharingModel>\n</CustomObject>\n',
+        'utf8',
+      );
+      expect((await runRefresh({ cwd, noPull: true })).status).toBe('success');
+
+      // The evidence a real (capped) report pull left behind.
+      const evidence = {
+        reports: { total: 4277, requested: 285, retrieved: 285 },
+        dashboards: { total: 81, requested: 73, retrieved: 73 },
+      };
+      const first = await loadManifest(vaultRoot);
+      if (!first.ok) throw new Error(first.error.message);
+      await writeFile(
+        join(vaultRoot, 'meta', 'manifest.json'),
+        JSON.stringify({ ...first.value, reportsCap: evidence }, null, 2),
+        'utf8',
+      );
+
+      for (const run of [2, 3]) {
+        expect((await runRefresh({ cwd, noPull: true })).status).toBe('success');
+        const loaded = await loadManifest(vaultRoot);
+        if (!loaded.ok) throw new Error(loaded.error.message);
+        const byType = rows(loaded.value.coverage ?? []);
+        expect({ run, pending: byType.get('Report')?.pending }).toEqual({ run, pending: undefined });
+        expect(byType.get('Report')?.capped).toBe(true);
+        expect(byType.get('Report')?.retrieved).toBe(285);
+        expect(byType.get('Dashboard')?.capped).toBe(true);
+        // ...because the manifest itself still holds the evidence for the next run.
+        expect((loaded.value as VaultManifest & { reportsCap?: unknown }).reportsCap).toEqual(evidence);
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe('buildCoverageEntries — a fold-erased type can never read as confirmed-empty', () => {

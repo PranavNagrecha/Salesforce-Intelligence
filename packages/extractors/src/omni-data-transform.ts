@@ -10,6 +10,7 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { extractMapperDataPack, isDataPackSource } from './datapack-extract.js';
 import { deriveComponentApiName } from './path-utils.js';
 
 const FILE_SUFFIX = '.rpt-meta.xml';
@@ -192,6 +193,62 @@ const buildSObjectReferenceEdge = (
 });
 
 /**
+ * Mapper types whose `inputFieldName` colon prefix names an EXTRACT ALIAS
+ * (a designer-chosen name bound to an SObject by an extract step). For every
+ * other type the prefix is a node of the input JSON.
+ */
+const EXTRACT_TYPES: ReadonlySet<string> = new Set(['Extract', 'Turbo Extract']);
+
+/**
+ * True for an Extract / Turbo Extract mapper. The raw `<type>` carries the
+ * short form; `<interfaceClass>`, when present, may carry the class form
+ * (`omnistudio.DataRaptorExtract`), so both are read.
+ */
+const isExtractMapper = (
+  interfaceClass: string | null,
+  operationType: string | null,
+): boolean => {
+  for (const raw of [operationType, interfaceClass]) {
+    if (raw === null) continue;
+    const v = raw.trim();
+    if (EXTRACT_TYPES.has(v) || /DataRaptor(Turbo)?Extract$/.test(v)) return true;
+  }
+  return false;
+};
+
+/** True when the item's output lands in JSON rather than on an SObject. */
+const isJsonOutput = (item: Record<string, unknown>): boolean => {
+  const out = optionalString(item, 'outputObjectName');
+  return out === null || NON_SOBJECT_OBJECT_NAMES.has(out.trim());
+};
+
+/**
+ * Bind each extract alias to the SObject its extract step reads. An Extract
+ * mapper declares a step as an item carrying `<inputObjectName>` (the
+ * SObject, plus its filter) whose `<outputFieldName>` is the alias the
+ * mapping rows then address as `alias:Field`. Two steps binding one alias to
+ * different objects make the alias ambiguous; it is dropped, never guessed.
+ */
+const extractAliasMap = (
+  items: readonly Record<string, unknown>[],
+): ReadonlyMap<string, string> => {
+  const map = new Map<string, string | null>();
+  for (const item of items) {
+    const object = optionalString(item, 'inputObjectName')?.trim() ?? '';
+    const alias = optionalString(item, 'outputFieldName')?.trim() ?? '';
+    if (object.length === 0 || alias.length === 0) continue;
+    if (NON_SOBJECT_OBJECT_NAMES.has(object)) continue;
+    const key = alias.split(':')[0] ?? alias;
+    const existing = map.get(key);
+    if (existing === undefined) map.set(key, object);
+    else if (existing !== object) map.set(key, null);
+  }
+  const resolved = new Map<string, string>();
+  for (const [alias, object] of map) if (object !== null) resolved.set(alias, object);
+  return resolved;
+};
+
+/**
  * Walk every `<omniDataTransformItem>` row and the top-level
  * `<sourceObject>` element, collect distinct SObject candidates, and
  * emit one `references` edge per candidate.
@@ -200,6 +257,17 @@ const buildSObjectReferenceEdge = (
  * edges to source/target SObjects via the field-mapping rows (parsing
  * the colon-separated path convention) PLUS the direct SObject element
  * surfaces (`<sourceObject>`, `<inputObjectName>`, `<outputObjectName>`).
+ *
+ * The colon prefix of a field path is an SObject candidate ONLY where the
+ * path addresses records:
+ *   - `inputPathAlias`: Extract mappers only, and only when the prefix is an
+ *     extract alias bound to an SObject by an extract step — the edge then
+ *     targets that SObject, not the alias. For Transform and Load mappers
+ *     the input is JSON and the prefix is a JSON node (an Edit Block, a
+ *     step output); minting `CustomObject:{node}` from it fabricated a
+ *     phantom object per JSON container.
+ *   - `outputPathAlias`: only for rows whose output is an SObject. A JSON
+ *     output path's prefix is a JSON node for the same reason.
  *
  * Per `OmniDataTransform.md` §"Edge emission rules": NO
  * `dispatchesOmniAction` edges — DataRaptors are leaf-of-the-chain.
@@ -218,7 +286,9 @@ const buildEdges = (
   rootObj: Record<string, unknown>,
   items: readonly Record<string, unknown>[],
   fromId: string,
+  isExtract: boolean,
 ): Edge[] => {
+  const aliases = isExtract ? extractAliasMap(items) : new Map<string, string>();
   // (targetApiName, confidence, role) -> Edge
   const dedup = new Map<string, Edge>();
   const addEdge = (
@@ -249,20 +319,22 @@ const buildEdges = (
       'declared',
       'outputObject',
     );
-    // Colon-prefix of <inputFieldName> path — parsed confidence (alias
-    // may not be a real SObject API name; the path convention is
-    // designer-controlled per OmniDataTransform.md).
-    addEdge(
-      colonAlias(optionalString(item, 'inputFieldName')),
-      'parsed',
-      'inputPathAlias',
-    );
-    // Colon-prefix of <outputFieldName> path — parsed confidence.
-    addEdge(
-      colonAlias(optionalString(item, 'outputFieldName')),
-      'parsed',
-      'outputPathAlias',
-    );
+    // Colon-prefix of <inputFieldName> path — parsed confidence. Only an
+    // Extract's alias addresses records; it is replaced by the SObject its
+    // extract step binds, and an unbound prefix emits nothing.
+    if (isExtract) {
+      const alias = colonAlias(optionalString(item, 'inputFieldName'));
+      addEdge(alias === null ? null : aliases.get(alias) ?? null, 'parsed', 'inputPathAlias');
+    }
+    // Colon-prefix of <outputFieldName> path — parsed confidence, and only
+    // when the row writes an SObject (a JSON output path names JSON nodes).
+    if (!isJsonOutput(item)) {
+      addEdge(
+        colonAlias(optionalString(item, 'outputFieldName')),
+        'parsed',
+        'outputPathAlias',
+      );
+    }
   }
 
   return [...dedup.values()].sort((a, b) => {
@@ -272,6 +344,156 @@ const buildEdges = (
     const bRole = String((b.properties as { role?: string }).role ?? '');
     return aRole < bRole ? -1 : aRole > bRole ? 1 : 0;
   });
+};
+
+/** True for a Load mapper (`Load`, or the `…DataRaptorLoad` class form). */
+const isLoadMapper = (interfaceClass: string | null, operationType: string | null): boolean => {
+  for (const raw of [operationType, interfaceClass]) {
+    if (raw === null) continue;
+    const v = raw.trim();
+    if (v === 'Load' || /DataRaptor(Post|Load)$/.test(v)) return true;
+  }
+  return false;
+};
+
+/** True for a Turbo Extract mapper (one object, field paths without an alias). */
+const isTurboExtractMapper = (interfaceClass: string | null, operationType: string | null): boolean => {
+  for (const raw of [operationType, interfaceClass]) {
+    if (raw === null) continue;
+    const v = raw.trim();
+    if (v === 'Turbo Extract' || /DataRaptorTurboExtract$/.test(v)) return true;
+  }
+  return false;
+};
+
+/** A relationship path (`Parent__r.Field__c`) on an object, left for the import to resolve. */
+export interface DataMapperTraversalRef {
+  readonly object: string;
+  readonly path: string;
+  readonly access: 'read' | 'write';
+}
+
+/** Field-level edges of a DataMapper plus the traversals the import must resolve. */
+interface FieldEdgeBuild {
+  readonly edges: readonly Edge[];
+  readonly traversals: readonly DataMapperTraversalRef[];
+}
+
+const FIELD_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+const MAX_SAMPLE_KEYS = 5;
+
+/**
+ * Field-level reads and writes of a DataMapper — the dependencies field tools
+ * (who writes / reads this field, safe-to-delete, unused fields, lineage,
+ * record creation) need, and that object-level `references` edges cannot give:
+ *
+ *   - Extract: a query row (`inputObjectName` + `inputFieldName` +
+ *     `filterOperator`) reads its filter field; a mapping row reads
+ *     `alias:Field`, the alias bound to its SObject by a query row.
+ *   - Turbo Extract: field paths are on the mapper's one `sourceObject`.
+ *   - Load: a row writes `outputObjectName.outputFieldName`; the object is
+ *     written too, as a create (`recordCreate`) or, when a row maps `Id` or
+ *     marks an upsert key, an upsert (`recordUpsert`).
+ *
+ * A relationship path (`Parent__r.Field__c`) cannot be resolved from this file
+ * alone; it is handed to the import (`unresolvedTraversalRefs` on the node),
+ * which resolves it against the vault's lookups or drops it — never guesses.
+ * Disabled rows emit nothing. Confidence `parsed`: the path is read from the
+ * mapping rows and the alias joined to its query row.
+ */
+const buildFieldEdges = (
+  rootObj: Record<string, unknown>,
+  items: readonly Record<string, unknown>[],
+  fromId: string,
+  kind: { readonly isExtract: boolean; readonly isTurbo: boolean; readonly isLoad: boolean },
+): FieldEdgeBuild => {
+  const aliases = kind.isExtract ? extractAliasMap(items) : new Map<string, string>();
+  const reads = new Map<string, { roles: Set<string>; keys: Set<string> }>();
+  const writes = new Map<string, { keys: Set<string> }>();
+  const objectsWritten = new Map<string, { upsert: boolean }>();
+  const traversals = new Map<string, DataMapperTraversalRef>();
+  const addRead = (object: string, path: string, role: string, key: string | null): void => {
+    if (path.includes('.')) {
+      traversals.set(`${object}|${path}|read`, { object, path, access: 'read' });
+      return;
+    }
+    if (!FIELD_NAME.test(path)) return;
+    const id = `CustomField:${object}.${path}`;
+    const entry = reads.get(id) ?? { roles: new Set<string>(), keys: new Set<string>() };
+    entry.roles.add(role);
+    if (key !== null) entry.keys.add(key);
+    reads.set(id, entry);
+  };
+  const sourceObject = optionalString(rootObj, 'sourceObject')?.trim() ?? '';
+  for (const item of items) {
+    if (coerceBoolean(unwrapSingle(item['disabled']))) continue;
+    const inField = optionalString(item, 'inputFieldName')?.trim() ?? '';
+    const inObject = optionalString(item, 'inputObjectName')?.trim() ?? '';
+    if (kind.isExtract) {
+      if (inObject.length > 0 && !NON_SOBJECT_OBJECT_NAMES.has(inObject)) {
+        // A query row: its inputFieldName is the filtered field on that object.
+        if (inField.length > 0 && !inField.includes(':')) addRead(inObject, inField, 'filter', null);
+      } else if (inField.includes(':')) {
+        const idx = inField.indexOf(':');
+        const object = aliases.get(inField.slice(0, idx));
+        const path = inField.slice(idx + 1);
+        if (object !== undefined && path.length > 0 && !path.includes(':')) addRead(object, path, 'mapping', inField);
+      }
+    } else if (kind.isTurbo && sourceObject.length > 0 && !NON_SOBJECT_OBJECT_NAMES.has(sourceObject)) {
+      if (inField.length > 0 && !inField.includes(':')) addRead(sourceObject, inField, 'mapping', inField);
+    }
+    if (kind.isLoad && !isJsonOutput(item)) {
+      const object = optionalString(item, 'outputObjectName')?.trim() ?? '';
+      const outRaw = optionalString(item, 'outputFieldName')?.trim() ?? '';
+      const field = outRaw.includes(':') ? outRaw.slice(outRaw.lastIndexOf(':') + 1) : outRaw;
+      if (object.length === 0 || field.length === 0) continue;
+      if (field.includes('.')) {
+        traversals.set(`${object}|${field}|write`, { object, path: field, access: 'write' });
+        continue;
+      }
+      if (!FIELD_NAME.test(field)) continue;
+      const id = `CustomField:${object}.${field}`;
+      const entry = writes.get(id) ?? { keys: new Set<string>() };
+      if (inField.length > 0) entry.keys.add(inField);
+      writes.set(id, entry);
+      const obj = objectsWritten.get(object) ?? { upsert: false };
+      if (field.toLowerCase() === 'id' || coerceBoolean(unwrapSingle(item['upsertKey']))) obj.upsert = true;
+      objectsWritten.set(object, obj);
+    }
+  }
+  const sample = (keys: ReadonlySet<string>): string[] => [...keys].sort().slice(0, MAX_SAMPLE_KEYS);
+  const edges: Edge[] = [
+    ...[...reads].map(([toId, e]): Edge => ({
+      fromId,
+      toId,
+      edgeType: 'readsFrom',
+      confidence: 'parsed',
+      source: EXTRACTOR_SOURCE,
+      properties: { mechanism: 'datamapper-extract', roles: [...e.roles].sort(), ...(e.keys.size > 0 ? { inputFieldNames: sample(e.keys) } : {}) },
+    })),
+    ...[...writes].map(([toId, e]): Edge => ({
+      fromId,
+      toId,
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      source: EXTRACTOR_SOURCE,
+      properties: { mechanism: 'datamapper-load', ...(e.keys.size > 0 ? { inputFieldNames: sample(e.keys) } : {}) },
+    })),
+    ...[...objectsWritten].map(([object, o]): Edge => ({
+      fromId,
+      toId: `CustomObject:${object}`,
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      source: EXTRACTOR_SOURCE,
+      properties: { mechanism: 'datamapper-load', operation: o.upsert ? 'recordUpsert' : 'recordCreate' },
+    })),
+  ].sort((a, b) => (a.toId !== b.toId ? (a.toId < b.toId ? -1 : 1) : a.edgeType < b.edgeType ? -1 : a.edgeType > b.edgeType ? 1 : 0));
+  return {
+    edges,
+    traversals: [...traversals.values()].sort((a, b) =>
+      a.object !== b.object ? (a.object < b.object ? -1 : 1) : a.path !== b.path ? (a.path < b.path ? -1 : 1) : a.access < b.access ? -1 : a.access > b.access ? 1 : 0,
+    ),
+  };
 };
 
 /**
@@ -329,6 +551,8 @@ const buildEdges = (
 export const extractOmniDataTransform = async (
   path: string,
 ): Promise<Result<ExtractionResult, ExtractorError>> => {
+  // A managed-package (Vlocity) DataRaptor export: a DataPack folder or its main file.
+  if (await isDataPackSource(path)) return extractMapperDataPack(path, extractOmniDataTransformRoot);
   const xmlResult = await readAndValidateXml(path);
   if (!xmlResult.ok) return xmlResult;
 
@@ -360,14 +584,23 @@ export const extractOmniDataTransform = async (
 
   const rootResult = validateRoot(parsed, path);
   if (!rootResult.ok) return rootResult;
-  const rootObj = rootResult.value;
-
   // The api-name is the filename stem (e.g., `DRGetIncomeApplicationById_1`).
   // Per OmniDataTransform.md, the file naming convention is
   // `{Name}_{VersionNumber}.rpt-meta.xml`; the stem is the canonical
   // versioned identity, matching the Salesforce metadata API's
   // fullName for the component.
-  const apiName = deriveComponentApiName(path, FILE_SUFFIX);
+  return extractOmniDataTransformRoot(rootResult.value, path, deriveComponentApiName(path, FILE_SUFFIX));
+};
+
+/**
+ * The extraction over the parsed `<OmniDataTransform>` root — the seam a
+ * converted source (a managed-package DataRaptor DataPack) enters through.
+ */
+export const extractOmniDataTransformRoot = (
+  rootObj: Record<string, unknown>,
+  path: string,
+  apiName: string,
+): Result<ExtractionResult, ExtractorError> => {
   const nodeId = `${NODE_TYPE}:${apiName}`;
 
   const name = String(unwrapSingle(rootObj['name']));
@@ -442,7 +675,19 @@ export const extractOmniDataTransform = async (
     },
   };
 
-  const edges = buildEdges(rootObj, items, nodeId);
+  const isExtract = isExtractMapper(interfaceClass, operationType);
+  const fieldBuild = buildFieldEdges(rootObj, items, nodeId, {
+    isExtract,
+    isTurbo: isTurboExtractMapper(interfaceClass, operationType),
+    isLoad: isLoadMapper(interfaceClass, operationType),
+  });
+  const edges = [...buildEdges(rootObj, items, nodeId, isExtract), ...fieldBuild.edges];
+  // OMIT-when-empty: relationship paths the import resolves against the
+  // vault's lookups (graph `relationship-refs`); most mappers have none.
+  const nodeOut: Node =
+    fieldBuild.traversals.length === 0
+      ? node
+      : { ...node, properties: { ...node.properties, unresolvedTraversalRefs: fieldBuild.traversals } };
 
-  return ok({ nodes: [node], edges });
+  return ok({ nodes: [nodeOut], edges });
 };

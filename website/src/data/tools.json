@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-09-01T16:00:03.467Z",
-  "toolCount": 217,
+  "generatedAt": "2026-10-03T18:18:42.266Z",
+  "toolCount": 231,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -407,6 +407,46 @@
         {
           "name": "sfi.omniuicard_widget_breakdown",
           "description": "Given an OmniUiCard canonical id (`OmniUiCard:{ApiName}`), returns the FlexCard's identity metadata (`omniUiCardType`, `authorName`, `versionNumber`, `isActive`,..."
+        },
+        {
+          "name": "sfi.omni_model",
+          "description": "The inside of ONE OmniStudio component as nodes and edges (the OmniStudio element model): an OmniScript's elements (`OmniElement:<uniqueName>#<Step>/<Block>/<name..."
+        },
+        {
+          "name": "sfi.omni_dead_references",
+          "description": "Does every show rule, merge field and payload key in an OmniScript / Integration Procedure point at something that exists in the version that RUNS? Findings with..."
+        },
+        {
+          "name": "sfi.omni_version_diff",
+          "description": "What changed between two versions of one OmniScript or Integration Procedure: elements added, removed and RENAMED (same type, parent and label key, different name..."
+        },
+        {
+          "name": "sfi.omni_edit_block_audit",
+          "description": "Audit every Edit Block (a list of cards with Add / Edit / Delete) of an OmniScript's active version - or of every active OmniScript: which server delete is wired..."
+        },
+        {
+          "name": "sfi.omni_completion_audit",
+          "description": "Does \"Complete\" mean \"saved\"? For one Integration Procedure (`ip` / `componentId`, active version) or every active one: `COMPLETE_WITHOUT_SUCCESS` (the step that..."
+        },
+        {
+          "name": "sfi.omni_form_spec",
+          "description": "The form a browser test runner fills, from metadata: for an OmniScript's active version, every step and its inputs - data key, `inputKind` (text / masked / radio..."
+        },
+        {
+          "name": "sfi.omni_path_simulator",
+          "description": "Given answers (a data JSON or flat name → value pairs), which steps and inputs of an OmniScript's active version are shown? Show rules are evaluated three-valued..."
+        },
+        {
+          "name": "sfi.omni_changed_since",
+          "description": "What changed in OmniStudio since a previous refresh - semantically, so a finding whose evidence changed can be re-checked before it goes out."
+        },
+        {
+          "name": "sfi.omni_prefill_trace",
+          "description": "For every answer an OmniScript screen saves: does the saved value come BACK when the screen reopens? Runs the save trace on the ACTIVE version, then follows every..."
+        },
+        {
+          "name": "sfi.omni_save_trace",
+          "description": "For every answer on an OmniScript screen: is it SAVED to the database, and if not, where exactly is it dropped? Judges the ACTIVE version (an inactive version or..."
         }
       ]
     },
@@ -516,7 +556,7 @@
         },
         {
           "name": "sfi.changed_since",
-          "description": "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 - date-only `YYYY-MM-DD` or full UTC timestamp; the natural token `last-refre..."
+          "description": "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (for a snapshot-based answer - what was added / removed / modified between two refreshe..."
         },
         {
           "name": "sfi.last_modified",
@@ -715,6 +755,10 @@
         {
           "name": "sfi.live_drift_check",
           "description": "Offline↔live contradiction detection (requires the opt-in live plane)."
+        },
+        {
+          "name": "sfi.live_verify",
+          "description": "Confirm ONE claim against the live org now, with the smallest read-only query that can, so a finding never rests on a stale snapshot."
         }
       ]
     },
@@ -832,6 +876,18 @@
         {
           "name": "sfi.record_creation_paths",
           "description": "\"How do records of this object get created?\" - the record-provenance trace an admin needs to answer \"how did this record get here?\"."
+        },
+        {
+          "name": "sfi.record_delete_impact",
+          "description": "\"If a record of this object is deleted, what happens to its children, and what stops it?\" For an object (`objectApiName` / `object` / `CustomObject:` `componentId..."
+        },
+        {
+          "name": "sfi.persona_unused_grants",
+          "description": "Which object and field permissions does this kind of user have that nothing they can run uses? A persona is a profile + permission sets + permission set groups -..."
+        },
+        {
+          "name": "sfi.how_to_see",
+          "description": "The exact click path a reviewer follows to open a component - the \"How to see it\" steps of a finding, worded with the vault's labels."
         },
         {
           "name": "sfi.flow_graph",

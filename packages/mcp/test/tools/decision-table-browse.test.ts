@@ -40,6 +40,7 @@ import {
 
 import type { Context } from '../../src/server.js';
 import { decisionTableBrowseHandler } from '../../src/tools/decision-table-browse.js';
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from '../../src/tools/omni-disclosures.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -71,7 +72,7 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
 // points at the real file so the tool's re-read works end-to-end.
 // =============================================================================
 
-const FPL_ID = 'DecisionTable:FPLFullTabe';
+const FPL_ID = 'DecisionTable:AcmeIncomeThresholds';
 const SOBJECT_ID = 'DecisionTable:AccountTier';
 const MANUAL_ID = 'DecisionTable:ManualRules';
 const MISSING_SOURCE_ID = 'DecisionTable:MissingSource';
@@ -101,7 +102,7 @@ const FPL_XML = `<?xml version="1.0" encoding="UTF-8"?>
   </decisionTableParameters>
   <executionType>HBASE</executionType>
   <filterResultBy>OutputOrder</filterResultBy>
-  <setupName>FPLFullTabe</setupName>
+  <setupName>AcmeIncomeThresholds</setupName>
   <sourceObject>CSV</sourceObject>
   <status>Active</status>
   <type>MediumVolume</type>
@@ -170,7 +171,7 @@ let manualPath: string;
 
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-decision-table-'));
-  fplPath = join(tempDir, 'FPLFullTabe.decisionTable-meta.xml');
+  fplPath = join(tempDir, 'AcmeIncomeThresholds.decisionTable-meta.xml');
   sobjectPath = join(tempDir, 'AccountTier.decisionTable-meta.xml');
   manualPath = join(tempDir, 'ManualRules.decisionTable-meta.xml');
   await writeFile(fplPath, FPL_XML, 'utf8');
@@ -189,11 +190,11 @@ beforeAll(async () => {
       makeNode({
         id: FPL_ID,
         type: 'DecisionTable',
-        apiName: 'FPLFullTabe',
-        label: 'FPLFullTabe',
+        apiName: 'AcmeIncomeThresholds',
+        label: 'AcmeIncomeThresholds',
         sourcePath: fplPath,
         properties: {
-          setupName: 'FPLFullTabe',
+          setupName: 'AcmeIncomeThresholds',
           dataSourceType: 'CsvUpload',
           sourceObject: 'CSV',
           executionType: 'HBASE',
@@ -288,7 +289,7 @@ describe('decisionTableBrowseHandler', () => {
     if (!result.ok) return;
     const data = result.value.data;
     expect(data.decisionTableId).toBe(FPL_ID);
-    expect(data.apiName).toBe('FPLFullTabe');
+    expect(data.apiName).toBe('AcmeIncomeThresholds');
     expect(data.dataSourceType).toBe('CsvUpload');
     expect(data.executionType).toBe('HBASE');
     expect(data.inputParams).toEqual([
@@ -314,11 +315,8 @@ describe('decisionTableBrowseHandler', () => {
     // CsvUpload-specific hint follows immediately.
     expect(data.boundaries[1]).toContain('dataSourceType is CsvUpload');
     expect(data.boundaries[1]).toContain('uploaded to this DecisionTable');
-    // Native-vs-Vlocity disclosure surfaces verbatim.
-    expect(data.boundaries[2]).toContain(
-      'v3.2 recognizes Industries Native XML shapes',
-    );
-    expect(data.boundaries[2]).toContain('`vlocity_cmt__`');
+    // Native-vs-Vlocity disclosure surfaces verbatim — the ONE shared sentence.
+    expect(data.boundaries[2]).toBe(NATIVE_VS_VLOCITY_DISCLOSURE);
   });
 
   it('names the sourceObject in the row-store hint for SObject dataSourceType', async () => {

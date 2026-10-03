@@ -1,10 +1,10 @@
 /// <reference types="vitest/globals" />
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ok } from '@sf-intelligence/core';
+import { err, ok } from '@sf-intelligence/core';
 import {
   closeGraph,
   listNodesByType,
@@ -17,7 +17,7 @@ import type {
 } from '@sf-intelligence/tooling-api';
 import { vaultPaths } from '@sf-intelligence/vault';
 
-import { runRefresh } from '../src/commands/refresh.js';
+import { formatRefreshSummary, runRefresh } from '../src/commands/refresh.js';
 
 /**
  * Stage a minimal vault with one ApexClass source file + meta-xml under
@@ -181,6 +181,63 @@ describe('runRefresh with --with-tooling-api', () => {
       expect(result.toolingApi).toBeDefined();
       if (result.toolingApi === undefined) return;
       expect(result.toolingApi.outcome).toBe('enrichment-threw');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a permission-dependency capture that did not land is never silent', () => {
+  it('marks the refresh partial and prints the WARNING when the capture query is refused', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-refresh-pdep-'));
+    try {
+      await seedVault(cwd);
+      const { client } = buildStubClient();
+      const refusing: ToolingApiClient = {
+        ...client,
+        query: async <T>(soql: string) =>
+          soql.includes('FROM PermissionDependency')
+            ? err({ kind: 'query-failed' as const, status: 403, message: 'INSUFFICIENT_ACCESS' })
+            : client.query<T>(soql),
+      };
+      const result = await runRefresh({ cwd, noPull: true, withToolingApi: true, toolingApiClient: refusing });
+      expect(result.status).toBe('partial');
+      expect(result.toolingApi?.permissionDependencyOutcome).not.toBe('ok');
+      expect(formatRefreshSummary(result)).toMatch(/WARNING — Permission dependencies: NOT captured/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the capture line when the Tooling pass stopped early (sign-in failure)', () => {
+    const text = formatRefreshSummary({
+      status: 'partial',
+      counts: { components: {}, edges: {} },
+      errors: [],
+      durationMs: 1,
+      skippedDirectories: {},
+      toolingApi: {
+        enrichedCount: 0,
+        errorCount: 0,
+        outcome: 'org-not-authenticated',
+        fatalMessage: 'no auth for alias',
+        permissionDependencyOutcome: 'org-not-authenticated',
+      },
+    });
+    expect(text).toContain('Tooling API: org-not-authenticated — no auth for alias');
+    expect(text).toContain('WARNING — Permission dependencies: NOT captured (org-not-authenticated)');
+  });
+
+  it('stays success when the capture landed', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-refresh-pdep-ok-'));
+    try {
+      const { vaultRoot } = await seedVault(cwd);
+      const { client } = buildStubClient();
+      const result = await runRefresh({ cwd, noPull: true, withToolingApi: true, toolingApiClient: client });
+      expect(result.toolingApi?.permissionDependencyOutcome).toBe('ok');
+      expect(result.status).toBe('success');
+      expect(formatRefreshSummary(result)).toContain('Permission dependencies: 0 edges captured');
+      await expect(readFile(vaultPaths(vaultRoot).permissionDependencies, 'utf8')).resolves.toContain('"edgeCount": 0');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

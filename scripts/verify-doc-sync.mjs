@@ -1003,6 +1003,24 @@ if (existsSync(contractsSrc) && existsSync(adr004)) {
   }
 }
 
+// OmniStudio element catalog doc: generated from the catalog every OmniStudio
+// tool reads, so the shipped document can never describe a different model.
+{
+  const catalogModule = join(root, 'packages/extractors/dist/src/omnistudio/catalog.js');
+  const catalogDoc = join(root, 'docs', 'omnistudio', 'element-catalog.md');
+  if (existsSync(catalogModule)) {
+    const { OMNI_ELEMENT_CATALOG } = await import(pathToFileURL(catalogModule).href);
+    const { renderCatalogDoc } = await import(pathToFileURL(join(root, 'scripts', 'gen-omnistudio-docs.mjs')).href);
+    const expected = renderCatalogDoc(OMNI_ELEMENT_CATALOG);
+    const current = existsSync(catalogDoc) ? read(catalogDoc) : '';
+    if (current !== expected) {
+      fail('docs/omnistudio/element-catalog.md is stale against the OmniStudio element catalog — run `pnpm docs:omnistudio`.');
+    }
+  } else {
+    warn('OmniStudio element catalog not built; element-catalog.md drift not checked (run pnpm -r build).');
+  }
+}
+
 const result = {
   toolCount: V01_TOOLS.length,
   advertisedToolCount: manifest?.tools.advertised ?? null,

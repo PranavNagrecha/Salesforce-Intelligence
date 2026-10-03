@@ -325,6 +325,22 @@ describe('driver sequencing + T0 skeleton honesty', () => {
     expect(t3.withReports).toBe(true);
     expect(t3.stagedMarker).toBeUndefined();
   });
+
+  it('--with-tooling-api reaches the final tier only (it used to be dropped)', async () => {
+    await seedVaultConfig();
+    const calls: RunRefreshOptions[] = [];
+    await runStagedRefresh({
+      cwd,
+      noPull: true,
+      withToolingApi: true,
+      refreshFn: async (o) => {
+        calls.push(o);
+        return okResult();
+      },
+      onProgress: () => {},
+    });
+    expect(calls.map((c) => c.withToolingApi)).toEqual([undefined, true]);
+  });
 });
 
 describe('failure injection + convergence (real pipeline, fixture vault)', () => {

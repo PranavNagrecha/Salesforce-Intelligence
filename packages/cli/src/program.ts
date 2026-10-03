@@ -16,6 +16,7 @@ import { registerQuickstartCommand } from './commands/quickstart.js';
 import { registerRefreshCommand } from './commands/refresh.js';
 import { registerRegisterVaultCommand } from './commands/register-vault.js';
 import { registerReviewChangeCommand } from './commands/review-change.js';
+import { registerRunCommand } from './commands/run.js';
 import { registerSelftestCommand } from './commands/selftest.js';
 import { registerServeCommand } from './commands/serve.js';
 import { registerSnapshotCommand } from './commands/snapshot.js';
@@ -80,6 +81,7 @@ export const createProgram = (): Command => {
   registerDoctorCommand(program);
   registerGapsCommand(program);
   registerReviewChangeCommand(program);
+  registerRunCommand(program);
   registerMcpCommand(program);
   registerDemoCommand(program);
   registerServeCommand(program);

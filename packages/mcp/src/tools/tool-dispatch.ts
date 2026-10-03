@@ -395,6 +395,7 @@ import {
   historyTrackingGapsHandler,
   historyTrackingGapsInputSchema,
 } from './history-tracking-gaps.js';
+import { howToSeeHandler, howToSeeInputSchema } from './how-to-see.js';
 import {
   installedPackageCatalogHandler,
   installedPackageCatalogInputSchema,
@@ -525,6 +526,7 @@ import {
   liveBudgetHandler,
   liveBudgetInputSchema,
 } from './live-session.js';
+import { liveVerifyHandler, liveVerifyInputSchema } from './live-verify.js';
 import {
   lookupRecordHandler,
   lookupRecordInputSchema,
@@ -557,6 +559,16 @@ import {
   objectAccessAuditHandler,
   objectAccessAuditInputSchema,
 } from './object-access-audit.js';
+import { omniChangedSinceHandler, omniChangedSinceInputSchema } from './omni-changed-since.js';
+import { omniCompletionAuditHandler, omniCompletionAuditInputSchema } from './omni-completion-audit.js';
+import { omniDeadReferencesHandler, omniDeadReferencesInputSchema } from './omni-dead-references.js';
+import { omniEditBlockAuditHandler, omniEditBlockAuditInputSchema } from './omni-edit-block-audit.js';
+import { omniFormSpecHandler, omniFormSpecInputSchema } from './omni-form-spec.js';
+import { omniModelHandler, omniModelInputSchema } from './omni-model.js';
+import { omniPathSimulatorHandler, omniPathSimulatorInputSchema } from './omni-path-simulator.js';
+import { omniPrefillTraceHandler, omniPrefillTraceInputSchema } from './omni-prefill-trace.js';
+import { omniSaveTraceHandler, omniSaveTraceInputSchema } from './omni-save-trace.js';
+import { omniVersionDiffHandler, omniVersionDiffInputSchema } from './omni-version-diff.js';
 // v3.2 — OmniStudio (Salesforce Industries) declarative-process tier.
 import {
   omniscriptFlowHandler,
@@ -598,6 +610,10 @@ import {
   permissionSetConsolidationInputSchema,
 } from './permission-set-consolidation.js';
 import {
+  personaUnusedGrantsHandler,
+  personaUnusedGrantsInputSchema,
+} from './persona-unused-grants.js';
+import {
   picklistIntegrityScanHandler,
   picklistIntegrityScanInputSchema,
 } from './picklist-integrity-scan.js';
@@ -625,6 +641,10 @@ import {
   recordCreationPathsHandler,
   recordCreationPathsInputSchema,
 } from './record-creation-paths.js';
+import {
+  recordDeleteImpactHandler,
+  recordDeleteImpactInputSchema,
+} from './record-delete-impact.js';
 import {
   recordtypeAvailabilityHandler,
   recordtypeAvailabilityInputSchema,
@@ -1466,6 +1486,14 @@ export const dispatchTool = async (
         recordCreationPathsInputSchema,
         recordCreationPathsHandler,
       );
+    case 'sfi.record_delete_impact':
+      return runTool(ctx, args, recordDeleteImpactInputSchema, recordDeleteImpactHandler);
+    case 'sfi.persona_unused_grants':
+      return runTool(ctx, args, personaUnusedGrantsInputSchema, personaUnusedGrantsHandler);
+    case 'sfi.live_verify':
+      return runTool(ctx, args, liveVerifyInputSchema, liveVerifyHandler);
+    case 'sfi.how_to_see':
+      return runTool(ctx, args, howToSeeInputSchema, howToSeeHandler);
     case 'sfi.explain_flow':
       return runTool(
         ctx,
@@ -2047,6 +2075,29 @@ export const dispatchTool = async (
         omniscriptFlowInputSchema,
         omniscriptFlowHandler,
       );
+    // OmniStudio model (spec F2): does every answer on the screen reach the database?
+    case 'sfi.omni_save_trace':
+      return runTool(ctx, args, omniSaveTraceInputSchema, omniSaveTraceHandler);
+    // OmniStudio model (spec F1/F3/F4/F5): element model, references, version
+    // diff, Edit Block and completion audits, form spec, path simulation.
+    case 'sfi.omni_model':
+      return runTool(ctx, args, omniModelInputSchema, omniModelHandler);
+    case 'sfi.omni_dead_references':
+      return runTool(ctx, args, omniDeadReferencesInputSchema, omniDeadReferencesHandler);
+    case 'sfi.omni_version_diff':
+      return runTool(ctx, args, omniVersionDiffInputSchema, omniVersionDiffHandler);
+    case 'sfi.omni_edit_block_audit':
+      return runTool(ctx, args, omniEditBlockAuditInputSchema, omniEditBlockAuditHandler);
+    case 'sfi.omni_completion_audit':
+      return runTool(ctx, args, omniCompletionAuditInputSchema, omniCompletionAuditHandler);
+    case 'sfi.omni_form_spec':
+      return runTool(ctx, args, omniFormSpecInputSchema, omniFormSpecHandler);
+    case 'sfi.omni_path_simulator':
+      return runTool(ctx, args, omniPathSimulatorInputSchema, omniPathSimulatorHandler);
+    case 'sfi.omni_prefill_trace':
+      return runTool(ctx, args, omniPrefillTraceInputSchema, omniPrefillTraceHandler);
+    case 'sfi.omni_changed_since':
+      return runTool(ctx, args, omniChangedSinceInputSchema, omniChangedSinceHandler);
     // v3.2 R3d — OmniStudio "what's inside this FlexCard" surface.
     case 'sfi.omniuicard_widget_breakdown':
       return runTool(

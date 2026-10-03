@@ -52,6 +52,8 @@
     "product-manifest": "node scripts/generate-product-manifest.mjs",
     "product-manifest:check": "node scripts/generate-product-manifest.mjs --check",
     "doc-sync": "node scripts/verify-doc-sync.mjs",
+    "docs:omnistudio": "node scripts/gen-omnistudio-docs.mjs",
+    "docs:omnistudio:check": "node scripts/gen-omnistudio-docs.mjs --check",
     "skill-gateway": "node scripts/check-skill-gateway.mjs",
     "sbom": "node scripts/generate-sbom.mjs",
     "snapshot": "node scripts/release-snapshot.mjs",

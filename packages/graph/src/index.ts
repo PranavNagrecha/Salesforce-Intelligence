@@ -35,6 +35,14 @@ export type {
 } from './duplicate-source.js';
 export { relativizeSourcePath } from './relativize.js';
 export {
+  buildOmniIndexes,
+  canonicalizeOmniStudioEdgeTargets,
+  normOmniLanguage,
+  parseOmniScriptKey,
+  pickOmniVersion,
+} from './omni-resolve.js';
+export type { OmniTargetKeyKind, OmniTargetResolution } from './omni-resolve.js';
+export {
   buildRelationshipMaps,
   mintRelationshipTraversalEdges,
   RELATIONSHIP_RESOLVER_SOURCE,

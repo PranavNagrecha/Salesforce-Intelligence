@@ -7,6 +7,8 @@
 import { gapLogPath, summarizeRouteGaps, type RouteGapSummary } from '@sf-intelligence/mcp';
 import { Command } from 'commander';
 
+import { VAULT_OPTION_HELP, vaultForAction } from '../vault-option.js';
+
 /** Default number of top categories to print when `--top` is omitted. */
 export const DEFAULT_GAPS_TOP = 10;
 
@@ -18,6 +20,8 @@ export interface GapsReportOptions {
   readonly top?: number;
   /** When set, used as "now" for relative `--since` (tests). */
   readonly now?: Date;
+  /** Count only gaps asked against this vault (the log is machine-wide). */
+  readonly vaultRoot?: string;
 }
 
 export interface GapsReport {
@@ -27,6 +31,8 @@ export interface GapsReport {
   /** ISO cutoff applied when `since` was set; null otherwise. */
   readonly sinceAt: string | null;
   readonly top: number;
+  /** The vault the report is scoped to, or null for every vault on this machine. */
+  readonly vaultRoot: string | null;
 }
 
 /**
@@ -76,6 +82,7 @@ export const buildGapsReport = async (opts: GapsReportOptions = {}): Promise<Gap
   const sinceDate = parseGapsSince(opts.since, opts.now ?? new Date());
   const summary = await summarizeRouteGaps(opts.logFile ?? gapLogPath(), {
     ...(sinceDate !== null ? { since: sinceDate } : {}),
+    ...(opts.vaultRoot !== undefined ? { vaultRoot: opts.vaultRoot } : {}),
     top,
   });
   return {
@@ -83,13 +90,19 @@ export const buildGapsReport = async (opts: GapsReportOptions = {}): Promise<Gap
     since: opts.since ?? null,
     sinceAt: sinceDate !== null ? sinceDate.toISOString() : null,
     top,
+    vaultRoot: opts.vaultRoot ?? null,
   };
 };
 
 /** Human-readable multi-line report (no question text). */
 export const formatGapsReport = (report: GapsReport): string => {
   const { summary, since, sinceAt, top } = report;
-  const lines: string[] = ['sfi gaps report', ''];
+  const lines: string[] = [
+    'sfi gaps report',
+    // Never the path itself — the report carries no vault paths (privacy).
+    report.vaultRoot === null ? 'Scope: every vault on this machine (pass --vault for one).' : 'Scope: the vault named by --vault.',
+    '',
+  ];
   if (!summary.exists) {
     lines.push(
       'No route-gap log yet on this machine.',
@@ -101,6 +114,9 @@ export const formatGapsReport = (report: GapsReport): string => {
   const window =
     since !== null && sinceAt !== null ? ` since ${since} (on/after ${sinceAt})` : '';
   lines.push(`${summary.count.toLocaleString()} open route gap(s)${window}.`);
+  if ((summary.unstampedExcluded ?? 0) > 0) {
+    lines.push(`${(summary.unstampedExcluded ?? 0).toLocaleString()} older gap(s) carry no vault stamp and are left out of this vault's count.`);
+  }
   if (summary.count === 0) {
     lines.push('Nothing to review in this window.', '');
     return lines.join('\n');
@@ -127,6 +143,8 @@ export const gapsReportJson = (report: GapsReport): unknown => ({
   topCategory: report.summary.topCategory,
   topCount: report.summary.topCount,
   categories: report.summary.categories,
+  scope: report.vaultRoot === null ? 'machine' : 'vault',
+  ...(report.summary.unstampedExcluded !== undefined ? { unstampedExcluded: report.summary.unstampedExcluded } : {}),
 });
 
 /** Register `sfi gaps report [--since][--top N][--json]`. */
@@ -143,7 +161,8 @@ export const registerGapsCommand = (program: Command): void => {
     .option('--since <window>', 'Only count gaps on/after this window (e.g. 7d, 24h) or ISO date')
     .option('--top <n>', `Show the top N categories (default ${DEFAULT_GAPS_TOP})`, String(DEFAULT_GAPS_TOP))
     .option('--json', 'Emit machine-readable JSON (category counts only)')
-    .action(async (flags: { since?: string; top?: string; json?: boolean }): Promise<void> => {
+    .option('--vault <path>', `${VAULT_OPTION_HELP} Counts only the gaps asked against that vault; without it, every vault on this machine.`)
+    .action(async (flags: { since?: string; top?: string; json?: boolean; vault?: string }): Promise<void> => {
       let top = DEFAULT_GAPS_TOP;
       if (flags.top !== undefined) {
         const n = Number.parseInt(flags.top, 10);
@@ -154,10 +173,18 @@ export const registerGapsCommand = (program: Command): void => {
         }
         top = n;
       }
+      // The log is machine-wide; only an explicit --vault scopes it.
+      let vaultRoot: string | undefined;
+      if (flags.vault !== undefined) {
+        const vault = vaultForAction(flags);
+        if (vault === null) return;
+        vaultRoot = vault.vaultRoot;
+      }
       let report: GapsReport;
       try {
         report = await buildGapsReport({
           ...(flags.since !== undefined ? { since: flags.since } : {}),
+          ...(vaultRoot !== undefined ? { vaultRoot } : {}),
           top,
         });
       } catch (cause) {

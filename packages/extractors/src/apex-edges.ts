@@ -1,5 +1,7 @@
 import type { Edge } from '@sf-intelligence/contracts';
-import { scanApexSource, type FrontendResourceRef } from '@sf-intelligence/parsers';
+import { scanApexSource, type FrontendResourceRef, type OmniStudioApexCall } from '@sf-intelligence/parsers';
+
+import { MANAGED_OMNISTUDIO_NAMESPACES } from './omnistudio/datapack.js';
 
 const SCANNER_SOURCE = 'apex-scanner';
 const APEX_CLASS_SOURCE = 'apex-class-extractor';
@@ -558,6 +560,55 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *   // result.edges[0].toId    === 'CustomField:acc.Industry__c'
  *   // result.warnings.length === 0
  */
+const OMNISTUDIO_NAMESPACES: ReadonlySet<string> = new Set(MANAGED_OMNISTUDIO_NAMESPACES);
+const OMNI_CALLABLE_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+/** True when a runtime call is written on one of OmniStudio's own namespaces. */
+const isOmniStudioRuntimeCall = (c: OmniStudioApexCall): boolean =>
+  c.namespace !== null && OMNISTUDIO_NAMESPACES.has(c.namespace.toLowerCase());
+
+/**
+ * Apex → OmniStudio: `<ns>.IntegrationProcedureService.runIntegrationService(
+ * 'Type_SubType', …)` runs that Integration Procedure and `<ns>.DRGlobal.process(
+ * …, 'Bundle')` that DataRaptor — so the class is a CALLER of the component,
+ * exactly like an OmniScript step naming it. One `dispatchesOmniAction` edge
+ * per target (the import resolves the key onto the version that runs, as for
+ * every OmniStudio caller); only literal keys on OmniStudio's own namespaces —
+ * a key built at runtime is not guessed.
+ */
+const buildApexOmniStudioEdges = (calls: readonly OmniStudioApexCall[], ownerId: string): Edge[] => {
+  const byTarget = new Map<string, { call: OmniStudioApexCall; methods: Set<string>; services: Set<string>; sites: number }>();
+  for (const c of calls) {
+    if (!isOmniStudioRuntimeCall(c) || c.target === null || !OMNI_CALLABLE_NAME.test(c.target)) continue;
+    const toId = c.kind === 'integration-procedure' ? `OmniIntegrationProcedure:${c.target}` : `OmniDataTransform:${c.target}`;
+    const agg = byTarget.get(toId);
+    const service = `${c.namespace as string}.${c.className}`;
+    if (agg === undefined) byTarget.set(toId, { call: c, methods: new Set([c.methodName]), services: new Set([service]), sites: 1 });
+    else {
+      agg.methods.add(c.methodName);
+      agg.services.add(service);
+      agg.sites += 1;
+    }
+  }
+  return [...byTarget].map(([toId, { call, methods, services, sites }]) => ({
+    fromId: ownerId,
+    toId,
+    edgeType: 'dispatchesOmniAction' as const,
+    confidence: 'heuristic' as const,
+    source: SCANNER_SOURCE,
+    properties: {
+      via: 'apex',
+      mechanism: 'apex-runtime-service',
+      runtimeServices: [...services].sort(),
+      methods: [...methods].sort(),
+      ...(call.kind === 'integration-procedure' ? { integrationProcedureKey: call.target } : { bundle: call.target }),
+      callSites: sites,
+      offset: call.offset,
+      length: call.length,
+    },
+  }));
+};
+
 export const buildApexScannerEdges = (
   source: string,
   ownerId: string,
@@ -581,9 +632,28 @@ export const buildApexScannerEdges = (
   // references (string-literal endpoints the scanner blanks) → heuristic
   // `references` edges to the Named Credential node.
   raw.push(...buildApexCalloutEdges(ownerId, source));
+  // Apex → OmniStudio runtime calls. The generic `Class.method(` / `Obj.field`
+  // sweeps read `omnistudio.IntegrationProcedureService.runIntegrationService(`
+  // as a call to an org class `IntegrationProcedureService` (namespace dropped)
+  // and a read of `CustomField:omnistudio.IntegrationProcedureService` — both
+  // phantoms. A method whose EVERY occurrence is on OmniStudio's namespace is
+  // the package's runtime service (no callsApex for it), and no `ns.X` on an
+  // OmniStudio namespace is a field read.
+  const omniCalls = scanResult.value.omniStudioCalls;
+  raw.push(...buildApexOmniStudioEdges(omniCalls, ownerId));
+  const runtimeOnlyMethods = new Set(
+    omniCalls
+      .map((c) => `${c.className}.${c.methodName}`)
+      .filter((key) => omniCalls.every((c) => `${c.className}.${c.methodName}` !== key || isOmniStudioRuntimeCall(c))),
+  );
+
   for (const access of scanResult.value.fieldAccesses) {
     // Drop field accesses on unresolvable receivers (Trigger context / this / super).
     if (UNRESOLVABLE_FIELD_RECEIVERS.has(access.object)) continue;
+    // `omnistudio.DRGlobal`, `vlocity_cmt.DRProcessResult r = …`: an OmniStudio
+    // package NAMESPACE qualifies a class or type — it is never an sObject
+    // variable, so nothing it qualifies is a field (see above).
+    if (OMNISTUDIO_NAMESPACES.has(access.object.toLowerCase())) continue;
     // APEX-STATIC-FIELD-CUSTOMFIELD-PHANTOMS: a camelCase-no-`__` member on a
     // PascalCase class token (`WidgetGuard.guardBefore`) is an Apex
     // static/instance field, not a schema field. Emit the real class dependency
@@ -642,6 +712,8 @@ export const buildApexScannerEdges = (
   for (const call of scanResult.value.methodCalls) {
     // Drop calls on unresolvable pseudo-classes (Trigger.newMap → `newMap`, etc.).
     if (UNRESOLVABLE_CALL_CLASSES.has(call.className)) continue;
+    // OmniStudio's runtime service, not an org class (see above).
+    if (runtimeOnlyMethods.has(`${call.className}.${call.methodName}`)) continue;
     if (hasCustomObjectSuffix(call.className)) {
       if (!objectRefs.has(call.className)) {
         objectRefs.set(call.className, {

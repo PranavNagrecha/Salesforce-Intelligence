@@ -177,3 +177,9 @@ export {
 } from './wave.js';
 export { extractWebLink } from './web-link.js';
 export { extractWorkflowRule } from './workflow-rule.js';
+/**
+ * The OmniStudio model's parsing core (element trees, DataMapper items, data
+ * keys, merge expressions, show rules, formulas) — namespaced so its generic
+ * helper names never collide with extractor exports.
+ */
+export * as omnistudio from './omnistudio/index.js';

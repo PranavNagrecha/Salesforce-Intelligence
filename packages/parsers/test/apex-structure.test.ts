@@ -221,6 +221,29 @@ describe('parseApexStructure — data-access sites', () => {
     expect(stmt.allOrNone).toBeNull();
   });
 
+  it('reads the access level WRITTEN on each DML site, and leaves it null when none is written', async () => {
+    const r = await parse(`
+      public class WidgetService {
+        public void run(List<Widget__c> rows) {
+          insert as user rows;
+          update as system rows;
+          Database.upsert(rows, false, AccessLevel.USER_MODE);
+          Database.delete(rows, AccessLevel.SYSTEM_MODE);
+          undelete rows;
+        }
+      }
+    `);
+    const byOp = (op: string): string | null | undefined =>
+      r.structure!.dmlSites.find((d) => d.operation === op)?.accessLevel;
+    expect(byOp('insert')).toBe('user');
+    expect(byOp('update')).toBe('system');
+    expect(byOp('upsert')).toBe('user');
+    expect(byOp('delete')).toBe('system');
+    // Not written: Apex's default (object / field permissions not enforced) —
+    // reported as null, never guessed as 'system'.
+    expect(byOp('undelete')).toBeNull();
+  });
+
   it('leaves allOrNone null when the argument is absent — never defaulted to true', async () => {
     const r = await parse(`
       public class WidgetService {

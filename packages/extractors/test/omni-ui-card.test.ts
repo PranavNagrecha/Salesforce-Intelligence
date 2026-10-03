@@ -225,10 +225,10 @@ describe('extractOmniUiCard', () => {
     //   2. a `DataAction` Action widget whose stringified-JSON `message`
     //      wraps a DataRaptor load.
     // These tests are fixture-free (plain `it`) so they run in the
-    // published product copy too. Real-world shapes are taken verbatim
-    // from a real state-agency org recon (openPdfPOC_Developer_2 ->
-    // IEEGetDocContentVersion via dataSource; IEEClientSearchResultChildFC
-    // _Developer_7 -> IEEUpdateContactInfoforMA21 via a DataAction).
+    // published product copy too. The shapes mirror a real state-agency
+    // org recon (a document-preview card loading through a DataRaptor
+    // dataSource; a search-result child card updating a contact through a
+    // DataAction) with synthetic names.
 
     it('emits a dispatchesOmniAction edge to OmniDataTransform when the card dataSource is a DataRaptor', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -277,12 +277,114 @@ describe('extractOmniUiCard', () => {
       }
     });
 
-    it('does NOT emit a dataSource edge for IntegrationProcedures / ApexRemote / Custom data sources (deferred or out of scope)', async () => {
-      // These are real card dependencies too, but card->IP and card->Apex
-      // are deliberately not modeled in the DataRaptor-scoped v3.3 change
-      // (see the omni-ui-card.ts "Edge emission rules" disclosure).
+    it('emits a dataSource edge to the IP key when the card loads through an Integration Procedure', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OmniUiCard xmlns="http://soap.sforce.com/2006/04/metadata">
+    <authorName>Developer</authorName>
+    <isActive>true</isActive>
+    <name>IpCard</name>
+    <omniUiCardType>Parent</omniUiCardType>
+    <dataSourceConfig>${esc({
+      dataSource: {
+        type: 'IntegrationProcedures',
+        value: { ipMethod: 'Acme_GetData', inputMap: { id: '{Params.id}' } },
+      },
+    })}</dataSourceConfig>
+    <propertySetConfig>${esc({ states: [] })}</propertySetConfig>
+    <versionNumber>1</versionNumber>
+</OmniUiCard>`;
+      const { dir, path } = await writeTempCardXml('IpCard_Developer_1.ouc-meta.xml', xml);
+      try {
+        const result = await extractOmniUiCard(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges).toHaveLength(1);
+        expect(result.value.edges[0]).toMatchObject({
+          fromId: 'OmniUiCard:IpCard_Developer_1',
+          toId: 'OmniIntegrationProcedure:Acme_GetData',
+          edgeType: 'dispatchesOmniAction',
+          confidence: 'parsed',
+          properties: {
+            dispatchSource: 'dataSource',
+            dataSourceType: 'IntegrationProcedures',
+            targetRawName: 'Acme_GetData',
+          },
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits an IP edge for a DataAction whose message calls an Integration Procedure', async () => {
+      const propertySetConfig = {
+        states: [
+          {
+            name: 'S0',
+            components: {
+              'layer-0': {
+                children: [
+                  {
+                    name: 'Action',
+                    elementLabel: 'Refresh',
+                    property: {
+                      actionList: [
+                        {
+                          stateAction: {
+                            type: 'DataAction',
+                            message: JSON.stringify({
+                              type: 'IntegrationProcedures',
+                              value: { ipMethod: 'Acme_RefreshList' },
+                            }),
+                          },
+                        },
+                        {
+                          stateAction: {
+                            type: 'DataAction',
+                            message: JSON.stringify({ type: 'IntegrationProcedures', value: {} }),
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      };
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OmniUiCard xmlns="http://soap.sforce.com/2006/04/metadata">
+    <authorName>Developer</authorName>
+    <isActive>true</isActive>
+    <name>IpActionCard</name>
+    <omniUiCardType>Parent</omniUiCardType>
+    <propertySetConfig>${esc(propertySetConfig)}</propertySetConfig>
+    <versionNumber>1</versionNumber>
+</OmniUiCard>`;
+      const { dir, path } = await writeTempCardXml('IpActionCard_Developer_1.ouc-meta.xml', xml);
+      try {
+        const result = await extractOmniUiCard(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges.map((e) => e.toId)).toEqual([
+          'OmniIntegrationProcedure:Acme_RefreshList',
+        ]);
+        expect(result.value.edges[0]?.properties).toMatchObject({
+          actionType: 'DataAction',
+          dataActionType: 'IntegrationProcedures',
+        });
+        // The keyless IP message is a warning, not an edge.
+        expect(result.value.nodes[0]?.properties['omniUiCardExtractionWarnings']).toEqual([
+          'DataAction in S0/Refresh calls an Integration Procedure with no ipMethod',
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('an ApexRemote data source emits one callsApex edge; a Custom one emits nothing', async () => {
+      // A card -> Apex dependency: the card runs the class when it renders.
       for (const dataSource of [
-        { type: 'IntegrationProcedures', value: { ipMethod: 'Acme_GetData' } },
         {
           type: 'ApexRemote',
           value: { remoteClass: 'FooController', remoteMethod: 'bar' },
@@ -307,17 +409,35 @@ describe('extractOmniUiCard', () => {
           const result = await extractOmniUiCard(path);
           expect(result.ok).toBe(true);
           if (!result.ok) continue;
-          expect(result.value.edges).toHaveLength(0);
+          if (dataSource.type === 'Custom') {
+            expect(result.value.edges).toHaveLength(0);
+            continue;
+          }
+          expect(result.value.edges).toEqual([
+            {
+              fromId: 'OmniUiCard:NonDrCard_Developer_1',
+              toId: 'ApexClass:FooController',
+              edgeType: 'callsApex',
+              confidence: 'parsed',
+              source: 'omni-ui-card',
+              properties: {
+                methods: ['bar'],
+                entryVia: 'omnistudio-remote',
+                callSites: [{ site: 'dataSource', siteType: 'dataSource', remoteMethod: 'bar' }],
+              },
+            },
+          ]);
         } finally {
           await rm(dir, { recursive: true, force: true });
         }
       }
     });
 
-    it('emits a DataRaptor edge for a DataAction widget while its Apex/Web Page/Custom siblings stay silent', async () => {
+    it('emits a DataRaptor edge and a callsApex edge for DataAction widgets while Web Page/Custom siblings stay silent', async () => {
       // One Action widget with four actionList entries: a DataAction that
-      // loads a DataRaptor (emits one edge), a DataAction that calls Apex
-      // (silent), a Web Page navigate (silent), and a Custom action (silent).
+      // loads a DataRaptor (dispatch edge), a DataAction that calls Apex
+      // (callsApex edge), a Web Page navigate (silent), and a Custom action
+      // (silent).
       const propertySetConfig = {
         states: [
           {
@@ -382,9 +502,14 @@ describe('extractOmniUiCard', () => {
         const result = await extractOmniUiCard(path);
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        // Exactly one edge: the DataAction -> DataRaptor.
-        expect(result.value.edges).toHaveLength(1);
-        const edge = result.value.edges[0];
+        // The DataAction -> Apex call is a callsApex edge (no remoteMethod
+        // was written, so `methods` is empty).
+        const apex = result.value.edges.filter((e) => e.edgeType === 'callsApex');
+        expect(apex.map((e) => [e.toId, e.properties['methods']])).toEqual([['ApexClass:FooController', []]]);
+        // Exactly one dispatch edge: the DataAction -> DataRaptor.
+        const dispatch = result.value.edges.filter((e) => e.edgeType === 'dispatchesOmniAction');
+        expect(dispatch).toHaveLength(1);
+        const edge = dispatch[0];
         expect(edge).toBeDefined();
         if (!edge) return;
         expect(edge.toId).toBe('OmniDataTransform:DR_LoadThing');
@@ -395,13 +520,14 @@ describe('extractOmniUiCard', () => {
         expect(edge.properties['dataActionType']).toBe('DataRaptor');
         expect(edge.properties['targetRawName']).toBe('DR_LoadThing');
         expect(edge.properties['widgetLabel']).toBe('MixedActions');
-        // No edge for the Apex / Web Page / Custom siblings.
+        // No edge for the Web Page / Custom siblings, and the Apex sibling
+        // is a callsApex edge, never a dispatch.
         expect(
           result.value.edges.find((e) => String(e.toId).includes('/home')),
         ).toBeUndefined();
         expect(
-          result.value.edges.find((e) =>
-            String(e.toId).includes('FooController'),
+          result.value.edges.find(
+            (e) => String(e.toId).includes('FooController') && e.edgeType !== 'callsApex',
           ),
         ).toBeUndefined();
       } finally {

@@ -10,6 +10,9 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { extractProcessDataPack, isDataPackSource } from './datapack-extract.js';
+import { canonicalElementType } from './omnistudio/catalog.js';
+import { type ApexRemoteCall, apexRemoteTarget, buildApexRemoteEdges, literalObjectArgs } from './omnistudio/remote.js';
 import { deriveComponentApiName } from './path-utils.js';
 
 const OIP_FILE_SUFFIX = '.oip-meta.xml';
@@ -18,16 +21,16 @@ const NODE_TYPE = 'OmniIntegrationProcedure';
 const EXTRACTOR_SOURCE = 'omni-integration-procedure';
 
 /**
- * Action `type` values that emit `dispatchesOmniAction` edges to an
- * `OmniDataTransform` target. Each carries its target DataRaptor's
- * `uniqueName` inside `propertySetConfig.bundle`. See
- * `docs/vendor/salesforce-metadata/OmniIntegrationProcedure.md`
- * §"Common action `type` values".
+ * Canonical action types (`omnistudio/catalog.ts`) that call a DataMapper —
+ * every spelling (`Data Mapper Load Action`, `DataRaptor Load Action`, …) is
+ * compared through {@link canonicalElementType}. Each carries its target's
+ * name in `propertySetConfig.bundle`.
  */
 const DATARAPTOR_ACTION_TYPES = new Set<string>([
   'DataRaptor Extract Action',
+  'DataRaptor Turbo Action',
   'DataRaptor Transform Action',
-  'DataRaptor Load Action',
+  'DataRaptor Post Action',
 ]);
 
 /**
@@ -38,20 +41,25 @@ const DATARAPTOR_ACTION_TYPES = new Set<string>([
 const NESTED_IP_ACTION_TYPE = 'Integration Procedure Action';
 
 /**
- * Action `type` value identifying an HTTP callout. Surfaced as a REST
- * endpoint property on the IP node (`restEndpoints` array + the derived
+ * Canonical action type identifying an HTTP callout (`Rest Action` and
+ * `HTTP Request Action` are spellings of it). Surfaced as a REST endpoint
+ * property on the IP node (`restEndpoints` array + the derived
  * `restEndpointCount`); does NOT emit a `dispatchesOmniAction` edge (the
  * target is external — its destination is surfaced for composition with
  * v1.5's integration-topology tools downstream).
  */
-const REST_ACTION_TYPE = 'Rest Action';
+const REST_ACTION_TYPE = 'HTTP Action';
+
+/** The callout's URL: `restPath` (Rest Action) or `httpUrl` (HTTP Action). */
+const restPathOf = (psc: Record<string, unknown> | null): string | null =>
+  psc === null ? null : nonEmptyString(psc['restPath']) ?? nonEmptyString(psc['httpUrl']);
 
 /**
- * Action `type` value identifying an Apex callout. Surfaced as a
- * `remoteActions` property on the IP node; does NOT emit a
- * `dispatchesOmniAction` edge — Apex coupling is the v3.3
- * `implementsOmniInterface` follow-up. Its
- * `propertySetConfig.remoteClass` / `.remoteMethod` name the target.
+ * Action `type` value identifying an Apex callout. Its
+ * `propertySetConfig.remoteClass` / `.remoteMethod` name the target. Surfaced
+ * as a `remoteActions` property on the IP node AND — like every element that
+ * names a `remoteClass` (Try Catch Block failure handlers, Calculation
+ * Actions) — as a `callsApex` edge to the class (see `omnistudio/remote.ts`).
  */
 const REMOTE_ACTION_TYPE = 'Remote Action';
 
@@ -245,9 +253,9 @@ export interface RestEndpoint {
  *   - `remoteMethod` — `propertySetConfig.remoteMethod` (`null` when
  *     the blob omits it).
  *
- * Surfaced on the IP node's `properties.remoteActions`. No edge is
- * emitted (Apex coupling is the v3.3 `implementsOmniInterface` tier);
- * this is the data-only surface a future tier composes against.
+ * Surfaced on the IP node's `properties.remoteActions` (the data surface
+ * `integration_map` reads). The dependency itself is the `callsApex` edge the
+ * walk emits for every element naming a `remoteClass`.
  */
 export interface RemoteAction {
   readonly stepName: string;
@@ -337,16 +345,17 @@ const resolveTargetKey = (
   psc: Record<string, unknown> | null,
 ): string => {
   if (psc === null) return '';
-  if (actionType === REST_ACTION_TYPE) {
-    return nonEmptyString(psc['restPath']) ?? '';
+  const kind = canonicalElementType(actionType);
+  if (kind === REST_ACTION_TYPE) {
+    return restPathOf(psc) ?? '';
   }
-  if (DATARAPTOR_ACTION_TYPES.has(actionType)) {
+  if (DATARAPTOR_ACTION_TYPES.has(kind)) {
     return nonEmptyString(psc['bundle']) ?? '';
   }
-  if (actionType === NESTED_IP_ACTION_TYPE) {
+  if (kind === NESTED_IP_ACTION_TYPE) {
     return nonEmptyString(psc['integrationProcedureKey']) ?? '';
   }
-  if (actionType === REMOTE_ACTION_TYPE) {
+  if (kind === REMOTE_ACTION_TYPE) {
     return nonEmptyString(psc['remoteClass']) ?? '';
   }
   return '';
@@ -361,6 +370,10 @@ interface WalkAccumulator {
   readonly edges: Edge[];
   readonly restEndpoints: RestEndpoint[];
   readonly remoteActions: RemoteAction[];
+  /** Every element that names a `remoteClass` — aggregated into `callsApex` edges after the walk. */
+  readonly apexCalls: ApexRemoteCall[];
+  /** Delete Action targets: object → steps that delete its records. */
+  readonly deletes: Map<string, { stepName: string; recordId: string | null }[]>;
   readonly seen: Set<string>;
   dataRaptorCount: number;
   chainedIpCount: number;
@@ -440,6 +453,35 @@ const walkElements = (
           properties: { stepName, stepType: actionType, bundle, sequenceNumber },
         });
       }
+      // Any element naming a `remoteClass` runs that Apex class — a Remote
+      // Action, a Try Catch Block's failure handler, a Calculation Action. The
+      // call sites are aggregated into one `callsApex` edge per class after the
+      // walk, so dead-code / impact / usage tools see the OmniStudio caller.
+      const apexTarget = apexRemoteTarget(psc['remoteClass']);
+      if (apexTarget !== null) {
+        acc.apexCalls.push({
+          target: apexTarget,
+          remoteMethod: typeof psc['remoteMethod'] === 'string' ? psc['remoteMethod'] : null,
+          site: stepName,
+          siteType: actionType,
+          objectArgs: literalObjectArgs(psc),
+        });
+      }
+      // A Delete Action names the SObject type of every record it deletes
+      // (`deleteSObject[].Type`). Emitted as `writesTo` with operation
+      // `recordDelete` — the vocabulary Flow delete elements use — so record
+      // delete paths are visible to every tool.
+      for (const entry of toArray(psc['deleteSObject'])) {
+        if (typeof entry !== 'object' || entry === null) continue;
+        const type = nonEmptyString((entry as Record<string, unknown>)['Type']);
+        if (type === null) continue;
+        const object = type.trim();
+        const idRaw = (entry as Record<string, unknown>)['Id'];
+        acc.deletes.set(object, [
+          ...(acc.deletes.get(object) ?? []),
+          { stepName, recordId: typeof idRaw === 'string' ? idRaw : null },
+        ]);
+      }
       const ipKey = nonEmptyString(psc['integrationProcedureKey']);
       if (ipKey !== null) {
         acc.chainedIpCount += 1;
@@ -461,9 +503,10 @@ const walkElements = (
       }
     }
 
-    if (actionType === REST_ACTION_TYPE) {
+    const kind = canonicalElementType(actionType);
+    if (kind === REST_ACTION_TYPE) {
       if (!alreadySeen) {
-        const restPath = psc === null ? null : nonEmptyString(psc['restPath']);
+        const restPath = restPathOf(psc);
         if (restPath !== null) {
           acc.restEndpoints.push({
             stepName,
@@ -481,7 +524,7 @@ const walkElements = (
       continue;
     }
 
-    if (actionType === REMOTE_ACTION_TYPE) {
+    if (kind === REMOTE_ACTION_TYPE) {
       if (!alreadySeen) {
         const remoteClass =
           psc === null ? null : nonEmptyString(psc['remoteClass']);
@@ -494,18 +537,18 @@ const walkElements = (
           });
         }
       }
-      // Remote Action emits no edge (v3.3 `implementsOmniInterface`
-      // territory) and nests no child actions; no recursion.
+      // The `callsApex` edge comes from the universal `remoteClass` rule
+      // above. A Remote Action nests no child actions; no recursion.
       continue;
     }
 
-    if (DATARAPTOR_ACTION_TYPES.has(actionType)) {
+    if (DATARAPTOR_ACTION_TYPES.has(kind)) {
       // Dispatch edge emitted by the universal block above; DataRaptor actions
       // nest no child elements, so there is nothing to recurse into.
       continue;
     }
 
-    if (actionType === NESTED_IP_ACTION_TYPE) {
+    if (kind === NESTED_IP_ACTION_TYPE) {
       // Dispatch edge emitted by the universal block above (keyed by the
       // downstream IP's omniProcessKey). A nested IP Action references another
       // IP by key and does not inline its elements — nothing to recurse into.
@@ -551,6 +594,8 @@ const walkActions = (
     edges: [],
     restEndpoints: [],
     remoteActions: [],
+    apexCalls: [],
+    deletes: new Map(),
     seen: new Set<string>(),
     dataRaptorCount: 0,
     chainedIpCount: 0,
@@ -584,8 +629,23 @@ const walkActions = (
           : 0,
   );
 
+  const deleteEdges: Edge[] = [...acc.deletes]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([object, steps]) => ({
+      fromId: ipNodeId,
+      toId: `CustomObject:${object}`,
+      edgeType: 'writesTo' as const,
+      confidence: 'parsed' as const,
+      source: EXTRACTOR_SOURCE,
+      properties: {
+        operation: 'recordDelete',
+        mechanism: 'omnistudio-delete-action',
+        steps: steps.map((x) => x.stepName).sort(),
+        recordIds: [...new Set(steps.map((x) => x.recordId).filter((x): x is string => x !== null))].sort(),
+      },
+    }));
   return {
-    edges: acc.edges,
+    edges: [...acc.edges, ...buildApexRemoteEdges(ipNodeId, acc.apexCalls, EXTRACTOR_SOURCE), ...deleteEdges],
     restEndpoints,
     remoteActions,
     dataRaptorCount: acc.dataRaptorCount,
@@ -620,11 +680,15 @@ const walkActions = (
  *     IP node's `restEndpoints` array (and counted in
  *     `restEndpointCount`) so `endpoint_catalog` / `integration_map`
  *     can render the org's OmniStudio outbound callout surface.
- *   - `Remote Action` steps DO NOT emit edges — Apex coupling is the
- *     v3.3 `implementsOmniInterface` follow-up — but their
- *     `remoteClass` / `remoteMethod` are surfaced on the IP node's
- *     `remoteActions` array as the data-only surface that tier composes
- *     against.
+ *   - `writesTo` -> `CustomObject:{Type}` with `operation: 'recordDelete'`
+ *     for every `deleteSObject[].Type` a Delete Action names (one edge per
+ *     object; `steps` and `recordIds` list where and which ids).
+ *   - `callsApex` -> `ApexClass:{remoteClass}` for every element whose
+ *     propertySetConfig names a `remoteClass` — a `Remote Action`, a Try
+ *     Catch Block's failure handler, a Calculation Action — aggregated to
+ *     one edge per class with every routed `remoteMethod` in `methods[]` and
+ *     every call site in `callSites[]` (`omnistudio/remote.ts`). Remote
+ *     Actions are also listed on the IP node's `remoteActions` array.
  *
  * The action walk is RECURSIVE and depth-bounded: it descends into
  * Block-type elements (Conditional / Loop / Cache / Try-Catch Blocks
@@ -683,6 +747,10 @@ const walkActions = (
 export const extractOmniIntegrationProcedure = async (
   path: string,
 ): Promise<Result<ExtractionResult, ExtractorError>> => {
+  // A managed-package (Vlocity) export: a DataPack folder or its main file.
+  if (await isDataPackSource(path)) {
+    return extractProcessDataPack(path, 'IntegrationProcedure', extractOmniIntegrationProcedureRoot);
+  }
   const xmlResult = await readAndValidateXml(path);
   if (!xmlResult.ok) return xmlResult;
 
@@ -713,14 +781,23 @@ export const extractOmniIntegrationProcedure = async (
 
   const rootResult = validateRoot(parsed, path);
   if (!rootResult.ok) return rootResult;
-  const rootObj = rootResult.value;
-
   // The file-level basename (sans `.oip-meta.xml`) IS the canonical
   // api-name for the graph node. In every well-formed file in the
   // Globex corpus the basename matches `<uniqueName>`; for the 4
   // degenerate stubs (where `<uniqueName xsi:nil="true"/>` is empty)
   // the filename is the only stable identifier.
-  const apiName = deriveComponentApiName(path, OIP_FILE_SUFFIX);
+  return extractOmniIntegrationProcedureRoot(rootResult.value, path, deriveComponentApiName(path, OIP_FILE_SUFFIX));
+};
+
+/**
+ * The extraction over the parsed `<OmniIntegrationProcedure>` root — the seam
+ * a converted source (a managed-package DataPack) enters through.
+ */
+export const extractOmniIntegrationProcedureRoot = (
+  rootObj: Record<string, unknown>,
+  path: string,
+  apiName: string,
+): Result<ExtractionResult, ExtractorError> => {
   const nodeId = `${NODE_TYPE}:${apiName}`;
   const labelName = optionalString(rootObj, 'name');
 

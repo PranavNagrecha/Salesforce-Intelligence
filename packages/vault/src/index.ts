@@ -90,7 +90,16 @@ export {
   readDemandQueue,
 } from './demand-queue.js';
 export type { DemandQueueEntry } from './demand-queue.js';
-export { deleteSnapshot, listSnapshots, loadSnapshot, saveSnapshot } from './snapshot.js';
+export {
+  deleteSnapshot,
+  listSnapshots,
+  loadSnapshot,
+  saveSnapshot,
+  snapshotRuntimeOf,
+  SOURCE_HASHED_TYPES,
+  sourceFileHash,
+  type SnapshotRuntime,
+} from './snapshot.js';
 export type {
   Snapshot,
   SnapshotEdge,

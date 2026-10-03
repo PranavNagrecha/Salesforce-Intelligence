@@ -23,7 +23,7 @@
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import type { RefusalShape } from './refusal-gates.js';
 
@@ -5994,8 +5994,13 @@ const RULES: readonly Rule[] = [
       // (P14-ROUTER-goldset-expand). Noun-final phrasings ("what references
       // the X validation rule") have no verb AFTER the noun, so they keep
       // component-usage.
-      /\b(formulas?|formula\s+fields?|validation\s+rules?)\b.*\b(reference|use|depend)\b/,
-      /\bwhat\s+formulas?\b.*\b(use|reference)\b/,
+      // The verb is matched in its present forms — `references` / `referencing`
+      // too ("every formula that references Amount__c" matched NOTHING when
+      // the trailing \b rejected the `s`). NOT `referenced`: "is this formula
+      // field referenced anywhere" asks for EVERY usage of the field, not only
+      // the formulas that reference it, so this rule must not claim it.
+      /\b(formulas?|formula\s+fields?|validation\s+rules?)\b.*\b(referenc(?:e|es|ing)|use|depend)\b/,
+      /\bwhat\s+formulas?\b.*\b(use|referenc(?:e|es|ing))\b/,
       // "what references X IN FORMULAS / validation rules" — the verb comes
       // FIRST in this phrasing, so the formulas-first patterns above missed
       // it and the later component-usage rule stole it onto the generic
@@ -6902,6 +6907,10 @@ const RULES: readonly Rule[] = [
     reason: 'Name lookup, typo correction, and ambiguous artifact selection are handled by the vault resolver.',
     patterns: [
       /\bfind\s+or\s+resolve\b/,
+      // "resolve the component named Account.Industry" — an explicit request to
+      // resolve a NAMED artifact. Anchored on `named` / `called`, so "resolve
+      // this validation error" (a fix request) does not match.
+      /\bresolve\s+(?:the\s+|this\s+)?(?:component|field|object|class|flow|artifact|metadata)\s+(?:named|called)\b/,
       /\bi\s+typed\b.*\b(salesforce\s+)?artifact\b.*\bmean\b/,
       /\bwhich\b.*\b(should\s+i\s+use|did\s+i\s+mean)\b/,
       /\bfind\s+[\w_]+\b/,
@@ -7673,6 +7682,12 @@ export interface RouteGapSummary {
   readonly topCount: number;
   /** Categories ranked by count descending (optionally truncated via `top`). */
   readonly categories: readonly RouteGapCategoryCount[];
+  /**
+   * Set only when the summary was scoped to one vault: entries left out
+   * because they carry no vault stamp (written before entries were stamped),
+   * so they cannot be attributed to any vault.
+   */
+  readonly unstampedExcluded?: number;
 }
 
 /** Options for {@link summarizeRouteGaps}. */
@@ -7685,6 +7700,8 @@ export interface SummarizeRouteGapsOptions {
   readonly since?: Date | string;
   /** Max categories to return in `categories` (all when omitted). */
   readonly top?: number;
+  /** Only count entries stamped with this vault (the log file is machine-wide). */
+  readonly vaultRoot?: string;
 }
 
 /**
@@ -7714,10 +7731,19 @@ export const summarizeRouteGaps = async (
         : Date.parse(opts.since);
   const byCategory = new Map<string, number>();
   let count = 0;
+  const vault = opts?.vaultRoot === undefined ? null : resolve(opts.vaultRoot);
+  let unstampedExcluded = 0;
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
     try {
-      const entry = JSON.parse(line) as { category?: unknown; at?: unknown };
+      const entry = JSON.parse(line) as { category?: unknown; at?: unknown; vaultRoot?: unknown };
+      if (vault !== null) {
+        if (typeof entry.vaultRoot !== 'string') {
+          unstampedExcluded += 1;
+          continue;
+        }
+        if (resolve(entry.vaultRoot) !== vault) continue;
+      }
       if (sinceMs !== null) {
         if (Number.isNaN(sinceMs)) {
           // Invalid since → treat as no matches (caller should validate first).
@@ -7745,6 +7771,7 @@ export const summarizeRouteGaps = async (
     topCategory: top?.category ?? null,
     topCount: top?.count ?? 0,
     categories,
+    ...(vault !== null ? { unstampedExcluded } : {}),
   };
 };
 

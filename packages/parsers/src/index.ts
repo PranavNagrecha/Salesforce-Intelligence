@@ -70,6 +70,7 @@ export type {
   FieldAccess,
   Instantiation,
   MethodCallSite,
+  OmniStudioApexCall,
 } from './apex-scanner.js';
 export { scanFrontendSource } from './frontend-scanner.js';
 export type {

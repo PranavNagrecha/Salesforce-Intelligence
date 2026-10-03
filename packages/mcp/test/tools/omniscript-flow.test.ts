@@ -18,6 +18,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from '../../src/tools/omni-disclosures.js';
 import {
   omniscriptFlowHandler,
   omniscriptFlowInputSchema,
@@ -414,19 +415,15 @@ describe('omniscriptFlowHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.boundaries).toHaveLength(3);
-    // Q180 Native-vs-Vlocity disclosure.
-    expect(r.value.data.boundaries[0]).toMatch(
-      /Industries Native XML shapes/,
-    );
-    expect(r.value.data.boundaries[0]).toMatch(/vlocity_cmt__/);
+    // Q180 Native-vs-Vlocity disclosure — the ONE shared sentence.
+    expect(r.value.data.boundaries[0]).toBe(NATIVE_VS_VLOCITY_DISCLOSURE);
     // Q179 record-level boundary.
     expect(r.value.data.boundaries[1]).toMatch(/OmniProcessElement/);
     expect(r.value.data.boundaries[1]).toMatch(/record-level/);
-    // Q180 v3.3 Apex-coupling deferral.
-    expect(r.value.data.boundaries[2]).toMatch(
-      /implements omnistudio\.VlocityOpenInterface/,
-    );
-    expect(r.value.data.boundaries[2]).toMatch(/v3\.3/);
+    // Q180 Apex-coupling scope: calls out are callsApex edges; Apex running OmniStudio by key is an edge from the class.
+    expect(r.value.data.boundaries[2]).toMatch(/callsApex/);
+    expect(r.value.data.boundaries[2]).toMatch(/IntegrationProcedureService/);
+    expect(r.value.data.boundaries[2]).toMatch(/a key built at runtime is not seen/);
   });
 
   it('rejects a non-OmniScript prefix with invalid-query', async () => {

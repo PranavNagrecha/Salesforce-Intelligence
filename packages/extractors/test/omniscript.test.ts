@@ -172,8 +172,8 @@ describe('extractOmniScript', () => {
     it('emits a dispatchesOmniAction IP edge for a Step that invokes an IP on Next', async () => {
       // A non-"Integration Procedure Action" element can still invoke an IP:
       // the integrationProcedureKey lives in its propertySetConfig. Real shape:
-      // example.gov AccountLinking_Existing has a "Next" Navigate Action whose
-      // config carries integrationProcedureKey=AccountLiniking_MPPValidation,
+      // example.gov Acme_Enrollment has a "Next" Navigate Action whose
+      // config carries integrationProcedureKey=Acme_ValidateMember,
       // which the type/targetType gate dropped. The dependency must surface for
       // ANY element carrying the key (a Step here, as the simplest isolated
       // case — Step is not in EDGE_EMITTING_TYPES at all).
@@ -186,8 +186,8 @@ describe('extractOmniScript', () => {
   <omniProcessElements>
     <isActive>true</isActive>
     <level>0.0</level>
-    <name>MPPCodeScreen</name>
-    <propertySetConfig>{&quot;label&quot;:&quot;Next&quot;,&quot;integrationProcedureKey&quot;:&quot;MyOrg_MPPValidation&quot;,&quot;useContinuation&quot;:false}</propertySetConfig>
+    <name>MemberCodeScreen</name>
+    <propertySetConfig>{&quot;label&quot;:&quot;Next&quot;,&quot;integrationProcedureKey&quot;:&quot;MyOrg_ValidateMember&quot;,&quot;useContinuation&quot;:false}</propertySetConfig>
     <sequenceNumber>0.0</sequenceNumber>
     <type>Step</type>
   </omniProcessElements>
@@ -210,9 +210,104 @@ describe('extractOmniScript', () => {
         );
         expect(ipEdges).toHaveLength(1);
         expect(ipEdges[0]?.toId).toBe(
-          'OmniIntegrationProcedure:MyOrg_MPPValidation',
+          'OmniIntegrationProcedure:MyOrg_ValidateMember',
         );
         expect(ipEdges[0]?.properties['stepType']).toBe('Step');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('Edit Block IP keys and embedded OmniScripts', () => {
+    const psc = (o: unknown): string =>
+      JSON.stringify(o).replace(/"/g, '&quot;');
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OmniScript xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>false</isIntegrationProcedure>
+    <language>English</language>
+    <name>Acme Cart</name>
+    <omniProcessElements>
+        <childElements>
+            <childElements>
+                <isActive>true</isActive>
+                <level>2.0</level>
+                <name>CartLineEditBlock-Delete</name>
+                <propertySetConfig>${psc({ integrationProcedureKey: 'Acme_DeleteRow', extraPayload: {} })}</propertySetConfig>
+                <sequenceNumber>0.0</sequenceNumber>
+                <type>Integration Procedure Action</type>
+            </childElements>
+            <isActive>true</isActive>
+            <level>1.0</level>
+            <name>CartLineEditBlock</name>
+            <propertySetConfig>${psc({
+              allowDelete: true,
+              deleteIPKey: 'Acme_DeleteCartLine',
+              deleteIPExtraPayload: { sObjectId: '%Id%' },
+              saveIPKey: 'Acme_SaveCartLine',
+            })}</propertySetConfig>
+            <sequenceNumber>0.0</sequenceNumber>
+            <type>Edit Block</type>
+        </childElements>
+        <childElements>
+            <isActive>true</isActive>
+            <level>1.0</level>
+            <name>EmbeddedTerms</name>
+            <propertySetConfig>${psc({ Type: 'Acme', 'Sub Type': 'Terms', Language: 'English' })}</propertySetConfig>
+            <sequenceNumber>1.0</sequenceNumber>
+            <type>OmniScript</type>
+        </childElements>
+        <isActive>true</isActive>
+        <level>0.0</level>
+        <name>CartStep</name>
+        <propertySetConfig>${psc({ label: 'Cart' })}</propertySetConfig>
+        <sequenceNumber>0.0</sequenceNumber>
+        <type>Step</type>
+    </omniProcessElements>
+    <omniProcessType>OmniScript</omniProcessType>
+    <subType>Cart</subType>
+    <type>Acme</type>
+    <uniqueName>Acme_Cart_English_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniScript>`;
+
+    it('emits an edge for each Edit Block deleteIPKey / saveIPKey, tagged with the property', async () => {
+      const { dir, path } = await writeTempXml('Acme_Cart_English_1.os-meta.xml', xml);
+      try {
+        const result = await extractOmniScript(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const byTarget = new Map(result.value.edges.map((e) => [e.toId, e]));
+        expect(byTarget.get('OmniIntegrationProcedure:Acme_DeleteCartLine')?.properties).toMatchObject({
+          stepName: 'CartLineEditBlock',
+          stepType: 'Edit Block',
+          via: 'deleteIPKey',
+          targetRawName: 'Acme_DeleteCartLine',
+        });
+        expect(byTarget.get('OmniIntegrationProcedure:Acme_SaveCartLine')?.properties).toMatchObject({
+          via: 'saveIPKey',
+        });
+        // The `-Delete` child action is still its own dispatch.
+        expect(byTarget.has('OmniIntegrationProcedure:Acme_DeleteRow')).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits an edge for an embedded OmniScript keyed by Type/Sub Type/Language', async () => {
+      const { dir, path } = await writeTempXml('Acme_Cart_English_1.os-meta.xml', xml);
+      try {
+        const result = await extractOmniScript(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const embed = result.value.edges.find((e) => e.toId === 'OmniScript:Acme/Terms/English');
+        expect(embed?.properties).toMatchObject({
+          stepName: 'EmbeddedTerms',
+          via: 'embeddedOmniScript',
+          targetRawName: 'Acme/Terms/English',
+        });
+        expect(result.value.nodes[0]?.properties['omniScriptExtractionWarnings']).toEqual([]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

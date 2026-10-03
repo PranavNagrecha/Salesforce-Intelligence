@@ -682,7 +682,13 @@ const collectCallers = async (
     // declares the action name at the class level. Surface them as
     // potential callers regardless of method.
     const isFlowCaller = edge.fromId.startsWith('Flow:');
-    if (!isFlowCaller && !callsMethod(edge, methodName)) {
+    // OmniStudio callers enter the class through its routing method
+    // (`invokeMethod` for VlocityOpenInterface, `call` for System.Callable)
+    // and pass `remoteMethod` as the routed name: they call the routed method
+    // AND the routing entry point.
+    const isOmniStudioRoutingCall =
+      edge.properties['entryVia'] === 'omnistudio-remote' && /^(invokeMethod|call)$/i.test(methodName);
+    if (!isFlowCaller && !isOmniStudioRoutingCall && !callsMethod(edge, methodName)) {
       continue;
     }
     if (impactsByCaller.has(edge.fromId)) {

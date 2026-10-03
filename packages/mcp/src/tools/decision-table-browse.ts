@@ -63,6 +63,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from './omni-disclosures.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 const DECISION_TABLE_PREFIX = 'DecisionTable:';
@@ -82,21 +83,6 @@ const ROW_DATA_BOUNDARY =
   'the metadata XML. v3.2 cannot enumerate row content. To see the ' +
   'actual rows, query the row data source (SObject record query or ' +
   'the original CSV).';
-
-/**
- * Native-vs-Vlocity-Legacy honesty disclosure surfaced for EVERY v3.2
- * tool response per PLAN-v3.2 §4 axis 1. DecisionTable is a Native-only
- * family (the Vlocity-managed-package legacy did not carry a DT
- * equivalent), but the discipline-consistency rule surfaces the phrase
- * on every v3.2 response so callers see the same boundary phrasing
- * across the OmniStudio tool surface.
- */
-const NATIVE_VS_VLOCITY_BOUNDARY =
-  'v3.2 recognizes Industries Native XML shapes (file extensions ' +
-  '`.os-meta.xml`, `.oip-meta.xml`, `.rpt-meta.xml`, `.ouc-meta.xml`, ' +
-  '`.decisionTable-meta.xml`). Legacy Vlocity-managed-package ' +
-  'components (namespace `vlocity_cmt__`) are NOT extracted by v3.2. ' +
-  'Mid-migration orgs may show partial coverage.';
 
 /**
  * dataSourceType-specific row-store hint. The verbatim disclosure
@@ -373,7 +359,7 @@ const readParametersFromSource = async (
  *
  * @example
  *   const r = await decisionTableBrowseHandler(ctx, {
- *     decisionTableId: 'DecisionTable:FPLFullTabe',
+ *     decisionTableId: 'DecisionTable:AcmeIncomeThresholds',
  *   });
  *   if (r.ok) console.log(r.value.data.inputParams.length);
  */
@@ -434,7 +420,7 @@ export const decisionTableBrowseHandler = async (
   const boundaries: string[] = [
     ROW_DATA_BOUNDARY,
     rowStoreHint(dataSourceTypeRaw, sourceObject),
-    NATIVE_VS_VLOCITY_BOUNDARY,
+    NATIVE_VS_VLOCITY_DISCLOSURE,
   ];
   if (readError !== null) {
     boundaries.push(readError);

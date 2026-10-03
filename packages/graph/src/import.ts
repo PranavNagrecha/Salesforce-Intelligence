@@ -11,6 +11,7 @@ import {
   type DuplicateSourceSummary,
   resolveDuplicateSourcePaths,
 } from './duplicate-source.js';
+import { canonicalizeOmniStudioEdgeTargets } from './omni-resolve.js';
 import { mintRelationshipTraversalEdges } from './relationship-refs.js';
 import { relativizeSourcePath } from './relativize.js';
 import type { GraphError, GraphStore } from './store.js';
@@ -957,6 +958,11 @@ export const importExtractionResults = async (
   // value-provider tokens minted verbatim by the frontend regex scanner.
   canonicalizeLabelEdgeTargets(allNodes, allEdges);
   canonicalizeResourceEdgeTargets(allNodes, allEdges);
+  // OmniStudio callers name their targets by a callable key (IP
+  // `omniProcessKey`, DataMapper `<name>`, OmniScript `Type/SubType/Language`)
+  // while the nodes are keyed by the versioned file stem — resolve each
+  // dangling target onto the version that runs (see `./omni-resolve.ts`).
+  canonicalizeOmniStudioEdgeTargets(allNodes, allEdges);
   // CR-CAP-09: mint class-granular @future dispatchesAsync edges AFTER targets
   // are canonicalized so the future-set membership test sees real node ids.
   mintFutureDispatchEdges(allNodes, allEdges);

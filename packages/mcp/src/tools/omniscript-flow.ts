@@ -21,7 +21,7 @@
  *   - `boundaries[]`: three verbatim disclosures surfaced ALWAYS per
  *     PLAN-v3.2 §4 honesty axes — Native-vs-Vlocity-Legacy detection
  *     heuristic, the OmniProcessElement record-level boundary (Q179
- *     anchor), and the v3.3 Apex-coupling deferral (Q180 anchor).
+ *     anchor), and the Apex-coupling scope (Q180 anchor).
  *
  * **Composition recipe**: loads the OmniScript node via
  * `getNodeById`, reads `node.sourcePath`, re-parses the XML with
@@ -29,16 +29,20 @@
  * extractor surfaces summary counts, not the individual elements), then
  * walks `listEdges` filtered to `dispatchesOmniAction` outgoing edges,
  * resolving each `toId` to `componentExistsInVault`. The Native-vs-
- * Vlocity disclosure surfaces verbatim regardless of vault state
- * because v3.2 cannot reliably detect mid-migration orgs (Q180
- * constitutional anchor).
+ * Vlocity disclosure (shared, `omni-disclosures.ts`) surfaces verbatim
+ * regardless of vault state: whether a managed-package export is
+ * current, or a mid-migration org is fully covered, is not knowable
+ * from the vault (Q180 constitutional anchor). A managed-package
+ * (Vlocity DataPack) OmniScript is read through the same parser as a
+ * native one.
  *
  * **Refusal contract**: `OmniScript:`-prefix violations surface as
  * `invalid-query`; the well-formed id missing from the vault surfaces
  * as `component-not-found` with the canonical `{kind, message, path}`
- * shape. Vault-Vlocity-Legacy hits look exactly like component-not-found
- * because the v3.2 extractor does NOT touch the legacy `vlocity_cmt__`
- * namespace; the boundaries[] disclosure makes that gap visible.
+ * shape. A managed-package (Vlocity) OmniScript is in the vault only
+ * when its DataPack export is under org-kb/source/vlocity/ — without
+ * one it looks exactly like component-not-found; the boundaries[]
+ * disclosure makes that gap visible.
  *
  * @see docs/vendor/salesforce-metadata/OmniScript.md
  * @see PLAN-v3.2.md §4, §7 (Q176 reference question)
@@ -60,20 +64,14 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from './omni-disclosures.js';
+import { isDataPackSourcePath, readDataPackRoot } from './omni-source.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /** Canonical id prefix the tool accepts. */
 const OMNISCRIPT_PREFIX = 'OmniScript:';
 /** Edge type the tool walks. */
 const DISPATCH_EDGE_TYPE = 'dispatchesOmniAction';
-
-/**
- * The Native-vs-Vlocity-Legacy honesty axis 1 disclosure, surfaced
- * verbatim on EVERY response per PLAN-v3.2 §4 honesty axis 1 / Q180
- * constitutional anchor.
- */
-const NATIVE_VS_VLOCITY_DISCLOSURE =
-  'v3.2 recognizes Industries Native XML shapes (file extensions `.os-meta.xml`, `.oip-meta.xml`, `.rpt-meta.xml`, `.ouc-meta.xml`, `.decisionTable-meta.xml`). Legacy Vlocity-managed-package components (namespace `vlocity_cmt__`) are NOT extracted by v3.2. Mid-migration orgs may show partial coverage.';
 
 /**
  * The OmniProcessElement record-level boundary disclosure, surfaced
@@ -85,13 +83,14 @@ const RECORD_LEVEL_DISCLOSURE =
   "v3.2 walks the OmniScript / IP / Card metadata XML. The actual user-entered data and runtime state lives in OmniProcessElement and related SObject records; that is record-level data, out of scope for v0.1's read-the-metadata posture.";
 
 /**
- * The v3.3 Apex-coupling deferral disclosure, surfaced verbatim on
- * EVERY `sfi.omniscript_flow` response per PLAN-v3.2 §4 honesty axis 3
- * / Q180 anchor — the 16 vaulted Apex classes that implement
- * `omnistudio.VlocityOpenInterface` produce zero v3.2 edges.
+ * The Apex-coupling scope disclosure, surfaced verbatim on EVERY
+ * `sfi.omniscript_flow` response (Q180 anchor): calls OUT to Apex are in
+ * the graph as `callsApex` edges, but this tool lists only the OmniStudio
+ * dispatches; Apex that runs OmniStudio by a literal key is an edge from
+ * the class (the usage tools list it).
  */
 const APEX_COUPLING_DEFERRAL_DISCLOSURE =
-  'v3.2 captures OmniStudio components and intra-OmniStudio call chains (`dispatchesOmniAction`). The Apex-to-OmniProcess coupling (`implements omnistudio.VlocityOpenInterface` etc.) is a v3.3 follow-up — those edges are NOT yet in the graph.';
+  'This lists the intra-OmniStudio call chain (`dispatchesOmniAction`). Elements that call Apex (a `remoteClass` on a Remote Action, a File upload, …) are in the graph as `callsApex` edges from this OmniScript, with their methods and call sites — not listed here; ask the Apex or usage tools. Apex that runs an Integration Procedure or DataRaptor by name (`IntegrationProcedureService` / `DRGlobal` with a literal key) is in the graph as a `dispatchesOmniAction` edge from that class (`via: apex`); a key built at runtime is not seen.';
 
 /**
  * Zod schema for the `sfi.omniscript_flow` tool input.
@@ -288,17 +287,15 @@ const walkElements = (raw: unknown, acc: WalkAccumulator): void => {
 };
 
 /**
- * Read and parse the OmniScript's source XML, returning the flattened
- * step list. Wraps fast-xml-parser with the same options the v3.2 R2
- * `omniscript` extractor uses so the two surfaces produce structurally
- * identical step views — only the storage location differs (extractor
- * persists counts to node properties; this tool re-parses for full
- * step shape).
+ * Read and parse the OmniScript's source XML into its `<OmniScript>` root.
+ * Wraps fast-xml-parser with the same options the v3.2 R2 `omniscript`
+ * extractor uses so the two surfaces produce structurally identical step
+ * views — only the storage location differs (extractor persists counts to
+ * node properties; this tool re-parses for full step shape).
  */
-const readSteps = async (
+const readOmniScriptXmlRoot = async (
   sourcePath: string,
-  includePsc: boolean,
-): Promise<Result<OmniScriptStep[], string>> => {
+): Promise<Result<Record<string, unknown>, string>> => {
   let xmlText: string;
   try {
     xmlText = await readFile(sourcePath, 'utf-8');
@@ -329,7 +326,28 @@ const readSteps = async (
   if (typeof root !== 'object' || root === null) {
     return err(`expected <OmniScript> root at ${sourcePath}`);
   }
-  const rootObj = root as Record<string, unknown>;
+  return ok(root as Record<string, unknown>);
+};
+
+/**
+ * The OmniScript's flattened step list, from its Metadata API XML or — for a
+ * managed-package (Vlocity) OmniScript — its DataPack, converted to the same
+ * `<OmniScript>` root so both walk identically.
+ */
+const readSteps = async (
+  sourcePath: string,
+  includePsc: boolean,
+): Promise<Result<OmniScriptStep[], string>> => {
+  let rootObj: Record<string, unknown>;
+  if (isDataPackSourcePath(sourcePath)) {
+    const dp = await readDataPackRoot(sourcePath, 'process');
+    if (!dp.ok) return err(dp.error.message);
+    rootObj = dp.value;
+  } else {
+    const xml = await readOmniScriptXmlRoot(sourcePath);
+    if (!xml.ok) return xml;
+    rootObj = xml.value;
+  }
   const acc: WalkAccumulator = { steps: [], includePsc };
   walkElements(rootObj['omniProcessElements'], acc);
   // Stable order: level ASC, sequenceNumber ASC, then name as tiebreaker.
@@ -393,12 +411,12 @@ const compareDispatched = (
  * returning the step sequence plus the downstream IP / DataRaptor / OS
  * dispatches resolved through `dispatchesOmniAction` edges. Surfaces
  * three verbatim boundary disclosures (Native-vs-Vlocity heuristic,
- * record-level data out of scope, Apex coupling deferred to v3.3) on
+ * record-level data out of scope, Apex coupling listed elsewhere) on
  * EVERY response per PLAN-v3.2 §4 / Q176-Q180 anchors.
  *
  * @example
  *   const r = await omniscriptFlowHandler(ctx, {
- *     omniScriptId: 'OmniScript:AccountLinking_Existing_English_1',
+ *     omniScriptId: 'OmniScript:Acme_Enrollment_English_1',
  *   });
  *   if (r.ok) console.log(r.value.data.steps.length);
  */

@@ -3,6 +3,7 @@ import { basename, join, relative, sep } from 'node:path';
 
 import type { ComponentType } from '@sf-intelligence/contracts';
 import { splitPathSegments } from '@sf-intelligence/core';
+import { omnistudio } from '@sf-intelligence/extractors';
 
 import { componentTypeFromSourcePath } from './refresh-pipeline.js';
 
@@ -74,6 +75,10 @@ const walkSourceEntries = async (
       } else if (entry.isFile()) {
         const relPath = relative(sourceRoot, abs);
         const fileName = entry.name;
+        // A Vlocity DataPack is a user's managed-package export, never Metadata
+        // API output, so it is never "absent from the authoritative retrieve" —
+        // reconciling it would delete every exported DataPack on each refresh.
+        if (omnistudio.isDataPackPath(fileName)) continue;
         let type = componentTypeFromSourcePath(sourceRoot, abs, false);
         if (type === null && isKnownSidecar(fileName)) {
           const primaryRel = primaryRelPathForSidecar(relPath, fileName);

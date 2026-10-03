@@ -1,41 +1,32 @@
 /**
  * Handler for the `sfi.integration_procedure_chain` MCP tool.
  *
- * The second of five v3.2 R3 OmniStudio composer tools. Given an
- * OmniIntegrationProcedure (IP) canonical id, walks the IP's action
- * chain in `sequenceNumber` order and surfaces:
+ * Given an OmniIntegrationProcedure (IP) canonical id, walks the IP's
+ * steps — top-level and nested inside blocks — in runtime order and
+ * surfaces:
  *
  *   1. The IP's identity metadata (`omniProcessKey`, `versionNumber`,
  *      `subType`, `type`, `uniqueName`, `isActive`).
- *   2. The ordered action list — every `<omniProcessElements>` child of
- *      the IP's `*.oip-meta.xml` file. Each action carries its `name`,
- *      `type`, `description`, `sequenceNumber`, `isActive`, and the
- *      optional `executionConditionalFormula` extracted from the
- *      `propertySetConfig` JSON.
- *   3. The `externalEndpoints[]` payload — every action whose
- *      `propertySetConfig` declares a downstream target:
- *        - `Rest Action` → kind `'rest'`; target = `restPath`;
- *          `namedCredential` carried alongside.
- *        - `DataRaptor Extract/Transform/Load Action` →
- *          kind `'dataraptor'`; target = the `bundle` field; `targetId`
- *          resolves to the OmniDataTransform node whose
- *          `properties.name` matches (the node id is the VERSIONED
- *          filename stem, so the bundle name is not it).
- *        - `Integration Procedure Action` →
- *          kind `'integration-procedure'`; target = the
- *          `integrationProcedureKey`; `targetId` resolves to the IP
- *          node whose `properties.omniProcessKey` matches (the node id
- *          is the filename stem, so the key is not it).
- *          Both kinds carry `targetResolution` +
- *          `targetCandidateIds` — see `ExternalEndpoint`.
- *        - `Remote Action` → kind `'remote-action'`; target =
- *          `{remoteClass}.{remoteMethod}`. No `targetId` resolution —
- *          Apex→OmniProcess edges are the v3.3
- *          `implementsOmniInterface` follow-up.
- *   4. The `responseShape` parsed from the terminal `Response Action`'s
+ *   2. The ordered action list — every step, siblings by
+ *      `sequenceNumber`, depth-first. Each carries its `name`, `type`,
+ *      `description`, `sequenceNumber`, `isActive`, the optional
+ *      `executionConditionalFormula`, its `path` / `depth`, and the element
+ *      catalog's `canonicalType` and `role` (`omnistudio/catalog.ts`), so
+ *      every spelling of one action is read the same way.
+ *   3. The `externalEndpoints[]` payload, by the same rules the extractor
+ *      uses for edges: ANY element naming a `bundle` (kind `dataraptor`),
+ *      an `integrationProcedureKey` (`integration-procedure`), a
+ *      `remoteClass` (`remote-action`, resolved to its ApexClass); an HTTP
+ *      step's URL (`rest`); a Delete Action's objects (`delete`). DataMapper
+ *      and IP targets take the graph's import-time resolution — the
+ *      version that runs, the others listed — and fall back to scanning
+ *      the target type by the property the caller names it by. A resolved
+ *      DataMapper carries the objects it reads and writes.
+ *   4. `dataAccess` — the chain's own footprint over its endpoints.
+ *   5. The `responseShape` parsed from the terminal `Response Action`'s
  *      `propertySetConfig.additionalOutput` (the response template).
- *   5. The verbatim honesty disclosures bundled into `boundaries[]`:
- *      Native-vs-Vlocity-Legacy (ALWAYS), the v3.3 Apex-deferral
+ *   6. The verbatim honesty disclosures bundled into `boundaries[]`:
+ *      Native-vs-Vlocity-Legacy (ALWAYS), the Apex-coupling scope
  *      (ALWAYS), the OmniProcessElement record-level boundary
  *      (ALWAYS — Q179 anchor), and the REST-endpoint reachability
  *      caveat (ALWAYS — URLs are `parsed`, not verified).
@@ -85,13 +76,16 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById } from '@sf-intelligence/graph';
+import { omnistudio } from '@sf-intelligence/extractors';
+import { getNodeById, listEdgesForNodes, listNodesByIds } from '@sf-intelligence/graph';
 import { resolveVaultSourcePath } from '@sf-intelligence/vault';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from './omni-disclosures.js';
+import { isDataPackSourcePath, readDataPackRoot } from './omni-source.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { FULL_SCAN_MAX_NODES } from './scan-cap.js';
@@ -106,53 +100,20 @@ const DATA_TRANSFORM_PREFIX = 'OmniDataTransform:';
 const ROOT_ELEMENT = 'OmniIntegrationProcedure';
 
 /**
- * Action `type` values that emit a `dataraptor`-kind external endpoint.
- * Mirrors the extractor's edge-emission matrix (the three DataRaptor
- * variants share the same `bundle` JSON key). See
- * `docs/vendor/salesforce-metadata/OmniIntegrationProcedure.md`
- * §"Common action `type` values".
- */
-const DATARAPTOR_ACTION_TYPES: ReadonlySet<string> = new Set([
-  'DataRaptor Extract Action',
-  'DataRaptor Transform Action',
-  'DataRaptor Load Action',
-]);
-
-/** Discriminant `type` value of an HTTP callout step. */
-const REST_ACTION_TYPE = 'Rest Action';
-/** Discriminant `type` value of a step calling a nested IP. */
-const NESTED_IP_ACTION_TYPE = 'Integration Procedure Action';
-/** Discriminant `type` value of a step calling an Apex method. */
-const REMOTE_ACTION_TYPE = 'Remote Action';
-/** Discriminant `type` value of the terminal response-shaping step. */
-const RESPONSE_ACTION_TYPE = 'Response Action';
-
-/**
- * Native-vs-Vlocity-Legacy honesty disclosure. Surfaced on every
- * response per PLAN-v3.2.md §4 (axis 1) and §5 (the
- * salesforce-industries-routing skill's verbatim-disclosure
- * discipline). Frozen as a constant so the test suite can assert the
- * exact string — a paraphrasing during rendering is a code-review
- * concern, not a silent drift.
- */
-const NATIVE_VS_VLOCITY_DISCLOSURE =
-  'v3.2 recognizes Industries Native XML shapes (file extensions ' +
-  '`.os-meta.xml`, `.oip-meta.xml`, `.rpt-meta.xml`, `.ouc-meta.xml`, ' +
-  '`.decisionTable-meta.xml`). Legacy Vlocity-managed-package components ' +
-  '(namespace `vlocity_cmt__`) are NOT extracted by v3.2. Mid-migration ' +
-  'orgs may show partial coverage.';
-
-/**
- * v3.3 Apex-coupling deferral disclosure. Surfaced on every IP-chain
- * response because Remote Action steps may invite callers to assume
- * Apex-edge coverage; the absence of that coverage is documented per
- * PLAN-v3.2.md §4 (axis 3) and §5.
+ * Apex-coupling scope disclosure. Surfaced on every IP-chain response:
+ * calls OUT to Apex are resolved; what the Apex does is answered elsewhere;
+ * Apex that runs this IP by a literal key is an INCOMING edge (usage tools).
  */
 const APEX_COUPLING_DEFERRAL_DISCLOSURE =
-  'v3.2 captures OmniStudio components and intra-OmniStudio call chains ' +
-  '(`dispatchesOmniAction`). The Apex-to-OmniProcess coupling ' +
-  '(`implements omnistudio.VlocityOpenInterface` etc.) is a v3.3 ' +
-  'follow-up — those edges are NOT yet in the graph.';
+  'Every element naming a `remoteClass` (a Remote Action, a Try Catch ' +
+  'failure handler, …) is resolved to its ApexClass — the graph carries the ' +
+  'matching `callsApex` edge from this IP. What that Apex reads or writes ' +
+  'is answered by the Apex tools, not here; a class the vault does not hold ' +
+  '(a managed-package class, or one not retrieved) is `not-in-vault`. ' +
+  'Apex that RUNS this IP by key (`<ns>.IntegrationProcedureService.runIntegrationService(' +
+  "'Type_SubType', …)` with a literal key) is in the graph as an incoming " +
+  '`dispatchesOmniAction` edge from that class (`via: apex`) — ask the usage or ' +
+  'impact tools for callers; a key built at runtime is not seen.';
 
 /**
  * OmniProcessElement record-level boundary (Q179 anchor). Surfaced on
@@ -213,6 +174,14 @@ export interface IntegrationProcedureAction {
   readonly sequenceNumber: number;
   readonly isActive: boolean;
   readonly executionConditionalFormula: string | null;
+  /** Names from the top-level step down (`Guard/LoadOrder`): a nested step runs inside its block. */
+  readonly path: string;
+  /** 0 for a top-level step. */
+  readonly depth: number;
+  /** The catalog's canonical type — every spelling of one action maps to one name. */
+  readonly canonicalType: string;
+  /** The step's role in the IP's data flow (catalog): dataMapper, remote, rest, nestedIp, delete, … */
+  readonly role: string;
   readonly propertySetConfigParsed?: Readonly<Record<string, unknown>>;
 }
 
@@ -224,7 +193,9 @@ export interface IntegrationProcedureAction {
  */
 export interface ExternalEndpoint {
   readonly stepName: string;
-  readonly kind: 'rest' | 'dataraptor' | 'remote-action' | 'integration-procedure';
+  /** The step's element path (`Guard/LoadOrder` for a step inside a block). */
+  readonly stepPath: string;
+  readonly kind: 'rest' | 'dataraptor' | 'remote-action' | 'integration-procedure' | 'delete';
   readonly target: string;
   readonly targetId: ComponentId | null;
   /**
@@ -233,6 +204,14 @@ export interface ExternalEndpoint {
    * affirmative fact about the org:
    *   - `'resolved'` — exactly one node in the vault answers to this
    *     target name; `targetId` is populated.
+   *   - `'active-version'` — several versions answer and exactly one is
+   *     active: `targetId` is that one (for an IP, `isActive` IS the
+   *     runtime switch). The others are in `targetCandidateIds`.
+   *   - `'highest-version'` — a DataMapper with several versions and no
+   *     single active one: the highest version is named (a DataMapper's
+   *     `active` flag is not a runtime switch).
+   *   - `'no-active-version'` — an IP with several versions, none active:
+   *     nothing runs; `targetId` is null.
    *   - `'ambiguous'` — MORE THAN ONE node answers to it (the normal
    *     shape for a versioned IP: every version file carries the same
    *     `omniProcessKey`). Which one runs is decided at RUNTIME by
@@ -251,8 +230,8 @@ export interface ExternalEndpoint {
    *     fact; it must never be read as "not in this vault". See
    *     `notExtractedFamilyDisclosure`'s reasoning in
    *     `absence-disclosure.ts` for why the two are kept apart.
-   *   - `'not-applicable'` — `rest` / `remote-action` kinds, which
-   *     never attempt a `targetId` lookup at all.
+   *   - `'not-applicable'` — `rest` endpoints (external URLs) and a
+   *     `delete` whose object has no node, which never resolve.
    */
   readonly targetResolution: TargetResolution;
   /**
@@ -265,11 +244,19 @@ export interface ExternalEndpoint {
   readonly targetCandidateIds: readonly ComponentId[];
   readonly namedCredential: string | null;
   readonly endpointConfidence: 'parsed';
+  /**
+   * For a resolved DataMapper: the objects it reads and writes (from its
+   * field-level `readsFrom` / `writesTo` edges). For a `delete`: the object.
+   */
+  readonly dataAccess?: { readonly reads: readonly string[]; readonly writes: readonly string[] };
 }
 
 /** @see ExternalEndpoint.targetResolution */
 export type TargetResolution =
   | 'resolved'
+  | 'active-version'
+  | 'highest-version'
+  | 'no-active-version'
   | 'ambiguous'
   | 'not-in-vault'
   | 'unresolved'
@@ -300,6 +287,20 @@ export interface IntegrationProcedureChainOutput {
   };
   readonly actions: readonly IntegrationProcedureAction[];
   readonly externalEndpoints: readonly ExternalEndpoint[];
+  /**
+   * What the chain's own steps touch, summed over its endpoints: objects its
+   * DataMappers read / write, objects its Delete Actions delete, the Apex
+   * classes and the IPs / DataMappers it calls (resolved ids). Nested IPs'
+   * own steps are not folded in — follow `ipsCalled`.
+   */
+  readonly dataAccess: {
+    readonly reads: readonly string[];
+    readonly writes: readonly string[];
+    readonly deletes: readonly string[];
+    readonly apexClasses: readonly string[];
+    readonly ipsCalled: readonly string[];
+    readonly mappersCalled: readonly string[];
+  };
   readonly responseShape: ResponseShape;
   readonly boundaries: readonly string[];
 }
@@ -398,69 +399,12 @@ const BOUNDARIES_VERBATIM: readonly string[] = Object.freeze([
 ]);
 
 /**
- * The `sfi.integration_procedure_chain` MCP tool.
- *
- * Pipeline:
- *   1. Validate the id carries the `OmniIntegrationProcedure:` prefix.
- *   2. Resolve the IP node from the graph; refuse with
- *      `component-not-found` when absent.
- *   3. Read and validate the source XML at the node's `sourcePath`.
- *   4. Walk every `<omniProcessElements>` child, sort by
- *      `sequenceNumber` ASC, and emit the structured `actions` list.
- *   5. For each action, classify by `type` and emit an
- *      `externalEndpoints` row when the action targets an external
- *      resource (REST URL / DataRaptor bundle / nested IP key / Apex
- *      remote class.method).
- *   6. Locate the `Response Action` and parse its
- *      `propertySetConfig.additionalOutput` into `responseShape`.
- *   7. Resolve `dataraptor` and `integration-procedure` endpoint
- *      targets against the graph so `targetId` carries a canonical
- *      id when the target component is in the vault.
- *
- * @example
- *   const r = await integrationProcedureChainHandler(ctx, {
- *     integrationProcedureId:
- *       'OmniIntegrationProcedure:AccountLiniking_MPPValidation_Procedure_1',
- *   });
- *   if (r.ok) console.log(r.value.data.actions.length);
+ * Read and parse the IP's Metadata API XML into its `<OmniIntegrationProcedure>` root.
  */
-export const integrationProcedureChainHandler = async (
+const readIpXmlRoot = async (
   ctx: Context,
-  input: IntegrationProcedureChainInput,
-): Promise<
-  Result<McpResponse<IntegrationProcedureChainOutput>, McpError>
-> => {
-  if (!input.integrationProcedureId.startsWith(IP_PREFIX)) {
-    return err({
-      kind: 'invalid-query',
-      message: `integrationProcedureId must start with '${IP_PREFIX}'; got '${input.integrationProcedureId}'`,
-      path: 'integrationProcedureId',
-    });
-  }
-
-  const nodeResult = await getNodeById(ctx.graph, input.integrationProcedureId);
-  if (!nodeResult.ok) {
-    return err({
-      kind: 'internal',
-      message: `graph query failed: ${nodeResult.error.message}`,
-    });
-  }
-  if (nodeResult.value === null) {
-    return err({
-      kind: 'component-not-found',
-      message: await phantomAwareNotFoundMessage(ctx, input.integrationProcedureId, 'OmniIntegrationProcedure'),
-      path: input.integrationProcedureId,
-    });
-  }
-  const node = nodeResult.value;
-  if (node.type !== 'OmniIntegrationProcedure') {
-    return err({
-      kind: 'invalid-query',
-      message: `node ${input.integrationProcedureId} is a ${node.type}, not an OmniIntegrationProcedure`,
-      path: 'integrationProcedureId',
-    });
-  }
-
+  node: Node,
+): Promise<Result<Record<string, unknown>, McpError>> => {
   let xmlText: string;
   try {
     xmlText = await readFile(
@@ -519,14 +463,105 @@ export const integrationProcedureChainHandler = async (
       path: node.sourcePath,
     });
   }
-  const rootObj = root as Record<string, unknown>;
+  return ok(root as Record<string, unknown>);
+};
+
+/**
+ * A managed-package (Vlocity) IP: its DataPack, converted to the same
+ * `<OmniIntegrationProcedure>` root the XML parses to. A missing DataPack is
+ * reported exactly like a missing XML file.
+ */
+const readIpDataPackRoot = async (
+  ctx: Context,
+  node: Node,
+): Promise<Result<Record<string, unknown>, McpError>> => {
+  const r = await readDataPackRoot(resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath), 'process');
+  if (r.ok) return r;
+  return err({
+    kind: r.error.missing ? 'component-not-found' : 'internal',
+    message: r.error.missing ? `source file missing for ${node.id}: ${r.error.message}` : r.error.message,
+    path: node.sourcePath,
+  });
+};
+
+/**
+ * The `sfi.integration_procedure_chain` MCP tool.
+ *
+ * Pipeline:
+ *   1. Validate the id carries the `OmniIntegrationProcedure:` prefix.
+ *   2. Resolve the IP node from the graph; refuse with
+ *      `component-not-found` when absent.
+ *   3. Read and validate the source XML at the node's `sourcePath`.
+ *   4. Walk every `<omniProcessElements>` child, sort by
+ *      `sequenceNumber` ASC, and emit the structured `actions` list.
+ *   5. For each action, classify by `type` and emit an
+ *      `externalEndpoints` row when the action targets an external
+ *      resource (REST URL / DataRaptor bundle / nested IP key / Apex
+ *      remote class.method).
+ *   6. Locate the `Response Action` and parse its
+ *      `propertySetConfig.additionalOutput` into `responseShape`.
+ *   7. Resolve `dataraptor` and `integration-procedure` endpoint
+ *      targets against the graph so `targetId` carries a canonical
+ *      id when the target component is in the vault.
+ *
+ * @example
+ *   const r = await integrationProcedureChainHandler(ctx, {
+ *     integrationProcedureId:
+ *       'OmniIntegrationProcedure:Acme_ValidateMember_Procedure_1',
+ *   });
+ *   if (r.ok) console.log(r.value.data.actions.length);
+ */
+export const integrationProcedureChainHandler = async (
+  ctx: Context,
+  input: IntegrationProcedureChainInput,
+): Promise<
+  Result<McpResponse<IntegrationProcedureChainOutput>, McpError>
+> => {
+  if (!input.integrationProcedureId.startsWith(IP_PREFIX)) {
+    return err({
+      kind: 'invalid-query',
+      message: `integrationProcedureId must start with '${IP_PREFIX}'; got '${input.integrationProcedureId}'`,
+      path: 'integrationProcedureId',
+    });
+  }
+
+  const nodeResult = await getNodeById(ctx.graph, input.integrationProcedureId);
+  if (!nodeResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${nodeResult.error.message}`,
+    });
+  }
+  if (nodeResult.value === null) {
+    return err({
+      kind: 'component-not-found',
+      message: await phantomAwareNotFoundMessage(ctx, input.integrationProcedureId, 'OmniIntegrationProcedure'),
+      path: input.integrationProcedureId,
+    });
+  }
+  const node = nodeResult.value;
+  if (node.type !== 'OmniIntegrationProcedure') {
+    return err({
+      kind: 'invalid-query',
+      message: `node ${input.integrationProcedureId} is a ${node.type}, not an OmniIntegrationProcedure`,
+      path: 'integrationProcedureId',
+    });
+  }
+
+  const rootResult = isDataPackSourcePath(node.sourcePath)
+    ? await readIpDataPackRoot(ctx, node)
+    : await readIpXmlRoot(ctx, node);
+  if (!rootResult.ok) return rootResult;
+  const rootObj = rootResult.value;
 
   const includePsc = input.includeChildPropertySetConfig === true;
   const walk = walkActions(rootObj, includePsc);
   const externalEndpoints = await resolveExternalEndpoints(
     ctx,
+    node.id,
     walk.endpointSeeds,
   );
+  const dataAccess = summarizeDataAccess(externalEndpoints);
 
   return ok({
     data: {
@@ -542,6 +577,7 @@ export const integrationProcedureChainHandler = async (
       },
       actions: walk.actions,
       externalEndpoints,
+      dataAccess,
       responseShape: walk.responseShape,
       boundaries: BOUNDARIES_VERBATIM,
     },
@@ -563,9 +599,12 @@ export const integrationProcedureChainHandler = async (
  */
 interface EndpointSeed {
   readonly stepName: string;
+  readonly stepPath: string;
   readonly kind: ExternalEndpoint['kind'];
   readonly target: string;
   readonly namedCredential: string | null;
+  /** The ApexClass api name for a remote call (`ns.Class` → `ns__Class`). */
+  readonly apexApiName?: string;
 }
 
 interface ActionWalk {
@@ -575,145 +614,114 @@ interface ActionWalk {
 }
 
 /**
- * Walk every `<omniProcessElements>` child. For each:
- *   - Build the per-action row (always).
- *   - When the action's `type` indicates an external dispatch, push a
- *     seed onto `endpointSeeds` for the post-walk graph-lookup pass.
- *   - When the action is a `Response Action`, parse its
- *     `additionalOutput` into `responseShape` (last-write-wins if
- *     the IP carries multiple, which is non-canonical but tolerated).
- *
- * Action rows are sorted by `sequenceNumber` ASC after the walk; the
- * walk itself preserves XML document order so equal sequence numbers
- * fall back to declaration order in the sort's stable comparator.
+ * Walk every step, top-level and nested (a Conditional / Loop / Try-Catch
+ * Block holds its steps as `<childElements>`), siblings in `sequenceNumber`
+ * order, depth-first. For each:
+ *   - Build the per-action row (always), with its path, depth, the catalog's
+ *     canonical type and the step's role.
+ *   - Push endpoint seeds by the same rules the extractor uses for edges, so
+ *     the chain and the graph agree: ANY element naming a `bundle` calls that
+ *     DataMapper, an `integrationProcedureKey` that IP, a `remoteClass` that
+ *     Apex class; an HTTP action (`Rest Action`, `HTTP Action`, …) its URL;
+ *     a Delete Action the objects in its `deleteSObject` list.
+ *   - When the action is a `Response Action`, parse its `additionalOutput`
+ *     into `responseShape` (last-write-wins if the IP carries several).
  */
 const walkActions = (
   rootObj: Record<string, unknown>,
   includePsc: boolean,
 ): ActionWalk => {
-  const elements = toArray(rootObj['omniProcessElements']);
   const actions: IntegrationProcedureAction[] = [];
   const endpointSeeds: EndpointSeed[] = [];
   let responseAdditionalOutput: Record<string, unknown> | null = null;
   let responseReturnOnlyAdditionalOutput: boolean | null = null;
 
-  for (const raw of elements) {
-    if (typeof raw !== 'object' || raw === null) continue;
-    const element = raw as Record<string, unknown>;
-    const type = nonEmptyString(unwrapSingle(element['type']));
-    if (type === null) continue;
+  const visit = (list: unknown, parentPath: string, depth: number): void => {
+    const rows: Array<{ element: Record<string, unknown>; sequenceNumber: number; order: number }> = [];
+    toArray(list).forEach((raw, order) => {
+      if (typeof raw !== 'object' || raw === null) return;
+      const element = raw as Record<string, unknown>;
+      rows.push({ element, sequenceNumber: coerceNumber(unwrapSingle(element['sequenceNumber'])), order });
+    });
+    // Siblings in runtime order; equal sequence numbers keep document order.
+    rows.sort((a, b) => a.sequenceNumber - b.sequenceNumber || a.order - b.order);
+    for (const { element, sequenceNumber } of rows) {
+      const type = nonEmptyString(unwrapSingle(element['type']));
+      if (type === null) continue;
+      const name = nonEmptyString(unwrapSingle(element['name'])) ?? '';
+      const path = parentPath === '' ? name : `${parentPath}/${name}`;
+      const description = nonEmptyString(unwrapSingle(element['description']));
+      const isActive = coerceBoolean(unwrapSingle(element['isActive']));
+      const psc = parsePropertySetConfig(element['propertySetConfig']);
+      const executionConditionalFormula =
+        psc === null ? null : nonEmptyString(psc['executionConditionalFormula']);
+      const canonicalType = omnistudio.canonicalElementType(type);
+      // A Remote Action on the managed runtime's IntegrationProcedureService
+      // runs the IP its method names: a nested IP call, not Apex.
+      const service =
+        psc === null ? null : omnistudio.runtimeServiceCall(omnistudio.apexRemoteTarget(psc['remoteClass']), psc['remoteMethod']);
+      const role = service === null ? omnistudio.ipStepRole(type) : 'nestedIp';
+      actions.push({
+        name,
+        type,
+        description,
+        sequenceNumber,
+        isActive,
+        executionConditionalFormula,
+        path,
+        depth,
+        canonicalType,
+        role,
+        ...(includePsc && psc !== null ? { propertySetConfigParsed: psc } : {}),
+      });
 
-    const name = nonEmptyString(unwrapSingle(element['name'])) ?? '';
-    const description = nonEmptyString(unwrapSingle(element['description']));
-    const sequenceNumber = coerceNumber(unwrapSingle(element['sequenceNumber']));
-    const isActive = coerceBoolean(unwrapSingle(element['isActive']));
-    const psc = parsePropertySetConfig(element['propertySetConfig']);
-    const executionConditionalFormula =
-      psc === null
-        ? null
-        : nonEmptyString(psc['executionConditionalFormula']);
-
-    const action: IntegrationProcedureAction = includePsc && psc !== null
-      ? {
-          name,
-          type,
-          description,
-          sequenceNumber,
-          isActive,
-          executionConditionalFormula,
-          propertySetConfigParsed: psc,
-        }
-      : {
-          name,
-          type,
-          description,
-          sequenceNumber,
-          isActive,
-          executionConditionalFormula,
-        };
-    actions.push(action);
-
-    // Endpoint classification mirrors the extractor's edge-emission
-    // matrix — REST Action (external URL; no edge), DataRaptor Actions
-    // (DataTransform target via `bundle`), Integration Procedure Action
-    // (IP target via `integrationProcedureKey`), and Remote Action
-    // (Apex target via `remoteClass` + `remoteMethod`; surfaced here
-    // for visibility but NOT emitted as a graph edge — that is v3.3's
-    // `implementsOmniInterface` follow-up).
-    if (type === REST_ACTION_TYPE) {
-      const restPath = psc === null ? null : nonEmptyString(psc['restPath']);
-      if (restPath !== null) {
-        endpointSeeds.push({
-          stepName: name,
-          kind: 'rest',
-          target: restPath,
-          namedCredential:
-            psc === null ? null : nonEmptyString(psc['namedCredential']),
-        });
-      }
-    } else if (DATARAPTOR_ACTION_TYPES.has(type)) {
-      const bundle = psc === null ? null : nonEmptyString(psc['bundle']);
-      if (bundle !== null) {
-        endpointSeeds.push({
-          stepName: name,
-          kind: 'dataraptor',
-          target: bundle,
-          namedCredential: null,
-        });
-      }
-    } else if (type === NESTED_IP_ACTION_TYPE) {
-      const ipKey =
-        psc === null ? null : nonEmptyString(psc['integrationProcedureKey']);
-      if (ipKey !== null) {
-        endpointSeeds.push({
-          stepName: name,
-          kind: 'integration-procedure',
-          target: ipKey,
-          namedCredential: null,
-        });
-      }
-    } else if (type === REMOTE_ACTION_TYPE) {
-      const remoteClass =
-        psc === null ? null : nonEmptyString(psc['remoteClass']);
-      const remoteMethod =
-        psc === null ? null : nonEmptyString(psc['remoteMethod']);
-      if (remoteClass !== null && remoteMethod !== null) {
-        endpointSeeds.push({
-          stepName: name,
-          kind: 'remote-action',
-          target: `${remoteClass}.${remoteMethod}`,
-          namedCredential: null,
-        });
-      }
-    } else if (type === RESPONSE_ACTION_TYPE) {
-      // Last-write-wins on the rare multi-response shape — the
-      // canonical authoring pattern is one terminal Response Action,
-      // and this tool surfaces the last one walked.
       if (psc !== null) {
-        const additional = psc['additionalOutput'];
-        if (
-          typeof additional === 'object' &&
-          additional !== null &&
-          !Array.isArray(additional)
-        ) {
-          responseAdditionalOutput = additional as Record<string, unknown>;
+        const seed = (kind: EndpointSeed['kind'], target: string, extra: Partial<EndpointSeed> = {}): void => {
+          endpointSeeds.push({ stepName: name, stepPath: path, kind, target, namedCredential: null, ...extra });
+        };
+        if (role === 'rest') {
+          const url = nonEmptyString(psc['restPath']) ?? nonEmptyString(psc['httpUrl']);
+          if (url !== null) {
+            seed('rest', url, {
+              namedCredential: nonEmptyString(psc['namedCredential']) ?? nonEmptyString(psc['restNamedCredential']),
+            });
+          }
         }
-        const returnOnly = psc['returnOnlyAdditionalOutput'];
-        if (typeof returnOnly === 'boolean') {
-          responseReturnOnlyAdditionalOutput = returnOnly;
+        const bundle = nonEmptyString(psc['bundle']);
+        if (bundle !== null) seed('dataraptor', bundle);
+        const ipKey = nonEmptyString(psc['integrationProcedureKey']);
+        if (ipKey !== null) seed('integration-procedure', ipKey);
+        const apex = omnistudio.apexRemoteTarget(psc['remoteClass']);
+        if (service !== null) {
+          seed('integration-procedure', service.key);
+        } else if (apex !== null) {
+          const method = nonEmptyString(psc['remoteMethod']);
+          seed('remote-action', `${apex.raw.trim()}${method === null ? '' : `.${method}`}`, { apexApiName: apex.apiName });
+        }
+        if (role === 'delete') {
+          for (const entry of toArray(psc['deleteSObject'])) {
+            const object = typeof entry === 'object' && entry !== null ? nonEmptyString((entry as Record<string, unknown>)['Type']) : null;
+            if (object !== null) seed('delete', object);
+          }
+        }
+        if (role === 'response') {
+          // Last-write-wins on the rare multi-response shape — the
+          // canonical authoring pattern is one terminal Response Action.
+          const additional = psc['additionalOutput'];
+          if (typeof additional === 'object' && additional !== null && !Array.isArray(additional)) {
+            responseAdditionalOutput = additional as Record<string, unknown>;
+          }
+          const returnOnly = psc['returnOnlyAdditionalOutput'];
+          if (typeof returnOnly === 'boolean') responseReturnOnlyAdditionalOutput = returnOnly;
         }
       }
+      visit(element['childElements'], path, depth + 1);
     }
-  }
-
-  // Sort by sequenceNumber ASC; equal-sequence steps fall back to
-  // declaration order via Array.prototype.sort's stability.
-  const sortedActions = [...actions].sort(
-    (a, b) => a.sequenceNumber - b.sequenceNumber,
-  );
+  };
+  visit(rootObj['omniProcessElements'], '', 0);
 
   return {
-    actions: sortedActions,
+    actions,
     endpointSeeds,
     responseShape: {
       additionalOutput: responseAdditionalOutput,
@@ -762,6 +770,14 @@ const TARGET_ID_PREFIX = {
 /** A resolvable endpoint kind — the two that attempt a `targetId`. */
 type ResolvableKind = keyof typeof TARGET_KEY_PROPERTY;
 
+/** One indexed target node: its id and the version facts that pick one. */
+interface IndexedTarget {
+  readonly id: ComponentId;
+  /** IP: `isActive` (the runtime switch). DataMapper: `active` (not a switch — a tie-breaker). */
+  readonly active: boolean;
+  readonly versionNumber: number;
+}
+
 /**
  * One node type's resolution index, or the fact that it could not be
  * read. `complete` is the honesty hinge: a miss against an INCOMPLETE
@@ -771,9 +787,9 @@ type TargetIndex =
   | {
       readonly ok: true;
       /** Every canonical node id of the type, for the conventional form. */
-      readonly byId: ReadonlySet<string>;
-      /** Key-property value → every node id carrying it. */
-      readonly byKey: ReadonlyMap<string, readonly ComponentId[]>;
+      readonly byId: ReadonlyMap<string, IndexedTarget>;
+      /** Key-property value → every node carrying it. */
+      readonly byKey: ReadonlyMap<string, readonly IndexedTarget[]>;
       /** False when the walk stopped at its residual node cap. */
       readonly complete: boolean;
     }
@@ -794,6 +810,12 @@ const targetScanCeiling = (): number => {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
 };
 
+const versionOf = (node: Node): number => {
+  const v = node.properties['versionNumber'];
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : Number.NaN;
+  return Number.isFinite(n) ? n : 0;
+};
+
 /**
  * Walk EVERY node of one type and index it both ways. Adopts the shared
  * {@link scanAllNodesOfTypes} rather than a single `listNodesByType`
@@ -812,17 +834,22 @@ const buildTargetIndex = async (
   if (!scan.ok) return { ok: false };
 
   const keyProperty = TARGET_KEY_PROPERTY[kind];
-  const byId = new Set<string>();
-  const byKey = new Map<string, ComponentId[]>();
+  const byId = new Map<string, IndexedTarget>();
+  const byKey = new Map<string, IndexedTarget[]>();
   for (const node of scan.value.nodes) {
-    byId.add(node.id);
+    const entry: IndexedTarget = {
+      id: node.id,
+      active: kind === 'dataraptor' ? node.properties['active'] === true : node.properties['isActive'] === true,
+      versionNumber: versionOf(node),
+    };
+    byId.set(node.id, entry);
     const keyValue = node.properties[keyProperty];
     if (typeof keyValue !== 'string') continue;
     const trimmed = keyValue.trim();
     if (trimmed.length === 0) continue;
     const bucket = byKey.get(trimmed);
-    if (bucket === undefined) byKey.set(trimmed, [node.id]);
-    else bucket.push(node.id);
+    if (bucket === undefined) byKey.set(trimmed, [entry]);
+    else bucket.push(entry);
   }
   return { ok: true, byId, byKey, complete: !scan.value.scanIncomplete };
 };
@@ -834,7 +861,7 @@ interface ResolvedTarget {
   readonly targetCandidateIds: readonly ComponentId[];
 }
 
-/** `rest` / `remote-action`: no lookup is attempted, ever. */
+/** `rest`: an external URL, never looked up. */
 const NOT_APPLICABLE: ResolvedTarget = {
   targetId: null,
   targetResolution: 'not-applicable',
@@ -842,19 +869,38 @@ const NOT_APPLICABLE: ResolvedTarget = {
 };
 
 /**
- * Classify ONE target name against a built index. Written ONCE and
- * called by BOTH resolvable kinds — the previous shape spelled this
- * mapping out twice, byte-identically, and only one copy was covered by
- * a test, so a regression on the other was invisible.
- *
- * Candidates are the union of the conventional id form and every node
- * carrying the key property, so a vault where both happen to hit yields
- * one candidate rather than a false ambiguity.
+ * Pick among several versions answering to one key — the same rule the
+ * import-time resolver (`graph/omni-resolve.ts`) applies to the edges:
+ * an IP runs its ACTIVE version (`isActive` is the runtime switch), so
+ * exactly one active version is the target, none means nothing runs, and
+ * several active is ambiguous. A DataMapper's `active` is not a switch: a
+ * single active version wins, else the highest version is named.
+ */
+const pickVersion = (kind: ResolvableKind, candidates: readonly IndexedTarget[]): ResolvedTarget => {
+  const ids = candidates.map((c) => c.id).sort();
+  const active = candidates.filter((c) => c.active);
+  if (active.length === 1) {
+    return { targetId: (active[0] as IndexedTarget).id, targetResolution: 'active-version', targetCandidateIds: ids };
+  }
+  if (kind === 'integration-procedure') {
+    return { targetId: null, targetResolution: active.length === 0 ? 'no-active-version' : 'ambiguous', targetCandidateIds: ids };
+  }
+  const highest = [...candidates].sort((a, b) => b.versionNumber - a.versionNumber || (a.id < b.id ? -1 : 1))[0] as IndexedTarget;
+  return { targetId: highest.id, targetResolution: 'highest-version', targetCandidateIds: ids };
+};
+
+/**
+ * Classify ONE target name against a built index — the fallback when the
+ * graph carries no resolved edge for the step (a vault imported before the
+ * import-time resolver, or a target outside a scoped pull). Candidates are
+ * the union of the conventional id form and every node carrying the key
+ * property, so a vault where both happen to hit yields one candidate rather
+ * than a false ambiguity.
  */
 const classifyTarget = (
   target: string,
   index: TargetIndex,
-  prefix: string,
+  kind: ResolvableKind,
 ): ResolvedTarget => {
   if (!index.ok) {
     return {
@@ -863,29 +909,17 @@ const classifyTarget = (
       targetCandidateIds: [],
     };
   }
-  const seen = new Set<string>();
-  const candidates: ComponentId[] = [];
-  for (const id of index.byKey.get(target) ?? []) {
-    if (seen.has(id)) continue;
-    seen.add(id);
-    candidates.push(id);
-  }
-  const conventionalId = `${prefix}${target}`;
-  if (index.byId.has(conventionalId) && !seen.has(conventionalId)) {
-    candidates.push(conventionalId as ComponentId);
-  }
-  candidates.sort();
+  const found = new Map<string, IndexedTarget>();
+  for (const entry of index.byKey.get(target) ?? []) found.set(entry.id, entry);
+  const conventional = index.byId.get(`${TARGET_ID_PREFIX[kind]}${target}`);
+  if (conventional !== undefined) found.set(conventional.id, conventional);
+  const candidates = [...found.values()];
 
   const only = candidates[0];
   if (candidates.length === 1 && only !== undefined) {
-    return { targetId: only, targetResolution: 'resolved', targetCandidateIds: candidates };
+    return { targetId: only.id, targetResolution: 'resolved', targetCandidateIds: [only.id] };
   }
-  if (candidates.length > 1) {
-    // Do not pick one. Which version runs is a RUNTIME activation fact
-    // the vault does not carry; naming a single `targetId` here would
-    // certify a choice nothing in the retrieved metadata makes.
-    return { targetId: null, targetResolution: 'ambiguous', targetCandidateIds: candidates };
-  }
+  if (candidates.length > 1) return pickVersion(kind, candidates);
   return {
     targetId: null,
     // A miss is only ABSENCE when the whole type was read. Behind a
@@ -895,27 +929,45 @@ const classifyTarget = (
   };
 };
 
+/** The import-time resolver's verdict, as this tool reports it. */
+const EDGE_RESOLUTION: Readonly<Record<string, TargetResolution>> = {
+  'only-version': 'resolved',
+  'active-version': 'active-version',
+  'highest-version': 'highest-version',
+  'ambiguous-active': 'ambiguous',
+  'no-active-version': 'no-active-version',
+};
+
+const stringList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+
+/** The object an access edge lands on: `CustomObject:X` / `CustomField:X.Y` → `X`. */
+const objectOfTarget = (toId: string): string | null => {
+  if (toId.startsWith('CustomObject:')) return toId.slice('CustomObject:'.length);
+  if (toId.startsWith('CustomField:')) {
+    const rest = toId.slice('CustomField:'.length);
+    const dot = rest.indexOf('.');
+    return dot === -1 ? null : rest.slice(0, dot);
+  }
+  return null;
+};
+
 /**
- * Resolve each endpoint seed against the graph. `dataraptor` targets
- * name an OmniDataTransform by its `<name>`; `integration-procedure`
- * targets name an IP by its `omniProcessKey` — in both cases a PROPERTY,
- * not the node id, which the extractors derive from the filename. `rest`
- * and `remote-action` kinds never resolve — REST URLs are external, and
- * Remote Action class.method targets are the v3.3
- * `implementsOmniInterface` follow-up.
+ * Resolve each endpoint seed. The graph's own edges come first: the import
+ * resolved every DataMapper / IP call onto the version that runs and kept
+ * the others (`targetResolution`, `otherVersionIds`), and every
+ * `remoteClass` onto its ApexClass (`callsApex`). A step the graph has no
+ * resolved edge for falls back to scanning the target type by the property
+ * the caller names it by — never by templating the name onto the type's id
+ * prefix, which misses a present target whenever the two differ.
  *
- * Each node type is walked at most ONCE per call, and only when a seed
- * of that kind is present, so an IP with no DataRaptor steps pays for no
- * DataRaptor scan.
- *
- * The endpoint's `target` (the verbatim name) is always present so the
- * renderer can flag an unresolved reference, and `targetResolution` says
- * WHICH of the four non-resolutions applies — a proven absence, an
- * ambiguity across versions, an unread tail, or a failed read. Only the
- * first is an assertion about the org.
+ * Each node type is walked at most ONCE per call, and only when a fallback
+ * needs it. The endpoint's `target` (the verbatim name) is always present
+ * and `targetResolution` says which rule applied; only `'not-in-vault'`
+ * asserts absence.
  */
 const resolveExternalEndpoints = async (
   ctx: Context,
+  ipId: ComponentId,
   seeds: readonly EndpointSeed[],
 ): Promise<readonly ExternalEndpoint[]> => {
   const resolved: ExternalEndpoint[] = [];
@@ -928,18 +980,66 @@ const resolveExternalEndpoints = async (
     return built;
   };
 
+  // The IP's own resolved edges, and which of their targets exist.
+  const out = await listEdgesForNodes(ctx.graph, [ipId], { direction: 'out' });
+  const ipEdges = out.ok ? (out.value.get(ipId) ?? []) : [];
+  const targetIds = [...new Set(ipEdges.map((e) => e.toId))];
+  const present = new Set<string>();
+  if (targetIds.length > 0) {
+    const nodes = await listNodesByIds(ctx.graph, targetIds);
+    if (nodes.ok) for (const n of nodes.value) present.add(n.id);
+  }
+  const rawOf = (props: Readonly<Record<string, unknown>>): string | null => {
+    for (const k of ['targetRawName', 'bundle', 'integrationProcedureKey']) {
+      const v = props[k];
+      if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+    }
+    return null;
+  };
+  const fromEdge = (seed: EndpointSeed): ResolvedTarget | null => {
+    const edge = ipEdges.find(
+      (e) => e.edgeType === 'dispatchesOmniAction' && e.properties['stepName'] === seed.stepName && rawOf(e.properties) === seed.target,
+    );
+    if (edge === undefined || !present.has(edge.toId)) return null;
+    const how = edge.properties['targetResolution'];
+    const resolution = typeof how === 'string' ? (EDGE_RESOLUTION[how] ?? 'resolved') : 'resolved';
+    const others = [...stringList(edge.properties['otherVersionIds']), ...stringList(edge.properties['ambiguousActiveIds'])];
+    const candidates = [...new Set([edge.toId, ...others])].sort() as ComponentId[];
+    const named = resolution === 'ambiguous' || resolution === 'no-active-version';
+    return { targetId: named ? null : edge.toId, targetResolution: resolution, targetCandidateIds: candidates };
+  };
+  const apexEdges = ipEdges.filter((e) => e.edgeType === 'callsApex');
+
   for (const seed of seeds) {
-    const target =
-      seed.kind === 'dataraptor' || seed.kind === 'integration-procedure'
-        ? classifyTarget(
-            seed.target,
-            await indexFor(seed.kind),
-            TARGET_ID_PREFIX[seed.kind],
-          )
+    let target: ResolvedTarget;
+    if (seed.kind === 'dataraptor' || seed.kind === 'integration-procedure') {
+      target = fromEdge(seed) ?? classifyTarget(seed.target, await indexFor(seed.kind), seed.kind);
+    } else if (seed.kind === 'remote-action') {
+      const wanted = `ApexClass:${seed.apexApiName ?? ''}`.toLowerCase();
+      const edge = apexEdges.find((e) => e.toId.toLowerCase() === wanted);
+      const id = (edge?.toId ?? `ApexClass:${seed.apexApiName ?? ''}`) as ComponentId;
+      let found: boolean;
+      if (edge !== undefined) found = present.has(edge.toId);
+      else {
+        const r = await getNodeById(ctx.graph, id);
+        found = r.ok && r.value !== null;
+      }
+      target = found
+        ? { targetId: id, targetResolution: 'resolved', targetCandidateIds: [id] }
+        : { targetId: null, targetResolution: 'not-in-vault', targetCandidateIds: [] };
+    } else if (seed.kind === 'delete') {
+      const id = `CustomObject:${seed.target}` as ComponentId;
+      const r = await getNodeById(ctx.graph, id);
+      target = r.ok && r.value !== null
+        ? { targetId: id, targetResolution: 'resolved', targetCandidateIds: [id] }
         : NOT_APPLICABLE;
+    } else {
+      target = NOT_APPLICABLE;
+    }
 
     resolved.push({
       stepName: seed.stepName,
+      stepPath: seed.stepPath,
       kind: seed.kind,
       target: seed.target,
       targetId: target.targetId,
@@ -947,10 +1047,43 @@ const resolveExternalEndpoints = async (
       targetCandidateIds: target.targetCandidateIds,
       namedCredential: seed.namedCredential,
       endpointConfidence: 'parsed',
+      ...(seed.kind === 'delete' ? { dataAccess: { reads: [], writes: [seed.target] } } : {}),
     });
   }
 
-  return resolved;
+  // What each resolved DataMapper reads and writes, from its access edges.
+  const mapperIds = [...new Set(resolved.filter((e) => e.kind === 'dataraptor' && e.targetId !== null).map((e) => e.targetId as ComponentId))];
+  if (mapperIds.length === 0) return resolved;
+  const access = await listEdgesForNodes(ctx.graph, mapperIds, { direction: 'out' });
+  if (!access.ok) return resolved;
+  const accessOf = new Map<string, { reads: string[]; writes: string[] }>();
+  for (const id of mapperIds) {
+    const reads = new Set<string>();
+    const writes = new Set<string>();
+    for (const e of access.value.get(id) ?? []) {
+      const object = objectOfTarget(e.toId);
+      if (object === null) continue;
+      if (e.edgeType === 'readsFrom') reads.add(object);
+      else if (e.edgeType === 'writesTo') writes.add(object);
+    }
+    accessOf.set(id, { reads: [...reads].sort(), writes: [...writes].sort() });
+  }
+  return resolved.map((e) => (e.kind === 'dataraptor' && e.targetId !== null ? { ...e, dataAccess: accessOf.get(e.targetId) ?? { reads: [], writes: [] } } : e));
+};
+
+/** The chain's own footprint, summed over its endpoints. */
+const summarizeDataAccess = (endpoints: readonly ExternalEndpoint[]): IntegrationProcedureChainOutput['dataAccess'] => {
+  const set = (xs: Iterable<string>): string[] => [...new Set(xs)].sort();
+  const ids = (kind: ExternalEndpoint['kind']): string[] =>
+    set(endpoints.filter((e) => e.kind === kind && e.targetId !== null).map((e) => e.targetId as string));
+  return {
+    reads: set(endpoints.filter((e) => e.kind === 'dataraptor').flatMap((e) => e.dataAccess?.reads ?? [])),
+    writes: set(endpoints.filter((e) => e.kind === 'dataraptor').flatMap((e) => e.dataAccess?.writes ?? [])),
+    deletes: set(endpoints.filter((e) => e.kind === 'delete').map((e) => e.target)),
+    apexClasses: ids('remote-action'),
+    ipsCalled: ids('integration-procedure'),
+    mappersCalled: ids('dataraptor'),
+  };
 };
 
 // ---------------------------------------------------------------------

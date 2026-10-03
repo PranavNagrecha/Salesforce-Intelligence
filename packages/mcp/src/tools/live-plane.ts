@@ -108,7 +108,7 @@ export const isLivePlaneEnabled = (): boolean => {
   return env === '1' || env === 'true';
 };
 
-const liveTrust = (queriedAt: string): TrustSummary => {
+export const liveTrust = (queriedAt: string): TrustSummary => {
   const grant = getActiveLiveGrant();
   const grantLine =
     grant === null

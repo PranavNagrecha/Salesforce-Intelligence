@@ -7159,6 +7159,149 @@ describe('concept:omnistudio-inactive-component-version — rule:omnistudio/inac
   });
 });
 
+describe('concept:dataraptor-active-flag-not-runtime-switch — rule:omnistudio/dataraptor-active-flag-not-runtime-switch', () => {
+  const rule = ruleById('rule:omnistudio/dataraptor-active-flag-not-runtime-switch');
+  const INACTIVE_DM = 'OmniDataTransform:Ns__QuoteTransform_1';
+  const ACTIVE_DM = 'OmniDataTransform:Ns__QuoteExtract_1';
+
+  it('ships the concept with the firing-condition kind and active===false bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(rule.bind.whereProperty).toEqual({ key: 'active', equals: false });
+  });
+
+  it('fires on a DataMapper with active=false with a still-runs, not-dead claim, declared', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(INACTIVE_DM, 'OmniDataTransform', { active: false })], edges: [] },
+      COMPLETE,
+      INACTIVE_DM,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(INACTIVE_DM);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('not a runtime switch');
+    expect(claim).toContain('do not treat it as dead');
+  });
+
+  it('does NOT fire on an active DataMapper, nor on an inactive OmniScript', () => {
+    expect(
+      interpret(rule, { nodes: [node(ACTIVE_DM, 'OmniDataTransform', { active: true })], edges: [] }, COMPLETE, ACTIVE_DM),
+    ).toEqual([]);
+    expect(
+      interpret(rule, { nodes: [node('OmniScript:Ns__Q_1', 'OmniScript', { isActive: false, active: false })], edges: [] }, COMPLETE, 'OmniScript:Ns__Q_1'),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:picklist-restriction — rule:field/picklist-unrestricted', () => {
+  const rule = ruleById('rule:field/picklist-unrestricted');
+  const OPEN = 'CustomField:Ns__Order__c.Source__c';
+  const CLOSED = 'CustomField:Ns__Order__c.Status__c';
+  const STANDARD = 'CustomField:Account.Industry';
+
+  it('ships the concept with the field-provenance kind and restricted===false bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+    expect(rule.bind.whereProperty).toEqual({ key: 'restricted', equals: false });
+  });
+
+  it('fires on an unrestricted picklist with a free-text exposure claim, declared', () => {
+    const out = interpret(rule, { nodes: [node(OPEN, 'CustomField', { dataType: 'Picklist', restricted: false })], edges: [] }, COMPLETE, OPEN);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(OPEN);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('unrestricted picklist');
+    expect(claim).toContain('does not establish');
+  });
+
+  it('does NOT fire on a restricted picklist, nor on one whose restriction is unknown', () => {
+    expect(interpret(rule, { nodes: [node(CLOSED, 'CustomField', { dataType: 'Picklist', restricted: true })], edges: [] }, COMPLETE, CLOSED)).toEqual([]);
+    expect(interpret(rule, { nodes: [node(STANDARD, 'CustomField', { dataType: 'Picklist' })], edges: [] }, COMPLETE, STANDARD)).toEqual([]);
+  });
+});
+
+describe('concept:apex-runs-omnistudio — rule:omnistudio/apex-runs-omnistudio', () => {
+  const rule = ruleById('rule:omnistudio/apex-runs-omnistudio');
+  const APEX = 'ApexClass:Ns_IntakeService';
+  const IP = 'OmniIntegrationProcedure:Ns_SaveIntake_English_2';
+  const OS = 'OmniScript:Ns_Intake_English_1';
+  const nodes = [node(APEX, 'ApexClass'), node(IP, 'OmniIntegrationProcedure'), node(OS, 'OmniScript')];
+
+  it('ships the concept with the access-mechanism kind', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('fires on an Apex caller of an IP, at heuristic, with the runtime-break claim', () => {
+    const out = interpret(rule, { nodes, edges: [edge(APEX, IP, 'dispatchesOmniAction', 'heuristic', { via: 'apex' })] }, COMPLETE);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.confidence).toBe('heuristic');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('breaks this caller at runtime');
+    expect(claim).toContain('only literal keys are seen');
+  });
+
+  it('does NOT fire on an OmniScript dispatch', () => {
+    expect(interpret(rule, { nodes, edges: [edge(OS, IP, 'dispatchesOmniAction', 'parsed', {})] }, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:omnistudio-managed-package-records — rule:omnistudio/vlocity-managed-package-installed', () => {
+  const rule = ruleById('rule:omnistudio/vlocity-managed-package-installed');
+  const VLOCITY = 'InstalledPackage:vlocity_ins';
+  const OTHER = 'InstalledPackage:Ns';
+
+  it('ships the concept with the firing-condition kind and a Vlocity-namespace bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(rule.bind.componentTypes).toEqual(['InstalledPackage']);
+  });
+
+  it('fires on a Vlocity industry package with a records-not-metadata claim, declared', () => {
+    const out = interpret(rule, { nodes: [node(VLOCITY, 'InstalledPackage', { namespace: 'vlocity_ins' })], edges: [] }, COMPLETE, VLOCITY);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(VLOCITY);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('no metadata api retrieve contains');
+    expect(claim).toContain('org-kb/source/vlocity/');
+    expect(claim).toContain('does not establish');
+  });
+
+  it('does NOT fire on another managed package, nor on the omnistudio support package', () => {
+    expect(interpret(rule, { nodes: [node(OTHER, 'InstalledPackage', { namespace: 'Ns' })], edges: [] }, COMPLETE, OTHER)).toEqual([]);
+    expect(
+      interpret(rule, { nodes: [node('InstalledPackage:omnistudio', 'InstalledPackage', { namespace: 'omnistudio' })], edges: [] }, COMPLETE, 'InstalledPackage:omnistudio'),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:omnistudio-managed-package-records — rule:omnistudio/datapack-sourced-component', () => {
+  const rule = ruleById('rule:omnistudio/datapack-sourced-component');
+  const PACKED = 'OmniScript:Ns_Intake_English_1';
+  const NATIVE = 'OmniScript:Ns_Intake_English_2';
+
+  it('binds every OmniStudio family on sourceFormat === vlocity-datapack', () => {
+    expect(rule.bind.componentTypes).toEqual(['OmniScript', 'OmniIntegrationProcedure', 'OmniDataTransform', 'OmniUiCard']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'sourceFormat', equals: 'vlocity-datapack' });
+  });
+
+  it('fires on a component modelled from a DataPack with an export-currency claim, declared', () => {
+    const out = interpret(rule, { nodes: [node(PACKED, 'OmniScript', { sourceFormat: 'vlocity-datapack' })], edges: [] }, COMPLETE, PACKED);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('vlocity datapack export');
+    expect(claim).toContain('as current as that export');
+  });
+
+  it('does NOT fire on native OmniStudio metadata', () => {
+    expect(interpret(rule, { nodes: [node(NATIVE, 'OmniScript', { isActive: true })], edges: [] }, COMPLETE, NATIVE)).toEqual([]);
+  });
+});
+
 describe('concept:required-field-absent-from-all-layouts (field-provenance anti-join)', () => {
   const rule = ruleById('rule:field/required-absent-from-all-layouts');
   const FIELD = 'CustomField:Ns__Deal__c.Region__c';
@@ -8231,5 +8374,110 @@ describe('concept:community-login-access-population — Network login-door NODE 
     ]) {
       expect(interpret(ruleById(id), slice, COMPLETE, 'CustomObject:Ns__Site')).toEqual([]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Platform truths learned from OmniStudio / record-delete work: lookup delete
+// behavior, OmniStudio → Apex, DataMapper Load writes, Edit Block delete wiring,
+// Integration Procedure Delete Actions. Synthetic Ns__ ids only.
+// ---------------------------------------------------------------------------
+
+describe('concept:lookup-delete-behavior — one rule per declared deleteConstraint', () => {
+  const CHILD_FIELD = 'CustomField:Ns__Child__c.Ns__Parent__c';
+  const PARENT = 'CustomObject:Ns__Parent__c';
+  const slice = (deleteConstraint: string): GroundedSlice => ({
+    nodes: [node(CHILD_FIELD, 'CustomField'), node(PARENT, 'CustomObject')],
+    edges: [edge(CHILD_FIELD, PARENT, 'lookupTo', 'declared', { relationshipType: 'Lookup', deleteConstraint })],
+  });
+
+  it('SetNull: children survive orphaned; Cascade: deleted, without their own delete triggers; Restrict: blocks', () => {
+    const setNull = interpret(ruleById('rule:relationship/lookup-delete-setnull'), slice('SetNull'), COMPLETE);
+    expect(setNull).toHaveLength(1);
+    expect(setNull[0]!.claim).toContain('orphaned');
+    expect(setNull[0]!.confidence).toBe('declared');
+    const cascade = interpret(ruleById('rule:relationship/lookup-delete-cascade'), slice('Cascade'), COMPLETE);
+    expect(cascade).toHaveLength(1);
+    expect(cascade[0]!.claim).toContain('do not fire their own delete triggers');
+    const restrict = interpret(ruleById('rule:relationship/lookup-delete-restrict'), slice('Restrict'), COMPLETE);
+    expect(restrict).toHaveLength(1);
+    expect(restrict[0]!.claim).toContain('cannot be deleted');
+  });
+
+  it('fires only on its own constraint, and not on a lookup that declares none', () => {
+    expect(interpret(ruleById('rule:relationship/lookup-delete-setnull'), slice('Cascade'), COMPLETE)).toEqual([]);
+    const undeclared: GroundedSlice = {
+      nodes: [node(CHILD_FIELD, 'CustomField'), node(PARENT, 'CustomObject')],
+      edges: [edge(CHILD_FIELD, PARENT, 'lookupTo', 'declared', { relationshipType: 'Lookup' })],
+    };
+    for (const id of ['rule:relationship/lookup-delete-setnull', 'rule:relationship/lookup-delete-cascade', 'rule:relationship/lookup-delete-restrict']) {
+      expect(interpret(ruleById(id), undeclared, COMPLETE)).toEqual([]);
+    }
+  });
+});
+
+describe('concept:omnistudio-remote-apex-call — rule:omnistudio/remote-apex-call', () => {
+  const rule = ruleById('rule:omnistudio/remote-apex-call');
+  const IP = 'OmniIntegrationProcedure:Ns__SaveQuote_English_1';
+  const CLASS = 'ApexClass:Ns__QuoteService';
+
+  it('fires on an OmniStudio callsApex edge at parsed, naming the routing entry point and user mode', () => {
+    const out = interpret(
+      rule,
+      {
+        nodes: [node(IP, 'OmniIntegrationProcedure'), node(CLASS, 'ApexClass')],
+        edges: [edge(IP, CLASS, 'callsApex', 'parsed', { entryVia: 'omnistudio-remote', methods: ['save'] })],
+      },
+      COMPLETE,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.confidence).toBe('parsed');
+    expect(out[0]!.claim).toContain('invokeMethod / call');
+    expect(out[0]!.claim).toContain('USER_MODE');
+  });
+
+  it('does NOT fire on an Apex-to-Apex call', () => {
+    const OTHER = 'ApexClass:Ns__Caller';
+    expect(
+      interpret(rule, { nodes: [node(OTHER, 'ApexClass'), node(CLASS, 'ApexClass')], edges: [edge(OTHER, CLASS, 'callsApex', 'parsed', { methods: ['save'] })] }, COMPLETE),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:datamapper-load-write, edit-block-delete-wiring, ip-delete-action', () => {
+  it('a DataMapper Load field write', () => {
+    const DM = 'OmniDataTransform:Ns__SaveQuote_1';
+    const FIELD = 'CustomField:Ns__Quote__c.Ns__Status__c';
+    const out = interpret(
+      ruleById('rule:omnistudio/datamapper-load-write'),
+      { nodes: [node(DM, 'OmniDataTransform'), node(FIELD, 'CustomField')], edges: [edge(DM, FIELD, 'writesTo', 'parsed', { mechanism: 'datamapper-load' })] },
+      COMPLETE,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.claim).toContain('renamed upstream');
+  });
+
+  it('an Edit Block deleteIPKey dispatch, and not a plain IP Action dispatch', () => {
+    const rule = ruleById('rule:omnistudio/edit-block-delete-wiring');
+    const OS = 'OmniScript:Ns__Cart_English_2';
+    const IP = 'OmniIntegrationProcedure:Ns__DeleteRow_English_1';
+    const nodes = [node(OS, 'OmniScript'), node(IP, 'OmniIntegrationProcedure')];
+    expect(interpret(rule, { nodes, edges: [edge(OS, IP, 'dispatchesOmniAction', 'parsed', { via: 'deleteIPKey' })] }, COMPLETE)).toHaveLength(1);
+    expect(interpret(rule, { nodes, edges: [edge(OS, IP, 'dispatchesOmniAction', 'parsed', {})] }, COMPLETE)).toEqual([]);
+  });
+
+  it('an Integration Procedure Delete Action', () => {
+    const IP = 'OmniIntegrationProcedure:Ns__RemoveMember_English_2';
+    const OBJ = 'CustomObject:Ns__Member__c';
+    const out = interpret(
+      ruleById('rule:omnistudio/ip-delete-action'),
+      {
+        nodes: [node(IP, 'OmniIntegrationProcedure'), node(OBJ, 'CustomObject')],
+        edges: [edge(IP, OBJ, 'writesTo', 'parsed', { operation: 'recordDelete', mechanism: 'omnistudio-delete-action' })],
+      },
+      COMPLETE,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.claim).toContain('delete constraint');
   });
 });

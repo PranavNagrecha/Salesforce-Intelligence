@@ -17,6 +17,7 @@ import {
   NODE_COLUMN_COUNT,
   nodeRowParams,
 } from './import.js';
+import { canonicalizeOmniStudioEdgeTargets } from './omni-resolve.js';
 import {
   mintRelationshipTraversalEdges,
   RELATIONSHIP_RESOLVER_SOURCE,
@@ -272,6 +273,11 @@ export const computeChangeSet = async (
   // mirrors above: only sees the change-set's node view.
   canonicalizeLabelEdgeTargets([...desiredNodes.values()], desiredEdgeList);
   canonicalizeResourceEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  // Mirror cold import — resolve OmniStudio callable keys (IP key, DataMapper
+  // bundle, OmniScript Type/SubType/Language) onto the versioned node that
+  // runs. Same INCREMENTAL GAP as the mirrors above: a target outside a scoped
+  // pull cannot anchor the remap until a full refresh.
+  canonicalizeOmniStudioEdgeTargets([...desiredNodes.values()], desiredEdgeList);
   // CR-CAP-09: mirror cold import — mint class-granular @future dispatchesAsync
   // edges after canonicalize. INCREMENTAL GAP: this only sees the change-set's
   // node view (`desiredNodes`), so a future-holding target class outside the

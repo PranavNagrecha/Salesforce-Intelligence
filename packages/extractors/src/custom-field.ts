@@ -354,6 +354,25 @@ const extractValueSetName = (rootObj: Record<string, unknown>): string | null =>
   return toNullableString((valueSet as Record<string, unknown>)['valueSetName']);
 };
 
+/**
+ * Whether a picklist accepts only its defined values. `null` when the field
+ * carries no `<valueSet>` (a standard picklist backed by a StandardValueSet,
+ * whose restriction is not in the field file — unknown, never assumed).
+ *
+ *   - `<restricted>true</restricted>` → true. Source format writes the element
+ *     only when it is true; its ABSENCE on an inline value set is the platform
+ *     default, unrestricted.
+ *   - A global value set (`<valueSetName>`) is always restricted — the
+ *     platform does not allow an unrestricted picklist on a global value set.
+ */
+const extractPicklistRestricted = (rootObj: Record<string, unknown>): boolean | null => {
+  const valueSet = unwrapSingle(rootObj['valueSet']);
+  if (typeof valueSet !== 'object' || valueSet === null) return null;
+  const vs = valueSet as Record<string, unknown>;
+  if (coerceBoolean(unwrapSingle(vs['restricted']))) return true;
+  return toNullableString(vs['valueSetName']) !== null;
+};
+
 /** The `SummaryOperation` enumeration Salesforce carries on `<summaryOperation>`. */
 const SUMMARY_DATA_TYPE = 'Summary';
 
@@ -417,6 +436,19 @@ const extractSummaryFilterFields = (
     out.push(field);
   }
   return out;
+};
+
+/**
+ * The lookup's declared `<deleteConstraint>` — what the platform does to this
+ * field's records when the referenced record is deleted: `SetNull` (clear the
+ * field, the record survives), `Restrict` (refuse the parent delete) or
+ * `Cascade` (delete the record too). `null` when the element is absent: a
+ * master-detail field never carries it (its children are always deleted with
+ * the parent), and a lookup that omits it takes the platform default.
+ */
+const extractDeleteConstraint = (rootObj: Record<string, unknown>): string | null => {
+  const v = toNullableString(rootObj['deleteConstraint']);
+  return v === null || v.trim().length === 0 ? null : v.trim();
 };
 
 /**
@@ -500,6 +532,13 @@ const buildProperties = (
       const valueSetName = extractValueSetName(rootObj);
       return valueSetName !== null ? { valueSetName } : {};
     })(),
+    // OMIT-when-null: only a picklist with a `<valueSet>` declares whether it
+    // is restricted; a standard picklist's restriction lives in its
+    // StandardValueSet, so it stays absent (unknown) rather than false.
+    ...(() => {
+      const restricted = isPicklist ? extractPicklistRestricted(rootObj) : null;
+      return restricted !== null ? { restricted } : {};
+    })(),
     // OMIT-when-null (unlike the fixed keys above): the declared field-level
     // Data Classification. `<securityClassification>` is the "sensitivity level"
     // (Public / Internal / Confidential / Restricted / MissionCritical) and
@@ -528,6 +567,15 @@ const buildProperties = (
     ...(summarizedField !== null ? { summarizedField } : {}),
     ...(summaryForeignKey !== null ? { summaryForeignKey } : {}),
     ...(summaryOperation !== null ? { summaryOperation } : {}),
+    // OMIT-when-null: only a lookup that DECLARES its delete behavior carries
+    // `<deleteConstraint>` (SetNull / Restrict / Cascade). Absent is NOT
+    // normalised to the platform default here — a consumer must be able to tell
+    // "declared SetNull" from "not declared" (record_delete_impact reports the
+    // second as the documented default, with its own confidence).
+    ...(() => {
+      const deleteConstraint = extractDeleteConstraint(rootObj);
+      return deleteConstraint !== null ? { deleteConstraint } : {};
+    })(),
   };
 };
 
@@ -654,13 +702,16 @@ export const extractCustomField = async (
     .map((r) => toNullableString(r))
     .filter((r): r is string => r !== null && r.length > 0);
   const relationshipType = dataType === 'MasterDetail' ? 'MasterDetail' : 'Lookup';
+  // The declared delete behavior rides on the edge too, so an inbound walk from
+  // the parent object (record_delete_impact) reads it without a node fetch.
+  const deleteConstraint = extractDeleteConstraint(rootObj);
   const lookupEdges: Edge[] = referenceTargets.map((target) => ({
     fromId: nodeId,
     toId: `CustomObject:${target}`,
     edgeType: 'lookupTo',
     confidence: 'declared',
     source: 'custom-field-extractor',
-    properties: { relationshipType },
+    properties: { relationshipType, ...(deleteConstraint !== null ? { deleteConstraint } : {}) },
   }));
 
   // ROLLUP-SOURCE-EDGE: a roll-up summary field aggregates a field on a CHILD

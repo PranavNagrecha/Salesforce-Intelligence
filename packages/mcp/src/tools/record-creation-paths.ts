@@ -2,12 +2,20 @@
  * sfi.record_creation_paths — "how do records of this object get created?"
  *
  * The Phase D record-creation trace. For an object, lists every automation that
- * INSERTS records of it (flows/apex whose `writesTo` edge is tagged
- * `operation: recordCreate`) plus the triggers that fire on it — so an admin
+ * INSERTS records of it plus the triggers that fire on it — so an admin
  * answering "how did this record get here?" sees the creation surface, not just
- * "what writes a field". Read-only, offline. Creators are FLOW record-creates
- * only: Apex DML inserts (`insert x;` static AND `Database.insert` dynamic) are
- * NOT modeled, so an object created only by Apex reports 0 creators.
+ * "what writes a field". Read-only, offline.
+ *
+ *   - `creators`: components whose `writesTo` edge to the object is tagged
+ *     `operation: recordCreate` (Flow record-creates, OmniStudio DataMapper
+ *     Loads) or `recordUpsert` (a DataMapper Load that maps `Id` / an upsert
+ *     key — it creates when no match exists).
+ *   - `apexInsertSites`: Apex `insert` / `upsert` statements whose enclosing
+ *     method names or queries the object (the shared Apex DML index;
+ *     attribution `inferred` — the parser does not resolve the inserted
+ *     variable's type).
+ *   - `genericInsertSites`: Apex that inserts / upserts whatever records it is
+ *     handed (it can create this object too).
  *
  * **Active-status filter (honesty).** A creation path is a RUNTIME path, so an
  * inactive firer (a Draft/Obsolete Flow, an Inactive ApexTrigger) is NOT a live
@@ -29,8 +37,11 @@ import { z } from 'zod';
 import { mdTable } from '../answer-render.js';
 import type { Context } from '../server.js';
 
+import { buildApexDmlIndex, dmlActsOn } from './apex-dml-index.js';
+import { resolveGenericDml } from './apex-generic-dml.js';
 import { offlineTrust } from './coverage-trust.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import {
   isActiveSoeFirer,
   recordInactiveSoeFirer,
@@ -50,6 +61,19 @@ export interface CreationSource {
   readonly sourceType: string;
   readonly name: string;
   readonly confidence: string;
+  /** Present only for an upsert (`recordUpsert`): it creates when no match exists. */
+  readonly operation?: 'recordUpsert';
+}
+
+/** One Apex statement that inserts (or upserts) records. */
+export interface ApexInsertSite {
+  readonly componentId: string;
+  readonly line: number;
+  readonly method: string | null;
+  readonly operation: string;
+  readonly statement: string;
+  readonly accessLevel: 'user' | 'system' | null;
+  readonly confidence: 'inferred';
 }
 export interface RecordCreationPathsOutput {
   readonly objectApiName: string;
@@ -78,6 +102,12 @@ export interface RecordCreationPathsOutput {
    * do not fire at save. Segregated (not dropped). Omitted when empty.
    */
   readonly inactiveTriggers?: readonly InactiveConfiguredFirer[];
+  /** Apex insert / upsert sites attributed to this object (`inferred`); capped at `limit`. */
+  readonly apexInsertSites: readonly ApexInsertSite[];
+  readonly apexInsertSiteCount: number;
+  /** Apex that inserts / upserts whatever records it is handed; capped at `limit`. */
+  readonly genericInsertSites: readonly ApexInsertSite[];
+  readonly genericInsertSiteCount: number;
   readonly trust: TrustSummary;
   readonly rendered: string;
 }
@@ -101,6 +131,11 @@ const dedupe = (sources: readonly CreationSource[]): CreationSource[] => {
     }
   }
   return out;
+};
+
+const objectNameIndexOf = async (ctx: Context): Promise<ReadonlyMap<string, string>> => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomObject']);
+  return new Map(scan.ok ? scan.value.nodes.map((n) => [n.apiName.toLowerCase(), n.apiName] as const) : []);
 };
 
 export const recordCreationPathsHandler = async (
@@ -144,8 +179,15 @@ export const recordCreationPathsHandler = async (
 
   const allCreators = dedupe(
     edges
-      .filter((e) => e.edgeType === 'writesTo' && e.properties['operation'] === 'recordCreate')
-      .map((e) => toSource(e.fromId, e.confidence)),
+      .filter(
+        (e) =>
+          e.edgeType === 'writesTo' &&
+          (e.properties['operation'] === 'recordCreate' || e.properties['operation'] === 'recordUpsert'),
+      )
+      .map((e) => {
+        const src = toSource(e.fromId, e.confidence);
+        return e.properties['operation'] === 'recordUpsert' ? { ...src, operation: 'recordUpsert' as const } : src;
+      }),
   ).sort((a, b) => a.sourceId.localeCompare(b.sourceId));
   const allTriggers = dedupe(
     edges.filter((e) => e.edgeType === 'triggersOn').map((e) => toSource(e.fromId, e.confidence)),
@@ -192,10 +234,57 @@ export const recordCreationPathsHandler = async (
   const creatorsTruncated = creators.length > limit;
   const triggersTruncated = triggers.length > limit;
 
-  const trust = offlineTrust(ctx, { status: summarizeCoverage(ctx.manifest).status });
+  // Apex insert / upsert sites, from the shared Apex DML index (inferred
+  // attribution: the enclosing method names or queries the object).
+  const apexInsertSites: ApexInsertSite[] = [];
+  const genericInsertSites: ApexInsertSite[] = [];
+  const limitations: string[] = [];
+  const index = await buildApexDmlIndex(ctx, ['insert', 'upsert']);
+  let objectIndex: ReadonlyMap<string, string> | undefined;
+  if (index.ok) {
+    for (const f of index.value.facts) {
+      const site: ApexInsertSite = {
+        componentId: f.componentId,
+        line: f.line,
+        method: f.method,
+        operation: f.operation,
+        statement: f.statement,
+        accessLevel: f.accessLevel,
+        confidence: 'inferred',
+      };
+      const acts = dmlActsOn(f, objectApiName);
+      if (acts === 'typed' || acts === 'named') apexInsertSites.push(site);
+      else if (acts === 'generic') {
+        // Resolve the generic helper at its call sites (every non-test caller).
+        objectIndex ??= await objectNameIndexOf(ctx);
+        const res = await resolveGenericDml(ctx, f, null, objectIndex);
+        if (res.status === 'closed') {
+          if (res.objects.some((o) => o.toLowerCase() === objectApiName.toLowerCase())) apexInsertSites.push(site);
+        } else if (res.status === 'open') {
+          genericInsertSites.push(site);
+        }
+      }
+    }
+    if (index.value.unparsed.length > 0) {
+      limitations.push(`${index.value.unparsed.length} Apex file(s) did not parse; their insert statements are not seen.`);
+    }
+  } else {
+    limitations.push(`The Apex insert scan failed: ${index.error.message}`);
+  }
+
+  const coverageStatus = summarizeCoverage(ctx.manifest).status;
+  const trust = offlineTrust(ctx, { status: coverageStatus }, undefined, limitations);
   const creatorTable = mdTable(
     ['Creator', 'Type', 'Confidence'],
-    creators.slice(0, limit).map((c) => [c.name, c.sourceType, c.confidence]),
+    creators.slice(0, limit).map((c) => [
+      c.operation === 'recordUpsert' ? `${c.name} (upsert)` : c.name,
+      c.sourceType,
+      c.confidence,
+    ]),
+  );
+  const apexTable = mdTable(
+    ['Apex', 'Method', 'Line', 'Operation'],
+    apexInsertSites.slice(0, limit).map((a) => [a.componentId, a.method ?? '—', String(a.line), a.operation]),
   );
   const triggerTable = mdTable(
     ['Trigger', 'Type'],
@@ -220,15 +309,19 @@ export const recordCreationPathsHandler = async (
         `._\n`
       : '';
   const rendered =
-    `Records of \`${objectApiName}\` are inserted by **${creators.length}** active Flow automation(s); ` +
+    `Records of \`${objectApiName}\` are inserted by **${creators.length}** active Flow automation(s) or ` +
+    `OmniStudio DataMapper Load(s), and by **${apexInsertSites.length}** Apex insert site(s) that name it; ` +
     `**${triggers.length}** active trigger(s) fire on it.\n\n` +
     (creators.length > 0 ? `### Creates records\n${creatorTable}\n${creatorTruncNote}\n` : '') +
+    (apexInsertSites.length > 0 ? `### Apex insert / upsert sites (inferred)\n${apexTable}\n` : '') +
     (triggers.length > 0 ? `### Triggers on save\n${triggerTable}\n${triggerTruncNote}\n` : '') +
     inactiveNote +
-    `_Offline static analysis surfaces **Flow** record-creates + triggers only. Apex DML inserts ` +
-    `(\`insert x;\` static AND \`Database.insert\` dynamic) are NOT modeled, so an object created only ` +
-    `by Apex reports **0 creators** — cross-check Apex (e.g. \`grep "new ${objectApiName}"\`) before ` +
-    `concluding nothing creates it._`;
+    (genericInsertSites.length > 0
+      ? `\n_${genericInsertSites.length} Apex site(s) insert whatever records they are handed (e.g. ${genericInsertSites[0]?.componentId ?? ''}); they can create \`${objectApiName}\` records too._\n`
+      : '') +
+    `_Apex insert attribution is **inferred**: a site counts when its enclosing method names or queries ` +
+    `\`${objectApiName}\` — the parser does not resolve the inserted variable's type, and dynamic Apex is ` +
+    `invisible. Cross-check Apex (e.g. \`grep "new ${objectApiName}"\`) before concluding nothing creates it._`;
 
   return ok({
     data: {
@@ -242,6 +335,10 @@ export const recordCreationPathsHandler = async (
       triggersTruncated,
       ...(inactiveCreators.length > 0 ? { inactiveCreators } : {}),
       ...(inactiveTriggers.length > 0 ? { inactiveTriggers } : {}),
+      apexInsertSites: apexInsertSites.slice(0, limit),
+      apexInsertSiteCount: apexInsertSites.length,
+      genericInsertSites: genericInsertSites.slice(0, limit),
+      genericInsertSiteCount: genericInsertSites.length,
       trust,
       rendered,
     },

@@ -28,6 +28,7 @@ import {
 // LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES: the advertised list_components
 // `type` enum is spread from this single source of truth, not hand-duplicated.
 import { USAGE_EDGE_TYPES } from './apex-reachability.js';
+import { APP_SCOPE_INPUT_JSON_SCHEMA } from './app-scope.js';
 import { rosterDeclaredOnlyDisclosure } from './declared-only-disclosure.js';
 import { SECTION_NAMES as FIELD_360_SECTION_NAMES } from './field-360.js';
 import { COMPONENT_TYPES } from './list-components.js';
@@ -1520,6 +1521,73 @@ const RECORD_CREATION_PATHS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     required: ['objectApiName'],
   });
 
+/** Concrete JSON Schema for `sfi.record_delete_impact`. Mirrors `recordDeleteImpactInputSchema`. */
+const RECORD_DELETE_IMPACT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      objectApiName: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      includeOmniStudio: { type: 'boolean' },
+      includeApex: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+    },
+  });
+
+/** Concrete JSON Schema for `sfi.persona_unused_grants`. Mirrors `personaUnusedGrantsInputSchema`. */
+const PERSONA_UNUSED_GRANTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    persona: { type: 'string', minLength: 1 },
+    profile: { type: 'string', minLength: 1 },
+    permissionSets: { type: 'array', items: { type: 'string', minLength: 1 } },
+    permissionSetGroups: { type: 'array', items: { type: 'string', minLength: 1 } },
+    codes: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string', enum: ['UNUSED_CREATE', 'UNUSED_EDIT', 'UNUSED_DELETE', 'UNUSED_FIELD_EDIT', 'USED_ONLY_IN_SYSTEM_MODE'] },
+    },
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.live_verify`. Mirrors `liveVerifyInputSchema` (claim is a discriminated union on `kind`). */
+const LIVE_VERIFY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    claim: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['object-permission', 'omni-active-version', 'validation-rules', 'field-definition', 'omniscript-compiled'] },
+        container: { type: 'string', minLength: 1 },
+        object: { type: 'string', minLength: 1 },
+        permission: { type: 'string', enum: ['create', 'read', 'edit', 'delete', 'viewAll', 'modifyAll'] },
+        type: { type: 'string', minLength: 1 },
+        subType: { type: 'string', minLength: 1 },
+        language: { type: 'string', minLength: 1 },
+        field: { type: 'string', minLength: 1 },
+      },
+      required: ['kind'],
+    },
+    orgAlias: { type: 'string', minLength: 1 },
+    liveEnabled: { type: 'boolean' },
+  },
+  required: ['claim'],
+});
+
+/** Concrete JSON Schema for `sfi.how_to_see`. Mirrors `howToSeeInputSchema`. */
+const HOW_TO_SEE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    elementPath: { type: 'string', minLength: 1 },
+    object: { type: 'string', minLength: 1 },
+  },
+  required: ['componentId'],
+});
+
 /**
  * Concrete JSON Schema for `sfi.why_cant_user_see_record`. Mirrors
  * `whyCantUserSeeRecordInputSchema`. JSON Schema cannot express the
@@ -1965,6 +2033,7 @@ const DOC_COVERAGE_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 100 },
       offset: { type: 'integer', minimum: 0 },
+      scope: APP_SCOPE_INPUT_JSON_SCHEMA,
     },
   });
 
@@ -2914,6 +2983,7 @@ const PICKLIST_INTEGRITY_SCAN_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       offset: { type: 'integer', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
+      scope: APP_SCOPE_INPUT_JSON_SCHEMA,
     },
   });
 
@@ -4691,6 +4761,160 @@ const INTEGRATION_PROCEDURE_CHAIN_INPUT_SCHEMA: Readonly<
   required: ['integrationProcedureId'],
 });
 
+/** Concrete JSON Schema for `sfi.omni_model`. Mirrors `omniModelInputSchema`. */
+const OMNI_MODEL_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    version: { type: 'integer', minimum: 0 },
+    include: { type: 'string', enum: ['nodes', 'edges'] },
+    nodeKinds: { type: 'array', minItems: 1, items: { type: 'string', enum: ['OmniElement', 'OmniIpStep', 'OmniDataKey', 'DataMapperItem'] } },
+    edgeKinds: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string', enum: ['containsElement', 'producesKey', 'readsKey', 'sendsToIp', 'stepOutputs', 'dmReads', 'dmWrites', 'writesField', 'deletesVia', 'prefillsKey'] },
+    },
+    elementPath: { type: 'string', minLength: 1 },
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+  required: ['componentId'],
+});
+
+/** Concrete JSON Schema for `sfi.omni_dead_references`. Mirrors `omniDeadReferencesInputSchema`. */
+const OMNI_DEAD_REFERENCES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    omniscript: { type: 'string', minLength: 1 },
+    ip: { type: 'string', minLength: 1 },
+    verdicts: { type: 'array', minItems: 1, items: { type: 'string', enum: ['defect', 'unknown'] } },
+    codes: { type: 'array', minItems: 1, items: { type: 'string', enum: ['DEAD_REFERENCE', 'WHITESPACE_KEY', 'UNRESOLVED_PLACEHOLDER', 'LABEL_NOT_VALUE'] } },
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.omni_version_diff`. Mirrors `omniVersionDiffInputSchema`. */
+const OMNI_VERSION_DIFF_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    omniscript: { type: 'string', minLength: 1 },
+    ip: { type: 'string', minLength: 1 },
+    from: { type: 'integer', minimum: 0 },
+    to: { type: 'integer', minimum: 0 },
+    maxChanges: { type: 'integer', minimum: 0, maximum: 1000 },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.omni_edit_block_audit`. Mirrors `omniEditBlockAuditInputSchema`. */
+const OMNI_EDIT_BLOCK_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    omniscript: { type: 'string', minLength: 1 },
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.omni_completion_audit`. Mirrors `omniCompletionAuditInputSchema`. */
+const OMNI_COMPLETION_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    ip: { type: 'string', minLength: 1 },
+    codes: { type: 'array', minItems: 1, items: { type: 'string', enum: ['COMPLETE_WITHOUT_SUCCESS', 'SUCCESS_FLAG_NEVER_READ', 'ONLY_FIRST_RESULT_CHECKED'] } },
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.omni_form_spec`. Mirrors `omniFormSpecInputSchema`. */
+const OMNI_FORM_SPEC_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    omniscript: { type: 'string', minLength: 1 },
+    step: { type: 'string', minLength: 1 },
+    crossScript: { type: 'boolean' },
+    limit: { type: 'integer', minimum: 1, maximum: 200 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.omni_path_simulator`. Mirrors `omniPathSimulatorInputSchema`. */
+const OMNI_PATH_SIMULATOR_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    omniscript: { type: 'string', minLength: 1 },
+    answers: { type: 'object' },
+    sections: {
+      type: 'array',
+      maxItems: 50,
+      items: {
+        type: 'object',
+        properties: {
+          step: { type: 'string', minLength: 1 },
+          enteredWhen: { type: 'string', minLength: 1 },
+          section: { type: 'string', minLength: 1 },
+        },
+        required: ['step', 'enteredWhen'],
+      },
+    },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.omni_changed_since`. Mirrors `omniChangedSinceInputSchema`. */
+const OMNI_CHANGED_SINCE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    snapshot: { type: 'string', minLength: 1 },
+    kinds: { type: 'array', minItems: 1, items: { type: 'string', enum: ['OmniScript', 'OmniIntegrationProcedure', 'OmniUiCard', 'OmniDataTransform'] } },
+    limit: { type: 'integer', minimum: 1, maximum: 200 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
+/** Concrete JSON Schema for `sfi.omni_prefill_trace`. Mirrors `omniPrefillTraceInputSchema`. */
+const OMNI_PREFILL_TRACE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    omniscript: { type: 'string', minLength: 1 },
+    step: { type: 'string', minLength: 1 },
+    statuses: { type: 'array', minItems: 1, items: { type: 'string', enum: ['PREFILLED', 'NEVER_PREFILLED', 'UNKNOWN'] } },
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
+/**
+ * Concrete JSON Schema for `sfi.omni_save_trace`. Mirrors
+ * `omniSaveTraceInputSchema`. `componentId` (canonical) and `omniscript` (the
+ * spec-named alias) are natural selectors for the OmniScript; at least one is
+ * required (enforced at the handler — a schema `anyOf` would hide both keys
+ * from hosts that flatten schemas).
+ */
+const OMNI_SAVE_TRACE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    omniscript: { type: 'string', minLength: 1 },
+    step: { type: 'string', minLength: 1 },
+    statuses: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string', enum: ['SAVED', 'SAVED_CONDITIONALLY', 'NEVER_SAVED', 'UNKNOWN', 'NOT_INPUT'] },
+    },
+    includeNonInputs: { type: 'boolean' },
+    limit: { type: 'integer', minimum: 1, maximum: 500 },
+    cursor: { type: 'string', minLength: 1 },
+  },
+});
+
 /**
  * Concrete JSON Schema for `sfi.omniscript_flow` (v3.2 R3). Mirrors
  * `omniscriptFlowInputSchema`. The `omniScriptId` prefix constraint
@@ -5075,7 +5299,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.doc_coverage_report',
     description:
-      'Offline, vault-only documentation-GAP meter — the documentation axis `sfi.tech_debt_score` lacks. MEASURES where the org\'s metadata is undocumented (it does NOT PRODUCE docs like `sfi.generate_data_dictionary` / `sfi.generate_admin_handbook`). Rolls the two documentation axes the extractors capture — a component\'s `description` and a field\'s `inlineHelpText` presence — into a scored, LOWEST-COVERAGE-FIRST report broken down by object, and WEIGHTS each undocumented component by its inbound graph edge-degree (a real criticality proxy — an undocumented, heavily-referenced field ranks above an undocumented orphan). `objects` is the per-object breakdown (each with a `description` and `helpText` axis rollup — measurable / documented / undocumented / coveragePct — plus `combinedCoveragePct` and `undocumentedDegreeWeight`), ranked worst-covered first and PAGED by `limit` (default 20, max 100) / `offset` / `nextOffset`; the page self-fits the response byte budget (`nextOffset` always equals `offset + objects.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips an object). `topUndocumented` surfaces the highest-impact undocumented components (undocumented AND high-degree) regardless of page; `totals` carries the org-wide axis rollups plus the excluded `notMeasurableCount` / `outOfScopeCount`. HONESTY: "not measurable" ≠ "undocumented" — a type whose description the extractor does NOT capture (or a family the refresh did not retrieve) is NOT MEASURABLE and is EXCLUDED from the undocumented count, never counted as a gap (objects have no inline help text, so they are not measurable on the help-text axis). Scoped to what the ORG owns: custom `__c`/`__mdt`/… fields + custom objects; standard fields (Salesforce-provided help) and managed-package (`ns__…`) components are reported separately as out-of-scope and never penalize the org. `description` absence and `inlineHelpText` absence are distinct axes, never conflated. Coverage is a floor (only retrieved families measured). Presence is `declared` (structural); "documented" means a NON-EMPTY field, not a QUALITY judgment (a one-word description still counts as present).',
+      'Offline, vault-only documentation-GAP meter — the documentation axis `sfi.tech_debt_score` lacks. MEASURES where the org\'s metadata is undocumented (it does NOT PRODUCE docs like `sfi.generate_data_dictionary` / `sfi.generate_admin_handbook`). Rolls the two documentation axes the extractors capture — a component\'s `description` and a field\'s `inlineHelpText` presence — into a scored, LOWEST-COVERAGE-FIRST report broken down by object, and WEIGHTS each undocumented component by its inbound graph edge-degree (a real criticality proxy — an undocumented, heavily-referenced field ranks above an undocumented orphan). `objects` is the per-object breakdown (each with a `description` and `helpText` axis rollup — measurable / documented / undocumented / coveragePct — plus `combinedCoveragePct` and `undocumentedDegreeWeight`), ranked worst-covered first and PAGED by `limit` (default 20, max 100) / `offset` / `nextOffset`; the page self-fits the response byte budget (`nextOffset` always equals `offset + objects.length`, `byteTrimmed` flags a byte-limited page, so a cursor walk never skips an object). `topUndocumented` surfaces the highest-impact undocumented components (undocumented AND high-degree) regardless of page; `totals` carries the org-wide axis rollups plus the excluded `notMeasurableCount` / `outOfScopeCount`. HONESTY: "not measurable" ≠ "undocumented" — a type whose description the extractor does NOT capture (or a family the refresh did not retrieve) is NOT MEASURABLE and is EXCLUDED from the undocumented count, never counted as a gap (objects have no inline help text, so they are not measurable on the help-text axis). Scoped to what the ORG owns: custom `__c`/`__mdt`/… fields + custom objects; standard fields (Salesforce-provided help) and managed-package (`ns__…`) components are reported separately as out-of-scope and never penalize the org. `description` absence and `inlineHelpText` absence are distinct axes, never conflated. Coverage is a floor (only retrieved families measured). Presence is `declared` (structural); "documented" means a NON-EMPTY field, not a QUALITY judgment (a one-word description still counts as present). APP SCOPE: `scope` {namePrefixes, namespaces} (default: the vault\'s org-kb/config/app-scope.json, else the OmniStudio appScope) narrows `totals`, `objects` and `topUndocumented` to the app\'s own objects and fields — the scoped gap is the answer; `orgWide.totals` carries the org-wide numbers as a labelled contrast and `scopeNote` says both in one sentence.',
     inputSchema: DOC_COVERAGE_REPORT_INPUT_SCHEMA,
   },
   {
@@ -5715,7 +5939,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   },
   {
     name: 'sfi.changed_since',
-    description: "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 — date-only `YYYY-MM-DD` or full UTC timestamp; the natural token `last-refresh` / `last refresh` / `last_refresh` / `refresh` (separator-insensitive) is ALSO accepted and resolves to the vault's `refreshedAt`, echoed back as `since` — for the component TYPES the last refresh itself brought in, use `what_changed_since_refresh`). Optional `types` narrows the scan; the default scans EVERY modelled ComponentType — the default set is derived from the same compile-time-proven ComponentType union the `types` validator accepts, not a hand-maintained subset, so the two cannot drift. A requested type that contributed no node is disclosed in `absence.sites[]` as `types-not-retrieved` rather than folded into 'nothing changed'. Optional `limit` (1-500, default 100) truncates the response; a truncated page returns a `nextCursor` to resume. Each entry carries `id`, `type`, `apiName`, `lastModifiedDate`, and `lastModifiedBy: { id, name }`. The output's `unenrichedCount` reports how many nodes (within the requested types) carry `lastModifiedDate: null` — these are the nodes the offline DX-source extractor produced without freshness data. Honesty axis (load-bearing): a non-zero `unenrichedCount` means the answer is PARTIAL. Run `sfi refresh --with-tooling-api` to enrich the freshness fields via the Tooling API integration; the tool remains fully functional against an un-enriched vault (returns `changed: []` plus the full `unenrichedCount` so consumers see the gap rather than assuming nothing has changed). the R2 Tooling API enricher covers ApexClass, ApexTrigger, Flow, Layout, CustomField, and ValidationRule; future + R3 expands coverage to the remaining types.",
+    description: "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (for a snapshot-based answer — what was added / removed / modified between two refreshes, including runtime-switch flips such as activation — use `sfi.diff_snapshots`; for OmniStudio's semantic changes — active versions and element-level diffs — use `sfi.omni_changed_since`) (ISO 8601 — date-only `YYYY-MM-DD` or full UTC timestamp; the natural token `last-refresh` / `last refresh` / `last_refresh` / `refresh` (separator-insensitive) is ALSO accepted and resolves to the vault's `refreshedAt`, echoed back as `since` — for the component TYPES the last refresh itself brought in, use `what_changed_since_refresh`). Optional `types` narrows the scan; the default scans EVERY modelled ComponentType — the default set is derived from the same compile-time-proven ComponentType union the `types` validator accepts, not a hand-maintained subset, so the two cannot drift. A requested type that contributed no node is disclosed in `absence.sites[]` as `types-not-retrieved` rather than folded into 'nothing changed'. Optional `limit` (1-500, default 100) truncates the response; a truncated page returns a `nextCursor` to resume. Each entry carries `id`, `type`, `apiName`, `lastModifiedDate`, and `lastModifiedBy: { id, name }`. The output's `unenrichedCount` reports how many nodes (within the requested types) carry `lastModifiedDate: null` — these are the nodes the offline DX-source extractor produced without freshness data. Honesty axis (load-bearing): a non-zero `unenrichedCount` means the answer is PARTIAL. Run `sfi refresh --with-tooling-api` to enrich the freshness fields via the Tooling API integration; the tool remains fully functional against an un-enriched vault (returns `changed: []` plus the full `unenrichedCount` so consumers see the gap rather than assuming nothing has changed). the R2 Tooling API enricher covers ApexClass, ApexTrigger, Flow, Layout, CustomField, and ValidationRule; future + R3 expands coverage to the remaining types.",
     inputSchema: CHANGED_SINCE_INPUT_SCHEMA,
   },
   {
@@ -5742,8 +5966,32 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.record_creation_paths',
     description:
-      "\"How do records of this object get created?\" — the record-provenance trace an admin needs to answer \"how did this record get here?\". For an object (`objectApiName` = api name like `Case` or the canonical `CustomObject:Case`), lists every automation that INSERTS records of it — Flows whose `writesTo` edge is tagged `operation: recordCreate` — plus the triggers that fire on it (`triggersOn` edges), each with source id/type and edge confidence. Read-only, offline. HONESTY (verbatim, surfaced ALWAYS): creators are FLOW record-creates ONLY — Apex DML inserts (`insert x;` static AND `Database.insert` dynamic) are NOT modeled, so an object created only by Apex reports **0 creators**; cross-check Apex before concluding nothing creates it. `limit` (default 100, max 500) caps both returned lists — `creatorCount`/`triggerCount` are always the FULL counts, and a cut list is disclosed via `creatorsTruncated`/`triggersTruncated` (no cursor; raise `limit` to see the tail). Complements `sfi.what_happens_on_save` (the save-time automation tree) by answering the narrower who-inserts-this question. `objectApiName` is REQUIRED and is VERIFIED against the vault: a name that resolves to nothing is refused as `invalid-query` rather than answering over an id built from the raw string, and a real object typed in the wrong case still answers.",
+      "\"How do records of this object get created?\" — the record-provenance trace an admin needs to answer \"how did this record get here?\". For an object (`objectApiName` = api name like `Case` or the canonical `CustomObject:Case`), lists every automation that INSERTS records of it — `creators`: Flows and OmniStudio DataMapper Loads whose `writesTo` edge is tagged `operation: recordCreate`, or `recordUpsert` (a Load that maps `Id` / an upsert key; it creates when no match exists, marked `operation: 'recordUpsert'`) — plus the triggers that fire on it (`triggersOn` edges), each with source id/type and edge confidence; `apexInsertSites[]`: Apex `insert` / `upsert` statements whose enclosing method names or queries the object (shared Apex DML index; `inferred` — the parser does not resolve the inserted variable's type, with `accessLevel` user/system when written); `genericInsertSites[]`: Apex that inserts whatever records it is handed, so it can create this object too. Read-only, offline. HONESTY (surfaced ALWAYS): Apex attribution is inferred and dynamic Apex is invisible — cross-check Apex before concluding nothing creates it. `limit` (default 100, max 500) caps every returned list — `creatorCount`/`triggerCount` are always the FULL counts, and a cut list is disclosed via `creatorsTruncated`/`triggersTruncated` (no cursor; raise `limit` to see the tail). Complements `sfi.what_happens_on_save` (the save-time automation tree) by answering the narrower who-inserts-this question. `objectApiName` is REQUIRED and is VERIFIED against the vault: a name that resolves to nothing is refused as `invalid-query` rather than answering over an id built from the raw string, and a real object typed in the wrong case still answers.",
     inputSchema: RECORD_CREATION_PATHS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.record_delete_impact',
+    description:
+      "\"If a record of this object is deleted, what happens to its children, and what stops it?\" For an object (`objectApiName` / `object` / `CustomObject:` `componentId`, verified against the vault): `children[]` \u2014 every relationship field pointing at it, and through a cascade at the records deleted with it (`depth`, `via`), each with its delete behavior: `ORPHANED` (SetNull \u2014 the child survives with a blank parent; a custom lookup that declares no `deleteConstraint` takes this platform default, `constraintSource: platform-default`), `DELETED_WITH_PARENT` (master-detail, or Cascade), `BLOCKS_DELETE` (Restrict), `UNKNOWN` (a standard relationship, or a required lookup with no declared constraint) \u2014 citing the field file and the `<deleteConstraint>` line. `guards` \u2014 active before/after-delete Apex triggers and delete-triggered flows (`status`: none / present / unknown); validation rules are counted as NOT running on delete, and cascaded records do not fire their own delete triggers. `rollups[]` \u2014 roll-up summaries that recalculate because records vanish. `whoCanDelete` \u2014 profiles / permission sets with Delete or Modify All on the object and Modify All Data holders (with the permission set groups that include them; muting disclosed, not applied), OmniStudio delete paths (an Integration Procedure Delete Action naming the object \u2014 `parsed`; an Edit Block whose cards save the object and wire a server delete \u2014 `inferred`), Apex delete sites whose enclosing method names or queries the object (`inferred`), and `genericDeletes` \u2014 Apex that deletes whatever records it is handed, so it can delete this object too. Findings: `ORPHANED` (per orphaned field; `defect` when no delete automation runs on the object, else `unknown`), `INCONSISTENT_CONSTRAINT` (one child object with several relationships to the object that behave differently), `NO_SERVER_GUARD` (nothing server-side runs on delete while children are orphaned or deleted with it). `limit` (default 100, max 500) caps each `whoCanDelete` list; totals stay whole and `truncated` says when a list was cut (no cursor; raise `limit`). `includeOmniStudio` / `includeApex` (default true) skip the slower scans. Offline; how many child records exist is live data, not answered here.",
+    inputSchema: RECORD_DELETE_IMPACT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.persona_unused_grants',
+    description:
+      "Which object and field permissions does this kind of user have that nothing they can run uses? A persona is a profile + permission sets + permission set groups — `persona` (declared in org-kb/config/personas.json) or inline `profile` / `permissionSets` / `permissionSetGroups` — composed by the effective-permissions engine (muting applied). Its REACHABLE automation is: every active OmniScript, Integration Procedure and FlexCard (inside the OmniStudio appScope when configured) and what they dispatch; Apex entered from them, from Lightning components the persona has Apex access to, and from granted @AuraEnabled / @InvocableMethod / REST classes, plus everything that Apex calls; the triggers and record-triggered flows on the objects written. Per object the persona can create / edit / delete, each operation is `USED` (evidence: DataMapper Load, Integration Procedure Delete Action, Apex DML — typed by the operand, generic helpers resolved at their call sites —, EventBus.publish, record-triggered Flow), `UNKNOWN` (`unknownReasons`: an open generic Apex writer while reachable code names the object, a Lightning component referencing it directly, an active flow not reached through the persona) or `UNUSED`. Findings: `UNUSED_CREATE` / `UNUSED_EDIT` / `UNUSED_DELETE` (`defect`, `inferred`, citing the permission set file and the `<object>` line), `UNUSED_FIELD_EDIT` (editable fields no reachable writer writes; `unknown` when a writer's field set is not visible), `USED_ONLY_IN_SYSTEM_MODE` (the only uses are Apex written `as system` / SYSTEM_MODE, which does not check the user's object permissions — the grant is not what makes them work). A reachable logger's insert is a real use. `objects[]` rows are paged (`limit` / `cursor`); `summary` counts are whole-set; `findings` cover the objects on the page. Offline; which users hold the persona is not answered here.",
+    inputSchema: PERSONA_UNUSED_GRANTS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.live_verify',
+    description:
+      "Confirm ONE claim against the live org now, with the smallest read-only query that can, so a finding never rests on a stale snapshot. `claim.kind`: `object-permission` (`container` = permission set or profile name, `object`, `permission` create/read/edit/delete/viewAll/modifyAll — ObjectPermissions), `omni-active-version` (`type`, `subType`, optional `language` — OmniProcess versions and which is active), `validation-rules` (`object` — Tooling ValidationRule names and active flags), `field-definition` (`object`, `field` — Tooling FieldDefinition type / length / precision / scale), `omniscript-compiled` (`type`, `subType`, `language` — Tooling LightningComponentBundle for an LWC OmniScript's compiled component; `code: ACTIVE_BUT_NOT_COMPILED` when none exists — the \"Invalid Component\" failure). Returns `verdict` (CONFIRMED / REFUTED / NOT_FOUND / UNKNOWN), a one-sentence `statement`, the exact `query`, `liveEvidence` rows, what the vault recorded (`vaultSays`) and `matchesVault`, with `queriedAt` and the vault `refreshedAt`. Read-only and consent-gated (sfi.live_consent); every query is a SELECT, and claim values accept only letters, digits, spaces, `_`, `.` and `-`.",
+    inputSchema: LIVE_VERIFY_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.how_to_see',
+    description:
+      "The exact click path a reviewer follows to open a component — the \"How to see it\" steps of a finding, worded with the vault's labels. Object Manager paths for objects, fields, validation rules, record types and page layouts; the admin pages for Apex, flows, permission sets / groups and profiles (`object` adds Object Settings → that object), duplicate rules, custom metadata records and Lightning pages; App Launcher → OmniStudio paths for OmniScripts (Type / SubType, version, language), Integration Procedures, Data Mappers and FlexCards (`elementPath` adds the element / step / mapping row). `urlPath` is a Lightning path when one is deterministic. A type with no fixed page falls back to Quick Find (`confidence: inferred`). Offline.",
+    inputSchema: HOW_TO_SEE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.explain_flow',
@@ -5854,7 +6102,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.picklist_integrity_scan',
     description:
-      "Org-wide picklist value-set integrity scan — the INVERSE of what_if_remove_picklist_value (which starts from one value). Sweeps EVERY Picklist / MultiselectPicklist CustomField that carries an inline value set and, for each, gathers every string literal that DECLARATIVE source metadata compares or assigns against it — ValidationRule / formula-field formulas and `ISPICKVAL(field,'X')`, Flow decision criteria, Flow record-create/update LITERAL assignments (`<stringValue>` on a `writesTo` edge), Workflow-Rule criteria, and the field's own default(s) — then flags each literal that matches NO defined value (`orphaned`, HIGH; a spelling-close defined value is offered as a `nearMatch`) or matches only an INACTIVE/deactivated value (`inactive-only`, MEDIUM). Comparison vs assignment matters: an orphaned COMPARISON cannot match a defined value so it is flagged (a branch that silently died on a value rename), but an orphaned ASSIGNMENT is a defect only for a RESTRICTED picklist — an UNRESTRICTED picklist accepts free text — so an orphaned assignment to a field of unknown/unrestricted restrictedness is NOT flagged (free-text writes are not mis-flagged). Output pages over FIELDS-with-findings (`limit` 1..500 default 50, `offset`), with per-hit citations carrying source ComponentId, use kind, location, and edge/parse confidence, plus a `trust` block whose claim confidence is the WEAKEST grounding source (any `parsed` formula literal weakens the `declared` value set to `parsed`). Honesty axis (verbatim): this is a METADATA integrity check, NOT a record-value check — whether any RECORD holds a value is a runtime question for live_picklist_usage. Apex picklist-literal comparison is NOT covered (an Apex node carries no literal-bearing property and a bare-field-name scan of raw `.cls` source would cross-attribute a same-named field on a different object). Variable comparisons, dynamic SOQL/Apex strings, and reflective field access are invisible, so an empty finding is \"not checked\", not proven clean; and the offline vault does not model each field's `restricted` flag, so orphaned assignments are withheld unless the flag is present and true.",
+      "Org-wide picklist value-set integrity scan — the INVERSE of what_if_remove_picklist_value (which starts from one value). Sweeps EVERY Picklist / MultiselectPicklist CustomField that carries an inline value set and, for each, gathers every string literal that DECLARATIVE source metadata compares or assigns against it — ValidationRule / formula-field formulas and `ISPICKVAL(field,'X')`, Flow decision criteria, Flow record-create/update LITERAL assignments (`<stringValue>` on a `writesTo` edge), Workflow-Rule criteria, and the field's own default(s) — then flags each literal that matches NO defined value (`orphaned`, HIGH; a spelling-close defined value is offered as a `nearMatch`) or matches only an INACTIVE/deactivated value (`inactive-only`, MEDIUM). Comparison vs assignment matters: an orphaned COMPARISON cannot match a defined value so it is flagged (a branch that silently died on a value rename), but an orphaned ASSIGNMENT is a defect only for a RESTRICTED picklist — an UNRESTRICTED picklist accepts free text — so an orphaned assignment to a field of unknown/unrestricted restrictedness is NOT flagged (free-text writes are not mis-flagged). Output pages over FIELDS-with-findings (`limit` 1..500 default 50, `offset`), with per-hit citations carrying source ComponentId, use kind, location, and edge/parse confidence, plus a `trust` block whose claim confidence is the WEAKEST grounding source (any `parsed` formula literal weakens the `declared` value set to `parsed`). Honesty axis (verbatim): this is a METADATA integrity check, NOT a record-value check — whether any RECORD holds a value is a runtime question for live_picklist_usage. Apex picklist-literal comparison is NOT covered (an Apex node carries no literal-bearing property and a bare-field-name scan of raw `.cls` source would cross-attribute a same-named field on a different object). Variable comparisons, dynamic SOQL/Apex strings, and reflective field access are invisible, so an empty finding is \"not checked\", not proven clean. RESTRICTION: `restriction` counts every picklist once — `globalValueSet` (always restricted), `inlineRestricted`, `inlineUnrestricted` (accepts values outside its set), `unknown` (a standard picklist whose value set is not in its field file, or a vault refreshed before the flag was captured); orphaned assignments are withheld unless the field is restricted. APP SCOPE: `scope` {namePrefixes, namespaces} (default: the vault's org-kb/config/app-scope.json, else the OmniStudio appScope) narrows every count and finding to the app's own fields (by field or object name) — the scoped number is the answer; `orgWide` carries the same counts org-wide as a labelled contrast and `scopeNote` says both in one sentence, because an org-wide count moves with whichever packages and standard objects the retrieve included.",
     inputSchema: PICKLIST_INTEGRITY_SCAN_INPUT_SCHEMA,
   },
   {
@@ -6142,7 +6390,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   // `boundaries[]` on every response.
   {
     name: 'sfi.datatransform_field_map',
-    description: "Given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mapping plus the operation-type metadata (Extract / Load / Transform). Composes the -R2c extractor's node (top-level `<sourceObject>`, `<inputType>`, `<interfaceClass>` with `<type>` fallback, `<active>` flag, `<description>`) with a fresh re-parse of the source XML for the per-row `<omniDataTransformItem>` table. Each `mappings[]` row carries `name`, `sourceField` (verbatim `<inputFieldName>`), `targetField` (verbatim `<outputFieldName>`), `outputObjectName`, `upsertKey`, `requiredForUpsert`, `disabled`, and a per-row `confidence` — `declared` when both field paths arrive as direct XML elements with no colon-prefix alias, `parsed` when either path uses the designer-controlled `{ObjectAlias}:{fieldPath}` convention (the -R2c extractor's edge-level confidence split). `sourceObject` and `targetObject` surface the top-level source SObject and the best-effort target SObject (first non-`json` `outputObjectName`); `operationType` pins the raw `<type>` element verbatim. `inputSampleJson` / `outputSampleJson` carry the designer's `<expectedInputJson>` / `<expectedOutputJson>` payloads when present. `boundaries[]` ALWAYS surfaces (1) the Native-vs-Vlocity disclosure and (2) the per-row confidence disclosure explaining the `declared`/`parsed` axis. Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
+    description: "Given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mapping plus the operation-type metadata (Extract / Load / Transform). Composes the -R2c extractor's node (top-level `<sourceObject>`, `<inputType>`, `<interfaceClass>` with `<type>` fallback, `<active>` flag, `<description>`) with a fresh re-parse of the source XML (for a managed-package DataRaptor, its Vlocity DataPack export, converted to the same shape) for the per-row `<omniDataTransformItem>` table. Each `mappings[]` row carries `name`, `sourceField` (verbatim `<inputFieldName>`), `targetField` (verbatim `<outputFieldName>`), `outputObjectName`, `upsertKey`, `requiredForUpsert`, `disabled`, and a per-row `confidence` — `declared` when both field paths arrive as direct XML elements with no colon-prefix alias, `parsed` when either path uses the designer-controlled `{ObjectAlias}:{fieldPath}` convention (the -R2c extractor's edge-level confidence split). `sourceObject` and `targetObject` surface the top-level source SObject and the best-effort target SObject (first non-`json` `outputObjectName`); `operationType` pins the raw `<type>` element verbatim. `inputSampleJson` / `outputSampleJson` carry the designer's `<expectedInputJson>` / `<expectedOutputJson>` payloads when present. `boundaries[]` ALWAYS surfaces (1) the Native-vs-Vlocity disclosure and (2) the per-row confidence disclosure explaining the `declared`/`parsed` axis. Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
     inputSchema: DATATRANSFORM_FIELD_MAP_INPUT_SCHEMA,
   },
   // v3.2 — OmniStudio declarative-process tier. The
@@ -6162,13 +6410,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   // endpoint classification (REST / DataRaptor / nested IP / Remote
   // Action). REST URLs and Apex `class.method` targets are surfaced
   // verbatim with `parsed` confidence — v3.2 does NOT probe URLs and
-  // does NOT emit Apex-edge resolution (v3.3 follow-up). Four
+  // resolves Apex calls to ApexClass nodes. Four
   // verbatim boundary disclosures surface ALWAYS — Native-vs-Vlocity,
-  // v3.3 Apex-coupling deferral, OmniProcessElement record-level,
+  // Apex-coupling scope, OmniProcessElement record-level,
   // and the REST-endpoint reachability caveat.
   {
     name: 'sfi.integration_procedure_chain',
-    description: "Given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata (`omniProcessKey`, `versionNumber`, `subType`, `type`, `uniqueName`, `isActive`), the ordered action chain (one row per `<omniProcessElements>` child, sorted by sequenceNumber ASC, each carrying `name`, `type`, `description`, `sequenceNumber`, `isActive`, and the optional `executionConditionalFormula`), the `externalEndpoints[]` per-step breakdown (kind `'rest' | 'dataraptor' | 'remote-action' | 'integration-procedure'`; REST steps surface the verbatim `restPath` and `namedCredential`, DataRaptor / nested-IP steps resolve their target by scanning the target node type and matching the property the caller names it by (`properties.omniProcessKey` for a nested IP, `properties.name` for a DataRaptor) — NOT by templating the name onto the id prefix, which misses a present target whenever the node id (filename stem) and the callable name differ. `targetId` is populated only when exactly ONE node answers; `targetResolution` says why it is `null` otherwise — `resolved` / `ambiguous` (several versions answer to one key; every candidate is listed in `targetCandidateIds`) / `not-in-vault` (a COMPLETE scan of the type found none — the only value that asserts absence) / `unresolved` (the scan stopped at its residual cap, so absence is NOT established) / `lookup-failed` (the graph read errored — not an org fact) / `not-applicable` (rest and remote-action steps, which never attempt a lookup). `targetCandidateIds[]` is always present, Remote Action steps surface `class.method` verbatim — no Apex-edge resolution per deferral), and the parsed `responseShape` from the terminal Response Action's `additionalOutput`. Optional `includeChildPropertySetConfig: true` attaches each action's parsed `propertySetConfig` JSON blob (1-10kB per action). REST URLs are surfaced with `parsed` confidence — does NOT probe the URL or verify the Named Credential against live state. `boundaries[]` ALWAYS surfaces FOUR verbatim disclosures: (1) the Native-vs-Vlocity-Legacy axis ( anchor), (2) the Apex-coupling deferral, (3) the OmniProcessElement record-level boundary ( anchor), and (4) the REST-endpoint reachability caveat. Non-IP prefixes surface as `invalid-query`; unknown well-formed ids surface as `component-not-found`; missing source files surface as `component-not-found` with the verbatim source path.",
+    description: "Given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata (`omniProcessKey`, `versionNumber`, `subType`, `type`, `uniqueName`, `isActive`) and its steps — top-level AND nested inside Conditional / Loop / Try-Catch blocks — in runtime order (siblings by sequenceNumber, depth-first), each with `name`, `type`, `description`, `sequenceNumber`, `isActive`, `executionConditionalFormula`, `path` / `depth`, and the element catalog's `canonicalType` and `role`, so every spelling of an action (`Data Mapper Load Action`, `HTTP Action`, …) is read the same way. `externalEndpoints[]` (each with `stepName` / `stepPath`) follow the extractor's edge rules: ANY element naming a `bundle` calls that DataMapper (`dataraptor`), an `integrationProcedureKey` that IP (`integration-procedure`), a `remoteClass` that Apex class (`remote-action`, resolved to its ApexClass node or `not-in-vault`) \u2014 except a Remote Action on the managed runtime's IntegrationProcedureService, which runs the IP its method names (`integration-procedure`); HTTP steps surface their verbatim URL and named credential (`rest`); a Delete Action its objects (`delete`). DataMapper / IP targets take the graph's import-time resolution — `targetResolution` `resolved` (one version) / `active-version` (several; the active one runs — an IP's `isActive` is the runtime switch) / `highest-version` (a DataMapper with several versions and no single active one) / `no-active-version` (an IP none of whose versions is active: nothing runs, `targetId` null) / `ambiguous` (several active) / `not-in-vault` (a COMPLETE scan found none — the only value asserting absence) / `unresolved` (scan capped) / `lookup-failed` (graph read errored) / `not-applicable` (REST URLs) — with every version in `targetCandidateIds`. A resolved DataMapper carries `dataAccess` {reads, writes} (objects, from its field-level edges); the response's `dataAccess` sums the chain's own footprint {reads, writes, deletes, apexClasses, ipsCalled, mappersCalled} (nested IPs' steps are not folded in — follow `ipsCalled`). Plus the parsed `responseShape` from the terminal Response Action's `additionalOutput`. Optional `includeChildPropertySetConfig: true` attaches each action's parsed `propertySetConfig` (1-10kB per action). REST URLs are `parsed` — never probed. `boundaries[]` ALWAYS carries FOUR verbatim disclosures: (1) Native-vs-Vlocity-Legacy, (2) Apex-coupling scope (calls out resolved; what the Apex does is answered elsewhere; Apex that runs this IP by a literal key is an incoming `dispatchesOmniAction` edge, `via: apex`, listed by the usage tools), (3) the OmniProcessElement record-level boundary, (4) the REST-endpoint reachability caveat. Non-IP prefixes surface as `invalid-query`; unknown well-formed ids as `component-not-found`; missing source files as `component-not-found` with the verbatim source path.",
     inputSchema: INTEGRATION_PROCEDURE_CHAIN_INPUT_SCHEMA,
   },
   // v3.2 R3a — the "walk this OmniScript end-to-end" Q176 surface.
@@ -6177,10 +6425,10 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   // `dispatchesOmniAction` edge family (for the IP / DataRaptor / OS
   // dispatch targets). Three verbatim boundary disclosures surface
   // ALWAYS — Native-vs-Vlocity, OmniProcessElement record-level,
-  // and the v3.3 Apex-coupling deferral.
+  // and the Apex-coupling scope.
   {
     name: 'sfi.omniscript_flow',
-    description: "Given an OmniScript canonical id (`OmniScript:{ApiName}`), returns the parsed step sequence (the `<omniProcessElements>` children walked recursively, sorted by `level` ASC then `sequenceNumber` ASC), the downstream IP / DataRaptor / sibling-OmniScript dispatches resolved through `dispatchesOmniAction` outgoing edges (each entry carries `stepName`, `stepType`, `targetId` — null when dangling — `targetRawName`, and edge `confidence`), and the OmniScript's identity metadata (`omniProcessType`, `versionNumber`, `language`, `subType`, `type`, `uniqueName`, `isActive`, `isWebCompEnabled`) sourced from the R2 extractor's node properties. Optional `includeChildPropertySetConfig: true` attaches each step's parsed `propertySetConfig` JSON blob to its entry (off by default — blobs can be kilobytes per step). The / / honesty anchors surface ALWAYS in `boundaries[]`: (1) Native-vs-Vlocity-Legacy detection is heuristic; (2) OmniProcessElement record-level data is out of scope; (3) Apex-to-OmniProcess coupling (`implements omnistudio.VlocityOpenInterface`) is a follow-up — not yet in the graph. Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
+    description: "Given an OmniScript canonical id (`OmniScript:{ApiName}`), returns the parsed step sequence (the `<omniProcessElements>` children walked recursively, sorted by `level` ASC then `sequenceNumber` ASC), the downstream IP / DataRaptor / sibling-OmniScript dispatches resolved through `dispatchesOmniAction` outgoing edges (each entry carries `stepName`, `stepType`, `targetId` — null when dangling — `targetRawName`, and edge `confidence`), and the OmniScript's identity metadata (`omniProcessType`, `versionNumber`, `language`, `subType`, `type`, `uniqueName`, `isActive`, `isWebCompEnabled`) sourced from the R2 extractor's node properties. Optional `includeChildPropertySetConfig: true` attaches each step's parsed `propertySetConfig` JSON blob to its entry (off by default — blobs can be kilobytes per step). The / / honesty anchors surface ALWAYS in `boundaries[]`: (1) Native-vs-Vlocity: a managed-package (Vlocity) OmniScript is read from its DataPack export under org-kb/source/vlocity/ \u2014 never from the retrieve \u2014 and is in the vault only when that export is; (2) OmniProcessElement record-level data is out of scope; (3) Apex coupling — calls out are `callsApex` edges, and Apex that runs an IP or DataRaptor by a literal key is a `dispatchesOmniAction` edge from the class (`via: apex`). Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
     inputSchema: OMNISCRIPT_FLOW_INPUT_SCHEMA,
   },
   // v3.2 R3d — the "what's inside this FlexCard" surface. Composes
@@ -6195,8 +6443,68 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   // AND Native-vs-Vlocity-Legacy.
   {
     name: 'sfi.omniuicard_widget_breakdown',
-    description: "Given an OmniUiCard canonical id (`OmniUiCard:{ApiName}`), returns the FlexCard's identity metadata (`omniUiCardType`, `authorName`, `versionNumber`, `isActive`, `isManagedUsingStdDesigner` — sourced from the R2 extractor's node properties), the parsed `states[]` array each carrying `name`, `stateIndex`, recursive `widgetCount`, and the full recursive `widgets[]` tree (each widget carries `name`, `element`, `elementLabel`, `type`, and nested `children[]` for Block / Datatable Row containers), the declared `dataSource` (`type` + `contextVariables[]`), and the `dispatchedActions[]` list resolved through outgoing `dispatchesOmniAction` edges (each entry: `stateName`, `stateIndex`, `widgetLabel`, `actionListIndex`, `actionType` ('OmniScript' | 'Integration Procedure'), `targetId`, `targetRawName`, edge `confidence`). The widget tree is re-parsed from the source XML on demand because the propertySetConfig blob is large (tens of KB per real-org card) and the R2 extractor stores only aggregate counts on the node. `boundaries[]` ALWAYS surfaces (1) the propertySetConfig-parsing disclosure verbatim explaining widget order follows the JSON's declared order, not the visual designer's drag-drop order, AND (2) the Native-vs-Vlocity-Legacy disclosure. When the card's source XML could not be read, did not validate, or carried no parseable `propertySetConfig`, `states` is empty because it was NOT PARSED, and `boundaries` leads with a named BLIND SPOT disclosure quoting the `stateCount` / `widgetCount` the refresh recorded; an empty `states` with no such disclosure is a verified 'this card declares no states and no widgets'. A node built by a refresh predating the v3.2 OmniUiCard extractor (no `stateCount` property) reports 'not modeled', never zero. `boundaries` also flags DRIFT when the on-disk XML disagrees with the vault's aggregates, and states whose widgets hang off a component layer other than `layer-0` (never walked). Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
+    description: "Given an OmniUiCard canonical id (`OmniUiCard:{ApiName}`), returns the FlexCard's identity metadata (`omniUiCardType`, `authorName`, `versionNumber`, `isActive`, `isManagedUsingStdDesigner` — sourced from the R2 extractor's node properties), the parsed `states[]` array each carrying `name`, `stateIndex`, recursive `widgetCount`, and the full recursive `widgets[]` tree (each widget carries `name`, `element`, `elementLabel`, `type`, and nested `children[]` for Block / Datatable Row containers), the declared `dataSource` (`type` + `contextVariables[]`), and the `dispatchedActions[]` list resolved through outgoing `dispatchesOmniAction` edges (each entry: `stateName`, `stateIndex`, `widgetLabel`, `actionListIndex`, `actionType` ('OmniScript' | 'Integration Procedure'), `targetId`, `targetRawName`, edge `confidence`). The widget tree is re-parsed from the source XML (or, for a managed-package card, its Vlocity DataPack export) on demand because the propertySetConfig blob is large (tens of KB per real-org card) and the R2 extractor stores only aggregate counts on the node. `boundaries[]` ALWAYS surfaces (1) the propertySetConfig-parsing disclosure verbatim explaining widget order follows the JSON's declared order, not the visual designer's drag-drop order, AND (2) the Native-vs-Vlocity-Legacy disclosure. When the card's source XML could not be read, did not validate, or carried no parseable `propertySetConfig`, `states` is empty because it was NOT PARSED, and `boundaries` leads with a named BLIND SPOT disclosure quoting the `stateCount` / `widgetCount` the refresh recorded; an empty `states` with no such disclosure is a verified 'this card declares no states and no widgets'. A node built by a refresh predating the v3.2 OmniUiCard extractor (no `stateCount` property) reports 'not modeled', never zero. `boundaries` also flags DRIFT when the on-disk XML disagrees with the vault's aggregates, and states whose widgets hang off a component layer other than `layer-0` (never walked). Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
     inputSchema: OMNIUICARD_WIDGET_BREAKDOWN_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_model',
+    description:
+      "The inside of ONE OmniStudio component as nodes and edges (the OmniStudio element model): an OmniScript's elements (`OmniElement:<uniqueName>#<Step>/<Block>/<name>` \u2014 type, data key, mask, pattern, required, options as stored name + label, show rule, Edit Block delete / save wiring), the data keys they produce and read (`OmniDataKey`), the server calls they make and the Integration Procedure input keys those fill (`sendsToIp`), Edit Block delete paths (`deletesVia`, mechanism `deleteIPKey` or the `<EditBlock>-Delete` child); an Integration Procedure's steps in execution order (`OmniIpStep` \u2014 condition, failOnStepError, bundle, remote class / method, additionalInput, output root); a DataMapper's items (`DataMapperItem` \u2014 input / output paths, and the field a Load writes). `componentId` accepts a canonical id, a unique name, a `Type/SubType/Language` OmniScript key, an IP key or a DataMapper name; OmniScripts / IPs resolve to the ACTIVE version unless `version` pins one. `counts` per node / edge kind; `include` nodes or edges; filters `nodeKinds`, `edgeKinds`, `elementPath` (prefix); `limit` / `cursor` page. Built on demand from the vault's retrieved source \u2014 Metadata API XML, or for a managed-package (Vlocity) component its DataPack export under org-kb/source/vlocity/, read by the same code \u2014 deterministic, offline, every node carrying its sourcePath and line; `trust.limitations` says when an installed Vlocity package's components are missing for want of an export.",
+    inputSchema: OMNI_MODEL_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_dead_references',
+    description:
+      "Does every show rule, merge field and payload key in an OmniScript / Integration Procedure point at something that exists in the version that RUNS? Findings with stable codes: `DEAD_REFERENCE` (reads a key nothing produces \u2014 `defect` when nothing undeclared could supply it or the name was RENAMED between versions, else `unknown` naming the undeclared writers and any earlier version that produced it; near-miss suggestions attached), `WHITESPACE_KEY` (a key, show-rule field, payload key, merge path, custom-metadata JSON key or Apex class / method with a leading or trailing space \u2014 it never matches; the runtime effect of a padded Apex name is `unknown`), `UNRESOLVED_PLACEHOLDER` (a `%\u2026` that never closes, or a `{\u2026}` placeholder no key matches \u2014 renders as literal text), `LABEL_NOT_VALUE` (a show rule compares a Radio / Select to an option's label instead of its stored name). Scope: `omniscript` / `componentId` (active version, plus whitespace checks on the IPs it calls), `ip`, or neither for EVERY active OmniScript and IP plus JSON-valued custom metadata (narrowed by org-kb/config/omnistudio.json `appScope.namePrefixes`). Defects only by default (`verdicts` to include `unknown`); `codes` filter; `counts` cover everything; `limit` / `cursor` page. Each finding cites the component, file, element path and line.",
+    inputSchema: OMNI_DEAD_REFERENCES_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_version_diff',
+    description:
+      "What changed between two versions of one OmniScript or Integration Procedure: elements added, removed and RENAMED (same type, parent and label key, different name \u2014 with every reference in the newer version that still uses the OLD name, i.e. what the rename left pointing at nothing), plus changes to behaviour-relevant settings (show rules, masks, patterns, payload maps, conditions, failOnStepError, Edit Block delete / save wiring). Defaults: `to` = the active version, `from` = the highest version below it; `family` lists every version with its active flag. `maxChanges` caps the property-change list.",
+    inputSchema: OMNI_VERSION_DIFF_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_edit_block_audit',
+    description:
+      "Audit every Edit Block (a list of cards with Add / Edit / Delete) of an OmniScript's active version \u2014 or of every active OmniScript: which server delete is wired (the block's `deleteIPKey` + `deleteIPExtraPayload`, and / or a `<EditBlock>-Delete` child Integration Procedure Action \u2014 both recorded when both exist), whether each delete IP is in the vault, where the deleted record's id comes from (the payload expression and what produces it, or `unknown` when an Apex method decides from the whole card), and whether an edited card keeps its record. Findings: `SCREEN_ONLY_DELETE` (Delete shown, no server delete \u2014 the record stays and prefill brings the card back), `DELETE_KEY_NO_PAYLOAD` (deleteIPKey with no payload \u2014 no record id sent), `DELETE_TARGET_NOT_IN_VAULT` (`unknown`), `EDIT_INSERTS_DUPLICATE` (no save path carries the row's record Id into a write, so an edit inserts a new record and leaves the old one), `DELETE_WITHOUT_GUARD` (the delete removes records of the object the cards save, whose child records keep a blank parent \u2014 SetNull lookups \u2014 and no delete trigger or delete flow on that object cleans up or blocks it; `unknown` when delete automation exists, since its logic is not analysed). `editBlocks[]` rows are paged (`limit` / `cursor`); findings and counts are complete.",
+    inputSchema: OMNI_EDIT_BLOCK_AUDIT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_completion_audit',
+    description:
+      "Does \"Complete\" mean \"saved\"? For one Integration Procedure (`ip` / `componentId`, active version) or every active one: `COMPLETE_WITHOUT_SUCCESS` (the step that marks a section / step Complete runs on a condition independent of the preceding write steps while at least one write swallows failures \u2014 `failOnStepError: false` \u2014 so a failed save still shows Complete), `SUCCESS_FLAG_NEVER_READ` (the IP returns a success / status / error key that no element of a calling OmniScript reads \u2014 a whitespace-broken read counts as not read), `ONLY_FIRST_RESULT_CHECKED` (a reader inspects only row 0 of a write's result \u2014 `unknown`, the Apex result shape is not analysed). Completion markers come from org-kb/config/omnistudio.json `completionMarkers` (remote class / method or an IP key); without it a status-update-named Remote Action is a heuristic marker (`inferred`). `codes` filter; `limit` / `cursor` page.",
+    inputSchema: OMNI_COMPLETION_AUDIT_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_form_spec',
+    description:
+      "The form a browser test runner fills, from metadata: for an OmniScript's active version, every step and its inputs \u2014 data key, `inputKind` (text / masked / radio / checkbox / select / multiselect / date / currency / email / number / telephone / custom-lwc \u2026), mask, pattern, max / min length, required, read-only, the resolved Custom Label text, options as `{stored, label}` (the stored name is what show rules compare), repeat flag, show rule \u2014 and a `sampleValue` that satisfies them (override per key in org-kb/config/omnistudio.json `sampleValues`). Checks: `PATTERN_INVALID_IN_BROWSER` (the declared pattern does not compile as `^(?:\u2026)$` with the regex `v` flag, so browsers drop it), `PATTERN_WEAKER_THAN_MASK` (e.g. `^[0-9]+$` under a 5-digit mask accepts one digit), and with `crossScript: true` `INCONSISTENT_FIELD_RULES` (the same kind of field \u2014 zip / phone / email / ssn, by name \u2014 declared differently across the active screens). `patternsDeclared` counts declared patterns. `step` filter; steps are paged (`limit` / `cursor`).",
+    inputSchema: OMNI_FORM_SPEC_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_path_simulator',
+    description:
+      "Given answers (a data JSON or flat name \u2192 value pairs), which steps and inputs of an OmniScript's active version are shown? Show rules are evaluated three-valued \u2014 a rule over an answer you did not supply is `unknown` and named in `unknownBecause`, never guessed. Each step carries `reachWith` (answers that satisfy its own show rule when it is a simple conjunction \u2014 for path-coverage live tests) and steps whose rule contradicts itself are reported as `UNREACHABLE_STEP`. Rules inside repeating containers are evaluated against the first row supplied. DEAD_END_SECTION: for each section the app adds outside the script (org-kb/config/omnistudio.json `sectionEntries` {omniscript: Type/SubType, step, enteredWhen, section}, or `sections` [{step, enteredWhen}] on the call — `enteredWhen` is an OmniStudio formula, e.g. `%cartTotal% > 1000`), searches for answers that add the section while its entry step hides itself: the step's rule is expanded through the Set Values that run before it, and each input ranges over the literals both conditions compare it with. `deadEndChecks[]` gives `verdict` defect (with `witness` answers) / clear (exhaustive, none) / unknown (`unknownReason`), the `variables` searched, and `assumptions` (a Set Values key computed by a function the evaluator does not compute, such as AGE, is searched as a free input — the finding is then `inferred`).",
+    inputSchema: OMNI_PATH_SIMULATOR_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_changed_since',
+    description:
+      "What changed in OmniStudio since a previous refresh — semantically, so a finding whose evidence changed can be re-checked before it goes out. Compares a refresh snapshot (`snapshot` label from `sfi snapshot list`; default: the previous refresh) with the current vault. Per OmniScript / Integration Procedure / FlexCard / DataMapper (`key` = file name without the version suffix): `change` — `added`, `removed`, `active-version-changed` (with `semantic`: elements added / removed / renamed and behaviour-relevant settings changed — show rules, formulas, required, patterns — between the version active then and the one active now, computed from the current source because OmniStudio keeps old versions), `activated`, `deactivated`, `active-edited-in-place` (same version, different source — element-level detail UNKNOWN), `versions-changed`, `mapper-changed`; `before` / `now` active version ids. Content changes are judged by a hash of each source file when both snapshots carry one; older snapshots fall back to the extracted-property hash and such rows carry `unknownReason` (a product upgrade can move it). `kinds` filters; `limit` / `cursor` page. Offline.",
+    inputSchema: OMNI_CHANGED_SINCE_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_prefill_trace',
+    description:
+      "For every answer an OmniScript screen saves: does the saved value come BACK when the screen reopens? Runs the save trace on the ACTIVE version, then follows every value the screen's prefill calls return \u2014 forward from each DataMapper Extract item (or the org's generic-fetch Apex output, recognized from how later steps read `<step>:records:<Object>`), through Transforms / Set Values / filters, to the Response Action, re-rooted at the calling action's response node. Rows (input elements whose answer is SAVED): `PREFILLED` (`prefilledBy` names the call, IP and response key), `NEVER_PREFILLED` (the field returns into the same card / container under a different key \u2014 `returnedElsewhere` \u2014 or the container is prefilled with other fields but not this one), `UNKNOWN` (a prefill response the model cannot see into; `unmodeledResponses` lists them). `findings[]`: `NEVER_PREFILLED` defects with near-miss keys. PREFILLED through an unconfigured fetch is `inferred` (the Apex field set is not analysed; declare it in org-kb/config/omnistudio.json `genericFetchAdapters`). Filters `step`, `statuses`; `limit` / `cursor` page.",
+    inputSchema: OMNI_PREFILL_TRACE_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.omni_save_trace',
+    description:
+      "For every answer on an OmniScript screen: is it SAVED to the database, and if not, where exactly is it dropped? Judges the ACTIVE version (an inactive version or a `Type/SubType/Language` / unique-name selector is redirected to the active one and echoed in `appliedScope`). Each answer-holding element's data key (`Step:Block:Element`, per-row inside an Edit Block) is followed through every server call the script makes — the action's `extraPayload` / row send, the Integration Procedure's steps in execution order (a Remote Action on the managed runtime's IntegrationProcedureService is followed into the IP it runs), its DataMappers (a Transform keeps a key ONLY if an item's `inputFieldName` matches it exactly — raw, a stray space or one underscore breaks it) and generic-upsert Apex adapters — to a field write. Rows: `status` SAVED / SAVED_CONDITIONALLY (lists the undecidable conditions) / NEVER_SAVED (with `droppedAt`: the DataMapper or IP where it is dropped, the mapper input key, and `nearMiss[]`: item keys that almost match plus the field each FEEDS) / UNKNOWN (enters a custom LWC, unanalysed Apex, REST, or a component missing from the vault — with the reason) / NOT_INPUT; `savedTo[]` names `CustomField:` ids; `derivedVia` when the answer is saved through a Formula; `conditions` met on the way (show rules, `executionConditionalFormula`) evaluated three-valued; `silentFailureSteps` (steps with `failOnStepError: false`). `findings[]` carry stable codes: `NEVER_SAVED` (an INPUT routed to a save path that dropped it, or to an IP no step of which reads the key — naming the keys the IP's steps for that call DO read) and `ORPHAN_WRITE` (a mapper item writes a field from a screen key no element produces, with the near-miss element). `orphanWrites[]` / `unfedWrites` (write paths fed by no element — often prefill). Filters: `step` (a top-level element name), `statuses`; `limit`/`cursor` page the rows. Generic-upsert Apex is recognized heuristically (`inferred`) unless declared in `org-kb/config/omnistudio.json` (`genericUpsertAdapters`, plus `prefixVariants` for near-miss rules, `customLwcOutputs`, `launchParameters`); `config.status` says whether that file was loaded. Offline, deterministic, citation-bearing (`citations[]` with sourcePath / element path / line).",
+    inputSchema: OMNI_SAVE_TRACE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.find_component_usages',

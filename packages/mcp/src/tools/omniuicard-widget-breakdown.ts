@@ -76,6 +76,8 @@ import {
   familyWasExtracted,
   notExtractedFamilyDisclosure,
 } from './absence-disclosure.js';
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from './omni-disclosures.js';
+import { isDataPackSourcePath, readDataPackRoot } from './omni-source.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /** Canonical id prefix for the OmniUiCard node type. */
@@ -126,21 +128,6 @@ const PROPERTY_SET_CONFIG_PARSING_DISCLOSURE =
   'FlexCard authors can edit the raw blob in the OmniStudio ' +
   "designer; widget order in the breakdown follows the JSON's " +
   "declared order, not the visual designer's drag-drop order.";
-
-/**
- * Verbatim disclosure for the Native-vs-Vlocity-Legacy detection
- * axis (PLAN-v3.2 §4 honesty axis 1; Q180 anchor). Surfaced ALWAYS
- * on every v3.2 tool response. v3.2's extractors recognize the
- * Industries Native XML shape only; mid-migration orgs (Native +
- * Vlocity-managed-package side-by-side) may show partial coverage.
- */
-const NATIVE_VS_VLOCITY_DISCLOSURE =
-  'v3.2 recognizes Industries Native XML shapes (file extensions ' +
-  '`.os-meta.xml`, `.oip-meta.xml`, `.rpt-meta.xml`, ' +
-  '`.ouc-meta.xml`, `.decisionTable-meta.xml`). Legacy ' +
-  'Vlocity-managed-package components (namespace `vlocity_cmt__`) ' +
-  'are NOT extracted by v3.2. Mid-migration orgs may show partial ' +
-  'coverage.';
 
 /**
  * Zod schema for the `sfi.omniuicard_widget_breakdown` tool input.
@@ -468,7 +455,7 @@ const sortDispatchedActions = (
 };
 
 /**
- * Why the widget tree could not be walked. Six distinct conditions used to
+ * Why the widget tree could not be walked. These distinct conditions used to
  * collapse into the same `states: []`, which is exactly the answer a
  * genuinely empty card gives — so a host asking "what widgets are on this
  * FlexCard?" could not tell "we looked and it has none" from "we never
@@ -480,7 +467,8 @@ type WidgetTreeFailure =
   | 'parser-threw'
   | 'no-root-element'
   | 'property-set-config-unparseable'
-  | 'states-not-an-array';
+  | 'states-not-an-array'
+  | 'datapack-unreadable';
 
 /** Outcome of {@link buildStatesFromSourceXml}: a real walk, or a named blind spot. */
 type WidgetTreeOutcome =
@@ -504,6 +492,8 @@ const WIDGET_TREE_FAILURE_CLAUSE: Readonly<Record<WidgetTreeFailure, string>> = 
     'the `propertySetConfig` blob is absent, empty, or not parseable JSON',
   'states-not-an-array':
     'the `propertySetConfig` blob carries no `states` array',
+  'datapack-unreadable':
+    "the card's managed-package DataPack export could not be read, or is not a Card DataPack",
 };
 
 /**
@@ -523,6 +513,12 @@ const WIDGET_TREE_FAILURE_CLAUSE: Readonly<Record<WidgetTreeFailure, string>> = 
 const buildStatesFromSourceXml = async (
   sourcePath: string,
 ): Promise<WidgetTreeOutcome> => {
+  if (isDataPackSourcePath(sourcePath)) {
+    // A managed-package (Vlocity) card: its DataPack, converted to the same
+    // `<OmniUiCard>` root the XML parses to, walks identically.
+    const dp = await readDataPackRoot(sourcePath, 'card');
+    return dp.ok ? statesFromRoot(dp.value) : { kind: 'blind', cause: 'datapack-unreadable' };
+  }
   let xmlText: string;
   try {
     xmlText = await readFile(sourcePath, 'utf-8');
@@ -551,7 +547,11 @@ const buildStatesFromSourceXml = async (
   if (typeof root !== 'object' || root === null) {
     return { kind: 'blind', cause: 'no-root-element' };
   }
-  const rootObj = root as Record<string, unknown>;
+  return statesFromRoot(root as Record<string, unknown>);
+};
+
+/** Parse the card root's propertySetConfig JSON and walk its states. */
+const statesFromRoot = (rootObj: Record<string, unknown>): WidgetTreeOutcome => {
   const propertySetConfig = parseJsonBlob(rootObj['propertySetConfig']);
   if (propertySetConfig === null) {
     return { kind: 'blind', cause: 'property-set-config-unparseable' };
@@ -674,7 +674,7 @@ const widgetTreeDisclosures = (
  *
  * @example
  *   const r = await omniuicardWidgetBreakdownHandler(ctx, {
- *     omniUiCardId: 'OmniUiCard:AccountLinkingIntro_Developer_1',
+ *     omniUiCardId: 'OmniUiCard:AcmeEnrollmentIntro_Developer_1',
  *   });
  *   if (r.ok) console.log(r.value.data.states.length);
  */

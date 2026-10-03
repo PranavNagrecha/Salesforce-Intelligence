@@ -48,6 +48,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { NATIVE_VS_VLOCITY_DISCLOSURE } from '../../src/tools/omni-disclosures.js';
 import { omniuicardWidgetBreakdownHandler } from '../../src/tools/omniuicard-widget-breakdown.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
@@ -517,11 +518,7 @@ describe('omniuicardWidgetBreakdownHandler', () => {
     expect(data.boundaries[0]).toContain(
       "widget order in the breakdown follows the JSON's declared order, not the visual designer's drag-drop order.",
     );
-    expect(data.boundaries[1]).toContain(
-      'v3.2 recognizes Industries Native XML shapes',
-    );
-    expect(data.boundaries[1]).toContain('vlocity_cmt__');
-    expect(data.boundaries[1]).toContain('Mid-migration orgs may show partial coverage.');
+    expect(data.boundaries[1]).toBe(NATIVE_VS_VLOCITY_DISCLOSURE);
   });
 
   it('echoes the vault state for stale-detection round-trips', async () => {

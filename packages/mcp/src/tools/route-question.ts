@@ -79,7 +79,9 @@ import {
 } from '../intent-router.js';
 import { detectRefusalShape, type RefusalKind, type RefusalShape } from '../refusal-gates.js';
 import {
+  CONF_MIN_COVERAGE,
   getPlaneByTool,
+  queryCoverage,
   resolveCandidatePlane,
   semanticCandidates,
   type ToolCandidate,
@@ -3229,7 +3231,14 @@ export const routeQuestionHandler = async (
       // FUNNEL_MIN_EVIDENCE_BREADTH. Without this, "empty is not none" leaks —
       // a question the product genuinely cannot place gets dressed up as an
       // advisory route instead of an honest unrouted.
-      funnelEvidenceBreadth(usable) >= FUNNEL_MIN_EVIDENCE_BREADTH
+      funnelEvidenceBreadth(usable) >= FUNNEL_MIN_EVIDENCE_BREADTH &&
+      // Third axis — COVERAGE. Breadth is fooled by one word that is common
+      // across the tool descriptions: "xyzzy quantum flibbertigibbet metadata"
+      // spreads support over every tool that mentions metadata, yet the corpus
+      // knows 1 of its 4 words. When most of what the user typed is unknown,
+      // the shortlist is a guess from leftovers — stay honestly unrouted. Same
+      // floor the funnel uses to call a shortlist's confidence `low`.
+      queryCoverage(input.question) >= CONF_MIN_COVERAGE
     ) {
       const tools = usable.slice(0, 3).map((candidate) => candidate.tool);
       // Bind the stage-3 resolver output only when it is EXACT and the key is

@@ -10,6 +10,8 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { extractProcessDataPack, isDataPackSource } from './datapack-extract.js';
+import { type ApexRemoteCall, apexRemoteTarget, buildApexRemoteEdges, literalObjectArgs } from './omnistudio/remote.js';
 import { deriveComponentApiName } from './path-utils.js';
 
 /**
@@ -23,12 +25,22 @@ import { deriveComponentApiName } from './path-utils.js';
  *     summary of the body's `<omniProcessElements>` (steps, actions,
  *     widgets) — see `properties` keys per `OmniScript.md`.
  *   - Zero-to-many `dispatchesOmniAction` edges, one per child element
- *     whose `type` is `Integration Procedure Action` (target =
- *     `OmniIntegrationProcedure:{integrationProcedureKey}`), `DataRaptor
- *     Extract Action` / `DataRaptor Transform Action` (target =
- *     `OmniDataTransform:{bundle}`), or `Navigate Action` with a
+ *     that names an `integrationProcedureKey` (target =
+ *     `OmniIntegrationProcedure:{integrationProcedureKey}`) or a DataMapper
+ *     `bundle` (any type: DataRaptor Extract / Transform / Post / Turbo
+ *     Action; target = `OmniDataTransform:{bundle}`), or a `Navigate Action` with a
  *     `propertySetConfig.targetType === 'OmniScript'` (target =
- *     `OmniScript:{omniType.Name}` / `targetId`).
+ *     `OmniScript:{omniType.Name}` / `targetId`). An Edit Block's
+ *     `deleteIPKey` / `saveIPKey` properties (target =
+ *     `OmniIntegrationProcedure:{key}`, `properties.via` names which) and an
+ *     embedded `OmniScript` element (target =
+ *     `OmniScript:{Type}/{Sub Type}/{Language}`) emit the same edge type.
+ *     Every target is the caller's KEY; the graph import resolves it onto
+ *     the versioned node that runs (`@sf-intelligence/graph` omni-resolve).
+ *   - `callsApex` edges, one per Apex class named by an element's
+ *     `remoteClass` (Remote Action, Calculation Action, File upload, …),
+ *     with every routed `remoteMethod` in `methods[]` and every call site in
+ *     `callSites[]` (`omnistudio/remote.ts`).
  *
  * The XML body's `<omniProcessElements>` carry a per-child
  * `<propertySetConfig>` HTML-entity-escaped JSON blob. fast-xml-parser
@@ -54,13 +66,40 @@ const OMNISCRIPT_FILE_SUFFIX = '.os-meta.xml';
 const ROOT_ELEMENT = 'OmniScript';
 const EDGE_SOURCE = 'omniscript-extractor';
 
-/** Element `type` discriminants we emit `dispatchesOmniAction` edges for. */
+/**
+ * Element `type` discriminants that imply a dispatch (a missing target on
+ * these is warned). Targets are read universally — ANY element naming an
+ * `integrationProcedureKey`, a DataMapper `bundle` or a `remoteClass` emits
+ * its edge, whatever its type (a Navigate Action invoking an IP, a
+ * DataRaptor Post / Turbo Action writing or reading directly from the
+ * screen, a File element uploading through Apex).
+ */
 const EDGE_EMITTING_TYPES = new Set<string>([
   'Integration Procedure Action',
   'DataRaptor Extract Action',
   'DataRaptor Transform Action',
+  'DataRaptor Post Action',
+  'DataRaptor Turbo Action',
   'Navigate Action',
 ]);
+
+/** Element types that must name a DataMapper `bundle` (a missing one is warned). */
+const DATAMAPPER_ACTION_TYPES = new Set<string>([
+  'DataRaptor Extract Action',
+  'DataRaptor Transform Action',
+  'DataRaptor Post Action',
+  'DataRaptor Turbo Action',
+]);
+
+/**
+ * Edit Block properties that name an Integration Procedure the block calls
+ * server-side: the per-card delete and the per-card save. They live in the
+ * block's own `propertySetConfig`, not on a child action element.
+ */
+const EDIT_BLOCK_IP_KEYS = ['deleteIPKey', 'saveIPKey'] as const;
+
+/** Element `type` of an OmniScript embedded inside another OmniScript. */
+const EMBEDDED_OMNISCRIPT_TYPE = 'OmniScript';
 
 /**
  * Unwrap fast-xml-parser's array-or-scalar shape for single-occurrence
@@ -213,9 +252,12 @@ const collectElements = (
  *   - Integration Procedure Action → target =
  *     `OmniIntegrationProcedure:{integrationProcedureKey}`. The key
  *     lives inside the propertySetConfig JSON. Confidence: `parsed`.
- *   - DataRaptor Extract / Transform Action → target =
- *     `OmniDataTransform:{bundle}`. The bundle name lives inside the
- *     propertySetConfig JSON. Confidence: `parsed`.
+ *   - Any element naming a DataMapper `bundle` (DataRaptor Extract /
+ *     Transform / Post / Turbo Action) → target = `OmniDataTransform:{bundle}`.
+ *     The bundle name lives inside the propertySetConfig JSON. Confidence:
+ *     `parsed`.
+ *   - Any element naming a `remoteClass` → one aggregated `callsApex` edge
+ *     per Apex class (`omnistudio/remote.ts`).
  *   - Navigate Action with `targetType === 'OmniScript'` → target =
  *     `OmniScript:{omniType.Name | targetId}`. Confidence: `parsed`.
  *     (Most navigate actions target Web Pages and emit no edge.)
@@ -230,8 +272,82 @@ const buildDispatchEdges = (
   warnings: string[],
 ): Edge[] => {
   const edges: Edge[] = [];
+  const apexCalls: ApexRemoteCall[] = [];
   for (const el of elements) {
     const cfg = el.propertySetConfig;
+    // Any element naming a `remoteClass` runs that Apex class (a Remote
+    // Action, a Calculation Action, a File upload). Aggregated into one
+    // `callsApex` edge per class after the loop.
+    if (cfg !== null) {
+      const apexTarget = apexRemoteTarget(cfg['remoteClass']);
+      if (apexTarget !== null) {
+        apexCalls.push({
+          target: apexTarget,
+          remoteMethod: typeof cfg['remoteMethod'] === 'string' ? cfg['remoteMethod'] : null,
+          site: el.name ?? '',
+          siteType: el.type ?? '',
+          objectArgs: literalObjectArgs(cfg),
+        });
+      }
+    }
+    // An Edit Block calls IPs through PROPERTIES of the block itself, not
+    // through a child element: `deleteIPKey` (the server delete behind the
+    // card's Delete button) and `saveIPKey` (the per-card save). Without
+    // these edges a script whose cards delete through `deleteIPKey` showed
+    // no dependency on that IP at all.
+    if (el.type === 'Edit Block' && cfg !== null) {
+      for (const via of EDIT_BLOCK_IP_KEYS) {
+        const raw = cfg[via];
+        if (typeof raw !== 'string' || raw.trim().length === 0) continue;
+        const key = raw.trim();
+        edges.push({
+          fromId: omniScriptId,
+          toId: `OmniIntegrationProcedure:${key}`,
+          edgeType: 'dispatchesOmniAction',
+          confidence: 'parsed',
+          source: EDGE_SOURCE,
+          properties: {
+            stepName: el.name,
+            stepType: el.type,
+            level: el.level,
+            sequenceNumber: el.sequenceNumber,
+            targetRawName: key,
+            via,
+          },
+        });
+      }
+    }
+    // An embedded OmniScript element runs another OmniScript inline; it
+    // names it by Type / Sub Type / Language (the import resolves that key
+    // to the active version).
+    if (el.type === EMBEDDED_OMNISCRIPT_TYPE && cfg !== null) {
+      const t = typeof cfg['Type'] === 'string' ? cfg['Type'].trim() : '';
+      const s = typeof cfg['Sub Type'] === 'string' ? cfg['Sub Type'].trim() : '';
+      const l = typeof cfg['Language'] === 'string' ? cfg['Language'].trim() : '';
+      if (t.length > 0 && s.length > 0 && l.length > 0) {
+        const target = `${t}/${s}/${l}`;
+        edges.push({
+          fromId: omniScriptId,
+          toId: `OmniScript:${target}`,
+          edgeType: 'dispatchesOmniAction',
+          confidence: 'parsed',
+          source: EDGE_SOURCE,
+          properties: {
+            stepName: el.name,
+            stepType: el.type,
+            level: el.level,
+            sequenceNumber: el.sequenceNumber,
+            targetRawName: target,
+            via: 'embeddedOmniScript',
+          },
+        });
+      } else {
+        warnings.push(
+          `embedded OmniScript "${el.name ?? '?'}" does not name Type / Sub Type / Language`,
+        );
+      }
+      continue;
+    }
     // An `integrationProcedureKey` is an unambiguous IP invocation. It appears
     // on `Integration Procedure Action` steps AND on other element types — e.g.
     // a Step or a "Next" Navigate Action that invokes an IP (the key lives in
@@ -239,11 +355,14 @@ const buildDispatchEdges = (
     // targetType, so such IP-carrying navigates were silently dropped). Emit
     // the dispatch edge whenever the key is present, regardless of the
     // element's display type, so the OmniScript→IP dependency is never hidden.
-    // DataRaptor / Navigate-to-OmniScript dispatches stay keyed on their types.
+    // A DataMapper `bundle` is read the same way (any element type);
+    // Navigate-to-OmniScript dispatches stay keyed on their type.
     const ipKeyRaw = cfg === null ? undefined : cfg['integrationProcedureKey'];
     const ipKey =
       typeof ipKeyRaw === 'string' && ipKeyRaw.length > 0 ? ipKeyRaw : null;
-    if (el.type === null || (!EDGE_EMITTING_TYPES.has(el.type) && ipKey === null)) {
+    const bundleRaw = cfg === null ? undefined : cfg['bundle'];
+    const hasBundle = typeof bundleRaw === 'string' && bundleRaw.length > 0;
+    if (el.type === null || (!EDGE_EMITTING_TYPES.has(el.type) && ipKey === null && !hasBundle)) {
       continue;
     }
     if (cfg === null) {
@@ -266,19 +385,18 @@ const buildDispatchEdges = (
           targetRawName: ipKey,
         },
       });
-      continue;
+      // An element can name both an IP and a DataMapper (rare); keep going
+      // so the bundle edge below is not lost.
+      if (!hasBundle) continue;
     }
-    if (el.type === 'Integration Procedure Action') {
+    if (el.type === 'Integration Procedure Action' && ipKey === null) {
       // Declared an IP Action but carried no integrationProcedureKey.
       warnings.push(
         `Integration Procedure Action "${el.name ?? '?'}" has no integrationProcedureKey`,
       );
       continue;
     }
-    if (
-      el.type === 'DataRaptor Extract Action' ||
-      el.type === 'DataRaptor Transform Action'
-    ) {
+    if (hasBundle || DATAMAPPER_ACTION_TYPES.has(el.type)) {
       const bundle = cfg['bundle'];
       if (typeof bundle === 'string' && bundle.length > 0) {
         edges.push({
@@ -343,7 +461,7 @@ const buildDispatchEdges = (
       }
     }
   }
-  return edges;
+  return [...edges, ...buildApexRemoteEdges(omniScriptId, apexCalls, EDGE_SOURCE)];
 };
 
 /**
@@ -437,16 +555,18 @@ const validateRoot = (
  *
  * @example
  *   const result = await extractOmniScript(
- *     'force-app/main/default/omniScripts/AccountLinking_Existing_English_1.os-meta.xml',
+ *     'force-app/main/default/omniScripts/Acme_Enrollment_English_1.os-meta.xml',
  *   );
  *   if (result.ok) {
  *     console.log(result.value.nodes[0].id);
- *     // => 'OmniScript:AccountLinking_Existing_English_1'
+ *     // => 'OmniScript:Acme_Enrollment_English_1'
  *   }
  */
 export const extractOmniScript = async (
   path: string,
 ): Promise<Result<ExtractionResult, ExtractorError>> => {
+  // A managed-package (Vlocity) export: a DataPack folder or its main file.
+  if (await isDataPackSource(path)) return extractProcessDataPack(path, 'OmniScript', extractOmniScriptRoot);
   const xmlResult = await readAndValidateXml(path);
   if (!xmlResult.ok) return xmlResult;
 
@@ -478,8 +598,19 @@ export const extractOmniScript = async (
 
   const rootResult = validateRoot(parsed, path);
   if (!rootResult.ok) return rootResult;
-  const rootObj = rootResult.value;
+  return extractOmniScriptRoot(rootResult.value, path, deriveComponentApiName(path, OMNISCRIPT_FILE_SUFFIX));
+};
 
+/**
+ * The extraction over the parsed `<OmniScript>` root — the seam a converted
+ * source (a managed-package DataPack) enters through. `apiName` is the
+ * component's file-stem name (`Type_SubType_Language_Version`).
+ */
+export const extractOmniScriptRoot = (
+  rootObj: Record<string, unknown>,
+  path: string,
+  apiName: string,
+): Result<ExtractionResult, ExtractorError> => {
   // The OmniScript XML root is shared with OmniIntegrationProcedure;
   // an IP file declares `<isIntegrationProcedure>true</...>` and
   // `<omniProcessType>Integration Procedure</...>`. Skip those — the
@@ -495,7 +626,6 @@ export const extractOmniScript = async (
     });
   }
 
-  const apiName = deriveComponentApiName(path, OMNISCRIPT_FILE_SUFFIX);
   // The canonical id and api-name come from the filename per the v3.2
   // convention (the XML's `<uniqueName>` should match — surfaced as a
   // property for the rare case where it doesn't, so downstream tools

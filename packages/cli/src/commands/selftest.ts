@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import { buildContext, dispatchTool, shutdown, type Context } from '@sf-intelligence/mcp';
 import { Command } from 'commander';
 
+import { projectDirForAction, VAULT_OPTION_HELP } from '../vault-option.js';
+
 /** Default vault root, relative to CWD. Mirrors init/status/doctor/quickstart. */
 const DEFAULT_VAULT_ROOT = 'org-kb';
 
@@ -139,8 +141,11 @@ export const registerSelftestCommand = (program: Command): void => {
   program
     .command('selftest')
     .description('Run real queries against the built vault and report which question types it answers')
-    .action(async (): Promise<void> => {
-      const report = await runSelftest({ cwd: process.cwd() });
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (flags: { vault?: string }): Promise<void> => {
+      const cwd = projectDirForAction(flags);
+      if (cwd === null) return;
+      const report = await runSelftest({ cwd });
       process.stdout.write(formatSelftest(report));
       if (selftestExitCode(report) !== 0) process.exit(1);
     });

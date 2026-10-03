@@ -58,6 +58,7 @@ import { XMLParser } from 'fast-xml-parser';
 
 import { readCliPackageVersion } from '../package-version.js';
 import { BUNDLE_PARENT_DIRS, componentTypeFromSourcePath } from '../refresh-pipeline.js';
+import { VAULT_OPTION_HELP, vaultForAction } from '../vault-option.js';
 
 /** JSON indentation, 2 spaces, matches the rest of the CLI. */
 const JSON_INDENT = 2;
@@ -835,7 +836,7 @@ export const registerReviewChangeCommand = (program: Command): void => {
     .option('--manifest <package.xml>', 'Review the components named in a package.xml (all reviewed as modified)')
     .option('--diff <base>', 'Review the components changed since <base> via `git diff --name-status`')
     .option('--project <dir>', 'sfdx project working tree for --diff (default: current directory)')
-    .option('--vault <path>', 'org-kb vault to resolve against (default: ./org-kb)')
+    .option('--vault <path>', VAULT_OPTION_HELP)
     .option(
       '--against <alias|path>',
       "Review against a DIFFERENT vault's graph (a registered alias or a path to an org-kb) — impact/verdict is vs THAT vault's last refresh (e.g. PROD), not --vault. Discloses the target, absent-in-target ids, and a product-version caveat.",
@@ -847,6 +848,8 @@ export const registerReviewChangeCommand = (program: Command): void => {
       'Emit PR-native output instead of the human report: sarif (SARIF 2.1.0, upload to GitHub code scanning) or markdown-comment (compact summary for a PR comment). Mutually exclusive with --json.',
     )
     .action(async (flags: ReviewChangeCliFlags): Promise<void> => {
+      const reviewVault = vaultForAction(flags);
+      if (reviewVault === null) process.exit(2);
       if (flags.manifest === undefined && flags.diff === undefined) {
         process.stderr.write(
           'sfi review-change: pass --manifest <package.xml> OR --diff <base> (with --project <dir>).\n',
@@ -906,7 +909,7 @@ export const registerReviewChangeCommand = (program: Command): void => {
 
       const limit = flags.limit !== undefined ? Number.parseInt(flags.limit, 10) : undefined;
       const result = await runReviewChange({
-        vaultRoot: resolve(process.cwd(), flags.vault ?? 'org-kb'),
+        vaultRoot: reviewVault.vaultRoot,
         components: assembled.value.components,
         ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
         ...(flags.against !== undefined ? { againstVault: flags.against } : {}),

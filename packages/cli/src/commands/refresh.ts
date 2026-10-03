@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -115,6 +116,7 @@ import {
   reconcileSourceDeletions,
   syncAuthoritativeRetrieveIntoSource,
 } from '../source-reconcile.js';
+import { projectDirForAction, VAULT_OPTION_HELP } from '../vault-option.js';
 
 import { ORG_ALIAS_RE, validateOrgAlias } from './org-alias.js';
 import { assessRefreshSize } from './refresh-preflight.js';
@@ -415,11 +417,12 @@ export interface ToolingApiRefreshSummary {
   readonly dependencyNewEdgeCount?: number;
   /**
    * Outcome of the sibling `PermissionDependency` capture — `'ok'`, the
-   * Tooling API error kind, `'write-failed'`, or `'threw'`. Absent when the
-   * pass did not run (no vault root handed in). The pass is FAIL-SOFT: a
-   * failure is reported here and leaves the artifact absent; it never flips
-   * the refresh status, because the offline vault is still coherent
-   * without it.
+   * Tooling API error kind (including a sign-in failure that stopped the
+   * pass before the capture), `'client-init-failed'`, `'write-failed'`,
+   * `'threw'`, or `'not-run'`. Absent only when no vault root was handed in.
+   * The pass is FAIL-SOFT: a failure is reported here and leaves the
+   * artifact absent; it never aborts the refresh, but a refresh that asked
+   * for the Tooling pass ends `partial` when this is not `'ok'`.
    */
   readonly permissionDependencyOutcome?: string;
   /** Distinct permission-dependency edges persisted. Absent unless the pass ran. */
@@ -684,7 +687,7 @@ const saveExtractCache = async (
  * pending files in INPUT order so vault output stays byte-stable. Graph
  * import + renderVault remain single-threaded callers of this function.
  */
-const applyApexAstEdges = async (
+export const applyApexAstEdges = async (
   results: readonly ExtractionResult[],
   progress: (message: string) => void,
 ): Promise<{
@@ -2369,6 +2372,13 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // pull landed everything; the GRAPH still holds a subset). The report-pull
   // failure pass runs last of the report-related ones so an errored pull always
   // wins over both.
+  // The capped-retrieve evidence for Report / Dashboard: this run's, or — on a
+  // run that pulled no reports (`--no-pull`, a scoped refresh, a staged tier) —
+  // the previous manifest's, which still describes the report files on disk.
+  // It is both read (coverage below) AND carried into the new manifest:
+  // dropping it made the NEXT offline refresh, or the next staged tier, regress
+  // Report / Dashboard to `pending` — the same source, two different answers.
+  const reportsCapEvidence = args.reportsCapStats ?? previousManifest?.reportsCap;
   const coverageComputedAt = new Date().toISOString();
   // AUDIT-F5: bump per-family epoch/retrievedAt only when a real pull ran
   // (`confirmedTypes !== null`); scoped / --no-pull / pending rows preserve
@@ -2448,7 +2458,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
       : {}),
     ...(opts.stagedMarker !== undefined ? { staged: opts.stagedMarker } : {}),
     ...(args.apexAstStats !== undefined ? { apexAst: args.apexAstStats } : {}),
-    ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+    ...(reportsCapEvidence !== undefined ? { reportsCap: reportsCapEvidence } : {}),
     ...(args.reportNodeStats !== undefined ? { reportNodeCap: args.reportNodeStats } : {}),
     ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     ...(profileGrantDisclosure !== null && profileGrantStats !== null
@@ -2692,6 +2702,23 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     );
   }
 
+  // `--with-tooling-api` was asked for, so the permission-dependency capture
+  // is an attempted coverage axis. One that did not land (no sign-in, query
+  // refused, write failed — or no Tooling pass ran on this path at all) leaves
+  // effective-permission answers understated; that is `partial`, for the
+  // same reason as a failed report pull below.
+  if (opts.withToolingApi === true && toolingApiSummary === undefined) {
+    toolingApiSummary = {
+      enrichedCount: 0,
+      errorCount: 0,
+      outcome: 'not-run',
+      fatalMessage: 'the Tooling API pass did not run on this refresh path',
+      permissionDependencyOutcome: 'not-run',
+    };
+  }
+  const permissionCaptureMissed =
+    opts.withToolingApi === true && toolingApiSummary?.permissionDependencyOutcome !== 'ok';
+
   return {
     // A profile-grant integrity disclosure forces `partial`: the vault built,
     // but its permission graph is untrustworthy — never report clean success.
@@ -2720,7 +2747,8 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
       args.retrieveFailures.length > 0 ||
       profileGrantDisclosure !== null ||
       (walked.duplicateSourcePaths?.conflicting ?? 0) > 0 ||
-      args.reportPull !== undefined
+      args.reportPull !== undefined ||
+      permissionCaptureMissed
         ? 'partial'
         : 'success',
     counts,
@@ -3292,10 +3320,12 @@ const runGraphEnrichmentPasses = async (
  *
  * FAIL-SOFT by contract. Every failure path — auth, query, write, or an
  * unexpected throw — returns an outcome string and leaves the artifact
- * ABSENT. It never flips the refresh status and never aborts the
- * enrichment pass, because the offline vault is coherent without it and
- * the MCP side discloses the absence rather than assuming "no
- * dependencies".
+ * ABSENT. It never aborts the refresh or the enrichment pass, because the
+ * offline vault is coherent without it and the MCP side discloses the
+ * absence rather than assuming "no dependencies". It is not SILENT: the
+ * summary prints a WARNING naming the outcome, and a refresh that asked for
+ * `--with-tooling-api` ends `partial` (non-zero exit) when the capture did
+ * not land.
  *
  * NOTE ON STALENESS: a failed capture leaves any PREVIOUS artifact in
  * place rather than deleting it. That is deliberate — a stale dependency
@@ -3375,6 +3405,12 @@ export const runToolingApiEnrichment = async (
   opts: RunRefreshOptions,
   vaultRoot?: string,
 ): Promise<ToolingApiRefreshSummary> => {
+  // No client means no capture either. Say so on the capture's own axis: a
+  // summary carrying only the auth error read as "the Tooling pass failed"
+  // and left the missing `permission-dependencies.json` to be discovered
+  // later, by an effective-permission answer.
+  const notCaptured = (outcome: string): Partial<ToolingApiRefreshSummary> =>
+    vaultRoot === undefined ? {} : { permissionDependencyOutcome: outcome };
   let client: ToolingApiClient;
   if (opts.toolingApiClient !== undefined) {
     client = opts.toolingApiClient;
@@ -3386,6 +3422,7 @@ export const runToolingApiEnrichment = async (
         errorCount: 0,
         outcome: authResult.error.kind,
         fatalMessage: authResult.error.message,
+        ...notCaptured(authResult.error.kind),
       };
     }
     try {
@@ -3397,6 +3434,7 @@ export const runToolingApiEnrichment = async (
         errorCount: 0,
         outcome: 'client-init-failed',
         fatalMessage: msg,
+        ...notCaptured('client-init-failed'),
       };
     }
   }
@@ -3410,9 +3448,19 @@ export const runToolingApiEnrichment = async (
   return { ...summary, ...permissionDependency };
 };
 
+/** Canonical path for comparison: symlinks resolved when the path exists. */
+const realOrResolved = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+};
+
 /**
  * Load `org-kb/meta/config.json` and resolve the vault root. Returns a
- * human-readable message string on error for `fatalError`.
+ * human-readable message string on error for `fatalError` — including when the
+ * config names a different vault root than the folder it was read from.
  */
 export const loadVaultConfig = async (cwd: string): Promise<Result<VaultConfig, string>> => {
   const configPath = resolve(cwd, 'org-kb', 'meta', 'config.json');
@@ -3442,9 +3490,22 @@ export const loadVaultConfig = async (cwd: string): Promise<Result<VaultConfig, 
   if (!ORG_ALIAS_RE.test(parsed.targetOrg)) {
     return err(`Vault config 'targetOrg' is not a valid org alias: ${configPath}`);
   }
+  const here = resolve(cwd, 'org-kb');
   const vaultRoot = typeof parsed.vaultRoot === 'string' && parsed.vaultRoot.length > 0
     ? parsed.vaultRoot
-    : resolve(cwd, 'org-kb');
+    : here;
+  // `sfi init` writes the folder the config lives in, so a config naming a
+  // DIFFERENT folder came with a copied or moved vault. Every caller of this
+  // function writes to `vaultRoot` (refresh, snapshots, annotations, vault
+  // git), so honouring it would change the other vault while the user works
+  // on this one — refuse, and say exactly how to fix it.
+  if (realOrResolved(vaultRoot) !== realOrResolved(here)) {
+    return err(
+      `Vault config at ${configPath} names vaultRoot '${vaultRoot}', but this vault is '${here}'. ` +
+        `It was copied or moved, and running here would write to the other vault. ` +
+        `Set "vaultRoot" in ${configPath} to "${here}" (or delete the key), then re-run.`,
+    );
+  }
   const snapshotOnRefresh = parsed.snapshotOnRefresh !== false;
   return ok({ targetOrg: parsed.targetOrg, vaultRoot, snapshotOnRefresh });
 };
@@ -5333,6 +5394,8 @@ const SKIPPED_TOP_N = 5;
 /** Retrieved metadata families with no extractor yet — not "unknown" surprises. */
 const KNOWN_UNMODELED_SKIP_DIRS: Readonly<Record<string, string>> = {
   sharingReasons: 'SharingReason (not modeled — skipped files are not org absence)',
+  vlocity:
+    'Vlocity DataPacks of types not modeled (OmniScript, IntegrationProcedure, DataRaptor and VlocityCard DataPacks are) — skipped files are not org absence',
 };
 
 /**
@@ -5378,9 +5441,6 @@ const formatSkippedWarning = (
  * live-data axis stays visually separate from the offline output.
  */
 const formatToolingApiSummary = (summary: ToolingApiRefreshSummary): string => {
-  if (summary.fatalMessage !== undefined) {
-    return `Tooling API: ${summary.outcome} — ${summary.fatalMessage}`;
-  }
   const depBits: string[] = [];
   if (summary.dependencyConfirmedCount !== undefined) {
     depBits.push(`${summary.dependencyConfirmedCount} deps confirmed`);
@@ -5390,11 +5450,15 @@ const formatToolingApiSummary = (summary: ToolingApiRefreshSummary): string => {
   }
   const depSuffix = depBits.length > 0 ? `; ${depBits.join(', ')}` : '';
   const lines = [
-    `Tooling API: enriched ${summary.enrichedCount} components, ${summary.errorCount} errors${depSuffix}`,
+    summary.fatalMessage !== undefined
+      ? `Tooling API: ${summary.outcome} — ${summary.fatalMessage}`
+      : `Tooling API: enriched ${summary.enrichedCount} components, ${summary.errorCount} errors${depSuffix}`,
   ];
   // The permission-dependency capture is FAIL-SOFT, so a failure is invisible
   // unless the summary says so. A silent absence is exactly the state that
-  // makes effective-access answers understate — name it here.
+  // makes effective-access answers understate — name it here, on every path:
+  // an early return on `fatalMessage` used to drop this line, so a capture
+  // that never ran left no trace in the summary at all.
   if (summary.permissionDependencyOutcome !== undefined) {
     if (summary.permissionDependencyOutcome === 'ok') {
       const truncNote =
@@ -5406,7 +5470,7 @@ const formatToolingApiSummary = (summary: ToolingApiRefreshSummary): string => {
       );
     } else {
       lines.push(
-        `Permission dependencies: NOT captured (${summary.permissionDependencyOutcome}) — effective-permission answers will disclose that grants are DECLARED only and may be UNDERSTATED.`,
+        `WARNING — Permission dependencies: NOT captured (${summary.permissionDependencyOutcome}); meta/permission-dependencies.json was not written, so effective-permission answers show DECLARED grants only and may be UNDERSTATED. The refresh is marked partial; fix the cause above and re-run \`sfi refresh --with-tooling-api\`.`,
       );
     }
   }
@@ -5752,11 +5816,21 @@ export const registerRefreshCommand = (program: Command): void => {
       '--drain-demand-queue',
       'Drain the phantom demand queue (`meta/demand-queue.jsonl`): retrieve every QUEUED automation-critical component that MCP consumers hit as phantoms (recorded by sfi.get_component), through the same gate as --components — grant-only / managed / standard / blindspot ids are refused with the reason. Dedup and idempotency are structural: N hits on one id drain once, and a re-drain of an already-drained id is a no-op. Drained entries are marked in the queue with their outcome.',
     )
-    .action(async (flags: RefreshCliFlags): Promise<void> => {
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (flags: RefreshCliFlags & { vault?: string }): Promise<void> => {
+      const cwd = projectDirForAction(flags);
+      if (cwd === null) process.exit(1);
+      // A targeted pull runs no Tooling pass. Say so rather than accept the
+      // flag and capture nothing.
+      if (flags.withToolingApi === true && (flags.drainDemandQueue === true || flags.components !== undefined)) {
+        process.stdout.write(
+          'WARNING — --with-tooling-api is ignored by a targeted pull (--components / --drain-demand-queue): no Tooling enrichment and no permission-dependency capture run. Use a full `sfi refresh --with-tooling-api` for those.\n',
+        );
+      }
       // P13-STAGED-demand-queue: drain queued phantom hits via the
       // demand-retrieve gate.
       if (flags.drainDemandQueue === true) {
-        const configResult = await loadVaultConfig(process.cwd());
+        const configResult = await loadVaultConfig(cwd);
         if (!configResult.ok) {
           process.stderr.write(`${configResult.error}\n`);
           process.exit(1);
@@ -5771,7 +5845,7 @@ export const registerRefreshCommand = (program: Command): void => {
           `Demand queue: draining ${ids.length} queued automation-critical id(s)...\n`,
         );
         const dr = await runDemandRetrieve({
-          cwd: process.cwd(),
+          cwd: cwd,
           components: ids,
           ...(flags.targetOrg !== undefined ? { targetOrg: flags.targetOrg } : {}),
           onProgress: (message) => process.stderr.write(`${message}\n`),
@@ -5786,10 +5860,11 @@ export const registerRefreshCommand = (program: Command): void => {
       if (flags.staged === true) {
         const { runStagedRefresh } = await import('./staged-refresh.js');
         const staged = await runStagedRefresh({
-          cwd: process.cwd(),
+          cwd: cwd,
           noPull: flags.pull === false,
           ...(flags.targetOrg !== undefined ? { targetOrg: flags.targetOrg } : {}),
           ...(flags.withReports === true ? { withReports: true } : {}),
+          ...(flags.withToolingApi === true ? { withToolingApi: true } : {}),
           onProgress: (message) => process.stderr.write(`${message}\n`),
         });
         process.stdout.write(formatRefreshSummary(staged.result));
@@ -5799,7 +5874,7 @@ export const registerRefreshCommand = (program: Command): void => {
       // P7-demand-retrieve: a targeted pull, not a full refresh.
       if (flags.components !== undefined) {
         const dr = await runDemandRetrieve({
-          cwd: process.cwd(),
+          cwd: cwd,
           components: flags.components
             .split(',')
             .map((s) => s.trim())
@@ -5812,7 +5887,7 @@ export const registerRefreshCommand = (program: Command): void => {
         return;
       }
       const result = await runRefresh({
-        cwd: process.cwd(),
+        cwd: cwd,
         noPull: flags.pull === false,
         ...(flags.targetOrg !== undefined ? { targetOrg: flags.targetOrg } : {}),
         ...(flags.types !== undefined ? { types: flags.types } : {}),

@@ -10,6 +10,8 @@ import {
 } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
+import { projectDirForAction, VAULT_OPTION_HELP } from '../vault-option.js';
+
 /** JSON indentation, 2 spaces, matches the rest of the CLI. */
 const JSON_INDENT = 2;
 /** Default vault root, identical to `sfi init`'s default. Read-only command never overrides. */
@@ -325,8 +327,11 @@ export const registerStatusCommand = (program: Command): void => {
       'Print the per-directory skip inventory the refresh walker recorded. Use this when the warning at the end of `sfi refresh` flagged unknown directories.',
       false,
     )
-    .action(async (flags: StatusCliFlags): Promise<void> => {
-      const out = await runStatus({ cwd: process.cwd() });
+    .option('--vault <path>', VAULT_OPTION_HELP)
+    .action(async (flags: StatusCliFlags & { vault?: string }): Promise<void> => {
+      const cwd = projectDirForAction(flags);
+      if (cwd === null) return;
+      const out = await runStatus({ cwd });
       if (flags.json === true) {
         process.stdout.write(`${JSON.stringify(out, null, JSON_INDENT)}\n`);
         return;

@@ -78,6 +78,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { appScopeSchema, inAppScope, resolveAppScope, scopeContrastNote, type AppScope } from './app-scope.js';
 import { readFieldDataType } from './field-properties.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { extractEqualityLiterals } from './picklist-literal-check.js';
@@ -145,7 +146,7 @@ const PICKLIST_INTEGRITY_STATIC_DISCLOSURE =
  * restrictedness is deliberately NOT flagged (it may be legitimate free text).
  */
 const PICKLIST_INTEGRITY_RESTRICTED_DISCLOSURE =
-  'The offline vault does not model each picklist\'s `restricted` flag on a field, so this scan cannot always tell a RESTRICTED picklist (which rejects undefined values) from an UNRESTRICTED one (which accepts free text). Policy: an orphaned literal in a COMPARISON is flagged (it cannot match a defined value regardless), but an orphaned literal that is only ASSIGNED to a field of unknown restrictedness is NOT flagged — it may be legitimate free text on an unrestricted picklist. When a field DOES carry a `restricted` flag in the vault it is honored: orphaned literals on an unrestricted field are suppressed; on a restricted field both comparisons and assignments are flagged.';
+  'A picklist\'s `restricted` flag is read from its value set: `<restricted>true</restricted>` is restricted, an inline value set without it is unrestricted (the platform default), and a global value set is always restricted. A picklist with no value set in its field file (a standard picklist, whose values live in a StandardValueSet) — or any picklist in a vault refreshed before the flag was captured — has UNKNOWN restrictedness. Policy: an orphaned literal in a COMPARISON is flagged (it cannot match a defined value regardless); an orphaned literal only ASSIGNED is flagged on a restricted field, suppressed on an unrestricted one (free text is accepted), and NOT flagged when restrictedness is unknown.';
 
 /**
  * Zod schema for the `sfi.picklist_integrity_scan` tool input.
@@ -164,6 +165,8 @@ export const picklistIntegrityScanInputSchema = z.object({
   limit: z.number().int().min(1).max(PICKLIST_INTEGRITY_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
+  /** The app's own fields (see `app-scope.ts`); the scoped counts are the answer. */
+  scope: appScopeSchema.optional(),
 });
 
 /** Parsed input shape. */
@@ -254,6 +257,30 @@ export interface PicklistFieldFindings {
   readonly findings: readonly PicklistFinding[];
 }
 
+/**
+ * How a set of picklists is restricted. Every Picklist / MultiselectPicklist
+ * field counts once, in exactly one bucket.
+ */
+export interface PicklistRestrictionCounts {
+  readonly picklists: number;
+  /** Backed by a global value set — always restricted. */
+  readonly globalValueSet: number;
+  /** Inline value set declared `<restricted>true</restricted>`. */
+  readonly inlineRestricted: number;
+  /** Inline value set without the flag — accepts values outside the set. */
+  readonly inlineUnrestricted: number;
+  /** No value set in the field file (a standard picklist), or a vault refreshed before the flag was captured. */
+  readonly unknown: number;
+}
+
+/** The org-wide numbers set beside the scoped answer. */
+export interface PicklistOrgWideContrast {
+  readonly picklistFieldCount: number;
+  readonly totalFieldCount: number;
+  readonly totalFindingCount: number;
+  readonly restriction: PicklistRestrictionCounts;
+}
+
 /** Output payload. */
 export interface PicklistIntegrityScanOutput {
   /** Per-field entries with at least one finding, sorted by fieldId ASC (sliced by `limit`). */
@@ -268,6 +295,14 @@ export interface PicklistIntegrityScanOutput {
   readonly totalFindingCount: number;
   /** Per-kind counter across the FULL matched set. */
   readonly byKind: Readonly<Record<PicklistFindingKind, number>>;
+  /** How the picklists in scope are restricted — the answer to "how many accept free text?". */
+  readonly restriction: PicklistRestrictionCounts;
+  /** The app scope applied; every count above is inside it. */
+  readonly appliedScope: AppScope;
+  /** The same counts org-wide, as a labelled contrast (equal to the above when no scope applied). */
+  readonly orgWide: PicklistOrgWideContrast;
+  /** One sentence setting the scoped number against the org-wide one. */
+  readonly scopeNote: string;
   /** Verbatim honesty disclosures. */
   readonly boundaries: readonly string[];
   /** True when the FIELD-level slice was trimmed to `limit`. */
@@ -669,15 +704,33 @@ const textConfidenceFor = (node: Node): ConfidenceLevel =>
       : 'declared';
 
 /**
- * Read a field's `restricted` flag from its node properties when the vault
- * carries it (some enrichment paths / global value sets do). Returns `undefined`
- * when the flag is not modeled — the offline default for an inline picklist,
- * which the classifier treats as "unknown restrictedness".
+ * Read a field's `restricted` flag from its node properties (the field
+ * extractor reads it from the value set). Returns `undefined` when the vault
+ * does not hold it — a standard picklist, or a vault refreshed before the flag
+ * was captured — which the classifier treats as "unknown restrictedness".
  */
 const readRestricted = (node: Node): boolean | undefined =>
   typeof node.properties['restricted'] === 'boolean'
     ? (node.properties['restricted'] as boolean)
     : undefined;
+
+type RestrictionBucket = Exclude<keyof PicklistRestrictionCounts, 'picklists'>;
+
+const emptyRestriction = (): { -readonly [K in keyof PicklistRestrictionCounts]: number } => ({
+  picklists: 0,
+  globalValueSet: 0,
+  inlineRestricted: 0,
+  inlineUnrestricted: 0,
+  unknown: 0,
+});
+
+/** Which restriction bucket a picklist field falls in. */
+const restrictionBucket = (node: Node): RestrictionBucket => {
+  const valueSetName = node.properties['valueSetName'];
+  if (typeof valueSetName === 'string' && valueSetName.length > 0) return 'globalValueSet';
+  const restricted = readRestricted(node);
+  return restricted === true ? 'inlineRestricted' : restricted === false ? 'inlineUnrestricted' : 'unknown';
+};
 
 /**
  * The `properties.conditions[]` mirror shape (from the condition-extractor) we
@@ -887,10 +940,13 @@ export const picklistIntegrityScanHandler = async (
   input: PicklistIntegrityScanInput,
 ): Promise<Result<McpResponse<PicklistIntegrityScanOutput>, McpError>> => {
   const limit = input.limit ?? PICKLIST_INTEGRITY_DEFAULT_LIMIT;
-  // This tool takes no filter args beyond limit/offset/cursor, so the
-  // fingerprint is constant — it still binds the cursor to THIS tool + vault,
-  // rejecting a cursor minted by a different tool or before a stale-vault swap.
-  const fingerprint = argsFingerprint({});
+  const scope = await resolveAppScope(ctx, input.scope);
+  // The fingerprint binds the cursor to THIS tool + vault + scope, rejecting a
+  // cursor minted by a different tool, under another scope, or before a
+  // stale-vault swap. Org-wide it stays the constant `{}` it always was.
+  const fingerprint = argsFingerprint(
+    scope.orgWide ? {} : { namePrefixes: scope.namePrefixes, namespaces: scope.namespaces },
+  );
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -912,17 +968,29 @@ export const picklistIntegrityScanHandler = async (
 
   // Keep only picklist fields that carry an INLINE value set — a field whose
   // values live in a Global Value Set has no offline value set to check against.
+  // Every picklist (inline or not) is counted in the restriction breakdown.
   const picklistFields: Array<{
     readonly node: Node;
     readonly defined: readonly NormalizedPicklistValue[];
     readonly fieldType: string;
+    readonly inScope: boolean;
   }> = [];
+  const restrictionScoped = emptyRestriction();
+  const restrictionOrg = emptyRestriction();
   for (const node of scan.value.nodes) {
     const fieldType = readFieldDataType(node);
     if (!PICKLIST_TYPES.has(fieldType)) continue;
+    const inScope = inAppScope(scope, node);
+    const bucket = restrictionBucket(node);
+    restrictionOrg.picklists += 1;
+    restrictionOrg[bucket] += 1;
+    if (inScope) {
+      restrictionScoped.picklists += 1;
+      restrictionScoped[bucket] += 1;
+    }
     const defined = normalizePicklistValues(node.properties['picklistValues']);
     if (defined === null || defined.length === 0) continue;
-    picklistFields.push({ node, defined, fieldType });
+    picklistFields.push({ node, defined, fieldType, inScope });
   }
 
   // Batch the incoming edges for every picklist field, then batch every source
@@ -966,14 +1034,19 @@ export const picklistIntegrityScanHandler = async (
     'inactive-only': 0,
   };
   let totalFindingCount = 0;
+  let orgFieldCount = 0;
+  let orgFindingCount = 0;
 
-  for (const { node, defined, fieldType } of picklistFields) {
+  for (const { node, defined, fieldType, inScope } of picklistFields) {
     const incoming = edgesByField?.get(node.id) ?? [];
     const references = gatherFieldReferences(node, defined, incoming, sourceById);
     const findings = classifyPicklistLiterals(defined, references, {
       fieldRestricted: readRestricted(node),
     });
     if (findings.length === 0) continue;
+    orgFieldCount += 1;
+    orgFindingCount += findings.length;
+    if (!inScope) continue;
     for (const finding of findings) {
       byKind[finding.kind] += 1;
       totalFindingCount += 1;
@@ -1049,10 +1122,24 @@ export const picklistIntegrityScanHandler = async (
     data: {
       fields: slice,
       scannedFieldCount: scan.value.nodes.length,
-      picklistFieldCount: picklistFields.length,
+      picklistFieldCount: picklistFields.filter((f) => f.inScope).length,
       totalFieldCount: fieldFindings.length,
       totalFindingCount,
       byKind,
+      restriction: restrictionScoped,
+      appliedScope: scope,
+      orgWide: {
+        picklistFieldCount: picklistFields.length,
+        totalFieldCount: orgFieldCount,
+        totalFindingCount: orgFindingCount,
+        restriction: restrictionOrg,
+      },
+      scopeNote: scopeContrastNote(
+        scope,
+        'unrestricted picklists',
+        restrictionScoped.inlineUnrestricted,
+        restrictionOrg.inlineUnrestricted,
+      ),
       boundaries,
       truncated,
       trust,

@@ -298,7 +298,7 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
       kind: 'relationship',
       label: 'Master-detail vs lookup relationship',
       summary:
-        'A relationship field links a child record to a parent, and its type decides what happens when the parent is deleted. A lookup is a loose reference: deleting the parent leaves the child in place (the reference is cleared, or the delete is blocked), and the child keeps its own owner and sharing. A master-detail relationship is tight ownership: the child cannot exist without its parent, so deleting the parent cascade-deletes every child record, and the child has no owner or sharing of its own — it inherits both from the parent; a roll-up summary field on the parent aggregates its child records and recalculates automatically, and is read-only. This concept deliberately does NOT assert three things the offline vault cannot ground: whether a master-detail child is reparentable (the reparentableMasterDetail attribute is not extracted), which parent of a two-master junction object is the primary one (relationshipOrder is not extracted), or how many child records actually exist under a given parent (a live-plane, record-level question). Those need the live plane or metadata the refresh does not retrieve. Two further boundaries on this concept: the roll-up rule detects roll-up summary fields captured from source metadata, but a roll-up on a standard or parent object seen only through the org describe snapshot carries its RESULT type (Number, Currency, and so on) rather than a Summary marker, so it may not be classified and is not asserted rather than guessed; and the delete behavior of a lookup (its deleteConstraint — SetNull, Restrict, or Cascade) is not extracted, so which action a lookup takes when its target record is deleted is not asserted.',
+        'A relationship field links a child record to a parent, and its type decides what happens when the parent is deleted. A lookup is a loose reference: deleting the parent leaves the child in place with the reference cleared, unless the lookup\'s declared deleteConstraint says otherwise (Restrict blocks the parent delete; Cascade deletes the child with it), and the child keeps its own owner and sharing. A master-detail relationship is tight ownership: the child cannot exist without its parent, so deleting the parent cascade-deletes every child record, and the child has no owner or sharing of its own — it inherits both from the parent; a roll-up summary field on the parent aggregates its child records and recalculates automatically, and is read-only. This concept deliberately does NOT assert three things the offline vault cannot ground: whether a master-detail child is reparentable (the reparentableMasterDetail attribute is not extracted), which parent of a two-master junction object is the primary one (relationshipOrder is not extracted), or how many child records actually exist under a given parent (a live-plane, record-level question). Those need the live plane or metadata the refresh does not retrieve. Two further boundaries on this concept: the roll-up rule detects roll-up summary fields captured from source metadata, but a roll-up on a standard or parent object seen only through the org describe snapshot carries its RESULT type (Number, Currency, and so on) rather than a Summary marker, so it may not be classified and is not asserted rather than guessed; and the delete behavior of a lookup is read from its declared deleteConstraint (SetNull, Restrict, or Cascade) when the field\'s metadata carries one — a custom lookup that declares none takes the platform default, SetNull, and a standard relationship\'s delete behavior is platform-defined per object and is not asserted (the record-delete-impact tool reports each relationship\'s behavior with its source).',
       docs: [
         { label: 'Salesforce Help — Object Relationships Overview', url: 'https://help.salesforce.com/s/articleView?id=sf.overview_of_custom_object_relationships.htm' },
       ],
@@ -1365,6 +1365,102 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
         'An OmniStudio component version — an OmniScript, Integration Procedure, or FlexCard — whose `isActive` flag is FALSE is a SAVED-BUT-DORMANT version: Salesforce serves and dispatches only the ACTIVE version of an OmniStudio component, so an inactive version does not execute at runtime — it is not rendered, invoked as an action, or embedded on a page until an admin activates it. It must be EXCLUDED from runtime-reachability, invocation-impact, and \'what actually runs\' reasoning about OmniStudio; treating a deactivated version as live would overstate the runtime surface, while assuming it still runs would misattribute behavior to a dormant draft. This is grounded from the component\'s own always-present `isActive` boolean; it names the non-running STRUCTURAL fact, NOT whether ANOTHER version of the same bundle is active and serving in its place (version lineage is org-specific and not resolved offline), NOT whether anything still references this version by name, NOT what the version WOULD do if activated, and NOT why it was deactivated. Only active OmniStudio component versions belong in runtime-execution surfaces.',
       docs: [
         { label: 'Salesforce Help — Activate an OmniScript', url: 'https://help.salesforce.com/s/articleView?id=sf.os_activate_an_omniscript.htm' },
+      ],
+    },
+    'concept:lookup-delete-behavior': {
+      id: 'concept:lookup-delete-behavior',
+      kind: 'relationship',
+      label: 'A lookup\'s delete constraint decides whether deleting the parent orphans, deletes, or is blocked by its child records',
+      summary:
+        'A lookup relationship field declares what happens to the records that reference a parent when the parent is deleted. SetNull (the default for a custom lookup that declares nothing) clears the field: the child records SURVIVE with a blank parent — orphaned — and nothing cleans them up unless delete automation on the parent does. Cascade deletes the child records together with the parent. Restrict refuses the parent delete while any child record still references it. A master-detail child is always deleted with its parent. Records removed by a cascade do not fire their OWN delete triggers or delete flows (Salesforce runs delete automation only for the record whose delete was requested), and validation rules never run on delete. HONEST BOUNDARY: this is the declared behavior of the relationship; how many child records exist, and whether a delete trigger on the parent re-parents or removes them, are not determined here.',
+      docs: [
+        { label: 'Salesforce Help — Considerations for Relationships', url: 'https://help.salesforce.com/s/articleView?id=sf.relationships_considerations.htm' },
+        { label: 'Apex Developer Guide — Operations That Don\'t Invoke Triggers', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers_ignoring_operations.htm' },
+      ],
+    },
+    'concept:omnistudio-remote-apex-call': {
+      id: 'concept:omnistudio-remote-apex-call',
+      kind: 'access-mechanism',
+      label: 'An OmniStudio component runs this Apex class through its routing method, in the user\'s session',
+      summary:
+        'An OmniScript, Integration Procedure or FlexCard element that names a remoteClass — a Remote Action, a Try Catch Block failure handler, a Calculation Action, a File upload, a FlexCard Apex data source — runs that Apex class. The runtime enters the class through its routing method (invokeMethod for VlocityOpenInterface, call for System.Callable) and passes remoteMethod as the routed name, so renaming the routed method, changing the payload keys it reads, or deleting the class breaks the OmniStudio caller at runtime even though no Apex calls it. The class runs in the requesting user\'s session: its DML enforces the user\'s object and field permissions only where the statement is written as user / AccessLevel.USER_MODE (Apex DML otherwise runs in system mode for object and field permissions, and a without sharing class ignores record sharing too). HONEST BOUNDARY: which routed method name maps to which Apex code path is decided inside the class and is not resolved here.',
+      docs: [
+        { label: 'Salesforce Help — Remote Action in OmniScripts', url: 'https://help.salesforce.com/s/articleView?id=sf.os_remote_action.htm' },
+        { label: 'Apex Developer Guide — Enforce User Mode for Database Operations', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_enforce_usermode.htm' },
+      ],
+    },
+    'concept:datamapper-load-write': {
+      id: 'concept:datamapper-load-write',
+      kind: 'field-provenance',
+      label: 'A DataMapper Load writes this field from OmniStudio data, creating or updating records',
+      summary:
+        'A DataMapper (DataRaptor) Load writes the fields its items map from the incoming JSON — called by an Integration Procedure step or directly by an OmniScript DataRaptor Post Action. A Load whose items map the record Id (or mark an upsert key) UPDATES the matched record and creates one when there is no match; otherwise every run CREATES a record. The value written is whatever the calling screen or procedure put under the mapped JSON key, so a key renamed on the screen silently stops reaching the field. HONEST BOUNDARY: whether the Load enforces the user\'s field-level security depends on its Check Field Level Security setting; which screens actually reach this Load is answered by the OmniStudio save trace, not by this edge.',
+      docs: [
+        { label: 'Salesforce Help — OmniStudio Data Mapper Load', url: 'https://help.salesforce.com/s/articleView?id=sf.os_dataraptor_loads.htm' },
+      ],
+    },
+    'concept:edit-block-delete-wiring': {
+      id: 'concept:edit-block-delete-wiring',
+      kind: 'firing-condition',
+      label: 'An Edit Block deletes saved rows through this Integration Procedure, sending only its declared delete payload',
+      summary:
+        'An OmniScript Edit Block lists saved records as cards with Add / Edit / Delete. Its Delete button deletes the record on the server only when a delete is wired: the block\'s deleteIPKey (an Integration Procedure called with the keys of deleteIPExtraPayload, typically the row\'s record Id) or a child Integration Procedure Action named after the block with a -Delete suffix. allowDelete alone only removes the card from the screen; the record stays and the next prefill brings it back. A deleteIPKey with no deleteIPExtraPayload sends the procedure no record Id. HONEST BOUNDARY: when a block wires both mechanisms, which one the runtime uses is not established from metadata; what the procedure deletes is decided by its own steps.',
+      docs: [
+        { label: 'Salesforce Help — Edit Block', url: 'https://help.salesforce.com/s/articleView?id=sf.os_edit_block.htm' },
+      ],
+    },
+    'concept:ip-delete-action': {
+      id: 'concept:ip-delete-action',
+      kind: 'firing-condition',
+      label: 'An Integration Procedure deletes records of this object',
+      summary:
+        'An Integration Procedure Delete Action deletes the records whose SObject type and Id it names (Id usually a merge field from the procedure\'s input). The delete runs the object\'s delete automation and its relationship rules — child records are orphaned, cascade-deleted, or block the delete according to each lookup\'s delete constraint. With failOnStepError false a failed delete is swallowed and the procedure continues. HONEST BOUNDARY: which record Ids reach the step is runtime data; the procedure runs only when an active OmniScript, FlexCard, Apex or API caller invokes it.',
+      docs: [
+        { label: 'Salesforce Help — Integration Procedure Delete Action', url: 'https://help.salesforce.com/s/articleView?id=sf.os_delete_action.htm' },
+      ],
+    },
+    'concept:dataraptor-active-flag-not-runtime-switch': {
+      id: 'concept:dataraptor-active-flag-not-runtime-switch',
+      kind: 'firing-condition',
+      label: 'A DataMapper with active=false still runs when an OmniScript or Integration Procedure calls it — the flag is not a runtime switch',
+      summary:
+        'A DataMapper (DataRaptor; an OmniStudio OmniDataTransform) whose `active` flag is FALSE is NOT dormant: unlike an OmniScript, Integration Procedure, or FlexCard version — where `isActive` decides which version is served — a DataMapper is invoked BY NAME from the OmniScript or Integration Procedure step that names its bundle, and it runs when that step runs, whatever its `active` flag says. So `active = false` must NOT be read as "dead", "unused", or "safe to delete": whether a DataMapper runs is decided by whether an ACTIVE OmniScript, Integration Procedure, or FlexCard calls it (its incoming dispatch references), not by its own flag. HONEST BOUNDARY — this names what the flag does NOT mean; it does NOT establish that any caller exists or is active (check the incoming references), NOT which version of a multi-version bundle a caller resolves to, and NOT what the transform does with the data.',
+      docs: [
+        { label: 'Salesforce Help — OmniStudio Data Mappers', url: 'https://help.salesforce.com/s/articleView?id=sf.os_omnistudio_dataraptors.htm' },
+      ],
+    },
+    'concept:picklist-restriction': {
+      id: 'concept:picklist-restriction',
+      kind: 'field-provenance',
+      label: 'An unrestricted picklist accepts values outside its defined list',
+      summary:
+        'A picklist is RESTRICTED when the platform rejects any value outside its defined list, and UNRESTRICTED when it stores whatever text an API call, Apex, a data import, or an integration sends — the list then only shapes the UI. A picklist backed by a global value set is always restricted; an inline value set is restricted only when it declares so (source metadata writes the restricted element only when true, so its absence means unrestricted); a standard picklist keeps its restriction in its standard value set, not in the field file. An unrestricted picklist is a data-quality exposure: reports, formulas, and automation that compare against the defined values silently miss records holding anything else. HONEST BOUNDARY — this names the declared behavior; it does NOT establish that any record holds an undefined value (a live, record-level question) or that any caller actually writes one.',
+      docs: [
+        { label: 'Salesforce Help — Restricted Picklists', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_creating_picklists_restricted.htm' },
+      ],
+    },
+    'concept:omnistudio-dead-end-section': {
+      id: 'concept:omnistudio-dead-end-section',
+      kind: 'firing-condition',
+      label: 'A section added for a population whose entry step hides itself for part of that population can never be started',
+      summary:
+        'An application often adds a section to a person\'s journey from OUTSIDE the OmniScript that runs it — a server formula, a configuration table read by Apex, a Set Values on another screen. When the step that opens that section carries its own show rule, and that rule is false for some of the people the section is added for, those people are sent into a section whose first step never appears: they cannot start it, and anything that waits for the section to complete waits forever. The check is a satisfiability question over the two conditions — is there a set of answers for which the section is added AND its entry step is hidden — with the entry step\'s rule expanded through the formulas that compute its inputs. HONEST BOUNDARY — when the section is added usually lives outside the script, so it must be declared; a formula the evaluator cannot compute (date arithmetic such as AGE) is treated as a free input, which can admit answers no real person gives.',
+    },
+    'concept:apex-runs-omnistudio': {
+      id: 'concept:apex-runs-omnistudio',
+      kind: 'access-mechanism',
+      label: 'Apex runs this Integration Procedure or DataRaptor by name, so renaming or deactivating it breaks the Apex caller at runtime',
+      summary:
+        'Apex can run OmniStudio directly: IntegrationProcedureService.runIntegrationService(\'Type_SubType\', input, options) runs the ACTIVE version of the Integration Procedure with that key, and DRGlobal.process(input, \'BundleName\') runs a DataRaptor by its bundle name — through the OmniStudio namespace (omnistudio for native OmniStudio, vlocity_cmt / vlocity_ins / vlocity_ps for the managed package). The key is a string, so the Apex compiler does not check it: renaming the procedure\'s Type or SubType, deactivating every version, or renaming the DataRaptor breaks the Apex caller at runtime, and an Integration Procedure called only from Apex looks unused from OmniStudio alone. It runs in the Apex transaction, as that transaction\'s user. HONEST BOUNDARY: only a key written as a literal is seen — a key assembled at runtime (concatenation, a variable, custom metadata) is not, and what the procedure does with the input is answered by its own steps.',
+    },
+    'concept:omnistudio-managed-package-records': {
+      id: 'concept:omnistudio-managed-package-records',
+      kind: 'firing-condition',
+      label: 'Managed-package (Vlocity) OmniStudio components are records, so no Metadata API retrieve contains them',
+      summary:
+        'OmniStudio began as the Vlocity managed package — namespace vlocity_cmt (Communications, Media and Energy), vlocity_ins (Insurance and Health) or vlocity_ps (Public Sector) — in which OmniScripts and Integration Procedures (OmniScript__c records with their Element__c children), DataRaptors (DRBundle__c with DRMapItem__c) and Cards (VlocityCard__c) are RECORDS of package objects. A Metadata API retrieve does not contain records, so an org running the managed package has OmniStudio that no source retrieve shows: it moves between orgs as Vlocity Build Tool DataPacks (JSON, one folder per component), and the OmniStudio Migration Tool converts it to native OmniStudio metadata (OmniProcess, OmniDataTransform, OmniUiCard). The managed runtime behaves like the native one — it serves the active version of each Type/SubType/Language, a script calls an Integration Procedure by its Type_SubType key, a step calls a DataRaptor by its bundle name, and a Remote Action on the runtime\'s IntegrationProcedureService runs the Integration Procedure its method names — so the same defects (a renamed key, an unwired delete, a swallowed failure) occur in both. Mid-migration orgs run both at once. HONEST BOUNDARY — a DataPack export is a snapshot: what the org runs today may differ from the last export, and record-level runtime data (saved responses, tracking entries) is in neither form.',
+      docs: [
+        { label: 'Vlocity Build Tool — DataPack export and deploy', url: 'https://github.com/vlocityinc/vlocity_build' },
       ],
     },
     'concept:required-field-absent-from-all-layouts': {
@@ -3442,6 +3538,126 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['OmniScript', 'OmniIntegrationProcedure', 'OmniUiCard'],
+  },
+  {
+    id: 'rule:relationship/lookup-delete-setnull',
+    concept: 'concept:lookup-delete-behavior',
+    bind: { edgeType: 'lookupTo', componentTypes: ['CustomField', 'CustomObject'], edgeWhereProperty: { key: 'deleteConstraint', equals: 'SetNull' } },
+    interpretation:
+      'Lookup {ids} is SetNull: deleting the parent record clears this field and the child records SURVIVE with a blank parent (orphaned); nothing cleans them up unless delete automation on the parent does. How many child records exist is a live-plane question.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:relationship/lookup-delete-cascade',
+    concept: 'concept:lookup-delete-behavior',
+    bind: { edgeType: 'lookupTo', componentTypes: ['CustomField', 'CustomObject'], edgeWhereProperty: { key: 'deleteConstraint', equals: 'Cascade' } },
+    interpretation:
+      'Lookup {ids} is Cascade: deleting the parent record deletes these child records too. Records removed by the cascade do not fire their own delete triggers or delete flows, and validation rules never run on delete.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:relationship/lookup-delete-restrict',
+    concept: 'concept:lookup-delete-behavior',
+    bind: { edgeType: 'lookupTo', componentTypes: ['CustomField', 'CustomObject'], edgeWhereProperty: { key: 'deleteConstraint', equals: 'Restrict' } },
+    interpretation:
+      'Lookup {ids} is Restrict: the parent record cannot be deleted while any child record still references it through this field.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:omnistudio/remote-apex-call',
+    concept: 'concept:omnistudio-remote-apex-call',
+    bind: { edgeType: 'callsApex', componentTypes: ['OmniScript', 'OmniIntegrationProcedure', 'OmniUiCard', 'ApexClass'], edgeWhereProperty: { key: 'entryVia', equals: 'omnistudio-remote' } },
+    interpretation:
+      'OmniStudio runs Apex here ({ids}): the class is entered through its routing method (invokeMethod / call) with the routed remoteMethod, in the requesting user\'s session. Renaming the routed method, changing the payload keys it reads, or deleting the class breaks this OmniStudio caller at runtime, although no Apex calls it. Its DML enforces the user\'s object / field permissions only where written as user / AccessLevel.USER_MODE.',
+    maxConfidence: 'parsed',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApexClass'],
+  },
+  {
+    id: 'rule:omnistudio/datamapper-load-write',
+    concept: 'concept:datamapper-load-write',
+    bind: { edgeType: 'writesTo', componentTypes: ['OmniDataTransform', 'CustomField'], edgeWhereProperty: { key: 'mechanism', equals: 'datamapper-load' } },
+    interpretation:
+      'A DataMapper Load writes this field ({ids}) from the JSON key its item maps; the value is whatever the calling screen or procedure put under that key, so a key renamed upstream silently stops reaching the field. Which screens reach this Load is answered by the OmniStudio save trace.',
+    maxConfidence: 'parsed',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniDataTransform'],
+  },
+  {
+    id: 'rule:omnistudio/edit-block-delete-wiring',
+    concept: 'concept:edit-block-delete-wiring',
+    bind: { edgeType: 'dispatchesOmniAction', componentTypes: ['OmniScript', 'OmniIntegrationProcedure'], edgeWhereProperty: { key: 'via', equals: 'deleteIPKey' } },
+    interpretation:
+      'An Edit Block deletes saved rows through this Integration Procedure ({ids}), sending only the keys of its deleteIPExtraPayload (typically the row\'s record Id). Without that payload the procedure receives no record Id.',
+    maxConfidence: 'parsed',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniScript'],
+  },
+  {
+    id: 'rule:omnistudio/ip-delete-action',
+    concept: 'concept:ip-delete-action',
+    bind: { edgeType: 'writesTo', componentTypes: ['OmniIntegrationProcedure', 'CustomObject'], edgeWhereProperty: { key: 'mechanism', equals: 'omnistudio-delete-action' } },
+    interpretation:
+      'An Integration Procedure deletes records of this object ({ids}); the object\'s delete automation and each lookup\'s delete constraint apply (children orphaned, cascade-deleted, or blocking). With failOnStepError false a failed delete is swallowed.',
+    maxConfidence: 'parsed',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniIntegrationProcedure'],
+  },
+  {
+    id: 'rule:omnistudio/dataraptor-active-flag-not-runtime-switch',
+    concept: 'concept:dataraptor-active-flag-not-runtime-switch',
+    bind: { componentTypes: ['OmniDataTransform'], whereProperty: { key: 'active', equals: false } },
+    interpretation:
+      '{ids} has active = false, but a DataMapper\'s active flag is NOT a runtime switch: the OmniScript or Integration Procedure step that names its bundle still runs it. Do NOT treat it as dead, unused, or safe to delete on that flag — whether it runs is decided by whether an ACTIVE OmniScript, Integration Procedure, or FlexCard calls it (its incoming references). This names what the flag does not mean; it does NOT establish that an active caller exists.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniDataTransform'],
+  },
+  {
+    id: 'rule:field/picklist-unrestricted',
+    concept: 'concept:picklist-restriction',
+    bind: { componentTypes: ['CustomField'], whereProperty: { key: 'restricted', equals: false } },
+    interpretation:
+      '{ids} is an UNRESTRICTED picklist: the platform stores any text an API call, Apex, an import, or an integration sends, not only its defined values, so comparisons against the defined values can silently miss records. Restrict it if only the defined values are valid. This names the declared setting; it does NOT establish that any record holds an undefined value.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:omnistudio/apex-runs-omnistudio',
+    concept: 'concept:apex-runs-omnistudio',
+    bind: { edgeType: 'dispatchesOmniAction', componentTypes: ['ApexClass', 'ApexTrigger'], edgeWhereProperty: { key: 'via', equals: 'apex' } },
+    interpretation:
+      'Apex runs OmniStudio by name ({ids}): the key or bundle is a string the compiler does not check, so renaming the Integration Procedure\'s Type / SubType, deactivating every version, or renaming the DataRaptor breaks this caller at runtime — and the component is used even when no OmniScript or FlexCard calls it. Only literal keys are seen; a key assembled at runtime is not.',
+    maxConfidence: 'heuristic',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApexClass'],
+  },
+  {
+    id: 'rule:omnistudio/vlocity-managed-package-installed',
+    concept: 'concept:omnistudio-managed-package-records',
+    bind: { componentTypes: ['InstalledPackage'], whereProperty: { key: 'namespace', in: ['vlocity_cmt', 'vlocity_ins', 'vlocity_ps'] } },
+    interpretation:
+      '{ids} is a Vlocity managed package: its OmniScripts, Integration Procedures, DataRaptors and Cards are records of the package objects, which no Metadata API retrieve contains. They are in this vault only when a Vlocity Build Tool DataPack export is placed under org-kb/source/vlocity/ and the vault is refreshed (those nodes carry sourceFormat vlocity-datapack); without one, every OmniStudio answer for this org leaves them out. This names where the components live; it does NOT establish which of them the org still runs.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['InstalledPackage'],
+  },
+  {
+    id: 'rule:omnistudio/datapack-sourced-component',
+    concept: 'concept:omnistudio-managed-package-records',
+    bind: { componentTypes: ['OmniScript', 'OmniIntegrationProcedure', 'OmniDataTransform', 'OmniUiCard'], whereProperty: { key: 'sourceFormat', equals: 'vlocity-datapack' } },
+    interpretation:
+      '{ids} was modelled from a Vlocity DataPack export, not from the Metadata API retrieve: it is a managed-package record, as current as that export rather than the last metadata refresh, analysed with the same rules as native OmniStudio metadata. Re-export it before relying on it for a change made in the org since the export.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniScript', 'OmniIntegrationProcedure', 'OmniDataTransform', 'OmniUiCard'],
   },
   {
     id: 'rule:field/required-absent-from-all-layouts',
