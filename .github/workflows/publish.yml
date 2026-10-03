@@ -456,23 +456,47 @@ jobs:
           ./mcp-publisher validate
           ./mcp-publisher login github-oidc
 
-          set +e
-          OUT="$(./mcp-publisher publish 2>&1)"
-          RC=$?
-          set -e
-          echo "$OUT"
+          # npm ACCEPTS a publish minutes before it SERVES the version ("may take
+          # a few minutes to become available"), and the registry looks this exact
+          # version up on npm before registering it. Publishing the moment the npm
+          # step returned lost that race on 0.3.3: 400 "version '0.3.3' was not
+          # found ... A newly published release can take a moment to appear on
+          # the registry. Wait and retry". Retry THAT rejection every 30s for up
+          # to 10 minutes; every other failure is still fatal on the spot. It is
+          # tested before the duplicate check, so a not-found message that also
+          # says the package "exists" can never pass as an idempotent re-run.
+          ATTEMPTS=20
+          for ATTEMPT in $(seq 1 "$ATTEMPTS"); do
+            set +e
+            OUT="$(./mcp-publisher publish 2>&1)"
+            RC=$?
+            set -e
+            echo "$OUT"
 
-          if [ "$RC" -eq 0 ]; then
-            echo "::notice::MCP Registry: published ${VERSION}."
-            exit 0
-          fi
+            if [ "$RC" -eq 0 ]; then
+              echo "::notice::MCP Registry: published ${VERSION}."
+              exit 0
+            fi
 
-          # The ONLY tolerated failure: this exact version is already on the
-          # registry, i.e. we are re-running a publish that already got this far.
-          if printf '%s' "$OUT" | grep -qiE 'already exists|already published|duplicate version|version .* exists'; then
-            echo "::notice::MCP Registry already carries ${VERSION} — idempotent re-run, treating as done."
-            exit 0
-          fi
+            if printf '%s' "$OUT" | grep -qiE "version '?${VERSION}'? was not found|take a moment to appear"; then
+              if [ "$ATTEMPT" -lt "$ATTEMPTS" ]; then
+                echo "npm is not serving ${VERSION} to the registry yet (attempt ${ATTEMPT}/${ATTEMPTS}) — retrying in 30s."
+                sleep 30
+                continue
+              fi
+              echo "::error::npm accepted ${VERSION} but still did not serve it to the MCP Registry after ${ATTEMPTS} attempts. Re-run this workflow once \`npm view sf-intelligence@${VERSION} version\` answers — that is safe: the npm step skips a version npm already has."
+              exit "$RC"
+            fi
+
+            # The ONLY tolerated failure: this exact version is already on the
+            # registry, i.e. we are re-running a publish that already got this far.
+            if printf '%s' "$OUT" | grep -qiE 'already exists|already published|duplicate version|version .* exists'; then
+              echo "::notice::MCP Registry already carries ${VERSION} — idempotent re-run, treating as done."
+              exit 0
+            fi
+
+            break
+          done
 
           echo "::error::MCP Registry publish FAILED for ${VERSION} and it was NOT a duplicate-version rejection. npm may already have this version, so the public record is now INCONSISTENT: fix the cause and re-run this workflow, which is safe — a genuine duplicate is tolerated above."
           exit "$RC"

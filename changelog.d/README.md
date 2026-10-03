@@ -41,7 +41,11 @@ A fragment lives in this directory only while its change is **unreleased**.
 
 1. Land the change with its fragment.
 2. `pnpm changelog:assemble` folds every fragment into `## [Unreleased]`.
-3. At release, the `[Unreleased]` block is retitled `## [x.y.z] — DATE`.
+3. At release, the `[Unreleased]` block is retitled `## [x.y.z] — DATE`, and a
+   fresh, empty `## [Unreleased]` heading is left directly above it. Without that
+   heading the assembler cannot find its place and inserts the next block above
+   the intro paragraph (the 0.3.3 release commit dropped it; the next assemble did
+   exactly that).
 4. **Delete the fragments that block went into, in the release commit.**
 
 Step 4 is not tidiness. The assembler *replaces* the `[Unreleased]` block from
